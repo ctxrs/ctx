@@ -75,7 +75,8 @@ pub use ctx_history_refresh_execution::{
     SourceBackedRefreshRecordRejection, SourceBackedRefreshRouteOutcome,
     SourceBackedRefreshRouteResult, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
     SourceBackedRefreshWorkset, SourceBackedZeroSourceAuthority,
-    SourceBackedZeroSourceAuthorityKind, ZeroSourcePublicationBlocked,
+    SourceBackedZeroSourceAuthorityKind, ZeroSourcePublicationBlockReason,
+    ZeroSourcePublicationBlocked,
 };
 pub use engine::{
     CoreRefreshEngine as RefreshEngine, PinnedCorePublication, RefreshRuntime,

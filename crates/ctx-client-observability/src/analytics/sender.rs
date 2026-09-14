@@ -192,6 +192,31 @@ pub(super) fn serialize_event(
                 if let Some((stage, kind)) = event.failure_diagnostic {
                     properties.insert("refresh_failure_stage".to_owned(), json!(stage.as_str()));
                     properties.insert("refresh_failure_kind".to_owned(), json!(kind.as_str()));
+                    if kind == ProviderRefreshFailureKind::Provider
+                        && event.foreground.is_some_and(|facts| facts.failure_code == ProviderRefreshFailureCode::AllProviderTerminalCoverageUnavailable)
+                    {
+                        if let Some(reason) = event.coverage_reason {
+                            properties.insert("refresh_coverage_reason".to_owned(), json!(reason.as_str()));
+                        }
+                    }
+                }
+            }
+            if event.surface == Surface::Daemon
+                && event.outcome == Outcome::Success
+                && event.foreground.is_some_and(|facts| {
+                    facts.refresh_result == ProviderRefreshResult::Partial
+                        && matches!(
+                            facts.failure_scope,
+                            ProviderRefreshFailureScope::Source
+                                | ProviderRefreshFailureScope::Mixed
+                        )
+                })
+            {
+                if let Some(class) = event.source_failure_class {
+                    properties.insert(
+                        "refresh_source_failure_class".to_owned(),
+                        json!(class.as_str()),
+                    );
                 }
             }
             (

@@ -368,6 +368,9 @@ impl SourceBackedRefreshAttempt {
                     "refresh_failure_kind".to_owned(),
                     json!(diagnostic.kind.as_str()),
                 );
+                if let Some(reason) = diagnostic.coverage_reason {
+                    fields.insert("refresh_coverage_reason".to_owned(), json!(reason.as_str()));
+                }
             }
         }
         fields.insert("logical_request_id".to_owned(), json!(self.request_id));
@@ -554,6 +557,7 @@ pub(super) fn projected_status_json(
             "last_error",
             "refresh_failure_stage",
             "refresh_failure_kind",
+            "refresh_coverage_reason",
             "automatic_retry",
         ] {
             fields.remove(field);
