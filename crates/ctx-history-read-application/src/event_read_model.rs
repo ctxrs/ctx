@@ -95,11 +95,19 @@ impl<'a> EventContentPolicyView<'a> {
     }
 }
 
-/// Stored Core is already JSON escaped. Reserving seven eighths of the MCP
-/// envelope covers event projection, receipt fields, and JSON-RPC framing
-/// before a record is materialized.
-pub const fn mcp_event_query_core_record_bytes(response_cap: usize) -> usize {
-    response_cap / 8
+/// Bound Core decoding before materialization independently of omitted content.
+/// Metadata-only pages retain Core's hard record/content limits and the shared
+/// soft page budget (at most one oversized singleton). Their final MCP response
+/// is still bounded after projection. Content-bearing projections reserve seven
+/// eighths of the envelope for projection, receipt fields, and JSON-RPC framing.
+pub const fn mcp_event_query_core_record_bytes(
+    response_cap: usize,
+    projection: EventContentProjection,
+) -> usize {
+    match projection {
+        EventContentProjection::None => ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES,
+        EventContentProjection::Full | EventContentProjection::Text => response_cap / 8,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
