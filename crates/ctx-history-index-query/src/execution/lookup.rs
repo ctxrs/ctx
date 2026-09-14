@@ -41,17 +41,17 @@ impl VerifiedIndex {
     }
 
     /// Streams forward from one semantic user anchor until the next user and
-    /// returns the latest nonempty assistant text in that turn.
+    /// returns all nonempty, discovery-eligible assistant text in that turn.
     ///
     /// Session coordinates are sought directly in fixed-size term pages. Tool
     /// records remain metadata-only, assistant Core bodies are decoded one at
-    /// a time, and no session-wide collector or retained session cache is used.
-    pub fn semantic_lite_turn_assistant(
+    /// a time, and the byte budget applies across the complete turn.
+    pub fn semantic_lite_turn_assistants(
         &self,
         anchor: &CoreEventRecord,
         page_items: usize,
         pairing_budget: CoreEventPageBudget,
-    ) -> Result<Option<SemanticTurnAssistant>> {
+    ) -> Result<Vec<SemanticTurnAssistant>> {
         if !(1..=MAX_SEMANTIC_PAIRING_PAGE_ITEMS).contains(&page_items) {
             return Err(IndexError::InvalidSessionEventCoordinateLimit {
                 requested: page_items,
@@ -101,7 +101,8 @@ impl VerifiedIndex {
             .collect::<std::io::Result<Vec<_>>>()?;
         let mut merged = TermMerger::new(streams);
 
-        let mut latest_assistant = None;
+        let mut assistant_messages = Vec::new();
+        let mut remaining_budget = pairing_budget;
         loop {
             let candidates = session_event_address_page(
                 session_id,
@@ -111,14 +112,16 @@ impl VerifiedIndex {
                 segments,
             )?;
             if candidates.is_empty() {
-                return Ok(latest_assistant);
+                return Ok(assistant_messages);
             }
 
             for candidate in candidates {
-                let event = stored_event_record(&self.searcher, candidate.address, fields)?;
+                let (event, _) =
+                    ranked_event_ref_at_address(&self.searcher, candidate.address, fields)?;
                 if candidate.order <= after
-                    || event.session_id != session_id
-                    || event.event_id.as_uuid() != candidate.order.event_id()
+                    || event.session_id != session_id.as_uuid()
+                    || event.source_owner_digest != session_id.source_digest()
+                    || event.event_id != candidate.order.event_id()
                     || event.event_sequence != candidate.order.event_sequence()
                     || event.occurred_at_unix_ms != candidate.order.occurred_at_unix_ms()
                 {
@@ -127,25 +130,58 @@ impl VerifiedIndex {
                     ));
                 }
                 after = candidate.order;
-                if event.event_type == "message" && event.role.as_deref() == Some("user") {
-                    return Ok(latest_assistant);
-                }
-                if event.event_type != "message" || event.role.as_deref() != Some("assistant") {
+                // These exact projections are audited at publication and pinned
+                // with the generation. Probe postings without loading Core bodies.
+                let has_term =
+                    |field, value: &str| -> Result<bool> {
+                        let segment = segments.get(candidate.address.segment_ord as usize).ok_or(
+                            IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD),
+                        )?;
+                        let inverted = segment.inverted_index(field)?;
+                        let term = Term::from_field_text(field, value);
+                        let Some(mut postings) =
+                            inverted.read_postings(&term, IndexRecordOption::Basic)?
+                        else {
+                            return Ok(false);
+                        };
+                        let doc = candidate.address.doc_id;
+                        Ok(postings.doc() == doc
+                            || (postings.doc() < doc && postings.seek(doc) == doc))
+                    };
+                if !has_term(fields.event_type, "message")? {
                     continue;
+                }
+                if has_term(fields.role, "user")? {
+                    return Ok(assistant_messages);
+                }
+                if !has_term(fields.role, "assistant")? {
+                    continue;
+                }
+                if remaining_budget.maximum_encoded_core_bytes == 0
+                    || remaining_budget.maximum_content_bytes == 0
+                {
+                    return Ok(assistant_messages);
                 }
 
                 let Some(batch) = self.core_events_by_ids_with_strict_budget(
-                    &[event.event_id.as_uuid()],
+                    &[event.event_id],
                     1,
-                    pairing_budget,
+                    remaining_budget,
                 )?
                 else {
-                    return Ok(None);
+                    return Ok(assistant_messages);
                 };
+                remaining_budget.maximum_encoded_core_bytes -= batch.encoded_core_bytes;
+                remaining_budget.maximum_content_bytes -= batch.content_bytes;
                 let assistant = batch.items.into_iter().next().ok_or(
                     IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD),
                 )?;
-                if assistant.session_id != session_id {
+                if SessionEventOrderKey::for_core_record(&assistant.core_record)? != candidate.order
+                    || assistant.event_id.digest() != event.event_identity_digest
+                    || assistant.source.identity().digest() != event.source_owner_digest
+                    || assistant.event_type != "message"
+                    || assistant.role.as_deref() != Some("assistant")
+                {
                     return Err(IndexError::InvalidStoredDocumentField(
                         SESSION_EVENT_ORDER_FIELD,
                     ));
@@ -156,7 +192,7 @@ impl VerifiedIndex {
                 let text = assistant.core_record.content.meaningful_text().trim();
                 if !text.is_empty() {
                     let body = assistant.core_record.content.meaningful_text();
-                    latest_assistant = Some(SemanticTurnAssistant {
+                    assistant_messages.push(SemanticTurnAssistant {
                         event: assistant.event,
                         text: text.to_owned(),
                         content_start_char: body[..body.len() - body.trim_start().len()]

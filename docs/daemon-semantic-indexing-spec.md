@@ -77,8 +77,13 @@ specific external contract requires them.
 
 The primary semantic corpus is `lite_turn + deterministic rollups`.
 
-`lite_turn` is one user message plus the last assistant message before the next
-user message. Rollups are deterministic, functional documents created from
+`lite_turn` is one user message plus all nonempty, discovery-eligible assistant
+messages before the next user message, in source order and within the bounded
+pairing budget: 64 MiB of encoded Core records and 16 MiB of content across
+assistant records. Pairing stops before the first record that exceeds either
+remaining budget. The combined text is then capped at its first 65,536 Unicode
+characters before chunking; later content remains available through lexical
+search and show. Rollups are deterministic, functional documents created from
 existing structured metadata:
 
 - file rollup: touched paths/change kinds for the session
