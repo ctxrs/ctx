@@ -1,23 +1,13 @@
 use super::super::super::context::DiscoveryPlatformDirs;
 use std::fs;
 
+use super::super::test_support::{
+    assert_automatic_role, resolve_provider as provider_report, tempdir,
+    write_fixture as write_file,
+};
 use super::*;
 
-fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
-    super::resolve(
-        &crate::provider_sources::TEST_PROVIDER_PROBES,
-        context,
-        spec,
-    )
-}
-
-use crate::provider_source_spec;
 use rusqlite::Connection;
-
-fn tempdir() -> tempfile::TempDir {
-    crate::test_support_paths::tempdir()
-        .expect("system temporary directory should support platform resolver fixtures")
-}
 
 fn context(root: &Path, platform: DiscoveryPlatform) -> DiscoveryContext {
     DiscoveryContext::new(
@@ -33,30 +23,6 @@ fn context(root: &Path, platform: DiscoveryPlatform) -> DiscoveryContext {
     )
 }
 
-fn provider_report(context: &DiscoveryContext, provider: CaptureProvider) -> DiscoveryReport {
-    resolve(
-        context,
-        provider_source_spec(provider).expect("provider spec should exist"),
-    )
-}
-
-fn write_file(path: &Path, body: &[u8]) {
-    fs::create_dir_all(path.parent().expect("fixture file should have a parent")).unwrap();
-    fs::write(path, body).unwrap();
-}
-
-fn assert_automatic_role(source: &ProviderSource, components: &[&[u8]]) {
-    let expected =
-        ctx_history_capture_model::ProviderRouteRole::from_dynamic(components.iter().copied())
-            .expect("expected test role should be bounded");
-    assert_eq!(
-        source.route_provenance.automatic_route_role(),
-        Some(&expected),
-        "unexpected route role for {}",
-        source.path.display()
-    );
-}
-
 fn write_lingma_db(path: &Path) {
     fs::create_dir_all(path.parent().expect("database should have a parent")).unwrap();
     let connection = Connection::open(path).unwrap();
@@ -67,6 +33,20 @@ fn write_lingma_db(path: &Path) {
                  error_result text, gmt_create integer, extra text);",
         )
         .unwrap();
+}
+
+const LINGMA_VSCODE_DEFAULT_DB: &str = ".lingma/vscode/sharedClientCache/cache/db/local.db";
+const LINGMA_JETBRAINS_DEFAULT_DB: &str = ".qoder-cn/shared_client/cache/db/local.db";
+
+fn lingma_report_with_stale_default(
+    default_database: &str,
+    configure_selectors: impl FnOnce(&Path),
+) -> DiscoveryReport {
+    let temp = tempdir();
+    let context = context(temp.path(), DiscoveryPlatform::Linux);
+    configure_selectors(temp.path());
+    write_lingma_db(&context.home().join(default_database));
+    provider_report(&context, CaptureProvider::Lingma)
 }
 
 #[test]
@@ -146,6 +126,63 @@ fn kiro_legacy_selection_is_os_gated_and_xdg_is_replacement() {
     assert!(provider_report(&windows, CaptureProvider::KiroCli)
         .sources
         .is_empty());
+}
+
+#[test]
+fn kiro_default_fixture_matrix_matches_released_platform_locations() {
+    for platform in [
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatform::MacOS,
+        DiscoveryPlatform::Windows,
+        DiscoveryPlatform::OtherUnix,
+    ] {
+        let temp = tempdir();
+        let context = context(temp.path(), platform);
+        let current = context.home().join(".kiro/sessions");
+        let linux_legacy = context.home().join(".local/share/kiro-cli/data.sqlite3");
+        let macos_legacy = context
+            .home()
+            .join("Library/Application Support/kiro-cli/data.sqlite3");
+        fs::create_dir_all(&current).unwrap();
+        write_file(&linux_legacy, b"linux legacy");
+        write_file(&macos_legacy, b"macos legacy");
+
+        let report = provider_report(&context, CaptureProvider::KiroCli);
+        assert_eq!(report.issues, [], "{platform:?}");
+        if platform == DiscoveryPlatform::OtherUnix {
+            assert!(report.sources.is_empty(), "{platform:?}: {report:#?}");
+            continue;
+        }
+
+        let current_source = report
+            .sources
+            .iter()
+            .find(|source| source.path == current)
+            .unwrap_or_else(|| panic!("missing current Kiro route for {platform:?}: {report:#?}"));
+        assert_eq!(current_source.status, ProviderSourceStatus::Unsupported);
+        assert_eq!(
+            current_source.source_kind,
+            ProviderSourceKind::DetectionOnly
+        );
+
+        let available = report
+            .sources
+            .iter()
+            .filter(|source| source.status == ProviderSourceStatus::Available)
+            .collect::<Vec<_>>();
+        match platform {
+            DiscoveryPlatform::Linux => {
+                assert_eq!(available.len(), 1, "{report:#?}");
+                assert_eq!(available[0].path, linux_legacy);
+            }
+            DiscoveryPlatform::MacOS => {
+                assert_eq!(available.len(), 1, "{report:#?}");
+                assert_eq!(available[0].path, macos_legacy);
+            }
+            DiscoveryPlatform::Windows => assert!(available.is_empty(), "{report:#?}"),
+            DiscoveryPlatform::OtherUnix => unreachable!(),
+        }
+    }
 }
 
 #[test]
@@ -577,18 +614,12 @@ fn zed_uses_macos_and_windows_platform_data_directories() {
 
 #[test]
 fn lingma_relative_persistent_setting_is_manual_and_suppresses_default() {
-    let temp = tempdir();
-    let context = context(temp.path(), DiscoveryPlatform::Linux);
-    write_file(
-        &temp.path().join("platform-config/Code/User/settings.json"),
-        br#"{"QoderCN.LocalMachineStoragePath":"relative-root"}"#,
-    );
-    write_lingma_db(
-        &context
-            .home()
-            .join(".lingma/vscode/sharedClientCache/cache/db/local.db"),
-    );
-    let report = provider_report(&context, CaptureProvider::Lingma);
+    let report = lingma_report_with_stale_default(LINGMA_VSCODE_DEFAULT_DB, |root| {
+        write_file(
+            &root.join("platform-config/Code/User/settings.json"),
+            br#"{"QoderCN.LocalMachineStoragePath":"relative-root"}"#,
+        );
+    });
     assert!(report.sources.is_empty());
     assert_eq!(report.issues.len(), 1);
     assert_eq!(
@@ -599,19 +630,12 @@ fn lingma_relative_persistent_setting_is_manual_and_suppresses_default() {
 
 #[test]
 fn lingma_unreadable_base_selector_suppresses_stale_default() {
-    let temp = tempdir();
-    let context = context(temp.path(), DiscoveryPlatform::Linux);
-    write_file(
-        &temp.path().join("platform-config/Code/User/settings.json"),
-        b"{ malformed",
-    );
-    write_lingma_db(
-        &context
-            .home()
-            .join(".lingma/vscode/sharedClientCache/cache/db/local.db"),
-    );
-
-    let report = provider_report(&context, CaptureProvider::Lingma);
+    let report = lingma_report_with_stale_default(LINGMA_VSCODE_DEFAULT_DB, |root| {
+        write_file(
+            &root.join("platform-config/Code/User/settings.json"),
+            b"{ malformed",
+        );
+    });
 
     assert!(report.sources.is_empty());
     assert_eq!(report.issues.len(), 1);
@@ -623,25 +647,16 @@ fn lingma_unreadable_base_selector_suppresses_stale_default() {
 
 #[test]
 fn lingma_unreadable_base_selector_with_empty_profile_suppresses_stale_default() {
-    let temp = tempdir();
-    let context = context(temp.path(), DiscoveryPlatform::Linux);
-    write_file(
-        &temp.path().join("platform-config/Code/User/settings.json"),
-        b"{ malformed",
-    );
-    write_file(
-        &temp
-            .path()
-            .join("platform-config/Code/User/profiles/p/settings.json"),
-        b"{}",
-    );
-    write_lingma_db(
-        &context
-            .home()
-            .join(".lingma/vscode/sharedClientCache/cache/db/local.db"),
-    );
-
-    let report = provider_report(&context, CaptureProvider::Lingma);
+    let report = lingma_report_with_stale_default(LINGMA_VSCODE_DEFAULT_DB, |root| {
+        write_file(
+            &root.join("platform-config/Code/User/settings.json"),
+            b"{ malformed",
+        );
+        write_file(
+            &root.join("platform-config/Code/User/profiles/p/settings.json"),
+            b"{}",
+        );
+    });
 
     assert!(report.sources.is_empty());
     assert_eq!(report.issues.len(), 1);
@@ -656,23 +671,16 @@ fn lingma_unreadable_base_selector_with_empty_profile_suppresses_stale_default()
 fn lingma_linked_base_selector_suppresses_stale_default() {
     use std::os::unix::fs::symlink;
 
-    let temp = tempdir();
-    let context = context(temp.path(), DiscoveryPlatform::Linux);
-    let target = temp.path().join("outside-settings.json");
-    write_file(
-        &target,
-        br#"{"QoderCN.LocalMachineStoragePath":"/outside"}"#,
-    );
-    let settings = temp.path().join("platform-config/Code/User/settings.json");
-    fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    symlink(&target, &settings).unwrap();
-    write_lingma_db(
-        &context
-            .home()
-            .join(".lingma/vscode/sharedClientCache/cache/db/local.db"),
-    );
-
-    let report = provider_report(&context, CaptureProvider::Lingma);
+    let report = lingma_report_with_stale_default(LINGMA_VSCODE_DEFAULT_DB, |root| {
+        let target = root.join("outside-settings.json");
+        write_file(
+            &target,
+            br#"{"QoderCN.LocalMachineStoragePath":"/outside"}"#,
+        );
+        let settings = root.join("platform-config/Code/User/settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        symlink(&target, &settings).unwrap();
+    });
 
     assert!(report.sources.is_empty());
     assert_eq!(report.issues.len(), 1);
@@ -687,29 +695,20 @@ fn lingma_linked_base_selector_suppresses_stale_default() {
 fn lingma_linked_base_selector_with_empty_profile_suppresses_stale_default() {
     use std::os::unix::fs::symlink;
 
-    let temp = tempdir();
-    let context = context(temp.path(), DiscoveryPlatform::Linux);
-    let target = temp.path().join("outside-settings.json");
-    write_file(
-        &target,
-        br#"{"QoderCN.LocalMachineStoragePath":"/outside"}"#,
-    );
-    let settings = temp.path().join("platform-config/Code/User/settings.json");
-    fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    symlink(&target, &settings).unwrap();
-    write_file(
-        &temp
-            .path()
-            .join("platform-config/Code/User/profiles/p/settings.json"),
-        b"{}",
-    );
-    write_lingma_db(
-        &context
-            .home()
-            .join(".lingma/vscode/sharedClientCache/cache/db/local.db"),
-    );
-
-    let report = provider_report(&context, CaptureProvider::Lingma);
+    let report = lingma_report_with_stale_default(LINGMA_VSCODE_DEFAULT_DB, |root| {
+        let target = root.join("outside-settings.json");
+        write_file(
+            &target,
+            br#"{"QoderCN.LocalMachineStoragePath":"/outside"}"#,
+        );
+        let settings = root.join("platform-config/Code/User/settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        symlink(&target, &settings).unwrap();
+        write_file(
+            &root.join("platform-config/Code/User/profiles/p/settings.json"),
+            b"{}",
+        );
+    });
 
     assert!(report.sources.is_empty());
     assert_eq!(report.issues.len(), 1);
@@ -724,20 +723,13 @@ fn lingma_linked_base_selector_with_empty_profile_suppresses_stale_default() {
 fn lingma_linked_profile_directory_suppresses_stale_default() {
     use std::os::unix::fs::symlink;
 
-    let temp = tempdir();
-    let context = context(temp.path(), DiscoveryPlatform::Linux);
-    let outside = temp.path().join("outside-profile");
-    write_file(&outside.join("settings.json"), b"{}");
-    let profiles = temp.path().join("platform-config/Code/User/profiles");
-    fs::create_dir_all(&profiles).unwrap();
-    symlink(&outside, profiles.join("linked-profile")).unwrap();
-    write_lingma_db(
-        &context
-            .home()
-            .join(".lingma/vscode/sharedClientCache/cache/db/local.db"),
-    );
-
-    let report = provider_report(&context, CaptureProvider::Lingma);
+    let report = lingma_report_with_stale_default(LINGMA_VSCODE_DEFAULT_DB, |root| {
+        let outside = root.join("outside-profile");
+        write_file(&outside.join("settings.json"), b"{}");
+        let profiles = root.join("platform-config/Code/User/profiles");
+        fs::create_dir_all(&profiles).unwrap();
+        symlink(&outside, profiles.join("linked-profile")).unwrap();
+    });
 
     assert!(report.sources.is_empty());
     assert_eq!(report.issues.len(), 1);
@@ -752,20 +744,13 @@ fn lingma_linked_profile_directory_suppresses_stale_default() {
 fn lingma_linked_jetbrains_product_suppresses_stale_default() {
     use std::os::unix::fs::symlink;
 
-    let temp = tempdir();
-    let context = context(temp.path(), DiscoveryPlatform::Linux);
-    let outside = temp.path().join("outside-jetbrains");
-    fs::create_dir_all(&outside).unwrap();
-    let products = temp.path().join("platform-config/JetBrains");
-    fs::create_dir_all(&products).unwrap();
-    symlink(&outside, products.join("LinkedProduct")).unwrap();
-    write_lingma_db(
-        &context
-            .home()
-            .join(".qoder-cn/shared_client/cache/db/local.db"),
-    );
-
-    let report = provider_report(&context, CaptureProvider::Lingma);
+    let report = lingma_report_with_stale_default(LINGMA_JETBRAINS_DEFAULT_DB, |root| {
+        let outside = root.join("outside-jetbrains");
+        fs::create_dir_all(&outside).unwrap();
+        let products = root.join("platform-config/JetBrains");
+        fs::create_dir_all(&products).unwrap();
+        symlink(&outside, products.join("LinkedProduct")).unwrap();
+    });
 
     assert!(report.sources.is_empty());
     assert_eq!(report.issues.len(), 1);

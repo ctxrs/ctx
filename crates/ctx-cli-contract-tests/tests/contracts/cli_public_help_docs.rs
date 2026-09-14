@@ -432,12 +432,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
     for (command, required) in [
         (
             "setup",
-            vec![
-                "Usage: ctx setup",
-                "--catalog-only",
-                "Deprecated and ignored; setup follows its normal refresh lifecycle",
-                "--format <FORMAT>",
-            ],
+            vec!["Usage: ctx setup", "--no-daemon", "--format <FORMAT>"],
         ),
         (
             "semantic",
@@ -508,8 +503,9 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx integrations",
                 "install",
+                "remove",
                 "status",
-                "Install or inspect ctx integrations",
+                "Install, inspect, or remove ctx integrations",
             ],
         ),
         (
@@ -596,6 +592,27 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
 }
 
 #[test]
+fn removed_compatibility_flags_use_clap_unknown_argument_errors() {
+    let temp = tempdir();
+    for (command, flag) in [
+        ("setup", "--catalog-only"),
+        ("setup", "--no-import"),
+        ("import", "--partial"),
+        ("sources", "--show-missing"),
+    ] {
+        ctx(&temp)
+            .args([command, flag])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "unexpected argument '{flag}' found"
+            )))
+            .stderr(predicate::str::contains("Usage:"));
+    }
+}
+
+#[test]
 fn machine_readable_output_uses_format_without_a_json_alias() {
     let temp = tempdir();
     for args in [
@@ -619,10 +636,17 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         &["docs", "search", "--help"],
         &["docs", "show", "--help"],
         &["integrations", "install", "mcp", "--help"],
-        &["integrations", "install", "skills", "--help"],
-        &["integrations", "install", "slash-commands", "--help"],
+        &["integrations", "install", "skill", "--help"],
+        &["integrations", "install", "slash-command", "--help"],
+        &["integrations", "install", "plugin", "--help"],
+        &["integrations", "remove", "mcp", "--help"],
+        &["integrations", "remove", "skill", "--help"],
+        &["integrations", "remove", "slash-command", "--help"],
+        &["integrations", "remove", "plugin", "--help"],
         &["integrations", "status", "mcp", "--help"],
-        &["integrations", "status", "skills", "--help"],
+        &["integrations", "status", "skill", "--help"],
+        &["integrations", "status", "slash-command", "--help"],
+        &["integrations", "status", "plugin", "--help"],
         &["daemon", "run", "--help"],
         &["upgrade", "--help"],
         &["upgrade", "check", "--help"],
@@ -654,6 +678,59 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         .stderr(predicate::str::contains(
             "unexpected argument '--progress' found",
         ));
+}
+
+#[test]
+fn integrations_use_singular_targets_with_hidden_released_aliases() {
+    let temp = tempdir();
+    for (action, alias, canonical) in [
+        ("install", "skills", "skill"),
+        ("status", "skills", "skill"),
+        ("install", "slash-commands", "slash-command"),
+    ] {
+        let output = ctx(&temp)
+            .args(["integrations", action, alias, "--help"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help = String::from_utf8(output).unwrap();
+        assert!(
+            help.contains(&format!("Usage: ctx integrations {action} {canonical}")),
+            "alias {alias} did not resolve to canonical {canonical}:\n{help}"
+        );
+    }
+
+    let install = ctx(&temp)
+        .args(["integrations", "install", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let install = String::from_utf8(install).unwrap();
+    for canonical in ["mcp", "skill", "slash-command", "plugin"] {
+        assert!(install.contains(&format!("\n  {canonical}")), "{install}");
+    }
+    assert!(!install.contains("\n  skills"), "{install}");
+    assert!(!install.contains("\n  slash-commands"), "{install}");
+}
+
+#[test]
+fn builtin_throttling_remains_config_only_without_new_semantic_flags() {
+    let temp = tempdir();
+    for args in [
+        &["semantic", "enable", "--help"][..],
+        &["semantic", "status", "--help"],
+        &["semantic", "disable", "--help"],
+    ] {
+        let output = ctx(&temp).args(args).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(!help.contains("builtin-throttling"), "{help}");
+        assert!(!help.contains("builtin_throttling"), "{help}");
+    }
 }
 
 #[test]
@@ -926,6 +1003,51 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     let stats_man = String::from_utf8(stats_man).unwrap();
     assert!(stats_man.contains(".TH ctx-stats"));
     assert!(stats_man.contains(r"\-\-detail"));
+
+    let compatibility_man_pages = [
+        (
+            "ctx-integrations-install-skills",
+            "ctx-integrations-install-skill",
+        ),
+        (
+            "ctx-integrations-status-skills",
+            "ctx-integrations-status-skill",
+        ),
+        (
+            "ctx-integrations-install-slash-commands",
+            "ctx-integrations-install-slash-command",
+        ),
+    ];
+    for (alias, canonical) in compatibility_man_pages {
+        let legacy_man = ctx(&temp)
+            .args(["docs", "man", "--print", alias])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let legacy_man = String::from_utf8(legacy_man).unwrap();
+        assert!(
+            legacy_man.contains(&format!(".TH {canonical}")),
+            "{legacy_man}"
+        );
+        assert!(!legacy_man.contains(alias), "{legacy_man}");
+    }
+
+    let man_dir = temp.path().join("man");
+    ctx(&temp)
+        .args(["docs", "man", "--out"])
+        .arg(&man_dir)
+        .assert()
+        .success();
+    for (alias, canonical) in compatibility_man_pages {
+        let legacy_man = fs::read_to_string(man_dir.join(format!("{alias}.1"))).unwrap();
+        assert!(
+            legacy_man.contains(&format!(".TH {canonical}")),
+            "{legacy_man}"
+        );
+        assert!(!legacy_man.contains(alias), "{legacy_man}");
+    }
 }
 
 #[test]

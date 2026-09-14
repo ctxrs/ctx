@@ -10,6 +10,7 @@ mod json;
 mod private_fs;
 mod query_index;
 mod source_document;
+mod source_passage;
 mod vector_store;
 mod vector_store_schema;
 mod vector_store_search;
@@ -102,6 +103,10 @@ pub mod test_support {
         store
             .flat_pin_generation()?
             .ok_or_else(|| anyhow!("semantic test store has no flat generation"))
+    }
+
+    pub fn commit_control_wal(store: &SemanticVectorStore) -> Result<()> {
+        store.commit_control_wal_for_test()
     }
 
     pub fn semantic_query_pin(

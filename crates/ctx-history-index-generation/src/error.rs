@@ -2,13 +2,37 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, GenerationError>;
 
+/// Tantivy retains several I/O errors in fields instead of its source chain.
+/// Both generation and query errors use this one resource-diagnostic adapter.
+pub fn tantivy_file_limit_hint(error: &tantivy::TantivyError) -> String {
+    use tantivy::directory::error::{OpenDirectoryError, OpenReadError, OpenWriteError};
+    use tantivy::TantivyError;
+    let source = match error {
+        TantivyError::IoError(source)
+        | TantivyError::OpenReadError(OpenReadError::IoError {
+            io_error: source, ..
+        })
+        | TantivyError::OpenWriteError(OpenWriteError::IoError {
+            io_error: source, ..
+        })
+        | TantivyError::OpenDirectoryError(OpenDirectoryError::IoError {
+            io_error: source, ..
+        })
+        | TantivyError::OpenDirectoryError(OpenDirectoryError::FailedToCreateTempDir(source)) => {
+            source
+        }
+        _ => return String::new(),
+    };
+    ctx_history_platform::open_file_limit_hint(source)
+}
+
 #[derive(Debug, Error)]
 pub enum GenerationError {
-    #[error(transparent)]
+    #[error("{0}{}", ctx_history_platform::open_file_limit_hint(.0))]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error(transparent)]
+    #[error("{0}{}", tantivy_file_limit_hint(.0))]
     Tantivy(#[from] tantivy::TantivyError),
     #[error("the lexical index has no active generation pointer")]
     MissingActiveGenerationPointer,

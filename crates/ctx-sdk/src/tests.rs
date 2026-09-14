@@ -52,9 +52,41 @@ fn run_json_shell(body: &str, timeout: Duration) -> Result<Value, AgentHistoryEr
 }
 
 #[test]
+fn generic_status_omits_retired_flags_without_changing_nested_semantics() {
+    for operation in [AgentHistoryOperation::Status, AgentHistoryOperation::Init] {
+        for flags in [
+            json!({}),
+            json!({"local_only": true}),
+            json!({"localOnly": false}),
+            json!({"local_only": null, "localOnly": "legacy"}),
+        ] {
+            let mut raw = flags;
+            raw["schema_version"] = json!(2);
+            raw["lexical"] = json!({"generation_id": "ready"});
+            raw["semantic"] = json!({"local_only": false, "diagnostics": {"localOnly": null}});
+            let output = serde_json::to_value(
+                normalize(operation.clone(), BackendInfo::local(None), raw).unwrap(),
+            )
+            .unwrap();
+            let status = &output["status"];
+            assert!(status.get("localOnly").is_none(), "{status}");
+            assert!(status.get("local_only").is_none(), "{status}");
+            assert_eq!(status["initialized"], true);
+            assert_eq!(status["semantic"]["localOnly"], false);
+            assert_eq!(
+                status["semantic"]["diagnostics"].get("localOnly"),
+                Some(&Value::Null)
+            );
+        }
+    }
+    let fallback = serde_json::to_value(normalize_status(&json!({})).unwrap()).unwrap();
+    assert_eq!(fallback, json!({"initialized": false}));
+}
+
+#[test]
 fn reads_shared_search_fixture() {
     let value: AgentHistoryEnvelope = serde_json::from_str(include_str!(
-        "../../../contracts/agent-history-v1/fixtures/search.results.json"
+        "../../../contracts/agent-history-v2/fixtures/search.results.json"
     ))
     .unwrap();
     assert_eq!(value.contract_version, CONTRACT_VERSION);
@@ -147,7 +179,7 @@ fn show_normalization_exposes_core_identity_and_content() {
 #[test]
 fn show_normalization_exposes_typed_mcp_tool_call_metadata() {
     let canonical: AgentHistoryEnvelope = serde_json::from_str(include_str!(
-        "../../../contracts/agent-history-v1/fixtures/show-event.mcp-tool-call.json"
+        "../../../contracts/agent-history-v2/fixtures/show-event.mcp-tool-call.json"
     ))
     .unwrap();
     let canonical_result = canonical.event.unwrap();
@@ -194,7 +226,7 @@ fn show_normalization_exposes_typed_mcp_tool_call_metadata() {
 #[test]
 fn show_normalization_exposes_lossless_typed_mcp_exchange_content() {
     let fixture: Value = serde_json::from_str(include_str!(
-        "../../../contracts/agent-history-v1/fixtures/show-event.mcp-tool-call.json"
+        "../../../contracts/agent-history-v2/fixtures/show-event.mcp-tool-call.json"
     ))
     .unwrap();
     let canonical = normalize_event(&fixture["event"]).unwrap();
@@ -318,31 +350,31 @@ fn show_normalization_exposes_lossless_typed_mcp_exchange_content() {
 fn mcp_exchange_normalization_rejects_null_unknown_and_alias_ambiguity() {
     for fixture in [
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-explicit-null.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-exchange-explicit-null.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-unknown-field.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-exchange-unknown-field.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-outer-alias-collision.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-exchange-outer-alias-collision.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-normalized-body-missing-event-text.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-exchange-normalized-body-missing-event-text.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-normalized-body-empty-event-text.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-exchange-normalized-body-empty-event-text.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-unsafe-duration-ns.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-exchange-unsafe-duration-ns.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-unsafe-observed-encoded-bytes.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-exchange-unsafe-observed-encoded-bytes.json"
         )
         .as_slice(),
     ] {
@@ -513,27 +545,27 @@ fn raw_json_decode_rejects_duplicate_members_without_scanning_string_contents() 
 
     for duplicate in [
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-event-mcp-tool-call-snake.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/duplicate-event-mcp-tool-call-snake.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-event-mcp-tool-call-camel.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/duplicate-event-mcp-tool-call-camel.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-mcp-tool-call-server.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/duplicate-mcp-tool-call-server.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-mcp-tool-call-tool.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/duplicate-mcp-tool-call-tool.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-event-mcp-exchange-snake.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/duplicate-event-mcp-exchange-snake.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-mcp-exchange-captured-value.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/duplicate-mcp-exchange-captured-value.json"
         )
         .as_slice(),
     ] {
@@ -548,35 +580,35 @@ fn raw_json_decode_rejects_duplicate_members_without_scanning_string_contents() 
 
     for transformed in [
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-transformed-server.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-tool-call-transformed-server.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-transformed-tool.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-tool-call-transformed-tool.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-transformed-collision.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-tool-call-transformed-collision.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-outer-alias-collision.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-tool-call-outer-alias-collision.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-outer-mixed-case.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-tool-call-outer-mixed-case.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-outer-repeated-separator.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-tool-call-outer-repeated-separator.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-outer-trailing-separator.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-tool-call-outer-trailing-separator.json"
         )
         .as_slice(),
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-outer-camel-snake.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/invalid-mcp-tool-call-outer-camel-snake.json"
         )
         .as_slice(),
     ] {
@@ -587,7 +619,7 @@ fn raw_json_decode_rejects_duplicate_members_without_scanning_string_contents() 
 
     let repeated = decode_json_value_exact(
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/valid-repeated-string-contents.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/valid-repeated-string-contents.json"
         ),
         "failed to decode ctx JSON",
     )
@@ -599,7 +631,7 @@ fn raw_json_decode_rejects_duplicate_members_without_scanning_string_contents() 
 
     let aliases = decode_json_value_exact(
         include_bytes!(
-            "../../../contracts/agent-history-v1/fixtures/adversarial/valid-mcp-tool-call-outer-aliases.json"
+            "../../../contracts/agent-history-v2/fixtures/adversarial/valid-mcp-tool-call-outer-aliases.json"
         ),
         "failed to decode ctx JSON",
     )
@@ -860,3 +892,6 @@ fn local_json_timeout_kills_and_reaps_the_child() {
 }
 
 mod additional;
+
+#[cfg(unix)]
+mod fidelity;

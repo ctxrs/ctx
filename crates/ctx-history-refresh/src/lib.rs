@@ -45,8 +45,7 @@ use ctx_history_index::{
 use ctx_history_refresh_execution::{
     is_sha256_identity, refresh_scope_from_json, refresh_scope_json, required_generation,
     source_backed_requested_route_observations, source_backed_route_retry_disposition,
-    verify_generation_query_readiness, GenerationQueryReadiness, PublishedSourceBackedState,
-    PublishedSourceBackedStatePort, SourceBackedAdmissionRouteFailures,
+    PublishedSourceBackedState, PublishedSourceBackedStatePort, SourceBackedAdmissionRouteFailures,
     SourceBackedExactScanProgress,
     SourceBackedRefreshProgressUpdate as PhysicalRefreshProgressUpdate,
 };
@@ -69,15 +68,15 @@ pub use ctx_history_refresh_execution::{
     upsert_explicit_source, validate_explicit_relocation_source, ExplicitSourceCatalogAuthority,
     ExplicitSourceCatalogRouteBinding, ExplicitSourceCatalogUpsert, ExplicitSourcePathMissing,
     ExplicitSourceRelocationAuthority, SourceBackedCurrentSourceProgress,
-    SourceBackedCurrentSourceProgressStage, SourceBackedPublicationMetadata,
+    SourceBackedCurrentSourceProgressStage, SourceBackedGenerationState,
     SourceBackedReconciliationDemand as RefreshReconciliationDemand,
     SourceBackedRefreshCatalogRouteOutcome, SourceBackedRefreshCurrent,
     SourceBackedRefreshExecution, SourceBackedRefreshPublication, SourceBackedRefreshReceipt,
     SourceBackedRefreshRecordRejection, SourceBackedRefreshRouteOutcome,
     SourceBackedRefreshRouteResult, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
     SourceBackedRefreshWorkset, SourceBackedZeroSourceAuthority,
-    SourceBackedZeroSourceAuthorityKind, ZeroSourcePublicationBlocked,
-    SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+    SourceBackedZeroSourceAuthorityKind, ZeroSourcePublicationBlockReason,
+    ZeroSourcePublicationBlocked,
 };
 pub use engine::{
     CoreRefreshEngine as RefreshEngine, PinnedCorePublication, RefreshRuntime,
@@ -90,16 +89,16 @@ pub use journal::{DurableAdmissionPersistence, RefreshJournal};
 pub use publication::count_verified_index_opens;
 pub use publication::{
     explicit_catalog_request_is_accounted_for, open_verified_index, pin_active_verified_generation,
-    pin_published_generation, pin_retained_generation,
-    published_explicit_source_relocation_authority, published_refresh_receipt,
-    verified_generation_is_query_ready, verify_generation_query_authority,
-    GenerationQueryAuthorityError, MissingActiveGeneration, PinnedSourceBackedGeneration,
+    pin_active_verified_generation_with_retained_peer, pin_published_generation,
+    pin_published_generation_with_retained_peer, pin_retained_generation,
+    pin_retained_generation_with_retained_peer, published_explicit_source_relocation_authority,
+    published_refresh_receipt, MissingActiveGeneration, PinnedSourceBackedGeneration,
 };
 pub use request::{
-    AdmissionResponseBarrier, RefreshAdmission, RefreshIntent, RefreshLogicalPhase,
-    RefreshLogicalStatus, RefreshMaintenanceWakeStatus, RefreshOperation, RefreshOutcomeClass,
-    RefreshOutcomeCode, RefreshRequest, RefreshRequestState, RefreshRequestTrigger,
-    RefreshRetryAdvice, RefreshSelection, RefreshStatus, RefreshStatusKind,
+    AdmissionResponseBarrier, RefreshAdmission, RefreshFailureKind, RefreshFailureStage,
+    RefreshIntent, RefreshLogicalPhase, RefreshLogicalStatus, RefreshMaintenanceWakeStatus,
+    RefreshOperation, RefreshOutcomeClass, RefreshOutcomeCode, RefreshRequest, RefreshRequestState,
+    RefreshRequestTrigger, RefreshRetryAdvice, RefreshSelection, RefreshStatus, RefreshStatusKind,
     RefreshTerminalFailureScope, RefreshTerminalFailureType, RefreshTerminalOutcome,
 };
 pub use route_ledger::EventWatermark;
@@ -111,9 +110,8 @@ use engine::{CoreRefreshEngine, SourceBackedRefreshProgressUpdate};
 use orchestration::admitted_refresh_for_test;
 use orchestration::{execute_source_backed_refresh, source_backed_route_admission_fence};
 use publication::{
-    open_published_generation, open_published_generation_for_recovery,
-    prepare_generation_control_state, published_generation_id, retained_generation_hint,
-    verify_source_backed_publication, PublishedGenerationOpen,
+    open_published_generation, prepare_generation_control_state, published_generation_id,
+    retained_generation_hint, verify_source_backed_publication,
 };
 
 const SOURCE_REFRESH_ATTEMPT_HISTORY: usize = 64;
@@ -123,8 +121,6 @@ const SOURCE_REFRESH_AUTOMATIC_RETRY_CONFIRMATION_LIMIT: u8 = 2;
 const SOURCE_REFRESH_AUTOMATIC_RETRY_ERROR_SUMMARY_BYTES: usize = 4 * 1024;
 const SOURCE_REFRESH_BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SOURCE_REFRESH_STARTUP_OBSERVATION_BUDGET: StdDuration = StdDuration::from_millis(250);
-const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unavailable";
-
 fn compact_json(mut value: Value) -> Value {
     prune_null_json(&mut value);
     value

@@ -1,5 +1,7 @@
 use super::*;
 
+mod catalog_pages;
+
 fn contract() -> FlatModelContract {
     FlatModelContract {
         contract_version: 2,

@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     ffi::OsString,
     fs,
     sync::{
@@ -16,6 +15,50 @@ use ctx_client_observability::analytics::{
 use ctx_terminal::{RenderContext, StreamKind, TestContext};
 
 use super::*;
+
+#[test]
+fn import_semantic_completion_owner_matrix_has_one_configured_writer() {
+    let mut config = ctx_app_config::AppConfig::default();
+    config.search.semantic = Some(false);
+    assert!(matches!(
+        ImportSemanticCompletion::from_import_config(&config),
+        ImportSemanticCompletion::Disabled
+    ));
+
+    config.search.semantic = Some(true);
+    config.indexing.mode = ctx_app_config::IndexingMode::Manual;
+    assert!(matches!(
+        ImportSemanticCompletion::from_import_config(&config),
+        ImportSemanticCompletion::Foreground { .. }
+    ));
+
+    config.indexing.mode = ctx_app_config::IndexingMode::Automatic;
+    config.daemon.mode = ctx_app_config::DaemonMode::Full;
+    assert!(matches!(
+        ImportSemanticCompletion::from_import_config(&config),
+        ImportSemanticCompletion::Daemon { .. }
+    ));
+
+    config.daemon.mode = ctx_app_config::DaemonMode::SourceRefreshOnly;
+    assert!(matches!(
+        ImportSemanticCompletion::from_import_config(&config),
+        ImportSemanticCompletion::Foreground { .. }
+    ));
+}
+
+#[test]
+fn import_semantic_owner_is_independent_of_daemon_autostart_suppression() {
+    let mut config = ctx_app_config::AppConfig::default();
+    config.search.semantic = Some(true);
+    config.daemon.mode = ctx_app_config::DaemonMode::Full;
+
+    // `ImportSemanticCompletion::from_import_config` intentionally receives
+    // no `--no-daemon` flag: Core alone decides whether it may start a daemon.
+    assert!(matches!(
+        ImportSemanticCompletion::from_import_config(&config),
+        ImportSemanticCompletion::Daemon { .. }
+    ));
+}
 
 #[test]
 fn companion_maintenance_wake_coalesces_without_losing_a_publication() {
@@ -66,11 +109,116 @@ struct RestoreEnvironment {
 }
 
 impl RestoreEnvironment {
+    fn capture(name: &'static str) -> Self {
+        Self {
+            name,
+            previous: std::env::var_os(name),
+        }
+    }
+
     fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let previous = std::env::var_os(name);
         std::env::set_var(name, value);
         Self { name, previous }
     }
+}
+
+fn external_executor(endpoint: &str) -> ctx_daemon_cli::SemanticEmbeddingExecutorConfig {
+    ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+        endpoint,
+        ctx_daemon_cli::ExternalSemanticSpace::new("space-v1", 384).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn explicit_selection_binds_auth_before_enablement_or_discovery() {
+    let _lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK.lock().unwrap();
+    let token = ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV;
+    let binding = ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV;
+    let _token = RestoreEnvironment::capture(token);
+    let _binding = RestoreEnvironment::capture(binding);
+    std::env::set_var(token, "secret");
+    std::env::remove_var(binding);
+
+    rebind_embedding_auth_for_explicit_selection("https://embed.example.test/base");
+    assert_eq!(
+        std::env::var(binding).unwrap(),
+        "https://embed.example.test/base"
+    );
+    rebind_embedding_auth_for_explicit_selection("builtin");
+    assert!(std::env::var_os(binding).is_none());
+}
+
+#[test]
+fn auth_endpoint_binding_requires_enabled_http_and_the_token() {
+    let _lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK.lock().unwrap();
+    let token = ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV;
+    let binding = ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV;
+    let _token = RestoreEnvironment::capture(token);
+    let _binding = RestoreEnvironment::capture(binding);
+    let mut config = ctx_app_config::AppConfig::default();
+    config.semantic.executor = external_executor("https://embed.example.test/base");
+    config.search.semantic = Some(true);
+
+    std::env::set_var(token, "secret");
+    std::env::remove_var(binding);
+    bind_embedding_auth_endpoint(&config);
+    assert_eq!(
+        std::env::var(binding).unwrap(),
+        "https://embed.example.test/base/"
+    );
+
+    std::env::set_var(binding, "https://independently-bound.example.test/");
+    bind_embedding_auth_endpoint(&config);
+    assert_eq!(
+        std::env::var(binding).unwrap(),
+        "https://independently-bound.example.test/"
+    );
+    rebind_embedding_auth_endpoint(&config);
+    assert_eq!(
+        std::env::var(binding).unwrap(),
+        "https://embed.example.test/base/"
+    );
+
+    config.semantic.executor = external_executor("http://127.0.0.1:8080");
+    bind_embedding_auth_endpoint(&config);
+    assert!(std::env::var_os(binding).is_none());
+    rebind_embedding_auth_endpoint(&config);
+    assert_eq!(std::env::var(binding).unwrap(), "http://127.0.0.1:8080/");
+    clear_embedding_auth_endpoint();
+    std::env::set_var(binding, "http://127.0.0.1:8080/");
+    bind_embedding_auth_endpoint(&config);
+    assert_eq!(std::env::var(binding).unwrap(), "http://127.0.0.1:8080/");
+
+    config.semantic.executor = external_executor("https://embed.example.test/base");
+    std::env::remove_var(token);
+    bind_embedding_auth_endpoint(&config);
+    assert_eq!(std::env::var(binding).unwrap(), "http://127.0.0.1:8080/");
+    clear_embedding_auth_endpoint();
+    assert!(std::env::var_os(binding).is_none());
+
+    std::env::set_var(token, "secret");
+    std::env::set_var(binding, "https://independently-bound.example.test/");
+    config.search.semantic = Some(false);
+    bind_embedding_auth_endpoint(&config);
+    assert_eq!(
+        std::env::var(binding).unwrap(),
+        "https://independently-bound.example.test/"
+    );
+    clear_embedding_auth_endpoint();
+    assert!(std::env::var_os(binding).is_none());
+
+    config.search.semantic = Some(true);
+    config.semantic.executor = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin();
+    std::env::set_var(binding, "https://independently-bound.example.test/");
+    bind_embedding_auth_endpoint(&config);
+    assert_eq!(
+        std::env::var(binding).unwrap(),
+        "https://independently-bound.example.test/"
+    );
+    rebind_embedding_auth_endpoint(&config);
+    assert!(std::env::var_os(binding).is_none());
 }
 
 impl Drop for RestoreEnvironment {
@@ -83,30 +231,42 @@ impl Drop for RestoreEnvironment {
 }
 
 #[test]
-fn daemon_cli_config_borrows_passive_upgrade_policy() {
-    let mut config = crate::config::AppConfig::default();
-    config.upgrade.auto = "off".to_owned();
+fn daemon_cli_projection_suppresses_staging_but_keeps_managed_upgrades() {
+    let config = ctx_app_config::AppConfig::default();
+    let managed = crate::upgrade::automatic_upgrade_eligible_for_marker_hint(&config, true, false);
+    let staging = crate::upgrade::automatic_upgrade_eligible_for_marker_hint(&config, true, true);
 
-    let mapped = daemon_cli_config(&config);
+    let managed = daemon_cli_config_with_automatic_upgrade_eligibility(&config, managed);
+    let staging = daemon_cli_config_with_automatic_upgrade_eligibility(&config, staging);
+    let mut disabled_config = config.clone();
+    disabled_config.upgrade.auto = "off".to_owned();
+    let disabled =
+        crate::upgrade::automatic_upgrade_eligible_for_marker_hint(&disabled_config, true, false);
+    let disabled = daemon_cli_config_with_automatic_upgrade_eligibility(&disabled_config, disabled);
 
-    assert!(!mapped.auto_upgrade_enabled());
-    assert!(matches!(&mapped.upgrade.channel, Cow::Borrowed(_)));
-    assert!(std::ptr::eq(
-        mapped.upgrade_channel().as_ptr(),
-        config.upgrade.channel.as_ptr(),
-    ));
+    assert!(managed.auto_upgrade_enabled());
+    assert!(!staging.auto_upgrade_enabled());
+    assert!(!disabled.auto_upgrade_enabled());
+    assert_eq!(managed.upgrade_channel(), config.upgrade.channel);
 }
 
 #[test]
-fn nonempty_daemon_observation_batch_loads_config_once() -> Result<()> {
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+fn daemon_observation_delivery_rechecks_config_at_each_ownership_boundary() -> Result<()> {
+    let _env_lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _dry_run = RestoreEnvironment::set("CTX_ANALYTICS_DRY_RUN", "1");
+    let device_root = tempfile::tempdir()?;
+    let _state = RestoreEnvironment::set("XDG_STATE_HOME", device_root.path());
+    let _home = RestoreEnvironment::set("HOME", device_root.path());
+    let _enabled = RestoreEnvironment::set("CTX_ANALYTICS_ENABLED", "true");
+    let _endpoint =
+        RestoreEnvironment::set("CTX_ANALYTICS_ENDPOINT", "http://127.0.0.1:9/telemetry");
+    let _dry_run = RestoreEnvironment::capture("CTX_ANALYTICS_DRY_RUN");
+    std::env::remove_var("CTX_ANALYTICS_DRY_RUN");
     initialize()?;
     let root = tempfile::tempdir()?;
     fs::write(
-        root.path().join(crate::config::CONFIG_FILE),
+        root.path().join(ctx_app_config::CONFIG_FILE),
         "[analytics]\nenabled = true\n\n[upgrade]\nauto = \"off\"\n",
     )?;
     let event = PublicEventV1::OperationCompleted(OperationCompletedV1::for_daemon(
@@ -115,19 +275,23 @@ fn nonempty_daemon_observation_batch_loads_config_once() -> Result<()> {
         Duration::ZERO,
     ));
 
-    let (_, empty_loads) =
-        crate::config::count_app_config_loads(|| deliver_daemon_events(root.path(), &[]));
-    assert_eq!(empty_loads, 0);
-    let (_, nonempty_loads) = crate::config::count_app_config_loads(|| {
+    let (_, empty_append_loads) =
+        ctx_app_config::count_app_config_loads(|| deliver_daemon_events(root.path(), &[]));
+    assert_eq!(empty_append_loads, 1);
+    let (_, empty_upload_loads) = ctx_app_config::count_app_config_loads(|| {
+        ctx_daemon_cli::DaemonCliHost::upload_daemon_events(&CtxDaemonCliHost, root.path(), &[]);
+    });
+    assert_eq!(empty_upload_loads, 3);
+    let (_, nonempty_loads) = ctx_app_config::count_app_config_loads(|| {
         deliver_daemon_events(root.path(), std::slice::from_ref(&event));
     });
-    assert_eq!(nonempty_loads, 1);
+    assert_eq!(nonempty_loads, 2);
     Ok(())
 }
 
 #[test]
 fn post_lock_initialization_failure_retains_restart_intent() -> Result<()> {
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+    let _env_lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     initialize()?;
@@ -184,7 +348,7 @@ fn post_lock_initialization_failure_retains_restart_intent() -> Result<()> {
             }),
         },
         root.path().to_path_buf(),
-        &crate::config::AppConfig::default(),
+        &ctx_app_config::AppConfig::default(),
         &mut ui,
     )
     .expect_err("the injected post-lock initialization failure must surface");

@@ -433,15 +433,6 @@ pub trait ReplacementDocumentTree: Send + Sync + 'static {
         &self,
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]>;
-    fn after_successful_publication(
-        &self,
-        _tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
-        _certificates: &HashMap<[u8; 32], CertifiedSource>,
-    ) {
-    }
-    fn has_successful_publication_work(&self) -> bool {
-        false
-    }
     fn publication_control(
         &self,
         _tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
@@ -474,13 +465,10 @@ where
     let source_state = Arc::clone(&state);
     let inventory_adapter = Arc::clone(&adapter);
     let inventory_state = Arc::clone(&state);
-    let publication_adapter = Arc::clone(&adapter);
-    let publication_state = Arc::clone(&state);
     let fence_adapter = Arc::clone(&adapter);
     let fence_state = Arc::clone(&state);
     let control_adapter = Arc::clone(&adapter);
     let control_state = Arc::clone(&state);
-    let has_successful_publication_work = publication_adapter.has_successful_publication_work();
     let route_control_expectation = adapter.route_control_expectation();
 
     let mut driver = SourceBackedRouteDriver::new(
@@ -535,18 +523,7 @@ where
     if uses_parallel_leaf_workers {
         driver = driver.with_parallel_leaf_workers();
     }
-    if !has_successful_publication_work {
-        return driver;
-    }
-    driver.with_successful_publication(move || {
-        let Ok(state) = publication_state.lock() else {
-            return;
-        };
-        let Some(expected) = state.expected.as_ref() else {
-            return;
-        };
-        publication_adapter.after_successful_publication(&expected.tree, &expected.certificates);
-    })
+    driver
 }
 
 fn scan_document_tree<A>(

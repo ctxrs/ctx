@@ -26,6 +26,9 @@ pub mod ui {
     pub use ctx_terminal::ui::*;
 }
 
+#[cfg(test)]
+mod test_support;
+
 pub use output::{JsonOutputFormat, OutputFormat};
 pub use progress::ProgressArg;
 pub use provider_args::{

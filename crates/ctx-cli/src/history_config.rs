@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 use ctx_history_cli::{HistoryCliConfig, HistoryConfigPort, HistoryConfigSnapshotPort};
 
-use crate::config::{self, AppConfig};
+use ctx_app_config::{self as config, AppConfig};
 
 /// Static bridge to the final binary's persisted configuration authority.
 /// It intentionally performs no loading, environment lookup, or fallback.

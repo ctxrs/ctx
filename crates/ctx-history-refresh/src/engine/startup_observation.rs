@@ -6,8 +6,8 @@ pub(super) fn overdue_hermes_exact_routes(
     expectation: impl Fn(&SourceRouteIdentity) -> Option<SourceBackedRouteControlExpectation>,
 ) -> BTreeSet<SourceRouteIdentity> {
     let manifest = index.manifest();
-    let route_controls = SourceBackedPublicationMetadata::decode(index)
-        .map(|metadata| metadata.route_controls)
+    let route_controls = SourceBackedGenerationState::decode_from_verified_index(index)
+        .map(|state| state.route_controls().clone())
         .unwrap_or_default();
     manifest
         .source_routes()
@@ -99,11 +99,14 @@ mod tests {
         .unwrap();
         let database_identity = [1_u8; 32];
         let schema_evidence = [2_u8; 32];
+        let physical_revision = [3_u8; 32];
         let revision = serde_json::to_vec(&serde_json::json!({
             "kind": "hermes-route-control-v1",
-            "version": 2,
+            "version": 3,
+            "parser_revision": "hermes-source-backed-v5-optional-admission",
             "profile_source_descriptor": profile_source_descriptor,
             "database_identity": database_identity,
+            "physical_revision": physical_revision,
             "schema_evidence": schema_evidence,
             "session_rowid": 4,
             "message_rowid": 9,
@@ -143,45 +146,24 @@ mod tests {
             .unwrap();
         let request_route = route.clone();
         writer
-            .commit_with_publication_metadata(
+            .commit_with_generation_state(
                 |_| true,
-                move |context| {
-                    let publication = SourceBackedRefreshPublication {
-                        generation_id: context.generation_id().to_owned(),
-                        published_explicit_source_catalog: None,
-                        unsupported_routes: 0,
-                        certified_source_count: 1,
-                        certified_source_bytes: 0,
-                        current: SourceBackedRefreshCurrent {
-                            source_count: 1,
-                            ..SourceBackedRefreshCurrent::default()
-                        },
-                        timings: SourceBackedRefreshTimings::default(),
-                        route_results: vec![SourceBackedRefreshRouteResult::succeeded(
-                            request_route.as_str().to_owned(),
-                            true,
-                        )],
-                        zero_source_authority: Vec::new(),
-                        catalog_route_bindings: Vec::new(),
-                        verified_index: None,
-                    };
-                    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
-                        None,
-                        context.generation_id().to_owned(),
-                        &publication,
-                    )
-                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                    SourceBackedPublicationMetadata {
-                        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                        request_id: "hermes-route-control-test".to_owned(),
-                        operation: SourceBackedRefreshOperation::Refresh,
-                        refresh_scope: SourceBackedRefreshScope::All,
-                        receipt: receipt.to_json(),
-                        route_observations: BTreeMap::new(),
-                        route_controls: BTreeMap::from([(request_route.clone(), revision)]),
+                |_| false,
+                {
+                    let request_route = request_route.clone();
+                    let revision = revision.clone();
+                    move |_| {
+                        SourceBackedGenerationState::new(
+                            None,
+                            Vec::new(),
+                            BTreeMap::new(),
+                            BTreeMap::from([(request_route, revision)]),
+                            Vec::new(),
+                        )?
+                        .envelope()
                     }
-                    .encode()
                 },
+                |_| Ok(()),
             )
             .unwrap();
         VerifiedIndex::open_pinned(root).unwrap()
@@ -205,48 +187,26 @@ mod tests {
             .unwrap();
         let request_route = route.clone();
         writer
-            .commit_with_publication_metadata(
+            .commit_with_generation_state(
                 |_| true,
-                move |context| {
-                    let publication = SourceBackedRefreshPublication {
-                        generation_id: context.generation_id().to_owned(),
-                        published_explicit_source_catalog: None,
-                        unsupported_routes: 0,
-                        certified_source_count: 0,
-                        certified_source_bytes: 0,
-                        current: SourceBackedRefreshCurrent::default(),
-                        timings: SourceBackedRefreshTimings::default(),
-                        route_results: vec![SourceBackedRefreshRouteResult::succeeded(
-                            request_route.as_str().to_owned(),
-                            true,
-                        )],
-                        zero_source_authority: vec![SourceBackedZeroSourceAuthority {
-                            generation_id: context.generation_id().to_owned(),
-                            route_identity: request_route.clone(),
-                            kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
-                        }],
-                        catalog_route_bindings: Vec::new(),
-                        verified_index: None,
-                    };
-                    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
-                        None,
-                        context.generation_id().to_owned(),
-                        &publication,
-                    )
-                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                    SourceBackedPublicationMetadata {
-                        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                        request_id: "empty-hermes-route-control-test".to_owned(),
-                        operation: SourceBackedRefreshOperation::Refresh,
-                        refresh_scope: SourceBackedRefreshScope::All,
-                        receipt: receipt.to_json(),
-                        route_observations: BTreeMap::new(),
-                        route_controls: control
-                            .map(|control| BTreeMap::from([(request_route.clone(), control)]))
-                            .unwrap_or_default(),
+                |_| false,
+                {
+                    let request_route = request_route.clone();
+                    let control = control.clone();
+                    move |_| {
+                        SourceBackedGenerationState::new(
+                            None,
+                            Vec::new(),
+                            BTreeMap::new(),
+                            control
+                                .map(|control| BTreeMap::from([(request_route, control)]))
+                                .unwrap_or_default(),
+                            Vec::new(),
+                        )?
+                        .envelope()
                     }
-                    .encode()
                 },
+                |_| Ok(()),
             )
             .unwrap();
         VerifiedIndex::open_pinned(root).unwrap()
@@ -319,9 +279,10 @@ mod tests {
             let persisted = empty_hermes_route_index(&temp.path().join(case), &route, control);
             let persisted_route = persisted.manifest().source_route(&route).unwrap();
             assert!(persisted_route.sources().is_empty());
-            let controls = SourceBackedPublicationMetadata::decode(&persisted)
+            let controls = SourceBackedGenerationState::decode_from_verified_index(&persisted)
                 .unwrap()
-                .route_controls;
+                .route_controls()
+                .clone();
             let recovery = hermes_routes_requiring_control_recovery(&catalog, &controls, 1_000);
             assert_eq!(recovery, BTreeSet::from([route.clone()]));
             assert_eq!(

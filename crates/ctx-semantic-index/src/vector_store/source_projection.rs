@@ -18,47 +18,49 @@ use uuid::Uuid;
 use super::control::FULL_REBUILD_STATE;
 use super::flat_segments::{
     FlatActiveEventLookup, FlatEventMetadataUpdate, FlatSourceHash, FlatSourceReceiptInput,
-    FlatSourceStageResume, PinnedFlatGeneration,
+    FlatSourceStageResume,
 };
 use super::{SemanticChunkDocument, SemanticVectorStore};
 use crate::{
-    indexing::{semantic_chunks_for_document, semantic_document_hash, semantic_source_text},
-    vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
+    indexing::{
+        semantic_chunks_for_document_with_fit, semantic_document_hash, semantic_source_text,
+    },
+    vector_store_schema::SemanticVectorStoreError,
     SemanticEventDocument,
 };
 
+mod embedding;
 mod manifest;
 mod outcome;
+mod progress;
 mod state;
 
+pub use embedding::SemanticBatchEmbedder;
+use embedding::{
+    embed_chunks_in_bounded_batches, source_event_page_limit, ResolvedSourceDocument,
+    SourceProjectionWorkers,
+};
 #[cfg(test)]
 use manifest::SOURCE_CONTRACT_VERSION;
 use manifest::{
     source_contract_fingerprint, source_contract_fingerprint_with_authority, validate_generation,
-    validate_page, validate_resolved_document, SourceProjectionFrontier, SourceTraversalPhase,
-    SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
+    validate_page, validate_resolved_document, validate_stored_event, SourceProjectionFrontier,
+    SourceTraversalPhase, SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
 };
 use outcome::merge_outcome;
 pub use outcome::SourceBackedSemanticOutcome;
+use progress::SourceBackedReconciliationBoundaryLimit;
+pub use state::SourceBackedGenerationPin;
 use state::{
-    clear_active_source, commit_frontier_after_flat, source_projection_states,
-    source_receipt_allows_vector_reuse, source_receipt_matches, SourceProjectionStates,
+    advance_frontier_progress, clear_active_source, commit_frontier_after_flat,
+    source_projection_states, source_receipt_allows_vector_reuse, source_receipt_matches,
+    SourceProjectionStates,
 };
 
 const SEARCH_DIRECTORY: &str = "search";
 const SEMANTIC_DIRECTORY: &str = "semantic";
 pub fn source_backed_semantic_vector_path(data_root: &Path) -> PathBuf {
     data_root.join(SEARCH_DIRECTORY).join(SEMANTIC_DIRECTORY)
-}
-
-fn external_embedding_chunk_limit(model_contract: &SemanticModelContract) -> Option<usize> {
-    model_contract
-        .external_space()
-        .map(|space| space.max_inputs_per_request())
-}
-
-fn source_event_page_limit(model_contract: &SemanticModelContract) -> usize {
-    external_embedding_chunk_limit(model_contract).unwrap_or(MAX_SOURCE_EVENT_PAGE_ITEMS)
 }
 
 /// Returns persisted projection identity for one vector space, excluding
@@ -202,54 +204,6 @@ pub trait SemanticDocumentBuilder {
         -> Result<Option<SemanticEventDocument>>;
 }
 
-pub trait SemanticBatchEmbedder {
-    fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>>;
-}
-
-pub enum SourceBackedGenerationPin {
-    NotReady,
-    ReadyEmpty,
-    Ready(PinnedFlatGeneration),
-}
-
-#[derive(Debug)]
-struct ResolvedSourceDocument {
-    event_id: StableEntityId,
-    stable_identity: Vec<u8>,
-    source_text_sha256: String,
-    seq: u64,
-    chunks: Vec<SemanticChunkDocument>,
-}
-
-fn embed_chunks_in_bounded_batches(
-    embedder: &mut dyn SemanticBatchEmbedder,
-    chunks: Vec<SemanticChunkDocument>,
-    dimensions: usize,
-    batch_limit: Option<usize>,
-) -> Result<Vec<(SemanticChunkDocument, Vec<f32>)>> {
-    let batch_limit = batch_limit.unwrap_or(chunks.len()).max(1);
-    let mut chunks = chunks.into_iter();
-    let mut replacements = Vec::new();
-    loop {
-        let batch = chunks.by_ref().take(batch_limit).collect::<Vec<_>>();
-        if batch.is_empty() {
-            return Ok(replacements);
-        }
-        let embeddings = embedder.embed_chunks(&batch)?;
-        if embeddings.len() != batch.len()
-            || embeddings
-                .iter()
-                .any(|embedding| embedding.len() != dimensions)
-        {
-            return Err(SemanticVectorStoreError::unavailable(
-                "source-backed semantic embedder returned an invalid batch",
-            )
-            .into());
-        }
-        replacements.extend(batch.into_iter().zip(embeddings));
-    }
-}
-
 impl SemanticVectorStore {
     pub fn reconcile_source_backed_index(
         &mut self,
@@ -257,20 +211,29 @@ impl SemanticVectorStore {
         builder: &mut dyn SemanticDocumentBuilder,
         embedder: &mut dyn SemanticBatchEmbedder,
     ) -> Result<SourceBackedSemanticOutcome> {
-        semantic_owned_sidecar_result((|| {
-            let work_before = self.flat.work_stats();
-            let generation =
-                SourceBackedSemanticGeneration::from_verified_index(index, self.contract())?;
-            let mut outcome =
-                self.reconcile_source_backed_generation(index, &generation, builder, embedder)?;
-            let work = self.flat.work_since(work_before);
-            outcome.vectors_touched = work.vectors_touched;
-            outcome.vector_bytes_touched = work.vector_bytes_touched;
-            outcome.metadata_records_touched = work.metadata_records_touched;
-            Ok(outcome)
-        })())
+        self.reconcile_source_backed_index_with_checkpoint(index, builder, embedder, &mut || Ok(()))
     }
 
+    /// Reconciles one pinned Core generation while checking the caller's
+    /// authority at every source-page publication and final commit boundary.
+    /// Staged pages remain invisible when a checkpoint fails.
+    pub fn reconcile_source_backed_index_with_checkpoint(
+        &mut self,
+        index: &VerifiedIndex,
+        builder: &mut dyn SemanticDocumentBuilder,
+        embedder: &mut dyn SemanticBatchEmbedder,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<SourceBackedSemanticOutcome> {
+        self.reconcile_source_backed_index_with_checkpoint_and_progress(
+            index,
+            builder,
+            embedder,
+            checkpoint,
+            &mut |_| Ok(()),
+        )
+    }
+
+    #[cfg(test)]
     fn reconcile_source_backed_generation(
         &mut self,
         index: &VerifiedIndex,
@@ -278,29 +241,50 @@ impl SemanticVectorStore {
         builder: &mut dyn SemanticDocumentBuilder,
         embedder: &mut dyn SemanticBatchEmbedder,
     ) -> Result<SourceBackedSemanticOutcome> {
+        self.reconcile_source_backed_generation_with_checkpoint(
+            index,
+            generation,
+            builder,
+            embedder,
+            &mut || Ok(()),
+            &mut |_| Ok(()),
+            SourceBackedReconciliationBoundaryLimit::Unbounded,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Authority/progress hooks and the boundary budget are independent controls.
+    fn reconcile_source_backed_generation_with_checkpoint(
+        &mut self,
+        index: &VerifiedIndex,
+        generation: &SourceBackedSemanticGeneration,
+        builder: &mut dyn SemanticDocumentBuilder,
+        embedder: &mut dyn SemanticBatchEmbedder,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(u64) -> Result<()>,
+        boundary_limit: SourceBackedReconciliationBoundaryLimit,
+    ) -> Result<SourceBackedSemanticOutcome> {
         validate_generation(generation)?;
         if generation.core_generation_id != index.generation_id() {
             return Err(anyhow!(
                 "source-backed semantic target does not match its pinned Core index"
             ));
         }
-        if let Some(outcome) = self.reconcile_pending_full_rebuild()? {
-            return Ok(outcome);
-        }
         self.flat
             .begin_source_generation_view()
             .map_err(anyhow::Error::new)?;
         let result = (|| {
             self.recover_lost_flat_publication()?;
-            if self
-                .acknowledged_source_projection(
-                    &generation.core_generation_id,
-                    None,
-                    Some(&generation.contract_fingerprint),
-                    Some(&generation.semantic_policy_fingerprint),
-                    false,
-                )?
-                .is_some()
+            let full_rebuild_pending = self.full_rebuild_pending()?;
+            if !full_rebuild_pending
+                && self
+                    .acknowledged_source_projection(
+                        &generation.core_generation_id,
+                        None,
+                        Some(&generation.contract_fingerprint),
+                        Some(&generation.semantic_policy_fingerprint),
+                        false,
+                    )?
+                    .is_some()
             {
                 return Ok(SourceBackedSemanticOutcome {
                     ready: true,
@@ -309,8 +293,18 @@ impl SemanticVectorStore {
             }
 
             let mut frontier = self.begin_or_resume_source_generation(generation)?;
+            if full_rebuild_pending {
+                if let Some(outcome) =
+                    self.reconcile_pending_full_rebuild(&mut frontier, progress)?
+                {
+                    if boundary_limit.stops_after_full_rebuild(&outcome) {
+                        return Ok(outcome);
+                    }
+                }
+            }
             let mut states =
                 source_projection_states(self.flat.source_states().map_err(anyhow::Error::new)?);
+            let mut workers = SourceProjectionWorkers { builder, embedder };
             let mut total = SourceBackedSemanticOutcome::default();
             loop {
                 if let Some(source_identity_digest) = frontier.active_source_identity_digest.clone()
@@ -320,6 +314,8 @@ impl SemanticVectorStore {
                             &mut frontier,
                             &source_identity_digest,
                             &mut states,
+                            checkpoint,
+                            progress,
                         )?
                     } else {
                         let source =
@@ -329,43 +325,65 @@ impl SemanticVectorStore {
                         )
                             })?;
                         if frontier.source_scan_complete {
-                            self.finish_active_source(&mut frontier, source, &mut states)?
+                            self.finish_active_source(
+                                &mut frontier,
+                                source,
+                                &mut states,
+                                checkpoint,
+                                progress,
+                            )?
                         } else {
                             self.reconcile_source_page(
                                 index,
                                 &mut frontier,
                                 source,
                                 generation,
-                                builder,
-                                embedder,
+                                &mut workers,
+                                checkpoint,
+                                progress,
                             )?
                         }
                     };
+                    let boundary_exhausted = boundary_limit.exhausted_by(&next);
                     merge_outcome(&mut total, next);
+                    if boundary_exhausted {
+                        return Ok(total);
+                    }
                     continue;
                 }
 
                 let next = match frontier.source_traversal_phase {
-                    SourceTraversalPhase::RemovingStaleSources => {
-                        self.reconcile_next_stale_source(&mut frontier, generation, &mut states)?
-                    }
+                    SourceTraversalPhase::RemovingStaleSources => self
+                        .reconcile_next_stale_source(
+                            &mut frontier,
+                            generation,
+                            &mut states,
+                            checkpoint,
+                            progress,
+                        )?,
                     SourceTraversalPhase::ReconcilingSources => self.reconcile_next_target_source(
                         index,
                         &mut frontier,
                         generation,
-                        builder,
-                        embedder,
+                        &mut workers,
                         &mut states,
+                        checkpoint,
+                        progress,
                     )?,
                     SourceTraversalPhase::Finalizing => {
-                        let finished =
-                            self.finish_source_generation(&frontier, generation, &states)?;
+                        let finished = self.finish_source_generation(
+                            &frontier, generation, &states, checkpoint, progress,
+                        )?;
                         merge_outcome(&mut total, finished);
                         total.work_remaining = false;
                         return Ok(total);
                     }
                 };
+                let boundary_exhausted = boundary_limit.exhausted_by(&next);
                 merge_outcome(&mut total, next);
+                if boundary_exhausted {
+                    return Ok(total);
+                }
             }
         })();
         let end = self
@@ -375,7 +393,12 @@ impl SemanticVectorStore {
         match (result, end) {
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),
-            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Ok(outcome), Ok(())) => {
+                if outcome.full_rebuild_boundary {
+                    self.refresh_idle_frontier_publication_after_full_rebuild()?;
+                }
+                Ok(outcome)
+            }
         }
     }
 
@@ -384,6 +407,8 @@ impl SemanticVectorStore {
         frontier: &mut SourceProjectionFrontier,
         generation: &SourceBackedSemanticGeneration,
         states: &mut SourceProjectionStates,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(u64) -> Result<()>,
     ) -> Result<SourceBackedSemanticOutcome> {
         let mut after = frontier.source_traversal_after_identity_digest.clone();
         loop {
@@ -407,20 +432,28 @@ impl SemanticVectorStore {
             if generation.source(&source_identity_digest).is_none() {
                 frontier.source_traversal_after_identity_digest = after;
                 self.start_source_removal(frontier, &source_identity_digest)?;
-                return self.reconcile_removed_source(frontier, &source_identity_digest, states);
+                return self.reconcile_removed_source(
+                    frontier,
+                    &source_identity_digest,
+                    states,
+                    checkpoint,
+                    progress,
+                );
             }
             after = Some(source_identity_digest);
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // checkpoint and durable-progress hooks are independent authority boundaries.
     fn reconcile_next_target_source(
         &mut self,
         index: &VerifiedIndex,
         frontier: &mut SourceProjectionFrontier,
         generation: &SourceBackedSemanticGeneration,
-        builder: &mut dyn SemanticDocumentBuilder,
-        embedder: &mut dyn SemanticBatchEmbedder,
+        workers: &mut SourceProjectionWorkers<'_>,
         states: &mut SourceProjectionStates,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(u64) -> Result<()>,
     ) -> Result<SourceBackedSemanticOutcome> {
         for source in
             generation.sources_after(frontier.source_traversal_after_identity_digest.as_deref())
@@ -443,8 +476,9 @@ impl SemanticVectorStore {
                     generation,
                     vector_reuse_allowed,
                 )?;
-                return self
-                    .reconcile_source_page(index, frontier, source, generation, builder, embedder);
+                return self.reconcile_source_page(
+                    index, frontier, source, generation, workers, checkpoint, progress,
+                );
             }
             frontier.source_traversal_after_identity_digest =
                 Some(source_identity_digest.to_owned());
@@ -457,53 +491,19 @@ impl SemanticVectorStore {
         })
     }
 
-    fn reconcile_pending_full_rebuild(&mut self) -> Result<Option<SourceBackedSemanticOutcome>> {
-        let pending = self.conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM semantic_maintenance_state WHERE key = ?1
-             )",
-            [FULL_REBUILD_STATE],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !pending {
-            return Ok(None);
-        }
-        self.flat
-            .begin_reconciliation_view(FULL_REBUILD_STATE)
-            .map_err(anyhow::Error::new)?;
-        let event_ids = self
-            .flat
-            .reconciliation_event_ids(FULL_REBUILD_STATE, MAX_SOURCE_EVENT_PAGE_ITEMS)
-            .map_err(anyhow::Error::new)?;
-        if !event_ids.is_empty() {
-            let deleted_chunks = self.delete_events(&event_ids)?;
-            return Ok(Some(SourceBackedSemanticOutcome {
-                deleted_chunks,
-                work_remaining: true,
-                ..SourceBackedSemanticOutcome::default()
-            }));
-        }
-        self.flat
-            .finish_reconciliation_view()
-            .map_err(anyhow::Error::new)?;
-        self.conn.execute(
-            "DELETE FROM semantic_maintenance_state WHERE key = ?1",
-            [FULL_REBUILD_STATE],
-        )?;
-        Ok(None)
-    }
-
+    #[allow(clippy::too_many_arguments)] // checkpoint and durable-progress hooks are independent authority boundaries.
     fn reconcile_source_page(
         &mut self,
         index: &VerifiedIndex,
         frontier: &mut SourceProjectionFrontier,
         source: &SourceBackedSemanticSource,
         generation: &SourceBackedSemanticGeneration,
-        builder: &mut dyn SemanticDocumentBuilder,
-        embedder: &mut dyn SemanticBatchEmbedder,
+        workers: &mut SourceProjectionWorkers<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(u64) -> Result<()>,
     ) -> Result<SourceBackedSemanticOutcome> {
         let model_contract = self.contract().clone();
-        let embedding_chunk_limit = external_embedding_chunk_limit(&model_contract);
+        let embedding_chunk_limit = source_event_page_limit(&model_contract);
         let after = frontier
             .after_identity
             .as_deref()
@@ -564,6 +564,22 @@ impl SemanticVectorStore {
                 ..SourceBackedSemanticOutcome::default()
             });
         }
+        // Read the same bounded page's existing authority before planning. A
+        // policy-compatible unchanged document needs no tokenizer or model load.
+        let eligible_event_ids = page
+            .records
+            .iter()
+            .filter(|record| generation.includes(record))
+            .map(|record| record.event_id.as_uuid())
+            .collect::<Vec<_>>();
+        let existing_events = self
+            .flat
+            .source_reconciliation_events(&eligible_event_ids)
+            .map_err(anyhow::Error::new)?
+            .into_iter()
+            .zip(eligible_event_ids)
+            .filter_map(|(event, event_id)| event.map(|event| (event_id, event)))
+            .collect::<HashMap<_, _>>();
         let mut outcome = SourceBackedSemanticOutcome {
             records_decoded,
             record_bytes_decoded,
@@ -582,18 +598,23 @@ impl SemanticVectorStore {
                 processed_page_records = processed_page_records.saturating_add(1);
                 continue;
             }
-            // Stop on a record boundary once this external work unit has filled
+            // Stop on a record boundary once this work unit has filled
             // its embedding budget. A first record is always admitted below so
             // one valid document that expands past the limit still progresses.
-            if embedding_chunk_limit.is_some_and(|limit| projected_chunks >= limit) {
+            if projected_chunks >= embedding_chunk_limit {
                 break;
             }
+            validate_stored_event(
+                record,
+                source,
+                existing_events.get(&record.event_id.as_uuid()),
+            )?;
             let next_semantic_records = semantic_records.checked_add(1).ok_or_else(|| {
                 SemanticVectorStoreError::reset_required(
                     "source-backed semantic candidate count overflowed",
                 )
             })?;
-            let Some(document) = builder.build_document(record)? else {
+            let Some(document) = workers.builder.build_document(record)? else {
                 semantic_records = next_semantic_records;
                 retire.push(record.event_id.as_uuid());
                 filtered_records = filtered_records.checked_add(1).ok_or_else(|| {
@@ -625,8 +646,21 @@ impl SemanticVectorStore {
                 &source_text,
                 &frontier.semantic_policy_fingerprint,
             );
-            let chunks = semantic_chunks_for_document(&document, &source_text, &source_text_sha256);
-            if chunks.is_empty() {
+            let reusable = frontier.vector_reuse_allowed
+                && existing_events
+                    .get(&record.event_id.as_uuid())
+                    .is_some_and(|event| event.source_text_hash.to_hex() == source_text_sha256);
+            let chunks = if reusable {
+                Vec::new()
+            } else {
+                semantic_chunks_for_document_with_fit(
+                    &document,
+                    &source_text,
+                    &source_text_sha256,
+                    &mut |text| workers.embedder.document_fits(text),
+                )?
+            };
+            if !reusable && chunks.is_empty() {
                 return Err(anyhow!(
                     "Core semantic projection produced an empty document for {}",
                     record.event_id
@@ -637,9 +671,7 @@ impl SemanticVectorStore {
                     "source-backed semantic embedding chunk count overflowed",
                 )
             })?;
-            if projected_chunks != 0
-                && embedding_chunk_limit.is_some_and(|limit| generated_chunks > limit)
-            {
+            if projected_chunks != 0 && generated_chunks > embedding_chunk_limit {
                 break;
             }
             projected_chunks = generated_chunks;
@@ -675,40 +707,6 @@ impl SemanticVectorStore {
                 "source-backed semantic source page count disagrees with its Core aggregate",
             )
             .into());
-        }
-        let eligible_event_ids = page
-            .records
-            .iter()
-            .filter(|record| generation.includes(record))
-            .map(|record| record.event_id.as_uuid())
-            .collect::<Vec<_>>();
-        let existing_events = self
-            .flat
-            .source_reconciliation_events(&eligible_event_ids)
-            .map_err(anyhow::Error::new)?
-            .into_iter()
-            .zip(eligible_event_ids)
-            .filter_map(|(event, event_id)| event.map(|event| (event_id, event)))
-            .collect::<HashMap<_, _>>();
-        for record in page
-            .records
-            .iter()
-            .filter(|record| generation.includes(record))
-        {
-            let stable_identity = record.event_id.encode_canonical()?;
-            let stable_identity_hash = Sha256::digest(stable_identity);
-            if let Some(prior) = existing_events.get(&record.event_id.as_uuid()) {
-                if (prior.stable_identity_hash != [0; 32]
-                    && prior.stable_identity_hash != stable_identity_hash.as_slice())
-                    || prior.source_identity_digest != source.aggregate.source_identity_digest()
-                {
-                    return Err(SemanticVectorStoreError::storage_conflict(format!(
-                        "source-backed semantic compact identity collision at {}",
-                        record.event_id.as_uuid()
-                    ))
-                    .into());
-                }
-            }
         }
         let existing_lookup = FlatActiveEventLookup::from_events(
             page.records
@@ -779,13 +777,14 @@ impl SemanticVectorStore {
         })?;
         if !pending_chunks.is_empty() {
             replacements = embed_chunks_in_bounded_batches(
-                embedder,
+                workers.embedder,
                 pending_chunks,
                 model_contract.dimensions(),
-                embedding_chunk_limit,
+                Some(embedding_chunk_limit),
             )?;
             outcome.records_embedded = outcome.records_embedded.saturating_add(pending_documents);
         }
+        checkpoint()?;
         let publication =
             self.publish_source_page(&replacements, &metadata_updates, &retire, &existing_lookup)?;
         frontier.processed_source_documents = processed_documents;
@@ -799,7 +798,8 @@ impl SemanticVectorStore {
         frontier.flat_staging = Some(publication.staging.clone());
 
         let transaction = self.conn.transaction()?;
-        commit_frontier_after_flat(&transaction, frontier, None)?;
+        let sequence = commit_frontier_after_flat(&transaction, frontier, None, true)?
+            .expect("source-page publication always advances semantic progress");
         transaction.commit()?;
         #[cfg(test)]
         if self.flat.take_source_frontier_commit_failure() {
@@ -807,8 +807,10 @@ impl SemanticVectorStore {
                 "injected failure after semantic source frontier commit"
             ));
         }
+        progress(sequence)?;
 
         outcome.work_remaining = true;
+        outcome.semantic_progress_sequence = Some(sequence);
         Ok(outcome)
     }
 
@@ -817,6 +819,8 @@ impl SemanticVectorStore {
         frontier: &mut SourceProjectionFrontier,
         source: &SourceBackedSemanticSource,
         states: &mut SourceProjectionStates,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(u64) -> Result<()>,
     ) -> Result<SourceBackedSemanticOutcome> {
         let reconciliation_id = frontier
             .active_source_reconciliation_id
@@ -849,6 +853,7 @@ impl SemanticVectorStore {
             });
         }
 
+        checkpoint()?;
         let finalization = self
             .flat
             .finish_source_reconciliation_view(Some(FlatSourceReceiptInput {
@@ -878,7 +883,13 @@ impl SemanticVectorStore {
         clear_active_source(frontier);
         frontier.source_traversal_after_identity_digest = Some(source_identity_digest);
         let transaction = self.conn.transaction()?;
-        commit_frontier_after_flat(&transaction, frontier, Some(&finalization.publication))?;
+        let sequence = commit_frontier_after_flat(
+            &transaction,
+            frontier,
+            Some(&finalization.publication),
+            true,
+        )?
+        .expect("source finalization always advances semantic progress");
         transaction.commit()?;
         #[cfg(test)]
         if self.flat.take_source_publication_commit_failure() {
@@ -886,12 +897,14 @@ impl SemanticVectorStore {
                 "injected failure after published semantic source frontier commit before staging acknowledgement"
             ));
         }
+        progress(sequence)?;
         self.flat
             .acknowledge_source_staging(&finalization.publication.token())
             .map_err(anyhow::Error::new)?;
         Ok(SourceBackedSemanticOutcome {
             deleted_chunks: usize::try_from(finalization.deleted_chunks).unwrap_or(usize::MAX),
             work_remaining: true,
+            semantic_progress_sequence: Some(sequence),
             ..SourceBackedSemanticOutcome::default()
         })
     }
@@ -901,6 +914,8 @@ impl SemanticVectorStore {
         frontier: &mut SourceProjectionFrontier,
         source_identity_digest: &str,
         states: &mut SourceProjectionStates,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(u64) -> Result<()>,
     ) -> Result<SourceBackedSemanticOutcome> {
         let removal_reconciliation_id = format!(
             "remove-{}-{source_identity_digest}",
@@ -923,6 +938,7 @@ impl SemanticVectorStore {
                 ..SourceBackedSemanticOutcome::default()
             });
         }
+        checkpoint()?;
         let finalization = self
             .flat
             .finish_source_reconciliation_view(None)
@@ -937,7 +953,13 @@ impl SemanticVectorStore {
         frontier.source_traversal_after_identity_digest = Some(source_identity_digest.to_owned());
         clear_active_source(frontier);
         let transaction = self.conn.transaction()?;
-        commit_frontier_after_flat(&transaction, frontier, Some(&finalization.publication))?;
+        let sequence = commit_frontier_after_flat(
+            &transaction,
+            frontier,
+            Some(&finalization.publication),
+            true,
+        )?
+        .expect("source removal always advances semantic progress");
         transaction.commit()?;
         #[cfg(test)]
         if self.flat.take_source_publication_commit_failure() {
@@ -945,12 +967,14 @@ impl SemanticVectorStore {
                 "injected failure after published semantic source frontier commit before staging acknowledgement"
             ));
         }
+        progress(sequence)?;
         self.flat
             .acknowledge_source_staging(&finalization.publication.token())
             .map_err(anyhow::Error::new)?;
         Ok(SourceBackedSemanticOutcome {
             deleted_chunks: usize::try_from(finalization.deleted_chunks).unwrap_or(usize::MAX),
             work_remaining: true,
+            semantic_progress_sequence: Some(sequence),
             ..SourceBackedSemanticOutcome::default()
         })
     }

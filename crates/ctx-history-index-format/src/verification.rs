@@ -177,8 +177,6 @@ pub struct PinnedPublication {
     searcher: Searcher,
     manifest: Arc<GenerationManifest>,
     generation_id: String,
-    requires_current_manifest_anchor: bool,
-    publication_metadata: Option<Arc<[u8]>>,
     fields: Fields,
     opstamp: u64,
     physical_integrity: CertifiedPhysicalIntegrity,
@@ -198,16 +196,6 @@ impl PinnedPublication {
     #[doc(hidden)]
     pub fn generation_id(&self) -> &str {
         &self.generation_id
-    }
-
-    #[doc(hidden)]
-    pub fn requires_current_manifest_anchor(&self) -> bool {
-        self.requires_current_manifest_anchor
-    }
-
-    #[doc(hidden)]
-    pub fn publication_metadata(&self) -> Option<&Arc<[u8]>> {
-        self.publication_metadata.as_ref()
     }
 
     /// Applies replacements to this already-validated immutable base without
@@ -321,40 +309,31 @@ pub fn open_pinned_publication(
     verify_searcher_structure(&searcher, publication.manifest())?;
     let physical_integrity =
         verify_or_certify_physical_integrity(root, authority.pointer(), slot, searcher.index())?;
-    let requires_current_manifest_anchor = publication.requires_current_manifest_anchor();
-    let (generation_id, manifest, publication_metadata) = publication.into_parts();
+    let (generation_id, manifest) = publication.into_parts();
     Ok(OpenedPinnedPublication::Published(PinnedPublication {
         writer_index: Some(index),
         searcher,
         manifest,
         generation_id,
-        requires_current_manifest_anchor,
-        publication_metadata,
         fields,
         opstamp: metas.opstamp,
         physical_integrity,
     }))
 }
 
-/// Opaque authority proving that one immutable searcher and its publication
-/// metadata passed the format-owned trust checks required by a query reader.
+/// Opaque authority proving that one immutable searcher and manifest passed
+/// the format-owned trust checks required by a query reader.
 pub struct VerifiedPublication {
     searcher: Searcher,
     manifest: Arc<GenerationManifest>,
     generation_id: String,
-    publication_metadata: Option<Arc<[u8]>>,
 }
 
 impl VerifiedPublication {
     /// Decomposes an already-verified publication for the query package.
     #[doc(hidden)]
-    pub fn into_parts(self) -> (Searcher, Arc<GenerationManifest>, String, Option<Arc<[u8]>>) {
-        (
-            self.searcher,
-            self.manifest,
-            self.generation_id,
-            self.publication_metadata,
-        )
+    pub fn into_parts(self) -> (Searcher, Arc<GenerationManifest>, String) {
+        (self.searcher, self.manifest, self.generation_id)
     }
 
     #[doc(hidden)]
@@ -378,6 +357,7 @@ impl VerifiedPublication {
 pub struct VerifiedCandidatePublication {
     publication: VerifiedPublication,
     physical_integrity_audit: PhysicalIntegrityAudit,
+    predecessor_physical_integrity: Option<CertifiedPhysicalIntegrity>,
 }
 
 impl VerifiedCandidatePublication {
@@ -389,6 +369,11 @@ impl VerifiedCandidatePublication {
     #[doc(hidden)]
     pub fn physical_integrity_audit(&self) -> &PhysicalIntegrityAudit {
         &self.physical_integrity_audit
+    }
+
+    #[doc(hidden)]
+    pub fn predecessor_physical_integrity(&self) -> Option<&CertifiedPhysicalIntegrity> {
+        self.predecessor_physical_integrity.as_ref()
     }
 
     #[doc(hidden)]
@@ -499,7 +484,7 @@ where
             IndexError::ConcurrentGenerationChange,
         ));
     }
-    let (generation_id, manifest, publication_metadata) = publication.into_parts();
+    let (generation_id, manifest) = publication.into_parts();
     let physical_integrity_audit = physical_integrity_audit_with_candidate_proof(
         searcher.index(),
         generation_path,
@@ -507,7 +492,7 @@ where
         candidate_physical_proof,
     )
     .map_err(|error| CandidatePublicationVerificationError::Candidate(error.into()))?;
-    if let Some(base) = base {
+    let predecessor_physical_integrity = if let Some(base) = base {
         let (root, pointer, slot) = base_authority.ok_or({
             CandidatePublicationVerificationError::Candidate(IndexError::WriterInvariant(
                 "incremental candidate verification lacks active base authority",
@@ -520,8 +505,10 @@ where
             base,
             Some(&physical_integrity_audit),
         )
-        .map_err(CandidatePublicationVerificationError::Reusable)?;
-    }
+        .map_err(CandidatePublicationVerificationError::Reusable)?
+    } else {
+        None
+    };
     report_logical_verification().map_err(CandidatePublicationVerificationError::Candidate)?;
     verify_publication_candidate(&searcher, &manifest, base.map(PinnedPublication::searcher))
         .map_err(CandidatePublicationVerificationError::Candidate)?;
@@ -530,9 +517,9 @@ where
             searcher,
             manifest,
             generation_id,
-            publication_metadata,
         },
         physical_integrity_audit,
+        predecessor_physical_integrity,
     })
 }
 
@@ -553,7 +540,7 @@ pub fn verify_pinned_publication_authority(
     slot: &GenerationSlot,
     publication: &PinnedPublication,
     candidate_audit: Option<&PhysicalIntegrityAudit>,
-) -> std::result::Result<(), ReusablePublicationError> {
+) -> std::result::Result<Option<CertifiedPhysicalIntegrity>, ReusablePublicationError> {
     if slot.generation_id() != publication.generation_id {
         return Err(ReusablePublicationError::Binding(
             IndexError::ConcurrentGenerationChange,
@@ -588,7 +575,6 @@ pub fn verify_and_bind_reusable_publication(
         searcher: publication.searcher,
         manifest: publication.manifest,
         generation_id: publication.generation_id,
-        publication_metadata: publication.publication_metadata,
     })
 }
 

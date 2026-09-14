@@ -6,18 +6,29 @@ use ctx_history_refresh::RefreshSelection;
 use super::daemon_service_ports::AVAILABILITY;
 
 pub use ctx_daemon_service::{
-    pin_active_verified_generation, published_explicit_source_relocation_authority,
-    PinnedSourceBackedGeneration, RefreshStatus, SourceBackedRefreshDaemonUnavailable,
-    SourceBackedRefreshMode, SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
-    SourceBackedRefreshTerminalError,
+    pin_active_verified_generation, pin_active_verified_generation_with_retained_peer,
+    published_explicit_source_relocation_authority, PinnedSourceBackedGeneration, RefreshStatus,
+    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+    SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,
 };
-pub use ctx_history_refresh::{open_verified_index, verified_generation_is_query_ready};
+pub use ctx_history_refresh::open_verified_index;
 
 pub fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
     ctx_daemon_service::coordinate_source_backed_refresh(&AVAILABILITY, data_root, mode)
+}
+
+pub fn coordinate_source_backed_refresh_with_retained_peer(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+) -> Result<SourceBackedRefreshObservation> {
+    ctx_daemon_service::coordinate_source_backed_refresh_with_retained_peer(
+        &AVAILABILITY,
+        data_root,
+        mode,
+    )
 }
 
 pub fn coordinate_source_backed_refresh_with_progress(
@@ -77,7 +88,7 @@ mod client_admission_recovery_tests {
         let data_root = temp.path().join("data");
         ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
         std::fs::write(
-            data_root.join(crate::config::CONFIG_FILE),
+            data_root.join(ctx_app_config::CONFIG_FILE),
             "[daemon]\nenabled = false\n",
         )
         .unwrap();
@@ -100,7 +111,7 @@ mod client_admission_recovery_tests {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
         ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
-        std::fs::write(data_root.join(crate::config::CONFIG_FILE), "[daemon\n").unwrap();
+        std::fs::write(data_root.join(ctx_app_config::CONFIG_FILE), "[daemon\n").unwrap();
         let request_id = "019fcaaa-0000-7000-8000-0000000002b2";
 
         let error = recover_wait_refresh_request_for_test(&AVAILABILITY, &data_root, request_id)

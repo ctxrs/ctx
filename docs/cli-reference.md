@@ -72,9 +72,6 @@ ctx daemon run
 - `setup --quiet` performs setup without printing success status lines, import
   summaries, data-root details, or get-started tips. It still exits nonzero and
   prints errors on failure.
-- `setup --catalog-only` remains accepted only for command-line compatibility.
-  It is deprecated and ignored; setup follows the same refresh lifecycle as
-  when the flag is omitted.
 - `status` reports the ctx root, source epoch, lexical and refresh readiness,
   semantic generation and coverage, daemon and supervisor health,
   initialization state, compact local usage health, local-only marker, and
@@ -108,6 +105,12 @@ ctx daemon run
   success. Use `status --format json` when scripts need the actual state.
 - `doctor` turns source-epoch, refresh, semantic, and daemon problems into a
   focused recovery action. It does not repeat the normal status inventory.
+  A recorded Semantic startup failure is reported as a failure, not preparation;
+  `ctx semantic status` shows the bounded background error. Resource-pressure
+  deferrals remain pending, and a Semantic failure does not invalidate keyword search.
+  Partial refresh findings include bounded provider error details, including
+  resource shortages. Status and doctor warn when a live daemon's heartbeat
+  is stale without treating its process as dead.
 - `index` prints a one-shot indexing status view. It is the focused view of the
   current indexing mode, lexical publication, refresh progress, semantic
   coverage, and background process state. Use `--format json` for the
@@ -141,7 +144,14 @@ ctx daemon run
   local configuration and state without requiring credentials, exposing a
   token, or making a network request. `semantic disable` opts out without
   deleting downloaded model/runtime assets or derived semantic indexes. Plain
-  enablement in manual mode does not change indexing mode. See
+  enablement in manual mode does not change indexing mode. Built-in document
+  indexing is throttled by default. Its config-only opt-out is `[semantic]
+  builtin_throttling = false`; it is rejected alongside an explicitly
+  configured HTTP executor and does not change `semantic enable` or
+  `--executor`. With the opt-out active, ctx removes deliberate inter-batch
+  pacing and uses the safely supported built-in thread and batch maxima while
+  retaining admission, integrity, cancellation, atomicity, and hard limits.
+  `semantic status` reports configured and effective throttling. See
   [Semantic Embedding Executors](semantic-executors.md) for the V2 protocol and
   retained fixed-E5 V1 compatibility.
 - `daemon run` is an advanced command that runs persistent local maintenance in
@@ -175,16 +185,19 @@ upgrade checks; explicit `ctx upgrade` remains available.
 ## Agent Skill
 
 ```bash
-ctx integrations install skills
-ctx integrations install skills --agent codex --agent claude-code --agent mimocode
-ctx integrations install skills --all-agents
-ctx integrations install skills --project
-ctx integrations install skills --force
-ctx integrations status skills
-ctx integrations status skills --agent codex --format json
+ctx integrations install skill
+ctx integrations install skill --agent codex --agent claude-code --agent mimocode
+ctx integrations install skill --all-agents
+ctx integrations install skill --project
+ctx integrations install skill --force
+ctx integrations status skill
+ctx integrations status skill --agent codex --format json
+ctx integrations remove skill
+ctx integrations remove skill --agent codex --project
+ctx integrations remove skill --force
 ```
 
-`integrations install skills` installs or refreshes ctx's bundled `ctx` skill.
+`integrations install skill` installs or refreshes ctx's bundled `ctx` skill.
 With no target flags in an interactive
 terminal, it opens a small agent picker with the universal `~/.agents/skills`
 location selected plus detected agent-specific folders for tools that need
@@ -199,16 +212,29 @@ MiMo Code, Gemini CLI, Antigravity, GitHub Copilot, Pi, and Goose.
 `--all-agents` writes all supported target folders. `--project` switches from
 global paths to the current project's skill folders.
 
-`integrations status skills` reports whether the bundled skill is `current`,
-`stale`, `modified`, or `missing`. `integrations install skills` refreshes
+`integrations status skill` reports whether the bundled skill is `current`,
+`stale`, `modified`, or `missing`. `integrations install skill` refreshes
 stale bundled copies automatically, but it refuses to overwrite locally
 modified skill files unless you pass `--force`. The command only manages the
 bundled ctx skill and does not fetch arbitrary remote skills. Without target
 flags, status uses the same default maintenance set as install.
 
-The 1.0 installer performs a one-way migration from a managed
+After a hosted-managed CLI upgrade, the first ordinary maintenance-capable run
+also makes a best-effort refresh of existing managed global copies. It does not
+install into missing agent folders, adopt local files, update plugins, emit
+user-facing output, or affect the requested command's result. Failed refreshes
+stay stale; a later eligible run retries when ownership remains provable, and
+an explicit install repairs ambiguous states.
+
+`integrations remove skill` removes current or stale ctx-managed copies and is
+an idempotent no-op when they are absent. Modified or unowned files are
+preserved unless `--force` is passed. Removal never deletes the parent skill
+directory, unrelated files, or plugin-manager-owned copies.
+
+The installer performs a one-way, current-first migration from a managed
 `ctx-agent-history-search` directory to `ctx`. It preserves a locally edited
-legacy skill unless `--force` is passed.
+legacy skill unless `--force` is passed; failed legacy cleanup may temporarily
+leave both names present.
 
 ## Integrations
 
@@ -219,16 +245,30 @@ ctx integrations install mcp --agent mimocode
 ctx integrations install mcp --provider cursor --project
 ctx integrations install mcp --all-agents --format json
 ctx integrations install mcp --agent cursor --force
+ctx integrations remove mcp
+ctx integrations remove mcp --agent codex
+ctx integrations remove mcp --provider cursor --project
+ctx integrations remove mcp --all-agents --format json
+ctx integrations remove mcp --agent cursor --force
 ctx integrations status mcp
 ctx integrations status mcp --agent codex --format json
-ctx integrations install slash-commands
-ctx integrations install slash-commands --agent opencode
-ctx integrations install slash-commands --agent mimocode
-ctx integrations install slash-commands --agent gemini-cli --project
-ctx integrations install slash-commands --agent qwen-code
-ctx integrations install slash-commands --all-agents
-ctx integrations install slash-commands --force
-ctx integrations install slash-commands --format json
+ctx integrations install plugin
+ctx integrations install plugin --agent codex
+ctx integrations install plugin --agent claude-code --project
+ctx integrations status plugin --all-agents --format json
+ctx integrations remove plugin --agent codex
+ctx integrations install slash-command
+ctx integrations install slash-command --agent opencode
+ctx integrations install slash-command --agent mimocode
+ctx integrations install slash-command --agent gemini-cli --project
+ctx integrations install slash-command --agent qwen-code
+ctx integrations install slash-command --all-agents
+ctx integrations install slash-command --force
+ctx integrations install slash-command --format json
+ctx integrations status slash-command
+ctx integrations status slash-command --agent gemini-cli --project
+ctx integrations remove slash-command
+ctx integrations remove slash-command --agent opencode --force
 ```
 
 `integrations install mcp` adds a local MCP server named `ctx` to supported
@@ -247,7 +287,13 @@ untouched unless `--force` is passed. Invalid JSON, JSONC, TOML, or YAML configs
 reported and left untouched. `integrations status mcp` reports `current`,
 `missing`, `conflict`, `invalid_config`, or `unsupported`.
 
-`integrations install slash-commands` installs a `/ctx` entry point only
+`integrations remove mcp` uses the same agent and project selectors. It removes
+only the selected clients' `ctx` MCP server entry while preserving unrelated
+configuration and the containing file. An absent entry is a successful no-op.
+A conflicting entry is preserved unless `--force` is supplied; invalid configs
+remain untouched even with `--force`.
+
+`integrations install slash-command` installs a `/ctx` entry point only
 for providers where ctx has a documented, file-based command surface it can
 manage safely: OpenCode, MiMo Code, Gemini CLI, and Qwen Code. With no
 explicit agent flag, it writes detected file-based targets only. `--project`
@@ -262,8 +308,28 @@ you pass `--force`.
 The 1.0 installer also migrates a managed `/ctx-history` file to `/ctx`. It
 preserves a locally edited legacy command unless `--force` is passed.
 
+`integrations status slash-command` inspects the same targets.
+`integrations remove slash-command` removes only current or stale ctx-managed
+command files. Modified or unowned files require `--force`; parent directories,
+unrelated files, skill integrations, and manual YAML integrations are never
+removed.
+
+`integrations install|status|remove plugin` delegates plugin ownership to the
+host manager. Codex and Claude Code have automated adapters; Cursor returns
+actionable manual Marketplace guidance because it does not expose a verified
+noninteractive lifecycle CLI. Plugin removal leaves the marketplace, direct
+skills, MCP configuration, CLI, and history intact. The plugin remains
+skill-only in this release; install MCP separately when needed. Native managers
+own plugin release selection; ctx treats their exact `ctx@ctx` installed state
+as authoritative and reports a manager-provided version only as information.
+
+The canonical targets are singular: `mcp`, `skill`, `slash-command`, and
+`plugin`. The released `skills` and `slash-commands` spellings remain accepted
+as hidden compatibility aliases. JSON discriminators and other machine
+identifiers do not change when an alias is used.
+
 For Codex, Claude Code, Cursor, GitHub Copilot CLI, Pi, and other skill-first
-agents, use `ctx integrations install skills`; those providers expose the
+agents, use `ctx integrations install skill`; those providers expose the
 bundled skill through their own skill invocation surface rather than a separate
 `/ctx` command file. See `ctx docs show slash-command-integrations` for
 the provider matrix and rationale.
@@ -494,10 +560,13 @@ provider sources. Use `import` to repair, re-run, resume, or target a specific
 provider/path. It creates the data root if needed, reads provider transcript
 files, builds a private immutable Core/Tantivy candidate containing complete
 normalized stored records plus lexical fields, identities, and filter metadata,
-verifies it, and atomically publishes it under `search/lexical`. Before
-returning, it waits only for that Core publication. Optional semantic indexing
-advances independently and does not extend the foreground import boundary. It
-does not write `config.toml` for implicit defaults.
+verifies it, and atomically publishes it under `search/lexical`. With semantic
+search disabled, it returns after that Core publication. With semantic search
+enabled, a successful import waits until the exact Core generation it published
+has a complete compatible semantic generation: a full daemon owns that write,
+while manual and source-refresh-only operation reconcile it in the foreground.
+An already-ready empty generation succeeds without constructing an executor.
+It does not write `config.toml` for implicit defaults.
 
 History-source plugin import is explicit and single-source in 1.0. A selected
 manifest declares a durable provider-owned `ctx-history-jsonl-v2` path; the
@@ -538,6 +607,13 @@ publication and the worker exits after admitted Core work is terminal and IPC
 is quiescent. `import --no-daemon` never starts or restarts a process and
 therefore requires an already-running endpoint. Import never falls back to a
 foreground writer.
+
+Import and search `--refresh wait` stop waiting after five minutes without
+observable request progress. Elapsed-time counters alone do not extend this
+wait. The command reports an unknown outcome, not a successful publication or
+worker failure: the admitted request stays retained and may finish later.
+Inspect `ctx daemon status` and `ctx index` before retrying. Work that continues
+to report progress can run longer than five minutes.
 
 ## Paid Companion Routes
 
@@ -681,16 +757,30 @@ ctx search "incident follow-up" --source-group work
 
 `search` defaults to `--refresh background`, which serves the published
 Tantivy generation. In automatic indexing mode it may start or wake the
-persistent daemon for lexical publication and optional semantic catch-up. In
+persistent daemon for lexical publication and optional semantic catch-up.
+Each accepted refresh keeps its own durable request ID. If the automatic
+refresh queue is full, background search can still read an existing generation;
+JSON freshness reports `admission_rejected` with no accepted request ID or
+publication receipt. This does not apply to `--refresh wait`, explicit import,
+or a search with no readable generation: those requests fail on overload. In
 manual mode, background refresh uses only the last published generation and
-does not contact, start, or wake a process; there is no hidden foreground
-bootstrap or importer. History-source plugins are searched from the published
-generation after explicit import; search refresh does not execute their
-commands in 1.0.
+does not contact, start, or wake a ctx daemon or worker; there is no hidden foreground
+bootstrap or importer. A direct CLI semantic or hybrid query may read an
+already-ready exact semantic generation and either embed from verified cached
+model/runtime assets or use an explicitly selected HTTP executor after
+preflight. A missing, stale, partial, incompatible, WAL-backed, or otherwise
+unsafe passive snapshot returns a typed semantic error; hybrid preserves its
+stable code and retryability while falling back to lexical.
+History-source plugins are searched from the published generation after
+explicit import; search refresh does not execute their commands in 1.0.
 Semantic retrieval reads an existing compatible generation under
-`search/semantic`; search does not initialize semantic storage, download
-embedding models, or run semantic indexing. Use `--refresh off` to query the
-published generations without starting or waking a process. Use
+`search/semantic`. Use `--refresh off` to query published Core and semantic
+generations without starting or waking a ctx daemon or worker. With automatic indexing disabled,
+this path embeds the query in the foreground from verified cached model assets;
+Core ML additionally requires an existing validated compiled artifact, Windows
+ML an already-ready provider, and ONNX an existing runtime. It does not
+initialize semantic storage, download or compile a model, prepare a provider,
+reconcile semantic coverage, or write projection state. Use
 `--refresh wait` to request authoritative Core publication; in manual mode it
 may start a finite worker that exits after admitted Core requests are terminal
 and IPC is quiescent. Results are rendered from Core under every refresh mode.
@@ -800,9 +890,12 @@ MCP searches do not automatically exclude the caller's session.
 
 `--refresh off` is read-only for ctx-derived storage, but it still serves
 indexed snippets and typed show/locate data from the active Core generation.
-Explicit semantic or hybrid
-requests may read a compatible semantic generation and ask the retained daemon
-query service to embed the query from an already-cached model.
+Explicit semantic or hybrid requests may read a compatible semantic generation.
+They embed the query through the retained daemon query service when it is
+available, or from verified cached model assets in the foreground when the
+daemon is disabled. An explicitly selected HTTP executor remains HTTP-capable
+after exact preflight; `off` prohibits indexing and durable mutation, not that
+selected network request.
 
 Results are local hits over indexed history. Event hits include `ctx_event_id`;
 hits with known session context include `ctx_session_id`; provider metadata
@@ -1041,6 +1134,7 @@ ctx docs list --format json
 ctx docs search <query> --format json
 ctx docs show <topic> --format json
 ctx integrations install mcp --format json
+ctx integrations remove mcp --format json
 ctx integrations status mcp --format json
 ctx upgrade --format json
 ctx upgrade check --format json

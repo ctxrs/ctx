@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use ctx_history_core::{CaptureProvider, EventRole, EventType};
-use ctx_history_index::{CoreEventPageBudget, CoreEventRecord, VerifiedIndex};
+use ctx_history_index::{
+    CoreEventPageBudget, CoreEventRecord, EventRecord, SemanticTurnAssistant, VerifiedIndex,
+};
 
 use crate::{semantic_core_content_is_control, SemanticDocumentBuilder, SemanticEventDocument};
 
@@ -37,30 +39,44 @@ impl<'a> SourceBackedSemanticDocumentBuilder<'a> {
         }
     }
 
-    fn paired_assistants(&self, anchor: &CoreEventRecord) -> Result<Vec<(String, i64)>> {
+    fn paired_assistants(&self, anchor: &CoreEventRecord) -> Result<Vec<SemanticTurnAssistant>> {
         Ok(self.index.semantic_lite_turn_assistants(
             anchor,
             self.pairing_page_records,
             self.pairing_budget,
         )?)
     }
-}
 
-impl SemanticDocumentBuilder for SourceBackedSemanticDocumentBuilder<'_> {
-    fn build_document(
+    pub(crate) fn build_source(
         &mut self,
         record: &CoreEventRecord,
-    ) -> Result<Option<SemanticEventDocument>> {
+    ) -> Result<Option<(SemanticEventDocument, Vec<SourceMember>)>> {
         let user_text = record.core_record.content.meaningful_text();
         if user_text.trim().is_empty() {
             return Ok(None);
         }
         let mut sections = vec![format!("user:\n{}", user_text.trim())];
+        let mut members = vec![SourceMember {
+            event: record.event.clone(),
+            source_range: 6..sections[0].chars().count(),
+            content_start_char: user_text[..user_text.len() - user_text.trim_start().len()]
+                .chars()
+                .count(),
+        }];
         let mut occurred_at_ms = record.occurred_at_unix_ms.unwrap_or_default();
         if !semantic_core_content_is_control(&sections[0]) {
-            for (assistant_text, assistant_at_ms) in self.paired_assistants(record)? {
-                sections.push(format!("assistant:\n{}", assistant_text.trim()));
-                occurred_at_ms = occurred_at_ms.max(assistant_at_ms);
+            let mut source_chars = sections[0].chars().count();
+            for assistant in self.paired_assistants(record)? {
+                let start = source_chars + 2 + "assistant:\n".len();
+                source_chars = start + assistant.text.chars().count();
+                members.push(SourceMember {
+                    source_range: start..source_chars,
+                    content_start_char: assistant.content_start_char,
+                    event: assistant.event.clone(),
+                });
+                sections.push(format!("assistant:\n{}", assistant.text));
+                occurred_at_ms =
+                    occurred_at_ms.max(assistant.event.occurred_at_unix_ms.unwrap_or_default());
             }
         }
         let literal_facts = record
@@ -69,24 +85,42 @@ impl SemanticDocumentBuilder for SourceBackedSemanticDocumentBuilder<'_> {
             .activity
             .as_ref()
             .map_or_else(Vec::new, |activity| activity.facts.clone());
-        Ok(Some(SemanticEventDocument::new(
-            record.event_id.as_uuid(),
-            Some(record.session_id.as_uuid()),
-            record.event_sequence,
-            occurred_at_ms,
-            parse_core_event_type(&record.event_type)?,
-            record
-                .role
-                .as_deref()
-                .map(parse_core_event_role)
-                .transpose()?,
-            "lite_turn".to_owned(),
-            Some(parse_core_provider(&record.provider)?),
-            Some(record.source_format.clone()),
-            record.core_record.agent_scope,
-            literal_facts,
-            sections.join("\n\n"),
+        Ok(Some((
+            SemanticEventDocument::new(
+                record.event_id.as_uuid(),
+                Some(record.session_id.as_uuid()),
+                record.event_sequence,
+                occurred_at_ms,
+                parse_core_event_type(&record.event_type)?,
+                record
+                    .role
+                    .as_deref()
+                    .map(parse_core_event_role)
+                    .transpose()?,
+                "lite_turn".to_owned(),
+                Some(parse_core_provider(&record.provider)?),
+                Some(record.source_format.clone()),
+                record.core_record.agent_scope,
+                literal_facts,
+                sections.join("\n\n"),
+            ),
+            members,
         )))
+    }
+}
+
+pub(crate) struct SourceMember {
+    pub event: EventRecord,
+    pub source_range: std::ops::Range<usize>,
+    pub content_start_char: usize,
+}
+
+impl SemanticDocumentBuilder for SourceBackedSemanticDocumentBuilder<'_> {
+    fn build_document(
+        &mut self,
+        record: &CoreEventRecord,
+    ) -> Result<Option<SemanticEventDocument>> {
+        Ok(self.build_source(record)?.map(|(document, _)| document))
     }
 }
 

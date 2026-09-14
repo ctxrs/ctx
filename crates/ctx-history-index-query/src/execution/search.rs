@@ -117,20 +117,32 @@ impl SegmentFilters {
             || self.file.as_ref().is_some_and(|bitmap| !bitmap.any)
     }
 
-    fn accepts(
+    /// Returns `doc` when every required group admits it, or a proven
+    /// lower bound from the first rejecting group. `TERMINATED` means no
+    /// later match is possible; `None` means posting work exhausted.
+    fn next_required_doc(
+        &mut self,
+        doc: DocId,
+        meter: &mut LexicalWorkMeter,
+        segment: &LexicalSegmentContext,
+    ) -> Option<DocId> {
+        for group in &mut self.required {
+            let next = posting_group_next(group, doc, meter, segment)?;
+            if next != doc {
+                return Some(next);
+            }
+        }
+        Some(doc)
+    }
+
+    /// Required groups have already admitted this candidate. Negative groups
+    /// and substring probes cannot supply a forward traversal bound.
+    fn accepts_remaining(
         &mut self,
         doc: DocId,
         meter: &mut LexicalWorkMeter,
         segment: &LexicalSegmentContext,
     ) -> Result<Option<bool>> {
-        for group in &mut self.required {
-            let Some(matches) = posting_group_contains(group, doc, meter, segment) else {
-                return Ok(None);
-            };
-            if !matches {
-                return Ok(Some(false));
-            }
-        }
         for group in &mut self.prohibited {
             let Some(matches) = posting_group_contains(group, doc, meter, segment) else {
                 return Ok(None);
@@ -735,12 +747,23 @@ fn posting_group_contains(
     meter: &mut LexicalWorkMeter,
     segment: &LexicalSegmentContext,
 ) -> Option<bool> {
+    Some(posting_group_next(postings, doc, meter, segment)? == doc)
+}
+
+fn posting_group_next(
+    postings: &mut [SegmentPostings],
+    doc: DocId,
+    meter: &mut LexicalWorkMeter,
+    segment: &LexicalSegmentContext,
+) -> Option<DocId> {
+    let mut next = TERMINATED;
     for postings in postings {
         if posting_contains(postings, doc, meter, segment)? {
-            return Some(true);
+            return Some(doc);
         }
+        next = next.min(postings.doc());
     }
-    Some(false)
+    Some(next)
 }
 
 fn posting_contains(

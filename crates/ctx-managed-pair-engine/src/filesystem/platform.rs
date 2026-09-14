@@ -90,8 +90,11 @@ pub(super) fn durable_rename(
         mem::size_of,
         os::windows::{ffi::OsStrExt as _, io::AsRawHandle as _},
     };
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
+    use windows_sys::{
+        Wdk::Storage::FileSystem::{
+            FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+        },
+        Win32::{Foundation::RtlNtStatusToDosError, System::IO::IO_STATUS_BLOCK},
     };
 
     let file = open_owner_regular_for_delete(source, label)?;
@@ -105,14 +108,15 @@ pub(super) fn durable_rename(
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| anyhow!("managed-pair target name is too long"))?;
     // Windows documents FileNameLength without the terminator, while the
-    // FILE_RENAME_INFO buffer itself must include its trailing WCHAR storage.
+    // FILE_RENAME_INFORMATION buffer itself must include its trailing WCHAR
+    // storage.
     // The zero-filled tail therefore supplies the required terminator.
-    let total_bytes = size_of::<FILE_RENAME_INFO>()
+    let total_bytes = size_of::<FILE_RENAME_INFORMATION>()
         .checked_add(name_bytes)
         .ok_or_else(|| anyhow!("managed-pair rename buffer is too large"))?;
     let words = total_bytes.div_ceil(size_of::<usize>());
     let mut buffer = vec![0_usize; words];
-    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     unsafe {
         (*information).Anonymous.ReplaceIfExists = replace;
         (*information).RootDirectory = target.directory.file.as_raw_handle().cast();
@@ -123,18 +127,22 @@ pub(super) fn durable_rename(
             name.len(),
         );
     }
-    if unsafe {
-        SetFileInformationByHandle(
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        NtSetInformationFile(
             file.as_raw_handle().cast(),
-            FileRenameInfo,
+            &mut status_block,
             information.cast(),
             u32::try_from(total_bytes)?,
+            FileRenameInformation,
         )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error()).context("rename managed-pair file by handle");
+    };
+    if status < 0 {
+        return Err(std::io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(status) } as i32,
+        ))
+        .context("rename managed-pair file by handle");
     }
-    file.sync_all()?;
     Ok(())
 }
 
@@ -149,6 +157,7 @@ pub(crate) fn durable_replace(
     require_stamp(source, expected, max, label)?;
     durable_rename(source, target, expected, label, true)?;
     require_stamp(target, expected, max, label)
+        .with_context(|| format!("revalidate renamed managed-pair {label}"))
 }
 
 #[cfg(unix)]
@@ -167,117 +176,4 @@ pub(crate) fn durable_replace(
 
 pub(super) fn sync_parent(entry: &Entry) -> Result<()> {
     entry.directory.sync()
-}
-
-#[cfg(windows)]
-pub(crate) fn current_process_creation_identity() -> Result<u64> {
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-
-    process_creation_identity(unsafe { GetCurrentProcess() })
-}
-
-#[cfg(windows)]
-pub(crate) fn wait_for_parent_exit(parent_pid: u32, parent_creation_time: u64) -> Result<()> {
-    wait_for_parent_exit_with_timeout(parent_pid, parent_creation_time, 5 * 60 * 1_000)
-}
-
-#[cfg(windows)]
-fn wait_for_parent_exit_with_timeout(
-    parent_pid: u32,
-    parent_creation_time: u64,
-    timeout_ms: u32,
-) -> Result<()> {
-    use windows_sys::Win32::{
-        Foundation::{
-            CloseHandle, ERROR_INVALID_PARAMETER, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
-        },
-        System::Threading::{
-            OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
-            PROCESS_SYNCHRONIZE,
-        },
-    };
-    if parent_pid == 0 || parent_pid == std::process::id() || parent_creation_time == 0 {
-        bail!("managed-pair swapper has an invalid parent identity");
-    }
-    let handle = unsafe {
-        OpenProcess(
-            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-            0,
-            parent_pid,
-        )
-    };
-    if handle.is_null() {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
-            return Ok(());
-        }
-        return Err(error).context("open managed-pair parent process");
-    }
-    let observed_creation_time = process_creation_identity(handle);
-    if observed_creation_time
-        .as_ref()
-        .is_ok_and(|observed| *observed != parent_creation_time)
-    {
-        unsafe { CloseHandle(handle) };
-        return Ok(());
-    }
-    observed_creation_time?;
-    let status = unsafe { WaitForSingleObject(handle, timeout_ms) };
-    unsafe { CloseHandle(handle) };
-    match status {
-        WAIT_OBJECT_0 => Ok(()),
-        WAIT_TIMEOUT => bail!("timed out waiting for the managed-pair parent process to exit"),
-        WAIT_FAILED => {
-            Err(std::io::Error::last_os_error()).context("wait for managed-pair parent process")
-        }
-        other => bail!("unexpected managed-pair parent wait status {other}"),
-    }
-}
-
-#[cfg(windows)]
-fn process_creation_identity(handle: windows_sys::Win32::Foundation::HANDLE) -> Result<u64> {
-    use std::mem::MaybeUninit;
-    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
-
-    let mut creation = MaybeUninit::<FILETIME>::zeroed();
-    let mut exit = MaybeUninit::<FILETIME>::zeroed();
-    let mut kernel = MaybeUninit::<FILETIME>::zeroed();
-    let mut user = MaybeUninit::<FILETIME>::zeroed();
-    if unsafe {
-        GetProcessTimes(
-            handle,
-            creation.as_mut_ptr(),
-            exit.as_mut_ptr(),
-            kernel.as_mut_ptr(),
-            user.as_mut_ptr(),
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error())
-            .context("read managed-pair parent creation identity");
-    }
-    let creation = unsafe { creation.assume_init() };
-    Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
-}
-
-#[cfg(all(test, windows))]
-pub(crate) fn process_creation_identity_for_test(parent_pid: u32) -> Result<u64> {
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, parent_pid) };
-    if handle.is_null() {
-        return Err(std::io::Error::last_os_error()).context("open test parent process");
-    }
-    let identity = process_creation_identity(handle);
-    unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-    identity
-}
-
-#[cfg(all(test, windows))]
-pub(crate) fn wait_for_parent_exit_for_test(
-    parent_pid: u32,
-    parent_creation_time: u64,
-    timeout_ms: u32,
-) -> Result<()> {
-    wait_for_parent_exit_with_timeout(parent_pid, parent_creation_time, timeout_ms)
 }

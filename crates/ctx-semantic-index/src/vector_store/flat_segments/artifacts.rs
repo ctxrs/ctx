@@ -201,59 +201,6 @@ pub(super) fn metadata_at(mapping: &Mmap, ordinal: usize) -> FlatChunkMetadata {
     decode_metadata_record(&mapping[start..start + METADATA_RECORD_BYTES])
 }
 
-pub(super) fn publish_manifest(root: &Path, manifest: Manifest) -> FlatResult<SelectedManifest> {
-    publish_prepared_manifest(root, prepare_manifest(manifest)?)
-}
-
-pub(super) fn prepare_manifest(manifest: Manifest) -> FlatResult<PreparedManifest> {
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
-    let digest = encode_hex(Sha256::digest(&manifest_bytes).as_slice());
-    let envelope = ManifestEnvelope {
-        format: STORE_FORMAT.to_owned(),
-        envelope_version: MANIFEST_ENVELOPE_VERSION,
-        manifest,
-        manifest_sha256: digest.clone(),
-    };
-    let bytes = serde_json::to_vec(&envelope)?;
-    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err(FlatStoreError::InvalidInput(
-            "manifest exceeds the safe size limit; compact first".to_owned(),
-        ));
-    }
-    Ok(PreparedManifest {
-        envelope,
-        generation_hash: digest,
-        bytes,
-    })
-}
-
-pub(super) fn publish_prepared_manifest(
-    root: &Path,
-    prepared: PreparedManifest,
-) -> FlatResult<SelectedManifest> {
-    let PreparedManifest {
-        envelope,
-        generation_hash: digest,
-        bytes,
-    } = prepared;
-    let directory = manifests_directory(root);
-    let final_path = directory.join(manifest_name(envelope.manifest.generation, &digest));
-    let temporary = unique_temporary_path(&directory, "manifest");
-    let mut file = create_new_file(&temporary)?;
-    file.write_all(&bytes)
-        .map_err(|source| io_error("write flat manifest", &temporary, source))?;
-    file.sync_all()
-        .map_err(|source| io_error("sync flat manifest", &temporary, source))?;
-    drop(file);
-    commit_unique_file(&temporary, &final_path)?;
-    sync_directory(&directory)?;
-    Ok(SelectedManifest {
-        envelope,
-        generation_hash: digest,
-        path: final_path,
-    })
-}
-
 pub(super) fn write_replacement_segment(
     root: &Path,
     contract: &FlatModelContract,

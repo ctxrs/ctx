@@ -1,4 +1,4 @@
-"""Transport implementations for agent-history-v1."""
+"""Transport implementations for agent-history-v2."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .errors import (
     CtxAgentHistoryValidationError,
     HostedTransportNotImplementedError,
 )
-from .agent_history_v1 import (
+from .agent_history_v2 import (
     envelope,
     hosted_backend,
     local_backend,
@@ -159,7 +159,7 @@ class AgentHistoryTransport(Protocol):
 
 
 class LocalCliAdapter:
-    """agent-history-v1 transport backed by the local ctx CLI."""
+    """agent-history-v2 transport backed by the local ctx CLI."""
 
     name = "local-cli"
 
@@ -277,8 +277,6 @@ class LocalCliAdapter:
         _validate_search_class_filters(content_scope=content_scope, event_type=event_type)
         validate_search_intent(query=query, terms=terms, file=file)
         args = ["search", "--format=json"]
-        if query is not None:
-            args.append(query)
         _extend_option(args, "--provider", provider)
         _extend_option(args, "--workspace", workspace)
         _extend_option(args, "--since", since)
@@ -287,7 +285,7 @@ class LocalCliAdapter:
         _extend_option(args, "--file", file)
         _extend_option(args, "--session", session)
         for term in terms or []:
-            args.extend(["--term", term])
+            args.extend([f"--term={term}"] if term.startswith("-") else ["--term", term])
         if events:
             args.append("--events")
         _extend_option(args, "--backend", backend)
@@ -300,6 +298,8 @@ class LocalCliAdapter:
         _extend_option(args, "--refresh", refresh)
         if include_current_session:
             args.append("--include-current-session")
+        if query is not None:
+            args.extend(["--", query])
         raw = self._json(args)
         return cast(
             SearchResponse,
@@ -471,4 +471,4 @@ class HostedAdapter:
 
 def _extend_option(args: list[str], flag: str, value: Optional[str]) -> None:
     if value is not None:
-        args.extend([flag, value])
+        args.extend([f"{flag}={value}"] if value.startswith("-") else [flag, value])

@@ -7,8 +7,8 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use super::super::CompletedOperation;
 use super::{
-    open_writable, preflight_existing_family, protect_sqlite_files, reject_future_daily_dates,
-    retention_cutoff, utc_day, verify_schema, UsageStoreError, WritableStore,
+    open_writable, reject_future_daily_dates, retention_cutoff, utc_day, verify_schema,
+    UsageStoreError,
 };
 
 pub(super) fn record_at(
@@ -19,13 +19,13 @@ pub(super) fn record_at(
     ctx_version: &str,
 ) -> Result<(), UsageStoreError> {
     let path = database_path.to_path_buf();
-    let WritableStore {
-        mut conn,
-        family_guard,
-    } = open_writable(&path, true, busy_timeout)?.ok_or(UsageStoreError::SchemaIdentity)?;
+    let mut store =
+        open_writable(&path, true, busy_timeout)?.ok_or(UsageStoreError::SchemaIdentity)?;
     let day = utc_day(now);
     let cutoff = retention_cutoff(now);
-    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
     verify_schema(&transaction)?;
     super::super::report::validate_rows(&transaction)?;
     reject_future_daily_dates(&transaction, &day)?;
@@ -89,12 +89,11 @@ pub(super) fn record_at(
             operation.matched_normalized_session_bytes,
         ],
     )?;
-    family_guard.recheck(&path)?;
-    let commit_guard = preflight_existing_family(&path, true)?;
+    let commit_guard = store.family_guard.before_commit(&path)?;
     verify_schema(&transaction)?;
     super::super::report::validate_rows(&transaction)?;
     transaction.commit()?;
     drop(commit_guard);
-    let _ = protect_sqlite_files(&path);
+    let _ = store.family_guard.protect(&path);
     Ok(())
 }

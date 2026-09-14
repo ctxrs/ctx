@@ -2,8 +2,7 @@ use std::{collections::BTreeSet, path::Path, path::PathBuf, sync::Arc};
 
 use ctx_history_capture_model::SourceRouteIdentity;
 use ctx_history_capture_runtime::{
-    BaseEventLookup, CaptureCommitOutcome, CaptureCommitReceipt, CaptureLifecycleOpenOutcome,
-    CaptureLifecycleSink, CapturePublicationContext, CapturePublicationDisposition,
+    BaseEventLookup, CaptureCommitReceipt, CaptureLifecycleOpenOutcome, CaptureLifecycleSink,
     CaptureRevalidationTarget, CaptureRouteRef, CaptureSourceAggregateRef, CoreMaterialization,
     CorePreparationFailureKind, CorePreparationPort, DocumentRecordSpool, ImmutableCaptureSnapshot,
     PresentCaptureRoute, SourceBackedRouteResources, SourceBackedRouteResult,
@@ -302,26 +301,6 @@ impl CaptureLifecycleSink for FakeLifecycle {
             0,
             0,
             FakeSnapshot,
-        ))
-    }
-
-    fn commit_with_metadata<F, I, M>(
-        self,
-        _revalidate: F,
-        _revalidate_inventory: I,
-        _metadata_factory: M,
-    ) -> Result<CaptureCommitOutcome<Self::CommittedSnapshot, Self::VerifiedPublication>, Self::Error>
-    where
-        F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: for<'a> FnOnce(
-            CapturePublicationContext<'a, Self::Snapshot<'a>>,
-        ) -> Result<Vec<u8>, Self::Error>,
-    {
-        Ok(CaptureCommitOutcome::new(
-            CaptureCommitReceipt::new("fake-generation".to_owned(), 0, 0, 0, 0, FakeSnapshot),
-            CapturePublicationDisposition::Published,
-            ctx_history_capture_runtime::VerifiedCapture::new(()),
         ))
     }
 }

@@ -203,23 +203,14 @@ pub fn reconcile_scheduled_state(mut state: Value, marker: Option<&InstallMarker
 
 #[cfg(test)]
 mod ui_tests {
-    use unicode_width::UnicodeWidthStr as _;
-
     use super::*;
-    use crate::ui::{ColorMode, StreamKind, TestContext};
+    use crate::{
+        test_support::assert_fits,
+        ui::{ColorMode, StreamKind, TestContext},
+    };
 
     fn context(width: usize) -> RenderContext {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
-    }
-
-    fn assert_fits(document: &Document, context: &RenderContext) {
-        let available = context.content_width().unwrap_or(1);
-        for line in document.render_plain().lines() {
-            assert!(
-                line.width() <= available,
-                "{line:?} exceeded {available} columns"
-            );
-        }
     }
 
     #[test]

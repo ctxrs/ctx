@@ -1,0 +1,17 @@
+diff --git a/src/fsevent.rs b/src/fsevent.rs
+--- a/src/fsevent.rs
++++ b/src/fsevent.rs
+@@ -391,5 +391,11 @@
+             stop_flag.store(true, Ordering::Release);
+-            runloop.stop();
+-            runloop.wake_up();
++            // A stop before CFRunLoopRun enters is not remembered. The worker
++            // may already have read a false stop flag, so repeat until it exits.
++            // This waits only during shutdown, never during idle watching.
++            while !thread_handle.is_finished() {
++                runloop.stop();
++                runloop.wake_up();
++                thread::sleep(std::time::Duration::from_millis(1));
++            }
+             // Wait for the thread to shut down.
+             thread_handle.join().expect("thread to shut down");

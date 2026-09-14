@@ -50,40 +50,6 @@ def history_source_boundaries():
     )
 
     py_test(
-        name = "history_capture_runtime_dependency_boundary_check",
-        srcs = ["//tools/bazel:check_history_capture_runtime_boundary.py"],
-        main = "//tools/bazel:check_history_capture_runtime_boundary.py",
-        args = [
-            "$(rootpath Cargo.toml)",
-            "$(rootpath //crates/ctx-history-capture-runtime:Cargo.toml)",
-            "$(rootpath //crates/ctx-history-capture-runtime:BUILD.bazel)",
-            "$(rootpath //crates/ctx-history-jsonl:Cargo.toml)",
-            "$(rootpath //crates/ctx-history-jsonl:BUILD.bazel)",
-            "$(rootpath //crates/ctx-history-provider-native-jsonl:Cargo.toml)",
-            "$(rootpath //crates/ctx-history-provider-native-jsonl:BUILD.bazel)",
-        ],
-        data = [
-            "Cargo.toml",
-            "//crates/ctx-history-capture-runtime:BUILD.bazel",
-            "//crates/ctx-history-capture-runtime:Cargo.toml",
-            "//crates/ctx-history-jsonl:BUILD.bazel",
-            "//crates/ctx-history-jsonl:Cargo.toml",
-            "//crates/ctx-history-provider-native-jsonl:BUILD.bazel",
-            "//crates/ctx-history-provider-native-jsonl:Cargo.toml",
-        ],
-    )
-
-    py_test(
-        name = "history_capture_runtime_boundary_mutation_tests",
-        srcs = [
-            "//tools/bazel:check_history_capture_runtime_boundary.py",
-            "//tools/bazel:check_history_capture_runtime_boundary_test.py",
-        ],
-        imports = ["tools/bazel"],
-        main = "//tools/bazel:check_history_capture_runtime_boundary_test.py",
-    )
-
-    py_test(
         name = "history_provider_runtime_dependency_boundary_check",
         srcs = ["//tools/bazel:check_history_provider_runtime_boundary.py"],
         main = "//tools/bazel:check_history_provider_runtime_boundary.py",

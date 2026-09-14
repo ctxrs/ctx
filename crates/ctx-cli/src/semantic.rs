@@ -1,33 +1,143 @@
 //! Final-binary composition for daemon and semantic adapters.
 
+use std::env;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Mutex,
 };
-use std::{borrow::Cow, io::Write, path::Path, time::Duration};
+use std::{io::Write, path::Path, thread, time::Duration};
 
 use anyhow::Result;
 use ctx_client_observability::analytics::PublicEventV1;
 use ctx_companion_bridge::CancellationToken;
-use ctx_daemon_cli::{AppConfig as DaemonCliConfig, DaemonConfig, DaemonMode};
+use ctx_daemon_cli::{DaemonConfig, DaemonMode, DaemonRuntimeConfig};
 
 pub(crate) use ctx_daemon_cli::{
-    begin_daemon_upgrade_handoff, begin_legacy_daemon_upgrade_handoff,
-    complete_replacement_daemon_handoff, coordinate_import_source_backed_refresh_with_progress,
+    begin_daemon_upgrade_handoff, complete_replacement_daemon_handoff,
+    coordinate_import_source_backed_refresh_with_progress,
     coordinate_setup_source_backed_refresh_with_progress,
     coordinate_source_backed_refresh_with_progress, daemon_autostart_suppression_reason,
     finish_replacement_daemon_handoff, mark_replacement_helper_handoff,
-    published_explicit_source_relocation_authority, replacement_helper_owns_daemon_handoff,
-    semantic_managed_model_snapshot_dir, semantic_native_accelerator_target,
-    semantic_provisioning_coreml_asset_matches, semantic_provisioning_model_contract_matches,
-    semantic_provisioning_model_path_count, semantic_provisioning_model_path_matches,
-    semantic_required_model_file_count, semantic_required_model_file_matches,
-    semantic_runtime_cache_dir, semantic_worker_cache_dir, DaemonHandoff, DaemonSetupHandoff,
-    DaemonUpgradeHandoff, RefreshStatus, SemanticNativeAcceleratorTarget, SemanticNotReady,
-    SemanticOrtModelVariant, SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
-    SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
-    SourceBackedRefreshTerminalError, SEMANTIC_WORKER_BATCH_MAX,
+    published_explicit_source_relocation_authority, semantic_managed_model_snapshot_dir,
+    semantic_native_accelerator_target, semantic_provisioning_coreml_asset_matches,
+    semantic_provisioning_model_contract_matches, semantic_provisioning_model_path_count,
+    semantic_provisioning_model_path_matches, semantic_required_model_file_count,
+    semantic_required_model_file_matches, semantic_runtime_cache_dir, semantic_worker_cache_dir,
+    DaemonHandoff, DaemonSetupHandoff, DaemonUpgradeHandoff, PinnedSourceBackedGeneration,
+    RefreshStatus, SemanticNativeAcceleratorTarget, SemanticNotReady, SemanticOrtModelVariant,
+    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+    SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,
+    SEMANTIC_WORKER_BATCH_MAX,
 };
+
+/// Selects the sole semantic writer after Import has durably published and
+/// pinned its exact Core generation. `--no-daemon` deliberately does not
+/// participate: it suppresses only Core daemon autostart, never ownership.
+#[derive(Clone, Debug)]
+pub(crate) enum ImportSemanticCompletion {
+    Disabled,
+    Foreground {
+        executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig,
+    },
+    Daemon {
+        executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig,
+        daemon: ctx_daemon_cli::SemanticCompletionDaemonConfig,
+    },
+}
+
+impl ImportSemanticCompletion {
+    pub(crate) fn from_import_config(config: &ctx_app_config::AppConfig) -> Self {
+        if !config.semantic_search_enabled() {
+            return Self::Disabled;
+        }
+
+        let executor = config.semantic_embedding_executor().clone();
+        if config.automatic_indexing_enabled()
+            && matches!(config.daemon.mode, ctx_app_config::DaemonMode::Full)
+        {
+            return Self::Daemon {
+                executor,
+                daemon: ctx_daemon_cli::SemanticCompletionDaemonConfig::new(
+                    true,
+                    "full",
+                    true,
+                    config.semantic_builtin_throttling_configured(),
+                ),
+            };
+        }
+
+        Self::Foreground { executor }
+    }
+
+    pub(crate) const fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+}
+
+/// Completes exactly the Core generation published by Import. The daemon path
+/// only observes the bound daemon identity; the foreground path is the only
+/// path that opens the semantic writer and it uses no query session.
+pub(crate) fn complete_import_semantic(
+    completion: &ImportSemanticCompletion,
+    data_root: &Path,
+    pin: PinnedSourceBackedGeneration,
+) -> Result<PinnedSourceBackedGeneration> {
+    match completion {
+        ImportSemanticCompletion::Disabled => Ok(pin),
+        ImportSemanticCompletion::Foreground { executor } => {
+            ctx_daemon_cli::complete_semantic_generation_foreground_with_checkpoint(
+                data_root,
+                pin,
+                executor.clone(),
+                &mut ctx_daemon_cli::foreground_checkpoint,
+            )
+            .map_err(Into::into)
+        }
+        ImportSemanticCompletion::Daemon { executor, daemon } => {
+            wait_for_import_daemon_semantic_completion(
+                data_root,
+                pin,
+                executor.clone(),
+                daemon.clone(),
+            )
+            .map_err(Into::into)
+        }
+    }
+}
+
+fn wait_for_import_daemon_semantic_completion(
+    data_root: &Path,
+    pin: PinnedSourceBackedGeneration,
+    executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig,
+    daemon: ctx_daemon_cli::SemanticCompletionDaemonConfig,
+) -> std::result::Result<PinnedSourceBackedGeneration, ctx_daemon_cli::SemanticCompletionError> {
+    let mut completion = ctx_daemon_cli::DaemonSemanticCompletion::new(
+        &pin,
+        executor,
+        daemon,
+        ctx_daemon_cli::SemanticCompletionBudgets::default(),
+    )?;
+    loop {
+        ctx_daemon_cli::foreground_checkpoint().map_err(|source| {
+            ctx_daemon_cli::SemanticCompletionError::Checkpoint {
+                generation_id: pin.generation_id().to_owned(),
+                source,
+            }
+        })?;
+        match completion.checkpoint(data_root, &pin)? {
+            ctx_daemon_cli::SemanticCompletionCheckpoint::Ready => return Ok(pin),
+            ctx_daemon_cli::SemanticCompletionCheckpoint::Pending { poll_after } => {
+                thread::sleep(poll_after);
+                ctx_daemon_cli::foreground_checkpoint().map_err(|source| {
+                    ctx_daemon_cli::SemanticCompletionError::Checkpoint {
+                        generation_id: pin.generation_id().to_owned(),
+                        source,
+                    }
+                })?;
+            }
+        }
+    }
+}
 
 struct CtxDaemonCliHost;
 
@@ -111,45 +221,133 @@ pub(crate) fn initialize() -> Result<()> {
     ctx_daemon_cli::install_host(&HOST)
 }
 
-fn daemon_cli_config<'a>(config: &'a crate::config::AppConfig) -> DaemonCliConfig<'a> {
-    DaemonCliConfig::new(
-        config.analytics.enabled,
+pub(crate) fn rebind_embedding_auth_for_explicit_selection(executor: &str) {
+    if executor == "builtin"
+        || env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV).is_none()
+    {
+        clear_embedding_auth_endpoint();
+    } else {
+        env::set_var(
+            ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+            executor,
+        );
+    }
+}
+
+pub(crate) fn bind_embedding_auth_endpoint(config: &ctx_app_config::AppConfig) {
+    bind_embedding_auth_endpoint_with(config, false);
+}
+
+pub(crate) fn rebind_embedding_auth_endpoint(config: &ctx_app_config::AppConfig) {
+    bind_embedding_auth_endpoint_with(config, true);
+}
+
+pub(crate) fn clear_embedding_auth_endpoint() {
+    env::remove_var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV);
+}
+
+fn bind_embedding_auth_endpoint_with(config: &ctx_app_config::AppConfig, explicit_selection: bool) {
+    let endpoint = config
+        .semantic_search_enabled()
+        .then(|| env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV))
+        .flatten()
+        .and_then(|_| config.semantic_embedding_executor().http_endpoint());
+    match endpoint {
+        Some(endpoint)
+            if !config
+                .semantic_embedding_executor()
+                .scope()
+                .content_leaves_machine() =>
+        {
+            if explicit_selection {
+                env::set_var(
+                    ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+                    endpoint,
+                );
+            } else if !env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV)
+                .is_ok_and(|binding| binding == endpoint)
+            {
+                clear_embedding_auth_endpoint();
+            }
+        }
+        Some(endpoint)
+            if config
+                .semantic_embedding_executor()
+                .scope()
+                .content_leaves_machine()
+                && (explicit_selection
+                    || env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV)
+                        .is_none()) =>
+        {
+            env::set_var(
+                ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+                endpoint,
+            );
+        }
+        // Preserve an independently supplied endpoint binding. A mismatch is
+        // rejected by the executor before any request. Loopback receives an
+        // inherited token only when the caller explicitly pre-bound it.
+        Some(_) => {}
+        None if explicit_selection => clear_embedding_auth_endpoint(),
+        None => {}
+    }
+}
+
+fn daemon_cli_config(config: &ctx_app_config::AppConfig) -> DaemonRuntimeConfig {
+    daemon_cli_config_with_automatic_upgrade_eligibility(
+        config,
         crate::upgrade::automatic_upgrade_eligible_hint(config),
-        Cow::Borrowed(config.upgrade.channel.as_str()),
+    )
+}
+
+fn daemon_cli_config_with_automatic_upgrade_eligibility(
+    config: &ctx_app_config::AppConfig,
+    automatic_upgrade_eligible: bool,
+) -> DaemonRuntimeConfig {
+    DaemonRuntimeConfig::new(
+        config.analytics.enabled,
+        automatic_upgrade_eligible,
+        config.upgrade.channel.clone(),
         config.upgrade.interval,
         DaemonConfig {
             enabled: config.automatic_indexing_enabled(),
             mode: match config.daemon.mode {
-                crate::config::DaemonMode::Full => DaemonMode::Full,
-                crate::config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
+                ctx_app_config::DaemonMode::Full => DaemonMode::Full,
+                ctx_app_config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
             },
         },
         config.semantic_search_enabled(),
         config.semantic_search_source(),
     )
     .with_semantic_embedding_executor(config.semantic_embedding_executor().clone())
+    .with_semantic_builtin_throttling(
+        config.semantic_builtin_throttling_configured(),
+        config.semantic_builtin_throttling_source(),
+    )
     .with_automatic_provider_discovery(config.automatic_source_discovery_enabled())
     .with_provider_roots(config.provider_root_definitions())
 }
 
-fn owned_daemon_cli_config(config: crate::config::AppConfig) -> DaemonCliConfig<'static> {
+fn owned_daemon_cli_config(config: ctx_app_config::AppConfig) -> DaemonRuntimeConfig {
     let analytics_enabled = config.analytics.enabled;
     let automatic_upgrade_enabled = crate::upgrade::automatic_upgrade_eligible_hint(&config);
     let upgrade_interval = config.upgrade.interval;
     let daemon_enabled = config.automatic_indexing_enabled();
     let daemon_mode = match config.daemon.mode {
-        crate::config::DaemonMode::Full => DaemonMode::Full,
-        crate::config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
+        ctx_app_config::DaemonMode::Full => DaemonMode::Full,
+        ctx_app_config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
     };
     let semantic_enabled = config.semantic_search_enabled();
     let semantic_source = config.semantic_search_source();
+    let semantic_builtin_throttling_configured = config.semantic_builtin_throttling_configured();
+    let semantic_builtin_throttling_source = config.semantic_builtin_throttling_source();
     let semantic_executor = config.semantic_embedding_executor().clone();
     let automatic_provider_discovery = config.automatic_source_discovery_enabled();
     let provider_roots = config.provider_root_definitions();
-    DaemonCliConfig::new(
+    DaemonRuntimeConfig::new(
         analytics_enabled,
         automatic_upgrade_enabled,
-        Cow::Owned(config.upgrade.channel),
+        config.upgrade.channel,
         upgrade_interval,
         DaemonConfig {
             enabled: daemon_enabled,
@@ -159,6 +357,10 @@ fn owned_daemon_cli_config(config: crate::config::AppConfig) -> DaemonCliConfig<
         semantic_source,
     )
     .with_semantic_embedding_executor(semantic_executor)
+    .with_semantic_builtin_throttling(
+        semantic_builtin_throttling_configured,
+        semantic_builtin_throttling_source,
+    )
     .with_automatic_provider_discovery(automatic_provider_discovery)
     .with_provider_roots(provider_roots)
 }
@@ -185,14 +387,14 @@ fn output_format(format: crate::output::JsonOutputFormat) -> ctx_terminal::JsonO
 
 pub(crate) fn source_epoch_status_report(
     data_root: &Path,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
 ) -> Result<ctx_daemon_cli::SourceEpochStatus> {
     ctx_daemon_cli::source_epoch_status_report(data_root, &daemon_cli_config(config))
 }
 
 pub(crate) fn autostart_daemon_and_wait(
     data_root: &Path,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
     trigger: crate::DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     ctx_daemon_cli::autostart_daemon_and_wait(
@@ -204,7 +406,7 @@ pub(crate) fn autostart_daemon_and_wait(
 
 pub(crate) fn restart_daemon_with_current_environment_and_wait(
     data_root: &Path,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
     trigger: crate::DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     ctx_daemon_cli::restart_daemon_with_current_environment_and_wait(
@@ -216,7 +418,7 @@ pub(crate) fn restart_daemon_with_current_environment_and_wait(
 
 pub(crate) fn autostart_daemon_for_setup_and_wait(
     data_root: &Path,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
     trigger: crate::DaemonTriggerCommandArg,
 ) -> Result<DaemonSetupHandoff> {
     ctx_daemon_cli::autostart_daemon_for_setup_and_wait(
@@ -228,14 +430,14 @@ pub(crate) fn autostart_daemon_for_setup_and_wait(
 
 pub(crate) fn observe_daemon_for_setup_and_wait(
     data_root: &Path,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
 ) -> Result<DaemonSetupHandoff> {
     ctx_daemon_cli::observe_daemon_for_setup_and_wait(data_root, &daemon_cli_config(config))
 }
 
 pub(crate) fn maybe_autostart_daemon(
     data_root: &Path,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
     trigger: crate::DaemonTriggerCommandArg,
 ) {
     ctx_daemon_cli::maybe_autostart_daemon(
@@ -247,7 +449,7 @@ pub(crate) fn maybe_autostart_daemon(
 
 pub(crate) fn update_indexing_mode(
     data_root: &Path,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
     automatic: bool,
 ) -> Result<ctx_daemon_cli::IndexingModeUpdate> {
     ctx_daemon_cli::update_indexing_mode(data_root, &daemon_cli_config(config), automatic)
@@ -268,7 +470,7 @@ pub(crate) fn begin_current_daemon_upgrade_handoff(
 }
 
 pub(crate) fn daemon_config_snapshot(
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
 ) -> ctx_daemon_cli::DaemonConfigSnapshot {
     ctx_daemon_cli::daemon_service_ports::config_snapshot(&daemon_cli_config(config))
 }
@@ -280,7 +482,7 @@ pub(crate) fn deliver_daemon_events(data_root: &Path, events: &[PublicEventV1]) 
 pub(crate) fn run_daemon_command(
     args: crate::DaemonArgs,
     data_root: std::path::PathBuf,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
     ui: &mut crate::ui::Ui,
 ) -> Result<()> {
     use crate::DaemonCommand as C;
@@ -327,20 +529,12 @@ pub(crate) fn run_daemon_command(
 }
 
 impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
-    fn load_config(&self, data_root: &Path) -> Result<DaemonCliConfig<'static>> {
-        let config = crate::config::AppConfig::load(data_root)?;
+    fn load_config(&self, data_root: &Path) -> Result<DaemonRuntimeConfig> {
+        let config = ctx_app_config::AppConfig::load(data_root)?;
         if !config.analytics.enabled {
-            crate::analytics::send_batch(data_root, &config, &[]);
+            crate::analytics::send_batch(data_root, &[]);
         }
         Ok(owned_daemon_cli_config(config))
-    }
-
-    fn persisted_daemon_enabled(&self, data_root: &Path) -> Result<bool> {
-        crate::config::persisted_daemon_enabled(data_root)
-    }
-
-    fn set_daemon_enabled(&self, data_root: &Path, enabled: bool) -> Result<()> {
-        crate::config::set_daemon_enabled(data_root, enabled)
     }
 
     fn home_dir(&self) -> Option<std::path::PathBuf> {
@@ -351,7 +545,7 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
         &self,
         data_root: &Path,
         request: ctx_daemon_cli::DaemonHostRunRequest,
-        config: &DaemonCliConfig<'_>,
+        config: &DaemonRuntimeConfig,
     ) -> Result<()> {
         let engine = crate::upgrade::ports::engine();
         let upgrade = ctx_daemon_cli::DaemonUpgradePorts {
@@ -370,13 +564,11 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
     }
 
     fn deliver_daemon_events(&self, data_root: &Path, events: &[PublicEventV1]) {
-        if events.is_empty() {
-            return;
-        }
-        let Ok(config) = crate::config::AppConfig::load(data_root) else {
-            return;
-        };
-        crate::analytics::send_daemon_batch(data_root, &config, events);
+        crate::analytics::send_batch(data_root, events);
+    }
+
+    fn upload_daemon_events(&self, data_root: &Path, events: &[PublicEventV1]) {
+        crate::analytics::send_daemon_batch(data_root, events);
     }
 
     fn fetch_to_writer(

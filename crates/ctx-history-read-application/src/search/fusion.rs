@@ -3,6 +3,7 @@ use std::{cmp::Ordering, collections::HashMap};
 use super::*;
 
 struct SourceFusionEvidence {
+    semantic_evidence: Option<ctx_history_index_query::SemanticSearchEvidence>,
     event: RankedEventRef,
     lexical_rank: Option<usize>,
     semantic_rank: Option<usize>,
@@ -18,6 +19,7 @@ pub(super) fn fuse_source_candidates(
         evidence.insert(
             candidate.event.event_identity_digest,
             SourceFusionEvidence {
+                semantic_evidence: None,
                 event: candidate.event,
                 lexical_rank: Some(rank.saturating_add(1)),
                 semantic_rank: None,
@@ -28,8 +30,14 @@ pub(super) fn fuse_source_candidates(
         let semantic_rank = rank.saturating_add(1);
         evidence
             .entry(candidate.event.event_identity_digest)
-            .and_modify(|entry| entry.semantic_rank = Some(semantic_rank))
+            .and_modify(|entry| {
+                entry.semantic_rank = Some(semantic_rank);
+                entry
+                    .semantic_evidence
+                    .clone_from(&candidate.semantic_evidence);
+            })
             .or_insert(SourceFusionEvidence {
+                semantic_evidence: candidate.semantic_evidence,
                 event: candidate.event,
                 lexical_rank: None,
                 semantic_rank: Some(semantic_rank),
@@ -38,6 +46,7 @@ pub(super) fn fuse_source_candidates(
     let mut candidates = evidence
         .into_values()
         .map(|evidence| EventSearchCandidate {
+            semantic_evidence: evidence.semantic_evidence,
             score: weighted_rrf_score(
                 evidence.lexical_rank,
                 evidence.semantic_rank,

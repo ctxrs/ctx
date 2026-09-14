@@ -119,7 +119,23 @@ fn production_refresh_persists_both_split_publications_without_provider_roots() 
         )
         .unwrap()])
         .unwrap();
-    writer.commit(|_| true).unwrap();
+    writer
+        .commit_with_generation_state(
+            |_| true,
+            |_| false,
+            |_| {
+                SourceBackedGenerationState::new(
+                    None,
+                    Vec::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    Vec::new(),
+                )?
+                .envelope()
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
 
     let report = || DiscoveryReport {
         sources: vec![cli.clone(), ide.clone()],
@@ -128,8 +144,9 @@ fn production_refresh_persists_both_split_publications_without_provider_roots() 
     let bridge = run_report(&discovery, report(), &data_root, &index_root).unwrap();
     let bridge_index = bridge.verified_index.as_ref().unwrap();
     assert!(bridge_index.manifest().source_route(&legacy).is_some());
-    let bridge_metadata = SourceBackedPublicationMetadata::decode(bridge_index).unwrap();
-    assert!(bridge_metadata.route_controls.contains_key(&legacy));
+    let bridge_state =
+        SourceBackedGenerationState::decode_from_verified_index(bridge_index).unwrap();
+    assert!(bridge_state.route_controls().contains_key(&legacy));
 
     let successor = run_report(&discovery, report(), &data_root, &index_root).unwrap();
     let successor_index = successor.verified_index.as_ref().unwrap();
@@ -141,8 +158,9 @@ fn production_refresh_persists_both_split_publications_without_provider_roots() 
         .collect::<BTreeSet<_>>();
     assert_eq!(final_routes, successors);
     assert!(!final_routes.contains(&legacy));
-    let successor_metadata = SourceBackedPublicationMetadata::decode(successor_index).unwrap();
-    assert!(!successor_metadata.route_controls.contains_key(&legacy));
+    let successor_state =
+        SourceBackedGenerationState::decode_from_verified_index(successor_index).unwrap();
+    assert!(!successor_state.route_controls().contains_key(&legacy));
 }
 
 fn write_hermes_profile(path: &Path) {
@@ -191,13 +209,11 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
         &index_root,
     )
     .unwrap();
-    assert!(cold
-        .verified_index
-        .as_ref()
-        .unwrap()
-        .manifest()
-        .source_route(&alpha_route)
-        .is_some());
+    let cold_index = cold.verified_index.as_ref().unwrap();
+    assert!(cold_index.manifest().source_route(&alpha_route).is_some());
+    let cold_state = SourceBackedGenerationState::decode_from_verified_index(cold_index).unwrap();
+    assert!(cold_state.route_controls().contains_key(&alpha_route));
+    drop(cold);
 
     std::fs::rename(alpha.parent().unwrap(), beta.parent().unwrap()).unwrap();
     let beta_source = provider_source_for_path(CaptureProvider::Hermes, beta);
@@ -210,14 +226,32 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
     let warm_index = warm.verified_index.as_ref().unwrap();
     assert!(warm_index.manifest().source_route(&alpha_route).is_none());
     assert!(warm_index.manifest().source_route(&beta_route).is_some());
-    let warm_metadata = SourceBackedPublicationMetadata::decode(warm_index).unwrap();
-    assert!(!warm_metadata.route_controls.contains_key(&alpha_route));
-    assert!(warm_metadata.route_controls.contains_key(&beta_route));
+    let warm_state = SourceBackedGenerationState::decode_from_verified_index(warm_index).unwrap();
+    assert!(!warm_state.route_controls().contains_key(&alpha_route));
+    assert!(warm_state.route_controls().contains_key(&beta_route));
+
+    let warm_snapshot = VerifiedIndex::open_pinned(&index_root)
+        .unwrap()
+        .into_generation_snapshot();
+    assert_eq!(warm_snapshot.generation_id(), warm_index.generation_id());
+    let manifest_state =
+        SourceBackedGenerationState::decode_from_manifest(warm_snapshot.manifest()).unwrap();
+    assert_eq!(manifest_state.route_controls(), warm_state.route_controls());
+    assert_eq!(
+        manifest_state.route_observations(),
+        warm_state.route_observations()
+    );
+    assert_eq!(
+        manifest_state.catalog_route_bindings(),
+        warm_state.catalog_route_bindings()
+    );
 
     let subsequent = run_report(&discovery, warm_report(), &data_root, &index_root).unwrap();
+    assert_eq!(subsequent.generation_id, warm.generation_id);
     let subsequent = subsequent.verified_index.as_ref().unwrap();
     assert!(subsequent.manifest().source_route(&alpha_route).is_none());
     assert!(subsequent.manifest().source_route(&beta_route).is_some());
+    assert!(warm_index.manifest().source_route(&beta_route).is_some());
 }
 
 fn registry_policy_automatic_route_identity(source: &ProviderSource) -> SourceRouteIdentity {
@@ -266,7 +300,17 @@ fn only_unscopable_registry_safety_issues_block_globally() {
         },
     };
     let error = reject_blocking_automatic_registry_issues(&[unsafe_overlap]).unwrap_err();
+    assert!(error
+        .downcast_ref::<ZeroSourcePublicationBlocked>()
+        .is_some());
     assert!(format!("{error:#}").contains("injected unsafe root overlap"));
+    assert_eq!(
+        error
+            .downcast_ref::<ZeroSourcePublicationBlocked>()
+            .unwrap()
+            .reason(),
+        Some(ZeroSourcePublicationBlockReason::UnsafeRoot)
+    );
 
     let configured_conflict = SourceBackedAutomaticRegistryIssue::Discovery(DiscoveryIssue {
         provider: CaptureProvider::Claude,
@@ -275,7 +319,17 @@ fn only_unscopable_registry_safety_issues_block_globally() {
         reason: "injected configured root conflict",
     });
     let error = reject_blocking_automatic_registry_issues(&[configured_conflict]).unwrap_err();
+    assert!(error
+        .downcast_ref::<ZeroSourcePublicationBlocked>()
+        .is_some());
     assert!(format!("{error:#}").contains("injected configured root conflict"));
+    assert_eq!(
+        error
+            .downcast_ref::<ZeroSourcePublicationBlocked>()
+            .unwrap()
+            .reason(),
+        Some(ZeroSourcePublicationBlockReason::UnsafeRoot)
+    );
 }
 
 #[test]
@@ -426,7 +480,9 @@ fn distinct_nanoclaw_registry_failures_match_retained_automatic_routes() {
     }
     writer.set_present_source_routes(retained_routes).unwrap();
     writer.commit(|_| true).unwrap();
-    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index_root)
+        .unwrap()
+        .into_generation_snapshot();
 
     let issues = sources.map(|source| SourceBackedAutomaticRegistryIssue::Unavailable {
         source,
@@ -643,7 +699,26 @@ fn unsupported_warp_preserves_same_epoch_last_good_route_as_stale() {
         )
         .unwrap()])
         .unwrap();
-    let retained_generation = writer.commit(|_| true).unwrap().generation_id;
+    let retained_generation = writer
+        .commit_with_generation_state(
+            |_| true,
+            |_| false,
+            |_| {
+                SourceBackedGenerationState::new(
+                    None,
+                    Vec::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    Vec::new(),
+                )?
+                .envelope()
+            },
+            |_| Ok(()),
+        )
+        .unwrap()
+        .receipt()
+        .generation_id
+        .clone();
 
     let publication = run_report(
         &discovery,

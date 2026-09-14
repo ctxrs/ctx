@@ -9,14 +9,17 @@ homepage.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+test-support = ["ctx-daemon-service/test-support"]
+
 [dependencies]
 anyhow.workspace = true
 fs2 = "0.4.3"
 serde_json.workspace = true
 thiserror.workspace = true
-toml_edit = "0.22"
 uuid.workspace = true
 ctx-client-observability = { path = "../ctx-client-observability" }
+ctx-app-config = { path = "../ctx-app-config" }
 ctx-daemon-application = { path = "../ctx-daemon-application" }
 ctx-daemon-runtime = { path = "../ctx-daemon-runtime" }
 ctx-daemon-service = { path = "../ctx-daemon-service" }

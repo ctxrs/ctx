@@ -2,7 +2,7 @@ use ctx_history_core::CaptureProvider;
 
 use crate::{NativeJsonlRuntime, QODER_SOURCE_FORMAT};
 
-const PARSER_REVISION: &str = "direct-native-jsonl-parser-v6-optional-activity-admission";
+const PARSER_REVISION: &str = "direct-native-jsonl-parser-v7-record-admission-order";
 
 pub const fn qoder_source_backed_adapter<R: NativeJsonlRuntime>(
 ) -> super::DirectJsonlFamilyAdapter<R> {

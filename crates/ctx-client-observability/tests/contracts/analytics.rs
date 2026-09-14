@@ -2,6 +2,23 @@ mod support;
 
 use support::*;
 
+fn analytics_command(
+    mut command: Command,
+    data_root: &Path,
+    home: &Path,
+    state: &Path,
+    events_path: &Path,
+) -> Command {
+    command
+        .env("CTX_DATA_ROOT", data_root)
+        .env("HOME", home)
+        .env("XDG_STATE_HOME", state)
+        .env("LOCALAPPDATA", state)
+        .env_remove("CTX_ANALYTICS_ENABLED")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(events_path));
+    command
+}
+
 #[test]
 fn capability_snapshot_is_sent_once_after_successful_delivery() {
     let temp = tempdir();
@@ -12,14 +29,8 @@ fn capability_snapshot_is_sent_once_after_successful_delivery() {
     fs::create_dir_all(&home).unwrap();
 
     for _ in 0..2 {
-        ctx(&temp)
+        analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
             .arg("doctor")
-            .env("CTX_DATA_ROOT", &data_root)
-            .env("HOME", &home)
-            .env("XDG_STATE_HOME", &state)
-            .env("LOCALAPPDATA", &state)
-            .env_remove("CTX_ANALYTICS_ENABLED")
-            .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
             .env("CTX_UPGRADE_AUTO", "off")
             .assert()
             .success();
@@ -61,7 +72,7 @@ fn capability_snapshot_is_sent_once_after_successful_delivery() {
 }
 
 #[test]
-fn capability_snapshot_durable_queue_handoff_marks_once_and_replays() {
+fn capability_snapshot_durable_queue_handoff_marks_once_and_daemon_replays() {
     let temp = tempdir();
     let delivery_dir = temp.path().join("missing-delivery-dir");
     let events_path = delivery_dir.join("analytics.jsonl");
@@ -70,14 +81,8 @@ fn capability_snapshot_durable_queue_handoff_marks_once_and_replays() {
     let data_root = temp.path().join("data");
     fs::create_dir_all(&home).unwrap();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .arg("doctor")
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
@@ -93,44 +98,92 @@ fn capability_snapshot_durable_queue_handoff_marks_once_and_replays() {
         !claim_path.exists(),
         "accepted delivery must clear the capability claim"
     );
+    let initially_queued = read_analytics_events(&events_path);
+    assert_eq!(initially_queued.len(), 1, "{initially_queued:#?}");
+    assert_operation_event(&initially_queued[0], "doctor", "success");
+    let doctor_event_id = analytics_operation_event_id(&initially_queued, "doctor").unwrap();
+    assert_eq!(doctor_event_id.get_version_num(), 4);
 
     fs::create_dir_all(&delivery_dir).unwrap();
-    ctx(&temp)
-        .arg("doctor")
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
+        .args(["status", "--format=json"])
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
 
-    let events = read_analytics_events(&events_path);
-    assert_eq!(
-        events.len(),
-        4,
-        "the queued event and failure observation should replay before the current event and recovery observation"
+    assert!(
+        !events_path.exists(),
+        "a second foreground command must not drain the analytics outbox"
     );
-    let replayed_properties = analytics_event_properties(&events[0]);
-    assert_capability_snapshot_is_coarse(replayed_properties);
-    assert_analytics_properties_are_allowlisted(replayed_properties);
-
+    let queued_after_reopen = read_analytics_events(&events_path);
     assert_eq!(
-        events[1]["events"][0]["event_name"],
-        "analytics_delivery_observation"
+        analytics_operation_event_id(&queued_after_reopen, "doctor"),
+        Some(doctor_event_id),
+        "the reopened outbox must retain the exact queued event ID"
     );
-
-    let current_properties = analytics_event_properties(&events[2]);
+    let status_event_id = analytics_operation_event_id(&queued_after_reopen, "status").unwrap();
+    assert_eq!(status_event_id.get_version_num(), 4);
+    let current_properties = analytics_event_properties(
+        queued_after_reopen
+            .iter()
+            .find(|payload| {
+                analytics_operation_event_id(std::slice::from_ref(*payload), "status")
+                    == Some(status_event_id)
+            })
+            .unwrap(),
+    );
     for key in CAPABILITY_PROPERTY_KEYS {
         assert!(!current_properties.contains_key(key));
     }
     assert_analytics_properties_are_allowlisted(current_properties);
-    assert_eq!(
-        events[3]["events"][0]["event_name"],
-        "analytics_delivery_observation"
+
+    let _daemon = spawn_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
     );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let events = loop {
+        if events_path.exists() {
+            let body = fs::read_to_string(&events_path).unwrap();
+            let delivered = body
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>();
+            if analytics_operation_event_id(&delivered, "doctor") == Some(doctor_event_id)
+                && analytics_operation_event_id(&delivered, "status") == Some(status_event_id)
+            {
+                break read_delivered_analytics_events(&events_path);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for daemon-owned analytics delivery"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(
+        analytics_operation_event_id(&events, "doctor"),
+        Some(doctor_event_id),
+        "daemon delivery must preserve the queued doctor event ID"
+    );
+    assert_eq!(
+        analytics_operation_event_id(&events, "status"),
+        Some(status_event_id),
+        "daemon delivery must preserve the queued status event ID"
+    );
+    let replayed = events
+        .iter()
+        .find(|payload| {
+            analytics_operation_event_id(std::slice::from_ref(*payload), "doctor")
+                == Some(doctor_event_id)
+        })
+        .unwrap();
+    let replayed_properties = analytics_event_properties(replayed);
+    assert_capability_snapshot_is_coarse(replayed_properties);
+    assert_analytics_properties_are_allowlisted(replayed_properties);
     assert!(marker_path.exists());
     assert!(!claim_path.exists());
 }
@@ -166,7 +219,7 @@ fn concurrent_invocations_claim_at_most_one_capability_snapshot() {
         assert!(child.wait().unwrap().success());
     }
 
-    let body = fs::read_to_string(&events_path).unwrap();
+    let body = serde_json::to_string(&read_analytics_events(&events_path)).unwrap();
     assert_eq!(body.matches("capability_snapshot_schema").count(), 1);
     assert!(expected_capability_marker_path(&home, &state).exists());
     assert!(!expected_capability_claim_path(&home, &state).exists());
@@ -183,14 +236,8 @@ fn existing_claim_suppresses_replay_without_being_rewritten() {
     fs::create_dir_all(claim_path.parent().unwrap()).unwrap();
     fs::write(&claim_path, "existing-claim\n").unwrap();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .arg("doctor")
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
@@ -218,14 +265,8 @@ fn capability_claim_symlink_is_never_followed_or_overwritten() {
     fs::write(&sentinel, "do-not-touch\n").unwrap();
     symlink(&sentinel, &claim_path).unwrap();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .arg("doctor")
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
@@ -253,14 +294,8 @@ fn analytics_device_identity_symlink_is_never_followed_or_overwritten() {
     fs::write(&sentinel, "{}\n").unwrap();
     symlink(&sentinel, &device_path).unwrap();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .arg("doctor")
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
@@ -282,14 +317,8 @@ fn status_emits_one_typed_event_when_enabled() {
     let data_root = temp.path().join("data");
     fs::create_dir_all(&home).unwrap();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .arg("status")
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
@@ -316,15 +345,8 @@ fn help_version_and_parse_errors_are_unobserved() {
 
     for args in [vec!["--help"], vec!["--version"], vec!["not-a-command"]] {
         let should_fail = args == ["not-a-command"];
-        let mut command = ctx(&temp);
-        command
-            .args(args)
-            .env("CTX_DATA_ROOT", &data_root)
-            .env("HOME", &home)
-            .env("XDG_STATE_HOME", &state)
-            .env("LOCALAPPDATA", &state)
-            .env_remove("CTX_ANALYTICS_ENABLED")
-            .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path));
+        let mut command = analytics_command(ctx(&temp), &data_root, &home, &state, &events_path);
+        command.args(args);
         let assertion = command.assert();
         if should_fail {
             assertion.failure();
@@ -350,19 +372,19 @@ fn import_and_index_emit_closed_safe_summaries() {
     fs::create_dir_all(&home).unwrap();
 
     let run = |args: &[&str]| {
-        ctx(&temp)
+        analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
             .args(args)
-            .env("CTX_DATA_ROOT", &data_root)
-            .env("HOME", &home)
-            .env("XDG_STATE_HOME", &state)
-            .env("LOCALAPPDATA", &state)
-            .env_remove("CTX_ANALYTICS_ENABLED")
-            .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
             .env("CTX_UPGRADE_AUTO", "off")
             .assert()
             .success();
     };
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
     run(&[
         "import",
         "--provider",
@@ -381,7 +403,7 @@ fn import_and_index_emit_closed_safe_summaries() {
         "1",
     ]);
 
-    let events = read_analytics_events(&events_path);
+    let events = read_analytics_operation_payloads(&events_path);
     assert_eq!(events.len(), 2);
     assert_operation_event(&events[0], "import", "success");
     assert_operation_event(&events[1], "index", "success");
@@ -408,14 +430,8 @@ fn daemon_status_emits_one_typed_event_when_enabled() {
     let data_root = temp.path().join("data");
     fs::create_dir_all(&home).unwrap();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args(["daemon", "status"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
@@ -442,14 +458,9 @@ fn daemon_status_opt_out_emits_nothing_and_creates_no_analytics_identities() {
     let data_root = temp.path().join("data");
     fs::create_dir_all(&home).unwrap();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args(["daemon", "status"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
         .env("CTX_ANALYTICS_ENABLED", "false")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
@@ -471,14 +482,8 @@ fn analytics_device_id_persists_across_data_roots() {
     fs::create_dir_all(&home).unwrap();
 
     for data_root in [&data_root_a, &data_root_b] {
-        ctx(&temp)
+        analytics_command(ctx(&temp), data_root, &home, &state, &events_path)
             .arg("doctor")
-            .env("CTX_DATA_ROOT", data_root)
-            .env("HOME", &home)
-            .env("XDG_STATE_HOME", &state)
-            .env("LOCALAPPDATA", &state)
-            .env_remove("CTX_ANALYTICS_ENABLED")
-            .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
             .assert()
             .success();
     }
@@ -526,13 +531,19 @@ fn analytics_payloads_omit_sensitive_command_data() {
     let data_root = temp.path().join("ctx-data");
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
     assert!(data_root.join("search/lexical").is_dir());
     assert!(!data_root.join("work.sqlite").exists());
     let private_query = "prompt text source-body-secret /home/alice/private/acme-secret \
         repo@example.com host.internal 192.0.2.44 bearer-token-secret private-credential-secret";
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args([
             "search",
             private_query,
@@ -541,49 +552,25 @@ fn analytics_payloads_omit_sensitive_command_data() {
             "--refresh",
             "off",
         ])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args(["docs", "search", "private prompt text", "--limit", "1"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args(["upgrade", "status"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args(["show", "session", "not-a-uuid-secret"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .failure();
 
-    let events = read_analytics_events(&events_path);
+    let events = read_analytics_operation_payloads(&events_path);
     assert_eq!(events.len(), 4);
     let operations = events
         .iter()
@@ -659,21 +646,21 @@ fn search_analytics_reports_empty_source_backed_generation() {
     let data_root = temp.path().join("ctx-data");
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args(["search", "activation telemetry", "--refresh", "off"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
 
-    let events = read_analytics_events(&events_path);
+    let events = read_analytics_operation_payloads(&events_path);
     assert_eq!(events.len(), 1);
     assert_operation_event(&events[0], "search", "success");
     let properties = analytics_event_properties(&events[0]);
@@ -696,7 +683,13 @@ fn search_analytics_reports_existing_indexed_content() {
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
     let fixture = provider_history_fixture("codex-sessions");
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
 
     ctx(&temp)
         .args([
@@ -717,19 +710,13 @@ fn search_analytics_reports_existing_indexed_content() {
         .assert()
         .success();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args(["search", "test failure", "--refresh", "off"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
 
-    let events = read_analytics_events(&events_path);
+    let events = read_analytics_operation_payloads(&events_path);
     assert_eq!(events.len(), 1);
     assert_operation_event(&events[0], "search", "success");
     let properties = analytics_event_properties(&events[0]);
@@ -749,15 +736,9 @@ fn upgrade_analytics_reports_manual_apply_success() {
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
 
-    let mut command = ctx(&temp);
+    let mut command = analytics_command(ctx(&temp), &data_root, &home, &state, &events_path);
     command
         .args(["upgrade", "--format=json"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off");
     fake_release_env(&mut command, &release).assert().success();
 
@@ -800,15 +781,9 @@ fn upgrade_check_repairs_preexisting_insecure_data_root_before_analytics_write()
     fs::set_permissions(&data_root, fs::Permissions::from_mode(0o755)).unwrap();
     fs::create_dir_all(&home).unwrap();
 
-    let mut command = ctx(&temp);
+    let mut command = analytics_command(ctx(&temp), &data_root, &home, &state, &events_path);
     command
         .args(["upgrade", "check", "--format=json"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off");
     fake_release_env(&mut command, &release).assert().success();
     assert_eq!(
@@ -835,14 +810,8 @@ fn upgrade_status_repairs_preexisting_insecure_data_root_before_analytics_write(
     fs::set_permissions(&data_root, fs::Permissions::from_mode(0o755)).unwrap();
     fs::create_dir_all(&home).unwrap();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args(["upgrade", "status", "--format=json"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
@@ -881,15 +850,9 @@ fn upgrade_analytics_reports_manual_failure_kind() {
     });
     let events_path = temp.path().join("analytics.jsonl");
 
-    let mut command = ctx(&temp);
+    let mut command = analytics_command(ctx(&temp), &data_root, &home, &state, &events_path);
     command
         .args(["upgrade", "--format=json"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off");
     fake_release_env(&mut command, &release).assert().failure();
 
@@ -929,17 +892,17 @@ fn hosted_install_marker_enriches_analytics_event_without_properties_leak() {
     )
     .unwrap();
 
-    ctx_from_binary(&temp, &binary)
-        .arg("doctor")
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-        .env("CTX_UPGRADE_AUTO", "off")
-        .assert()
-        .success();
+    analytics_command(
+        ctx_from_binary(&temp, &binary),
+        &data_root,
+        &home,
+        &state,
+        &events_path,
+    )
+    .arg("doctor")
+    .env("CTX_UPGRADE_AUTO", "off")
+    .assert()
+    .success();
 
     let events = read_analytics_events(&events_path);
     assert_eq!(events.len(), 1);
@@ -977,17 +940,17 @@ fn expired_hosted_install_attribution_is_ignored() {
     )
     .unwrap();
 
-    ctx_from_binary(&temp, &binary)
-        .arg("doctor")
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-        .env("CTX_UPGRADE_AUTO", "off")
-        .assert()
-        .success();
+    analytics_command(
+        ctx_from_binary(&temp, &binary),
+        &data_root,
+        &home,
+        &state,
+        &events_path,
+    )
+    .arg("doctor")
+    .env("CTX_UPGRADE_AUTO", "off")
+    .assert()
+    .success();
 
     let events = read_analytics_events(&events_path);
     assert_eq!(events.len(), 1);
@@ -1012,17 +975,17 @@ fn malformed_hosted_install_marker_is_ignored() {
     )
     .unwrap();
 
-    ctx_from_binary(&temp, &binary)
-        .arg("doctor")
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-        .env("CTX_UPGRADE_AUTO", "off")
-        .assert()
-        .success();
+    analytics_command(
+        ctx_from_binary(&temp, &binary),
+        &data_root,
+        &home,
+        &state,
+        &events_path,
+    )
+    .arg("doctor")
+    .env("CTX_UPGRADE_AUTO", "off")
+    .assert()
+    .success();
 
     let events = read_analytics_events(&events_path);
     assert_eq!(events.len(), 1);
@@ -1045,14 +1008,8 @@ fn setup_analytics_emits_one_terminal_event() {
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
 
-    ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
+        .args(["setup", "--progress", "none"])
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
@@ -1068,7 +1025,7 @@ fn setup_analytics_emits_one_terminal_event() {
     assert_eq!(setup_events.len(), 1, "{events:#?}");
     assert_operation_event(setup_events[0], "setup", "success");
     let properties = analytics_event_properties(setup_events[0]);
-    assert_eq!(properties["catalog_only"], true);
+    assert!(properties.get("catalog_only").is_none());
     assert_eq!(properties["setup_mode"], "background");
     assert!(properties.get("has_indexed_content_after_setup").is_none());
     assert_capability_snapshot_is_coarse(properties);
@@ -1094,21 +1051,21 @@ fn setup_wait_analytics_reports_ready_source_epoch() {
         ),
     )
     .unwrap();
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args(["setup", "--wait", "--progress", "none"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();
 
-    let events = read_analytics_events(&events_path);
+    let events = read_analytics_operation_payloads(&events_path);
     assert_eq!(events.len(), 1);
     assert_operation_event(&events[0], "setup", "success");
     let completed = analytics_event_properties(&events[0]);
@@ -1129,10 +1086,16 @@ fn foreground_provider_refreshes_batch_once_per_source_backed_import() {
     let events_path = temp.path().join("analytics.jsonl");
     let fixture = provider_history_fixture("codex-sessions");
     fs::create_dir_all(&home).unwrap();
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
 
     for _ in 0..2 {
-        ctx(&temp)
+        analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
             .args([
                 "import",
                 "--provider",
@@ -1142,18 +1105,12 @@ fn foreground_provider_refreshes_batch_once_per_source_backed_import() {
                 "--format=json",
                 "--no-daemon",
             ])
-            .env("CTX_DATA_ROOT", &data_root)
-            .env("HOME", &home)
-            .env("XDG_STATE_HOME", &state)
-            .env("LOCALAPPDATA", &state)
-            .env_remove("CTX_ANALYTICS_ENABLED")
-            .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
             .env("CTX_UPGRADE_AUTO", "off")
             .assert()
             .success();
     }
 
-    let payloads = read_analytics_events(&events_path);
+    let payloads = read_analytics_operation_payloads(&events_path);
     assert_eq!(payloads.len(), 2, "each invocation must send one batch");
     for (payload, expected_change) in payloads.iter().zip(["changed", "no_op"]) {
         let expected_core_result = if expected_change == "changed" {
@@ -1293,14 +1250,8 @@ fn setup_analytics_emits_one_failure_event() {
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(data_root.join(".config.mutation.lock")).unwrap();
 
-    ctx(&temp)
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
         .args(["setup", "--semantic", "--no-daemon", "--progress", "none"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .failure();
@@ -1324,7 +1275,7 @@ fn setup_analytics_opt_out_suppresses_start_completion_and_identities() {
     fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
 
     ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
+        .args(["setup", "--progress", "none"])
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -1362,15 +1313,9 @@ fn setup_analytics_dry_run_suppresses_start_completion_and_identities() {
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
 
-    ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
+    analytics_command(ctx(&temp), &data_root, &home, &state, &events_path)
+        .args(["setup", "--progress", "none"])
         .env("CTX_ANALYTICS_DRY_RUN", "1")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_AUTO", "off")
         .assert()
         .success();

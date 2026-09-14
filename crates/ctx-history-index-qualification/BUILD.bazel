@@ -16,7 +16,10 @@ filegroup(
 ctx_rust_test(
     name = "source_backed_recovery_tests",
     testonly = True,
-    srcs = ["tests/source_backed_recovery.rs"],
+    srcs = [
+        "tests/manifest_failure.rs",
+        "tests/source_backed_recovery.rs",
+    ],
     crate_name = "ctx_history_index_qualification",
     crate_root = "tests/source_backed_recovery.rs",
     edition = crate_edition(),

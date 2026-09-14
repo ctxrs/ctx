@@ -1,3 +1,7 @@
+//! Progress and publication-authority coverage for the refresh client.
+
+use std::collections::BTreeSet;
+
 use super::*;
 use ctx_history_core::{
     CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey, SourceObservation,
@@ -5,6 +9,7 @@ use ctx_history_core::{
 use ctx_history_index::{
     GenerationWriter, SourceRouteIdentity, SourceRouteSnapshot, VerifiedIndex, WriterOptions,
 };
+use ctx_history_refresh::{RefreshOutcomeCode, RefreshRetryAdvice};
 
 fn source_count_route(byte: u8) -> SourceRouteIdentity {
     SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap()
@@ -80,6 +85,35 @@ fn typed_terminal_status() -> Value {
             "detail": "typed mixed route outcome",
         },
     })
+}
+
+fn set_terminal_state(response: &mut Value, state: &str) {
+    response["request_state"] = json!(state);
+    response["physical_attempt_state"] = json!(state);
+    response["progress_owner_attempt_state"] = json!(state);
+}
+
+fn typed_published_status() -> Value {
+    let generation = "c1".repeat(32);
+    let mut response = typed_terminal_status();
+    set_terminal_state(&mut response, "published");
+    response["published_generation"] = json!(generation);
+    response["structured_outcome"] = json!({
+        "code": "completed",
+        "class": "completed",
+        "retryable": false,
+        "affected_routes": [],
+        "retryable_routes": [],
+        "blocked_routes": [],
+        "physical_attempt_id": Uuid::from_u128(0x294_0101).to_string(),
+        "published_generation": generation,
+    });
+    response
+}
+
+fn assert_protocol_error(response: &Value, expected: &str) {
+    let error = source_refresh_protocol_status(response).unwrap_err();
+    assert_eq!(error.root_cause().to_string(), expected);
 }
 
 #[test]
@@ -286,24 +320,43 @@ fn structured_terminal_error_preserves_engine_route_dispositions() {
     let terminal = error
         .downcast_ref::<SourceBackedRefreshTerminalError>()
         .expect("typed terminal error");
+    let outcome = terminal.outcome();
 
-    assert_eq!(terminal.code, "source_failures");
-    assert_eq!(terminal.class, "mixed");
-    assert!(terminal.retryable);
-    assert_eq!(terminal.affected_routes.len(), 2);
-    assert_eq!(terminal.retryable_routes, vec!["a1".repeat(32)]);
-    assert_eq!(terminal.blocked_routes, vec!["a2".repeat(32)]);
+    assert_eq!(outcome.code(), RefreshOutcomeCode::SourceFailures);
+    assert_eq!(outcome.class(), RefreshOutcomeClass::Mixed);
+    assert!(outcome.retryable());
+    assert_eq!(outcome.affected_routes().len(), 2);
     assert_eq!(
-        terminal.physical_attempt_id,
+        outcome.retryable_routes(),
+        &BTreeSet::from([SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap()])
+    );
+    assert_eq!(
+        outcome.blocked_routes(),
+        &BTreeSet::from([SourceRouteIdentity::from_sha256("a2".repeat(32)).unwrap()])
+    );
+    assert_eq!(
+        outcome.physical_attempt_id(),
         Uuid::from_u128(0x294_0101).to_string()
     );
     assert_eq!(
-        terminal.retained_generation.as_deref(),
+        outcome.retained_generation(),
         Some("b1".repeat(32).as_str())
     );
     assert_eq!(
-        terminal.retry_advice.as_deref(),
-        Some("retry_affected_routes")
+        outcome.retry_advice(),
+        Some(RefreshRetryAdvice::RetryAffectedRoutes)
+    );
+    assert_eq!(
+        terminal.to_string(),
+        format!(
+            "daemon-owned source-backed refresh failed (code=source_failures, class=mixed, retryable=true, attempt={}, affected_routes={:?}, retryable_routes={:?}, blocked_routes={:?}, retained_generation={:?}, retry_advice={:?}): typed mixed route outcome",
+            Uuid::from_u128(0x294_0101),
+            vec!["a1".repeat(32), "a2".repeat(32)],
+            vec!["a1".repeat(32)],
+            vec!["a2".repeat(32)],
+            Some("b1".repeat(32)),
+            Some("retry_affected_routes"),
+        )
     );
 }
 
@@ -324,11 +377,18 @@ fn explicit_path_disappearance_code_survives_the_daemon_boundary() {
     let terminal = error
         .downcast_ref::<SourceBackedRefreshTerminalError>()
         .expect("typed terminal error");
+    let outcome = terminal.outcome();
 
-    assert_eq!(terminal.code, "explicit_source_path_missing");
-    assert_eq!(terminal.class, "unavailable");
-    assert!(terminal.retryable);
-    assert_eq!(terminal.retry_advice.as_deref(), Some("inspect_sources"));
+    assert_eq!(
+        outcome.code(),
+        RefreshOutcomeCode::ExplicitSourcePathMissing
+    );
+    assert_eq!(outcome.class(), RefreshOutcomeClass::Unavailable);
+    assert!(outcome.retryable());
+    assert_eq!(
+        outcome.retry_advice(),
+        Some(RefreshRetryAdvice::InspectSources)
+    );
 }
 
 #[test]
@@ -346,15 +406,22 @@ fn source_unclaimed_terminal_error_preserves_the_culprit_and_retryable_peer() {
     let terminal = error
         .downcast_ref::<SourceBackedRefreshTerminalError>()
         .expect("typed terminal error");
+    let outcome = terminal.outcome();
 
-    assert_eq!(terminal.code, "source_unclaimed");
-    assert_eq!(terminal.class, "coverage");
-    assert!(terminal.retryable);
-    assert_eq!(terminal.retryable_routes, vec!["a1".repeat(32)]);
-    assert_eq!(terminal.blocked_routes, vec!["a2".repeat(32)]);
+    assert_eq!(outcome.code(), RefreshOutcomeCode::SourceUnclaimed);
+    assert_eq!(outcome.class(), RefreshOutcomeClass::Coverage);
+    assert!(outcome.retryable());
     assert_eq!(
-        terminal.retry_advice.as_deref(),
-        Some("retry_retryable_routes_and_inspect_blocked")
+        outcome.retryable_routes(),
+        &BTreeSet::from([SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap()])
+    );
+    assert_eq!(
+        outcome.blocked_routes(),
+        &BTreeSet::from([SourceRouteIdentity::from_sha256("a2".repeat(32)).unwrap()])
+    );
+    assert_eq!(
+        outcome.retry_advice(),
+        Some(RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked)
     );
 }
 
@@ -376,6 +443,22 @@ fn present_structured_fields_are_strictly_validated() {
     )
     .contains("inconsistent route dispositions"));
 
+    let mut wrong_class = typed_terminal_status();
+    wrong_class["structured_outcome"]["class"] = json!("internal");
+    assert!(format!(
+        "{:#}",
+        source_refresh_protocol_status(&wrong_class).unwrap_err()
+    )
+    .contains("inconsistent code and class"));
+
+    let mut failed_with_publication = typed_terminal_status();
+    failed_with_publication["structured_outcome"]["published_generation"] = json!("c1".repeat(32));
+    assert!(format!(
+        "{:#}",
+        source_refresh_protocol_status(&failed_with_publication).unwrap_err()
+    )
+    .contains("failed source refresh outcome has a published generation"));
+
     let mut partial = typed_terminal_status();
     partial.as_object_mut().unwrap().remove("logical_phase");
     assert!(format!(
@@ -383,6 +466,34 @@ fn present_structured_fields_are_strictly_validated() {
         source_refresh_protocol_status(&partial).unwrap_err()
     )
     .contains("partial typed logical status"));
+}
+
+#[test]
+fn published_status_rejects_a_failure_outcome() {
+    let mut response = typed_terminal_status();
+    set_terminal_state(&mut response, "published");
+    response["published_generation"] = json!("c1".repeat(32));
+
+    assert_protocol_error(&response, "published source refresh has a failure outcome");
+}
+
+#[test]
+fn failed_status_rejects_a_nonfailure_outcome() {
+    let mut response = typed_published_status();
+    set_terminal_state(&mut response, "failed");
+
+    assert_protocol_error(&response, "failed source refresh has a nonfailure outcome");
+}
+
+#[test]
+fn published_status_requires_matching_outer_and_outcome_generations() {
+    let mut response = typed_published_status();
+    response["published_generation"] = json!("d1".repeat(32));
+
+    assert_protocol_error(
+        &response,
+        "published source refresh generation disagrees with its outcome",
+    );
 }
 
 #[test]

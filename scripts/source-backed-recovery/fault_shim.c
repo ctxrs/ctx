@@ -313,6 +313,7 @@ static bool perform_action(void) {
         return false;
     }
     if (env_equals("CTX_RECOVERY_FAULT_ACTION", "fail")) {
+        write_marker();
         errno = configured_errno();
         return true;
     }

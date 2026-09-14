@@ -4,13 +4,13 @@ use anyhow::Result;
 use ctx_history_core::utc_now;
 use ctx_semantic_index::{
     source_backed_semantic_vector_path, SemanticBatchEmbedder, SemanticChunkDocument,
-    SemanticVectorStore, SourceBackedGenerationPin, SourceBackedSemanticDocumentBuilder,
+    SemanticNotReady, SemanticQueryPin, SemanticVectorStore, SourceBackedSemanticDocumentBuilder,
     SourceBackedSemanticOutcome,
 };
 use ctx_semantic_model::{
     semantic_model_acquisition_integrity_error, semantic_model_key, ArtifactFetcher,
     SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition, SemanticEmbeddingExecutor,
-    SemanticModelLoadDeferred,
+    SemanticEmbeddingExecutorConfig, SemanticModelLoadDeferred,
 };
 use serde_json::{json, Value};
 
@@ -20,7 +20,7 @@ use super::{
     daemon::DaemonRuntime,
     daemon_retry::{annotate_semantic_failure, classify_semantic_failure, DaemonRetryBackoff},
     daemon_scheduler::{daemon_deadline_has_min_budget, daemon_run_start_mode},
-    paths_status::write_daemon_status,
+    paths_status::{daemon_semantic_job_path, write_daemon_job_status, write_daemon_status},
     resource_policy::{
         semantic_background_resource_deferred, semantic_external_background_resource_deferred,
         semantic_resource_deferral_releases_runtime, SemanticBackgroundOperation,
@@ -30,13 +30,40 @@ use super::{
         DAEMON_MIN_REMAINING_FOR_JOB_SECS, DAEMON_SEMANTIC_RESERVE_GRACE_SECS,
         SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
     },
-    source_backed_refresh_coordinator::{pin_published_generation, PinnedSourceBackedGeneration},
+    source_backed_refresh_coordinator::PinnedSourceBackedGeneration,
 };
 
 #[cfg(test)]
 use super::daemon::daemon_test_job;
 
 use crate::compact_json;
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_SEMANTIC_INDEX_PUBLICATION_DEFERRAL: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+struct SemanticIndexPublicationDeferralGuard;
+
+#[cfg(test)]
+impl Drop for SemanticIndexPublicationDeferralGuard {
+    fn drop(&mut self) {
+        FORCE_SEMANTIC_INDEX_PUBLICATION_DEFERRAL.with(|forced| forced.set(false));
+    }
+}
+
+#[cfg(test)]
+fn force_semantic_index_publication_deferral_for_test() -> SemanticIndexPublicationDeferralGuard {
+    FORCE_SEMANTIC_INDEX_PUBLICATION_DEFERRAL.with(|forced| {
+        assert!(
+            !forced.replace(true),
+            "semantic publication deferral already forced"
+        );
+    });
+    SemanticIndexPublicationDeferralGuard
+}
 
 #[derive(Debug)]
 pub(super) enum DaemonSemanticModelStartup {
@@ -62,16 +89,30 @@ fn daemon_semantic_model_acquisition_error(
     } else {
         "model_acquisition_failed"
     };
-    DaemonSemanticModelStartup::Finished(annotate_semantic_failure(
+    DaemonSemanticModelStartup::Finished(daemon_semantic_model_startup_failure(
+        last_run_at_ms,
+        failure_code,
+        message,
+        failure_class,
+    ))
+}
+
+fn daemon_semantic_model_startup_failure(
+    last_run_at_ms: i64,
+    failure_code: &'static str,
+    message: String,
+    failure_class: super::daemon_retry::SemanticFailureClass,
+) -> Value {
+    annotate_semantic_failure(
         daemon_semantic_job_json(
-            "skipped",
+            "failed",
             Some(failure_code),
             last_run_at_ms,
             None,
             Some(message),
         ),
         failure_class,
-    ))
+    )
 }
 
 pub(super) fn run_daemon_semantic_model_startup_with<Acquire, AcquireCpuFallback, Load>(
@@ -91,7 +132,7 @@ where
             return Ok(daemon_semantic_model_acquisition_error(
                 last_run_at_ms,
                 error,
-            ))
+            ));
         }
     };
     let mut acquire_cpu_fallback = Some(acquire_cpu_fallback);
@@ -117,7 +158,7 @@ where
                         return Ok(daemon_semantic_model_acquisition_error(
                             last_run_at_ms,
                             error,
-                        ))
+                        ));
                     }
                 };
             }
@@ -132,16 +173,11 @@ where
             Err(error) => {
                 let message = format!("{error:#}");
                 let failure_class = classify_semantic_failure(&error);
-                let failure_code = "model_load_failed";
                 return Ok(DaemonSemanticModelStartup::Finished(
-                    annotate_semantic_failure(
-                        daemon_semantic_job_json(
-                            "skipped",
-                            Some(failure_code),
-                            last_run_at_ms,
-                            None,
-                            Some(message),
-                        ),
+                    daemon_semantic_model_startup_failure(
+                        last_run_at_ms,
+                        "model_load_failed",
+                        message,
                         failure_class,
                     ),
                 ));
@@ -150,14 +186,64 @@ where
     }
 }
 
+#[derive(Clone, Copy)]
+enum DaemonSemanticReconciliationBudget {
+    Drain,
+    OneDurableBoundary,
+}
+
 pub(super) fn run_daemon_semantic_job(
-    _args: &DaemonRunArgs,
     data_root: &Path,
+    source_generation: &PinnedSourceBackedGeneration,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
     semantic_enabled: bool,
     artifact_fetcher: &dyn ArtifactFetcher,
     config: &dyn DaemonConfigPort,
+) -> Result<Value> {
+    run_daemon_semantic_job_with_budget(
+        data_root,
+        source_generation,
+        runtime,
+        deadline,
+        semantic_enabled,
+        artifact_fetcher,
+        config,
+        DaemonSemanticReconciliationBudget::Drain,
+    )
+}
+
+pub(super) fn run_daemon_semantic_job_one_durable_boundary(
+    data_root: &Path,
+    source_generation: &PinnedSourceBackedGeneration,
+    runtime: &mut DaemonRuntime,
+    deadline: Option<Instant>,
+    semantic_enabled: bool,
+    artifact_fetcher: &dyn ArtifactFetcher,
+    config: &dyn DaemonConfigPort,
+) -> Result<Value> {
+    run_daemon_semantic_job_with_budget(
+        data_root,
+        source_generation,
+        runtime,
+        deadline,
+        semantic_enabled,
+        artifact_fetcher,
+        config,
+        DaemonSemanticReconciliationBudget::OneDurableBoundary,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Scheduler ports and reconciliation budget are independent controls.
+fn run_daemon_semantic_job_with_budget(
+    data_root: &Path,
+    source_generation: &PinnedSourceBackedGeneration,
+    runtime: &mut DaemonRuntime,
+    deadline: Option<Instant>,
+    semantic_enabled: bool,
+    artifact_fetcher: &dyn ArtifactFetcher,
+    config: &dyn DaemonConfigPort,
+    reconciliation_budget: DaemonSemanticReconciliationBudget,
 ) -> Result<Value> {
     let last_run_at_ms = utc_now().timestamp_millis();
     if !semantic_enabled {
@@ -175,15 +261,32 @@ pub(super) fn run_daemon_semantic_job(
         return Ok(value);
     }
 
-    let Some(source_generation) = pin_published_generation(data_root)? else {
-        return Ok(daemon_semantic_job_json(
-            "skipped",
-            Some("source_generation_missing"),
-            last_run_at_ms,
-            None,
-            None,
-        ));
-    };
+    // Readiness is an exact semantic-index property. Derive the selected V2
+    // contract from configuration alone, then use the ordinary WAL-aware
+    // preflight before constructing an executor or touching writable state.
+    let index_contract = semantic_index_contract(runtime.config.semantic_executor.contract())?;
+    let source_eligible_events = source_generation.semantic_eligible_event_count()?;
+    match SemanticQueryPin::preflight(
+        source_generation.verified_index(),
+        data_root,
+        &index_contract,
+    ) {
+        Ok(_) => {
+            return Ok(daemon_semantic_job_json(
+                "ready",
+                None,
+                last_run_at_ms,
+                None,
+                None,
+            ));
+        }
+        Err(error)
+            if error
+                .downcast_ref::<SemanticNotReady>()
+                .is_some_and(SemanticNotReady::retryable) => {}
+        Err(error) => return Err(error),
+    }
+    let vector_path = source_backed_semantic_vector_path(data_root);
     if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
         return Ok(daemon_semantic_job_json(
             "skipped",
@@ -192,6 +295,48 @@ pub(super) fn run_daemon_semantic_job(
             None,
             None,
         ));
+    }
+    // A generation with no semantic-eligible events still needs its durable
+    // acknowledgement, but has no embedding work. Admit that index publication
+    // through the same deadline and resource boundaries as ordinary daemon
+    // work, then reconcile it from the configuration-derived contract before
+    // resolving credentials or constructing an executor. The vector path may
+    // already exist for the fixed built-in contract when a bounded
+    // reconciliation resumes or removes stale vectors. Existing external
+    // state is admitted only when its matching read and writable open share
+    // the writer coordination guard. Unknown or mismatched state follows the
+    // verified executor path below, so contract drift cannot race a reset.
+    if source_eligible_events == 0 {
+        if let Some(deferred) = semantic_index_publication_resource_deferred(
+            data_root,
+            &runtime.config.semantic_executor,
+        ) {
+            return Ok(daemon_semantic_resource_deferred_job(
+                last_run_at_ms,
+                deferred,
+            ));
+        }
+        let executor_free_store =
+            if !vector_path.exists() || runtime.config.semantic_executor.is_builtin() {
+                Some(SemanticVectorStore::open(&vector_path, &index_contract)?)
+            } else {
+                SemanticVectorStore::open_source_backed_reconciliation_if_contract_matches_at(
+                    &vector_path,
+                    &index_contract,
+                )?
+            };
+        if let Some(mut vector_store) = executor_free_store {
+            let (outcome, indexed_chunks) = reconcile_empty_source_backed_semantic_page(
+                source_generation,
+                &mut vector_store,
+                reconciliation_budget,
+            )?;
+            return Ok(daemon_semantic_reconciliation_job(
+                last_run_at_ms,
+                outcome,
+                indexed_chunks,
+            ));
+        }
     }
 
     let executor = match runtime.semantic_executor.clone() {
@@ -232,25 +377,8 @@ pub(super) fn run_daemon_semantic_job(
         ));
     }
 
-    let vector_path = source_backed_semantic_vector_path(data_root);
     let mut vector_store = open_selected_semantic_vector_store(&vector_path, &executor)?;
-    let source_eligible_events = source_generation.semantic_eligible_event_count()?;
-    let source_pending = matches!(
-        vector_store.source_backed_generation_pin_exact(
-            source_generation.generation_id(),
-            source_eligible_events,
-        )?,
-        SourceBackedGenerationPin::NotReady
-    );
-    if !source_pending {
-        return Ok(daemon_semantic_job_json(
-            "ready",
-            None,
-            last_run_at_ms,
-            None,
-            None,
-        ));
-    }
+
     let min_remaining_secs = executor
         .builtin_executor()
         .map(|builtin| {
@@ -298,27 +426,58 @@ pub(super) fn run_daemon_semantic_job(
             DaemonSemanticModelStartup::Finished(job) => return Ok(job),
         }
     }
+    let core_generation_id = source_generation.generation_id().to_owned();
+    let source_contract_fingerprint =
+        ctx_semantic_index::source_backed_semantic_contract_fingerprint(&index_contract)?;
+    let mut publish_progress = |sequence| {
+        let mut progress = daemon_semantic_job_json(
+            "budget_exhausted",
+            None,
+            utc_now().timestamp_millis(),
+            None,
+            None,
+        );
+        progress["model_key"] = Value::String(index_contract.model_key().to_owned());
+        progress["model_contract_fingerprint"] =
+            Value::String(index_contract.fingerprint().to_owned());
+        progress["source_contract_fingerprint"] =
+            Value::String(source_contract_fingerprint.clone());
+        progress["core_generation_id"] = Value::String(core_generation_id.clone());
+        progress["semantic_progress_sequence"] = json!(sequence);
+        progress["source_generation_ready"] = Value::Bool(false);
+        progress["source_work_remaining"] = Value::Bool(true);
+        write_daemon_job_status(&daemon_semantic_job_path(data_root), &progress)
+    };
     let (outcome, indexed_chunks) = reconcile_source_backed_semantic_page(
         data_root,
         source_generation,
         &mut vector_store,
         semantic_executor,
         deadline,
+        &mut publish_progress,
+        reconciliation_budget,
     )?;
-    let (status, reason, last_error) = if outcome.ready() {
-        ("ready", None, None)
-    } else {
-        ("budget_exhausted", None, None)
-    };
-    let mut job = daemon_semantic_job_json(
-        status,
-        reason,
+    Ok(daemon_semantic_reconciliation_job(
         last_run_at_ms,
-        (indexed_chunks > 0).then_some(indexed_chunks),
-        last_error,
-    );
-    annotate_source_backed_semantic_progress(&mut job, &outcome);
-    Ok(job)
+        outcome,
+        indexed_chunks,
+    ))
+}
+
+fn semantic_index_publication_resource_deferred(
+    data_root: &Path,
+    executor: &SemanticEmbeddingExecutorConfig,
+) -> Option<SemanticResourceDeferred> {
+    #[cfg(test)]
+    if FORCE_SEMANTIC_INDEX_PUBLICATION_DEFERRAL.with(std::cell::Cell::get) {
+        return Some(SemanticResourceDeferred::disk_pressure_for_test());
+    }
+
+    if executor.is_builtin() {
+        semantic_background_resource_deferred(data_root, SemanticBackgroundOperation::IndexBatch)
+    } else {
+        semantic_external_background_resource_deferred(data_root)
+    }
 }
 
 fn open_selected_semantic_vector_store(
@@ -367,21 +526,87 @@ fn verify_external_semantic_contract_before_store_open(
 
 fn reconcile_source_backed_semantic_page(
     _data_root: &Path,
-    generation: PinnedSourceBackedGeneration,
+    generation: &PinnedSourceBackedGeneration,
     vector_store: &mut SemanticVectorStore,
     executor: &dyn SemanticEmbeddingExecutor,
     deadline: Option<Instant>,
+    progress: &mut dyn FnMut(u64) -> Result<()>,
+    reconciliation_budget: DaemonSemanticReconciliationBudget,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
-    let index = generation.into_index();
-    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
+    let index = generation.verified_index();
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
     let mut embedder = RuntimeSourceSemanticEmbedder {
         executor,
         deadline,
         indexed_chunks: 0,
     };
-    let outcome =
-        vector_store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+    let outcome = match reconciliation_budget {
+        DaemonSemanticReconciliationBudget::Drain => vector_store
+            .reconcile_source_backed_index_with_checkpoint_and_progress(
+                index,
+                &mut builder,
+                &mut embedder,
+                &mut || Ok(()),
+                progress,
+            )?,
+        DaemonSemanticReconciliationBudget::OneDurableBoundary => vector_store
+            .reconcile_source_backed_index_one_durable_boundary_with_checkpoint_and_progress(
+                index,
+                &mut builder,
+                &mut embedder,
+                &mut || Ok(()),
+                progress,
+            )?,
+    };
     Ok((outcome, embedder.indexed_chunks))
+}
+
+fn reconcile_empty_source_backed_semantic_page(
+    generation: &PinnedSourceBackedGeneration,
+    vector_store: &mut SemanticVectorStore,
+    reconciliation_budget: DaemonSemanticReconciliationBudget,
+) -> Result<(SourceBackedSemanticOutcome, usize)> {
+    let index = generation.verified_index();
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
+    let mut embedder = EmptySourceSemanticEmbedder;
+    let outcome = match reconciliation_budget {
+        DaemonSemanticReconciliationBudget::Drain => {
+            vector_store.reconcile_source_backed_index(index, &mut builder, &mut embedder)?
+        }
+        DaemonSemanticReconciliationBudget::OneDurableBoundary => vector_store
+            .reconcile_source_backed_index_one_durable_boundary_with_checkpoint_and_progress(
+                index,
+                &mut builder,
+                &mut embedder,
+                &mut || Ok(()),
+                &mut |_| Ok(()),
+            )?,
+    };
+    Ok((outcome, 0))
+}
+
+fn daemon_semantic_reconciliation_job(
+    last_run_at_ms: i64,
+    outcome: SourceBackedSemanticOutcome,
+    indexed_chunks: usize,
+) -> Value {
+    let status = if outcome.ready() {
+        "ready"
+    } else {
+        "budget_exhausted"
+    };
+    let mut job = daemon_semantic_job_json(
+        status,
+        None,
+        last_run_at_ms,
+        (indexed_chunks > 0).then_some(indexed_chunks),
+        None,
+    );
+    annotate_source_backed_semantic_progress(&mut job, &outcome);
+    if let Some(sequence) = outcome.semantic_progress_sequence() {
+        job["semantic_progress_sequence"] = json!(sequence);
+    }
+    job
 }
 
 fn annotate_source_backed_semantic_progress(
@@ -404,7 +629,23 @@ struct RuntimeSourceSemanticEmbedder<'a> {
     indexed_chunks: usize,
 }
 
+struct EmptySourceSemanticEmbedder;
+
+impl SemanticBatchEmbedder for EmptySourceSemanticEmbedder {
+    fn document_fits(&mut self, _text: &str) -> Result<bool> {
+        anyhow::bail!("unexpected semantic input assessment")
+    }
+
+    fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
+        anyhow::bail!("zero-eligible semantic reconciliation requested embeddings")
+    }
+}
+
 impl SemanticBatchEmbedder for RuntimeSourceSemanticEmbedder<'_> {
+    fn document_fits(&mut self, text: &str) -> Result<bool> {
+        self.executor.document_fits(text)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         let texts = chunks
             .iter()
@@ -582,22 +823,29 @@ fn write_daemon_lifecycle_status_observed(
     semantic_runtime_active: Option<bool>,
     config_reload: Option<&Value>,
 ) -> Result<()> {
-    write_daemon_status(
-        data_root,
-        &compact_json(json!({
-            "schema_version": 1,
-            "status": status,
-            "pid": process::id(),
-            "started_at_ms": started_at_ms,
-            "heartbeat_at_ms": utc_now().timestamp_millis(),
-            "finished_at_ms": finished_at_ms,
-            "start_mode": daemon_run_start_mode(args).as_str(),
-            "trigger_command": args.trigger_command.map(DaemonTriggerCommandArg::as_str),
-            "last_error": last_error,
-            "semantic_runtime_active": semantic_runtime_active,
-            "config_reload": config_reload,
-        })),
-    )
+    let mut value = compact_json(json!({
+        "schema_version": 1,
+        "status": status,
+        "pid": process::id(),
+        "started_at_ms": started_at_ms,
+        "heartbeat_at_ms": utc_now().timestamp_millis(),
+        "finished_at_ms": finished_at_ms,
+        "start_mode": daemon_run_start_mode(args).as_str(),
+        "trigger_command": args.trigger_command.map(DaemonTriggerCommandArg::as_str),
+        "last_error": last_error,
+        "semantic_runtime_active": semantic_runtime_active,
+        "config_reload": config_reload,
+    }));
+    for binding in ["requested", "applied"] {
+        let pointer = format!("/{binding}/semantic_builtin_throttling_effective");
+        if config_reload
+            .and_then(|reload| reload.pointer(&pointer))
+            .is_some_and(Value::is_null)
+        {
+            value["config_reload"][binding]["semantic_builtin_throttling_effective"] = Value::Null;
+        }
+    }
+    write_daemon_status(data_root, &value)
 }
 
 #[cfg(test)]

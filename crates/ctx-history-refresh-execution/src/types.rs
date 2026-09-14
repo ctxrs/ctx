@@ -287,8 +287,14 @@ impl fmt::Debug for SourceBackedRefreshPublication {
     }
 }
 
+pub enum PublishedSourceBackedGeneration {
+    Missing,
+    RebuildRequired,
+    Verified(VerifiedGenerationSnapshot),
+}
+
 pub struct PublishedSourceBackedState {
-    pub verified_index: Option<VerifiedIndex>,
+    pub generation: PublishedSourceBackedGeneration,
     pub explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     pub catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
     pub route_controls: BTreeMap<SourceRouteIdentity, Vec<u8>>,

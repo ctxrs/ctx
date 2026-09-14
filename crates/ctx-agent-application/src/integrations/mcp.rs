@@ -1,8 +1,9 @@
 //! MCP client configuration workflows independent of CLI presentation.
 
 use ctx_agent_integrations::mcp_config::{
-    dedupe_agents, execute_install, execute_status, ConfigStatus, McpInstallReceipt,
-    McpInstallRequest, McpPathContext, McpStatusReceipt, McpStatusRequest, McpTarget,
+    dedupe_agents, execute_install, execute_remove, execute_status, ConfigStatus,
+    McpInstallReceipt, McpInstallRequest, McpPathContext, McpRemoveReceipt, McpRemoveRequest,
+    McpStatusReceipt, McpStatusRequest, McpTarget,
 };
 
 use crate::{IntegrationResultFact, IntegrationTelemetryFacts, ProductIdentity};
@@ -20,6 +21,12 @@ pub struct McpStatusOutcome {
     pub telemetry: IntegrationTelemetryFacts,
 }
 
+#[derive(Debug)]
+pub struct McpRemoveOutcome {
+    pub receipt: McpRemoveReceipt,
+    pub telemetry: IntegrationTelemetryFacts,
+}
+
 pub fn install(request: McpInstallRequest, context: &McpPathContext) -> McpInstallOutcome {
     let receipt = execute_install(request, context);
     let telemetry = IntegrationTelemetryFacts {
@@ -33,6 +40,21 @@ pub fn install(request: McpInstallRequest, context: &McpPathContext) -> McpInsta
         ..IntegrationTelemetryFacts::default()
     };
     McpInstallOutcome { receipt, telemetry }
+}
+
+pub fn remove(request: McpRemoveRequest, context: &McpPathContext) -> McpRemoveOutcome {
+    let receipt = execute_remove(request, context);
+    let telemetry = IntegrationTelemetryFacts {
+        resolved_agents: Some(receipt.selected_agents),
+        result: Some(if receipt.failed == 0 {
+            IntegrationResultFact::Ok
+        } else {
+            IntegrationResultFact::PartialError
+        }),
+        modified_targets: Some(receipt.modified),
+        ..IntegrationTelemetryFacts::default()
+    };
+    McpRemoveOutcome { receipt, telemetry }
 }
 
 pub fn status(
@@ -81,6 +103,19 @@ pub fn force_install_command(identity: ProductIdentity<'_>, target: &McpTarget) 
     };
     format!(
         "{} integrations install mcp --agent {}{project} --force",
+        identity.name,
+        target.agent.id()
+    )
+}
+
+pub fn force_remove_command(identity: ProductIdentity<'_>, target: &McpTarget) -> String {
+    let project = if target.scope.as_str() == "project" {
+        " --project"
+    } else {
+        ""
+    };
+    format!(
+        "{} integrations remove mcp --agent {}{project} --force",
         identity.name,
         target.agent.id()
     )

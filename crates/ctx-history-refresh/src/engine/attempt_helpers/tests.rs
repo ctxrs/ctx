@@ -1,5 +1,12 @@
 use super::*;
 
+fn classify(
+    error: &anyhow::Error,
+    routes: &BTreeSet<SourceRouteIdentity>,
+) -> RefreshTerminalOutcome {
+    source_backed_refresh_failure_outcome(error, routes, &uuid::Uuid::nil().to_string()).unwrap()
+}
+
 #[test]
 fn bounded_failure_diagnostics_do_not_bound_affected_routes_or_retryability() {
     let attempted_routes = (0..70)
@@ -26,12 +33,12 @@ fn bounded_failure_diagnostics_do_not_bound_affected_routes_or_retryability() {
     let error: anyhow::Error =
         SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes }.into();
 
-    let outcome = source_backed_refresh_failure_outcome(&error, &attempted_routes);
+    let outcome = classify(&error, &attempted_routes);
 
-    assert_eq!(outcome.affected_routes, attempted_routes);
-    assert!(outcome.retryable);
-    assert_eq!(outcome.blocked_routes.len(), 64);
-    assert_eq!(outcome.retryable_routes.len(), 6);
+    assert_eq!(outcome.affected_routes(), &attempted_routes);
+    assert!(outcome.retryable());
+    assert_eq!(outcome.blocked_routes().len(), 64);
+    assert_eq!(outcome.retryable_routes().len(), 6);
 }
 
 #[test]
@@ -46,15 +53,15 @@ fn unclaimed_base_source_is_terminal_and_not_retryable() {
     }
     .into();
 
-    let mut outcome = source_backed_refresh_failure_outcome(&error, &attempted_routes);
+    let mut outcome = classify(&error, &attempted_routes);
 
-    assert_eq!(outcome.code, RefreshOutcomeCode::SourceUnclaimed);
-    assert_eq!(outcome.class, RefreshOutcomeClass::Coverage);
-    assert!(!outcome.retryable);
-    assert_eq!(outcome.blocked_routes, BTreeSet::from([route.clone()]));
-    assert!(outcome.retryable_routes.is_empty());
+    assert_eq!(outcome.code(), RefreshOutcomeCode::SourceUnclaimed);
+    assert_eq!(outcome.class(), RefreshOutcomeClass::Coverage);
+    assert!(!outcome.retryable());
+    assert_eq!(outcome.blocked_routes(), &BTreeSet::from([route.clone()]));
+    assert!(outcome.retryable_routes().is_empty());
     assert_eq!(
-        outcome.retry_advice,
+        outcome.retry_advice(),
         Some(RefreshRetryAdvice::InspectSources)
     );
 
@@ -86,18 +93,18 @@ fn unclaimed_base_source_preserves_peer_route_dispositions() {
     }
     .into();
 
-    let outcome = source_backed_refresh_failure_outcome(&error, &attempted_routes);
+    let outcome = classify(&error, &attempted_routes);
 
-    assert_eq!(outcome.code, RefreshOutcomeCode::SourceUnclaimed);
-    assert_eq!(outcome.class, RefreshOutcomeClass::Coverage);
-    assert!(outcome.retryable);
-    assert_eq!(outcome.retryable_routes, BTreeSet::from([healthy]));
+    assert_eq!(outcome.code(), RefreshOutcomeCode::SourceUnclaimed);
+    assert_eq!(outcome.class(), RefreshOutcomeClass::Coverage);
+    assert!(outcome.retryable());
+    assert_eq!(outcome.retryable_routes(), &BTreeSet::from([healthy]));
     assert_eq!(
-        outcome.blocked_routes,
-        BTreeSet::from([culprit, incompatible])
+        outcome.blocked_routes(),
+        &BTreeSet::from([culprit, incompatible])
     );
     assert_eq!(
-        outcome.retry_advice,
+        outcome.retry_advice(),
         Some(RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked)
     );
 }
@@ -176,9 +183,9 @@ fn route_index_and_internal_failures_have_stable_retry_classes() {
     ];
 
     for (error, code, class, retryable) in cases {
-        let outcome = source_backed_refresh_failure_outcome(&error, &attempted_routes);
-        assert_eq!(outcome.code, code);
-        assert_eq!(outcome.class, class);
-        assert_eq!(outcome.retryable, retryable);
+        let outcome = classify(&error, &attempted_routes);
+        assert_eq!(outcome.code(), code);
+        assert_eq!(outcome.class(), class);
+        assert_eq!(outcome.retryable(), retryable);
     }
 }

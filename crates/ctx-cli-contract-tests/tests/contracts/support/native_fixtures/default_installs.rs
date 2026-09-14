@@ -6,7 +6,9 @@ use std::{
 };
 use tempfile::TempDir;
 
-use crate::support::{copy_dir_all, provider_history_fixture, write_codex_message_fixture};
+use crate::support::{
+    copy_dir_all, data_root, provider_history_fixture, write_codex_message_fixture,
+};
 
 use super::{
     install_default_astrbot_fixture, install_default_auggie_fixture,
@@ -46,7 +48,7 @@ pub(crate) fn install_provider_default_fixture(
         "open_code" => install_opencode(temp, user_text),
         "kilo" => install_kilo(temp, user_text),
         "mimocode" => install_mimocode(temp, user_text),
-        "kiro_cli" => install_default_kiro_fixture(temp, user_text),
+        "kiro_cli" => install_kiro(temp, user_text),
         "crush" => install_fixture_file("crush/v1/crush.db", &workspace.join(".crush/crush.db")),
         "goose" => install_fixture_file(
             "goose/v15/sessions.db",
@@ -96,6 +98,25 @@ pub(crate) fn install_provider_default_fixture(
         ),
         "fx" => install_fx(temp, user_text, assistant_text),
         other => panic!("missing default fixture installer for matrix provider {other}"),
+    }
+}
+
+fn install_kiro(temp: &TempDir, user_text: &str) {
+    let path = install_default_kiro_fixture(temp, user_text);
+    if cfg!(target_os = "windows") {
+        let config = data_root(temp).join("config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let mut config = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(config)
+            .unwrap();
+        writeln!(
+            config,
+            "[sources.roots.kiro_windows_conformance]\nprovider = \"kiro_cli\"\npath = {:?}\n",
+            path.display().to_string(),
+        )
+        .unwrap();
     }
 }
 

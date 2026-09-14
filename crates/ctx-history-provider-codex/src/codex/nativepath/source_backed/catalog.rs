@@ -152,7 +152,11 @@ pub(super) fn bind_source_keys(
                 path: source.source_path.clone(),
             }
         })?;
-        let source_key = codex_source_key_in_root(source.source_root_lineage, &native_session_id)?;
+        let source_key = codex_source_key_for_path(
+            source.source_root_lineage,
+            &native_session_id,
+            &source.source_path,
+        )?;
         bound.push((source, source_key, native_session_id));
     }
     Ok(bound)
@@ -214,7 +218,11 @@ pub(super) fn bind_codex_partial_member_v0(
         authority_root: Some(member.authority().as_ref().clone()),
         authority_relative_path: Some(member.authority_path().to_path_buf()),
     };
-    let source_key = codex_source_key_in_root(source.source_root_lineage, &native_session_id)?;
+    let source_key = codex_source_key_for_path(
+        source.source_root_lineage,
+        &native_session_id,
+        &source.source_path,
+    )?;
     Ok((source, source_key, native_session_id))
 }
 

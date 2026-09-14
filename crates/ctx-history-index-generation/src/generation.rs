@@ -30,6 +30,8 @@ use ctx_history_platform::platform_security::{
 
 use crate::clone::{bind_candidate_activation_fence, create_authenticated_candidate_generation};
 use crate::is_generation_id;
+#[cfg(any(test, feature = "test-support"))]
+use crate::publication_probe::{publication_io_checkpoint, PublicationIoEvent};
 use crate::retention::{
     ensure_generation_read_lease_coordinator, try_generation_directory_reclaim_authority,
 };
@@ -191,6 +193,17 @@ pub(crate) fn load_active_generation_pointer_from_read_root(
     parse_active_generation_pointer(bytes).map(Some)
 }
 
+/// Loads only the active generation ID below a caller-validated lexical root.
+///
+/// This does not grant mutation authority or expose the publication pointer or
+/// its physical slot details.
+pub fn load_active_generation_id_from_read_root(
+    root: &crate::GenerationReadRoot,
+) -> Result<Option<String>> {
+    load_active_generation_pointer_from_read_root(root)
+        .map(|pointer| pointer.map(|pointer| pointer.active().generation_id().to_owned()))
+}
+
 fn parse_active_generation_pointer(bytes: Vec<u8>) -> Result<ActiveGenerationPointer> {
     #[derive(Deserialize)]
     struct PointerVersion {
@@ -301,7 +314,42 @@ where
     }
 }
 
+/// Publishes a successor pointer while retaining predecessor authority through
+/// terminal candidate validation. On Windows, the predecessor handle is
+/// released only as the direct predecessor of the prepared replacement call.
+#[cfg(windows)]
+pub fn publish_active_generation_pointer_validated_predecessor_fence<F>(
+    root: &Path,
+    pointer: &ActiveGenerationPointer,
+    predecessor_fence: &mut crate::ActiveGenerationPointerFence,
+    validate_before_replace: F,
+) -> Result<PointerPublicationOutcome>
+where
+    F: FnOnce(&crate::ActiveGenerationPointerFence) -> Result<()>,
+{
+    pointer.validate()?;
+    ensure_generation_read_lease_coordinator(root)?;
+    let bytes = serde_json::to_vec(pointer)?;
+    let directory = DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
+    let outcome = directory.atomic_write_with_outcome_validated_predecessor_fence(
+        Path::new(ACTIVE_GENERATION_POINTER_FILE),
+        &bytes,
+        predecessor_fence,
+        validate_before_replace,
+    )?;
+    match outcome {
+        DurableAtomicWriteOutcome::Durable => Ok(PointerPublicationOutcome::Durable),
+        DurableAtomicWriteOutcome::VisibleButDurabilityUncertain(error) => {
+            Ok(PointerPublicationOutcome::CommittedVisible {
+                detail: error.to_string(),
+            })
+        }
+    }
+}
+
 pub fn sync_generation(path: &Path) -> Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    publication_io_checkpoint(PublicationIoEvent::CandidateGenerationSync)?;
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         if entry.file_type()?.is_file() {
@@ -369,7 +417,7 @@ pub fn reclaim_inactive_generation_directories(
             };
             let candidate = RetainedGenerationDirectory::open(entry.path())?;
             reclamation_checkpoint(ReclamationStage::AfterCandidateRetained, candidate.path())?;
-            remove_reclaimed_generation_directory(&candidate)?;
+            remove_reclaimed_generation_directory(root, pointer, &candidate)?;
             removed = true;
         }
     }
@@ -379,7 +427,26 @@ pub fn reclaim_inactive_generation_directories(
     Ok(())
 }
 
-fn remove_reclaimed_generation_directory(candidate: &RetainedGenerationDirectory) -> Result<()> {
+fn remove_reclaimed_generation_directory(
+    root: &Path,
+    pointer: Option<&ActiveGenerationPointer>,
+    candidate: &RetainedGenerationDirectory,
+) -> Result<()> {
+    let remove = || remove_reclaimed_generation_directory_inner(candidate);
+    if let (Some(pointer), Some(directory)) = (
+        pointer,
+        candidate.path().file_name().and_then(|name| name.to_str()),
+    ) {
+        return crate::certification::reclaim_with_pointer_certifications(
+            root, pointer, directory, remove,
+        );
+    }
+    remove()
+}
+
+fn remove_reclaimed_generation_directory_inner(
+    candidate: &RetainedGenerationDirectory,
+) -> Result<()> {
     for attempt in 0..GENERATION_RECLAIM_REMOVE_ATTEMPTS {
         candidate.validate_binding()?;
         match fs::remove_dir_all(candidate.path()) {

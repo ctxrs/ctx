@@ -276,7 +276,7 @@ fn stale_global_backoff_cannot_overwrite_durable_same_id_admission() {
         "op": "source_refresh_request",
         "request_id": request_id,
         "mode": "wait",
-        "operation": "refresh",
+        "refresh_intent": {"kind": "automatic_maintenance"},
     });
     let admitted = coordinator
         .handle_ipc_request(&data_root, &request)

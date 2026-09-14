@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{Read as _, Write as _},
     os::windows::{io::AsRawHandle as _, process::CommandExt as _},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdout, Command, Stdio},
     time::{Duration, Instant},
 };
@@ -16,10 +16,7 @@ use windows_sys::Win32::{
     },
 };
 
-use super::{
-    protocol::{self, JournalIdentity},
-    InstallTransactionJournal,
-};
+use super::{protocol, InstallTransactionJournal};
 use crate::upgrade::{ReleaseProcessPort, SemanticLayoutPort};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -27,12 +24,12 @@ const READY_POLL: Duration = Duration::from_millis(10);
 const MAX_READY_BYTES: usize = 512;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-pub(super) struct ParentProcess {
+pub(in crate::upgrade) struct ParentProcess {
     handle: HANDLE,
 }
 
 impl ParentProcess {
-    pub(super) fn open(parent_pid: u32) -> Result<Self> {
+    pub(in crate::upgrade) fn open(parent_pid: u32) -> Result<Self> {
         if parent_pid == 0 || parent_pid == std::process::id() {
             return Err(anyhow!(
                 "Windows replacement helper has an invalid parent PID"
@@ -65,7 +62,7 @@ impl ParentProcess {
         }
     }
 
-    pub(super) fn wait(self) -> Result<()> {
+    pub(in crate::upgrade) fn wait(self) -> Result<()> {
         let status = unsafe { WaitForSingleObject(self.handle, INFINITE) };
         match status {
             WAIT_OBJECT_0 => Ok(()),
@@ -126,8 +123,60 @@ pub(super) fn spawn(
         &expected,
         helper_pid,
     )
-    .and_then(|()| wait_for_ready(&mut child, stdout, &expected, helper_pid));
+    .and_then(|()| wait_for_ready(&mut child, stdout, expected.attempt_id(), helper_pid));
     if let Err(error) = result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    Ok(helper_pid)
+}
+
+pub(in crate::upgrade) fn prepare_managed_pair(
+    source: &Path,
+    install_path: &Path,
+    attempt_id: &str,
+) -> Result<PathBuf> {
+    cleanup_stale_copies(install_path)?;
+    let helper_path = super::helper_path(install_path, attempt_id)?;
+    copy_helper(source, &helper_path)?;
+    Ok(helper_path)
+}
+
+pub(in crate::upgrade) fn spawn_managed_pair(
+    process: &dyn ReleaseProcessPort,
+    helper_path: &Path,
+    data_root: &Path,
+    install_path: &Path,
+    attempt_id: &str,
+    parent_pid: u32,
+) -> Result<u32> {
+    let mut command = Command::new(helper_path);
+    command
+        .arg("--data-root")
+        .arg(data_root)
+        .arg("upgrade")
+        .arg("--replacement-helper")
+        .arg("--install-path")
+        .arg(install_path)
+        .arg("--attempt-id")
+        .arg(attempt_id)
+        .arg("--parent-pid")
+        .arg(parent_pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW);
+    process.sanitize_release_authority_env(&mut command);
+    let mut child = command
+        .spawn()
+        .context("spawn Windows managed-pair replacement helper")?;
+    let helper_pid = child.id();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("Windows managed-pair helper has no readiness pipe"))?;
+    if let Err(error) = wait_for_ready(&mut child, stdout, attempt_id, helper_pid) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(error);
@@ -146,7 +195,7 @@ pub(super) fn write_ready(attempt_id: &str, helper_pid: u32) -> Result<()> {
 fn wait_for_ready(
     child: &mut Child,
     mut stdout: ChildStdout,
-    expected: &JournalIdentity,
+    attempt_id: &str,
     helper_pid: u32,
 ) -> Result<()> {
     let deadline = Instant::now() + READY_TIMEOUT;
@@ -188,11 +237,7 @@ fn wait_for_ready(
             if receipt.contains(&b'\n') {
                 let receipt = std::str::from_utf8(&receipt)
                     .context("Windows helper readiness receipt is not UTF-8")?;
-                return protocol::validate_ready_receipt(
-                    receipt,
-                    expected.attempt_id(),
-                    helper_pid,
-                );
+                return protocol::validate_ready_receipt(receipt, attempt_id, helper_pid);
             }
         }
         if Instant::now() >= deadline {

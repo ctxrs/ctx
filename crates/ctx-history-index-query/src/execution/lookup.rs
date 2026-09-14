@@ -40,20 +40,8 @@ impl VerifiedIndex {
             .and_then(|mut events| events.pop()))
     }
 
-    /// Returns the latest bounded assistant text in one semantic lite turn.
-    pub fn semantic_lite_turn_assistant(
-        &self,
-        anchor: &CoreEventRecord,
-        page_items: usize,
-        pairing_budget: CoreEventPageBudget,
-    ) -> Result<Option<(String, i64)>> {
-        Ok(self
-            .semantic_lite_turn_assistants(anchor, page_items, pairing_budget)?
-            .pop())
-    }
-
     /// Streams forward from one semantic user anchor until the next user and
-    /// returns all nonempty assistant text in that turn.
+    /// returns all nonempty, discovery-eligible assistant text in that turn.
     ///
     /// Session coordinates are sought directly in fixed-size term pages. Tool
     /// records remain metadata-only, assistant Core bodies are decoded one at
@@ -63,7 +51,7 @@ impl VerifiedIndex {
         anchor: &CoreEventRecord,
         page_items: usize,
         pairing_budget: CoreEventPageBudget,
-    ) -> Result<Vec<(String, i64)>> {
+    ) -> Result<Vec<SemanticTurnAssistant>> {
         if !(1..=MAX_SEMANTIC_PAIRING_PAGE_ITEMS).contains(&page_items) {
             return Err(IndexError::InvalidSessionEventCoordinateLimit {
                 requested: page_items,
@@ -175,10 +163,14 @@ impl VerifiedIndex {
                 }
                 let text = assistant.core_record.content.meaningful_text().trim();
                 if !text.is_empty() {
-                    assistant_messages.push((
-                        text.to_owned(),
-                        assistant.occurred_at_unix_ms.unwrap_or_default(),
-                    ));
+                    let body = assistant.core_record.content.meaningful_text();
+                    assistant_messages.push(SemanticTurnAssistant {
+                        event: assistant.event,
+                        text: text.to_owned(),
+                        content_start_char: body[..body.len() - body.trim_start().len()]
+                            .chars()
+                            .count(),
+                    });
                 }
             }
         }

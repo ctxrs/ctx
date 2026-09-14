@@ -4,13 +4,10 @@ use super::super::super::{
 };
 use std::fs;
 
+use super::super::test_support::{
+    provider_source_for_path, resolve_provider, source_paths as paths, tempdir,
+};
 use super::*;
-use crate::test_support_paths;
-
-fn tempdir() -> tempfile::TempDir {
-    test_support_paths::tempdir()
-        .expect("system temporary directory should support simple resolver fixtures")
-}
 
 fn context(temp: &tempfile::TempDir, platform: DiscoveryPlatform) -> DiscoveryContext {
     let home = temp.path().join("home");
@@ -18,33 +15,6 @@ fn context(temp: &tempfile::TempDir, platform: DiscoveryPlatform) -> DiscoveryCo
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&cwd).unwrap();
     DiscoveryContext::new(home, cwd, platform, DiscoveryPlatformDirs::default())
-}
-
-fn resolve_provider(context: &DiscoveryContext, provider: CaptureProvider) -> DiscoveryReport {
-    crate::provider_sources::discover_provider_sources_for_provider_with_context(
-        &crate::provider_sources::TEST_PROVIDER_PROBES,
-        context,
-        provider,
-    )
-}
-
-fn provider_source_for_path(
-    provider: CaptureProvider,
-    path: PathBuf,
-) -> crate::provider_sources::ProviderSource {
-    crate::provider_sources::provider_source_for_path(
-        &crate::provider_sources::TEST_PROVIDER_PROBES,
-        provider,
-        path,
-    )
-}
-
-fn paths(report: &DiscoveryReport) -> Vec<PathBuf> {
-    report
-        .sources
-        .iter()
-        .map(|source| source.path.clone())
-        .collect()
 }
 
 #[test]

@@ -27,7 +27,7 @@ class LocalConfig:
 
 @dataclass(frozen=True)
 class HostedConfig:
-    """Deprecated placeholder configuration for a hosted agent-history-v1 transport.
+    """Deprecated placeholder configuration for a hosted agent-history-v2 transport.
 
     Hosted SDK placeholders are deprecated and will be removed in the next
     breaking SDK revision; hosted operations remain unsupported.

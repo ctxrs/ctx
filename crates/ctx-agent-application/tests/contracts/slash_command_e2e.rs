@@ -51,7 +51,7 @@ fn slash_command_e2e_detected_global_harnesses_discover_and_invoke() {
     let output = json_output(ctx(&temp).env("XDG_CONFIG_HOME", &xdg).args([
         "integrations",
         "install",
-        "slash-commands",
+        "slash-command",
         "--format=json",
     ]));
 
@@ -87,7 +87,7 @@ fn slash_command_e2e_mimocode_honors_config_dir_env() {
     let output = json_output(ctx(&temp).env("MIMOCODE_CONFIG_DIR", &config_dir).args([
         "integrations",
         "install",
-        "slash-commands",
+        "slash-command",
         "--agent",
         "mimocode",
         "--format=json",
@@ -112,7 +112,7 @@ fn slash_command_e2e_mimocode_default_detection_honors_config_dir_env() {
     let output = json_output(ctx(&temp).env("MIMOCODE_CONFIG_DIR", &config_dir).args([
         "integrations",
         "install",
-        "slash-commands",
+        "slash-command",
         "--format=json",
     ]));
 
@@ -132,7 +132,7 @@ fn slash_command_e2e_mimocode_rejects_relative_home_override() {
             .args([
                 "integrations",
                 "install",
-                "slash-commands",
+                "slash-command",
                 "--agent",
                 "mimocode",
                 "--format=json",
@@ -152,7 +152,7 @@ fn slash_command_e2e_project_harnesses_discover_and_invoke() {
     command.current_dir(&project).args([
         "integrations",
         "install",
-        "slash-commands",
+        "slash-command",
         "--agent",
         "opencode",
         "--agent",
@@ -204,7 +204,7 @@ fn slash_command_e2e_skill_only_agents_do_not_write_legacy_command_surfaces() {
         let output = json_output(ctx(&temp).args([
             "integrations",
             "install",
-            "slash-commands",
+            "slash-command",
             "--agent",
             agent,
             "--format=json",
@@ -227,7 +227,7 @@ fn slash_command_e2e_manual_only_agents_are_accepted_without_writing_files() {
         let output = json_output(ctx(&temp).args([
             "integrations",
             "install",
-            "slash-commands",
+            "slash-command",
             "--agent",
             agent,
             "--format=json",
@@ -258,7 +258,7 @@ fn slash_command_e2e_all_agents_json_covers_the_complete_accepted_matrix() {
     let output = json_output(ctx(&temp).args([
         "integrations",
         "install",
-        "slash-commands",
+        "slash-command",
         "--all-agents",
         "--format=json",
     ]));
@@ -287,7 +287,7 @@ fn slash_command_e2e_project_all_agents_json_covers_the_complete_accepted_matrix
     let output = json_output(ctx(&temp).current_dir(&project).args([
         "integrations",
         "install",
-        "slash-commands",
+        "slash-command",
         "--all-agents",
         "--project",
         "--format=json",
@@ -316,6 +316,114 @@ fn slash_command_e2e_project_all_agents_json_covers_the_complete_accepted_matrix
     assert_ctx_prompt(&mimocode.invoke(COMMAND_NAME, QUERY), QUERY);
     assert_ctx_prompt(&gemini.invoke(COMMAND_NAME, QUERY), QUERY);
     assert_ctx_prompt(&qwen.invoke(COMMAND_NAME, QUERY), QUERY);
+}
+
+#[test]
+fn slash_command_status_and_remove_preserve_modified_files_until_forced() {
+    let temp = tempdir();
+    let xdg = temp.path().join("xdg-config");
+    let command_path = xdg.join("opencode/commands/ctx.md");
+
+    json_output(ctx(&temp).env("XDG_CONFIG_HOME", &xdg).args([
+        "integrations",
+        "install",
+        "slash-command",
+        "--agent",
+        "opencode",
+        "--format=json",
+    ]));
+    let current = json_output(ctx(&temp).env("XDG_CONFIG_HOME", &xdg).args([
+        "integrations",
+        "status",
+        "slash-command",
+        "--agent",
+        "opencode",
+        "--format=json",
+    ]));
+    assert_eq!(current["integration"], "slash-commands");
+    assert_eq!(current["results"][0]["status"], "current");
+
+    fs::write(&command_path, "local command edits\n").unwrap();
+    let modified = json_output(ctx(&temp).env("XDG_CONFIG_HOME", &xdg).args([
+        "integrations",
+        "status",
+        "slash-command",
+        "--agent",
+        "opencode",
+        "--format=json",
+    ]));
+    assert_eq!(modified["results"][0]["status"], "modified");
+
+    let preserved = ctx(&temp)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .args([
+            "integrations",
+            "remove",
+            "slash-command",
+            "--agent",
+            "opencode",
+            "--format=json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let preserved: Value = serde_json::from_slice(&preserved.stdout).unwrap();
+    assert_eq!(preserved["results"][0]["success"], false);
+    assert_eq!(preserved["results"][0]["previous_status"], "modified");
+    assert_eq!(
+        fs::read_to_string(&command_path).unwrap(),
+        "local command edits\n"
+    );
+
+    let removed = json_output(ctx(&temp).env("XDG_CONFIG_HOME", &xdg).args([
+        "integrations",
+        "remove",
+        "slash-command",
+        "--agent",
+        "opencode",
+        "--force",
+        "--format=json",
+    ]));
+    assert_eq!(removed["results"][0]["status"], "missing");
+    assert_eq!(removed["results"][0]["modified"], true);
+    assert!(!command_path.exists());
+    assert!(command_path
+        .parent()
+        .unwrap()
+        .join(".ctx-slash-commands.json")
+        .exists());
+
+    let missing = json_output(ctx(&temp).env("XDG_CONFIG_HOME", &xdg).args([
+        "integrations",
+        "remove",
+        "slash-command",
+        "--agent",
+        "opencode",
+        "--format=json",
+    ]));
+    assert_eq!(missing["results"][0]["already_absent"], true);
+    assert_eq!(missing["results"][0]["modified"], false);
+}
+
+#[test]
+fn slash_command_remove_does_not_mutate_skill_or_manual_only_targets() {
+    let temp = tempdir();
+    for (agent, expected_status) in [("codex", "skill_only"), ("goose", "manual_only")] {
+        let output = json_output(ctx(&temp).args([
+            "integrations",
+            "remove",
+            "slash-command",
+            "--agent",
+            agent,
+            "--format=json",
+        ]));
+        assert_eq!(output["results"][0]["status"], expected_status);
+        assert_eq!(output["results"][0]["already_absent"], true);
+        assert_eq!(output["results"][0]["modified"], false);
+    }
+    assert!(!temp.path().join(".codex/skills").exists());
+    assert!(!temp.path().join(".config/goose").exists());
 }
 
 struct OpenCodeHarness {

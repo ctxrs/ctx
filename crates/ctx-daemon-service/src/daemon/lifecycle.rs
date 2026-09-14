@@ -125,6 +125,22 @@ pub(super) fn daemon_automatic_recovery_allowed(
         )
 }
 
+pub(super) fn publish_lifecycle_ready<I: DaemonInstallationPort>(
+    data_root: &Path,
+    lifecycle: &DaemonLifecycleState,
+    installation: &I,
+    acknowledge_restart_requests: bool,
+) -> Result<bool> {
+    let _transition = ctx_daemon_runtime::DaemonLifecycleTransitionLock::acquire(data_root)?;
+    if installation.upgrade_handoff_blocks_current_process(data_root) || !lifecycle.mark_ready() {
+        return Ok(false);
+    }
+    if acknowledge_restart_requests {
+        installation.acknowledge_restart_requests(data_root);
+    }
+    Ok(true)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn fail_daemon_before_ready_for_test(data_root: &Path) -> Result<()> {
     if data_root
@@ -208,5 +224,20 @@ mod tests {
             1,
             started_at + FINITE_WORKER_QUIET_GRACE + FINITE_WORKER_QUIET_GRACE,
         ));
+    }
+
+    #[test]
+    fn queued_successor_prevents_retirement_after_first_completion() {
+        let started_at = Instant::now();
+        let mut exit = tracker(started_at);
+
+        assert!(!exit.observe_state(true, 1, 1, 1, started_at));
+        let after_first_completion = started_at + FINITE_WORKER_REQUEST_TIMEOUT;
+        assert!(!exit.observe_state(true, 0, 2, 2, after_first_completion,));
+        let successor_completed = after_first_completion + StdDuration::from_millis(1);
+        assert!(!exit.observe_state(false, 0, 3, 2, successor_completed));
+        let quiet_started = successor_completed + StdDuration::from_millis(1);
+        assert!(!exit.observe_state(false, 0, 3, 2, quiet_started));
+        assert!(exit.observe_state(false, 0, 3, 2, quiet_started + FINITE_WORKER_QUIET_GRACE,));
     }
 }

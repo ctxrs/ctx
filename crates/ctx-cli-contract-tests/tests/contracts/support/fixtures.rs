@@ -1,11 +1,11 @@
-use ctx_history_index::{CoreRecord, GenerationWriter, VerifiedIndex, WriterOptions};
+use ctx_history_index::{CoreRecord, GenerationWriter, IndexError, VerifiedIndex, WriterOptions};
 use rusqlite::Connection;
 use serde_json::json;
 use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub(crate) fn provider_history_fixture(name: &str) -> String {
@@ -89,65 +89,7 @@ pub(crate) fn initialize_generation_only_core(data_root: &Path) -> String {
 }
 
 pub(crate) fn initialize_authoritative_empty_core(data_root: &Path) -> String {
-    let generation_id = initialize_generation_only_core(data_root);
-    let route_identity = "ab".repeat(32);
-    let receipt = json!({
-        "published_generation": generation_id,
-        "generation_changed": true,
-        "current": {
-            "current_source_count": 0,
-            "current_indexed_documents": 0,
-            "current_complete_records": 0,
-            "current_retained_records": 0,
-            "current_rejected_records": 0,
-            "current_ignored_records": 0,
-            "current_certified_source_bytes": 0,
-            "current_sources_with_rejections": 0,
-            "removed_source_count": 0,
-        },
-        "outcome": "completed",
-        "selected_route_total": 1,
-        "successful_route_total": 1,
-        "source_failure_total": 0,
-        "source_failures_omitted": 0,
-        "rejected_record_total": 0,
-        "rejection_diagnostics_omitted": 0,
-        "route_results": {(route_identity): ["s", true]},
-        "zero_source_authority": {
-            "generation_id": generation_id,
-            "route_kinds": "e",
-        },
-        "catalog_route_bindings": {},
-    });
-    republish_active_generation_metadata(
-        data_root,
-        &generation_id,
-        serde_json::to_vec(&json!({
-            "version": 3,
-            "request_id": "mcp-authoritative-empty-fixture",
-            "operation": "refresh",
-            "refresh_scope": {"kind": "all"},
-            "receipt": receipt,
-            "route_observations": [null],
-            "route_controls": {},
-        }))
-        .unwrap(),
-    );
-    generation_id
-}
-
-pub(crate) fn republish_active_generation_metadata(
-    data_root: &Path,
-    generation_id: &str,
-    metadata: Vec<u8>,
-) {
-    let index_root = data_root.join("search").join("lexical");
-    GenerationWriter::open(&index_root, WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap()
-        .republish_current_publication_metadata(generation_id, metadata)
-        .unwrap();
+    initialize_generation_only_core(data_root)
 }
 
 pub(crate) fn write_codex_message_fixture(root: &Path, session_id: &str, message: &str) -> PathBuf {
@@ -189,7 +131,11 @@ pub(crate) fn write_codex_message_fixture(root: &Path, session_id: &str, message
 }
 
 pub(crate) fn provider_core_records(data_root: &Path, provider: &str) -> Vec<CoreRecord> {
-    let index = VerifiedIndex::open_pinned(data_root.join("search/lexical")).unwrap();
+    let index = open_provider_index_with(
+        || VerifiedIndex::open_pinned(data_root.join("search/lexical")),
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
     let sources = index
         .manifest()
         .sources
@@ -213,6 +159,25 @@ pub(crate) fn provider_core_records(data_root: &Path, provider: &str) -> Vec<Cor
         }
     }
     records
+}
+
+pub(crate) fn open_provider_index_with(
+    mut open: impl FnMut() -> Result<VerifiedIndex, IndexError>,
+    deadline: Instant,
+) -> Result<VerifiedIndex, IndexError> {
+    loop {
+        match open() {
+            // A test-owned daemon may publish again after the import receipt.
+            // Wait only for that contention; preserve every other read error.
+            Err(IndexError::ConcurrentGenerationChange) if Instant::now() < deadline => {
+                std::thread::sleep(
+                    Duration::from_millis(25)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => return result,
+        }
+    }
 }
 
 pub(crate) fn provider_core_counts(data_root: &Path, provider: &str) -> (usize, usize) {

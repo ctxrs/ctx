@@ -157,6 +157,18 @@ pub fn upsert(body: &str, kind: ConfigKind, force: bool, path: &Path) -> Result<
     }
 }
 
+pub fn remove(body: &str, kind: ConfigKind, force: bool, path: &Path) -> Result<String> {
+    if body.trim().is_empty() {
+        return Ok(body.to_owned());
+    }
+    match kind {
+        ConfigKind::CodexToml => toml::remove(body, force),
+        ConfigKind::GooseYaml => yaml::remove_goose(body, force),
+        ConfigKind::ContinueYaml => yaml::remove_continue(body, force),
+        ConfigKind::Json { root, server } => json::remove(body, root, server, force, path),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

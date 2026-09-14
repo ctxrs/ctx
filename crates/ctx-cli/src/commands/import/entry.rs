@@ -21,19 +21,14 @@ pub(crate) fn run_import(
     data_root: PathBuf,
     telemetry: &mut ImportTelemetry,
     provider_refreshes: &mut ProviderRefreshCollector,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
     ui: &mut Ui,
 ) -> Result<()> {
     let json = args.format.is_json();
-    let machine_output = json || args.progress == crate::progress::ProgressArg::Json;
-    if args.partial && !machine_output {
-        let document =
-            ctx_cli_presentation::commands::render_partial_deprecation(ui.stderr_context());
-        ui.write_stderr(&document)?;
-    }
     let request = import_request(&args);
     provider_refreshes.start_timing();
-    let mut host = CliImportHost::new();
+    let mut host =
+        CliImportHost::new(crate::semantic::ImportSemanticCompletion::from_import_config(config));
     let config_snapshot = crate::history_config::CliHistoryConfigSnapshot::new(config);
     let report = ctx_history_cli::run_import_application(
         request,
@@ -112,10 +107,11 @@ fn record_terminal_import_failure(
     }) else {
         return false;
     };
+    let outcome = terminal.outcome();
     provider_refreshes.record_terminal_core_failure(
         ProviderRefreshTrigger::Import,
-        terminal.code.parse().ok(),
-        terminal.retryable,
+        Some(outcome.code()),
+        outcome.retryable(),
     );
     true
 }
@@ -181,7 +177,6 @@ fn import_request(args: &ImportArgs) -> ctx_history_cli::ImportRequest {
             .map(|_| ctx_history_cli::ImportFormat::CtxHistoryJsonlV2),
         all: args.all,
         resume: args.resume,
-        partial: args.partial,
         no_daemon: args.no_daemon,
         format: if args.format.is_json() {
             ctx_history_cli::OutputFormat::Json
@@ -237,7 +232,7 @@ fn record_application_facts(
 mod tests {
     use std::collections::BTreeSet;
 
-    use ctx_history_refresh::{RefreshOutcomeClass, RefreshOutcomeCode, RefreshTerminalOutcome};
+    use ctx_history_refresh::{RefreshOutcomeCode, RefreshTerminalOutcome};
 
     use crate::analytics::{
         Outcome, ProviderCoreResult, ProviderRefreshFailureScope, ProviderRefreshFailureType,
@@ -246,24 +241,22 @@ mod tests {
 
     use super::*;
 
-    fn terminal_error(
-        code: RefreshOutcomeCode,
-        class: RefreshOutcomeClass,
-        retryable: bool,
-    ) -> anyhow::Error {
-        crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
-            code,
-            class,
-            retryable,
-            affected_routes: BTreeSet::new(),
-            retryable_routes: BTreeSet::new(),
-            blocked_routes: BTreeSet::new(),
-            physical_attempt_id: "physical-attempt".to_owned(),
-            retained_generation: None,
-            published_generation: None,
-            retry_advice: None,
-            detail: Some("content-bearing raw terminal detail".to_owned()),
-        })
+    fn terminal_error(code: RefreshOutcomeCode, retryable: bool) -> anyhow::Error {
+        crate::semantic::SourceBackedRefreshTerminalError::from(
+            RefreshTerminalOutcome::new(
+                code,
+                retryable,
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                uuid::Uuid::nil().to_string(),
+                None,
+                None,
+                None,
+                Some("content-bearing raw terminal detail".to_owned()),
+            )
+            .unwrap(),
+        )
         .into()
     }
 
@@ -280,11 +273,7 @@ mod tests {
 
     #[test]
     fn explicit_import_terminal_failure_emits_one_cli_owned_bounded_event() {
-        let error = terminal_error(
-            RefreshOutcomeCode::MalformedSource,
-            RefreshOutcomeClass::Unreadable,
-            false,
-        );
+        let error = terminal_error(RefreshOutcomeCode::MalformedSource, false);
         let mut collector = ProviderRefreshCollector::default();
 
         assert!(record_terminal_import_failure(&mut collector, &error));
@@ -312,11 +301,7 @@ mod tests {
 
     #[test]
     fn automatic_import_terminal_failure_emits_one_retryable_unknown_source_event() {
-        let error = terminal_error(
-            RefreshOutcomeCode::SourceFailures,
-            RefreshOutcomeClass::Mixed,
-            true,
-        );
+        let error = terminal_error(RefreshOutcomeCode::SourceFailures, true);
         let mut collector = ProviderRefreshCollector::default();
 
         assert!(record_terminal_import_failure(&mut collector, &error));

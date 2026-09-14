@@ -202,7 +202,7 @@ fi
 [[ "${factory_host_os_version}" =~ ^[0-9]+\.[0-9]+$ ]] || die "factory host OS version is malformed"
 factory_host_os="${factory_host_os_id}-${factory_host_os_version}-${factory_host_arch}"
 
-for command_name in cargo cat curl file git install llvm-objdump llvm-readobj llvm-strip \
+for command_name in cargo cat curl file git install llvm-objdump llvm-readobj llvm-strip patch \
   python3 rustc rustup sha256sum tar xz; do
   require_command "${command_name}"
 done
@@ -346,12 +346,26 @@ fi
 mkdir -p "$(dirname "${output_dir}")"
 [[ ! -e "${output_dir}" ]] || die "output directory already exists: ${output_dir}"
 stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-linux-release-factory.XXXXXX")"
+pids=()
 cleanup() {
+  # Other targets can still be reading shared inputs after one build fails.
+  local pid
+  for pid in "${pids[@]}"; do wait "$pid" || true; done
   rm -rf "${stage_dir:-}" "${sdk_cleanup:-}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 artifact_stage="${stage_dir}/artifacts"
 mkdir -p "${artifact_stage}"
+notify_source=""
+if [[ "${needs_macos}" == "1" ]]; then
+  # Cargo paths overrides preserve the locked graph. Bazel applies this exact
+  # patch too; never modify the shared registry cache to obtain parity.
+  notify_archive="${toolchain_dir}/notify-9.0.0-rc.4.crate"
+  download_verified "https://static.crates.io/crates/notify/notify-9.0.0-rc.4.crate" \
+    "b44b771d4dd781ef14c84078693e67495da6b47f609f72e8a4da8420a861240e" "${notify_archive}"
+  notify_source="$(python3 scripts/release/notify_source.py \
+    --archive "${notify_archive}" --output "${stage_dir}/notify")"
+fi
 cargo_lock_sha256="$(sha256_file Cargo.lock)"
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(p["version"] for p in d["packages"] if p["name"]=="ctx"))')"
 
@@ -360,7 +374,7 @@ build_target() {
   local encoded_flags
   local CTX_PUBLIC_TARGET_PLATFORM CTX_PUBLIC_TARGET_TRIPLE CTX_PUBLIC_TARGET_BINARY
   local CTX_PUBLIC_TARGET_GLIBC_MAX
-  local -a build_env
+  local -a build_env notify_args=()
   eval "$(python3 "${repo_root}/scripts/public-cli-release-targets.py" shell "${target_id}")"
   platform="${CTX_PUBLIC_TARGET_PLATFORM}"
   triple="${CTX_PUBLIC_TARGET_TRIPLE}"
@@ -380,8 +394,12 @@ build_target() {
     # Without this, the x86_64 Mach-O can place __text immediately after the
     # existing commands, leaving rcodesign nowhere to add LC_CODE_SIGNATURE.
     encoded_flags="-Clink-arg=-Wl,-headerpad,0x1000"
+    encoded_flags+=$'\x1f'"--remap-path-prefix=${notify_source}=/ctx/deps/notify-9.0.0-rc.4"
+    notify_args=(--config "${stage_dir}/notify/config.toml")
   fi
   build_env=(
+    # Build locked lzma sources; the host library can exceed the target ABI.
+    "LZMA_API_STATIC=1"
     "CARGO_TARGET_DIR=${target_dir}"
     "CTX_RELEASE_BUILD_SOURCE_COMMIT=${source_commit}"
     "CTX_RELEASE_BUILD_CARGO_LOCK_SHA256=${cargo_lock_sha256}"
@@ -393,6 +411,7 @@ build_target() {
   fi
   env "${build_env[@]}" \
     "${cargo_zigbuild_bin}" zigbuild --manifest-path "${repo_root}/Cargo.toml" \
+      "${notify_args[@]}" \
       -p ctx --bin ctx --release --locked --target "${build_triple}" -j "${cargo_jobs}"
   if [[ "${target_id}" == macos-* ]]; then
     # Cargo's release profile strips debug data, but the Linux cross-link can
@@ -408,7 +427,6 @@ build_target() {
     printf 'not run on this host: %s\n' "${platform}" >"${artifact_stage}/${binary}.version"
   fi
 }
-pids=()
 for target_id in "${target_ids[@]}"; do
   build_target "${target_id}" &
   pids+=("$!")
@@ -459,7 +477,12 @@ for target_id in "${target_ids[@]}"; do
     inventory="${stage_dir}/${target_id}.cargo-inventory.json"
     materials="${stage_dir}/${target_id}.cargo-materials.json"
     material_root="${stage_dir}/${target_id}.cargo-materials"
+    notify_inventory_args=()
+    if [[ "${target_id}" == macos-* ]]; then
+      notify_inventory_args=(--notify-source "${notify_source}")
+    fi
     python3 scripts/release/cargo-release-inventory.py \
+      "${notify_inventory_args[@]}" \
       --repo "${repo_root}" --target "${CTX_PUBLIC_TARGET_TRIPLE}" \
       --target-output "${inventory}" --materials-output "${materials}" \
       --material-root "${material_root}"

@@ -52,6 +52,17 @@ pub(super) struct SemanticResourceDeferred {
 }
 
 impl SemanticResourceDeferred {
+    #[cfg(test)]
+    pub(super) const fn disk_pressure_for_test() -> Self {
+        Self {
+            reason: SemanticResourceDeferralReason::DiskPressure,
+            available_memory_bytes: None,
+            required_available_memory_bytes: None,
+            available_disk_bytes: Some(0),
+            required_available_disk_bytes: Some(SEMANTIC_BACKGROUND_MIN_AVAILABLE_DISK_BYTES),
+        }
+    }
+
     pub(super) fn reason(self) -> SemanticResourceDeferralReason {
         self.reason
     }

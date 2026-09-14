@@ -23,7 +23,8 @@ pub use progress::{progress, Progress};
 pub use refresh_progress::{
     refresh_progress, RefreshCurrentSourceProgress, RefreshCurrentSourceProgressStage,
     RefreshLogicalPhase, RefreshLogicalStatus, RefreshProgress, RefreshProgressSnapshot,
-    RefreshRequestState, RefreshStatusKind, RefreshStructuredOutcome, RefreshWholeRunStage,
+    RefreshRequestState, RefreshStatusKind, RefreshStructuredOutcome, RefreshTerminalPresentation,
+    RefreshWholeRunStage,
 };
 pub use section::section;
 pub use table::{table, Table};

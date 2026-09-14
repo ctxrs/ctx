@@ -642,16 +642,14 @@ fn index_wait_json(
     wait_status: &str,
     read_only: bool,
 ) -> Value {
-    let local_only = status["local_only"].as_bool().unwrap_or(true);
     compact_json(json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "status": wait_status,
         "selection": {
             "lexical": selection.lexical,
             "semantic": selection.semantic,
         },
         "readiness": status,
-        "local_only": local_only,
         "read_only": read_only,
     }))
 }

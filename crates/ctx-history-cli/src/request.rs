@@ -219,7 +219,6 @@ pub struct ImportRequest {
     pub input_format: Option<ImportFormat>,
     pub all: bool,
     pub resume: bool,
-    pub partial: bool,
     pub no_daemon: bool,
     pub format: OutputFormat,
     pub progress: ProgressMode,
@@ -227,7 +226,6 @@ pub struct ImportRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupRequest {
-    pub catalog_only: bool,
     pub semantic: bool,
     pub no_daemon: bool,
     pub wait: bool,
@@ -239,7 +237,6 @@ pub struct SetupRequest {
 pub struct SourcesRequest {
     pub provider: Option<HistoryProvider>,
     pub all: bool,
-    pub show_missing: bool,
     pub format: OutputFormat,
 }
 

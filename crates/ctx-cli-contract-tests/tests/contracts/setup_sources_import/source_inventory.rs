@@ -438,7 +438,7 @@ fn sources_lists_supported_personal_agent_provider_defaults() {
     let temp = tempdir();
     install_default_hermes_fixture(&temp, "hermes-sources-oracle");
     install_default_kilo_fixture(&temp, "kilo-sources-oracle");
-    install_default_kiro_fixture(&temp, "kiro-sources-oracle");
+    let kiro_fixture = install_default_kiro_fixture(&temp, "kiro-sources-oracle");
     install_default_astrbot_fixture(&temp, "astrbot-sources-oracle");
     install_default_continue_fixture(&temp, "continue-sources-oracle");
     install_default_forgecode_fixture(&temp, "forgecode-sources-oracle");
@@ -454,7 +454,6 @@ fn sources_lists_supported_personal_agent_provider_defaults() {
     for (provider, source_format) in [
         ("hermes", "hermes_state_sqlite"),
         ("kilo", "kilo_sqlite"),
-        ("kiro_cli", "kiro_cli_sqlite"),
         ("astrbot", "astrbot_data_v4_sqlite"),
         ("continue", "continue_cli_sessions_json"),
         ("forgecode", "forgecode_sqlite"),
@@ -473,6 +472,19 @@ fn sources_lists_supported_personal_agent_provider_defaults() {
         assert_eq!(source["importable"], true);
         assert!(source["unsupported_reason"].is_null());
     }
+
+    let kiro_sources = source_entries(&sources)
+        .iter()
+        .filter(|source| source["provider"] == "kiro_cli")
+        .collect::<Vec<_>>();
+    if cfg!(target_os = "windows") {
+        assert!(kiro_sources.is_empty(), "{sources:#}");
+    } else {
+        assert_eq!(kiro_sources.len(), 1, "{sources:#}");
+        assert_eq!(kiro_sources[0]["status"], "available");
+        assert_eq!(kiro_sources[0]["source_format"], "kiro_cli_sqlite");
+        assert_eq!(kiro_sources[0]["path"], kiro_fixture.to_str().unwrap());
+    }
 }
 
 #[test]
@@ -488,7 +500,7 @@ fn sources_reports_adjacent_current_and_legacy_routes_without_unsupported_duplic
     .unwrap();
     fs::write(openclaw_sessions.join("session.jsonl"), "{}\n").unwrap();
 
-    install_default_kiro_fixture(&temp, "kiro-coexistence-oracle");
+    let kiro_fixture = install_default_kiro_fixture(&temp, "kiro-coexistence-oracle");
     fs::create_dir_all(temp.path().join(".kiro/sessions")).unwrap();
 
     let qoder_root = temp.path().join(".qoder/projects");
@@ -542,12 +554,23 @@ fn sources_reports_adjacent_current_and_legacy_routes_without_unsupported_duplic
         .iter()
         .filter(|source| source["provider"] == "kiro_cli")
         .collect::<Vec<_>>();
-    assert_eq!(kiro.len(), 2, "{sources:#}");
-    assert!(kiro.iter().any(|source| {
-        source["source_format"] == "kiro_cli_sqlite"
-            && source["status"] == "available"
-            && source["importable"] == true
-    }));
+    assert_eq!(
+        kiro.len(),
+        if cfg!(target_os = "windows") { 1 } else { 2 },
+        "{sources:#}",
+    );
+    if cfg!(target_os = "windows") {
+        assert!(kiro
+            .iter()
+            .all(|source| source["path"] != kiro_fixture.to_str().unwrap()));
+    } else {
+        assert!(kiro.iter().any(|source| {
+            source["source_format"] == "kiro_cli_sqlite"
+                && source["status"] == "available"
+                && source["importable"] == true
+                && source["path"] == kiro_fixture.to_str().unwrap()
+        }));
+    }
     assert!(kiro.iter().any(|source| {
         source["status"] == "unsupported"
             && source["path"] == temp.path().join(".kiro/sessions").to_str().unwrap()
@@ -724,17 +747,19 @@ fn nanoclaw_identity_snapshot(temp: &TempDir) -> (String, String, usize) {
     )
 }
 
-fn registered_nanoclaw(temp: &TempDir, query: &str) -> (PathBuf, PathBuf) {
-    let project = PathBuf::from(write_native_nanoclaw_fixture(temp, query));
+fn registered_nanoclaw(temp: &TempDir, query: &str) -> (PathBuf, PathBuf, bool) {
+    let fixture = PathBuf::from(write_native_nanoclaw_fixture(temp, query));
+    let project = temp.path().join("native & nanoclaw");
+    fs::rename(fixture, &project).unwrap();
     let registered = project
         .parent()
         .unwrap()
         .join(".")
         .join(project.file_name().unwrap());
-    write_nanoclaw_systemd_registration(temp, &registered);
+    let has_service_registration = write_nanoclaw_service_registration(temp, &registered);
     let unrelated_cwd = temp.path().join("unrelated-cwd");
     fs::create_dir_all(&unrelated_cwd).unwrap();
-    (project, unrelated_cwd)
+    (project, unrelated_cwd, has_service_registration)
 }
 
 fn assert_nanoclaw_counts(counts: &Value, sources: u64, documents: u64) {
@@ -777,11 +802,25 @@ fn import_nanoclaw(temp: &TempDir, cwd: Option<&Path>, path: Option<&Path>) -> V
 fn nanoclaw_automatic_then_explicit_import_preserves_one_source_session_and_result() {
     let temp = tempdir();
     let query = "nanoclaw-lexical-registration-auto-refresh-oracle";
-    let (project, unrelated_cwd) = registered_nanoclaw(&temp, query);
+    let (project, unrelated_cwd, has_service_registration) = registered_nanoclaw(&temp, query);
 
     let mut sources_command = ctx(&temp);
     sources_command.current_dir(&unrelated_cwd);
     let sources = json_output(sources_command.args(["sources", "--format=json"]));
+    if !has_service_registration {
+        assert!(source_entries(&sources)
+            .iter()
+            .all(|source| source["provider"] != "nanoclaw"));
+        import_nanoclaw(&temp, Some(&unrelated_cwd), None);
+        assert!(provider_core_records(&data_root(&temp), "nanoclaw").is_empty());
+
+        ctx(&temp).args(["daemon", "enable"]).assert().success();
+        let imported = import_nanoclaw(&temp, None, Some(&project));
+        assert_eq!(imported["totals"]["current_rejected_records"], 0);
+        assert_nanoclaw_counts(&imported["totals"], 1, 2);
+        assert_nanoclaw_search(&temp, query, None);
+        return;
+    }
     let nanoclaw = source_entry(&sources, "nanoclaw", None);
     assert_eq!(nanoclaw["status"], "available");
     assert_eq!(nanoclaw["import_support"], "native");
@@ -811,12 +850,28 @@ fn nanoclaw_automatic_then_explicit_import_preserves_one_source_session_and_resu
 fn nanoclaw_explicit_then_automatic_import_preserves_one_source_session_and_result() {
     let temp = tempdir();
     let query = "nanoclaw-explicit-then-automatic-oracle";
-    let (project, unrelated_cwd) = registered_nanoclaw(&temp, query);
+    let (project, unrelated_cwd, has_service_registration) = registered_nanoclaw(&temp, query);
 
     ctx(&temp).args(["daemon", "enable"]).assert().success();
     let explicit = import_nanoclaw(&temp, None, Some(&project));
     assert_nanoclaw_counts(&explicit["totals"], 1, 2);
     let explicit_identity = nanoclaw_identity_snapshot(&temp);
+    assert_nanoclaw_search(&temp, query, None);
+
+    if !has_service_registration {
+        let mut sources_command = ctx(&temp);
+        sources_command.current_dir(&unrelated_cwd);
+        let sources = json_output(sources_command.args([
+            "sources",
+            "--provider",
+            "nanoclaw",
+            "--format=json",
+        ]));
+        assert!(source_entries(&sources)
+            .iter()
+            .all(|source| source["provider"] != "nanoclaw"));
+        return;
+    }
 
     let automatic = import_nanoclaw(&temp, Some(&unrelated_cwd), None);
     assert_nanoclaw_counts(&automatic["totals"], 1, 2);
@@ -831,13 +886,16 @@ fn nanoclaw_service_registration_import_all_indexes_two_checkouts_without_exact_
     let first_fixture = PathBuf::from(write_native_nanoclaw_fixture(&temp, first_query));
     let first_project = temp.path().join("registered NanoClaw checkout one");
     fs::rename(&first_fixture, &first_project).unwrap();
-    write_nanoclaw_systemd_registration(&temp, &first_project);
+    let has_service_registration = write_nanoclaw_service_registration(&temp, &first_project);
 
     let second_query = "marigoldvelvetpulsar";
     let second_fixture = PathBuf::from(write_native_nanoclaw_fixture(&temp, second_query));
     let second_project = temp.path().join("registered NanoClaw checkout two");
     fs::rename(&second_fixture, &second_project).unwrap();
-    write_nanoclaw_systemd_registration(&temp, &second_project);
+    assert_eq!(
+        write_nanoclaw_service_registration(&temp, &second_project),
+        has_service_registration,
+    );
     let unrelated_cwd = temp.path().join("unrelated-cwd");
     fs::create_dir_all(&unrelated_cwd).unwrap();
 
@@ -845,6 +903,18 @@ fn nanoclaw_service_registration_import_all_indexes_two_checkouts_without_exact_
     sources_command.current_dir(&unrelated_cwd);
     let sources =
         json_output(sources_command.args(["sources", "--provider", "nanoclaw", "--format=json"]));
+    if !has_service_registration {
+        assert!(source_entries(&sources).is_empty(), "{sources:#}");
+        for (project, query) in [
+            (&first_project, first_query),
+            (&second_project, second_query),
+        ] {
+            let imported = import_nanoclaw(&temp, None, Some(project));
+            assert_nanoclaw_counts(&imported["totals"], 1, 2);
+            assert_nanoclaw_search(&temp, query, None);
+        }
+        return;
+    }
     let mut nanoclaw_paths = source_entries(&sources)
         .iter()
         .filter(|source| source["provider"] == "nanoclaw")
@@ -874,6 +944,18 @@ fn nanoclaw_service_registration_import_all_indexes_two_checkouts_without_exact_
     }
 }
 
+fn write_nanoclaw_service_registration(temp: &TempDir, project: &Path) -> bool {
+    if cfg!(target_os = "linux") {
+        write_nanoclaw_systemd_registration(temp, project);
+        true
+    } else if cfg!(target_os = "macos") {
+        write_nanoclaw_launchd_registration(temp, project);
+        true
+    } else {
+        false
+    }
+}
+
 fn write_nanoclaw_systemd_registration(temp: &TempDir, project: &Path) {
     let slug = nanoclaw_test_sha1_slug(project.to_string_lossy().as_bytes());
     let unit = temp
@@ -894,6 +976,41 @@ fn write_nanoclaw_systemd_registration(temp: &TempDir, project: &Path) {
         ),
     )
     .unwrap();
+}
+
+fn write_nanoclaw_launchd_registration(temp: &TempDir, project: &Path) {
+    let slug = nanoclaw_test_sha1_slug(project.to_string_lossy().as_bytes());
+    let label = format!("com.nanoclaw-v2-{slug}");
+    let plist = temp
+        .path()
+        .join("Library/LaunchAgents")
+        .join(format!("{label}.plist"));
+    fs::create_dir_all(plist.parent().unwrap()).unwrap();
+    let project = project.to_str().unwrap();
+    let home = temp.path().to_str().unwrap();
+    fs::write(
+        plist,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n    <key>Label</key>\n    <string>{}</string>\n    <key>ProgramArguments</key>\n    <array>\n        <string>/usr/local/bin/node</string>\n        <string>{}</string>\n    </array>\n    <key>WorkingDirectory</key>\n    <string>{}</string>\n    <key>RunAtLoad</key>\n    <true/>\n    <key>KeepAlive</key>\n    <true/>\n    <key>EnvironmentVariables</key>\n    <dict>\n        <key>PATH</key>\n        <string>/usr/local/bin:/usr/bin:/bin:{}/.local/bin</string>\n        <key>HOME</key>\n        <string>{}</string>\n    </dict>\n    <key>StandardOutPath</key>\n    <string>{}/logs/nanoclaw.log</string>\n    <key>StandardErrorPath</key>\n    <string>{}/logs/nanoclaw.error.log</string>\n</dict>\n</plist>",
+            nanoclaw_xml_escape(&label),
+            nanoclaw_xml_escape(&format!("{project}/dist/index.js")),
+            nanoclaw_xml_escape(project),
+            nanoclaw_xml_escape(home),
+            nanoclaw_xml_escape(home),
+            nanoclaw_xml_escape(project),
+            nanoclaw_xml_escape(project),
+        ),
+    )
+    .unwrap();
+}
+
+fn nanoclaw_xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn nanoclaw_test_sha1_slug(input: &[u8]) -> String {

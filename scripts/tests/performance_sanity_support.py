@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import signal
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - unavailable on Windows
+    fcntl = None
 
 
 COMMAND_TIMEOUT_SECONDS = 30.0
@@ -23,6 +30,39 @@ FORCE_SINGLE_CPU_ENV = "CTX_PERFORMANCE_FORCE_SINGLE_CPU"
 TASK_BINARY_ENV = "CTX_PERFORMANCE_TASK_BINARY"
 SOURCE_WORKER_THREAD_PREFIX = "ctx-src-scan"
 MIN_SOURCE_WORKER_CPU_TICKS = 1
+
+# Linux FIEMAP reports the physical extents behind each regular file. Counting
+# the union keeps the storage oracle truthful for both hard links and
+# copy-on-write reflinks instead of charging a retained generation twice merely
+# because its shared extents have distinct inodes.
+FIEMAP_IOCTL = 0xC020660B
+FIEMAP_FLAG_SYNC = 0x00000001
+FIEMAP_EXTENT_LAST = 0x00000001
+FIEMAP_EXTENT_UNKNOWN = 0x00000002
+FIEMAP_EXTENT_DELALLOC = 0x00000004
+FIEMAP_EXTENT_ENCODED = 0x00000008
+FIEMAP_EXTENT_DATA_ENCRYPTED = 0x00000080
+FIEMAP_EXTENT_NOT_ALIGNED = 0x00000100
+FIEMAP_EXTENT_DATA_INLINE = 0x00000200
+FIEMAP_EXTENT_DATA_TAIL = 0x00000400
+FIEMAP_UNACCOUNTABLE_FLAGS = (
+    FIEMAP_EXTENT_UNKNOWN
+    | FIEMAP_EXTENT_DELALLOC
+    | FIEMAP_EXTENT_ENCODED
+    | FIEMAP_EXTENT_DATA_ENCRYPTED
+    | FIEMAP_EXTENT_NOT_ALIGNED
+    | FIEMAP_EXTENT_DATA_INLINE
+    | FIEMAP_EXTENT_DATA_TAIL
+)
+FIEMAP_EXTENT_BATCH = 128
+FIEMAP_HEADER = struct.Struct("=QQIIII")
+FIEMAP_EXTENT = struct.Struct("=QQQQQIIII")
+FIEMAP_UNSUPPORTED_ERRNOS = {
+    errno.EBADF,
+    errno.EINVAL,
+    errno.ENOTTY,
+    errno.EOPNOTSUPP,
+}
 
 
 def ctx_binary_argument() -> Path:
@@ -135,14 +175,17 @@ def command_failure(
     )
 
 
-def run_checked(args: list[str], env: dict[str, str], cwd: Path) -> bytes:
+def run_checked(
+    args: list[str], env: dict[str, str], cwd: Path,
+    *, timeout_seconds: float = COMMAND_TIMEOUT_SECONDS,
+) -> bytes:
     completed = subprocess.run(
         [task_binary(env), *args],
         cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=COMMAND_TIMEOUT_SECONDS,
+        timeout=timeout_seconds,
         check=False,
     )
     if completed.returncode != 0:
@@ -152,8 +195,11 @@ def run_checked(args: list[str], env: dict[str, str], cwd: Path) -> bytes:
     return completed.stdout
 
 
-def run_json(args: list[str], env: dict[str, str], cwd: Path) -> dict[str, object]:
-    packet = json.loads(run_checked(args, env, cwd))
+def run_json(
+    args: list[str], env: dict[str, str], cwd: Path,
+    *, timeout_seconds: float = COMMAND_TIMEOUT_SECONDS,
+) -> dict[str, object]:
+    packet = json.loads(run_checked(args, env, cwd, timeout_seconds=timeout_seconds))
     if not isinstance(packet, dict):
         raise RuntimeError(f"{' '.join(args)} did not return a JSON object")
     return packet
@@ -275,6 +321,60 @@ def require_parallel_source_workers(
     return workers
 
 
+class DaemonSampler:
+    """One sampler for command deltas and fresh-process lifetime measurements."""
+
+    def __init__(self, pid: int, started: float, *, lifetime: bool = False):
+        self.pid = pid
+        self.started = started
+        self.initial_cpu_ticks = 0 if lifetime else linux_process_cpu_ticks(pid)
+        self.initial_worker_ticks = (
+            {} if lifetime else linux_source_worker_cpu_ticks(pid)
+        )
+        self.baseline_open_fds = linux_open_fd_count(pid)
+        self.peak_open_fds = self.baseline_open_fds
+        self.peak_open_fd_summary = linux_open_fd_summary(pid)
+        self.peak_rss_bytes = linux_peak_rss_bytes(pid)
+        self.worker_cpu_deltas: dict[tuple[int, str], int] = {}
+
+    def sample(self) -> None:
+        open_fds = linux_open_fd_count(self.pid)
+        if open_fds > self.peak_open_fds:
+            self.peak_open_fds = open_fds
+            self.peak_open_fd_summary = linux_open_fd_summary(self.pid)
+        self.peak_rss_bytes = max(
+            self.peak_rss_bytes, linux_peak_rss_bytes(self.pid)
+        )
+        for worker, ticks in linux_source_worker_cpu_ticks(self.pid).items():
+            delta = max(0, ticks - self.initial_worker_ticks.get(worker, 0))
+            self.worker_cpu_deltas[worker] = max(
+                self.worker_cpu_deltas.get(worker, 0), delta
+            )
+
+    def finish(self, packet: dict[str, object]) -> RefreshPerformanceSample:
+        elapsed_seconds = time.monotonic() - self.started
+        cpu_seconds = (
+            linux_process_cpu_ticks(self.pid) - self.initial_cpu_ticks
+        ) / os.sysconf("SC_CLK_TCK")
+        return RefreshPerformanceSample(
+            packet=packet,
+            elapsed_seconds=elapsed_seconds,
+            cpu_seconds=cpu_seconds,
+            cpu_per_wall=cpu_seconds / elapsed_seconds,
+            baseline_open_fds=self.baseline_open_fds,
+            peak_open_fds=self.peak_open_fds,
+            peak_open_fd_summary=self.peak_open_fd_summary,
+            peak_rss_bytes=self.peak_rss_bytes,
+            source_workers=tuple(
+                SourceWorkerCpu(tid=tid, name=name, cpu_ticks=ticks)
+                for (tid, name), ticks in sorted(
+                    self.worker_cpu_deltas.items(),
+                    key=lambda item: (item[0][1], item[0][0]),
+                )
+            ),
+        )
+
+
 def run_refresh_measured(
     args: list[str],
     env: dict[str, str],
@@ -283,27 +383,7 @@ def run_refresh_measured(
     timeout_seconds: float = COMMAND_TIMEOUT_SECONDS,
 ) -> RefreshPerformanceSample:
     started = time.monotonic()
-    initial_cpu_ticks = linux_process_cpu_ticks(daemon_pid)
-    initial_worker_ticks = linux_source_worker_cpu_ticks(daemon_pid)
-    baseline_open_fds = linux_open_fd_count(daemon_pid)
-    peak_open_fds = baseline_open_fds
-    peak_open_fd_summary = linux_open_fd_summary(daemon_pid)
-    peak_rss_bytes = linux_peak_rss_bytes(daemon_pid)
-    worker_cpu_deltas: dict[tuple[int, str], int] = {}
-
-    def sample_daemon() -> None:
-        nonlocal peak_open_fds, peak_open_fd_summary, peak_rss_bytes
-        open_fds = linux_open_fd_count(daemon_pid)
-        if open_fds > peak_open_fds:
-            peak_open_fds = open_fds
-            peak_open_fd_summary = linux_open_fd_summary(daemon_pid)
-        peak_rss_bytes = max(peak_rss_bytes, linux_peak_rss_bytes(daemon_pid))
-        for worker, ticks in linux_source_worker_cpu_ticks(daemon_pid).items():
-            delta = max(0, ticks - initial_worker_ticks.get(worker, 0))
-            worker_cpu_deltas[worker] = max(
-                worker_cpu_deltas.get(worker, 0), delta
-            )
-
+    sampler = DaemonSampler(daemon_pid, started)
     with tempfile.TemporaryFile(mode="w+b", dir=cwd) as stdout_file, (
         tempfile.TemporaryFile(mode="w+b", dir=cwd)
     ) as stderr_file:
@@ -316,7 +396,7 @@ def run_refresh_measured(
         )
         deadline = started + timeout_seconds
         while True:
-            sample_daemon()
+            sampler.sample()
             if process.poll() is not None:
                 break
             if time.monotonic() >= deadline:
@@ -339,28 +419,7 @@ def run_refresh_measured(
     packet = json.loads(stdout)
     if not isinstance(packet, dict):
         raise RuntimeError(f"{' '.join(args)} did not return a JSON object")
-    elapsed_seconds = time.monotonic() - started
-    clock_ticks = os.sysconf("SC_CLK_TCK")
-    cpu_seconds = (
-        linux_process_cpu_ticks(daemon_pid) - initial_cpu_ticks
-    ) / clock_ticks
-    source_workers = tuple(
-        SourceWorkerCpu(tid=tid, name=name, cpu_ticks=ticks)
-        for (tid, name), ticks in sorted(
-            worker_cpu_deltas.items(), key=lambda item: (item[0][1], item[0][0])
-        )
-    )
-    return RefreshPerformanceSample(
-        packet=packet,
-        elapsed_seconds=elapsed_seconds,
-        cpu_seconds=cpu_seconds,
-        cpu_per_wall=cpu_seconds / elapsed_seconds,
-        baseline_open_fds=baseline_open_fds,
-        peak_open_fds=peak_open_fds,
-        peak_open_fd_summary=peak_open_fd_summary,
-        peak_rss_bytes=peak_rss_bytes,
-        source_workers=source_workers,
-    )
+    return sampler.finish(packet)
 
 
 def published_file_state(path: Path) -> PublishedFileState:
@@ -372,8 +431,8 @@ def published_file_state(path: Path) -> PublishedFileState:
     )
 
 
-def published_index_bytes(path: Path) -> int:
-    physical_files: dict[tuple[int, int], int] = {}
+def published_index_files(path: Path) -> tuple[Path, ...]:
+    entries: list[Path] = []
     for directory_name in (
         "ctx-generations",
         "index-generations",
@@ -381,18 +440,119 @@ def published_index_bytes(path: Path) -> int:
         directory = path / directory_name
         if not directory.is_dir():
             continue
-        for entry in directory.rglob("*"):
-            if (
-                not entry.is_file()
-                or entry.name.endswith(".lock")
-                or entry.name.startswith(".ctx-tantivy-atomic-")
-            ):
-                continue
-            metadata = entry.stat()
-            physical_files.setdefault(
-                (metadata.st_dev, metadata.st_ino), metadata.st_size
-            )
+        entries.extend(
+            entry
+            for entry in directory.rglob("*")
+            if entry.is_file()
+            and not entry.name.endswith(".lock")
+            and not entry.name.startswith(".ctx-tantivy-atomic-")
+        )
+    return tuple(entries)
+
+
+def logical_inode_index_bytes(path: Path) -> int:
+    physical_files: dict[tuple[int, int], int] = {}
+    for entry in published_index_files(path):
+        metadata = entry.stat()
+        physical_files.setdefault(
+            (metadata.st_dev, metadata.st_ino), metadata.st_size
+        )
     return sum(physical_files.values())
+
+
+def linux_file_physical_extents(
+    descriptor: int,
+) -> tuple[tuple[int, int], ...] | None:
+    if sys.platform != "linux" or fcntl is None:
+        return None
+    metadata = os.fstat(descriptor)
+    if metadata.st_blocks == 0:
+        return ()
+
+    extents: list[tuple[int, int]] = []
+    logical_start = 0
+    while True:
+        buffer = bytearray(
+            FIEMAP_HEADER.size + FIEMAP_EXTENT_BATCH * FIEMAP_EXTENT.size
+        )
+        FIEMAP_HEADER.pack_into(
+            buffer,
+            0,
+            logical_start,
+            (1 << 64) - 1 - logical_start,
+            FIEMAP_FLAG_SYNC,
+            0,
+            FIEMAP_EXTENT_BATCH,
+            0,
+        )
+        try:
+            fcntl.ioctl(descriptor, FIEMAP_IOCTL, buffer, True)
+        except OSError as error:
+            if error.errno in FIEMAP_UNSUPPORTED_ERRNOS:
+                return None
+            raise
+        _, _, _, mapped, _, _ = FIEMAP_HEADER.unpack_from(buffer)
+        if mapped == 0:
+            return None
+
+        last = False
+        next_logical_start = logical_start
+        for index in range(mapped):
+            offset = FIEMAP_HEADER.size + index * FIEMAP_EXTENT.size
+            (
+                logical,
+                physical,
+                length,
+                _,
+                _,
+                flags,
+                _,
+                _,
+                _,
+            ) = FIEMAP_EXTENT.unpack_from(buffer, offset)
+            if physical == 0 or length == 0 or flags & FIEMAP_UNACCOUNTABLE_FLAGS:
+                return None
+            extents.append((physical, length))
+            next_logical_start = max(next_logical_start, logical + length)
+            last = bool(flags & FIEMAP_EXTENT_LAST)
+        if last:
+            return tuple(extents)
+        if next_logical_start <= logical_start:
+            return None
+        logical_start = next_logical_start
+
+
+def merged_extent_bytes(extents: list[tuple[int, int]]) -> int:
+    total = 0
+    end = 0
+    for start, length in sorted(extents):
+        extent_end = start + length
+        if start >= end:
+            total += length
+        elif extent_end > end:
+            total += extent_end - end
+        end = max(end, extent_end)
+    return total
+
+
+def published_index_bytes(path: Path) -> int:
+    if sys.platform != "linux":
+        return logical_inode_index_bytes(path)
+
+    observed_inodes: set[tuple[int, int]] = set()
+    extents_by_device: dict[int, list[tuple[int, int]]] = {}
+    for entry in published_index_files(path):
+        with entry.open("rb") as file:
+            metadata = os.fstat(file.fileno())
+            identity = (metadata.st_dev, metadata.st_ino)
+            if identity in observed_inodes:
+                continue
+            observed_inodes.add(identity)
+            extents = linux_file_physical_extents(file.fileno())
+            if extents is None:
+                return logical_inode_index_bytes(path)
+            extents_by_device.setdefault(metadata.st_dev, []).extend(extents)
+    return sum(merged_extent_bytes(extents) for extents in extents_by_device.values())
 
 
 def immutable_tree_snapshot(path: Path) -> tuple[ImmutableTreeEntry, ...]:
@@ -459,14 +619,16 @@ def active_generation_meta_path(index_root: Path, expected_generation: str) -> P
 
 
 def refresh_snapshot(
-    search: dict[str, object], root: Path, env: dict[str, str]
+    search: dict[str, object], root: Path, env: dict[str, str],
+    *, cold_status: dict[str, object] | None = None,
 ) -> RefreshSnapshot:
     retrieval = search["retrieval"]
     generation_id = retrieval["generation_id"]
     indexed_documents = retrieval["indexed_documents"]
     deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
     while True:
-        status = run_json(["status", "--format=json"], env, root)
+        live_status = run_json(["status", "--format=json"], env, root)
+        status = live_status if cold_status is None else cold_status
         daemon = status["daemon"]
         job = daemon["jobs"]["core_refresh"]
         if (
@@ -481,6 +643,8 @@ def refresh_snapshot(
             raise RuntimeError(
                 f"refresh failed before publishing the queried generation: {job!r}"
             )
+        if cold_status is not None:
+            raise RuntimeError("retained cold publication disagrees with search")
         if time.monotonic() >= deadline:
             raise RuntimeError(
                 "refresh did not settle on the queried generation through the "
@@ -495,6 +659,8 @@ def refresh_snapshot(
         job["published_generation"] != generation_id
         or receipt["published_generation"] != generation_id
         or status["lexical"]["generation_id"] != generation_id
+        or live_status["lexical"]["generation_id"] != generation_id
+        or live_status["lexical"]["indexed_documents"] != indexed_documents
         or current["current_indexed_documents"] != indexed_documents
     ):
         raise RuntimeError(
@@ -534,32 +700,44 @@ def refresh_snapshot(
     )
 
 
-def start_daemon(
+def launch_daemon(
     root: Path,
     env: dict[str, str],
     affinity: set[int] | None = None,
 ) -> tuple[subprocess.Popen[bytes], object, object]:
     stdout_file = (root / "daemon.stdout").open("w+b")
-    stderr_file = (root / "daemon.stderr").open("w+b")
-    process = subprocess.Popen(
-        [
-            task_binary(env),
-            "daemon",
-            "run",
-            "--force",
-            "--loop-interval-seconds",
-            "300",
-            "--format=json",
-        ],
-        cwd=root,
-        env=env,
-        stdout=stdout_file,
-        stderr=stderr_file,
-        start_new_session=os.name == "posix",
-    )
-    if affinity is not None:
-        os.sched_setaffinity(process.pid, affinity)
-    deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
+    stderr_file = None
+    process = None
+    try:
+        stderr_file = (root / "daemon.stderr").open("w+b")
+        # Linux affinity is per calling thread and inherited across fork/exec.
+        # Set it before Popen, not on a child that may already have made workers.
+        original_affinity = os.sched_getaffinity(0) if affinity is not None else None
+        try:
+            if affinity is not None:
+                os.sched_setaffinity(0, affinity)
+            process = subprocess.Popen(
+                [task_binary(env), "daemon", "run", "--force",
+                 "--loop-interval-seconds", "300", "--format=json"],
+                cwd=root, env=env, stdout=stdout_file, stderr=stderr_file,
+                start_new_session=os.name == "posix",
+            )
+        finally:
+            if original_affinity is not None:
+                os.sched_setaffinity(0, original_affinity)
+        return process, stdout_file, stderr_file
+    except BaseException:
+        try:
+            if process is not None:
+                terminate_daemon_process(process)
+        finally:
+            stdout_file.close()
+            if stderr_file is not None:
+                stderr_file.close()
+        raise
+
+
+def wait_daemon_ready(process, stdout_file, stderr_file, root, env, deadline):
     last_status: object = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -571,12 +749,12 @@ def start_daemon(
                 stdout_file.read(),
                 stderr_file.read(),
             )
-            stdout_file.close()
-            stderr_file.close()
-            terminate_daemon_process(process)
             raise error
         try:
-            status = run_json(["daemon", "status", "--format=json"], env, root)
+            status = run_json(
+                ["daemon", "status", "--format=json"], env, root,
+                timeout_seconds=max(0.0, deadline - time.monotonic()),
+            )
             last_status = status
         except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
             time.sleep(0.02)
@@ -587,10 +765,10 @@ def start_daemon(
             if isinstance(daemon, dict)
             else {}
         )
-        if daemon.get("running") is True and endpoint.get("available") is True:
-            return process, stdout_file, stderr_file
+        if (daemon.get("running") is True and endpoint.get("available") is True
+                and time.monotonic() < deadline):
+            return
         time.sleep(0.02)
-    terminate_daemon_process(process)
     stdout_file.seek(0)
     stderr_file.seek(0)
     error = TimeoutError(
@@ -599,9 +777,109 @@ def start_daemon(
         f"stdout:\n{stdout_file.read().decode(errors='replace')}\n"
         f"stderr:\n{stderr_file.read().decode(errors='replace')}"
     )
-    stdout_file.close()
-    stderr_file.close()
     raise error
+
+
+def close_daemon(process, stdout_file, stderr_file) -> None:
+    try:
+        terminate_daemon_process(process)
+    finally:
+        stdout_file.close()
+        stderr_file.close()
+
+
+def start_daemon(root, env, affinity=None):
+    process, stdout_file, stderr_file = launch_daemon(root, env, affinity)
+    try:
+        wait_daemon_ready(
+            process, stdout_file, stderr_file, root, env,
+            time.monotonic() + COMMAND_TIMEOUT_SECONDS,
+        )
+        return process, stdout_file, stderr_file
+    except BaseException:
+        close_daemon(process, stdout_file, stderr_file)
+        raise
+
+
+def cold_job_completed(job: dict[str, object], request_id: str) -> bool:
+    if (
+        not isinstance(request_id, str) or not request_id
+        or job.get("request_id") != request_id
+        or job.get("owner") != "daemon" or job.get("trigger") != "periodic"
+        or job.get("trigger_provenance") != "daemon_scheduler"
+        or job.get("previous_generation") is not None
+    ):
+        raise RuntimeError(f"cold startup request identity changed or is warm: {job!r}")
+    if job.get("status") in {"failed", "retry_backoff", "cancelled", "canceled"}:
+        raise RuntimeError(f"cold startup request failed: {job!r}")
+    if job.get("status") != "completed":
+        return False
+    receipt = job.get("receipt")
+    if (
+        job.get("request_state") != "published"
+        or job.get("generation_changed") is not True
+        or not isinstance(receipt, dict)
+        or receipt.get("outcome") != "completed"
+        or receipt.get("previous_generation") is not None
+        or receipt.get("generation_changed") is not True
+        or not job.get("published_generation")
+        or receipt.get("published_generation") != job["published_generation"]
+        or not isinstance(receipt.get("current"), dict)
+        or job.get("timings_us", {}).get("scan_stage", 0) <= 0
+    ):
+        raise RuntimeError(f"cold startup omitted a changed publication receipt: {job!r}")
+    return True
+
+
+def start_cold_daemon(root, env, affinity=None, *, timeout_seconds=COMMAND_TIMEOUT_SECONDS):
+    data = Path(env["CTX_DATA_ROOT"])
+    journal = data / "daemon/jobs/core-refresh.json"
+    if (data / "search/lexical/active-generation.json").exists() or journal.exists():
+        raise RuntimeError("cold startup requires a fresh generation and job root")
+    started = time.monotonic()
+    process, stdout_file, stderr_file = launch_daemon(root, env, affinity)
+    try:
+        sampler = DaemonSampler(process.pid, started, lifetime=True)
+        request_id = None
+        deadline = started + timeout_seconds
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError("daemon exited before cold publication")
+            sampler.sample()
+            try:
+                job = json.loads(journal.read_bytes())
+            except FileNotFoundError:
+                if request_id is not None:
+                    raise RuntimeError("observed cold startup request disappeared")
+            else:
+                if request_id is None:
+                    request_id = job.get("request_id")
+                if cold_job_completed(job, request_id):
+                    cold = sampler.finish(job)
+                    break
+            time.sleep(0.002)
+        else:
+            raise TimeoutError("cold startup did not complete its first publication")
+        # Observe publication even if it precedes endpoint readiness. No blocking
+        # readiness command may hide startup CPU or extend the cold interval.
+        wait_daemon_ready(process, stdout_file, stderr_file, root, env, deadline)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("cold startup exhausted its launch deadline")
+        status = run_json(
+            ["status", "--format=json"], env, root, timeout_seconds=remaining,
+        )
+        if time.monotonic() >= deadline:
+            raise TimeoutError("cold status exceeded its launch deadline")
+        selected = status["daemon"]["jobs"]["core_refresh"]
+        if (status["daemon"]["mode"] != "source-refresh-only"
+                or not cold_job_completed(selected, request_id)
+                or selected["receipt"] != job["receipt"]):
+            raise RuntimeError("ready status lost the observed cold publication")
+        return process, stdout_file, stderr_file, cold, status
+    except BaseException:
+        close_daemon(process, stdout_file, stderr_file)
+        raise
 
 
 def terminate_daemon_process(process: subprocess.Popen[bytes]) -> None:
@@ -657,9 +935,7 @@ def stop_daemon(
     env: dict[str, str],
 ) -> None:
     daemon_pid = process.pid
-    terminate_daemon_process(process)
-    stdout_file.close()
-    stderr_file.close()
+    close_daemon(process, stdout_file, stderr_file)
     status = run_json(["daemon", "status", "--format=json"], env, root)
     daemon = status.get("daemon", {})
     if isinstance(daemon, dict) and daemon.get("running") is True:

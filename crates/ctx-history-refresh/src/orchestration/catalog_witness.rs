@@ -1,23 +1,23 @@
 use super::*;
+use ctx_history_index::VerifiedGenerationSnapshot;
 
-pub(super) fn retained_catalog_witness(
-    retained_generation: Option<&VerifiedIndex>,
-) -> Result<(
+pub(super) type RetainedGenerationState = (
     Option<ExplicitSourceCatalogAuthority>,
     Vec<ExplicitSourceCatalogRouteBinding>,
-)> {
+    BTreeMap<SourceRouteIdentity, Vec<u8>>,
+);
+
+pub(super) fn retained_generation_state(
+    retained_generation: Option<&VerifiedGenerationSnapshot>,
+) -> Result<RetainedGenerationState> {
     let Some(generation) = retained_generation else {
-        return Ok((None, Vec::new()));
+        return Ok((None, Vec::new(), BTreeMap::new()));
     };
-    if generation.publication_metadata().is_none() {
-        return Ok((None, Vec::new()));
-    }
-    let metadata = SourceBackedPublicationMetadata::decode(generation)
-        .context("decode retained explicit catalog generation witness")?;
-    let receipt = published_refresh_receipt_for_index(&metadata.response_value(), generation)
-        .context("validate retained explicit catalog generation witness")?;
+    let state = SourceBackedGenerationState::decode_from_manifest(generation.manifest())
+        .context("decode retained source-backed generation state")?;
     Ok((
-        receipt.published_explicit_source_catalog,
-        receipt.catalog_route_bindings,
+        state.applied_explicit_source_catalog().cloned(),
+        state.catalog_route_bindings().to_vec(),
+        state.route_controls().clone(),
     ))
 }

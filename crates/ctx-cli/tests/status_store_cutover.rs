@@ -12,7 +12,7 @@ fn pristine_status_doctor_and_mcp_status_create_nothing() {
             .args(["status", "--format=json"])
             .env("CTX_DATA_ROOT", &data_root),
     );
-    assert_eq!(status["schema_version"], 2);
+    assert_eq!(status["schema_version"], 3);
     assert_eq!(status["indexing"]["mode"], "auto");
     assert_eq!(status["initialized"], false);
     assert_eq!(
@@ -31,7 +31,7 @@ fn pristine_status_doctor_and_mcp_status_create_nothing() {
             .env("CTX_DATA_ROOT", &data_root),
     );
     assert_eq!(doctor["schema_version"], 1);
-    assert_eq!(doctor["source_epoch"]["schema_version"], 2);
+    assert_eq!(doctor["source_epoch"]["schema_version"], 3);
     assert!(!data_root.exists(), "doctor created a pristine data root");
 
     let data_root_text = data_root.to_string_lossy().into_owned();
@@ -58,7 +58,11 @@ fn pristine_status_doctor_and_mcp_status_create_nothing() {
         &[("CTX_DATA_ROOT", data_root_text.as_str())],
     );
     let mcp_status = &responses[1]["result"]["structuredContent"];
-    assert_eq!(mcp_status["schema_version"], 2);
+    assert_eq!(mcp_status["schema_version"], 3);
+    for report in [&status, &doctor["source_epoch"], mcp_status] {
+        assert!(report.get("local_only").is_none(), "{report}");
+        assert!(report.get("localOnly").is_none(), "{report}");
+    }
     assert!(
         !data_root.exists(),
         "MCP status created a pristine data root"

@@ -14,6 +14,79 @@ fn test_config(cache_dir: &Path) -> SemanticModelConfig {
 }
 
 #[test]
+fn passive_invalid_backend_preference_is_a_typed_configuration_failure() {
+    let temporary = tempfile::tempdir().unwrap();
+    let config = test_config(temporary.path())
+        .with_backend_preference_error("invalid passive backend fixture".to_owned());
+    let error = SharedSemanticRuntime::default()
+        .ensure_loaded_passively(&config)
+        .expect_err("invalid passive configuration must fail before backend loading");
+    let typed = error
+        .downcast_ref::<SemanticPassiveConfigurationError>()
+        .expect("passive configuration error must retain its type");
+    assert!(typed
+        .to_string()
+        .contains("invalid passive backend fixture"));
+}
+
+#[test]
+fn passive_missing_cpu_cache_is_typed_and_does_not_create_the_cache() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cache = temporary.path().join("missing-cache");
+    let config = test_config(&cache).with_backend_preference(SemanticBackendPreference::Cpu);
+    let error = SharedSemanticRuntime::default()
+        .ensure_loaded_passively(&config)
+        .expect_err("passive loading cannot provision an absent cache");
+    error
+        .downcast_ref::<SemanticPassiveLoadUnavailable>()
+        .expect("passive cache misses must retain their retryable unavailable type");
+    assert!(!cache.exists());
+}
+
+#[test]
+fn passive_final_backend_failure_retains_retryable_unavailable_type() {
+    let error = passive::passive_load_result::<()>(
+        "coreml",
+        Err(anyhow::anyhow!("cached Core ML canary failed")),
+    )
+    .expect_err("final passive authorization failures must be typed unavailable");
+    let unavailable = error
+        .downcast_ref::<SemanticPassiveLoadUnavailable>()
+        .expect("final passive failure must retain its unavailable type");
+    assert!(unavailable
+        .to_string()
+        .contains("cached Core ML canary failed"));
+}
+
+#[test]
+fn passive_integrity_failure_is_not_mapped_to_retryable_unavailable() {
+    let error = passive::passive_load_result::<()>(
+        "cpu",
+        Err(SemanticCpuModelIntegrityError("corrupt passive CPU cache".to_owned()).into()),
+    )
+    .expect_err("passive integrity failures must stay fatal");
+    assert!(semantic_model_acquisition_integrity_error(&error));
+    assert!(error
+        .downcast_ref::<SemanticPassiveLoadUnavailable>()
+        .is_none());
+}
+
+#[cfg(ctx_semantic_fastembed)]
+#[test]
+fn passive_auto_accelerator_integrity_failure_does_not_fall_back() {
+    let fallback_called = std::cell::Cell::new(false);
+    let integrity = SemanticCpuModelIntegrityError("corrupt accelerator cache".to_owned()).into();
+    let error = passive::passive_fallback_unless_integrity(Err::<(), _>(integrity), |_| {
+        fallback_called.set(true);
+        Ok(())
+    })
+    .expect_err("passive Auto must not hide accelerator integrity failures");
+
+    assert!(semantic_model_acquisition_integrity_error(&error));
+    assert!(!fallback_called.get());
+}
+
+#[test]
 fn fixed_shape_settings_are_strict() {
     assert_eq!(semantic_fixed_shape_from_values(None, None).unwrap(), None);
     assert_eq!(

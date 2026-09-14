@@ -138,23 +138,28 @@ pub struct SearchApplicationRequest {
 
 impl SearchApplicationRequest {
     fn retained_peer_read(&self) -> RetainedPeerRead {
-        let compact_selector = self
-            .plan
-            .request()
-            .session
-            .as_deref()
-            .is_some_and(reference_needs_retained_peer)
-            || self
-                .plan
-                .request()
-                .exclude_sessions
-                .iter()
-                .any(|selector| reference_needs_retained_peer(selector));
-        if self.compact_projection || compact_selector {
-            RetainedPeerRead::IfAvailable
-        } else {
-            RetainedPeerRead::Omit
-        }
+        retained_peer_read_for_search(self.plan.request(), self.compact_projection)
+    }
+}
+
+/// Selects the authority needed by both refresh-time pinning and query execution.
+/// Compact output and compact selectors must capture their peer with the target.
+pub fn retained_peer_read_for_search(
+    request: &SearchRequest,
+    compact_projection: bool,
+) -> RetainedPeerRead {
+    let compact_selector = request
+        .session
+        .as_deref()
+        .is_some_and(reference_needs_retained_peer)
+        || request
+            .exclude_sessions
+            .iter()
+            .any(|selector| reference_needs_retained_peer(selector));
+    if compact_projection || compact_selector {
+        RetainedPeerRead::IfAvailable
+    } else {
+        RetainedPeerRead::Omit
     }
 }
 

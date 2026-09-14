@@ -1,8 +1,5 @@
 #[cfg(test)]
-use std::{
-    collections::BTreeMap,
-    ffi::{OsStr, OsString},
-};
+use std::{collections::BTreeMap, ffi::OsStr};
 use std::{
     collections::BTreeSet,
     env, fs, io,
@@ -17,9 +14,9 @@ use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::{compact_json, composition::DaemonRuntimeConfig, DaemonTriggerCommandArg};
 #[cfg(test)]
-use crate::config::DAEMON_MODE_ENV;
-use crate::{compact_json, config::AppConfig, DaemonTriggerCommandArg};
+use ctx_app_config::DAEMON_MODE_ENV;
 
 #[cfg(test)]
 use super::runtime_limits::{DAEMON_AUTOSTART_OFF_ENV, DAEMON_BACKGROUND_CHILD_ENV};
@@ -62,9 +59,8 @@ pub(super) use handoff::{
 };
 pub use handoff::{
     begin_current_daemon_upgrade_handoff, begin_daemon_upgrade_handoff,
-    begin_legacy_daemon_upgrade_handoff, complete_replacement_daemon_handoff,
-    finish_replacement_daemon_handoff, mark_replacement_helper_handoff,
-    replacement_helper_owns_daemon_handoff, DaemonUpgradeHandoff,
+    complete_replacement_daemon_handoff, finish_replacement_daemon_handoff,
+    mark_replacement_helper_handoff, DaemonUpgradeHandoff,
 };
 #[cfg(test)]
 use handoff::{read_daemon_upgrade_handoff, write_daemon_upgrade_handoff};

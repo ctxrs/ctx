@@ -4,6 +4,9 @@ use ctx_client_observability::analytics::PublicEventV1;
 #[path = "refresh_retry/durable_retry.rs"]
 mod durable_retry;
 
+#[path = "refresh_retry/terminal_status.rs"]
+mod terminal_status;
+
 fn enqueue_synthetic_refresh_successor(
     coordinator: &CoreRefreshEngine,
     data_root: &Path,
@@ -50,6 +53,62 @@ fn run_source_refresh_cycle(
         Some(coordinator),
     )
     .unwrap()
+}
+
+#[test]
+fn pending_admission_response_does_not_create_a_refresh_failure_or_retry_delay() {
+    for mode in [DaemonMode::Full, DaemonMode::SourceRefreshOnly] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = Arc::clone(&calls);
+        let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+            move |execution: SourceBackedRefreshExecution<'_>| {
+                execution_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(publish_empty_authoritative_generation(&execution))
+            },
+        ));
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let admission = coordinator
+            .submit(
+                &data_root,
+                ctx_history_refresh::RefreshRequest::automatic(
+                    request_id.clone(),
+                    ctx_history_refresh::RefreshRequestTrigger::Import,
+                ),
+            )
+            .unwrap();
+        let before = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+        let mut runtime = DaemonRuntime::default();
+        runtime.config.daemon.mode = mode;
+        let waiting = run_source_refresh_cycle(&data_root, &mut runtime, &coordinator);
+        assert!(
+            !waiting.failed,
+            "pending acknowledgement is not a refresh failure"
+        );
+        assert!(!waiting.did_work);
+        assert_eq!(runtime.history_retry.consecutive_failures, 0);
+        assert!(runtime.history_retry.ready());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap(),
+            before,
+            "a scheduler wait must preserve the engine's durable admission"
+        );
+        admission.into_parts().1.unwrap().release(&coordinator);
+        coordinator
+            .complete_pending_admission_for_test(&data_root, &request_id, BTreeMap::new())
+            .unwrap();
+        let published = run_source_refresh_cycle(&data_root, &mut runtime, &coordinator);
+        assert!(!published.failed);
+        assert!(published.did_work);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            coordinator.status_for_test(&request_id).unwrap()["request_state"],
+            "published"
+        );
+    }
 }
 
 #[test]
@@ -340,8 +399,10 @@ fn terminal_admission_fence_failure_releases_root_before_exact_dirty_route_runs(
                 "op": "source_refresh_request",
                 "request_id": request_id,
                 "mode": "wait",
-                "operation": "refresh",
-                "fresh_after_admitted_snapshot": true,
+                "refresh_intent": {
+                    "kind": "selected_import",
+                    "selection": {"kind": "all"},
+                },
             }),
         )
         .unwrap()
@@ -450,8 +511,10 @@ fn persistent_admission_status_failure_uses_scheduler_backoff() {
                 "op": "source_refresh_request",
                 "request_id": request_id,
                 "mode": "wait",
-                "operation": "refresh",
-                "fresh_after_admitted_snapshot": true,
+                "refresh_intent": {
+                    "kind": "selected_import",
+                    "selection": {"kind": "all"},
+                },
             }),
         )
         .unwrap()
@@ -584,7 +647,7 @@ fn persistent_terminal_status_failure_retries_without_reexecution_or_hot_spin() 
 }
 
 #[test]
-fn scheduler_retries_post_route_finalization_once_and_notifies_generation_once() {
+fn scheduler_retries_terminal_persistence_once_and_notifies_generation_once() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -592,10 +655,11 @@ fn scheduler_retries_post_route_finalization_once_and_notifies_generation_once()
     let execution_count = Arc::clone(&executions);
     let executor = Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
         execution_count.fetch_add(1, Ordering::SeqCst);
-        let commit = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+        let writer = GenerationWriter::open(execution.index_root, WriterOptions::default())?
             .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?
-            .commit(|_| true)?;
+            .map_err(crate::committed_generation_recovery_error)?;
+        let (commit, _, verified_index) =
+            commit_source_backed_generation_for_test(writer)?.into_parts();
         Ok(SourceBackedRefreshPublication {
             generation_id: commit.generation_id,
             published_explicit_source_catalog: None,
@@ -607,16 +671,16 @@ fn scheduler_retries_post_route_finalization_once_and_notifies_generation_once()
             route_results: Vec::new(),
             zero_source_authority: Vec::new(),
             catalog_route_bindings: Vec::new(),
-            verified_index: None,
+            verified_index: Some(Arc::new(verified_index)),
         })
     });
     let terminal_failures = Arc::new(AtomicUsize::new(0));
     let failures = Arc::clone(&terminal_failures);
     let writer = Arc::new(move |path: &Path, job: &Value| {
         if job.get("request_state").and_then(Value::as_str) == Some("published")
-            && failures.fetch_add(1, Ordering::SeqCst) == 1
+            && failures.fetch_add(1, Ordering::SeqCst) == 0
         {
-            anyhow::bail!("injected scheduler route-finalization persistence failure");
+            anyhow::bail!("injected scheduler terminal persistence failure");
         }
         write_daemon_job_status(path, job)
     });
@@ -647,8 +711,7 @@ fn scheduler_retries_post_route_finalization_once_and_notifies_generation_once()
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     assert_eq!(notification.calls.load(Ordering::SeqCst), 0);
     let pending = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
-    assert_eq!(pending["request_state"], "published");
-    assert_eq!(pending["route_finalization_pending"], true);
+    assert_ne!(pending["request_state"], "published");
 
     let mut retry = run_pending_core_refresh(
         &data_root,
@@ -670,11 +733,10 @@ fn scheduler_retries_post_route_finalization_once_and_notifies_generation_once()
         [PublicEventV1::ProviderRefreshCompleted(_)]
     ));
     assert_eq!(executions.load(Ordering::SeqCst), 1);
-    assert_eq!(terminal_failures.load(Ordering::SeqCst), 3);
+    assert_eq!(terminal_failures.load(Ordering::SeqCst), 2);
     assert_eq!(notification.calls.load(Ordering::SeqCst), 1);
     let terminal = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
     assert_eq!(terminal["request_state"], "published");
-    assert!(terminal.get("route_finalization_pending").is_none());
     assert!(terminal.get("last_error").is_none());
     assert!(terminal.get("failure_type").is_none());
 }

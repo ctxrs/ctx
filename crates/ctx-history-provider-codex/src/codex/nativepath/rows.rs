@@ -228,9 +228,10 @@ pub(super) fn build_source_backed_event_row(
     Ok(Ok(CodexSourceBackedBuiltRowV0 {
         row: CodexCoreRecordDraft {
             raw_ordinal,
-            provider_event_identity: (!audit.selector_ambiguous(SelectorGroup::CallId))
-                .then_some(provider_event_identity)
-                .flatten(),
+            provider_event_identity: (!audit.selector_ambiguous(SelectorGroup::CallId)
+                && !audit.selector_ambiguous(SelectorGroup::ItemId))
+            .then_some(provider_event_identity)
+            .flatten(),
             provider_event_copy: None,
             occurred_at,
             event_type: semantic.event_type,
@@ -288,9 +289,10 @@ pub(super) fn build_source_backed_sparse_output_row(
         .flatten();
     Ok(Some(CodexCoreRecordDraft {
         raw_ordinal,
-        provider_event_identity: (!audit.selector_ambiguous(SelectorGroup::CallId))
-            .then_some(provider_event_identity)
-            .flatten(),
+        provider_event_identity: (!audit.selector_ambiguous(SelectorGroup::CallId)
+            && !audit.selector_ambiguous(SelectorGroup::ItemId))
+        .then_some(provider_event_identity)
+        .flatten(),
         provider_event_copy,
         occurred_at,
         event_type: result_event_type,
@@ -312,6 +314,7 @@ fn codex_invocation_activity(
 ) -> Option<CoreActivity> {
     let facts = audit.facts().to_vec();
     if audit.selector_ambiguous(SelectorGroup::CallId)
+        || audit.selector_ambiguous(SelectorGroup::ItemId)
         || audit.selector_ambiguous(SelectorGroup::ToolName)
         || audit.selector_ambiguous(SelectorGroup::McpTool)
     {
@@ -364,7 +367,9 @@ fn codex_result_activity(
     occurred_at: DateTime<Utc>,
 ) -> Option<CoreActivity> {
     let facts = audit.facts().to_vec();
-    if audit.selector_ambiguous(SelectorGroup::CallId) {
+    if audit.selector_ambiguous(SelectorGroup::CallId)
+        || audit.selector_ambiguous(SelectorGroup::ItemId)
+    {
         return facts_only_activity(facts);
     }
     let call_id = call_id
@@ -494,7 +499,10 @@ pub(super) fn audit_codex_record(raw_record: &[u8]) -> serde_json::Result<RawJso
 fn codex_selector_group(key: &str) -> Option<SelectorGroup> {
     match key {
         "type" => Some(SelectorGroup::Type),
-        "id" | "call_id" | "callId" => Some(SelectorGroup::CallId),
+        // Response-item identity and invocation linkage are independent fields.
+        "id" => Some(SelectorGroup::ItemId),
+        "call_id" => Some(SelectorGroup::CallId),
+        "callId" => Some(SelectorGroup::CallIdAlias),
         "name" => Some(SelectorGroup::ToolName),
         "arguments" | "input" | "args" => Some(SelectorGroup::Arguments),
         "output" | "result" => Some(SelectorGroup::Result),

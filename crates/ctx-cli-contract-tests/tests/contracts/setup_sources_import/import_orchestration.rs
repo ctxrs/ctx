@@ -1,14 +1,18 @@
 use super::{
-    assert_daemon_process_running, assert_no_daemon_autostart_mutation, ctx, support::*,
-    wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
+    assert_daemon_process_running, ctx, support::*, wait_for_daemon_status,
+    write_active_daemon_upgrade_handoff, write_codex_setup_session,
 };
 use std::{
     io::Read,
     process::{Child, Command as StdCommand, Stdio},
 };
 
+#[path = "import_orchestration/cancellation.rs"]
+mod cancellation;
 #[path = "import_orchestration/relocation.rs"]
 mod relocation;
+#[path = "import_orchestration/semantic_failure.rs"]
+mod semantic_failure;
 
 struct SourceRefreshDaemon {
     child: Option<Child>,
@@ -29,13 +33,35 @@ impl Drop for SourceRefreshDaemon {
 }
 
 fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
-    bind_test_ctx_binary(temp);
-    fs::create_dir_all(data_root(temp)).unwrap();
-    fs::write(
-        data_root(temp).join("config.toml"),
+    start_source_refresh_daemon_with_config(
+        temp,
+        "full",
         "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
     )
-    .unwrap();
+}
+
+fn start_source_refresh_daemon_with_semantic_executor(
+    temp: &TempDir,
+    mode: &str,
+    semantic_executor: &str,
+) -> SourceRefreshDaemon {
+    start_source_refresh_daemon_with_config(
+        temp,
+        mode,
+        &format!(
+            "[daemon]\nenabled = true\nmode = \"{mode}\"\n\n[search]\nsemantic = true\n\n[semantic]\nexecutor = \"{semantic_executor}\"\nspace_id = \"ctx-contract-test-space\"\ndimensions = 7\n"
+        ),
+    )
+}
+
+fn start_source_refresh_daemon_with_config(
+    temp: &TempDir,
+    mode: &str,
+    config: &str,
+) -> SourceRefreshDaemon {
+    bind_test_ctx_binary(temp);
+    fs::create_dir_all(data_root(temp)).unwrap();
+    fs::write(data_root(temp).join("config.toml"), config).unwrap();
     let binary = copied_ctx_binary(temp);
     let prepared = ctx_from_binary(temp, &binary);
     let mut command = StdCommand::new(prepared.get_program());
@@ -51,7 +77,7 @@ fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
     }
     command
         .args(["daemon", "run", "--force", "--loop-interval-seconds", "600"])
-        .env("CTX_DAEMON_MODE", "full")
+        .env("CTX_DAEMON_MODE", mode)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let spawn_deadline = Instant::now() + Duration::from_secs(1);
@@ -284,35 +310,6 @@ fn manual_exact_noop_repairs_legacy_permissive_control_state() {
         published_generation(&initial)
     );
     assert_private_index_control_state(&temp);
-}
-
-#[test]
-fn deprecated_partial_remains_a_noop_without_bypassing_daemon_only_writes() {
-    let temp = tempdir();
-    write_codex_setup_session(&temp);
-    let source_root = temp.path().join(".codex").join("sessions");
-
-    ctx(&temp)
-        .args([
-            "import",
-            "--partial",
-            "--quiet",
-            "--provider",
-            "codex",
-            "--path",
-            source_root.to_str().unwrap(),
-            "--no-daemon",
-            "--progress",
-            "none",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--partial is deprecated"))
-        .stderr(predicate::str::contains(
-            "tolerant import is always enabled",
-        ))
-        .stderr(predicate::str::contains("no foreground writer was started"));
-    assert_no_daemon_autostart_mutation(&temp);
 }
 
 #[test]

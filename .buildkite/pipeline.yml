@@ -158,6 +158,7 @@ steps:
     artifact_paths:
       - "target/public-cli-native-smoke/macos-arm64/candidate-smoke.json"
       - "target/public-cli-native-smoke/macos-arm64/ctx-macos-arm64.native-execution.json"
+      - "target/public-cli-native-smoke/macos-arm64/ctx-macos-arm64.signing.json"
 
   - label: ":test_tube: public CLI macos-x64 exact-byte validation"
     key: "public-cli-macos-x64-native-smoke"
@@ -178,6 +179,7 @@ steps:
     artifact_paths:
       - "target/public-cli-native-smoke/macos-x64/candidate-smoke.json"
       - "target/public-cli-native-smoke/macos-x64/ctx-macos-x64.native-execution.json"
+      - "target/public-cli-native-smoke/macos-x64/ctx-macos-x64.signing.json"
 
   - label: ":package: Semantic macos-x64 runtime"
     key: "public-cli-macos-x64-runtime-producer"
@@ -237,6 +239,12 @@ steps:
       buildkite-agent artifact download "target/public-cli-native-smoke/macos-arm64/ctx-macos-arm64.native-execution.json" . --step public-cli-macos-arm64-native-smoke
       buildkite-agent artifact download "target/public-cli-native-smoke/macos-x64/ctx-macos-x64.native-execution.json" . --step public-cli-macos-x64-native-smoke
       buildkite-agent artifact download "target/public-cli-native-smoke/windows-x64/ctx-windows-x64.native-execution.json" . --step public-cli-windows-x64-native-smoke
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
+        "target/public-cli-native-smoke/macos-arm64/ctx-macos-arm64.signing.json" . \
+        --step public-cli-macos-arm64-native-smoke
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
+        "target/public-cli-native-smoke/macos-x64/ctx-macos-x64.signing.json" . \
+        --step public-cli-macos-x64-native-smoke
       CTX_PUBLIC_RELEASE_SOURCE_COMMIT="$${source_commit}" \
         scripts/stage-github-release-assets.sh \
           target/public-cli-artifacts \

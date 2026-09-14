@@ -205,3 +205,6 @@ pub fn read_daemon_job_status_strict(path: &Path) -> Result<Option<Value>> {
         .with_context(|| format!("decode durable daemon job status {}", path.display()))
         .map(Some)
 }
+
+#[cfg(test)]
+mod tests;

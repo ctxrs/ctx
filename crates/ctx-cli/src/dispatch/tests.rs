@@ -1,19 +1,35 @@
-use std::{
-    io::Write,
-    sync::{Arc, Mutex},
-};
+use std::io::Write;
 
 use clap::Parser as _;
 
 use super::*;
 use crate::cli::Cli;
+use crate::dispatch::test_support::pipe_ui;
 use crate::operation_descriptor::LocalUsageOperation;
-use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext};
+use crate::ui::ColorMode;
 
 fn daemon_autostart_trigger(args: &[&str]) -> Option<DaemonTriggerCommandArg> {
     let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
         .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
     command_daemon_autostart_trigger(&cli.command)
+}
+
+#[test]
+fn explicit_man_generation_skips_automatic_man_reconciliation() {
+    for (args, expected) in [
+        (&["docs", "man", "--out", "/tmp/man"][..], false),
+        (&["docs", "man", "--print", "ctx"][..], false),
+        (&["docs", "list"][..], true),
+        (&["status"][..], true),
+    ] {
+        let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+            .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        assert_eq!(
+            should_reconcile_man_pages(&cli.command),
+            expected,
+            "{args:?}"
+        );
+    }
 }
 
 #[test]
@@ -101,56 +117,11 @@ fn show_commands_are_typed_and_status_and_stats_are_excluded_from_local_usage() 
     }
 }
 
-#[test]
-fn query_authority_error_json_is_scoped_to_machine_search_show_and_locate() {
-    for (args, expected) in [
-        (&["search", "authority", "--format=json"][..], true),
-        (&["show", "event", "bad", "--format=json"][..], true),
-        (&["locate", "event", "bad", "--format=json"][..], true),
-        (&["search", "authority"][..], false),
-        (&["status", "--format=json"][..], false),
-    ] {
-        let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
-            .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
-        let json_output = command_json_output(&cli.command);
-        assert_eq!(
-            command_uses_query_authority_error_json(&cli.command, json_output),
-            expected,
-            "{args:?}"
-        );
-    }
-}
-
-#[derive(Clone, Default)]
-struct SharedBytes(Arc<Mutex<Vec<u8>>>);
-
-impl SharedBytes {
-    fn bytes(&self) -> Vec<u8> {
-        self.0.lock().map(|bytes| bytes.clone()).unwrap_or_default()
-    }
-}
-
-impl Write for SharedBytes {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| io::Error::other("shared test writer was poisoned"))?
-            .extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn forced_color_test_ui(stderr: SharedBytes) -> Ui {
-    Ui::with_writers(
-        SharedBytes::default(),
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always)),
-        stderr,
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
-    )
+fn rendered_generic_error(error: &anyhow::Error, machine: bool, color: ColorMode) -> Vec<u8> {
+    let (mut ui, _, stderr) = pipe_ui(color);
+    render_generic_command_error(error, machine, &mut ui).unwrap();
+    ui.flush().unwrap();
+    stderr.bytes()
 }
 
 #[test]
@@ -163,13 +134,11 @@ fn clap_value_errors_use_the_selected_stderr_stream_with_contextual_usage() {
         .collect::<Vec<_>>();
     parse::attach_value_validation_usage(&mut error, &os_arguments);
 
-    let stderr = SharedBytes::default();
-    let stderr_copy = stderr.clone();
-    let mut ui = forced_color_test_ui(stderr);
+    let (mut ui, _, stderr) = pipe_ui(ColorMode::Always);
     write_clap_output(&error, &mut ui).unwrap();
     ui.flush().unwrap();
 
-    let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
+    let rendered = String::from_utf8(stderr.bytes()).unwrap();
     assert!(rendered.contains('\u{1b}'));
     let mut stripped = anstream::StripStream::new(Vec::new());
     stripped.write_all(rendered.as_bytes()).unwrap();
@@ -196,18 +165,12 @@ fn forced_color_never_decorates_generic_machine_mode_errors() {
             "{args:?}"
         );
 
-        let styled_stderr = SharedBytes::default();
-        let styled_stderr_copy = styled_stderr.clone();
-        let mut ui = forced_color_test_ui(styled_stderr);
-        render_generic_command_error(
+        let machine_stderr = rendered_generic_error(
             &anyhow::anyhow!("representative command failure"),
             true,
-            &mut ui,
-        )
-        .unwrap();
-        ui.flush().unwrap();
+            ColorMode::Always,
+        );
 
-        let machine_stderr = styled_stderr_copy.bytes();
         assert!(!machine_stderr.contains(&0x1b), "{args:?}");
         assert!(String::from_utf8_lossy(&machine_stderr)
             .starts_with("Error: representative command failure"));
@@ -216,35 +179,256 @@ fn forced_color_never_decorates_generic_machine_mode_errors() {
 
 #[test]
 fn forced_color_still_styles_generic_human_mode_errors() {
-    let styled_stderr = SharedBytes::default();
-    let styled_stderr_copy = styled_stderr.clone();
-    let mut ui = forced_color_test_ui(styled_stderr);
-
-    render_generic_command_error(&anyhow::anyhow!("human command failure"), false, &mut ui)
-        .unwrap();
-    ui.flush().unwrap();
-
-    assert!(styled_stderr_copy.bytes().contains(&0x1b));
+    let rendered = rendered_generic_error(
+        &anyhow::anyhow!("human command failure"),
+        false,
+        ColorMode::Always,
+    );
+    assert!(rendered.contains(&0x1b));
 }
 
 #[test]
 fn generic_human_errors_include_the_actionable_cause_chain() {
-    let stderr = SharedBytes::default();
-    let stderr_copy = stderr.clone();
-    let mut ui = Ui::with_writers(
-        SharedBytes::default(),
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Never)),
-        stderr,
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Never)),
-    );
     let error = anyhow::anyhow!("No such file or directory")
         .context("approve explicit source path /tmp/missing.jsonl");
-
-    render_generic_command_error(&error, false, &mut ui).unwrap();
-    ui.flush().unwrap();
-
-    let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
+    let rendered =
+        String::from_utf8(rendered_generic_error(&error, false, ColorMode::Never)).unwrap();
     assert!(rendered.contains("approve explicit source path /tmp/missing.jsonl"));
     assert!(rendered.contains("No such file or directory"));
     assert!(!rendered.contains("Stack backtrace"));
+}
+
+struct SemanticCompletionErrorCase {
+    name: &'static str,
+    error: ctx_daemon_cli::SemanticCompletionError,
+    reason: &'static str,
+    retryable: bool,
+    active_generation_id: Option<&'static str>,
+    failure_class: Option<&'static str>,
+}
+
+fn semantic_completion_error_cases() -> Vec<SemanticCompletionErrorCase> {
+    use ctx_daemon_cli::{SemanticCompletionError, SemanticFailureClass};
+
+    vec![
+        SemanticCompletionErrorCase {
+            name: "contract",
+            error: SemanticCompletionError::Contract {
+                generation_id: "core-contract".to_owned(),
+                source: anyhow::anyhow!("contract detail"),
+            },
+            reason: "semantic_completion_contract_invalid",
+            retryable: false,
+            active_generation_id: None,
+            failure_class: None,
+        },
+        SemanticCompletionErrorCase {
+            name: "core_superseded",
+            error: SemanticCompletionError::CoreSuperseded {
+                generation_id: "core-superseded".to_owned(),
+                active_generation_id: "core-active".to_owned(),
+                retryable: true,
+            },
+            reason: "semantic_completion_generation_superseded",
+            retryable: true,
+            active_generation_id: Some("core-active"),
+            failure_class: None,
+        },
+        SemanticCompletionErrorCase {
+            name: "checkpoint",
+            error: SemanticCompletionError::Checkpoint {
+                generation_id: "core-checkpoint".to_owned(),
+                source: anyhow::anyhow!("checkpoint detail"),
+            },
+            reason: "semantic_completion_interrupted",
+            retryable: false,
+            active_generation_id: None,
+            failure_class: None,
+        },
+        SemanticCompletionErrorCase {
+            name: "preflight",
+            error: SemanticCompletionError::Preflight {
+                generation_id: "core-preflight".to_owned(),
+                retryable: true,
+                source: anyhow::anyhow!("preflight detail"),
+            },
+            reason: "semantic_completion_preflight_failed",
+            retryable: true,
+            active_generation_id: None,
+            failure_class: None,
+        },
+        SemanticCompletionErrorCase {
+            name: "reconciliation",
+            error: SemanticCompletionError::Reconciliation {
+                generation_id: "core-reconciliation".to_owned(),
+                retryable: false,
+                source: anyhow::anyhow!("reconciliation detail"),
+            },
+            reason: "semantic_completion_reconciliation_failed",
+            retryable: false,
+            active_generation_id: None,
+            failure_class: None,
+        },
+        SemanticCompletionErrorCase {
+            name: "daemon_activation",
+            error: SemanticCompletionError::DaemonActivationFailed {
+                generation_id: "core-activation".to_owned(),
+                detail: "activation detail".to_owned(),
+                retryable: true,
+            },
+            reason: "semantic_completion_activation_failed",
+            retryable: true,
+            active_generation_id: None,
+            failure_class: None,
+        },
+        SemanticCompletionErrorCase {
+            name: "daemon_configuration",
+            error: SemanticCompletionError::DaemonConfigurationFailed {
+                generation_id: "core-configuration".to_owned(),
+                detail: "configuration detail".to_owned(),
+                retryable: true,
+            },
+            reason: "semantic_completion_configuration_failed",
+            retryable: true,
+            active_generation_id: None,
+            failure_class: None,
+        },
+        SemanticCompletionErrorCase {
+            name: "daemon_job_with_failure_class",
+            error: SemanticCompletionError::DaemonJobFailed {
+                generation_id: "core-job-classified".to_owned(),
+                detail: "job detail".to_owned(),
+                retryable: true,
+                failure_class: Some(SemanticFailureClass::ResourcePressure),
+            },
+            reason: "semantic_completion_job_failed",
+            retryable: true,
+            active_generation_id: None,
+            failure_class: Some("resource_pressure"),
+        },
+        SemanticCompletionErrorCase {
+            name: "daemon_job_without_failure_class",
+            error: SemanticCompletionError::DaemonJobFailed {
+                generation_id: "core-job-unclassified".to_owned(),
+                detail: "unclassified job detail".to_owned(),
+                retryable: false,
+                failure_class: None,
+            },
+            reason: "semantic_completion_job_failed",
+            retryable: false,
+            active_generation_id: None,
+            failure_class: None,
+        },
+        SemanticCompletionErrorCase {
+            name: "no_progress",
+            error: SemanticCompletionError::NoProgress {
+                generation_id: "core-no-progress".to_owned(),
+                retryable: true,
+            },
+            reason: "semantic_completion_no_progress",
+            retryable: true,
+            active_generation_id: None,
+            failure_class: None,
+        },
+        SemanticCompletionErrorCase {
+            name: "observation_outage",
+            error: SemanticCompletionError::ObservationOutage {
+                generation_id: "core-outage".to_owned(),
+                detail: "observation detail".to_owned(),
+                retryable: true,
+            },
+            reason: "semantic_completion_observation_unavailable",
+            retryable: true,
+            active_generation_id: None,
+            failure_class: None,
+        },
+        SemanticCompletionErrorCase {
+            name: "postcondition",
+            error: SemanticCompletionError::Postcondition {
+                generation_id: "core-postcondition".to_owned(),
+                retryable: false,
+                source: anyhow::anyhow!("postcondition detail"),
+            },
+            reason: "semantic_completion_postcondition_failed",
+            retryable: false,
+            active_generation_id: None,
+            failure_class: None,
+        },
+    ]
+}
+
+#[test]
+fn semantic_completion_json_dispatch_covers_every_variant() {
+    for case in semantic_completion_error_cases() {
+        let generation_id = case.error.generation_id().to_owned();
+        let detail = case.error.to_string();
+        let result: Result<()> = Err(case.error.into());
+        let (mut ui, stdout, stderr) = pipe_ui(ColorMode::Always);
+        let rendered = render_command_result_error(&result, true, true, true, &mut ui)
+            .unwrap_or_else(|error| panic!("{} failed to render: {error:#}", case.name))
+            .unwrap_or_else(|| panic!("{} did not return a rendered error", case.name));
+        assert!(rendered.is::<RenderedJsonError>(), "{}", case.name);
+        ui.flush().unwrap();
+
+        assert!(stdout.bytes().is_empty(), "{}", case.name);
+        let stderr = stderr.bytes();
+        assert!(!stderr.contains(&0x1b), "{}", case.name);
+        let document: serde_json::Value = serde_json::from_slice(&stderr)
+            .unwrap_or_else(|error| panic!("{} stderr was not JSON: {error}", case.name));
+        assert_eq!(document["error"], detail, "{}", case.name);
+        assert_eq!(
+            document["error_code"], "semantic_completion_failed",
+            "{}",
+            case.name
+        );
+        assert_eq!(document["reason"], case.reason, "{}", case.name);
+        assert_eq!(document["generation_id"], generation_id, "{}", case.name);
+        assert_eq!(document["core_published"], true, "{}", case.name);
+        assert_eq!(document["retryable"], case.retryable, "{}", case.name);
+        assert_eq!(document["detail"], detail, "{}", case.name);
+        assert_eq!(
+            document
+                .get("active_generation_id")
+                .and_then(|value| value.as_str()),
+            case.active_generation_id,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            document
+                .get("failure_class")
+                .and_then(|value| value.as_str()),
+            case.failure_class,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            document.as_object().expect("error document object").len(),
+            7 + usize::from(case.active_generation_id.is_some())
+                + usize::from(case.failure_class.is_some()),
+            "{}",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn semantic_completion_human_dispatch_remains_generic() {
+    let error = ctx_daemon_cli::SemanticCompletionError::NoProgress {
+        generation_id: "core-human".to_owned(),
+        retryable: true,
+    };
+    let result: Result<()> = Err(error.into());
+    let (mut ui, stdout, stderr) = pipe_ui(ColorMode::Never);
+    let rendered = render_command_result_error(&result, false, false, false, &mut ui)
+        .unwrap()
+        .expect("human error must be rendered");
+    assert!(rendered.is::<RenderedCliError>());
+    ui.flush().unwrap();
+
+    assert!(stdout.bytes().is_empty());
+    let rendered = String::from_utf8(stderr.bytes()).unwrap();
+    assert!(rendered
+        .contains("daemon semantic completion made no progress for Core generation core-human"));
+    assert!(!rendered.contains("semantic_completion_failed"));
 }

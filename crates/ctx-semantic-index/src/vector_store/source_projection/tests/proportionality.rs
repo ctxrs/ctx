@@ -53,6 +53,7 @@ fn changed_logical_source_replay_work_is_measured_for_jsonl_and_sqlite() -> Resu
         let mut embedder = MarkerEmbedder::default();
         reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
 
+        embedder.fit_calls = 0;
         let append = reconcile_all(&mut store, &appended, &mut builder, &mut embedder)?;
         let append_bytes = encoded_record_bytes(&fixture, 0, &appended_bodies, 0)?;
         let appended_event_bytes = encoded_record_bytes(
@@ -65,6 +66,10 @@ fn changed_logical_source_replay_work_is_measured_for_jsonl_and_sqlite() -> Resu
         assert_eq!(append.record_bytes_decoded, append_bytes);
         assert_eq!(append.records_reused, LONG_SOURCE_RECORDS);
         assert_eq!(append.records_embedded, 1);
+        assert_eq!(
+            embedder.fit_calls, 1,
+            "only the appended document needs token fitting"
+        );
         assert!(append_bytes / appended_event_bytes >= 128);
         eprintln!(
             "semantic format={source_format} transition=one_event_append changed_events=1 decoded_records={} decoded_bytes={append_bytes} changed_record_bytes={appended_event_bytes} byte_amplification={}x",
@@ -75,13 +80,16 @@ fn changed_logical_source_replay_work_is_measured_for_jsonl_and_sqlite() -> Resu
         drop(store);
         let mut store =
             SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
+        embedder.fit_calls = 0;
         let restarted = reconcile_all(&mut store, &appended, &mut builder, &mut embedder)?;
         assert_eq!(restarted.records_decoded, 0);
+        assert_eq!(embedder.fit_calls, 0);
         assert_eq!(restarted.record_bytes_decoded, 0);
         eprintln!(
             "semantic format={source_format} transition=completed_restart decoded_records=0 decoded_bytes=0"
         );
 
+        embedder.fit_calls = 0;
         let replacement_outcome =
             reconcile_all(&mut store, &replacement, &mut builder, &mut embedder)?;
         let replacement_bytes = encoded_record_bytes(&fixture, 0, &replacement_bodies, 0)?;
@@ -96,6 +104,10 @@ fn changed_logical_source_replay_work_is_measured_for_jsonl_and_sqlite() -> Resu
         assert_eq!(replacement_outcome.record_bytes_decoded, replacement_bytes);
         assert_eq!(replacement_outcome.records_reused, LONG_SOURCE_RECORDS);
         assert_eq!(replacement_outcome.records_embedded, 1);
+        assert_eq!(
+            embedder.fit_calls, 1,
+            "only the replaced document needs token fitting"
+        );
         assert!(replacement_bytes / replaced_record_bytes >= 128);
         eprintln!(
             "semantic format={source_format} transition=one_record_replacement changed_events=1 decoded_records={} decoded_bytes={replacement_bytes} changed_record_bytes={replaced_record_bytes} byte_amplification={}x",

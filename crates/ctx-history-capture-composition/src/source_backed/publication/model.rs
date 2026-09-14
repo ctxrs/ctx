@@ -134,8 +134,8 @@ impl fmt::Debug for SourceBackedVerifiedPublication {
 }
 
 impl SourceBackedRefreshReceipt {
-    /// Takes the already-open verified pin returned by an opaque-metadata
-    /// publication. Legacy publication entry points intentionally return none.
+    /// Takes the already-open verified pin returned by a generation-state
+    /// publication. Plain capture entry points intentionally return none.
     pub fn take_verified_publication(
         &mut self,
     ) -> Option<(CapturePublicationDisposition, IndexCaptureVerifiedPin)> {
@@ -145,11 +145,11 @@ impl SourceBackedRefreshReceipt {
     }
 }
 
-/// Final capture-owned route facts made available to the control plane's
-/// opaque metadata factory immediately before terminal revalidation. Core
-/// binds the resulting bytes only when that complete source fence succeeds.
-pub struct SourceBackedPublicationMetadataContext<'a> {
-    publication: CapturePublicationContext<'a, BorrowedIndexManifestView<'a>>,
+/// Final capture-owned facts available while the generation manifest is still
+/// a draft. These facts intentionally carry no generation identity: their
+/// output participates in deciding that identity.
+pub struct SourceBackedGenerationStateContext<'a> {
+    snapshot: BorrowedIndexManifestView<'a>,
     selected_route_ids: &'a BTreeSet<SourceRouteIdentity>,
     failed_routes: &'a BTreeMap<SourceRouteIdentity, SourceBackedFailedRoute>,
     logical_source_failures: &'a SourceBackedLogicalSourceFailures,
@@ -160,10 +160,10 @@ pub struct SourceBackedPublicationMetadataContext<'a> {
     removed_source_count: usize,
 }
 
-impl<'a> SourceBackedPublicationMetadataContext<'a> {
+impl<'a> SourceBackedGenerationStateContext<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
-        publication: CapturePublicationContext<'a, BorrowedIndexManifestView<'a>>,
+        snapshot: BorrowedIndexManifestView<'a>,
         selected_route_ids: &'a BTreeSet<SourceRouteIdentity>,
         failed_routes: &'a BTreeMap<SourceRouteIdentity, SourceBackedFailedRoute>,
         logical_source_failures: &'a SourceBackedLogicalSourceFailures,
@@ -174,7 +174,7 @@ impl<'a> SourceBackedPublicationMetadataContext<'a> {
         removed_source_count: usize,
     ) -> Self {
         Self {
-            publication,
+            snapshot,
             selected_route_ids,
             failed_routes,
             logical_source_failures,
@@ -186,12 +186,8 @@ impl<'a> SourceBackedPublicationMetadataContext<'a> {
         }
     }
 
-    pub fn generation_id(&self) -> &str {
-        self.publication.generation_id()
-    }
-
     pub fn snapshot(&self) -> &BorrowedIndexManifestView<'a> {
-        self.publication.snapshot()
+        &self.snapshot
     }
 
     pub fn selected_route_ids(&self) -> impl ExactSizeIterator<Item = &SourceRouteIdentity> {

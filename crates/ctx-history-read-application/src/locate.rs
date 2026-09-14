@@ -3,6 +3,7 @@ use ctx_history_core::{CaptureProvider, SourceKey};
 use ctx_history_index_query::{CoreEventRecord, EventRecord, SessionRecord};
 use serde_json::{json, Value};
 
+use crate::event_read_model::EventReadView;
 use crate::generation::PinnedGenerationRead;
 use crate::json::compact_json;
 use crate::{
@@ -188,11 +189,7 @@ fn locate_session_read_model(session: &SessionRecord, first_event: &EventRecord)
 }
 
 fn locate_event_read_model(event: &CoreEventRecord) -> Value {
-    let (provider_key, source_id) = event
-        .custom_source_identity()
-        .map_or((None, None), |(provider_key, source_id)| {
-            (Some(provider_key), Some(source_id))
-        });
+    let view = EventReadView::new(event);
     compact_json(json!({
         "schema_version": 1,
         "target": "event",
@@ -200,14 +197,14 @@ fn locate_event_read_model(event: &CoreEventRecord) -> Value {
         "ctx_event_id": event.event_id.as_uuid(),
         "ctx_session_id": event.session_id.as_uuid(),
         "provider": event.provider,
-        "provider_key": provider_key,
-        "source_id": source_id,
+        "provider_key": view.provider_key,
+        "source_id": view.source_id,
         "provider_session_id": event.provider_session_id,
         "provider_event_id": event.native_event_id,
         "sequence": event.event_sequence,
         "event_type": event.event_type,
         "role": event.role,
-        "occurred_at": timestamp_json(event.occurred_at_unix_ms),
+        "occurred_at": view.occurred_at.as_deref(),
         "source": source_read_model(&event.source),
     }))
 }

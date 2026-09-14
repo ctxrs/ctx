@@ -145,10 +145,25 @@ sh_test(
 test_suite(
     name = "fault_qualification",
     tests = [
+        ":manifest_failure_reclaims_only_its_candidate_and_preserves_visible_publication",
         ":inactive_generation_and_atomic_pointer_process_death_matrix",
         ":injected_enospc_and_write_sync_failures_preserve_previous_generation",
         ":retry_after_pre_pointer_crash_reclaims_inactive_generation",
         ":retry_republishes_a_reclaimed_manifest_before_pointer_publication",
         ":writer_reopen_reclaims_abandoned_atomic_write_files",
     ],
+)
+
+sh_test(
+    name = "manifest_failure_reclaims_only_its_candidate_and_preserves_visible_publication",
+    srcs = ["run-bazel-linux-fault-test.sh"],
+    args = [
+        "$(rootpath //crates/ctx-history-index-qualification:source_backed_recovery_tests)",
+        "$(rootpath :libctx_source_recovery_fault.so)",
+        "manifest_failure::manifest_failure_reclaims_only_its_candidate_and_preserves_visible_publication",
+    ],
+    data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
+    size = "medium",
+    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS,
+    target_compatible_with = ["@platforms//os:linux"],
 )

@@ -112,6 +112,25 @@ fn verified_download_is_bounded_reusable_and_ephemeral() {
 }
 
 #[test]
+fn bounded_bytes_are_staged_once_as_a_retained_private_input() {
+    let root = private_tempdir();
+    let bytes = b"signed envelope or managed Core marker";
+    let mut artifact =
+        DownloadedArtifact::from_bytes(root.path(), bytes, bytes.len() as u64, "pair input")
+            .unwrap();
+    let path = artifact.retained_path().unwrap().to_path_buf();
+
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(artifact.byte_len(), bytes.len() as u64);
+    assert_eq!(artifact.sha256(), digest(bytes));
+    assert!(DownloadedArtifact::from_bytes(root.path(), b"", 1, "pair input").is_err());
+    assert!(DownloadedArtifact::from_bytes(root.path(), bytes, 1, "pair input").is_err());
+
+    drop(artifact);
+    assert!(!path.exists());
+}
+
+#[test]
 fn invalid_checksums_are_rejected_before_download_state() {
     let root = private_tempdir();
     for checksum in ["g".repeat(64), "0".repeat(64)] {

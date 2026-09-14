@@ -10,15 +10,63 @@ fn committed_generation_recovery_error(
 }
 
 mod composition;
-pub use composition::{install_host, AppConfig, DaemonCliHost, DaemonConfig, DaemonMode};
+pub use composition::{install_host, DaemonCliHost, DaemonConfig, DaemonMode, DaemonRuntimeConfig};
 pub use ctx_daemon_application::DaemonHostRunRequest;
 pub use ctx_daemon_runtime::apply_supervisor_environment_handoff;
-pub use ctx_daemon_service::{CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts};
+pub use ctx_daemon_service::{
+    CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts, SemanticFailureClass,
+};
 pub use ctx_semantic_model::{
     ExternalSemanticSpace, SemanticEmbeddingExecutorAuth, SemanticEmbeddingExecutorConfig,
     SemanticEmbeddingExecutorHandle, SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
     SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
 };
+
+#[cfg(test)]
+pub(crate) mod test_environment {
+    use std::{
+        ffi::{OsStr, OsString},
+        sync::{Mutex, MutexGuard},
+    };
+
+    static TEST_ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct EnvironmentGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvironmentGuard {
+        pub(crate) fn capture(names: &[&'static str]) -> Self {
+            let lock = TEST_ENVIRONMENT_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = names
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect();
+            Self { _lock: lock, saved }
+        }
+
+        pub(crate) fn set(&self, name: &'static str, value: Option<&OsStr>) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
 
 pub fn semantic_embedding_executor_auth_from_environment(
 ) -> anyhow::Result<SemanticEmbeddingExecutorAuth> {
@@ -59,40 +107,13 @@ fn daemon_environment_preserves_the_endpoint_bound_semantic_embedding_token() {
 
 #[cfg(test)]
 mod semantic_executor_auth_tests {
-    use std::{ffi::OsString, path::PathBuf};
+    use std::{ffi::OsStr, path::PathBuf};
 
     use ctx_semantic_model::{
         SemanticModelConfig, SemanticModelPaths, SemanticOnnxRuntimePaths, SharedSemanticRuntime,
     };
 
     use super::*;
-
-    struct RestoreEnvironment {
-        token: Option<OsString>,
-        binding: Option<OsString>,
-    }
-
-    impl RestoreEnvironment {
-        fn capture() -> Self {
-            Self {
-                token: std::env::var_os(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV),
-                binding: std::env::var_os(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV),
-            }
-        }
-    }
-
-    impl Drop for RestoreEnvironment {
-        fn drop(&mut self) {
-            match self.token.take() {
-                Some(value) => std::env::set_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV, value),
-                None => std::env::remove_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV),
-            }
-            match self.binding.take() {
-                Some(value) => std::env::set_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV, value),
-                None => std::env::remove_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV),
-            }
-        }
-    }
 
     fn loopback_executor() -> SemanticEmbeddingExecutorHandle {
         let auth = semantic_embedding_executor_auth_from_environment().unwrap();
@@ -114,38 +135,29 @@ mod semantic_executor_auth_tests {
 
     #[test]
     fn unbound_token_is_ignored_until_an_exact_endpoint_binding_is_present() {
-        let _lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let _restore = RestoreEnvironment::capture();
-        std::env::set_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV, "loopback-token");
-        std::env::remove_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV);
+        let environment = crate::test_environment::EnvironmentGuard::capture(&[
+            SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+            SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+        ]);
+        environment.set(
+            SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+            Some(OsStr::new("loopback-token")),
+        );
+        environment.set(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV, None);
         assert!(!loopback_executor()
             .http_executor()
             .unwrap()
             .authentication_configured());
 
-        std::env::set_var(
+        environment.set(
             SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
-            "http://127.0.0.1:41007/",
+            Some(OsStr::new("http://127.0.0.1:41007/")),
         );
         assert!(loopback_executor()
             .http_executor()
             .unwrap()
             .authentication_configured());
     }
-}
-
-mod config {
-    #[cfg(test)]
-    pub use crate::composition::DAEMON_MODE_ENV;
-    pub use crate::composition::{
-        persisted_daemon_enabled, set_daemon_enabled, AppConfig, DaemonMode, CONFIG_FILE,
-        DAEMON_DEFAULT_ENABLED,
-    };
-
-    #[cfg(test)]
-    pub(crate) static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
 
 use ctx_terminal::compact_json;
@@ -161,8 +173,12 @@ mod analytics {
 
     use ctx_client_observability::analytics::PublicEventV1;
 
-    pub fn send_batch(data_root: &Path, events: &[PublicEventV1]) {
+    pub fn append_batch(data_root: &Path, events: &[PublicEventV1]) {
         crate::composition::host().deliver_daemon_events(data_root, events);
+    }
+
+    pub fn append_and_upload_batch(data_root: &Path, events: &[PublicEventV1]) {
+        crate::composition::host().upload_daemon_events(data_root, events);
     }
 }
 
@@ -277,9 +293,19 @@ pub use ctx_semantic_index::SemanticNotReady;
 #[allow(unused_imports)]
 pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
 mod query_adapter;
-pub use query_adapter::{wait_for_daemon_semantic_generation, SemanticQueryAdapter};
+pub use query_adapter::{
+    wait_for_daemon_semantic_generation, wait_for_daemon_semantic_generation_with_retained_peer,
+    SemanticQueryAdapter,
+};
+mod semantic_completion;
+pub use semantic_completion::{
+    complete_semantic_generation_foreground,
+    complete_semantic_generation_foreground_with_checkpoint, DaemonSemanticCompletion,
+    SemanticCompletionBudgets, SemanticCompletionCheckpoint, SemanticCompletionDaemonConfig,
+    SemanticCompletionError,
+};
 mod query_service;
-pub use query_service::wait_for_daemon_query_service;
+pub use query_service::{wait_for_daemon_query_service, wait_for_daemon_query_service_cancellable};
 mod daemon;
 mod paths_status;
 pub use daemon::{run_daemon_command, update_indexing_mode};
@@ -294,20 +320,27 @@ mod source_backed_refresh_coordinator;
 pub use source_backed_refresh_coordinator::{
     coordinate_import_source_backed_refresh_with_progress,
     coordinate_setup_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
-    coordinate_source_backed_refresh_with_progress, pin_active_verified_generation,
+    coordinate_source_backed_refresh_with_progress,
+    coordinate_source_backed_refresh_with_retained_peer, pin_active_verified_generation,
+    pin_active_verified_generation_with_retained_peer,
     published_explicit_source_relocation_authority, PinnedSourceBackedGeneration, RefreshStatus,
     SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
     SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,
+};
+mod finite_worker_owner;
+pub use finite_worker_owner::{
+    checkpoint as foreground_checkpoint, finish_foreground_result, finite_worker_interrupted,
+    foreground_interrupt_epoch, foreground_operation_active, foreground_result_interrupted,
+    record_foreground_interrupt, with_foreground_guard_since, FiniteWorkerInterrupted,
 };
 mod daemon_autostart;
 #[allow(unused_imports)]
 pub use daemon_autostart::{
     autostart_daemon_and_wait, autostart_daemon_for_setup_and_wait,
     begin_current_daemon_upgrade_handoff, begin_daemon_upgrade_handoff,
-    begin_legacy_daemon_upgrade_handoff, complete_replacement_daemon_handoff,
-    daemon_autostart_suppression_reason, finish_replacement_daemon_handoff,
-    mark_replacement_helper_handoff, maybe_autostart_daemon, observe_daemon_for_setup_and_wait,
-    replacement_helper_owns_daemon_handoff, restart_daemon_with_current_environment_and_wait,
+    complete_replacement_daemon_handoff, daemon_autostart_suppression_reason,
+    finish_replacement_daemon_handoff, mark_replacement_helper_handoff, maybe_autostart_daemon,
+    observe_daemon_for_setup_and_wait, restart_daemon_with_current_environment_and_wait,
     DaemonHandoff, DaemonSetupHandoff, DaemonUpgradeHandoff,
 };
 

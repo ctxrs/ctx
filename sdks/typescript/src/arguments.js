@@ -118,19 +118,19 @@ export function appendSessionLookupArgs(args, options) {
 function appendRepeated(args, flag, value) {
   const values = Array.isArray(value) ? value : value ? [value] : [];
   for (const item of values) {
-    args.push(flag, item);
+    appendOptional(args, flag, item);
   }
 }
 
 function appendOptional(args, flag, value) {
   if (value !== undefined && value !== null && value !== false) {
-    args.push(flag, value);
+    args.push(...(typeof value === "string" && value.startsWith("-") ? [`${flag}=${value}`] : [flag, value]));
   }
 }
 
 export function appendOptionalNumber(args, flag, value) {
   if (value !== undefined && value !== null) {
-    args.push(flag, String(value));
+    args.push(...(String(value).startsWith("-") ? [`${flag}=${value}`] : [flag, String(value)]));
   }
 }
 

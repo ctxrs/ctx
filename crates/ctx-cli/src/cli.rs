@@ -151,7 +151,7 @@ pub(crate) enum CommandRoot {
     Search(SearchArgs),
     #[command(about = "Read embedded ctx documentation")]
     Docs(docs::DocsArgs),
-    #[command(about = "Install or inspect ctx integrations")]
+    #[command(about = "Install, inspect, or remove ctx integrations")]
     Integrations(integrations::IntegrationsArgs),
     #[command(about = "Serve local ctx tools over MCP")]
     Mcp(mcp::McpArgs),
@@ -216,8 +216,6 @@ pub(crate) struct ImportArgs {
     pub(crate) all: bool,
     #[arg(long)]
     pub(crate) resume: bool,
-    #[arg(long, hide = true)]
-    pub(crate) partial: bool,
     #[arg(
         long,
         help = "Do not start or restart the daemon; require an already-running daemon"

@@ -4,12 +4,9 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::{
-    analytics::IndexTelemetry,
-    config::{self, CONFIG_FILE},
-    output::compact_json,
-    semantic::source_epoch_status_report,
-    ui::Ui,
+    analytics::IndexTelemetry, output::compact_json, semantic::source_epoch_status_report, ui::Ui,
 };
+use ctx_app_config::{self as config, CONFIG_FILE};
 
 #[cfg(test)]
 pub(crate) mod dashboard_fixture;
@@ -79,12 +76,11 @@ fn index_mode_report(
     update: Option<ctx_daemon_cli::IndexingModeUpdate>,
 ) -> Value {
     let mut report = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "indexing": {
             "mode": mode,
         },
         "config_path": data_root.join(CONFIG_FILE),
-        "local_only": true,
         "read_only": update.is_none(),
     });
     if let Some(requested_mode) = requested_mode {
@@ -110,7 +106,7 @@ fn index_readiness_snapshot(data_root: &Path) -> Result<Value> {
     let semantic_flat = &source_semantic["flat_f32"];
     let source_daemon = &source.report["daemon"];
     Ok(compact_json(json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "initialized": source.initialized,
         "indexing": {
             "mode": config.indexing.mode.as_str(),
@@ -158,7 +154,6 @@ fn index_readiness_snapshot(data_root: &Path) -> Result<Value> {
                 "semantic_index": source_daemon.get("jobs").and_then(|jobs| jobs.get("semantic_index")),
             },
         },
-        "local_only": true,
         "read_only": true,
     })))
 }

@@ -129,7 +129,7 @@ fn mcp_telemetry_is_content_free_coalesced_and_stdout_pure() {
         .iter()
         .all(|response| response.get("jsonrpc") == Some(&json!("2.0"))));
 
-    let payloads = read_analytics_events(&events_path);
+    let payloads = read_queued_analytics_events(temp.path());
     let events = payloads
         .iter()
         .flat_map(|payload| payload["events"].as_array().unwrap())
@@ -311,6 +311,9 @@ fn mcp_opt_out_creates_no_identity_or_sink_output() {
         .stdout
         .clone();
     assert_eq!(String::from_utf8(output).unwrap().lines().count(), 2);
-    assert!(!events_path.exists());
+    assert!(
+        analytics_outbox_paths(temp.path()).is_empty(),
+        "analytics opt-out left a durable outbox behind"
+    );
     assert!(!expected_device_path(&home, &state).exists());
 }

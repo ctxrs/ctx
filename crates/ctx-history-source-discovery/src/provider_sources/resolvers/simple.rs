@@ -4,12 +4,13 @@ use std::{
 };
 
 use ctx_history_core::CaptureProvider;
+use ctx_history_source_io::SYMLINK_PROVIDER_SOURCE_REASON;
 
 use super::{
     super::{
         context::{DiscoveryContext, DiscoveryPlatform},
         reasons::path_presence_unknown_reason,
-        selectors::{encoded_path_within_limit, source_path_kind, SourcePathKind},
+        selectors::{encoded_path_within_limit, source_path_kind, SourcePathError, SourcePathKind},
         types::{DiscoveryIssueKind, DiscoveryReport, ProviderSourceKind, ProviderSourceSpec},
         StaticProviderProbeCatalog,
     },
@@ -137,8 +138,11 @@ fn resolve_inferred_codex(
             };
             match source_path_kind(&root) {
                 Ok(SourcePathKind::Directory) => {}
-                Err(super::super::selectors::SourcePathError::Unsupported) => {
+                Err(SourcePathError::Unsupported(SYMLINK_PROVIDER_SOURCE_REASON)) => {
                     return manual_report(spec, safe_issue_path(&root), SYMLINK_REASON);
+                }
+                Err(SourcePathError::Unsupported(reason)) => {
+                    return manual_report(spec, safe_issue_path(&root), reason);
                 }
                 Ok(SourcePathKind::File) | Err(_) => {
                     return manual_report(spec, safe_issue_path(&root), CODEX_OVERRIDE_REASON);
@@ -751,8 +755,8 @@ fn add_source_inner(
         );
         return;
     }
-    match path_presence(&path) {
-        PathPresence::Unknown(kind) => {
+    match source_path_kind(&path) {
+        Err(SourcePathError::Unavailable(kind)) => {
             push_issue_once(
                 report,
                 spec,
@@ -762,17 +766,21 @@ fn add_source_inner(
             );
             return;
         }
-        PathPresence::Unsupported => {
+        Err(SourcePathError::Unsupported(reason)) => {
             push_issue_once(
                 report,
                 spec,
                 safe_issue_path(&path),
                 DiscoveryIssueKind::SelectorUnreconstructible,
-                SYMLINK_REASON,
+                if reason == SYMLINK_PROVIDER_SOURCE_REASON {
+                    SYMLINK_REASON
+                } else {
+                    reason
+                },
             );
             return;
         }
-        PathPresence::Missing | PathPresence::Present => {}
+        Err(SourcePathError::Missing) | Ok(_) => {}
     }
     let source = source_from_parts_with_data_root(
         probes,

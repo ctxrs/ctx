@@ -1,36 +1,10 @@
-use std::{
-    ffi::OsString,
-    io,
-    sync::{Arc, Mutex},
-};
+use std::{ffi::OsString, io::Write as _};
 
 use unicode_width::UnicodeWidthStr as _;
 
 use super::*;
+use crate::dispatch::test_support::pipe_ui;
 use crate::ui::{StreamKind, TestContext};
-
-#[derive(Clone, Default)]
-struct SharedBytes(Arc<Mutex<Vec<u8>>>);
-
-impl SharedBytes {
-    fn bytes(&self) -> Vec<u8> {
-        self.0.lock().unwrap().clone()
-    }
-}
-
-impl io::Write for SharedBytes {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| io::Error::other("shared test writer was poisoned"))?
-            .extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
 
 fn error_and_arguments(arguments: &[&str]) -> (clap::Error, Vec<OsString>) {
     let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
@@ -218,39 +192,25 @@ fn machine_parse_errors_remain_raw_clap_bytes() {
         let expected = error.to_string();
         assert!(expected.contains(expected_fragment), "{expected}");
 
-        let stderr = SharedBytes::default();
-        let stderr_copy = stderr.clone();
-        let mut ui = Ui::with_writers(
-            SharedBytes::default(),
-            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Never)),
-            stderr,
-            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Never)),
-        );
+        let (mut ui, _, stderr) = pipe_ui(ColorMode::Never);
         write_adapted_clap_output(&error, &arguments, true, &mut ui).unwrap();
         ui.flush().unwrap();
 
-        assert_eq!(String::from_utf8(stderr_copy.bytes()).unwrap(), expected);
+        assert_eq!(String::from_utf8(stderr.bytes()).unwrap(), expected);
     }
 }
 
 #[test]
 fn human_parse_errors_use_the_selected_styled_stderr() {
     let (error, arguments) = error_and_arguments(&["ctx", "sources", "--provider", "unknown"]);
-    let stderr = SharedBytes::default();
-    let stderr_copy = stderr.clone();
-    let mut ui = Ui::with_writers(
-        SharedBytes::default(),
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always)),
-        stderr,
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
-    );
+    let (mut ui, _, stderr) = pipe_ui(ColorMode::Always);
     write_adapted_clap_output(&error, &arguments, false, &mut ui).unwrap();
     ui.flush().unwrap();
 
-    let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
+    let rendered = String::from_utf8(stderr.bytes()).unwrap();
     assert!(rendered.contains('\u{1b}'), "{rendered:?}");
     let mut stripped = anstream::StripStream::new(Vec::new());
-    io::Write::write_all(&mut stripped, rendered.as_bytes()).unwrap();
+    stripped.write_all(rendered.as_bytes()).unwrap();
     let plain = String::from_utf8(stripped.into_inner()).unwrap();
     assert!(plain.contains("unknown provider"), "{plain}");
     assert!(plain.contains("ctx sources [OPTIONS]"), "{plain}");
@@ -304,18 +264,11 @@ fn clap_help_has_no_authored_trailing_cells_at_supported_widths() {
 fn affected_help_paths_trim_line_ends_in_the_human_clap_pipeline() {
     let arguments = &["ctx", "sources", "--help"][..];
     let (error, os_arguments) = error_and_arguments(arguments);
-    let stdout = SharedBytes::default();
-    let stdout_copy = stdout.clone();
-    let mut ui = Ui::with_writers(
-        stdout,
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always)),
-        SharedBytes::default(),
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
-    );
+    let (mut ui, stdout, _) = pipe_ui(ColorMode::Always);
     write_adapted_clap_output(&error, &os_arguments, false, &mut ui).unwrap();
     ui.flush().unwrap();
 
-    let styled = String::from_utf8(stdout_copy.bytes()).unwrap();
+    let styled = String::from_utf8(stdout.bytes()).unwrap();
     let plain = anstream::adapter::strip_str(&styled).to_string();
     assert!(styled.contains('\u{1b}'), "{arguments:?}");
     assert!(plain.contains("Usage: ctx"), "{arguments:?}:\n{plain}");

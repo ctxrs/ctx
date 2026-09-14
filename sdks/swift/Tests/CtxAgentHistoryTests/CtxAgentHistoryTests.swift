@@ -2,6 +2,140 @@ import XCTest
 @testable import CtxAgentHistory
 
 final class CtxAgentHistoryTests: XCTestCase {
+    func testStatusDropsRetiredLocalityFromRawAndCanonicalValues() throws {
+        let variants: [[String: JSONValue]] = [[:], ["local_only": .bool(true)],
+            ["localOnly": .bool(false)], ["local_only": .null, "localOnly": .string("legacy")]]
+        for flags in variants {
+            var raw = flags
+            raw["initialized"] = .bool(true)
+            raw["semantic"] = .object([
+                "local_only": .bool(false),
+                "executor": .object(["kind": .string("http"), "scope": .string("loopback"),
+                                     "content_leaves_machine": .bool(false)])
+            ])
+            let bytes = try JSONEncoder().encode(JSONValue.object(raw))
+            let runner = CapturingRunner { _ in CommandResult(stdout: bytes) }
+            let client = AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+            let direct = try JSONDecoder().decode(AgentHistoryStatus.self, from: bytes)
+            let statuses = [try client.status().status, try client.initialize().status, direct]
+            for (index, status) in statuses.enumerated() {
+                let output = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(status))
+                XCTAssertNil(output["localOnly"])
+                XCTAssertNil(output["local_only"])
+                XCTAssertEqual(output["initialized"], .bool(true))
+                let key = index == 2 ? "local_only" : "localOnly"
+                XCTAssertEqual(output["semantic"]?[key], .bool(false))
+                XCTAssertEqual(output["semantic"]?["executor"]?["kind"], .string("http"))
+                XCTAssertEqual(output["semantic"]?["executor"]?["scope"], .string("loopback"))
+                let boundaryKey = index == 2 ? "content_leaves_machine" : "contentLeavesMachine"
+                XCTAssertEqual(output["semantic"]?["executor"]?[boundaryKey], .bool(false))
+            }
+        }
+        let runner = CapturingRunner { _ in CommandResult(stdout: "{}") }
+        let status = try AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner)).status().status
+        let output = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(status))
+        XCTAssertEqual(output, .object(["initialized": .bool(false)]))
+    }
+
+    func testPreservesOpaqueEventPayloadsAndExplicitNulls() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("contracts/agent-history-v2/fixtures/cli/opaque-event.json")
+        let event = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: fixtureURL))
+        let values: [JSONValue?] = [
+            event["structured_content"], .array([.null, .object(["snake_key": .bool(false)])]),
+            .string("literal_雪"), .number(42), .bool(false), .null, nil
+        ]
+        var cases = [try XCTUnwrap(event.objectValue)]
+        for value in values {
+            var current = try XCTUnwrap(event.objectValue)
+            current["structured_content"] = value
+            current["activity"] = value
+            cases.append(current)
+        }
+        for current in cases {
+            let raw = JSONValue.object([
+                "event": .object(current), "events": .array([.object(current)]), "session": .object([:])
+            ])
+            let bytes = try JSONEncoder().encode(raw)
+            let runner = CapturingRunner { _ in CommandResult(stdout: bytes) }
+            let client = AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+            let shown = try client.showEvent("event-1").event
+            let single = try XCTUnwrap(shown.event)
+            let window = try XCTUnwrap(shown.events.first)
+            let session = try XCTUnwrap(client.showSession("session-1").session.events.first)
+            for actual in [single, window, session] {
+                XCTAssertEqual(actual.structuredContent, current["structured_content"])
+                // Encoding uses the existing API so this regression also compiles against the old DTO.
+                let encoded = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(actual))
+                XCTAssertEqual(encoded["activity"], current["activity"])
+                XCTAssertEqual(encoded["structuredContent"], current["structured_content"])
+            }
+        }
+    }
+
+    func testPassesSearchQueriesAndOptionValuesLiterally() throws {
+        for query in ["--help", "--refresh=off", "-needle", "--", "two words", "a'雪"] {
+            let runner = CapturingRunner { _ in CommandResult(stdout: #"{"results":[]}"#) }
+            let client = AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+            _ = try client.search(
+                query, options: SearchOptions(terms: ["-term"], limit: 2, file: "-file", refresh: "off")
+            )
+            XCTAssertEqual(
+                try XCTUnwrap(runner.requests.last).arguments,
+                ["search", "--term=-term", "--limit", "2", "--file=-file", "--refresh", "off", "--format=json", "--", query]
+            )
+        }
+        let runner = CapturingRunner { _ in CommandResult(stdout: #"{"results":[]}"#) }
+        _ = try AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+            .search(options: SearchOptions(terms: ["-term"], file: "-file"))
+        XCTAssertEqual(
+            try XCTUnwrap(runner.requests.last).arguments,
+            ["search", "--term=-term", "--file=-file", "--format=json"]
+        )
+    }
+
+    func testRetainsProducerErrorsAndRetryability() throws {
+        let retryValues: [Bool?] = [false, true, nil]
+        for retryable in retryValues {
+            var producer: [String: JSONValue] = [
+                "error_code": .string("generation_changed"),
+                "details": .object(["snake_key": .array([.null, .string("雪")])])
+            ]
+            producer["retryable"] = retryable.map { .bool($0) }
+            let stderr = String(decoding: try JSONEncoder().encode(JSONValue.object(producer)), as: UTF8.self)
+            let runner = CapturingRunner { _ in CommandResult(stdout: "partial stdout", stderr: stderr, exitCode: 1) }
+            let client = AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+            XCTAssertThrowsError(try client.showEvent("event-1")) { error in
+                let typed = error as? CtxAgentHistorySDKError
+                XCTAssertEqual(typed?.code, .adapterError)
+                XCTAssertEqual(typed?.retryable, retryable ?? false)
+                XCTAssertEqual(typed?.details?["producerError"], .object(producer))
+                XCTAssertEqual(typed?.exitCode, 1)
+                XCTAssertEqual(typed?.stdout, "partial stdout")
+                XCTAssertEqual(typed?.stderr, stderr)
+                XCTAssertEqual(typed?.command, ["ctx", "show", "event", "event-1", "--format", "json"])
+            }
+        }
+        for stderr in [
+            "ordinary stderr", "{}", "[]", "null", #"{"error_code":""}"#,
+            #"{"error_code":7}"#, #"{"error_code":"busy","retryable":null}"#,
+            #"{"error_code":"busy","retryable":"true"}"#,
+            #"{"error_code":"busy","retryable":1}"#,
+            "warning\n{\"error_code\":\"busy\",\"retryable\":true}"
+        ] {
+            let runner = CapturingRunner { _ in CommandResult(stdout: "", stderr: stderr, exitCode: 2) }
+            XCTAssertThrowsError(try AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner)).status()) { error in
+                let typed = error as? CtxAgentHistorySDKError
+                XCTAssertEqual(typed?.code, .adapterError)
+                XCTAssertEqual(typed?.retryable, false)
+                XCTAssertNil(typed?.details?["producerError"])
+                XCTAssertEqual(typed?.stderr, stderr)
+            }
+        }
+    }
+
     func testForcesAnalyticsOffAfterAmbientAndUserEnvironmentMerging() throws {
         #if !os(macOS)
         throw XCTSkip("Darwin process-group execution is macOS-only")
@@ -88,7 +222,6 @@ final class CtxAgentHistoryTests: XCTestCase {
 
         let invalid = AgentHistoryStatus(
             initialized: true,
-            localOnly: true,
             indexedItems: maximum + 2
         )
         XCTAssertThrowsError(try JSONEncoder().encode(invalid))
@@ -150,7 +283,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             runner.requests[0].arguments,
             [
                 "--data-root", "/tmp/ctx-sdk-test",
-                "search", "retry handling",
+                "search",
                 "--term", "timeout",
                 "--term", "backoff",
                 "--limit", "5",
@@ -166,7 +299,7 @@ final class CtxAgentHistoryTests: XCTestCase {
                 "--events",
                 "--refresh", "off",
                 "--include-current-session",
-                "--format=json"
+                "--format=json", "--", "retry handling"
             ]
         )
     }
@@ -194,9 +327,9 @@ final class CtxAgentHistoryTests: XCTestCase {
             runner.requests[0].arguments,
             [
                 "--data-root", "/tmp/ctx-sdk-test",
-                "search", "agent history",
+                "search",
                 "--content-scope", "calls",
-                "--format=json"
+                "--format=json", "--", "agent history"
             ]
         )
         XCTAssertEqual(
@@ -247,7 +380,11 @@ final class CtxAgentHistoryTests: XCTestCase {
             switch Array(request.arguments.dropFirst(2).prefix(2)) {
             case ["status", "--format=json"]:
                 return CommandResult(stdout: Self.statusJSON)
-            case ["search", "local agent history"]:
+            case ["search", "--limit"]:
+                XCTAssertEqual(
+                    Array(request.arguments.dropFirst(2)),
+                    ["search", "--limit", "1", "--refresh", "off", "--format=json", "--", "local agent history"]
+                )
                 return CommandResult(stdout: Self.searchJSON)
             case ["show", "event"]:
                 return CommandResult(stdout: Self.eventJSON)
@@ -318,11 +455,11 @@ final class CtxAgentHistoryTests: XCTestCase {
         let version = try client.version()
 
         XCTAssertEqual(version.schemaVersion, 1)
-        XCTAssertEqual(version.apiVersion, AGENT_HISTORY_V1_VERSION)
+        XCTAssertEqual(version.apiVersion, AGENT_HISTORY_V2_VERSION)
         XCTAssertEqual(version.sdkVersion, CTX_AGENT_HISTORY_SWIFT_SDK_VERSION)
         XCTAssertEqual(version.adapter, "local-cli")
         XCTAssertEqual(version.ctxVersion, "1.2.3")
-        XCTAssertEqual(try client.versioning()["api_version"]?.stringValue, AGENT_HISTORY_V1_VERSION)
+        XCTAssertEqual(try client.versioning()["api_version"]?.stringValue, AGENT_HISTORY_V2_VERSION)
     }
 
     func testStructuredErrors() throws {
@@ -477,7 +614,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent(
-                "contracts/agent-history-v1/fixtures/adversarial",
+                "contracts/agent-history-v2/fixtures/adversarial",
                 isDirectory: true
             )
         for name in [
@@ -528,7 +665,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("contracts/agent-history-v1/fixtures/show-event.mcp-tool-call.json")
+            .appendingPathComponent("contracts/agent-history-v2/fixtures/show-event.mcp-tool-call.json")
         let fixtureData = try Data(contentsOf: fixtureURL)
         let envelope = try JSONDecoder().decode(AgentHistoryEnvelope.self, from: fixtureData)
         let selected = try XCTUnwrap(envelope.event?.event)
@@ -634,7 +771,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent(
-                "contracts/agent-history-v1/fixtures/adversarial",
+                "contracts/agent-history-v2/fixtures/adversarial",
                 isDirectory: true
             )
         for name in [
@@ -712,7 +849,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("contracts/agent-history-v1/fixtures", isDirectory: true)
+            .appendingPathComponent("contracts/agent-history-v2/fixtures", isDirectory: true)
         let fixtureURLs = try FileManager.default
             .contentsOfDirectory(at: fixturesDirectory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
@@ -720,7 +857,7 @@ final class CtxAgentHistoryTests: XCTestCase {
 
         for url in fixtureURLs {
             let envelope = try decoder.decode(AgentHistoryEnvelope.self, from: Data(contentsOf: url))
-            XCTAssertEqual(envelope.contractVersion, AGENT_HISTORY_V1_VERSION, url.lastPathComponent)
+            XCTAssertEqual(envelope.contractVersion, AGENT_HISTORY_V2_VERSION, url.lastPathComponent)
             XCTAssertEqual(envelope.schemaVersion, 1, url.lastPathComponent)
             switch envelope.operation {
             case .status:

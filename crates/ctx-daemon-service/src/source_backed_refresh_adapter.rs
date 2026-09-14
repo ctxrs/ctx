@@ -14,7 +14,7 @@ use super::source_backed_refresh_coordinator::CoreRefreshEngine;
 #[cfg(not(test))]
 pub(super) fn refresh_engine(config: &'static dyn crate::DaemonConfigPort) -> RefreshEngine {
     RefreshEngine::new(
-        Arc::new(journal::DaemonRefreshJournal),
+        Arc::new(journal::DaemonRefreshJournal::default()),
         Arc::new(runtime::DaemonRefreshRuntime::new(config)),
     )
 }

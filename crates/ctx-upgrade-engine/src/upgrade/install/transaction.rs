@@ -50,15 +50,11 @@ pub(in crate::upgrade) fn run_windows_replacement_helper<D: DaemonUpgradePort + 
     )
 }
 
-#[cfg(unix)]
-pub(super) fn discard_legacy_previous_binary(install_path: &Path) -> Result<()> {
-    let previous = super::durability::backup_path(install_path);
-    unix::remove_owner_regular_file(&previous)?;
-    if let Some(parent) = install_path.parent() {
-        super::durability::sync_directory(parent)?;
-    }
-    Ok(())
-}
+#[cfg(windows)]
+pub(in crate::upgrade) use windows::{
+    open_managed_pair_parent, prepare_managed_pair_helper, spawn_managed_pair_helper,
+    write_managed_pair_helper_ready,
+};
 
 #[cfg(unix)]
 pub(in crate::upgrade) const RECOVERY_REEXEC_ENV: &str = "CTX_UPGRADE_RECOVERY_REEXEC_ATTEMPT";
@@ -205,9 +201,12 @@ pub(in crate::upgrade) fn apply_artifact_for_attempt(
             return Err(error);
         }
         let install_attribution = existing_install_attribution(&marker_path);
-        if let Err(error) =
-            write_install_marker_to(marker_staged, plan, install_attribution.as_ref())
-        {
+        if let Err(error) = write_install_marker_to(
+            marker_staged,
+            &marker_path,
+            plan,
+            install_attribution.as_ref(),
+        ) {
             remove_unpublished_file(staged);
             remove_unpublished_file(marker_staged);
             return Err(error);

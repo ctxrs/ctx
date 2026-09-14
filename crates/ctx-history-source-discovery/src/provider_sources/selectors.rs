@@ -77,7 +77,7 @@ pub(super) enum SourcePathKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SourcePathError {
     Missing,
-    Unsupported,
+    Unsupported(&'static str),
     Unavailable(ErrorKind),
 }
 
@@ -629,14 +629,16 @@ fn source_path_error(error: SourceIoError) -> SourcePathError {
     match error {
         SourceIoError::Io(error) if error.kind() == ErrorKind::NotFound => SourcePathError::Missing,
         SourceIoError::Io(error) => SourcePathError::Unavailable(error.kind()),
-        SourceIoError::InvalidProviderTranscriptPath { .. } => SourcePathError::Unsupported,
+        SourceIoError::InvalidProviderTranscriptPath { reason, .. } => {
+            SourcePathError::Unsupported(reason)
+        }
         _ => SourcePathError::Unavailable(ErrorKind::Other),
     }
 }
 
 fn selector_open_error(error: SourceIoError) -> SelectorReadError {
     match source_path_error(error) {
-        SourcePathError::Unsupported => SelectorReadError::UnsupportedRoot,
+        SourcePathError::Unsupported(_) => SelectorReadError::UnsupportedRoot,
         SourcePathError::Missing | SourcePathError::Unavailable(_) => {
             SelectorReadError::Unavailable
         }

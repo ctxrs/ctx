@@ -617,6 +617,8 @@ fn query_and_documents_send_exact_raw_text_and_protocol_assertions() {
     ]);
     let executor =
         super::HttpSemanticEmbeddingExecutor::new(&server.base_url, accepted.clone()).unwrap();
+    // No local E5 fit policy or extra request is imposed on opaque spaces.
+    assert!(executor.document_fits(&"世界".repeat(1200)).unwrap());
     assert_eq!(
         executor
             .embed_query(

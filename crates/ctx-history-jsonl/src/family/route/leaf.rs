@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     sync::{Arc, Mutex},
 };
 
@@ -47,8 +47,8 @@ use evidence::{
     candidate_would_replace_retained_records_with_only_rejections, terminal_byte_remainder,
 };
 use outcomes::{
-    collect_leaf_outcomes, quarantine_leaf, reconcile_parallel_leaf_outcomes,
-    JsonlFamilyWorkerContexts, JsonlLeafJob, LeafScanOutcome,
+    collect_leaf_outcomes, quarantine_leaf, reconcile_parallel_leaf_outcomes, JsonlLeafJob,
+    LeafScanOutcome,
 };
 pub(super) use outcomes::{LeafScanResult, PreparedLeaf};
 pub(super) use output::{JsonlLeafOutput, JsonlLeafOutputEvent};
@@ -61,9 +61,6 @@ pub(super) use scheduling::family_scanner_worker_count_policy;
 use semantic::{prepare_semantic_leaf, SemanticLeafExecution, SemanticLeafPlan};
 
 const JSONL_SINGLE_LEAF_PIPELINE_MIN_BYTES: u64 = 1024 * 1024;
-
-const JSONL_PARTITION_CONTEXT_SHARDS: usize = 16;
-const JSONL_PARTITION_COMPONENTS_PER_WAVE: usize = 16;
 
 fn scan_leaf_serial<R: JsonlFamilyRuntime>(
     adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
@@ -272,7 +269,7 @@ fn scan_leaf_serial<R: JsonlFamilyRuntime>(
 fn run_parallel_leaf_job_batch<R: JsonlFamilyRuntime>(
     adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
     jobs: Vec<ParallelLeafScanJob<JsonlLeafJob<JsonlRuntimeError<R>>>>,
-    worker_states: &mut [JsonlFamilyWorkerContexts<R>],
+    worker_states: &mut [JsonlFamilyWorkerContext<R>],
     base_event_lookup: &JsonlRuntimeLookup<R>,
     sink: &mut SourceBackedGenerationSink<'_, R::Lifecycle>,
     append_only_trust_allowed: bool,
@@ -283,7 +280,7 @@ fn run_parallel_leaf_job_batch<R: JsonlFamilyRuntime>(
         jobs,
         worker_states,
         |contexts, job, emitter| {
-            let worker = contexts.for_job(job.leaf().context_shard);
+            let worker = contexts;
             #[cfg(test)]
             let _active_scanner = scanner_probe.map(JsonlFamilyScannerProbe::enter);
             let leaf = &job.leaf().leaf;
@@ -595,46 +592,9 @@ pub(super) fn scan_leaves<R: JsonlFamilyRuntime>(
         .map(|limit| recommended_workers.min(limit.max(1)))
         .unwrap_or(recommended_workers);
     let worker_count = family_scanner_worker_count(recommended_workers);
-    let mut leaf_metadata = Vec::new();
-    leaf_metadata
-        .try_reserve_exact(leaves.len())
-        .map_err(|_| route_internal("JSONL leaf scheduling allocation failed"))?;
-    let mut saw_partition = false;
-    let mut saw_unpartitioned = false;
-    let mut previous_phase = None;
-    for leaf in leaves {
-        let phase = adapter
-            .leaf_scan_phase(leaf)
-            .map_err(|error| route_scan(adapter, error))?;
-        if previous_phase.is_some_and(|previous| previous > phase) {
-            return Err(route_invalid(
-                "JSONL adapter returned non-monotonic leaf scan phases",
-            ));
-        }
-        previous_phase = Some(phase);
-        let partition = adapter
-            .leaf_scan_partition(leaf)
-            .map_err(|error| route_scan(adapter, error))?;
-        saw_partition |= partition.is_some();
-        saw_unpartitioned |= partition.is_none();
-        leaf_metadata.push((phase, partition));
-    }
-    if saw_partition && saw_unpartitioned {
-        return Err(route_invalid(
-            "JSONL adapter mixed partitioned and unpartitioned leaf scans",
-        ));
-    }
-    let partition_wave_limit = adapter
-        .leaf_scan_partition_wave_limit()
-        .min(JSONL_PARTITION_COMPONENTS_PER_WAVE);
-    if saw_partition && partition_wave_limit == 0 {
-        return Err(route_invalid(
-            "JSONL adapter returned a zero partition wave limit",
-        ));
-    }
     let mut serial_worker = JsonlFamilyWorkerContext::default();
     #[cfg(test)]
-    let scanner_probe = jsonl_family_scanner_probe(if saw_partition { 1 } else { worker_count });
+    let scanner_probe = jsonl_family_scanner_probe(worker_count);
     // Pipeline multi-leaf families and large single files so scanning can
     // overlap writer admission even when concurrency is capped at one.
     let large_single_leaf = leaves.len() == 1
@@ -643,18 +603,10 @@ pub(super) fn scan_leaves<R: JsonlFamilyRuntime>(
         });
     if worker_count <= 1 && leaves.len() <= 1 && !large_single_leaf {
         let mut outcomes = Vec::with_capacity(leaves.len());
-        for (leaf_index, leaf) in leaves.iter().enumerate() {
-            let partition = leaf_metadata
-                .get(leaf_index)
-                .and_then(|(_, partition)| *partition);
-            if let Some(partition) = partition {
-                adapter
-                    .begin_leaf_scan_partition(partition)
-                    .map_err(|error| route_scan(adapter, error))?;
-            }
+        for leaf in leaves {
             #[cfg(test)]
             let _active_scanner = scanner_probe.as_ref().map(|probe| probe.enter());
-            let evidence = scan_leaf_serial(
+            outcomes.push(scan_leaf_serial(
                 adapter,
                 leaf,
                 base_for_leaf(bases, leaf),
@@ -662,17 +614,7 @@ pub(super) fn scan_leaves<R: JsonlFamilyRuntime>(
                 &mut serial_worker,
                 sink,
                 append_only_trust_allowed,
-            );
-            let finish_partition = partition
-                .map(|partition| {
-                    adapter
-                        .finish_leaf_scan_partition(partition)
-                        .map_err(|error| route_scan(adapter, error))
-                })
-                .transpose();
-            let outcome = evidence?;
-            finish_partition?;
-            outcomes.push(outcome);
+            )?);
         }
         #[cfg(test)]
         record_jsonl_family_scanner_activity(worker_count, scanner_probe.as_deref());
@@ -680,174 +622,26 @@ pub(super) fn scan_leaves<R: JsonlFamilyRuntime>(
     }
 
     let mut worker_states = (0..worker_count)
-        .map(|_| JsonlFamilyWorkerContexts::default())
+        .map(|_| JsonlFamilyWorkerContext::default())
         .collect::<Vec<_>>();
-
-    if saw_partition {
-        let mut partitions =
-            BTreeMap::<u64, Vec<(usize, JsonlFamilyLeaf<JsonlRuntimeError<R>>)>>::new();
-        for (leaf, (phase, partition)) in leaves.iter().cloned().zip(leaf_metadata.iter()) {
-            let partition = partition.ok_or_else(|| {
-                route_invalid("JSONL partition metadata disappeared before scheduling")
-            })?;
-            partitions
-                .entry(partition)
-                .or_default()
-                .push((*phase, leaf));
-        }
-        let mut partitions = partitions.into_iter().collect::<Vec<_>>();
-        partitions.sort_by(
-            |(left_partition, left_leaves), (right_partition, right_leaves)| {
-                let left_bytes = left_leaves.iter().fold(0_u64, |total, (_, leaf)| {
-                    total.saturating_add(leaf.estimated_scan_bytes())
-                });
-                let right_bytes = right_leaves.iter().fold(0_u64, |total, (_, leaf)| {
-                    total.saturating_add(leaf.estimated_scan_bytes())
-                });
-                right_bytes
-                    .cmp(&left_bytes)
-                    .then_with(|| left_partition.cmp(right_partition))
-            },
-        );
-        let mut outcomes = Vec::with_capacity(leaves.len());
-        for wave in partitions.chunks(partition_wave_limit) {
-            let mut begun = Vec::with_capacity(wave.len());
-            for (partition, _) in wave {
-                if let Err(error) = adapter.begin_leaf_scan_partition(*partition) {
-                    for begun_partition in begun.into_iter().rev() {
-                        let _ = adapter.finish_leaf_scan_partition(begun_partition);
-                    }
-                    return Err(route_scan(adapter, error));
-                }
-                begun.push(*partition);
-            }
-
-            let mut frontiers =
-                BTreeMap::<usize, Vec<JsonlFamilyLeaf<JsonlRuntimeError<R>>>>::new();
-            for (_, partition_leaves) in wave {
-                for (phase, leaf) in partition_leaves {
-                    frontiers.entry(*phase).or_default().push(leaf.clone());
-                }
-            }
-
-            let batch: SourceBackedRouteResult<Vec<LeafScanOutcome<JsonlRuntimeError<R>>>> =
-                (|| {
-                    let mut batch = Vec::new();
-                    for (_, mut frontier) in frontiers {
-                        frontier.sort_by(|left, right| {
-                            right
-                                .estimated_scan_bytes()
-                                .cmp(&left.estimated_scan_bytes())
-                                .then_with(|| {
-                                    left.source()
-                                        .exact_descriptor_digest()
-                                        .cmp(&right.source().exact_descriptor_digest())
-                                })
-                        });
-                        let logical_lane_count = JSONL_PARTITION_CONTEXT_SHARDS.min(frontier.len());
-                        let mut lane_bytes = vec![0_u64; logical_lane_count];
-                        let mut jobs = Vec::with_capacity(frontier.len());
-                        for leaf in frontier {
-                            let lane = lane_bytes
-                                .iter()
-                                .enumerate()
-                                .min_by_key(|(lane, bytes)| (**bytes, *lane))
-                                .map(|(lane, _)| lane)
-                                .ok_or_else(|| {
-                                    route_internal("JSONL frontier has no worker lane")
-                                })?;
-                            lane_bytes[lane] =
-                                lane_bytes[lane].saturating_add(leaf.estimated_scan_bytes());
-                            let base = base_for_leaf(bases, &leaf).cloned();
-                            jobs.push(
-                                ParallelLeafScanJob::new(
-                                    leaf.source().clone(),
-                                    JsonlLeafJob {
-                                        leaf,
-                                        base,
-                                        context_shard: Some(lane as u64),
-                                    },
-                                )
-                                .with_worker_affinity(lane as u64),
-                            );
-                        }
-                        batch.extend(run_parallel_leaf_job_batch(
-                            adapter,
-                            jobs,
-                            &mut worker_states,
-                            &base_event_lookup,
-                            sink,
-                            append_only_trust_allowed,
-                            #[cfg(test)]
-                            scanner_probe.as_deref(),
-                        )?);
-                    }
-                    Ok(batch)
-                })();
-            let mut finish_error = None;
-            for partition in begun.into_iter().rev() {
-                if let Err(error) = adapter.finish_leaf_scan_partition(partition) {
-                    if finish_error.is_none() {
-                        finish_error = Some(route_scan(adapter, error));
-                    }
-                }
-            }
-            let batch = batch?;
-            if let Some(error) = finish_error {
-                return Err(error);
-            }
-            outcomes.extend(batch);
-        }
+    let mut jobs = Vec::with_capacity(leaves.len());
+    for leaf in leaves.iter().cloned() {
+        let base = base_for_leaf(bases, &leaf).cloned();
+        jobs.push(ParallelLeafScanJob::new(
+            leaf.source().clone(),
+            JsonlLeafJob { leaf, base },
+        ));
+    }
+    let outcomes = run_parallel_leaf_job_batch(
+        adapter,
+        jobs,
+        &mut worker_states,
+        &base_event_lookup,
+        sink,
+        append_only_trust_allowed,
         #[cfg(test)]
-        record_jsonl_family_scanner_activity(worker_count, scanner_probe.as_deref());
-        return collect_leaf_outcomes(outcomes);
-    }
-
-    let phases = leaf_metadata
-        .iter()
-        .map(|(phase, _)| *phase)
-        .collect::<Vec<_>>();
-
-    let mut outcomes = Vec::with_capacity(leaves.len());
-    let mut phase_start = 0_usize;
-    while phase_start < leaves.len() {
-        let phase = phases[phase_start];
-        let mut phase_end = phase_start.saturating_add(1);
-        while phase_end < leaves.len() && phases[phase_end] == phase {
-            phase_end = phase_end.saturating_add(1);
-        }
-        let mut jobs = Vec::with_capacity(phase_end.saturating_sub(phase_start));
-        for leaf in leaves[phase_start..phase_end].iter().cloned() {
-            let base = base_for_leaf(bases, &leaf).cloned();
-            let worker_affinity = adapter
-                .leaf_worker_affinity(&leaf)
-                .map_err(|error| route_scan(adapter, error))?;
-            let job = ParallelLeafScanJob::new(
-                leaf.source().clone(),
-                JsonlLeafJob {
-                    leaf,
-                    base,
-                    context_shard: None,
-                },
-            );
-            jobs.push(match worker_affinity {
-                Some(worker_affinity) => job.with_worker_affinity(worker_affinity),
-                None => job,
-            });
-        }
-        let phase_outcomes = run_parallel_leaf_job_batch(
-            adapter,
-            jobs,
-            &mut worker_states,
-            &base_event_lookup,
-            sink,
-            append_only_trust_allowed,
-            #[cfg(test)]
-            scanner_probe.as_deref(),
-        )?;
-        outcomes.extend(phase_outcomes);
-        phase_start = phase_end;
-    }
+        scanner_probe.as_deref(),
+    )?;
     #[cfg(test)]
     record_jsonl_family_scanner_activity(worker_count, scanner_probe.as_deref());
 

@@ -33,7 +33,8 @@ pub use host::{
 pub use lifecycle::{
     configured_daemon_autostart_command, daemon_autostart_allowed, daemon_autostart_command,
     daemon_autostart_suppression_reason, daemon_restart_trigger, parse_persisted_trigger,
-    spawn_detached_daemon_child, DaemonHandoff, DaemonStartError,
+    spawn_detached_daemon_child, DaemonHandoff, DaemonStartError, FiniteCoreWorkerLease,
+    FiniteWorkerLease,
 };
 pub use status::{
     DaemonConfigReloadContext, DaemonSemanticStatusContext, DaemonStatusPreparation,
@@ -102,6 +103,8 @@ pub struct DaemonConfigSnapshot {
     pub semantic_executor: String,
     /// Redaction-safe exact fingerprint of the selected semantic vector-space contract.
     pub semantic_contract_fingerprint: String,
+    pub semantic_builtin_throttling_configured: bool,
+    pub semantic_builtin_throttling_effective: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +238,30 @@ impl<'a> DaemonApplication<'a> {
         lifecycle::start_core_daemon_and_wait(self.host, data_root, config, trigger)
     }
 
+    pub fn start_daemon_and_wait_with_cancellation(
+        &self,
+        data_root: &Path,
+        config: &DaemonConfigSnapshot,
+        trigger: DaemonTrigger,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+        lifecycle::start_daemon_and_wait_with_cancellation(
+            self.host, data_root, config, trigger, checkpoint,
+        )
+    }
+
+    pub fn start_core_daemon_and_wait_with_cancellation(
+        &self,
+        data_root: &Path,
+        config: &DaemonConfigSnapshot,
+        trigger: DaemonTrigger,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+        lifecycle::start_core_daemon_and_wait_with_cancellation(
+            self.host, data_root, config, trigger, checkpoint,
+        )
+    }
+
     pub fn restart_daemon_with_current_environment(
         &self,
         data_root: &Path,
@@ -249,8 +276,20 @@ impl<'a> DaemonApplication<'a> {
         data_root: &Path,
         config: &DaemonConfigSnapshot,
         trigger: DaemonTrigger,
-    ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+    ) -> std::result::Result<FiniteCoreWorkerLease, DaemonStartError> {
         lifecycle::start_finite_core_worker_and_wait(self.host, data_root, config, trigger)
+    }
+
+    pub fn start_finite_core_worker_and_wait_with_cancellation(
+        &self,
+        data_root: &Path,
+        config: &DaemonConfigSnapshot,
+        trigger: DaemonTrigger,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<FiniteCoreWorkerLease, DaemonStartError> {
+        lifecycle::start_finite_core_worker_and_wait_with_cancellation(
+            self.host, data_root, config, trigger, checkpoint,
+        )
     }
 
     pub fn observe_daemon_and_wait(
@@ -390,6 +429,8 @@ impl DaemonApplicationHost for TestHost {
             semantic_enabled: true,
             semantic_executor: "builtin".to_owned(),
             semantic_contract_fingerprint: "sha256:test-builtin-contract".to_owned(),
+            semantic_builtin_throttling_configured: true,
+            semantic_builtin_throttling_effective: Some(true),
         })
     }
 

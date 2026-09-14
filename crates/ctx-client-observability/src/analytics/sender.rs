@@ -184,6 +184,41 @@ pub(super) fn serialize_event(
             if let Some(health) = event.terminal_health {
                 insert_provider_refresh_terminal_health_properties(&mut properties, &health);
             }
+            if event.surface == Surface::Daemon
+                && event.outcome == Outcome::Failure
+                && properties.contains_key("failure_code")
+                && properties.contains_key("retryable")
+            {
+                if let Some((stage, kind)) = event.failure_diagnostic {
+                    properties.insert("refresh_failure_stage".to_owned(), json!(stage.as_str()));
+                    properties.insert("refresh_failure_kind".to_owned(), json!(kind.as_str()));
+                    if kind == ProviderRefreshFailureKind::Provider
+                        && event.foreground.is_some_and(|facts| facts.failure_code == ProviderRefreshFailureCode::AllProviderTerminalCoverageUnavailable)
+                    {
+                        if let Some(reason) = event.coverage_reason {
+                            properties.insert("refresh_coverage_reason".to_owned(), json!(reason.as_str()));
+                        }
+                    }
+                }
+            }
+            if event.surface == Surface::Daemon
+                && event.outcome == Outcome::Success
+                && event.foreground.is_some_and(|facts| {
+                    facts.refresh_result == ProviderRefreshResult::Partial
+                        && matches!(
+                            facts.failure_scope,
+                            ProviderRefreshFailureScope::Source
+                                | ProviderRefreshFailureScope::Mixed
+                        )
+                })
+            {
+                if let Some(class) = event.source_failure_class {
+                    properties.insert(
+                        "refresh_source_failure_class".to_owned(),
+                        json!(class.as_str()),
+                    );
+                }
+            }
             (
                 "provider_refresh_completed",
                 event.surface,
@@ -310,7 +345,6 @@ fn insert_client_operation_properties(
 ) {
     match operation {
         CliOperation::Setup(value) => {
-            insert_bool(properties, "catalog_only", value.catalog_only);
             insert_bool(properties, "no_daemon", value.no_daemon);
             insert_bool(properties, "wait", value.wait);
             insert_str(properties, "progress_mode", value.progress_mode.as_str());
@@ -399,7 +433,6 @@ fn insert_client_operation_properties(
         }
         CliOperation::Sources(value) => {
             insert_bool(properties, "all_sources", value.all);
-            insert_bool(properties, "show_missing", value.show_missing);
             insert_optional_provider(properties, "provider_filter", value.provider_filter);
             insert_optional_count(
                 properties,

@@ -3,9 +3,8 @@ use std::{collections::BTreeSet, path::Path};
 use ctx_history_capture_model::SourceRouteIdentity;
 use ctx_history_capture_runtime::{
     CaptureCommitOutcome, CaptureCommitReceipt, CaptureLifecycleOpenOutcome, CaptureLifecycleSink,
-    CapturePublicationContext, CapturePublicationDisposition, CaptureRevalidationTarget,
-    CaptureRouteRef, CaptureSourceAggregateRef, ImmutableCaptureSnapshot, PresentCaptureRoute,
-    VerifiedCapture,
+    CapturePublicationDisposition, CaptureRevalidationTarget, CaptureRouteRef,
+    CaptureSourceAggregateRef, ImmutableCaptureSnapshot, PresentCaptureRoute, VerifiedCapture,
 };
 use ctx_history_core::{
     CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
@@ -334,30 +333,5 @@ impl CaptureLifecycleSink for TestLifecycle {
         I: FnMut(&CertifiedSourceInventory) -> bool,
     {
         Ok(self.commit_receipt())
-    }
-
-    fn commit_with_metadata<F, I, M>(
-        self,
-        _revalidate: F,
-        _revalidate_inventory: I,
-        metadata_factory: M,
-    ) -> Result<CaptureCommitOutcome<Self::CommittedSnapshot, Self::VerifiedPublication>, Self::Error>
-    where
-        F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: for<'a> FnOnce(
-            CapturePublicationContext<'a, Self::Snapshot<'a>>,
-        ) -> Result<Vec<u8>, Self::Error>,
-    {
-        let snapshot = self.snapshot();
-        metadata_factory(CapturePublicationContext::new(
-            "sqlite-inventory-test-generation",
-            snapshot,
-        ))?;
-        Ok(CaptureCommitOutcome::new(
-            self.commit_receipt(),
-            CapturePublicationDisposition::Published,
-            VerifiedCapture::new(()),
-        ))
     }
 }

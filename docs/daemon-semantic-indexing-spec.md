@@ -22,6 +22,13 @@ When auto remains effective, ctx installs or repairs supervision and starts the
 daemon; manual mode stops it and removes supervision.
 The canonical config is `[indexing] mode = "auto"|"manual"`.
 
+After an automatic Core publication, the daemon advances opted-in semantic
+indexing through bounded durable turns until that Core generation is ready
+before running an already queued Core successor. Yielding between turns keeps
+deadline, resource, and foreground-query checks active while preventing
+continuously changing Core generations from restarting semantic work forever.
+Foreground query activity and semantic deferral or failure still let Core run.
+
 Search is an interactive read path and never becomes a duplicate importer.
 Automatic background search may start or signal the persistent daemon. Manual
 background search reads the current indexes without contacting a process;
@@ -30,7 +37,11 @@ Neither search path performs inline history refresh or lexical publication in
 the query process. After the finite worker publishes Core in manual mode, an
 opted-in semantic or nonzero-weight hybrid `--refresh wait` may reconcile the
 semantic document projection for that exact generation and embed the query in
-the waiting foreground process.
+the waiting foreground process. Daemon-free `--refresh off` and `--refresh
+background` may embed a query in the foreground only when the exact semantic
+generation and verified cached model assets are already ready, or through an
+explicitly selected HTTP executor after the same exact preflight. They never
+reconcile or write projection state.
 
 The public retrieval modes are:
 
@@ -48,8 +59,8 @@ Freshness is separate from retrieval mode:
 
 | Freshness | Meaning |
 | --- | --- |
-| `background` | Default. Serve current indexes; start/poke persistent daemon work only in automatic indexing mode. Manual mode is inert. |
-| `off` | Serve current indexes and do not start, poke, wait for, or run indexing. |
+| `background` | Default. Serve current indexes; start/poke persistent daemon work only in automatic indexing mode. Manual mode may query an already-ready semantic projection and is otherwise refresh-inert. |
+| `off` | Serve current indexes and do not start, poke, wait for, or run indexing. A daemon-free query may use an already-ready semantic projection with verified cached model assets, or its explicitly selected HTTP executor after exact preflight. |
 | `wait` | Wait for authoritative Core publication from the persistent daemon or a manual-mode finite Core worker, then search or fail with a clear local error. |
 
 When an automatic-mode `wait` search needs semantic evidence, it also waits
@@ -95,14 +106,41 @@ responsibility boundary is the
 [external semantic executor contract](semantic-executors.md). This document
 owns only its daemon lifecycle integration.
 
-The daemon constructs one executor per applied configuration and uses it for
-both indexing and query embedding. Endpoint identity drift fails closed without
-falling back to E5. Rerunning `ctx semantic enable --executor URL` explicitly
-accepts the current identity; if it changed, ctx wipes and rebuilds only the
-derived semantic index. Core history and lexical generations remain intact.
+The daemon constructs one executor per applied configuration and uses it when
+indexing or a query requires embeddings. A Core generation with no eligible
+semantic events can publish its semantic acknowledgement from the selected
+configuration contract without credentials or an executor. Existing external
+state is admitted this way only when its control, Flat, and source contracts
+match under the same writer lock used for writable opening; drift still
+requires endpoint verification before reset. Endpoint identity drift fails
+closed without falling back to E5. Rerunning `ctx semantic enable --executor
+URL` explicitly accepts the current identity; if it changed, ctx wipes and
+rebuilds only the derived semantic index. Core history and lexical generations
+remain intact.
+
+Built-in semantic document indexing is throttled by default. The effective
+default is `builtin_throttling = true` even when the key is absent. An operator
+can opt the built-in executor out in `config.toml`:
+
+```toml
+[semantic]
+builtin_throttling = false
+```
+
+The setting is configuration-only and does not change `ctx semantic enable`,
+`--executor`, or semantic query/index identity. Combining it with an explicitly
+configured HTTP executor is invalid and fails configuration loading. When
+disabled, ctx adds no deliberate delay between built-in inference batches and
+uses up to eight threads, bounded by available parallelism, with batches of up
+to 512 inputs. Work admission, model/runtime integrity, cancellation
+boundaries, source-page atomicity, and all hard resource and protocol limits
+remain authoritative. The built-in model remains the pinned
+`intfloat/multilingual-e5-small` contract.
 
 `ctx semantic status` reads persisted and observed local state only. It does
 not require the token, send it, probe either route, or make any network request.
+Its human and JSON forms report configured and effective built-in throttling,
+including the defaulted configured value.
 
 ## Setup UX
 
@@ -150,8 +188,7 @@ The exact words can change, but the output must communicate:
 
 `ctx setup --format json` reports the same counts/status as structured fields;
 output format does not change daemon-autostart behavior. `ctx setup --no-daemon`
-is the one-run daemon-autostart opt-out. The deprecated `--catalog-only` flag is
-ignored and does not change setup behavior.
+is the one-run daemon-autostart opt-out.
 
 The long-lived daemon reloads effective daemon and semantic configuration
 between maintenance cycles. A later supported semantic opt-in plus repeat setup
@@ -168,7 +205,10 @@ executor, ctx stops the old query service and releases the old executor before
 it prepares the replacement. If replacement activation fails, ctx does not
 resume or send work to the old executor; requested intent remains visible,
 while applied semantic state and runtime ownership are inactive and the
-semantic job is not reported as enabled.
+semantic job is not reported as enabled for embedding or queries. Executor-free
+maintenance may still acknowledge an exact Core generation with no eligible
+semantic events; it cannot contact the endpoint or reset mismatched external
+state.
 
 ## Foreground Progress Commands
 
@@ -236,7 +276,7 @@ The setup command owns:
 - creating the data root/config/store
 - source discovery and scanning
 - persistent daemon autostart only in automatic mode and unless explicitly
-  disabled with `--no-daemon`; the deprecated `--catalog-only` flag is ignored
+  disabled with `--no-daemon`
 - printing initial background indexing estimates and status commands
 - queueing model acquisition for the daemon without downloading in the setup
   process
@@ -260,16 +300,24 @@ background startup; there is no separate public daemon start command.
 
 - No public `auto` retrieval mode.
 - No lexical-then-semantic fallback as the default strategy.
-- No foreground semantic embedding from implicit/background or `--refresh off`
-  search. An opted-in manual-mode semantic or nonzero-weight hybrid
-  `--refresh wait` is the sole query-process exception: after finite Core
-  publication it may prepare the selected executor, reconcile semantic
-  coverage for that exact generation, and embed the query.
-- No built-in model download from foreground setup, import, status, doctor,
-  MCP, or index-observer commands. Acquisition belongs to the opted-in daemon in
-  auto mode and the explicit manual `--refresh wait` exception above;
-  unverified bytes must fail closed before cache publication. Status and
-  observer commands never probe an external executor.
+- With automatic indexing disabled, direct CLI `--refresh off` and
+  `--refresh background` queries may embed from verified cached model assets
+  or use the configured HTTP executor only after
+  exact-generation preflight succeeds; they never acquire a model, reconcile
+  coverage, or write projection state. Passive preflight shares the existing
+  Flat transaction lock from SQLite sidecar inspection through control-schema
+  validation and exact Flat-generation pinning. It refuses WAL and rollback
+  journals and opens the main database immutable/read-only without creating
+  lock, WAL, or SHM files. Ordinary daemon and Reconcile preflight remains
+  WAL-aware so committed daemon work is visible.
+  An opted-in manual-mode semantic or nonzero-weight hybrid `--refresh wait`
+  may prepare the selected executor, acquire the pinned local model when
+  selected, reconcile semantic coverage for that exact generation, and embed
+  the query.
+- No model download from foreground setup, import, status, doctor, MCP, or
+  index-observer commands. Acquisition belongs to the opted-in daemon in auto
+  mode and the explicit manual `--refresh wait` exception above; unverified
+  bytes must fail closed before cache publication.
 - No duplicate inline importer. Persistent and finite publication both use the
   same daemon/Core refresh engine.
 - A finite Core worker installs no supervision, runs no watcher/timer/semantic/

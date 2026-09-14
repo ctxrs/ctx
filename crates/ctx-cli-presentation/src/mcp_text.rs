@@ -72,7 +72,6 @@ fn render_status_text(value: &Value) -> String {
         );
     }
     push_key_value(&mut out, "read_only", value.get("read_only"));
-    push_key_value(&mut out, "local_only", value.get("local_only"));
     push_status_semantic_summary(&mut out, value.get("semantic"));
     push_status_daemon_summary(&mut out, value.get("daemon"));
     out

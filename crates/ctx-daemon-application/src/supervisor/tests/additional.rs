@@ -20,6 +20,8 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
         semantic_enabled: true,
         semantic_executor: endpoint.to_owned(),
         semantic_contract_fingerprint: "sha256:external-space-a".to_owned(),
+        semantic_builtin_throttling_configured: true,
+        semantic_builtin_throttling_effective: None,
     };
 
     env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENV, "token-a");
@@ -92,6 +94,8 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
     let builtin_config = crate::DaemonConfigSnapshot {
         semantic_executor: "builtin".to_owned(),
         semantic_contract_fingerprint: "sha256:builtin-space".to_owned(),
+        semantic_builtin_throttling_configured: true,
+        semantic_builtin_throttling_effective: Some(true),
         ..enabled_http.clone()
     };
     let builtin_environment = configured_supervisor_environment_for_config(
@@ -936,21 +940,16 @@ fn native_disable_failure_does_not_claim_an_unavailable_launch_probe_is_healthy(
 
 #[test]
 fn canonical_supervisor_root_is_independent_of_ctx_data_root_override() {
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-    let _guard = ENV_LOCK.lock().unwrap();
-    let previous = env::var_os("CTX_DATA_ROOT");
+    let _env_lock = crate::test_environment_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _restore = RestoreTestEnvironment::capture(&["CTX_DATA_ROOT"]);
     let canonical = ctx_history_platform::managed_data_root().unwrap();
     let custom = canonical.with_file_name("ctx-custom-supervisor-test");
     env::set_var("CTX_DATA_ROOT", &custom);
 
     assert!(is_canonical_managed_data_root(&canonical).unwrap());
     assert!(!is_canonical_managed_data_root(&custom).unwrap());
-
-    if let Some(previous) = previous {
-        env::set_var("CTX_DATA_ROOT", previous);
-    } else {
-        env::remove_var("CTX_DATA_ROOT");
-    }
 }
 
 #[test]

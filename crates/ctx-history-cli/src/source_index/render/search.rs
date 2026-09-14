@@ -188,6 +188,22 @@ fn render_result(
 
     let event_id = result["ctx_event_id"].as_str().unwrap_or("unknown");
     render_event_summary(document, context, event_id, result["timestamp"].as_str());
+    if let Some(citations) = result["semantic_passage"]["citations"].as_array() {
+        for citation in citations {
+            if let Some(member_id) = citation["ctx_event_id"].as_str() {
+                let role = citation["role"].as_str().unwrap_or("message");
+                push_field(
+                    document,
+                    context,
+                    CARD_INDENT,
+                    "Passage",
+                    CARD_LABEL_WIDTH,
+                    &format!("{role} · {member_id}"),
+                    Token::Reference,
+                );
+            }
+        }
+    }
 
     if let Some(more) = result["more_matches_in_session"]
         .as_u64()

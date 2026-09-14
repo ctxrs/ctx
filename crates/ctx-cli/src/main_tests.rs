@@ -157,11 +157,11 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
     let command = Cli::command();
     let mut paths = Vec::new();
     collect_paths(&command, &[], &mut paths);
-    // Semantic lifecycle is a public namespace with three closed leaves; the
-    // two named-provider-home mutations are public source-management leaves.
+    // Integrations exposes install, status, and remove for four canonical
+    // targets; hidden compatibility aliases do not add grammar nodes.
     assert_eq!(
         paths.len(),
-        54,
+        62,
         "unexpected public CLI grammar depth: {paths:?}"
     );
 

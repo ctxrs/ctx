@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 smoke="${repo_root}/scripts/run-native-candidate-smoke.sh"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctx-native-smoke-test.XXXXXX")"
+chmod 0700 "${tmp}"
+chmod u-s,g-s,o-t "${tmp}"
 
 cleanup_survivor_fixture() {
   local survivor_pids
@@ -28,7 +31,37 @@ trap cleanup_test EXIT
 fake_template="${tmp}/ctx.template"
 make_fake() {
   local destination="$1"
-  cp "${fake_template}" "${destination}"
+  python3 -I - "${fake_template}" \
+    "${repo_root}/scripts/tests/native-candidate-outbox.json" \
+    "${destination}" "${2:-current}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+outbox = json.loads(Path(sys.argv[2]).read_text())
+payload = json.loads(outbox["entries"][0]["payload"])
+case = sys.argv[4]
+if case == "legacy":
+    outbox["schema_version"] = outbox["entries"][0]["schema_version"] = 2
+elif case == "malformed-entries":
+    outbox["entries"] = {}
+elif case == "event-mismatch":
+    payload["events"][0]["event_id"] = "33333333-3333-4333-8333-333333333333"
+elif case == "duplicate-delivery":
+    payload["events"] *= 2
+elif case == "non-v4":
+    payload["events"][0]["event_id"] = "11111111-1111-1111-8111-111111111111"
+    outbox["entries"][0]["payload"] = json.dumps(payload)
+elif case == "wrong-operation":
+    payload["events"][0]["operation"] = "search"
+    outbox["entries"][0]["payload"] = json.dumps(payload)
+elif case != "current":
+    raise SystemExit("unknown analytics fixture case")
+source = Path(sys.argv[1]).read_text()
+source = source.replace("@ANALYTICS_OUTBOX@", json.dumps(outbox))
+source = source.replace("@ANALYTICS_PAYLOAD@", json.dumps(payload))
+Path(sys.argv[3]).write_text(source)
+PY
   chmod +x "${destination}"
 }
 
@@ -79,14 +112,60 @@ snapshot_tree() {
 }
 
 process_ids_for_command_path() {
-  ps -axo pid=,command= 2>/dev/null \
-    | awk -v executable="$1" '$2 == executable || $3 == executable { print $1 }' \
-    | LC_ALL=C sort -n
+  ps -axo pid=,command= > "${tmp}/processes.snapshot" 2>/dev/null
+  awk -v executable="$1" '
+    {
+      pid = $1
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", $0)
+      start = index($0, executable)
+      after = start + length(executable)
+      if (start > 0 \
+          && (start == 1 || substr($0, start - 1, 1) == " ") \
+          && (after > length($0) || substr($0, after, 1) == " ")) {
+        print pid
+      }
+    }
+  ' "${tmp}/processes.snapshot" | LC_ALL=C sort -n
+}
+
+assert_no_candidate_processes_in_tmpdir() {
+  local candidate_root_fragment="$1"
+  local remaining
+  ps -axo pid=,command= > "${tmp}/processes.snapshot" 2>/dev/null
+  remaining="$(
+    awk -v fragment="${candidate_root_fragment}" \
+      'index($0, fragment) { print $1 }' "${tmp}/processes.snapshot" \
+      | LC_ALL=C sort -n
+  )"
+  if [[ -n "${remaining}" ]]; then
+    kill -KILL ${remaining} 2>/dev/null || true
+    printf 'candidate smoke left space-path processes running: %s\n' \
+      "${remaining}" >&2
+    exit 1
+  fi
 }
 
 cat > "${fake_template}" <<'EOF'
 #!/bin/sh
 set -eu
+
+if test "${1:-}" = --ctx-core-managed-pair-apply-v1; then
+  test "$#" = 7
+  test "$3" = -
+  install_root="$2"
+  mkdir -p "${install_root}/bin" "${install_root}/libexec" "${install_root}/share/ctx"
+  cp "$5" "${install_root}/bin/ctx"
+  chmod 0700 "${install_root}/bin/ctx"
+  cp "$6" "${install_root}/libexec/ctx-pro"
+  chmod 0700 "${install_root}/libexec/ctx-pro"
+  cp "$4" "${install_root}/share/ctx/managed-pair-envelope.json"
+  cp "$7" "${install_root}/bin/ctx.install.json"
+  printf '%s\n' '{"schema_version":1,"command":"managed_pair_apply","ok":true,"status":"committed"}'
+  case "${0##*/}" in
+    *extra-receipt*) printf '%s\n' 'unexpected output' ;;
+  esac
+  exit 0
+fi
 
 test "${CTX_DAEMON_AUTOSTART_OFF:-}" = 1
 test -n "${CTX_DATA_ROOT:-}"
@@ -94,12 +173,19 @@ test -n "${HOME:-}"
 test -n "${XDG_CONFIG_HOME:-}"
 test -n "${XDG_CACHE_HOME:-}"
 test "${HOME}" != "${ORIGINAL_HOME:-not-in-clean-env}"
-if data_root_mode="$(stat -c '%a' "${CTX_DATA_ROOT}" 2>/dev/null)"; then
-  :
-else
-  data_root_mode="$(stat -f '%Lp' "${CTX_DATA_ROOT}")"
-fi
-test "${data_root_mode}" = 700
+for private_dir in "${CTX_DATA_ROOT%/*}" "${CTX_DATA_ROOT}" "${HOME}" \
+  "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}" "${XDG_STATE_HOME}" "${TMPDIR}" "${PWD}"; do
+  if private_mode="$(stat -c '%a' "${private_dir}" 2>/dev/null)"; then
+    :
+  else
+    private_mode="$(stat -f '%Lp' "${private_dir}")"
+  fi
+  if test "${private_mode}" != 700; then
+    printf 'private candidate directory is mode %s, not 700: %s\n' \
+      "${private_mode}" "${private_dir}" >&2
+    exit 1
+  fi
+done
 
 case "${0##*/}" in
   *ctx-hang*)
@@ -131,6 +217,13 @@ case " $* " in
     test "${CTX_DAEMON_ENABLED:-}" = 1
     printf '%s\n' 'semantic-only search will not initialize or download intfloat/multilingual-e5-small during search' >&2
     exit 1
+    ;;
+  *" daemon run "*)
+    test "${CTX_ANALYTICS_ENABLED+x}" != x
+    test "${CTX_UPGRADE_AUTO:-}" = off
+    test "${CTX_DAEMON_ENABLED:-}" = true
+    test "${CTX_DAEMON_MODE:-}" = source-refresh-only
+    test "${CTX_SEARCH_SEMANTIC:-}" = 0
     ;;
   *" status --format json "*)
     test -z "${CTX_SEARCH_SEMANTIC:-}"
@@ -184,11 +277,33 @@ case "${1:-}" in
   search)
     printf '%s\n' '{"retrieval":{"requested_mode":"lexical","effective_mode":"lexical"},"results":[{"text":"Add a parser test."}]}'
     ;;
+  pro)
+    test "${2:-}" = --help
+    ;;
   status)
     if test "${CTX_ANALYTICS_ENABLED+x}" != x; then
       analytics_path="${CTX_ANALYTICS_ENDPOINT#file://}"
-      printf '%s\n' '{"events":[{"event_name":"operation_completed"}]}' > "${analytics_path}"
-      cat <<'JSON'
+      analytics_payload='@ANALYTICS_PAYLOAD@'
+      case "${0##*/}" in
+        *foreground-analytics*)
+          printf '%s\n' "${analytics_payload}" > "${analytics_path}"
+          ;;
+        *)
+          analytics_outbox="${XDG_STATE_HOME}/ctx/analytics-outbox-v1.json"
+          mkdir -p "${analytics_outbox%/*}"
+          chmod 0700 "${analytics_outbox%/*}"
+          printf '%s\n' '@ANALYTICS_OUTBOX@' \
+            > "${analytics_outbox}"
+          chmod 0600 "${analytics_outbox}"
+          ;;
+      esac
+      upgrade_auto=off
+      upgrade_enabled=false
+      if test -f "$0.install.json"; then
+        upgrade_auto=apply
+        upgrade_enabled=true
+      fi
+      cat <<JSON
 {
   "read_only": true,
   "daemon": {
@@ -200,8 +315,8 @@ case "${1:-}" in
     "enabled": true
   },
   "upgrade": {
-    "auto": "off",
-    "auto_enabled": false
+    "auto": "${upgrade_auto}",
+    "auto_enabled": ${upgrade_enabled}
   },
   "semantic": {
     "config_source": "default",
@@ -241,6 +356,24 @@ JSON
 JSON
     fi
     ;;
+  daemon)
+    test "${2:-}" = run
+    analytics_outbox="${XDG_STATE_HOME}/ctx/analytics-outbox-v1.json"
+    test -s "${analytics_outbox}"
+    case "${0##*/}" in
+      *no-analytics-delivery*)
+        trap '' 1 2 15
+        while :; do :; done
+        ;;
+      *)
+        trap 'exit 0' 1 2 15
+        analytics_path="${CTX_ANALYTICS_ENDPOINT#file://}"
+        printf '%s\n' '@ANALYTICS_PAYLOAD@' \
+          > "${analytics_path}"
+        ;;
+    esac
+    while :; do sleep 1; done
+    ;;
   --survivor-child)
     sleep 30
     ;;
@@ -270,6 +403,66 @@ result="${tmp}/result.json"
 "${smoke}" "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${result}" >/dev/null
 assert_passed_result "${result}"
 
+for analytics_case in legacy malformed-entries event-mismatch duplicate-delivery non-v4 wrong-operation; do
+  negative_fake="${tmp}/ctx-${analytics_case}"
+  make_fake "${negative_fake}" "${analytics_case}"
+  negative_result="${tmp}/${analytics_case}-result.json"
+  if "${smoke}" "${negative_fake}" "${tmp}/fixture.jsonl" 0.25.0 \
+    "${negative_result}" >"${tmp}/${analytics_case}.out" 2>"${tmp}/${analytics_case}.err"; then
+    printf 'candidate smoke accepted invalid analytics: %s\n' "${analytics_case}" >&2
+    exit 1
+  fi
+  grep -Fq 'candidate did not preserve exact status analytics across daemon delivery' \
+    "${tmp}/${analytics_case}.err"
+  test ! -e "${negative_result}"
+done
+
+space_tmp="${tmp}/setgid task parent"
+mkdir -p "${space_tmp}"
+chmod 2700 "${space_tmp}"
+space_result="${tmp}/space-result.json"
+TMPDIR="${space_tmp}" "${smoke}" \
+  "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${space_result}" >/dev/null
+assert_passed_result "${space_result}"
+assert_no_candidate_processes_in_tmpdir \
+  "${space_tmp}/ctx-native-candidate-smoke."
+
+foreground_analytics_fake="${tmp}/ctx-foreground-analytics"
+make_fake "${foreground_analytics_fake}"
+foreground_analytics_result="${tmp}/foreground-analytics-result.json"
+if "${smoke}" "${foreground_analytics_fake}" "${tmp}/fixture.jsonl" 0.25.0 \
+  "${foreground_analytics_result}" >"${tmp}/foreground-analytics.out" \
+  2>"${tmp}/foreground-analytics.err"; then
+  printf 'candidate smoke accepted foreground analytics delivery\n' >&2
+  exit 1
+fi
+grep -Fq 'foreground CLI delivered analytics before daemon ownership' \
+  "${tmp}/foreground-analytics.err"
+test ! -e "${foreground_analytics_result}"
+
+no_analytics_delivery_fake="${tmp}/ctx-no-analytics-delivery"
+make_fake "${no_analytics_delivery_fake}"
+no_analytics_delivery_result="${tmp}/no-analytics-delivery-result.json"
+started="$(date +%s)"
+if TMPDIR="${space_tmp}" CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS=1 \
+  "${smoke}" \
+  "${no_analytics_delivery_fake}" "${tmp}/fixture.jsonl" 0.25.0 \
+  "${no_analytics_delivery_result}" >"${tmp}/no-analytics-delivery.out" \
+  2>"${tmp}/no-analytics-delivery.err"; then
+  printf 'candidate smoke accepted an analytics daemon that did not deliver\n' >&2
+  exit 1
+fi
+elapsed="$(( $(date +%s) - started ))"
+[[ "${elapsed}" -lt 10 ]] || {
+  printf 'candidate analytics delivery timeout was not bounded: %ss\n' "${elapsed}" >&2
+  exit 1
+}
+grep -Fq 'daemon did not deliver queued status analytics within 1 seconds' \
+  "${tmp}/no-analytics-delivery.err"
+test ! -e "${no_analytics_delivery_result}"
+assert_no_candidate_processes_in_tmpdir \
+  "${space_tmp}/ctx-native-candidate-smoke."
+
 ctx_v1_parent="${tmp}/ctx-v1-parent"
 mkdir -p "${ctx_v1_parent}"
 ordinary_fake="${ctx_v1_parent}/ctx"
@@ -291,6 +484,30 @@ assert_passed_result "${v1_result}" || {
   cat "${v1_result}" >&2
   exit 1
 }
+
+pair_companion="${tmp}/ctx-pro"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "${pair_companion}"
+chmod +x "${pair_companion}"
+pair_envelope="${tmp}/pair-envelope.json"
+printf '%s\n' '{}' > "${pair_envelope}"
+pair_result="${tmp}/result-pair.json"
+"${smoke}" "${fake}" "${pair_companion}" "${pair_envelope}" \
+  "${tmp}/fixture.jsonl" 0.25.0 "${pair_result}" >/dev/null
+assert_passed_result "${pair_result}"
+grep -Fq '"managed_pair_apply":"passed"' "${pair_result}"
+grep -Fq '"companion_selection":"passed"' "${pair_result}"
+test "$(grep -Fc -- '--ctx-core-managed-pair-apply-v1' "${smoke}")" = 1
+extra_receipt_fake="${tmp}/ctx-extra-receipt"
+make_fake "${extra_receipt_fake}"
+extra_receipt_result="${tmp}/result-pair-extra-receipt.json"
+if "${smoke}" "${extra_receipt_fake}" "${pair_companion}" "${pair_envelope}" \
+  "${tmp}/fixture.jsonl" 0.25.0 "${extra_receipt_result}" \
+  >"${tmp}/extra-receipt.out" 2>"${tmp}/extra-receipt.err"; then
+  printf 'candidate smoke accepted extra managed-pair receipt output\n' >&2
+  exit 1
+fi
+grep -Fq 'invalid managed-pair apply receipt' "${tmp}/extra-receipt.err"
+test ! -e "${extra_receipt_result}"
 
 lifecycle_parent="${tmp}/lifecycle-candidate"
 lifecycle_tmpdir_real="${tmp}/lifecycle-smoke-tmp-real"

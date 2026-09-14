@@ -67,7 +67,6 @@ impl PlannedFile {
 pub(super) struct ValidatedClonePlan {
     files: Vec<PlannedFile>,
     logical_bytes: u64,
-    required_headroom: u64,
     managed_bytes: Vec<u8>,
 }
 
@@ -78,10 +77,6 @@ impl ValidatedClonePlan {
 
     pub(super) fn logical_bytes(&self) -> u64 {
         self.logical_bytes
-    }
-
-    pub(super) fn required_headroom(&self) -> u64 {
-        self.required_headroom
     }
 
     pub(super) fn managed_bytes(&self) -> &[u8] {
@@ -225,13 +220,9 @@ pub(super) fn authenticated_clone_plan(
         ));
     }
 
-    let required_headroom = total_bytes
-        .checked_add(REPUBLISH_HEADROOM_RESERVE_BYTES)
-        .ok_or(IndexError::CountOverflow)?;
     Ok(ValidatedClonePlan {
         files: planned.into_values().collect(),
         logical_bytes: total_bytes,
-        required_headroom,
         managed_bytes,
     })
 }

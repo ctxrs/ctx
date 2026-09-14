@@ -2,7 +2,11 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 
 fn private_data_root() -> (tempfile::TempDir, PathBuf) {
-    let temp = tempfile::tempdir().expect("temporary data root");
+    // Provider admission rejects symlinked roots; canonicalize macOS temporary paths.
+    let base = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temp root");
+    let temp = tempfile::tempdir_in(base).expect("temporary data root");
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root)
         .expect("private data root");
@@ -110,26 +114,48 @@ fn queued_complete_catalog_is_readmitted_when_provider_roots_change() {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
-        let commit = ctx_history_index::GenerationWriter::open(
+        let mut writer = ctx_history_index::GenerationWriter::open(
             execution.index_root,
             ctx_history_index::WriterOptions::default(),
         )?
         .into_writer()
-        .map_err(crate::committed_generation_recovery_error)?
-        .commit(|_| true)?;
-        Ok(SourceBackedRefreshPublication {
-            route_results: selected
+        .map_err(crate::committed_generation_recovery_error)?;
+        writer.set_present_source_routes(
+            selected
                 .iter()
-                .map(|route| {
-                    SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true)
-                })
-                .collect(),
-            zero_source_authority: selected
+                .cloned()
+                .map(|route| ctx_history_index::SourceRouteSnapshot::present(route, Vec::new()))
+                .collect::<ctx_history_index::Result<Vec<_>>>()?,
+        )?;
+        let route_results = selected
+            .iter()
+            .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
+            .collect::<Vec<_>>();
+        let zero_source_authority = selected
+            .iter()
+            .cloned()
+            .map(|route| {
+                (
+                    route,
+                    SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+                )
+            })
+            .collect::<Vec<_>>();
+        let commit = tests::commit_source_backed_test_generation_with_facts(
+            writer,
+            tests::SourceBackedTestGenerationFacts {
+                explicit_source_catalog: execution.explicit_source_catalog.cloned(),
+                ..tests::SourceBackedTestGenerationFacts::default()
+            },
+        )?;
+        Ok(SourceBackedRefreshPublication {
+            route_results,
+            zero_source_authority: zero_source_authority
                 .into_iter()
-                .map(|route| SourceBackedZeroSourceAuthority {
+                .map(|(route_identity, kind)| SourceBackedZeroSourceAuthority {
                     generation_id: commit.generation_id.clone(),
-                    route_identity: route,
-                    kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+                    route_identity,
+                    kind,
                 })
                 .collect(),
             catalog_route_bindings: Vec::new(),
@@ -408,6 +434,8 @@ fn internal_registration_failure_uses_admission_retry_handoff() {
 
     assert!(run.failed, "{:#}", run.job);
     assert_eq!(run.job["error_code"], "source_refresh_admission_failed");
+    assert_eq!(run.job["refresh_failure_stage"], "admission");
+    assert_eq!(run.job["refresh_failure_kind"], "provider");
     assert_eq!(run.job["reason"], "control_plane");
     assert_eq!(run.job["structured_outcome"]["retryable"], true);
     assert_eq!(
@@ -1167,41 +1195,9 @@ fn durable_recovery_preserves_intent_separately_from_physical_scope() {
     assert_eq!(recovered.intent, attempt.intent);
     assert_eq!(recovered.refresh_scope, scope);
 
-    let mut legacy = job.clone();
-    legacy.as_object_mut().unwrap().remove("refresh_intent");
-    legacy["refresh_selector"] = json!({ "kind": "automatic_provider", "provider": "codex" });
-    let recovered_legacy = recover_queued_root(&legacy, None).unwrap();
-    assert_eq!(
-        recovered_legacy.intent,
-        RefreshIntent::SelectedImport(RefreshSelection::Provider(CaptureProvider::Codex))
-    );
-    assert_eq!(recovered_legacy.refresh_scope, attempt.refresh_scope);
-
-    let legacy_authority = crate::explicit_source_catalog_authority_for_test(1);
-    let mut legacy_explicit = new_refresh_attempt(
-        None,
-        SourceRefreshRuntimeMetadata {
-            operation: SourceBackedRefreshOperation::Import,
-            daemon_mode: "full".to_owned(),
-            trigger: "import",
-            trigger_provenance: "explicit_source_catalog",
-        },
-        RefreshIntent::SelectedImport(RefreshSelection::ExactSource(legacy_authority.clone())),
-        SourceBackedRefreshScope::All,
-    )
-    .job_json();
-    legacy_explicit
-        .as_object_mut()
-        .unwrap()
-        .remove("refresh_intent");
-    legacy_explicit["requested_explicit_source_catalog"] = legacy_authority.to_json();
-    let recovered_explicit = recover_queued_root(&legacy_explicit, None).unwrap();
-    assert_eq!(
-        recovered_explicit.intent,
-        RefreshIntent::SelectedImport(RefreshSelection::ExactSource(
-            crate::explicit_source_catalog_authority_for_test(1),
-        ))
-    );
+    let mut missing = job.clone();
+    missing.as_object_mut().unwrap().remove("refresh_intent");
+    assert!(recover_queued_root(&missing, None).is_err());
 
     let mut malformed = job.clone();
     malformed["refresh_intent"] = json!({

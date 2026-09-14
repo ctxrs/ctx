@@ -20,21 +20,26 @@ use super::{CompletedOperation, LocalUsageStorageAuthority, RETENTION_DAYS};
 #[cfg(test)]
 const TEST_PRODUCT_VERSION: &str = "1.0.0";
 
+mod access;
 mod connection;
 mod error;
 mod file_family;
+#[cfg(all(test, unix))]
+mod lock_tests;
 mod migration;
 mod write;
 
+use access::RootAccess;
 use connection::{configure_persistent, configure_report_connection, configure_transient};
 pub use error::UsageStoreError;
+#[cfg(test)]
+use file_family::protect_sqlite_files;
 #[cfg(all(test, windows))]
 pub(super) use file_family::{assert_single_link_for_test, verify_same_file_for_test};
 use file_family::{
     capture_checkpointed_image, deserialize_read_only, open_nofollow, preflight_auxiliaries,
-    preflight_existing_family, protect_sqlite_files, reopen_same_file, verify_file_owner,
-    verify_metadata_owner, verify_private_directory_and_owner, verify_same_file,
-    verify_single_link, FamilyGuard,
+    preflight_existing_family, reopen_same_file, verify_file_owner, verify_metadata_owner,
+    verify_private_directory_and_owner, verify_same_file, verify_single_link, FamilyGuard,
 };
 pub use migration::verify_report_dates;
 pub(super) use migration::verify_supported_schema;
@@ -69,14 +74,9 @@ pub fn usage_path(data_root: &Path) -> PathBuf {
 
 pub fn usage_store_exists(authority: &LocalUsageStorageAuthority) -> Result<bool, UsageStoreError> {
     let path = authority.database_path();
-    let Some(parent) = path.parent() else {
-        return Err(UsageStoreError::SchemaIdentity);
+    let Some(_access) = RootAccess::acquire(path, false)? else {
+        return Ok(false);
     };
-    match parent.symlink_metadata() {
-        Ok(_) => verify_private_directory_and_owner(parent)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    }
     match path.symlink_metadata() {
         Ok(_) => {
             let _guard = preflight_existing_family(path, true)?;
@@ -615,6 +615,7 @@ pub struct ReadOnlyStore {
     conn: Connection,
     family_guard: FamilyGuard,
     path: PathBuf,
+    _access: RootAccess,
 }
 
 impl ReadOnlyStore {
@@ -628,6 +629,7 @@ impl ReadOnlyStore {
 }
 
 pub fn open_read_only(path: &Path) -> Result<ReadOnlyStore, UsageStoreError> {
+    let access = RootAccess::acquire(path, false)?.ok_or(UsageStoreError::SchemaIdentity)?;
     let guard = preflight_existing_family(path, true)?;
     if guard.has_nonempty_auxiliary()? {
         return Err(UsageStoreError::UnsafeReadState);
@@ -641,6 +643,7 @@ pub fn open_read_only(path: &Path) -> Result<ReadOnlyStore, UsageStoreError> {
         conn,
         family_guard: guard,
         path: path.to_path_buf(),
+        _access: access,
     })
 }
 
@@ -653,20 +656,17 @@ fn reset_with_post_commit<T>(
     after_commit: impl FnOnce(&Path) -> T,
 ) -> Result<bool, UsageStoreError> {
     let path = database_path.to_path_buf();
-    let Some(WritableStore {
-        mut conn,
-        family_guard,
-    }) = open_writable(&path, false, BUSY_TIMEOUT)?
-    else {
+    let Some(mut store) = open_writable(&path, false, BUSY_TIMEOUT)? else {
         return Ok(false);
     };
-    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
     verify_schema(&transaction)?;
     super::report::validate_rows(&transaction)?;
     transaction.execute("DELETE FROM daily_usage", [])?;
     transaction.execute("DELETE FROM maintenance", [])?;
-    family_guard.recheck(&path)?;
-    let commit_guard = preflight_existing_family(&path, true)?;
+    let commit_guard = store.family_guard.before_commit(&path)?;
     verify_schema(&transaction)?;
     super::report::validate_rows(&transaction)?;
     transaction.commit()?;
@@ -675,14 +675,16 @@ fn reset_with_post_commit<T>(
     // Reset promises logical deletion, not forensic erasure. Truncate the WAL
     // when no reader prevents it, but do not turn a completed logical reset
     // into an error if this best-effort checkpoint is busy.
-    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    });
-    let _ = protect_sqlite_files(&path);
+    let _ = store
+        .conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        });
+    let _ = store.family_guard.protect(&path);
     Ok(true)
 }
 
@@ -699,8 +701,15 @@ enum PreparedFile {
 }
 
 struct WritableStore {
+    // Unix descriptor closes release process-owned locks, so SQLite closes
+    // first. Windows instead drops no-delete-sharing guards before SQLite's
+    // close-time auxiliary cleanup. Root admission is always released last.
+    #[cfg(unix)]
     conn: Connection,
     family_guard: FamilyGuard,
+    #[cfg(not(unix))]
+    conn: Connection,
+    _access: RootAccess,
 }
 
 fn open_writable(
@@ -717,6 +726,9 @@ fn open_writable_with_migration_hook(
     busy_timeout: Duration,
     before_migration_commit: impl FnOnce() -> Result<(), UsageStoreError>,
 ) -> Result<Option<WritableStore>, UsageStoreError> {
+    let Some(access) = RootAccess::acquire(path, create)? else {
+        return Ok(None);
+    };
     let prepared = prepare_file(path, create)?;
     let newly_created = matches!(prepared, PreparedFile::NewInitialized(_));
     let guard = match prepared {
@@ -744,12 +756,18 @@ fn open_writable_with_migration_hook(
     if newly_created {
         flags |= OpenFlags::SQLITE_OPEN_CREATE;
     }
-    let mut conn = Connection::open_with_flags(path, flags)?;
+    let mut store = WritableStore {
+        conn: Connection::open_with_flags(path, flags)?,
+        family_guard: guard,
+        _access: access,
+    };
+    let conn = &mut store.conn;
+    let guard = &store.family_guard;
     verify_same_file(path, guard.main_file())?;
     verify_single_link(guard.main_file())?;
-    let schema_version = verify_supported_schema(&conn)?;
-    super::report::validate_rows_for_schema(&conn, schema_version)?;
-    configure_transient(&conn, busy_timeout)?;
+    let schema_version = verify_supported_schema(conn)?;
+    super::report::validate_rows_for_schema(conn, schema_version)?;
+    configure_transient(conn, busy_timeout)?;
     if schema_version != SCHEMA_VERSION {
         // A quiescent predecessor store can have a WAL-mode main header without
         // auxiliaries. Opening it natively creates fresh WAL/SHM files, which
@@ -776,36 +794,19 @@ fn open_writable_with_migration_hook(
         }
         guard.recheck(path)?;
     }
-    migrate_to_current(&mut conn, || {
-        guard.recheck(path)?;
-        let commit_guard = preflight_existing_family(path, true)?;
+    migrate_to_current(conn, || {
+        let commit_guard = guard.before_commit(path)?;
         before_migration_commit()?;
         Ok(commit_guard)
     })?;
-    configure_persistent(&conn)?;
-    verify_schema(&conn)?;
-    super::report::validate_rows(&conn)?;
-    drop(guard);
-    protect_sqlite_files(path)?;
-    let family_guard = preflight_existing_family(path, true)?;
-    Ok(Some(WritableStore { conn, family_guard }))
+    configure_persistent(conn)?;
+    verify_schema(conn)?;
+    super::report::validate_rows(conn)?;
+    store.family_guard.admit_created_auxiliaries(path)?;
+    Ok(Some(store))
 }
 
 fn prepare_file(path: &Path, create: bool) -> Result<PreparedFile, UsageStoreError> {
-    let Some(parent) = path.parent() else {
-        return Err(UsageStoreError::SchemaIdentity);
-    };
-    match parent.symlink_metadata() {
-        Ok(_) => verify_private_directory_and_owner(parent)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
-            establish_private_data_root(parent)?;
-            verify_private_directory_and_owner(parent)?;
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(PreparedFile::Missing);
-        }
-        Err(error) => return Err(error.into()),
-    }
     match path.symlink_metadata() {
         Ok(_) => {
             return Ok(PreparedFile::Existing(preflight_existing_family(

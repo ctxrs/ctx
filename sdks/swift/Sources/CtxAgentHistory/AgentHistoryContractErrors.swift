@@ -56,8 +56,8 @@ public struct VersionInfo: Codable, Equatable, Sendable {
     public var hosted: Bool?
 
     public init(
-        schemaVersion: Int = AGENT_HISTORY_V1_SCHEMA_VERSION,
-        apiVersion: String = AGENT_HISTORY_V1_VERSION,
+        schemaVersion: Int = AGENT_HISTORY_V2_SCHEMA_VERSION,
+        apiVersion: String = AGENT_HISTORY_V2_VERSION,
         sdkVersion: String = CTX_AGENT_HISTORY_SWIFT_SDK_VERSION,
         adapter: String,
         ctxVersion: String? = nil,

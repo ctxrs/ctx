@@ -3,16 +3,13 @@ use super::*;
 #[cfg(test)]
 mod catalog_refresh_admission_tests;
 mod family_fallback;
-mod publication;
+pub(crate) mod publication;
 mod registry_merge;
 mod route_local;
 
 use family_fallback::{exact_member_family_fallback_required, ExactMemberFallbackRequired};
 pub use publication::exclusive_scan_stage_duration;
-use publication::{
-    encode_publication_metadata, provider_route_results, publication_from_verified_metadata,
-    validate_recertified_metadata, ProviderPublicationFacts,
-};
+use publication::{provider_route_results, ProviderPublicationFacts};
 pub(super) use registry_merge::build_merged_source_backed_registry;
 use registry_merge::{
     build_merged_source_backed_registry_with_automatic_routes, provider_root_publication_scope,
@@ -24,7 +21,8 @@ pub(super) struct MergedSourceBackedRegistry {
     previous_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     previous_catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
     requested_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
-    pub(super) retained_generation: Option<VerifiedIndex>,
+    pub(super) retained_generation: Option<VerifiedGenerationSnapshot>,
+    pub(super) exact_base_generation: bool,
     pub(super) requested_catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
     previous_route_controls: BTreeMap<SourceRouteIdentity, Vec<u8>>,
 }

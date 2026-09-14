@@ -310,7 +310,11 @@ fn hybrid_maps_typed_port_failure_to_lexical_fallback() -> Result<()> {
     let calls = CallLog::default();
     let port = FakeSemanticPort::failing(
         calls.clone(),
-        HistorySemanticError::failed("fixture transport failed"),
+        HistorySemanticError::not_ready(
+            SemanticReason::ExecutorUnavailable,
+            "fixture transport unavailable",
+            true,
+        ),
     );
     let request = semantic_request(SearchBackend::Hybrid);
 
@@ -318,9 +322,23 @@ fn hybrid_maps_typed_port_failure_to_lexical_fallback() -> Result<()> {
 
     assert_eq!(collection.effective_backend, SearchBackend::Lexical);
     assert_eq!(collection.semantic_status, "unavailable");
+    let diagnostics = crate::semantic_diagnostics_read_model(
+        &collection,
+        Some("semantic_executor_unavailable"),
+        Some("passive cached backend is unavailable"),
+    )
+    .expect("hybrid fallback diagnostics");
+    assert_eq!(
+        diagnostics["fallback"]["code"],
+        "semantic_executor_unavailable"
+    );
+    assert_eq!(diagnostics["fallback"]["reason"], "ExecutorUnavailable");
+    assert_eq!(diagnostics["fallback"]["retryable"], true);
     let fallback = collection.semantic_fallback.unwrap();
-    assert_eq!(fallback.reason, None);
-    assert_eq!(fallback.detail, "fixture transport failed");
+    assert_eq!(fallback.code, Some("semantic_executor_unavailable"));
+    assert_eq!(fallback.reason, Some(SemanticReason::ExecutorUnavailable));
+    assert_eq!(fallback.detail, "fixture transport unavailable");
+    assert!(fallback.retryable);
     assert_eq!(calls.values(), vec!["begin_query"]);
     Ok(())
 }

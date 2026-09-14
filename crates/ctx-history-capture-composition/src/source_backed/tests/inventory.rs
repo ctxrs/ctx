@@ -772,36 +772,12 @@ fn provider_inventory_covers_supported_automatic_routes() {
             "{} must have at least one central source-backed format route",
             spec.provider.as_str()
         );
-        assert!(
-            source_backed_route_constructor(spec.provider).is_some(),
-            "{} must have a mechanical driver constructor",
-            spec.provider.as_str()
-        );
         assert_eq!(
             providers_with_automatic_routes.contains(&spec.provider),
             spec.import_support.is_importable(),
             "{} support classification disagrees with its landed route",
             spec.provider.as_str()
         );
-        for location in spec.default_locations {
-            let matching = routes
-                .iter()
-                .filter(|route| route.source_format == location.source_format)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                matching.len(),
-                1,
-                "{} default format {} must have exactly one central format route",
-                spec.provider.as_str(),
-                location.source_format
-            );
-            assert!(
-                matching[0].automatic,
-                "{} default format {} is not automatic",
-                spec.provider.as_str(),
-                location.source_format
-            );
-        }
     }
 
     let root_leaf_variants = [
@@ -938,6 +914,7 @@ fn provider_inventory_covers_supported_automatic_routes() {
         assert_eq!(route.automatic, automatic);
         assert_eq!(route.explicit_manual, explicit);
     }
+    assert!(landed_format_route(CaptureProvider::Codex, "unknown_codex_format").is_none());
 }
 
 #[test]

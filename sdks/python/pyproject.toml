@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ctx-agent-history"
 version = "0.1.0a0"
-description = "Experimental Python SDK for the ctx agent-history-v1 API"
+description = "Experimental Python SDK for the ctx agent-history-v2 API"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

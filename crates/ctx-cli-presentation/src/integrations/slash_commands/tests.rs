@@ -1,14 +1,10 @@
-use std::{
-    fs,
-    io::{self, Write as _},
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
-
-use unicode_width::UnicodeWidthStr as _;
+use std::{fs, path::PathBuf};
 
 use super::*;
-use crate::ui::{ColorMode, StreamKind, TestContext};
+use crate::{
+    test_support::{assert_fits, strip_ansi, SharedWriter},
+    ui::{ColorMode, StreamKind, TestContext},
+};
 use tempfile::tempdir;
 
 const PRODUCT: ProductIdentity<'static> = ProductIdentity {
@@ -40,39 +36,6 @@ fn install_result(status: SlashCommandInstallStatus) -> InstallResult {
     }
 }
 
-fn assert_fits(document: &Document, context: &RenderContext) {
-    let width = context.content_width().unwrap_or(1);
-    for line in document.render_plain().lines() {
-        assert!(line.width() <= width, "{line:?} exceeded {width} columns");
-    }
-}
-
-fn strip_ansi(rendered: &str) -> String {
-    let mut stream = anstream::StripStream::new(Vec::new());
-    stream.write_all(rendered.as_bytes()).unwrap();
-    String::from_utf8(stream.into_inner()).unwrap()
-}
-
-#[derive(Clone, Default)]
-struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-impl SharedWriter {
-    fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-impl io::Write for SharedWriter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 #[test]
 fn install_results_are_outcome_first_and_responsive() {
     let results = vec![install_result(SlashCommandInstallStatus::Current)];
@@ -94,7 +57,7 @@ fn no_detected_targets_is_actionable() {
     let context = render_context(48, ColorMode::Never);
     let rendered = render_install_results(&context, &[]).render_plain();
     assert!(rendered.starts_with("No separate slash-command targets detected\n"));
-    assert!(rendered.contains("Next\n  ctx integrations install skills\n"));
+    assert!(rendered.contains("Next\n  ctx integrations install skill\n"));
 }
 
 #[test]
@@ -117,7 +80,7 @@ fn modified_target_has_a_force_recovery_command() {
     .render_plain();
     let compact = diagnostic.split_whitespace().collect::<String>();
     assert!(diagnostic.contains("local command edits detected"));
-    assert!(compact.contains("ctxintegrationsinstallslash-commands--agentopencode--force"));
+    assert!(compact.contains("ctxintegrationsinstallslash-command--agentopencode--force"));
     assert_fits(&document, &context);
 }
 
@@ -161,7 +124,7 @@ fn failed_target_details_and_recovery_are_written_to_stderr() {
     assert!(stdout.contains("Targets"));
     assert!(!stdout.contains("local command edits detected"));
     assert!(stderr.contains("local command edits detected"));
-    assert!(stderr.contains("--agent gemini-cli --force"));
+    assert!(stderr.contains("--agent gemini-cli --project --force"));
 }
 
 #[test]

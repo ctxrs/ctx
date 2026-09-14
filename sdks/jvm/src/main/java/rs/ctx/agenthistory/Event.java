@@ -3,7 +3,7 @@ package rs.ctx.agenthistory;
 import java.util.List;
 import java.util.Map;
 
-/** A agent-history-v1 transcript event. */
+/** A agent-history-v2 transcript event. */
 public final class Event {
     private final Map<String, Object> fields;
     private final List<Citation> citations;

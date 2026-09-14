@@ -19,6 +19,41 @@ pub fn raise_open_file_soft_limit() {
     raise_unix_open_file_soft_limit();
 }
 
+/// Adds actionable resource context without replacing the original OS error.
+pub fn open_file_limit_hint(error: &std::io::Error) -> String {
+    #[cfg(unix)]
+    {
+        if error.raw_os_error() == Some(libc::ENFILE) {
+            return "; the system-wide open-file limit was reached; close unused files or increase the system's permitted open-file capacity, then retry".to_owned();
+        }
+        if error.raw_os_error() == Some(libc::EMFILE) {
+            let mut limits = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            let current = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limits) } == 0 {
+                let display_limit = |limit: libc::rlim_t| {
+                    if limit == libc::RLIM_INFINITY {
+                        "unlimited".to_owned()
+                    } else {
+                        limit.to_string()
+                    }
+                };
+                format!(
+                    " (soft limit: {}, hard limit: {})",
+                    display_limit(limits.rlim_cur),
+                    display_limit(limits.rlim_max)
+                )
+            } else {
+                String::new()
+            };
+            return format!("; process open-file limit reached{current}; another file could not be opened. Close unused files or increase the permitted open-file limit, restart the affected ctx process, and retry");
+        }
+    }
+    let _ = error;
+    String::new()
+}
+
 #[cfg(unix)]
 fn raise_unix_open_file_soft_limit() {
     let _guard = match OPEN_FILE_LIMIT_LOCK.lock() {
@@ -52,6 +87,19 @@ fn raised_open_file_soft_limit(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_hint_distinguishes_process_and_system_capacity_without_reclassifying_io() {
+        let process = std::io::Error::from_raw_os_error(libc::EMFILE);
+        let hint = open_file_limit_hint(&process);
+        assert!(hint.contains("soft limit:"));
+        assert!(hint.contains("hard limit:"));
+        assert_eq!(process.raw_os_error(), Some(libc::EMFILE));
+        let system = open_file_limit_hint(&std::io::Error::from_raw_os_error(libc::ENFILE));
+        assert!(system.contains("system-wide"));
+        assert!(!system.contains("soft limit"));
+        assert!(open_file_limit_hint(&std::io::Error::from_raw_os_error(libc::EACCES)).is_empty());
+    }
 
     #[test]
     fn open_file_soft_limit_raise_is_capped_by_the_hard_limit() {

@@ -1,13 +1,13 @@
 use super::*;
 
-struct CandidateAliasAuthority {
+pub(super) struct CertificationAliasAuthority {
     directories: HashSet<String>,
     retention_lease: Option<GenerationRetentionLease>,
     _process_read_authorities: Vec<ExistingGenerationDirectoryReadAuthority>,
 }
 
-impl CandidateAliasAuthority {
-    fn capture(
+impl CertificationAliasAuthority {
+    pub(super) fn capture(
         root: &Path,
         predecessor_fence: &ActiveGenerationPointerFence,
         slot: &GenerationSlot,
@@ -55,7 +55,11 @@ impl CandidateAliasAuthority {
         Ok(authority)
     }
 
-    fn validate(
+    pub(super) fn directories(&self) -> &HashSet<String> {
+        &self.directories
+    }
+
+    pub(super) fn validate(
         &self,
         root: &Path,
         predecessor_fence: &ActiveGenerationPointerFence,
@@ -107,13 +111,13 @@ pub fn verify_candidate_physical_integrity_read_only(
     {
         return Err(IndexError::ChecksumMismatch);
     }
-    let alias_authority = CandidateAliasAuthority::capture(root, predecessor_fence, slot)?;
+    let alias_authority = CertificationAliasAuthority::capture(root, predecessor_fence, slot)?;
     for expected in &certification.artifacts {
         let current = capture_artifact_with_retained_aliases(
             root,
             &generation_path,
             Path::new(&expected.artifact.path),
-            &alias_authority.directories,
+            alias_authority.directories(),
         )?;
         if current != expected.artifact {
             return Err(IndexError::ChecksumMismatch);

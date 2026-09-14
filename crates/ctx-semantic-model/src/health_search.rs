@@ -24,17 +24,19 @@ pub(super) fn semantic_embed_policy_from_config_and_resources(
     config: &crate::SemanticModelConfig,
     resources: SemanticSystemResources,
 ) -> SemanticEmbedPolicy {
-    let quiet = semantic_quiet_policy(resources, compute_class);
+    let builtin = semantic_builtin_policy(resources, compute_class, config.builtin_throttling());
     let mut policy = SemanticEmbedPolicy {
-        threads: quiet.threads,
-        batch_size: quiet.batch_size,
+        threads: builtin.threads,
+        batch_size: builtin.batch_size,
         available_memory_bytes: resources.available_memory_bytes,
     };
-    if let Some(threads) = config.thread_override() {
-        policy.threads = threads.min(SEMANTIC_EMBED_THREADS_MAX);
-    }
-    if let Some(batch_size) = config.batch_size_override() {
-        policy.batch_size = batch_size.min(SEMANTIC_EMBED_BATCH_MAX);
+    if config.builtin_throttling() {
+        if let Some(threads) = config.thread_override() {
+            policy.threads = threads.min(SEMANTIC_EMBED_THREADS_MAX);
+        }
+        if let Some(batch_size) = config.batch_size_override() {
+            policy.batch_size = batch_size.min(SEMANTIC_EMBED_BATCH_MAX);
+        }
     }
     policy
 }
@@ -137,7 +139,7 @@ use crate::{
         SemanticCpuModelIntegrityError, SemanticOrtModelVariant, SEMANTIC_MODEL_REVISION,
     },
     resource_policy::{
-        semantic_quiet_policy, SemanticComputeClass, SemanticSystemResources,
+        semantic_builtin_policy, SemanticComputeClass, SemanticSystemResources,
         SEMANTIC_EMBED_BATCH_MAX, SEMANTIC_EMBED_THREADS_MAX,
     },
 };

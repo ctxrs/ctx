@@ -104,6 +104,17 @@
       "environment_variable": null
     },
     {
+      "behavior": "semantic built-in throttling",
+      "config_key": "semantic.builtin_throttling",
+      "environment_variable": null,
+      "released_default": {
+        "value": true,
+        "state": "on",
+        "scope": "all_cli_installations"
+      },
+      "introduced_after": "v0.25.0"
+    },
+    {
       "behavior": "semantic embedding vector-space identity",
       "config_key": "semantic.space_id",
       "environment_variable": null
@@ -148,7 +159,7 @@
   "retired_control_reference": "docs/storage.md",
   "retired_control_containment": [
     {
-      "path": "crates/ctx-cli/src/config_tests.rs",
+      "path": "crates/ctx-app-config/src/tests.rs",
       "purpose": "Assert rejection of the removed release-authority key and migration of the short-lived RFC 2544 compatibility key.",
       "controls": [
         "upgrade.functions_base",
@@ -156,7 +167,7 @@
       ]
     },
     {
-      "path": "crates/ctx-cli/src/config/mutation.rs",
+      "path": "crates/ctx-app-config/src/mutation.rs",
       "purpose": "Remove the short-lived RFC 2544 compatibility key from persisted 1.2.1 configuration without changing unrelated settings.",
       "controls": [
         "upgrade.allow_rfc2544_fake_ip"
@@ -208,7 +219,7 @@
       ]
     }
   ],
-  "deprecated_compatibility_handler": "crates/ctx-cli/src/deprecated_controls.rs",
+  "deprecated_compatibility_handler": "crates/ctx-app-config/src/deprecated_controls.rs",
   "deprecated_compatibility_count": 7,
   "deprecated_compatibility_removal_version": null,
   "deprecated_control_references": [
@@ -221,14 +232,6 @@
       "controls": [
         "CTX_DAEMON_OFF",
         "CTX_DISABLE_DAEMON",
-        "CTX_UPGRADE_OFF",
-        "CTX_DISABLE_AUTO_UPGRADE"
-      ]
-    },
-    {
-      "path": "scripts/test-windows-legacy-daemon-takeover.ps1",
-      "purpose": "Exercise deprecated upgrade opt-outs while verifying legacy Windows daemon takeover.",
-      "controls": [
         "CTX_UPGRADE_OFF",
         "CTX_DISABLE_AUTO_UPGRADE"
       ]

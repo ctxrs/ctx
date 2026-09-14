@@ -7,10 +7,10 @@ use ctx_semantic_model::SemanticModelContract;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{SourceBackedSemanticGeneration, SourceBackedSemanticPage};
+use super::{SourceBackedSemanticGeneration, SourceBackedSemanticPage, SourceBackedSemanticSource};
 use crate::{
     vector_store::flat_segments::{
-        FlatPublicationToken, FlatSourceStagingToken, PinnedFlatGeneration,
+        FlatActiveEvent, FlatPublicationToken, FlatSourceStagingToken, PinnedFlatGeneration,
     },
     SemanticEventDocument,
 };
@@ -48,6 +48,11 @@ pub(super) struct SourceProjectionFrontier {
     pub(super) flat_publication: FlatPublicationToken,
     #[serde(default)]
     pub(super) flat_staging: Option<FlatSourceStagingToken>,
+    /// Monotonic only within this exact Core/model/source target. It is
+    /// advanced with a durable reconciliation boundary, never with a status
+    /// write or an elapsed-time observation.
+    #[serde(default)]
+    pub(super) semantic_progress_sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +83,10 @@ pub(super) struct SourceProjectionAcknowledgement {
     pub(super) flat_active_events: u64,
     #[serde(default)]
     pub(super) flat_active_chunks: u64,
+    /// Carries the frontier sequence across final acknowledgement, after the
+    /// frontier itself has been removed.
+    #[serde(default)]
+    pub(super) semantic_progress_sequence: u64,
 }
 
 pub(super) struct AcknowledgedSourceProjection {
@@ -176,6 +185,29 @@ pub(super) fn validate_page(
             ));
         }
         previous = Some(encoded.to_vec());
+    }
+    Ok(())
+}
+
+// Validate stored identity before its hash can avoid model work.
+pub(super) fn validate_stored_event(
+    record: &CoreEventRecord,
+    source: &SourceBackedSemanticSource,
+    prior: Option<&FlatActiveEvent>,
+) -> Result<()> {
+    let stable_identity = record.event_id.encode_canonical()?;
+    let stable_identity_hash = Sha256::digest(stable_identity);
+    if let Some(prior) = prior {
+        if (prior.stable_identity_hash != [0; 32]
+            && prior.stable_identity_hash != stable_identity_hash.as_slice())
+            || prior.source_identity_digest != source.aggregate.source_identity_digest()
+        {
+            return Err(super::SemanticVectorStoreError::storage_conflict(format!(
+                "source-backed semantic compact identity collision at {}",
+                record.event_id.as_uuid()
+            ))
+            .into());
+        }
     }
     Ok(())
 }

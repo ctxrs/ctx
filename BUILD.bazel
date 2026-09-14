@@ -25,6 +25,7 @@ exports_files([
     "contracts/ctx-managed-pair-release-authority-v1.json",
     "contracts/ctx-managed-pair-state-v1.schema.json",
     "scripts/check.sh",
+    "scripts/tests/native-candidate-outbox.json",
 ])
 
 root_build_settings()
@@ -72,6 +73,7 @@ NON_RUST_GATE_DATA = glob([
 CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-agent-application:cargo_package_data",
     "//crates/ctx-agent-integrations:cargo_package_data",
+    "//crates/ctx-app-config:cargo_package_data",
     "//crates/ctx-companion-bridge:cargo_package_data",
     "//crates/ctx-cli:cargo_package_data",
     "//crates/ctx-cli-contract-tests:cargo_package_data",
@@ -175,7 +177,7 @@ REAL_HARNESS_DATA = NON_RUST_GATE_DATA + ["//crates/ctx-cli:ctx"]
 
 filegroup(
     name = "agent_history_contract_fixtures",
-    srcs = glob(["contracts/agent-history-v1/fixtures/**/*.json"]),
+    srcs = glob(["contracts/agent-history-v2/fixtures/**/*.json"]),
     visibility = ["//visibility:public"],
 )
 
@@ -280,6 +282,12 @@ filegroup(
 )
 
 filegroup(
+    name = "omp_parent_session_test_fixtures",
+    srcs = glob(["tests/fixtures/provider-history/pi-omp/v18.0.10-parent-session/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "upgrade_extractor_contract",
     srcs = ["scripts/test-windows-runtime-upgrade-extractor.ps1"],
     visibility = ["//visibility:public"],
@@ -374,6 +382,7 @@ py_test(
     srcs = [
         "scripts/check-rust-crate-size.py",
         "scripts/tests/check_rust_crate_size_test.py",
+        "scripts/check-loc.py",
     ],
     deps = ["@ctx_tomli//:lib"],
     main = "scripts/tests/check_rust_crate_size_test.py",
@@ -381,7 +390,10 @@ py_test(
 
 py_binary(
     name = "rust_crate_size_preflight",
-    srcs = ["scripts/check-rust-crate-size.py"],
+    srcs = [
+        "scripts/check-rust-crate-size.py",
+        "scripts/check-loc.py",
+    ],
     deps = ["@ctx_tomli//:lib"],
     main = "scripts/check-rust-crate-size.py",
 )
@@ -482,37 +494,12 @@ py_test(
 )
 
 py_test(
-    name = "rust_toolchain_pin_check",
-    srcs = ["//tools/bazel:check_rust_toolchain_pins.py"],
-    main = "//tools/bazel:check_rust_toolchain_pins.py",
-    args = [
-        "$(rootpath MODULE.bazel)",
-        "$(rootpath contracts/release-targets-v1.json)",
-        "$(rootpath //tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch)",
-        "$(rootpath //tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch)",
-    ],
-    data = [
-        "MODULE.bazel",
-        "contracts/release-targets-v1.json",
-        "//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch",
-        "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
-    ],
-)
-
-py_test(
-    name = "rust_toolchain_pin_mutation_tests",
-    srcs = [
-        "//tools/bazel:check_rust_toolchain_pins.py",
-        "//tools/bazel:check_rust_toolchain_pins_test.py",
-    ],
-    data = [
-        "MODULE.bazel",
-        "contracts/release-targets-v1.json",
-        "//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch",
-        "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
-    ],
-    imports = ["tools/bazel"],
-    main = "//tools/bazel:check_rust_toolchain_pins_test.py",
+    name = "rust_toolchain_module_policy",
+    srcs = ["//tools/bazel:check_rust_toolchain_module_policy.py"],
+    main = "//tools/bazel:check_rust_toolchain_module_policy.py",
+    args = ["$(rootpath MODULE.bazel)"],
+    data = ["MODULE.bazel"],
+    tags = ["build-graph", "rust"],
 )
 
 py_test(
@@ -547,18 +534,9 @@ py_test(
 )
 
 py_test(
-    name = "bazel_affected_mutation_tests",
-    srcs = [
-        "//tools/bazel:select_affected_tests.py",
-        "//tools/bazel:select_affected_tests_test.py",
-    ],
-    imports = ["tools/bazel"],
-    main = "//tools/bazel:select_affected_tests_test.py",
-)
-
-py_test(
     name = "performance_sanity_tests",
     srcs = [
+        "scripts/tests/performance_cold_start_test.py",
         "scripts/tests/performance_family_fixtures.py",
         "scripts/tests/performance_family_runtime_test.py",
         "scripts/tests/performance_sanity_test.py",
@@ -628,10 +606,10 @@ sh_test(
     data = [
         ".bazelversion",
         "scripts/bazel-affected.sh",
+        "scripts/bazel/workspace-status.sh",
         "scripts/bazelw",
         "scripts/ci-common.sh",
         "scripts/tests/fixtures/fake-bazel.sh",
-        "//tools/bazel:select_affected_tests.py",
     ],
 )
 
@@ -794,29 +772,6 @@ py_test(
 )
 
 py_test(
-    name = "managed_pair_installer_tests",
-    srcs = [
-        "scripts/check-managed-pair-contracts.py",
-        "scripts/install-managed-pair.py",
-        "scripts/managed_pair_installer/__init__.py",
-        "scripts/managed_pair_installer/transaction_contract.py",
-        "scripts/tests/check-managed-pair-contracts-test.py",
-        "scripts/tests/install-managed-pair-test.py",
-    ],
-    main = "scripts/tests/install-managed-pair-test.py",
-    data = [
-        "contracts/ctx-managed-pair-manifest-v1.schema.json",
-        "contracts/ctx-managed-pair-release-authority-v1.json",
-        "contracts/ctx-managed-pair-release-set-v1.schema.json",
-        "contracts/ctx-managed-pair-signed-envelope-v1.schema.json",
-        "contracts/ctx-managed-pair-state-v1.schema.json",
-        "contracts/release-targets-v1.json",
-        "scripts/check-release-target-matrix.py",
-    ],
-    tags = ["release-gate"],
-)
-
-py_test(
     name = "provider_support_matrix_tests",
     srcs = [
         "scripts/check-provider-support-matrix.py",
@@ -857,6 +812,7 @@ py_test(
     srcs = [
         "scripts/check-public-cli-build-info.py",
         "scripts/release/cargo-release-inventory.py",
+        "scripts/release/notify_source.py",
         "scripts/release/linux-factory-build-info.py",
         "scripts/release/resolve-cargo-zigbuild.py",
         "scripts/release/release_bundle.py",
@@ -876,6 +832,26 @@ py_test(
     ],
     main = "scripts/tests/linux-release-factory-test.py",
     tags = ["release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+py_test(
+    name = "notify_source_tests",
+    srcs = [
+        "scripts/release/cargo-release-inventory.py",
+        "scripts/release/notify_source.py",
+        "scripts/tests/notify-source-test.py",
+    ],
+    args = ["$(rootpath @ctx_notify_archive//file)"],
+    data = [
+        "Cargo.lock",
+        "MODULE.bazel",
+        "scripts/release/build-public-candidate-on-linux.sh",
+        "//tools/bazel/patches:notify-fsevents-stop.patch",
+        "@ctx_notify_archive//file",
+    ],
+    imports = ["scripts/release"],
+    main = "scripts/tests/notify-source-test.py",
     target_compatible_with = ["@platforms//os:linux"],
 )
 
@@ -1087,6 +1063,26 @@ sh_test(
         "//crates/ctx-upgrade-engine:Cargo.toml",
         "//crates/ctx-upgrade-engine:build.rs",
         "//crates/ctx-upgrade-engine:cargo_package_data",
+    ],
+)
+
+sh_test(
+    name = "app_config_dependency_boundary_check",
+    srcs = ["//tools/bazel:check-app-config-dependency-boundary-test.sh"],
+    args = [
+        "$(rootpath //tools/bazel:check-app-config-dependency-boundary.sh)",
+        "$(rootpath BUILD.bazel)",
+    ],
+    data = [
+        "BUILD.bazel",
+        "scripts/bazelw",
+        "//tools/bazel:check-app-config-dependency-boundary.sh",
+    ] + CARGO_WORKSPACE_PACKAGE_DATA,
+    tags = [
+        "build-graph",
+        "exclusive",
+        "no-cache",
+        "no-sandbox",
     ],
 )
 
@@ -1386,6 +1382,7 @@ non_rust_gate(
     data = NON_RUST_GATE_DATA + [
         "//crates/ctx-agent-application:cargo_package_data",
         "//crates/ctx-agent-integrations:cargo_package_data",
+        "//crates/ctx-app-config:cargo_package_data",
         "//crates/ctx-cli:cargo_package_data",
         "//crates/ctx-client-observability:cargo_package_data",
         "//crates/ctx-daemon-cli:cargo_package_data",

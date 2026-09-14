@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** agent-history-v1 transport backed by a local ctx CLI. */
+/** agent-history-v2 transport backed by a local ctx CLI. */
 public final class LocalCliAdapter implements AgentHistoryTransport {
     private static final String ANALYTICS_ENABLED_ENV = "CTX_ANALYTICS_ENABLED";
     static final int MAX_RETAINED_STDOUT_BYTES = 64 * 1024 * 1024;

@@ -265,8 +265,12 @@ fn acquisition_error(kind: ModelAcquisitionErrorKind, message: impl Into<String>
     })
 }
 
-fn archive_integrity(message: impl Into<String>) -> anyhow::Error {
+pub(crate) fn coreml_model_integrity_error(message: impl Into<String>) -> anyhow::Error {
     acquisition_error(ModelAcquisitionErrorKind::Integrity, message)
+}
+
+fn archive_integrity(message: impl Into<String>) -> anyhow::Error {
+    coreml_model_integrity_error(message)
 }
 
 mod platform;

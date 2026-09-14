@@ -183,9 +183,7 @@ pub fn default_maintenance_selection(
     include_installed_targets(super::default_agent_selection(context), project, context)
 }
 
-/// Extends default maintenance to every recognized location that already has
-/// a current or legacy skill. Explicit and picker selections remain exact.
-fn include_installed_targets(
+pub(super) fn include_installed_targets(
     mut selection: SkillAgentSelection,
     project: bool,
     context: &super::PathContext,
@@ -273,7 +271,7 @@ fn inspect_discovered_skill_path(
 }
 
 #[cfg(windows)]
-fn is_windows_reparse_point(metadata: &fs::Metadata) -> bool {
+pub(super) fn is_windows_reparse_point(metadata: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt as _;
 
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -281,7 +279,7 @@ fn is_windows_reparse_point(metadata: &fs::Metadata) -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_windows_reparse_point(_metadata: &fs::Metadata) -> bool {
+pub(super) fn is_windows_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 
@@ -319,6 +317,9 @@ pub fn install_target(
         });
     }
     if current_content {
+        if !metadata_is_current(previous.metadata.as_ref(), product_version) {
+            write_metadata(target, product_version)?;
+        }
         if migrates_legacy {
             remove_legacy_skill_files(
                 target,
@@ -327,9 +328,6 @@ pub fn install_target(
                     .as_ref()
                     .expect("legacy status has a snapshot"),
             )?;
-        }
-        if !metadata_is_current(previous.metadata.as_ref(), product_version) {
-            write_metadata(target, product_version)?;
         }
         return Ok(InstallResult {
             target: target.clone(),
@@ -344,24 +342,15 @@ pub fn install_target(
         });
     }
     if migrates_legacy {
-        let prior_body = read_optional_regular_file(&target.skill_dir.join("SKILL.md"))?;
         write_skill_body(target)?;
-        if let Err(cleanup) = remove_legacy_skill_files(
+        write_metadata(target, product_version)?;
+        remove_legacy_skill_files(
             target,
             previous
                 .legacy_snapshot
                 .as_ref()
                 .expect("legacy status has a snapshot"),
-        ) {
-            if let Err(rollback) = rollback_skill_body(target, prior_body.as_deref()) {
-                return Err(anyhow!(
-                    "{cleanup:#}; failed to roll back {} after migration cleanup failed: {rollback:#}",
-                    target.skill_dir.join("SKILL.md").display()
-                ));
-            }
-            return Err(cleanup);
-        }
-        write_metadata(target, product_version)?;
+        )?;
     } else {
         write_skill_files(target, product_version)?;
     }
@@ -424,7 +413,9 @@ fn inspect_current_skill(
         Some(hash) if hash == bundled_hash() => SkillInstallStatus::Stale,
         Some(hash) if LEGACY_BUNDLED_SKILL_HASHES.contains(&hash) => SkillInstallStatus::Stale,
         Some(hash) => match metadata.as_ref() {
-            Some(metadata) if metadata.skill_hash == hash => SkillInstallStatus::Stale,
+            Some(metadata) if metadata_manages_hash(Some(metadata), hash) => {
+                SkillInstallStatus::Stale
+            }
             _ => SkillInstallStatus::Modified,
         },
     };
@@ -436,19 +427,18 @@ fn inspect_legacy_skill(skill_dir: &Path) -> Result<Option<LegacySkillSnapshot>>
         return Ok(None);
     };
     let installed_hash = sha256_hex(&body);
-    let metadata_body = read_optional_regular_file(&skill_dir.join(METADATA_FILE))
-        .ok()
-        .flatten();
+    let metadata_body = read_optional_regular_file(&skill_dir.join(METADATA_FILE))?;
     let metadata = metadata_body
         .as_deref()
         .and_then(|body| serde_json::from_slice(body).ok());
     let metadata_is_managed = metadata_manages_legacy_hash(metadata.as_ref(), &installed_hash);
-    let status =
-        if LEGACY_BUNDLED_SKILL_HASHES.contains(&installed_hash.as_str()) || metadata_is_managed {
-            SkillInstallStatus::Stale
-        } else {
-            SkillInstallStatus::Modified
-        };
+    let metadata_free_released_legacy =
+        metadata_body.is_none() && LEGACY_BUNDLED_SKILL_HASHES.contains(&installed_hash.as_str());
+    let status = if metadata_is_managed || metadata_free_released_legacy {
+        SkillInstallStatus::Stale
+    } else {
+        SkillInstallStatus::Modified
+    };
     Ok(Some(LegacySkillSnapshot {
         status,
         body,
@@ -467,7 +457,7 @@ fn ensure_safe_skill_directory(target: &SkillTarget) -> Result<()> {
         .with_context(|| format!("create {}", target.skill_dir.display()))
 }
 
-fn validate_directory_path(authority_root: &Path, path: &Path) -> Result<()> {
+pub(super) fn validate_directory_path(authority_root: &Path, path: &Path) -> Result<()> {
     ensure_path_inside(authority_root, path)?;
     let relative = path
         .strip_prefix(authority_root)
@@ -500,7 +490,7 @@ fn validate_directory_path(authority_root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn legacy_skill_dir(target: &SkillTarget) -> Result<PathBuf> {
+pub(super) fn legacy_skill_dir(target: &SkillTarget) -> Result<PathBuf> {
     let path = target.base_dir.join(LEGACY_BUNDLED_SKILL_NAME);
     ensure_path_inside(&target.base_dir, &path)?;
     Ok(path)
@@ -512,14 +502,12 @@ fn remove_legacy_skill_files(target: &SkillTarget, legacy: &LegacySkillSnapshot)
     atomic_remove_if_unchanged(&legacy_dir.join("SKILL.md"), &legacy.body)
         .with_context(|| format!("remove {}", legacy_dir.join("SKILL.md").display()))?;
     if let Some(metadata_body) = &legacy.managed_metadata_body {
-        // The skill file is the active integration surface. Metadata that was
-        // concurrently edited is no longer installer-owned, so preserve it.
         let _ = atomic_remove_if_unchanged(&legacy_dir.join(METADATA_FILE), metadata_body);
     }
     Ok(())
 }
 
-fn read_optional_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(super) fn read_optional_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() && !is_windows_reparse_point(&metadata) => {
             fs::read(path)
@@ -529,22 +517,6 @@ fn read_optional_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
         Ok(_) => Err(anyhow!("target is not a regular file: {}", path.display())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
-    }
-}
-
-fn rollback_skill_body(target: &SkillTarget, prior_body: Option<&[u8]>) -> Result<()> {
-    let path = target.skill_dir.join("SKILL.md");
-    match prior_body {
-        Some(prior_body) => atomic_update(&path, |existing| {
-            if existing != Some(BUNDLED_SKILL_BODY.as_bytes()) {
-                return Err(anyhow!(
-                    "refusing to overwrite concurrently changed target {}",
-                    path.display()
-                ));
-            }
-            Ok(prior_body.to_vec())
-        }),
-        None => atomic_remove_if_unchanged(&path, BUNDLED_SKILL_BODY.as_bytes()).map(|_| ()),
     }
 }
 
@@ -579,7 +551,7 @@ fn metadata_is_current(metadata: Option<&SkillMetadata>, product_version: &str) 
         && metadata.is_some_and(|metadata| metadata.ctx_cli_version == product_version)
 }
 
-fn metadata_manages_hash(metadata: Option<&SkillMetadata>, hash: &str) -> bool {
+pub(super) fn metadata_manages_hash(metadata: Option<&SkillMetadata>, hash: &str) -> bool {
     metadata.is_some_and(|metadata| {
         metadata.schema_version == 1
             && metadata.installer == "ctx-cli"
@@ -588,7 +560,7 @@ fn metadata_manages_hash(metadata: Option<&SkillMetadata>, hash: &str) -> bool {
     })
 }
 
-fn metadata_manages_legacy_hash(metadata: Option<&SkillMetadata>, hash: &str) -> bool {
+pub(super) fn metadata_manages_legacy_hash(metadata: Option<&SkillMetadata>, hash: &str) -> bool {
     metadata.is_some_and(|metadata| {
         metadata.schema_version == 1
             && metadata.installer == "ctx-cli"
@@ -892,11 +864,8 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn failed_legacy_cleanup_rolls_back_the_new_skill_body() {
-        use std::os::unix::fs::PermissionsExt as _;
-
+    fn failed_legacy_cleanup_keeps_the_published_current_skill() {
         let root = tempfile::tempdir().unwrap();
         let context = super::super::PathContext::for_tests(
             root.path().join("home"),
@@ -906,14 +875,26 @@ mod tests {
             super::super::single_target(super::super::SkillAgentArg::Universal, false, &context)
                 .unwrap();
         let legacy_dir = write_managed_legacy_skill(&target, b"managed legacy\n");
-        fs::set_permissions(&legacy_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::create_dir(legacy_dir.join(".SKILL.md.ctx-agent-integrations.lock")).unwrap();
 
         let error = install_target(&target, false, true, "1.0.0").unwrap_err();
 
-        fs::set_permissions(&legacy_dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(format!("{error:#}").contains("transaction lock"));
         assert!(legacy_dir.join("SKILL.md").is_file());
-        assert!(!target.skill_dir.join("SKILL.md").exists());
+        assert_eq!(
+            fs::read(target.skill_dir.join("SKILL.md")).unwrap(),
+            BUNDLED_SKILL_BODY.as_bytes()
+        );
+        assert_eq!(
+            status_target(&target).unwrap().status,
+            SkillInstallStatus::Stale,
+            "the retained legacy copy still requires cleanup"
+        );
+        let metadata: SkillMetadata =
+            serde_json::from_slice(&fs::read(target.skill_dir.join(METADATA_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(metadata.ctx_cli_version, "1.0.0");
+        assert_eq!(metadata.skill_hash, bundled_hash());
     }
 
     #[test]

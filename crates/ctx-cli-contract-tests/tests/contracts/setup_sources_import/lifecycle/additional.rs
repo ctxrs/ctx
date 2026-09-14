@@ -52,7 +52,9 @@ fn installer_style_setup_succeeds_with_a_genuinely_empty_source_catalog() {
     let temp = daemon_test_root();
 
     let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_empty_catalog_default_background_setup(&setup);
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
@@ -99,7 +101,6 @@ fn operational_systemd_installer_style_setup_verifies_an_empty_noop_core() {
         fs::read_to_string(temp.path().join("fake-systemd-daemon.stderr")).unwrap_or_default(),
     );
     let setup: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["status"], "verified", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["persistent"], true, "{setup:#}");
     assert_eq!(
@@ -176,7 +177,6 @@ fn hosted_setup_recovers_when_the_new_systemd_service_first_exits_cleanly() {
         fs::read_to_string(temp.path().join("fake-systemd-daemon.stderr")).unwrap_or_default(),
     );
     let setup: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["status"], "verified", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["persistent"], true, "{setup:#}");
     assert_eq!(
@@ -214,7 +214,6 @@ fn unavailable_systemd_installer_style_setup_starts_a_persistent_fallback() {
         .env("PATH", &path)
         .env_remove("CTX_DAEMON_AUTOSTART_OFF");
     let setup = json_output(setup_command.args(["setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["status"], "degraded", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["persistent"], true, "{setup:#}");
     assert!(
@@ -225,7 +224,6 @@ fn unavailable_systemd_installer_style_setup_starts_a_persistent_fallback() {
         setup["daemon"]["supervisor"]["status"], "manager_unavailable",
         "{setup:#}"
     );
-    assert_eq!(setup["refresh_request"]["mode"], "wait", "{setup:#}");
     assert_empty_catalog_default_background_setup(&setup);
 
     let mut human_command = ctx_from_binary(&temp, &binary);
@@ -303,7 +301,9 @@ fn machine_readable_setup_uses_v2_top_level_persistent_daemon_contract() {
     let temp = daemon_test_root();
 
     let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert!(setup.get("background_indexing").is_none(), "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["status"], "degraded", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["requested"], true, "{setup:#}");
@@ -362,7 +362,7 @@ fn setup_wait_progress_json_uses_stderr_and_keeps_final_json_on_stdout() {
         .clone();
 
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(stdout["schema_version"], 2, "{stdout:#}");
+    assert_eq!(stdout["schema_version"], 3, "{stdout:#}");
     let events = String::from_utf8(output.stderr)
         .unwrap()
         .lines()
@@ -447,13 +447,7 @@ fn foreground_import_rejections_complete_and_preserve_diagnostics() {
     )
     .unwrap();
     ctx_from_binary(&temp, &binary)
-        .args([
-            "setup",
-            "--catalog-only",
-            "--no-daemon",
-            "--progress",
-            "none",
-        ])
+        .args(["setup", "--no-daemon", "--progress", "none"])
         .assert()
         .success();
 
@@ -550,13 +544,7 @@ fn foreground_import_rejection_diagnostics_survive_a_noop_source_cycle() {
     )
     .unwrap();
     ctx_from_binary(&temp, &binary)
-        .args([
-            "setup",
-            "--catalog-only",
-            "--no-daemon",
-            "--progress",
-            "none",
-        ])
+        .args(["setup", "--no-daemon", "--progress", "none"])
         .assert()
         .success();
 
@@ -610,13 +598,7 @@ fn foreground_import_returns_at_ready_core_generation() {
     )
     .unwrap();
     ctx_from_binary(&temp, &binary)
-        .args([
-            "setup",
-            "--catalog-only",
-            "--no-daemon",
-            "--progress",
-            "none",
-        ])
+        .args(["setup", "--no-daemon", "--progress", "none"])
         .assert()
         .success();
 
@@ -654,18 +636,20 @@ fn foreground_import_returns_at_ready_core_generation() {
         import["totals"]["current_indexed_documents"], 1,
         "{import:#}"
     );
-    let generation = import["sources"][0]["published_generation"]
-        .as_str()
-        .unwrap();
+    let source = &import["sources"][0];
+    assert_eq!(source["status"], "published", "{import:#}");
+    let request_id = source["daemon_request_id"].as_str().unwrap();
+    assert!(!request_id.is_empty(), "{import:#}");
+    assert_eq!(
+        source["daemon_request_metadata"]["owner"], "daemon",
+        "{import:#}",
+    );
+    let generation = source["published_generation"].as_str().unwrap();
+    assert!(!generation.is_empty(), "{import:#}");
 
     let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
     assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
-    assert_eq!(status["refresh"]["status"], "ready", "{status:#}");
-    assert_eq!(
-        status["refresh"]["published_generation"], generation,
-        "{status:#}"
-    );
     assert!(status.get("relational").is_none(), "{status:#}");
     assert!(!data_root(&temp).join("relational.sqlite").exists());
 
@@ -684,6 +668,10 @@ fn foreground_import_returns_at_ready_core_generation() {
         "prompt history daemon refresh oracle",
         1,
         "message",
+    );
+    assert_eq!(
+        search["retrieval"]["generation_id"], generation,
+        "{search:#}"
     );
 
     drop(core_daemon);
@@ -775,7 +763,9 @@ fn clean_multisource_setup_imports_hermes_and_preserves_source_bytes() {
         .to_owned();
     let status = wait_for_core_generation(&temp, &generation);
 
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
     assert!(status.get("relational").is_none(), "{status:#}");

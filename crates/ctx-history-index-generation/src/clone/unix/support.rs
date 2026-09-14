@@ -35,13 +35,8 @@ pub struct CloneTestOptions {
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CloneMetrics {
-    pub planned_files: usize,
     pub logical_bytes: u64,
     pub required_headroom: u64,
-    pub available_bytes: u64,
-    pub copied_bytes: u64,
-    pub linked_files: usize,
-    pub copied_files: usize,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -62,13 +57,8 @@ thread_local! {
         std::cell::RefCell::new(None);
     static TEST_CLONE_METRICS: std::cell::Cell<CloneMetrics> = const {
         std::cell::Cell::new(CloneMetrics {
-            planned_files: 0,
             logical_bytes: 0,
             required_headroom: 0,
-            available_bytes: 0,
-            copied_bytes: 0,
-            linked_files: 0,
-            copied_files: 0,
         })
     };
 }
@@ -155,29 +145,18 @@ pub(super) fn clone_checkpoint(_stage: CloneStage, _path: &Path) -> Result<()> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(super) fn record_plan_metrics(plan: &ClonePlan, available: u64) {
-    record_plan_metrics_with_required(plan, available, plan.required_headroom);
-}
-
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn record_plan_metrics_with_required(
     plan: &ClonePlan,
-    available: u64,
+    _available: u64,
     required_headroom: u64,
 ) {
     TEST_CLONE_METRICS.with(|metrics| {
         metrics.set(CloneMetrics {
-            planned_files: plan.files.len(),
             logical_bytes: plan.logical_bytes,
             required_headroom,
-            available_bytes: available,
-            ..metrics.get()
         });
     });
 }
-
-#[cfg(not(any(test, feature = "test-support")))]
-pub(super) fn record_plan_metrics(_plan: &ClonePlan, _available: u64) {}
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn record_plan_metrics_with_required(
@@ -185,20 +164,4 @@ pub(super) fn record_plan_metrics_with_required(
     _available: u64,
     _required_headroom: u64,
 ) {
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub(super) fn record_clone_metrics(copied_bytes: u64, linked_files: usize, copied_files: usize) {
-    TEST_CLONE_METRICS.with(|metrics| {
-        metrics.set(CloneMetrics {
-            copied_bytes,
-            linked_files,
-            copied_files,
-            ..metrics.get()
-        });
-    });
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-pub(super) fn record_clone_metrics(_copied_bytes: u64, _linked_files: usize, _copied_files: usize) {
 }

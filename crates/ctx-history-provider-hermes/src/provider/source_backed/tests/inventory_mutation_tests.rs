@@ -132,7 +132,10 @@ fn observe_exact(
         snapshot.connection().unwrap(),
         None,
         SourceBackedReconciliationDemand::Exhaustive,
-        *snapshot.evidence().identity(),
+        HermesPhysicalSourceRevision {
+            database_identity: *snapshot.evidence().identity(),
+            physical_revision: *snapshot.evidence().physical_revision(),
+        },
         1_000,
         &mut context,
     )
@@ -292,7 +295,10 @@ fn incremental_inventory_touches_only_the_appended_session() {
         snapshot.connection().unwrap(),
         Some(&route_control),
         SourceBackedReconciliationDemand::Incremental,
-        *snapshot.evidence().identity(),
+        HermesPhysicalSourceRevision {
+            database_identity: *snapshot.evidence().identity(),
+            physical_revision: *snapshot.evidence().physical_revision(),
+        },
         2_000,
         &mut context,
     )

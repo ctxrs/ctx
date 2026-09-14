@@ -1,4 +1,8 @@
-use std::{mem::MaybeUninit, path::PathBuf, time::Duration};
+#[cfg(test)]
+use std::path::PathBuf;
+use std::{mem::MaybeUninit, time::Duration};
+#[cfg(test)]
+use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
 
 use anyhow::{anyhow, Context, Result};
 use windows_sys::Win32::{
@@ -7,9 +11,8 @@ use windows_sys::Win32::{
         WAIT_TIMEOUT,
     },
     System::Threading::{
-        GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
-        PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-        PROCESS_TERMINATE, PROCESS_VM_READ,
+        GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
     },
 };
 
@@ -25,7 +28,6 @@ pub(super) struct WindowsProcess {
 pub(super) enum WindowsProcessAccess {
     Observe,
     ModernTerminate,
-    LegacyTerminate,
 }
 
 impl WindowsProcess {
@@ -57,6 +59,7 @@ impl WindowsProcess {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn executable_path(&self) -> Option<PathBuf> {
         let mut buffer = vec![0_u16; 32_768];
         let mut length = u32::try_from(buffer.len()).ok()?;
@@ -113,9 +116,6 @@ pub(super) fn process_access_rights(access: WindowsProcessAccess) -> u32 {
     match access {
         WindowsProcessAccess::Observe => base,
         WindowsProcessAccess::ModernTerminate => base | PROCESS_TERMINATE,
-        WindowsProcessAccess::LegacyTerminate => {
-            base | PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
-        }
     }
 }
 
@@ -153,26 +153,34 @@ pub(super) fn filetime_unix_ms(value: u64) -> Option<i64> {
 mod tests {
     use std::{env, fs, path::Path};
 
-    use serde_json::Value;
-
     use super::super::tests::{
-        fixture_test_guard, spawn_fixture_child, wait_for_path, LegacyFixture,
+        fixture_test_guard, spawn_fixture_child, wait_for_path, DaemonFixture,
     };
-    use super::super::{legacy_image::same_windows_path, wait_for_released_residual_daemon};
+    use super::super::{image_identity::same_windows_path, wait_for_released_residual_daemon};
     use super::*;
-    use crate::{
-        daemon_lock_path, executable_sha256, observe_pid_advisory_lock, read_pid_lock_json,
-        PidAdvisoryLockObservation,
-    };
+    use crate::{daemon_lock_path, observe_pid_advisory_lock, PidAdvisoryLockObservation};
+
+    #[test]
+    fn modern_termination_rights_do_not_request_vm_read() {
+        use windows_sys::Win32::System::Threading::{
+            PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            PROCESS_TERMINATE, PROCESS_VM_READ,
+        };
+        let modern = process_access_rights(WindowsProcessAccess::ModernTerminate);
+        assert_eq!(
+            modern,
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE
+        );
+        assert_eq!(modern & (PROCESS_QUERY_INFORMATION | PROCESS_VM_READ), 0);
+    }
 
     #[test]
     fn renamed_digest_bearing_owner_terminates_with_modern_rights() {
         let _serial = fixture_test_guard();
-        let mut fixture = LegacyFixture::start();
+        let mut fixture = DaemonFixture::start();
         let target = WindowsProcess::open(fixture.owner.id(), WindowsProcessAccess::Observe)
             .expect("open renamed modern owner signal handle")
             .expect("live renamed modern owner");
-        publish_digest_identity(&fixture);
         let moved = replace_running_image(&fixture);
         assert_renamed_process_path(&target, &moved);
 
@@ -195,11 +203,10 @@ mod tests {
     #[test]
     fn released_renamed_digest_bearing_owner_waits_for_exit() {
         let _serial = fixture_test_guard();
-        let mut fixture = LegacyFixture::start();
+        let mut fixture = DaemonFixture::start();
         let target = WindowsProcess::open(fixture.owner.id(), WindowsProcessAccess::Observe)
             .expect("open released modern owner signal handle")
             .expect("live released modern owner");
-        publish_digest_identity(&fixture);
         let moved = replace_running_image(&fixture);
         assert_renamed_process_path(&target, &moved);
         fs::write(fixture.root.join("release-trigger"), b"release")
@@ -229,20 +236,7 @@ mod tests {
         assert!(fixture.root.join("clean-exit").exists());
     }
 
-    fn publish_digest_identity(fixture: &LegacyFixture) {
-        let mut value = read_pid_lock_json(&daemon_lock_path(&fixture.root))
-            .expect("digest-bearing owner metadata");
-        value["binary_sha256"] = Value::String(
-            executable_sha256(&fixture.active).expect("digest-bearing owner image digest"),
-        );
-        fs::write(
-            daemon_lock_path(&fixture.root),
-            serde_json::to_vec(&value).expect("encode digest-bearing owner metadata"),
-        )
-        .expect("publish digest-bearing owner metadata");
-    }
-
-    fn replace_running_image(fixture: &LegacyFixture) -> PathBuf {
+    fn replace_running_image(fixture: &DaemonFixture) -> PathBuf {
         let moved = fixture.active.with_file_name("ctx.modern-running.exe");
         fs::rename(&fixture.active, &moved).expect("rename running modern image");
         fs::copy(

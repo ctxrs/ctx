@@ -1,40 +1,148 @@
 use super::*;
 use crate::{
-    source_token, AppliedProviderRoot, AppliedProviderRootSourceMembership,
-    DetachedReleasedProviderRootAuthority,
+    provider_source_config_digest, source_token, AppliedProviderRoot,
+    AppliedProviderRootSourceMembership, DetachedReleasedProviderRootAuthority,
+    ProviderRootDefinition, ProviderRootSourceIdentity, SourceRouteIdentity, SourceRouteSnapshot,
 };
 use ctx_history_core::{
     CaptureProvider, CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey,
     SourceObservation, TypedKey,
 };
 
-const V8_EMPTY_FIXTURE: &[u8] = br#"{"manifest_version":8,"identity_version":1,"core_record_version":3,"core_record_contract_fingerprint":"ebb5c9b638de184824a6ce141ebf9b70941fb293fc113d29e2851565bad4371e","lexical_schema_version":22,"lexical_analyzer_version":2,"policy_schema_hash":"84d58ff1dbcfbf524845eea78162e013e76cc000b275393711b6617764da3ae9","indexed_documents":0,"certified_source_bytes":0,"sources":[],"core_record_aggregates":[],"source_routes":[]}"#;
-const V9_CODEX_FIXTURE: &[u8] = br#"{"manifest_version":9,"identity_version":1,"core_record_version":3,"core_record_contract_fingerprint":"ebb5c9b638de184824a6ce141ebf9b70941fb293fc113d29e2851565bad4371e","lexical_schema_version":22,"lexical_analyzer_version":2,"policy_schema_hash":"84d58ff1dbcfbf524845eea78162e013e76cc000b275393711b6617764da3ae9","indexed_documents":0,"certified_source_bytes":0,"sources":[],"core_record_aggregates":[],"source_routes":[],"automatic_provider_discovery":true,"provider_root_config_digest":"655246d699705d7c3bee11f277332db40cd54fda6a8e75a0ea10eec60306d3c2","provider_roots":[{"definition":{"id":"codex","provider":"codex","path":"/fixtures/codex"},"source_identity":"released","routes":[]}]}"#;
-
-fn v9_value() -> serde_json::Value {
-    serde_json::from_slice(V9_CODEX_FIXTURE).unwrap()
+fn released_v2_payload(metadata_json: &str) -> String {
+    format!(
+        r#"{{"version":2,"generation_id":"{}","publication_metadata":{metadata_json}}}"#,
+        "a".repeat(64)
+    )
 }
 
-fn canonical_v9_bytes(value: serde_json::Value) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::from_value::<PreviousGenerationManifestV9>(value).unwrap())
-        .unwrap()
+#[test]
+fn released_v2_envelopes_are_typed_incompatible() {
+    // Literal envelopes reproduce the released writer's field order and null
+    // handling, independently of either current or historical serializers.
+    for metadata in [
+        "null".to_owned(),
+        r#""""#.to_owned(),
+        r#""AQID""#.to_owned(),
+        format!("\"{}\"", "AAAA".repeat(64)),
+        format!("\"{}\"", "AAAA".repeat(16 * 1024)),
+    ] {
+        let encoded = released_v2_payload(&metadata);
+        assert!(matches!(
+            decode_commit_payload(&encoded),
+            Err(IndexError::UnsupportedCommitPayload(2))
+        ));
+    }
+    let encoded = released_v2_payload(&format!("\"{}\"", "AAAA".repeat(64)));
+    assert!(encoded.len() > 256);
+}
+
+#[test]
+fn malformed_v2_envelopes_do_not_gain_rebuild_classification() {
+    let canonical = released_v2_payload("null");
+    for encoded in [
+        released_v2_payload("42"),
+        released_v2_payload("{}"),
+        released_v2_payload("[]"),
+        canonical.replace("\"version\":2", "\"version\":2,\"version\":3"),
+        canonical.replace("\"publication_metadata\":null", "\"unknown\":null"),
+        canonical.replace(
+            "\"publication_metadata\":null",
+            "\"publication_metadata\":null,\"publication_metadata\":null",
+        ),
+        canonical.replace(&"a".repeat(64), &"z".repeat(64)),
+        format!("{canonical}{{}}"),
+        canonical[..canonical.len() - 1].to_owned(),
+    ] {
+        assert!(
+            matches!(decode_commit_payload(&encoded), Err(IndexError::Json(_))),
+            "unexpected classification for {encoded}"
+        );
+    }
+}
+
+#[test]
+fn oversized_v2_envelopes_keep_the_size_error() {
+    // One byte beyond the old base64 budget still fits the envelope budget.
+    // Beyond either bound, this is not a recognized released envelope.
+    for metadata_bytes in [64 * 1024 + 1, 64 * 1024 + 256] {
+        let encoded = released_v2_payload(&format!("\"{}\"", "A".repeat(metadata_bytes)));
+        assert!(matches!(
+            decode_commit_payload(&encoded),
+            Err(IndexError::CommitPayloadTooLarge { actual, maximum: 256 })
+                if actual == encoded.len()
+        ));
+    }
+}
+
+#[test]
+fn current_commit_payload_stays_strict_and_canonical() {
+    let generation_id = "a".repeat(64);
+    let canonical = format!(r#"{{"version":3,"generation_id":"{generation_id}"}}"#);
+    assert_eq!(
+        decode_commit_payload(&canonical).unwrap().generation_id,
+        generation_id
+    );
+    assert_eq!(canonical_commit_payload(&generation_id).unwrap(), canonical);
+
+    for encoded in [
+        format!(" {canonical}"),
+        format!("{canonical}\n"),
+        format!(r#"{{"generation_id":"{generation_id}","version":3}}"#),
+    ] {
+        assert!(matches!(
+            decode_commit_payload(&encoded),
+            Err(IndexError::NonCanonicalCommitPayload)
+        ));
+    }
+    assert!(matches!(
+        decode_commit_payload(&canonical.replace(&generation_id, &"z".repeat(64))),
+        Err(IndexError::InvalidGenerationId)
+    ));
+}
+
+#[test]
+fn malformed_current_and_unknown_envelopes_stay_json_errors() {
+    let canonical = format!(r#"{{"version":3,"generation_id":"{}"}}"#, "a".repeat(64));
+    for encoded in [
+        "{".to_owned(),
+        canonical.replace("\"version\":3", "\"version\":\"3\""),
+        canonical.replace("\"version\":3", "\"version\":null"),
+        canonical.replace("\"version\":3,", ""),
+        canonical.replace("\"version\":3", "\"version\":3,\"version\":2"),
+        canonical.replace("\"version\":3", "\"version\":3,\"unknown\":true"),
+        format!("{canonical}{{}}"),
+        released_v2_payload("null").replace("\"version\":2", "\"version\":3"),
+        released_v2_payload("null").replace("\"version\":2", "\"version\":4"),
+    ] {
+        assert!(
+            matches!(decode_commit_payload(&encoded), Err(IndexError::Json(_))),
+            "unexpected classification for {encoded}"
+        );
+    }
+}
+
+#[test]
+fn oversized_current_payloads_keep_the_256_byte_limit() {
+    let canonical = format!(r#"{{"version":3,"generation_id":"{}"}}"#, "a".repeat(64));
+    for total_bytes in [257, 64 * 1024 + 256, 64 * 1024 + 257] {
+        let encoded = format!("{canonical}{}", " ".repeat(total_bytes - canonical.len()));
+        assert!(matches!(
+            decode_commit_payload(&encoded),
+            Err(IndexError::CommitPayloadTooLarge { actual, maximum: 256 })
+                if actual == total_bytes
+        ));
+    }
+    let encoded = released_v2_payload(&format!("\"{}\"", "AAAA".repeat(64)))
+        .replace("\"version\":2", "\"version\":3");
+    assert!(matches!(
+        decode_commit_payload(&encoded),
+        Err(IndexError::CommitPayloadTooLarge { maximum: 256, .. })
+    ));
 }
 
 fn route(byte: &str) -> SourceRouteIdentity {
     SourceRouteIdentity::from_sha256(byte.repeat(64)).unwrap()
-}
-
-fn previous_root(
-    id: &str,
-    provider: &str,
-    source_identity: &str,
-    routes: Vec<SourceRouteIdentity>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "definition": {"id": id, "provider": provider, "path": format!("/fixtures/{id}")},
-        "source_identity": source_identity,
-        "routes": routes,
-    })
 }
 
 fn fixture_source(name: &str) -> SourceKey {
@@ -60,169 +168,8 @@ fn certified(source: SourceKey) -> CertifiedSource {
     .unwrap()
 }
 
-fn write_literal_manifest(root: &Path, bytes: &[u8]) -> String {
-    let generation_id = sha256_hex(bytes);
-    write_manifest_bytes(root, &generation_id, bytes).unwrap();
-    generation_id
-}
-
-fn current_as_v9(manifest: GenerationManifest) -> Vec<u8> {
-    let mut value = serde_json::to_value(manifest).unwrap();
-    value["manifest_version"] = serde_json::json!(PREVIOUS_GENERATION_MANIFEST_VERSION);
-    for root in value["provider_roots"].as_array_mut().unwrap() {
-        root.as_object_mut().unwrap().remove("connector_binding");
-        root.as_object_mut()
-            .unwrap()
-            .remove("exact_source_memberships");
-    }
-    canonical_v9_bytes(value)
-}
-
 #[test]
-fn literal_v8_and_v9_fixtures_migrate_directly_to_final_v10() {
-    let v8 = migrate_previous_manifest_v8(V8_EMPTY_FIXTURE).unwrap();
-    assert_eq!(v8.manifest_version, GENERATION_MANIFEST_VERSION);
-    assert!(v8.automatic_provider_discovery());
-    assert!(v8.provider_roots().is_empty());
-
-    let definition = ProviderRootDefinition {
-        id: "codex".to_owned(),
-        provider: CaptureProvider::Codex,
-        path: "/fixtures/codex".into(),
-        group: None,
-        kind: None,
-    };
-    assert_eq!(
-        provider_source_config_digest(true, std::slice::from_ref(&definition)),
-        "655246d699705d7c3bee11f277332db40cd54fda6a8e75a0ea10eec60306d3c2"
-    );
-    let v9 = migrate_previous_manifest_v9(V9_CODEX_FIXTURE).unwrap();
-    let root = &v9.provider_roots()[0];
-    assert_eq!(root.definition(), &definition);
-    assert!(root.connector_binding().unwrap().identity_root().is_none());
-    assert!(root.exact_source_memberships().is_empty());
-}
-
-#[test]
-fn v9_root_dto_rejects_kind_and_v10_only_fields() {
-    let mut kind = v9_value();
-    kind["provider_roots"][0]["definition"]["kind"] = serde_json::json!("legacy-persistence");
-    assert!(migrate_previous_manifest_v9(&serde_json::to_vec(&kind).unwrap()).is_err());
-
-    for field in ["connector_binding", "exact_source_memberships"] {
-        let mut value = v9_value();
-        value["provider_roots"][0][field] = serde_json::json!([]);
-        assert!(migrate_previous_manifest_v9(&serde_json::to_vec(&value).unwrap()).is_err());
-    }
-}
-
-#[test]
-fn v9_rejects_every_non_public_provider_for_both_source_identities() {
-    for source_identity in ["named_v1", "released"] {
-        let mut value = v9_value();
-        value["provider_roots"][0]["definition"]["provider"] = serde_json::json!("crush");
-        value["provider_roots"][0]["source_identity"] = serde_json::json!(source_identity);
-        assert!(matches!(
-            migrate_previous_manifest_v9(&canonical_v9_bytes(value)),
-            Err(IndexError::InvalidProviderRoots(detail))
-                if detail.contains("outside the public v9 contract")
-        ));
-    }
-}
-
-#[test]
-fn v9_validates_source_route_root_and_ownership_canonicality_before_conversion() {
-    let first = route("1");
-    let second = route("2");
-    let snapshot = |route| SourceRouteSnapshot::present(route, Vec::new()).unwrap();
-
-    let mut source_route_order = v9_value();
-    source_route_order["source_routes"] =
-        serde_json::to_value([snapshot(second.clone()), snapshot(first.clone())]).unwrap();
-    assert!(matches!(
-        migrate_previous_manifest_v9(&canonical_v9_bytes(source_route_order)),
-        Err(IndexError::NonCanonicalSourceRoutes)
-    ));
-
-    let mut root_order = v9_value();
-    root_order["provider_roots"] = serde_json::json!([
-        previous_root("codex", "codex", "released", Vec::new()),
-        previous_root("alpha", "claude", "named_v1", Vec::new()),
-    ]);
-    assert!(matches!(
-        migrate_previous_manifest_v9(&canonical_v9_bytes(root_order)),
-        Err(IndexError::InvalidProviderRoots(detail)) if detail.contains("root definitions")
-    ));
-
-    let mut route_order = v9_value();
-    route_order["source_routes"] =
-        serde_json::to_value([snapshot(first.clone()), snapshot(second.clone())]).unwrap();
-    route_order["provider_roots"][0]["routes"] =
-        serde_json::to_value([second.clone(), first.clone()]).unwrap();
-    assert!(matches!(
-        migrate_previous_manifest_v9(&canonical_v9_bytes(route_order)),
-        Err(IndexError::InvalidProviderRoots(detail)) if detail.contains("routes are not")
-    ));
-
-    let mut dangling = v9_value();
-    dangling["provider_roots"][0]["routes"] = serde_json::to_value([first.clone()]).unwrap();
-    assert!(matches!(
-        migrate_previous_manifest_v9(&canonical_v9_bytes(dangling)),
-        Err(IndexError::ProviderRootRouteNotRetained { .. })
-    ));
-
-    let mut shared = v9_value();
-    shared["source_routes"] = serde_json::to_value([snapshot(first.clone())]).unwrap();
-    shared["provider_roots"] = serde_json::json!([
-        previous_root("alpha", "claude", "named_v1", vec![first.clone()]),
-        previous_root("codex", "codex", "released", vec![first]),
-    ]);
-    assert!(matches!(
-        migrate_previous_manifest_v9(&canonical_v9_bytes(shared)),
-        Err(IndexError::SourceRouteOwnedByMultipleProviderRoots { .. })
-    ));
-}
-
-#[test]
-fn v9_root_filter_migration_preserves_whole_route_semantics() {
-    let source = fixture_source("v9-filter");
-    let token = source_token(&source);
-    let certified = certified(source.clone());
-    let route = route("3");
-    let definition = ProviderRootDefinition {
-        id: "claude".to_owned(),
-        provider: CaptureProvider::Claude,
-        path: "/fixtures/claude".into(),
-        group: Some("work".to_owned()),
-        kind: None,
-    };
-    let manifest = GenerationManifest::from_parts_with_record_aggregates_and_provider_roots(
-        vec![certified],
-        vec![SourceCoreRecordAggregate::new(token.clone(), 0, "00".repeat(32)).unwrap()],
-        vec![SourceRouteSnapshot::present(route.clone(), vec![source]).unwrap()],
-        true,
-        provider_source_config_digest(true, std::slice::from_ref(&definition)),
-        vec![AppliedProviderRoot::new(definition, vec![route]).unwrap()],
-    )
-    .unwrap();
-    let migrated = migrate_previous_manifest_v9(&current_as_v9(manifest)).unwrap();
-
-    assert_eq!(
-        migrated
-            .provider_root_source_tokens(&["claude".to_owned()], &[])
-            .unwrap(),
-        vec![token.clone()]
-    );
-    assert_eq!(
-        migrated
-            .provider_root_source_tokens(&[], &["work".to_owned()])
-            .unwrap(),
-        vec![token]
-    );
-}
-
-#[test]
-fn membership_only_successor_uses_a_full_v10_manifest() {
+fn membership_only_successor_uses_a_full_manifest() {
     let temp = tempfile::tempdir().unwrap();
     let route = route("4");
     let alpha = fixture_source("alpha");
@@ -279,6 +226,32 @@ fn membership_only_successor_uses_a_full_v10_manifest() {
     assert!(!prepared.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
     let persisted: GenerationManifest = serde_json::from_slice(&prepared.bytes).unwrap();
     persisted.validate_contract().unwrap();
+}
+
+#[test]
+fn generation_state_only_successor_uses_a_full_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = GenerationManifest::from_sources(Vec::new())
+        .unwrap()
+        .with_generation_state(
+            crate::GenerationStateEnvelope::new("ctx.test-state.v1", b"one".to_vec()).unwrap(),
+        )
+        .unwrap();
+    let base_id = base.generation_id().unwrap();
+    write_manifest(temp.path(), &base_id, &base).unwrap();
+    let successor = base
+        .clone()
+        .with_generation_state(
+            crate::GenerationStateEnvelope::new("ctx.test-state.v1", b"two".to_vec()).unwrap(),
+        )
+        .unwrap();
+
+    let prepared =
+        prepare_successor_manifest(temp.path(), Arc::new(successor), Some((&base_id, &base)))
+            .unwrap();
+
+    assert_ne!(prepared.generation_id(), base_id);
+    assert!(!prepared.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
 }
 
 #[test]
@@ -341,84 +314,7 @@ fn detached_authority_change_survives_a_cold_reopen() {
     clear_manifest_cache_for_root(temp.path()).unwrap();
     let reopened = load_materialized_manifest(temp.path(), prepared.generation_id(), 0).unwrap();
     assert_eq!(
-        reopened.manifest.detached_released_provider_roots(),
+        reopened.detached_released_provider_roots(),
         successor.detached_released_provider_roots()
     );
-}
-
-#[test]
-fn migrated_v8_and_v9_anchors_are_rewritten_once_before_reuse() {
-    let temp = tempfile::tempdir().unwrap();
-    for bytes in [V8_EMPTY_FIXTURE, V9_CODEX_FIXTURE] {
-        let generation_id = write_literal_manifest(temp.path(), bytes);
-        let loaded = load_materialized_manifest(temp.path(), &generation_id, 0).unwrap();
-        assert!(loaded.requires_current_anchor);
-
-        let prepared = prepare_successor_manifest(
-            temp.path(),
-            Arc::clone(&loaded.manifest),
-            Some((&generation_id, loaded.manifest.as_ref())),
-        )
-        .unwrap();
-        assert_ne!(prepared.generation_id(), generation_id);
-        assert!(!prepared.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&prepared.bytes).unwrap()
-                ["manifest_version"],
-            GENERATION_MANIFEST_VERSION
-        );
-
-        write_prepared_manifest(temp.path(), &prepared).unwrap();
-        let anchored_id = prepared.generation_id().to_owned();
-        let reused = prepare_successor_manifest(
-            temp.path(),
-            Arc::clone(&loaded.manifest),
-            Some((&anchored_id, loaded.manifest.as_ref())),
-        )
-        .unwrap();
-        assert_eq!(reused.generation_id(), anchored_id);
-    }
-}
-
-#[test]
-fn flat_delta_inherits_the_v9_anchors_rewrite_requirement() {
-    let temp = tempfile::tempdir().unwrap();
-    let source = fixture_source("v9-delta-anchor");
-    let base = GenerationManifest::from_sources(vec![certified(source.clone())]).unwrap();
-    let base_generation_id = write_literal_manifest(temp.path(), &current_as_v9(base));
-    let observation = SourceObservation::new(source.clone(), "fixture-revision", vec![2]).unwrap();
-    let successor = CertifiedSource::certify(
-        observation.clone(),
-        observation,
-        "fixture-parser",
-        [1; 32],
-        ScannedSourceCounts::default(),
-    )
-    .unwrap();
-    let delta = StoredManifestFlatDeltaV1 {
-        storage_format: MANIFEST_FLAT_DELTA_STORAGE.to_owned(),
-        base_generation_id,
-        indexed_documents: 0,
-        certified_source_bytes: 0,
-        source_count: 1,
-        changes: vec![StoredManifestSourceChangeV1 {
-            source_identity: source.identity().digest(),
-            source: successor,
-            aggregate: SourceCoreRecordAggregate::new(source_token(&source), 0, "00".repeat(32))
-                .unwrap(),
-        }],
-    };
-    let delta_generation_id =
-        write_literal_manifest(temp.path(), &serde_json::to_vec(&delta).unwrap());
-    let loaded = load_materialized_manifest(temp.path(), &delta_generation_id, 0).unwrap();
-    assert!(loaded.requires_current_anchor);
-
-    let prepared = prepare_successor_manifest(
-        temp.path(),
-        Arc::clone(&loaded.manifest),
-        Some((&delta_generation_id, loaded.manifest.as_ref())),
-    )
-    .unwrap();
-    assert!(!prepared.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
-    assert_ne!(prepared.generation_id(), delta_generation_id);
 }

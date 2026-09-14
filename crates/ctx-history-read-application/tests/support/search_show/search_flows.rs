@@ -26,7 +26,7 @@ fn fresh_home_search_mvp_flow() {
     );
 
     let setup_json = json_output(ctx(&temp).args(["setup", "--format=json"]));
-    assert_eq!(setup_json["schema_version"], 2);
+    assert_eq!(setup_json["schema_version"], 3);
     assert_eq!(setup_json["network_required"], false);
     assert_eq!(setup_json["repo_writes"], false);
     assert!(
@@ -296,7 +296,10 @@ fn fresh_home_search_mvp_flow() {
     assert!(verbose_search.contains("Retrieval score"));
     assert!(verbose_search.contains(" show session "));
     assert!(verbose_search.contains(" show event "));
-    assert!(verbose_search.contains(" search onboarding --session"));
+    assert!(
+        verbose_search.contains(&format!(" search --session {ctx_session_id} -- onboarding")),
+        "{verbose_search}"
+    );
     assert!(!human_search.contains("work_record"));
     assert!(!human_search.contains("history_record"));
 
@@ -334,7 +337,7 @@ fn fresh_home_search_mvp_flow() {
     );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["schema_version"], 2);
+    assert_eq!(status["schema_version"], 3);
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["semantic"]["reason"], "semantic_disabled");

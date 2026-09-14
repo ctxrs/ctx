@@ -24,7 +24,7 @@ use super::{
     },
     source::{CodexCatalogSource, CodexFileObservation},
     source_backed::{
-        codex_core_record, codex_session_identity, codex_source_key_in_root,
+        codex_core_record, codex_session_identity, codex_source_key_for_path,
         CodexEventIdentityStateV0, CodexSourceBackedErrorV0,
     },
 };

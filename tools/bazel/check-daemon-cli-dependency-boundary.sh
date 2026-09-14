@@ -35,6 +35,7 @@ assert_labels() {
 
 assert_labels 'direct dependency set' \
   'kind("rust_library rule", deps(//crates/ctx-daemon-cli:lib, 1)) intersect //crates/...' \
+  '//crates/ctx-app-config:lib' \
   '//crates/ctx-client-observability:lib' \
   '//crates/ctx-daemon-application:lib' \
   '//crates/ctx-daemon-cli:lib' \
@@ -53,6 +54,7 @@ assert_labels 'direct dependency set' \
 
 assert_labels 'qualification dependency set' \
   'kind("rust_library rule", deps(//crates/ctx-daemon-cli:qualification_lib, 1)) intersect //crates/...' \
+  '//crates/ctx-app-config:lib' \
   '//crates/ctx-client-observability:lib' \
   '//crates/ctx-daemon-application:qualification_lib' \
   '//crates/ctx-daemon-cli:qualification_lib' \
@@ -99,6 +101,14 @@ if [[ -n "$(query 'somepath(//crates/ctx-daemon-cli:lib, //crates/ctx-cli:ctx)')
   echo 'ctx-daemon-cli has a reverse dependency path into ctx-cli' >&2
   exit 1
 fi
+if [[ -z "$(query 'somepath(//crates/ctx-daemon-cli:lib, //crates/ctx-app-config:lib)')" ]]; then
+  echo 'ctx-daemon-cli must consume ctx-app-config through the intended downward edge' >&2
+  exit 1
+fi
+if [[ -n "$(query 'somepath(//crates/ctx-app-config:lib, //crates/ctx-daemon-cli:lib)')" ]]; then
+  echo 'ctx-app-config must not depend upward on ctx-daemon-cli' >&2
+  exit 1
+fi
 
 python3 - "${repo_root}" <<'PY'
 import pathlib
@@ -110,6 +120,7 @@ manifest_path = root / "crates/ctx-daemon-cli/Cargo.toml"
 manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
 expected_dependencies = {
     "anyhow",
+    "ctx-app-config",
     "ctx-client-observability",
     "ctx-daemon-application",
     "ctx-daemon-runtime",
@@ -127,7 +138,6 @@ expected_dependencies = {
     "fs2",
     "serde_json",
     "thiserror",
-    "toml_edit",
     "uuid",
 }
 actual_dependencies = set(manifest.get("dependencies", {}))
@@ -154,8 +164,10 @@ if actual_dev_dependencies != expected_dev_dependencies:
         f"missing={sorted(expected_dev_dependencies - actual_dev_dependencies)} "
         f"extra={sorted(actual_dev_dependencies - expected_dev_dependencies)}"
     )
-if manifest.get("features"):
-    raise SystemExit("ctx-daemon-cli must not define feature-selected authority")
+if manifest.get("features") != {"test-support": ["ctx-daemon-service/test-support"]}:
+    raise SystemExit(
+        "ctx-daemon-cli features must expose only test-support forwarding to ctx-daemon-service"
+    )
 if manifest.get("package", {}).get("publish") is not False:
     raise SystemExit("ctx-daemon-cli must remain an internal non-published package")
 

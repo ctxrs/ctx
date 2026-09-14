@@ -455,6 +455,10 @@ pub(crate) fn fake_legacy_release(temp: &TempDir, latest_version: &str) -> FakeR
         "metadata_url": null,
         "artifact_url": null,
         "installed_at": installed_at,
+        "man_pages": {
+            "schema_version": 1,
+            "status": "disabled",
+        },
     });
     fs::write(
         install_marker_path(&target),
@@ -580,7 +584,11 @@ fn write_fake_runtime_archive(artifact: &Path, library: &str, version: &str, mod
         ),
         (
             format!("lib/{library}"),
-            b"fake onnxruntime shared library\n".to_vec(),
+            if mode == "replacement" {
+                b"corrected fake onnxruntime shared library\n".to_vec()
+            } else {
+                b"fake onnxruntime shared library\n".to_vec()
+            },
         ),
     ];
     for (name, contents) in files {

@@ -30,6 +30,10 @@ enum InvalidEmbeddingBatch {
 struct InvalidEmbedder(InvalidEmbeddingBatch);
 
 impl SemanticBatchEmbedder for InvalidEmbedder {
+    fn document_fits(&mut self, _text: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         let dimensions = semantic_model_contract().dimensions();
         let unit = || {

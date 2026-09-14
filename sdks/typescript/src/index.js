@@ -26,7 +26,7 @@ export {
   CtxValidationError,
 };
 
-export const AGENT_HISTORY_V1_VERSION = "agent-history-v1";
+export const AGENT_HISTORY_V2_VERSION = "agent-history-v2";
 export const SDK_VERSION = "0.0.0";
 
 export class LocalCliAdapter {
@@ -116,11 +116,9 @@ export class LocalAgentHistoryClient {
         : { ...queryOrOptions };
     validateSearchOptions(options);
     const args = ["search"];
-    if (options.query) {
-      args.push(options.query);
-    }
     appendSearchArgs(args, options);
     args.push("--format=json");
+    if (options.query !== undefined && options.query !== null) args.push("--", options.query);
     return this.#agentHistoryJson("search", args);
   }
 
@@ -152,7 +150,7 @@ export class LocalAgentHistoryClient {
     const raw = result.stdout.trim();
     return {
       schema_version: 1,
-      api_version: AGENT_HISTORY_V1_VERSION,
+      api_version: AGENT_HISTORY_V2_VERSION,
       sdk_version: SDK_VERSION,
       adapter: "local-cli",
       ctx_version: parseCtxVersion(raw),
@@ -428,7 +426,7 @@ export class HostedAgentHistoryClient {
   version() {
     return Promise.resolve({
       schema_version: 1,
-      api_version: AGENT_HISTORY_V1_VERSION,
+      api_version: AGENT_HISTORY_V2_VERSION,
       sdk_version: SDK_VERSION,
       adapter: "hosted-placeholder",
       hosted: false,
@@ -458,7 +456,7 @@ export function createAgentHistoryClient(options = {}) {
 function hostedUnsupported() {
   return Promise.reject(
     new CtxUnsupportedError(
-      "The hosted agent-history-v1 transport is reserved for future ctx service support. Use the local CLI adapter today.",
+      "The hosted agent-history-v2 transport is reserved for future ctx service support. Use the local CLI adapter today.",
       { details: { adapter: "hosted-placeholder" } },
     ),
   );
@@ -466,7 +464,7 @@ function hostedUnsupported() {
 
 export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
   const envelope = {
-    contractVersion: AGENT_HISTORY_V1_VERSION,
+    contractVersion: AGENT_HISTORY_V2_VERSION,
     schemaVersion: 1,
     operation,
     ...(backend ? { backend } : {}),
@@ -505,7 +503,7 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
       };
       break;
     default:
-      throw new CtxValidationError(`unsupported agent-history-v1 operation: ${operation}`, {
+      throw new CtxValidationError(`unsupported agent-history-v2 operation: ${operation}`, {
         details: { operation },
       });
   }
@@ -557,10 +555,15 @@ function normalizeEventRecord(value) {
         member: key,
       });
     }
-    outer[key] = item;
+    const camelKey = snakeToCamel(key);
+    if (["configPath", "itemType", "payloadType", "recordType"].includes(camelKey)) continue;
+    Object.defineProperty(outer, camelKey, {
+      value: ["content", "citations"].includes(key) ? camelizeKeys(item) : item,
+      enumerable: true, writable: true, configurable: true,
+    });
   }
 
-  const event = camelizeKeys(outer);
+  const event = outer;
   if (hasSnake || hasCamel) {
     event.mcpToolCall = validateMcpToolCall(
       hasSnake ? value.mcp_tool_call : value.mcpToolCall,
@@ -748,7 +751,7 @@ function validateMcpSafeInteger(value, field) {
 }
 
 function invalidMcpExchange(message, details = {}) {
-  return new CtxParseError(`agent-history-v1 MCP exchange ${message}`, {
+  return new CtxParseError(`agent-history-v2 MCP exchange ${message}`, {
     details: { field: "mcpExchange", ...details },
   });
 }
@@ -808,7 +811,7 @@ function validateMcpToolCallComponent(value, field) {
 }
 
 function invalidMcpToolCall(message, details = {}) {
-  return new CtxParseError(`agent-history-v1 MCP tool call ${message}`, {
+  return new CtxParseError(`agent-history-v2 MCP tool call ${message}`, {
     details: { field: "mcpToolCall", ...details },
   });
 }
@@ -838,7 +841,6 @@ function normalizeStatus(raw) {
     }
   }
   status.initialized ??= typeof current.lexical?.generationId === "string";
-  status.localOnly = true;
   return status;
 }
 
@@ -888,7 +890,14 @@ function snakeToCamel(value) {
 
 
 function cliError(message, result) {
+  let producer;
+  try { producer = JSON.parse(result.stderr); } catch { /* Plain diagnostic fallback. */ }
+  if (!producer || typeof producer !== "object" || Array.isArray(producer) ||
+      typeof producer.error_code !== "string" || !producer.error_code ||
+      (producer.retryable !== undefined && typeof producer.retryable !== "boolean")) producer = undefined;
   return new CtxCliError(message, {
+    retryable: producer?.retryable ?? false,
+    details: producer ? { producerError: producer } : undefined,
     command: result.command,
     args: result.args,
     exitCode: result.exitCode,

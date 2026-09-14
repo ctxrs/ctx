@@ -5,15 +5,16 @@ use std::{
     sync::Mutex,
 };
 
-use ctx_history_core::{CaptureProvider, SourceAnchorScope, SourceKey};
+use ctx_history_capture_runtime::decode_document_full_snapshot_checkpoint;
+use ctx_history_core::{CaptureProvider, CertifiedSource, SourceAnchorScope, SourceKey};
 use sha2::{Digest, Sha256};
 
 use super::{
     observe_logical_source_with_progress_scoped,
     open_root_authorized_snapshot_retained_with_progress,
-    opencode_family_source_backed_registrations, scan_pinned_source, OpenCodeAuthorizedSnapshot,
-    OpenCodeLogicalObservation, OpenCodeScanOutput, OpenCodeSourceBackedError,
-    OpenCodeSourceBackedRegistration, OpenCodeSourceBackedResult,
+    opencode_family_source_backed_registrations, retain_root_authorized_source, scan_pinned_source,
+    OpenCodeAuthorizedSnapshot, OpenCodeLogicalObservation, OpenCodeScanOutput,
+    OpenCodeSourceBackedError, OpenCodeSourceBackedRegistration, OpenCodeSourceBackedResult,
     SourceBackedCurrentSourceProgress, PARSER_REVISION, SQLITE_SOURCE_INVALID_REASON,
 };
 use crate::{
@@ -26,8 +27,8 @@ use crate::{
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
     provider_sources::{
-        SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
-        SqliteSourceTerminalFence,
+        sqlite_retry_decision, SqliteRetryDecision, SqliteSourceAccessError,
+        SqliteSourceReadSnapshot, SqliteSourceReplayFence, SqliteSourceTerminalFence,
     },
     CaptureError, ProviderSource,
 };
@@ -52,9 +53,16 @@ pub enum OpenCodeTreeAuthority {
 }
 
 pub struct OpenCodeDocumentLeaf {
-    observation: OpenCodeLogicalObservation,
+    observation: Option<OpenCodeLogicalObservation>,
     snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
     terminal_fence: Mutex<Option<SqliteSourceTerminalFence>>,
+    replay: Option<OpenCodeReplayLeaf>,
+}
+
+struct OpenCodeReplayLeaf {
+    source: SourceKey,
+    physical_fence: SqliteSourceReplayFence,
+    leaf_fingerprint: [u8; 32],
 }
 
 type OpenCodeDocumentTree = CompleteDocumentTree<OpenCodeDocumentLeaf, OpenCodeTreeAuthority>;
@@ -88,7 +96,7 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
 
     fn discover_complete_with_progress(
         &self,
-        _base_sources: &[ctx_history_core::CertifiedSource],
+        base_sources: &[CertifiedSource],
         report_progress: &mut dyn FnMut(
             SourceBackedCurrentSourceProgress,
         ) -> SourceBackedRouteResult<()>,
@@ -98,6 +106,7 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
             &self.path,
             self.registration.dialect,
             self.source_scope,
+            base_sources,
             report_progress,
         )
         .map_err(route_error)
@@ -115,6 +124,9 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
                 "missing OpenCode-family tree unexpectedly contained a leaf",
             ));
         };
+        let observation = leaf.observation.as_ref().ok_or_else(|| {
+            source_internal("exact OpenCode-family replay unexpectedly required a logical scan")
+        })?;
         let snapshot = leaf
             .snapshot
             .lock()
@@ -124,7 +136,7 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
         let scan = scan_pinned_source(
             &self.path,
             self.registration.dialect,
-            &leaf.observation,
+            observation,
             snapshot,
             &mut |output| match output {
                 OpenCodeScanOutput::Begin(source) => sink.begin_source(source).map_err(Into::into),
@@ -144,7 +156,7 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
             },
         )
         .map_err(route_error)?;
-        if !scan.source.exact_descriptor_eq(&leaf.observation.source) {
+        if !scan.source.exact_descriptor_eq(&observation.source) {
             return Err(source_changed(
                 "OpenCode-family projection did not match its logical observation",
             ));
@@ -173,6 +185,22 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
                     ));
                 };
                 let leaf = &observed.provider_leaf;
+                if let Some(replay) = &leaf.replay {
+                    replay
+                        .physical_fence
+                        .revalidate()
+                        .map_err(|error| route_error(error.into()))?;
+                    let current_fingerprint =
+                        admitted_leaf_fingerprint(&replay.source, replay.physical_fence.revision());
+                    if current_fingerprint != replay.leaf_fingerprint
+                        || current_fingerprint != tree.tree_fingerprint
+                    {
+                        return Err(source_changed(
+                            "OpenCode-family replay revision changed during staging",
+                        ));
+                    }
+                    return Ok(current_fingerprint);
+                }
                 if let Some(snapshot) = leaf
                     .snapshot
                     .lock()
@@ -196,6 +224,22 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
                 Ok(*tree_fingerprint)
             }
         }
+    }
+
+    fn durable_replay_source(
+        &self,
+        _authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<Option<SourceKey>> {
+        Ok(leaf
+            .replay
+            .as_ref()
+            .map(|replay| replay.source.clone())
+            .or_else(|| {
+                leaf.observation
+                    .as_ref()
+                    .map(|observation| observation.source.clone())
+            }))
     }
 }
 
@@ -236,7 +280,9 @@ fn discover_document_tree(
     dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
     source_scope: SourceAnchorScope,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
-    discover_document_tree_with_progress(data_root, path, dialect, source_scope, &mut |_| Ok(()))
+    discover_document_tree_with_progress(data_root, path, dialect, source_scope, &[], &mut |_| {
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -253,10 +299,21 @@ fn discover_document_tree_with_progress(
     path: &std::path::Path,
     dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
     source_scope: SourceAnchorScope,
+    base_sources: &[CertifiedSource],
     report_progress: &mut dyn FnMut(
         SourceBackedCurrentSourceProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
+    if let Some(base) = exact_replay_base(base_sources, dialect.provider, source_scope) {
+        match observe_exact_replay_tree(data_root, path, base) {
+            Ok(Some(tree)) => return Ok(tree),
+            Ok(None) => {}
+            Err(OpenCodeSourceBackedError::SqliteSource(error))
+                if sqlite_retry_decision(&error) == SqliteRetryDecision::RetrySourceTransition => {}
+            Err(error) if source_missing(&error) => return observe_missing_document_tree(path),
+            Err(error) => return Err(error),
+        }
+    }
     match observe_present_document_tree_with_progress(
         data_root,
         path,
@@ -268,6 +325,59 @@ fn discover_document_tree_with_progress(
         Err(error) if source_missing(&error) => observe_missing_document_tree(path),
         Err(error) => Err(error),
     }
+}
+
+fn exact_replay_base(
+    base_sources: &[CertifiedSource],
+    provider: CaptureProvider,
+    source_scope: SourceAnchorScope,
+) -> Option<&CertifiedSource> {
+    let registration = registration_for_provider(provider)?;
+    let [base] = base_sources else {
+        return None;
+    };
+    (base.parser_revision() == PARSER_REVISION
+        && registration.owns_source(base.observation().source(), source_scope)
+        && decode_document_full_snapshot_checkpoint(base).is_ok())
+    .then_some(base)
+}
+
+fn observe_exact_replay_tree(
+    data_root: &Path,
+    path: &Path,
+    base: &CertifiedSource,
+) -> OpenCodeSourceBackedResult<Option<OpenCodeDocumentTree>> {
+    let Ok(checkpoint) = decode_document_full_snapshot_checkpoint(base) else {
+        return Ok(None);
+    };
+    let retained = retain_root_authorized_source(data_root, path)?;
+    let physical_fence = retained
+        .sqlite_authority
+        .observe_replay_fence(&retained.database_leaf)?;
+    let physical_revision = *physical_fence.revision();
+    let source = base.observation().source().clone();
+    let leaf_fingerprint = admitted_leaf_fingerprint(&source, &physical_revision);
+    if checkpoint.physical_fingerprint() != leaf_fingerprint {
+        return Ok(None);
+    }
+    Ok(Some(CompleteDocumentTree::new(
+        leaf_fingerprint,
+        vec![ObservedDocumentLeaf::with_durable_replay(
+            DocumentLeafFingerprint::new(leaf_fingerprint),
+            OpenCodeDocumentLeaf {
+                observation: None,
+                snapshot: Mutex::new(None),
+                terminal_fence: Mutex::new(None),
+                replay: Some(OpenCodeReplayLeaf {
+                    source,
+                    physical_fence,
+                    leaf_fingerprint,
+                }),
+            },
+            true,
+        )],
+        OpenCodeTreeAuthority::Present,
+    )))
 }
 
 fn observe_present_document_tree_with_progress(
@@ -295,7 +405,7 @@ fn observe_present_document_tree_with_progress(
     };
     let leaf_fingerprint = DocumentLeafFingerprint::new(admitted_leaf_fingerprint(
         &observation.source,
-        authorized.sqlite_snapshot.evidence(),
+        authorized.sqlite_snapshot.evidence().physical_revision(),
     ));
     let replay_from_frontier = authorized
         .sqlite_snapshot
@@ -306,9 +416,10 @@ fn observe_present_document_tree_with_progress(
         vec![ObservedDocumentLeaf::with_durable_replay(
             leaf_fingerprint,
             OpenCodeDocumentLeaf {
-                observation,
+                observation: Some(observation),
                 snapshot: Mutex::new(Some(authorized.sqlite_snapshot)),
                 terminal_fence: Mutex::new(None),
+                replay: None,
             },
             replay_from_frontier,
         )],
@@ -338,13 +449,13 @@ pub(super) fn abort_opencode_snapshot(
     }
 }
 
-fn admitted_leaf_fingerprint(source: &SourceKey, evidence: &SqliteSourceEvidence) -> [u8; 32] {
+fn admitted_leaf_fingerprint(source: &SourceKey, physical_revision: &[u8; 32]) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"ctx.opencode-family-admitted-sqlite-revision-v1\0");
+    digest.update(b"ctx.opencode-family-admitted-sqlite-revision-v2\0");
     digest.update(source.exact_descriptor_digest());
     digest.update((PARSER_REVISION.len() as u64).to_be_bytes());
     digest.update(PARSER_REVISION.as_bytes());
-    digest.update(evidence.revision());
+    digest.update(physical_revision);
     digest.finalize().into()
 }
 

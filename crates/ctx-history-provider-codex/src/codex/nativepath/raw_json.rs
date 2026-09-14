@@ -12,6 +12,8 @@ const MAX_RECOGNIZED_FACT_KEYS_PER_OBJECT: usize = 64;
 pub(crate) enum SelectorGroup {
     Type,
     CallId,
+    ItemId,
+    CallIdAlias,
     ToolName,
     Arguments,
     Result,
@@ -290,8 +292,22 @@ impl<'de> Visitor<'de> for AuditVisitor<'_> {
         let mut seen_fact_keys = Vec::<String>::new();
         while let Some(key) = map.next_key::<String>()? {
             if let Some(group) = selector_group(&key) {
-                if seen_selectors & group.bit() != 0 {
-                    audit.mark_duplicate(group);
+                // callId remains an audited, unsupported alias. It conflicts
+                // with either the selected call_id or its id-only fallback.
+                let conflicts = match group {
+                    SelectorGroup::ItemId | SelectorGroup::CallId => {
+                        group.bit() | SelectorGroup::CallIdAlias.bit()
+                    }
+                    SelectorGroup::CallIdAlias => {
+                        group.bit() | SelectorGroup::CallId.bit() | SelectorGroup::ItemId.bit()
+                    }
+                    _ => group.bit(),
+                };
+                if seen_selectors & conflicts != 0 {
+                    audit.mark_duplicate(match group {
+                        SelectorGroup::CallIdAlias => SelectorGroup::CallId,
+                        _ => group,
+                    });
                 }
                 seen_selectors |= group.bit();
             }

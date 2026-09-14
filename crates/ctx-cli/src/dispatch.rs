@@ -18,7 +18,7 @@ use crate::{
         index::run_index,
         list::run_list,
         locate::run_locate,
-        search::run_search,
+        search::{run_search, CliRefreshArg},
         semantic::run_semantic,
         setup::run_setup,
         show::{run_show, ShowArgs, ShowTarget},
@@ -29,8 +29,6 @@ use crate::{
             run_status_authorized as run_status, run_usage_action,
         },
     },
-    config::AppConfig,
-    deprecated_controls::DeprecatedControls,
     docs, integrations, local_usage, mcp,
     operation_descriptor::{CliOperation, OperationDescriptor},
     output::{OutputFormat, OutputMeasurement},
@@ -41,12 +39,17 @@ use crate::{
     },
     upgrade,
 };
+use ctx_app_config::{AppConfig, DeprecatedControls};
 
 mod finalization;
 mod parse;
+mod semantic_completion_error;
+#[cfg(test)]
+mod test_support;
 
 use finalization::{
-    complete_local_usage, flush_cli_output, record_search_final_delivery, send_online_after_output,
+    complete_local_usage, flush_cli_output, record_analytics_after_output,
+    record_search_final_delivery,
 };
 use parse::parse_cli_from;
 
@@ -72,6 +75,7 @@ pub(crate) fn run() -> ExitCode {
 
     match run_cli() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if ctx_daemon_cli::finite_worker_interrupted(&error) => ExitCode::from(130),
         Err(error) if error.is::<RenderedClapError>() => {
             let exit_code = error
                 .downcast_ref::<RenderedClapError>()
@@ -161,17 +165,18 @@ fn render_unhandled_command_error(error: &anyhow::Error) -> Result<()> {
 
 pub(crate) fn run_cli() -> Result<()> {
     semantic::initialize()?;
-    if upgrade::ports::engine().run_legacy_automatic_bridge()? {
-        return Ok(());
-    }
     let started = Instant::now();
     let output_measurement = OutputMeasurement::start();
     let cli = parse_cli_from(env::args_os())?;
+    integrations::refresh_existing_managed_skills_on_startup(&cli.command);
     let mut ui = Ui::stdio(cli.color.into());
+    if should_reconcile_man_pages(&cli.command) {
+        ctx_upgrade_engine::reconcile_current_man_pages(|| {
+            docs::managed_man_bundle(&crate::Cli::command())
+        });
+    }
     let json_output = command_json_output(&cli.command);
     let machine_output = command_machine_readable_output(&cli.command, json_output);
-    let query_authority_error_json =
-        command_uses_query_authority_error_json(&cli.command, json_output);
     let _analytics_delivery_failure_output =
         analytics::quiet_delivery_failure_output(machine_output);
     let deprecated_controls = DeprecatedControls::detect();
@@ -233,7 +238,7 @@ pub(crate) fn run_cli() -> Result<()> {
             Ok(config) => config,
             Err(error)
                 if command_is_status_report(&cli.command)
-                    && crate::config::is_removed_cloud_mode_error(&error) =>
+                    && ctx_app_config::is_removed_cloud_mode_error(&error) =>
             {
                 return removed_cloud_config_failure(json_output, &mut ui);
             }
@@ -250,12 +255,12 @@ pub(crate) fn run_cli() -> Result<()> {
                 let mut fallback = AppConfig::default();
                 fallback.analytics.enabled = false;
                 fallback.local_usage.enabled =
-                    crate::config::resolve_local_usage_control(&data_root).effective_on_startup();
+                    ctx_app_config::resolve_local_usage_control(&data_root).effective_on_startup();
                 fallback
             }
             Err(error) => return Err(error),
         };
-    crate::config::bind_semantic_embedding_auth_endpoint(&config);
+    crate::semantic::bind_embedding_auth_endpoint(&config);
     if let Some(draft) = analytics_draft.as_mut() {
         draft.set_deprecated_controls(deprecated_controls.nonprivacy_analytics_ids().as_deref());
     }
@@ -269,7 +274,8 @@ pub(crate) fn run_cli() -> Result<()> {
     };
 
     let search_operation = matches!(&cli.command, CommandRoot::Search(_));
-    let result = match cli.command {
+    let foreground_finite_wait = command_uses_foreground_finite_wait(&cli.command);
+    let execute_command = || match cli.command {
         CommandRoot::Pro | CommandRoot::Blame | CommandRoot::Referral => Err(anyhow::anyhow!(
             "companion-owned command bypassed native argv routing"
         )),
@@ -434,11 +440,16 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut ui,
         ),
     };
+    let result = if foreground_finite_wait {
+        crate::foreground_interrupt::with_scope(execute_command)
+    } else {
+        execute_command()
+    };
+    let foreground_interrupted = ctx_daemon_cli::foreground_result_interrupted(&result);
     let output_started = Instant::now();
     let (rendered_error, search_error_render_failure) = match render_command_result_error(
         &result,
         json_output,
-        query_authority_error_json,
         machine_output,
         search_operation,
         &mut ui,
@@ -456,9 +467,13 @@ pub(crate) fn run_cli() -> Result<()> {
     } else {
         // Preserve the released non-Search ordering: buffered UI failure
         // returns here; final process-stream failure is returned after the
-        // analytics and the daemon post-command hook below.
-        ui.flush().context("flush structured terminal output")?;
-        flush_cli_output(&mut stdout, &mut stderr).map_err(Into::into)
+        // analytics and the daemon post-command hook below. Interruption is
+        // the sole exception: delivery failures stay secondary to exit 130.
+        match ui.flush().context("flush structured terminal output") {
+            Ok(()) => flush_cli_output(&mut stdout, &mut stderr).map_err(Into::into),
+            Err(error) if foreground_interrupted => Err(error),
+            Err(error) => return Err(error),
+        }
     };
     let output_duration = output_started.elapsed();
     let duration = started.elapsed();
@@ -496,48 +511,50 @@ pub(crate) fn run_cli() -> Result<()> {
             ));
         }
     }
-    let output_result = send_online_after_output(output_result, || {
-        analytics::send_batch(&data_root, &config, &events);
+    let output_result = record_analytics_after_output(output_result, || {
+        analytics::send_batch(&data_root, &events);
     });
     if result.is_ok() {
         if let Some(trigger) = daemon_autostart_trigger {
             semantic::maybe_autostart_daemon(&data_root, &config, trigger);
         }
     }
-    output_result?;
-    if let Some(error) = rendered_error {
-        return Err(error);
-    }
-    result
+    ctx_daemon_cli::finish_foreground_result(result, || {
+        output_result?;
+        rendered_error.map_or(Ok(()), Err)
+    })
+}
+
+fn should_reconcile_man_pages(command: &CommandRoot) -> bool {
+    !matches!(
+        command,
+        CommandRoot::Docs(args) if matches!(&args.command, Some(docs::DocsCommand::Man(_)))
+    )
+}
+
+fn command_uses_foreground_finite_wait(command: &CommandRoot) -> bool {
+    matches!(command, CommandRoot::Import(_))
+        || matches!(command, CommandRoot::Search(args) if args.refresh == CliRefreshArg::Wait)
 }
 
 fn render_command_result_error(
     result: &Result<()>,
     json_output: bool,
-    query_authority_error_json: bool,
     machine_output: bool,
     search_operation: bool,
     ui: &mut Ui,
 ) -> Result<Option<anyhow::Error>> {
+    if ctx_daemon_cli::foreground_result_interrupted(result) {
+        // Interruption remains typed through UI flush, analytics, and command
+        // finalization. The outer exit boundary maps it to exactly 130 and no
+        // public format receives an ordinary error document.
+        return Ok(None);
+    }
     let rendered_error = if let Err(error) = result {
         if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() {
             Some(RenderedCliError.into())
         } else if json_output {
-            if let Some(authority_error) = error
-                .downcast_ref::<ctx_history_refresh::GenerationQueryAuthorityError>()
-                .filter(|_| query_authority_error_json)
-            {
-                write_machine_error(
-                    search_operation,
-                    ui,
-                    &serde_json::to_string(
-                        &crate::commands::source_index::generation_query_authority_error_json(
-                            authority_error,
-                        ),
-                    )?,
-                )?;
-                Some(RenderedJsonError.into())
-            } else if let Some(error) =
+            if let Some(error) =
                 error.downcast_ref::<presentation_limit::PresentationOutputLimitError>()
             {
                 write_machine_error(
@@ -553,6 +570,15 @@ fn render_command_result_error(
                     search_operation,
                     ui,
                     &serde_json::to_string(&error.structured())?,
+                )?;
+                Some(RenderedJsonError.into())
+            } else if let Some(error) =
+                error.downcast_ref::<ctx_daemon_cli::SemanticCompletionError>()
+            {
+                write_machine_error(
+                    search_operation,
+                    ui,
+                    &serde_json::to_string(&semantic_completion_error::structured(error))?,
                 )?;
                 Some(RenderedJsonError.into())
             } else {
@@ -678,14 +704,6 @@ fn command_json_output(command: &CommandRoot) -> bool {
     }
 }
 
-fn command_uses_query_authority_error_json(command: &CommandRoot, json_output: bool) -> bool {
-    json_output
-        && matches!(
-            command,
-            CommandRoot::Search(_) | CommandRoot::Show(_) | CommandRoot::Locate(_)
-        )
-}
-
 fn show_json_output(args: &ShowArgs) -> bool {
     match &args.target {
         ShowTarget::Session(args) => args.format == OutputFormat::Json,
@@ -751,7 +769,6 @@ pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDe
             unreachable!("companion-owned commands are routed before Clap")
         }
         CommandRoot::Setup(args) => CliOperation::Setup(SetupTelemetry {
-            catalog_only: args.catalog_only,
             no_daemon: args.no_daemon,
             wait: args.wait,
             progress_mode: crate::observability_product::progress_mode(args.progress),
@@ -785,7 +802,6 @@ pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDe
         CommandRoot::Index(_) => CliOperation::Index(IndexTelemetry::default()),
         CommandRoot::Sources(args) => CliOperation::Sources(SourcesTelemetry {
             all: args.all,
-            show_missing: args.show_missing,
             provider_filter: args.provider.map(|provider| provider.capture_provider()),
             providers_detected: None,
             providers_existing: None,

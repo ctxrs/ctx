@@ -1,0 +1,60 @@
+{
+  "contractVersion": "agent-history-v2",
+  "schemaVersion": 1,
+  "operation": "status",
+  "backend": {
+    "kind": "local",
+    "dataRoot": "/tmp/ctx-sdk-fixture"
+  },
+  "status": {
+    "initialized": true,
+    "readOnly": true,
+    "dataRoot": "/tmp/ctx-sdk-fixture",
+    "indexedItems": 3,
+    "indexedSessions": 1,
+    "indexedEvents": 3,
+    "indexedSources": 1,
+    "historyEpoch": {
+      "name": "self_contained_core",
+      "status": "ready",
+      "activationAuthority": "verified_lexical_generation"
+    },
+    "lexical": {
+      "status": "ready",
+      "generationId": "fixture-generation",
+      "indexedDocuments": 3,
+      "certifiedSources": 1
+    },
+    "refresh": {
+      "status": "ready",
+      "requestState": "published",
+      "publishedGeneration": "fixture-generation",
+      "generationMatches": true
+    },
+    "semantic": {
+      "status": "ready",
+      "enabled": true,
+      "flatF32": {
+        "status": "ready",
+        "semanticDocuments": 3,
+        "activeEvents": 3,
+        "activeChunks": 4
+      }
+    },
+    "daemon": {
+      "enabled": true,
+      "status": "completed",
+      "running": false,
+      "jobs": {
+        "coreRefresh": {
+          "status": "completed",
+          "requestState": "published"
+        },
+        "semanticIndex": {
+          "enabled": true,
+          "status": "ready"
+        }
+      }
+    }
+  }
+}

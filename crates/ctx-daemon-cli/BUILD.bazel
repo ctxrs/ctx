@@ -35,6 +35,7 @@ PROD_SRCS = glob(
 )
 
 CTX_DAEMON_CLI_DEPS = [
+    "//crates/ctx-app-config:lib",
     "//crates/ctx-client-observability:lib",
     "//crates/ctx-daemon-application:lib",
     "//crates/ctx-daemon-runtime:lib",
@@ -52,6 +53,7 @@ CTX_DAEMON_CLI_DEPS = [
 ]
 
 CTX_DAEMON_CLI_TEST_DEPS = [
+    "//crates/ctx-app-config:test_support_lib",
     "//crates/ctx-client-observability:test_support_lib",
     "//crates/ctx-daemon-application:test_support_lib",
     "//crates/ctx-daemon-runtime:lib",
@@ -69,6 +71,7 @@ CTX_DAEMON_CLI_TEST_DEPS = [
 ]
 
 CTX_DAEMON_CLI_QUALIFICATION_DEPS = [
+    "//crates/ctx-app-config:lib",
     "//crates/ctx-client-observability:lib",
     "//crates/ctx-daemon-application:qualification_lib",
     "//crates/ctx-daemon-runtime:qualification_lib",
@@ -86,6 +89,7 @@ CTX_DAEMON_CLI_QUALIFICATION_DEPS = [
 ]
 
 CTX_DAEMON_CLI_QUALIFICATION_TEST_SUPPORT_DEPS = [
+    "//crates/ctx-app-config:lib",
     "//crates/ctx-client-observability:lib",
     "//crates/ctx-daemon-application:lib",
     "//crates/ctx-daemon-runtime:lib",
@@ -175,11 +179,9 @@ daemon_cli_binary_contract(
     ],
     extra_data = [
         "//crates/ctx-cli:ctx_auto_upgrade_acceptance_fixture",
-        "//crates/ctx-upgrade-engine:ctx_v025_upgrade_fixture",
     ],
     extra_env = {
         "CTX_AUTO_UPGRADE_ACCEPTANCE_FIXTURE": "$(rootpath //crates/ctx-cli:ctx_auto_upgrade_acceptance_fixture)",
-        "CTX_V025_UPGRADE_FIXTURE": "$(rootpath //crates/ctx-upgrade-engine:ctx_v025_upgrade_fixture)",
         "RUST_TEST_THREADS": "1",
     },
     fixtures = True,
@@ -214,6 +216,8 @@ daemon_cli_binary_contract(
     },
     extra_srcs = [
         "tests/contracts/native/process_control.rs",
+        "tests/contracts/persistent_daemon_lifecycle/capture.rs",
+        "tests/contracts/persistent_daemon_lifecycle/capture_tests.rs",
         "tests/contracts/persistent_daemon_lifecycle/lifecycle_regressions.rs",
     ],
     tags = [

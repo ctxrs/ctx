@@ -33,6 +33,13 @@ CTX_SEMANTIC_INDEX_DEPS = [
     "//crates/ctx-semantic-model:lib",
 ]
 
+CTX_SEMANTIC_INDEX_TEST_DEPS = [
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-index:test_support_lib",
+    "//crates/ctx-history-platform:lib",
+    "//crates/ctx-semantic-model:lib",
+]
+
 CTX_SEMANTIC_INDEX_RUSTC_FLAGS = [
     "--check-cfg=cfg(test)",
     '--check-cfg=cfg(feature, values("test-support"))',
@@ -72,7 +79,7 @@ ctx_rust_test(
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
-    deps = all_crate_deps(normal = True, normal_dev = True) + CTX_SEMANTIC_INDEX_DEPS,
+    deps = all_crate_deps(normal = True, normal_dev = True) + CTX_SEMANTIC_INDEX_TEST_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_flags = CTX_SEMANTIC_INDEX_RUSTC_FLAGS,

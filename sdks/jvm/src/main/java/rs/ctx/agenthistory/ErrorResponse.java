@@ -2,7 +2,7 @@ package rs.ctx.agenthistory;
 
 import java.util.Map;
 
-/** Response wrapper for canonical agent-history-v1 error fixtures. */
+/** Response wrapper for canonical agent-history-v2 error fixtures. */
 public final class ErrorResponse extends AgentHistoryEnvelope {
     private final AgentHistoryError error;
 

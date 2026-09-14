@@ -11,9 +11,7 @@ use super::model_contract::SemanticModelLoadDeferred;
 #[cfg(test)]
 use anyhow::Result;
 
-#[cfg(ctx_semantic_fastembed)]
 pub(super) const SEMANTIC_EMBED_THREADS_MAX: usize = 8;
-#[cfg(ctx_semantic_fastembed)]
 pub(super) const SEMANTIC_EMBED_BATCH_MAX: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,6 +151,22 @@ pub(super) fn semantic_quiet_policy(
             active_percent: 50,
         },
     }
+}
+
+pub(super) fn semantic_builtin_policy(
+    resources: SemanticSystemResources,
+    compute_class: SemanticComputeClass,
+    throttling: bool,
+) -> SemanticQuietPolicy {
+    let mut policy = semantic_quiet_policy(resources, compute_class);
+    if !throttling {
+        policy.threads = resources
+            .available_parallelism
+            .clamp(1, SEMANTIC_EMBED_THREADS_MAX);
+        policy.batch_size = SEMANTIC_EMBED_BATCH_MAX;
+        policy.active_percent = 100;
+    }
+    policy
 }
 
 pub(super) fn semantic_batch_rest(active: StdDuration, active_percent: u8) -> StdDuration {
@@ -500,6 +514,54 @@ mod semantic_resource_policy_tests {
         assert_eq!(policy.batch_size, 64);
         assert_eq!(policy.memory_budget_bytes, 1_717_986_918);
         assert_eq!(policy.active_percent, 50);
+    }
+
+    #[test]
+    fn throttled_builtin_policy_retains_quiet_policy_exactly() {
+        let resources = SemanticSystemResources {
+            total_memory_bytes: Some(16 * 1024 * 1024 * 1024),
+            available_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+            available_parallelism: 12,
+        };
+        for compute_class in [SemanticComputeClass::Cpu, SemanticComputeClass::Accelerator] {
+            assert_eq!(
+                semantic_builtin_policy(resources, compute_class, true),
+                semantic_quiet_policy(resources, compute_class)
+            );
+        }
+    }
+
+    #[test]
+    fn unthrottled_builtin_policy_uses_hard_maxima_and_zero_pacing() {
+        let resources = SemanticSystemResources {
+            total_memory_bytes: Some(16 * 1024 * 1024 * 1024),
+            available_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+            available_parallelism: SEMANTIC_EMBED_THREADS_MAX + 4,
+        };
+        for compute_class in [SemanticComputeClass::Cpu, SemanticComputeClass::Accelerator] {
+            let policy = semantic_builtin_policy(resources, compute_class, false);
+            assert_eq!(policy.threads, SEMANTIC_EMBED_THREADS_MAX);
+            assert_eq!(policy.batch_size, SEMANTIC_EMBED_BATCH_MAX);
+            assert_eq!(policy.active_percent, 100);
+            assert_eq!(
+                semantic_limited_batch_rest(
+                    StdDuration::from_secs(3),
+                    policy.active_percent,
+                    Some(StdDuration::from_secs(1)),
+                ),
+                StdDuration::ZERO
+            );
+        }
+
+        let constrained = semantic_builtin_policy(
+            SemanticSystemResources {
+                available_parallelism: 3,
+                ..resources
+            },
+            SemanticComputeClass::Cpu,
+            false,
+        );
+        assert_eq!(constrained.threads, 3);
     }
 
     #[test]

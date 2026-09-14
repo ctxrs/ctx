@@ -6,6 +6,7 @@
 
 mod certification;
 mod clone;
+pub use clone::observed_low_candidate_space;
 mod durable_directory;
 mod error;
 mod generation;
@@ -13,46 +14,49 @@ mod identity;
 mod lock;
 mod manifest;
 mod physical;
+#[cfg(any(test, feature = "test-support"))]
+mod publication_probe;
 mod read_root;
 mod retention;
 
 #[cfg(windows)]
 pub use certification::{acquire_terminal_publication_guard, TerminalPublicationGuard};
-#[cfg(any(test, feature = "test-support"))]
 pub use certification::{
-    certification_file_for_active, MAX_CERTIFICATION_BYTES, MAX_CERTIFIED_ARTIFACTS,
-};
-pub use certification::{
+    active_generation_storage_metadata, cache_recertified_physical_integrity,
     certify_activated_generation, certify_candidate_physical_integrity,
     reclaim_unreferenced_certifications, scrub_and_certify_physical_integrity,
     verify_candidate_physical_integrity_read_only, verify_certified_physical_integrity,
     verify_or_certify_physical_integrity, verify_physical_integrity_read_only,
-    ActiveGenerationPointerFence, CertifiedPhysicalIntegrity,
+    ActiveGenerationPointerFence, ActiveGenerationStorageMetadata, CertifiedPhysicalIntegrity,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use certification::{
+    certification_file_for_active, MAX_CERTIFICATION_BYTES, MAX_CERTIFIED_ARTIFACTS,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use clone::{
     candidate_clone_metrics, reset_candidate_clone_metrics, CandidateCloneMetrics,
     PortableCloneMetrics, PortableCloneStage, PortableCloneTestGuard, PortableCloneTestOptions,
 };
-pub use clone::{
-    create_authenticated_candidate_generation, create_authenticated_republish_candidate,
-    CandidateActivationFence, RepublishCandidate,
-};
+pub use clone::{create_authenticated_candidate_generation, CandidateActivationFence};
 #[cfg(all(
     any(test, feature = "test-support"),
     any(target_os = "linux", target_os = "macos")
 ))]
 pub use clone::{CloneMetrics, CloneStage, CloneTestHookGuard, CloneTestOptions};
+pub use ctx_history_platform::open_file_limit_hint;
 pub use durable_directory::{
     durable_atomic_replace_file, reclaim_abandoned_atomic_writes, DurableAtomicWriteOutcome,
     DurableMmapDirectory,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use durable_directory::{AtomicWriteStage, AtomicWriteTestHookGuard};
-pub use error::{GenerationError, Result};
+pub use error::{tantivy_file_limit_hint, GenerationError, Result};
+#[cfg(windows)]
+pub use generation::publish_active_generation_pointer_validated_predecessor_fence;
 pub use generation::{
-    create_candidate_generation, lexical_index_settings, load_active_generation_pointer,
-    open_slot_index, publish_active_generation_pointer,
+    create_candidate_generation, lexical_index_settings, load_active_generation_id_from_read_root,
+    load_active_generation_pointer, open_slot_index, publish_active_generation_pointer,
     publish_active_generation_pointer_validated, reclaim_inactive_generation_directories,
     slot_path, sync_directory, sync_generation, ActiveGenerationPointer, CandidateGeneration,
     GenerationSlot, PointerPublicationOutcome,
@@ -74,6 +78,11 @@ pub use physical::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use physical::{checksum_walks, hashed_artifact_bytes, reset_physical_verification_activity};
+#[cfg(any(test, feature = "test-support"))]
+pub use publication_probe::{
+    AtomicPublicationStage, AtomicReplacementFailureProbe, PublicationIoProbe,
+    PublicationIoProbeGuard,
+};
 pub use read_root::GenerationReadRoot;
 #[cfg(any(test, feature = "test-support"))]
 pub use read_root::{GenerationRootTraversalStage, GenerationRootTraversalTestHookGuard};

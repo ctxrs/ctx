@@ -14,6 +14,8 @@ mod runtime;
 pub use runtime::*;
 mod search;
 pub use search::*;
+mod storage;
+pub use storage::*;
 mod contract;
 pub use contract::*;
 mod operation;

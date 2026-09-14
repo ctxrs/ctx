@@ -67,8 +67,11 @@ shipped.
 ## Search Semantics
 
 - Search quality depends on what providers expose and what importers index.
-- Command and tool result bodies are not searchable; only compact typed
-  outcome/evidence metadata is indexed.
+- Admitted command and tool result bodies are searchable lexically. Outputs
+  are downweighted in the default `all` scope; use `--content-scope outputs`
+  to search them at ordinary lexical strength. Provider availability and
+  content policy still limit which bodies are indexed. Output-only semantic
+  search is unsupported; hybrid output searches fall back to lexical retrieval.
 - Ranking is deterministic for the same local database and options, but it is
   not a claim of semantic understanding.
 - Empty or punctuation-only search is invalid. Broad valid queries can still

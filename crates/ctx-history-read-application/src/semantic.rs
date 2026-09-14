@@ -15,6 +15,8 @@ pub enum SemanticReason {
     ContentScopeUnsupported,
     EventTypeUnsupported,
     QueryServiceUnavailable,
+    ExecutorUnavailable,
+    ExecutorConfigurationInvalid,
     StoreUnavailable,
     StoreMissing,
     GenerationUnreadable,
@@ -34,6 +36,8 @@ impl SemanticReason {
     pub fn from_adapter_code(code: &'static str) -> Self {
         match code {
             "semantic_query_service_unavailable" => Self::QueryServiceUnavailable,
+            "semantic_executor_unavailable" => Self::ExecutorUnavailable,
+            "semantic_executor_configuration_invalid" => Self::ExecutorConfigurationInvalid,
             "semantic_store_unavailable" => Self::StoreUnavailable,
             "semantic_store_missing" => Self::StoreMissing,
             "semantic_generation_unreadable" => Self::GenerationUnreadable,
@@ -41,6 +45,29 @@ impl SemanticReason {
             "semantic_generation_receipt_mismatch" => Self::GenerationReceiptMismatch,
             "semantic_projection_event_mismatch" => Self::ProjectionEventMismatch,
             other => Self::Adapter(other),
+        }
+    }
+
+    /// Returns the original adapter-owned code when this reason came from the
+    /// semantic query port. Policy reasons remain code-neutral here and are
+    /// translated by the CLI/wire adapter that owns their public taxonomy.
+    pub const fn adapter_code(self) -> Option<&'static str> {
+        match self {
+            Self::PolicyDisabled
+            | Self::PlatformUnsupported
+            | Self::ExecutionUnavailable
+            | Self::ContentScopeUnsupported
+            | Self::EventTypeUnsupported => None,
+            Self::QueryServiceUnavailable => Some("semantic_query_service_unavailable"),
+            Self::ExecutorUnavailable => Some("semantic_executor_unavailable"),
+            Self::ExecutorConfigurationInvalid => Some("semantic_executor_configuration_invalid"),
+            Self::StoreUnavailable => Some("semantic_store_unavailable"),
+            Self::StoreMissing => Some("semantic_store_missing"),
+            Self::GenerationUnreadable => Some("semantic_generation_unreadable"),
+            Self::GenerationNotAcknowledged => Some("semantic_generation_not_acknowledged"),
+            Self::GenerationReceiptMismatch => Some("semantic_generation_receipt_mismatch"),
+            Self::ProjectionEventMismatch => Some("semantic_projection_event_mismatch"),
+            Self::Adapter(code) => Some(code),
         }
     }
 }
@@ -100,6 +127,17 @@ impl HistorySemanticError {
 }
 
 pub trait HistorySemanticQuery {
+    /// Verify and resolve one final winner, using this query's captured authority.
+    fn resolve_passage(
+        &mut self,
+        _event: &ctx_history_index_query::RankedEventRef,
+        _evidence: &ctx_history_index_query::SemanticSearchEvidence,
+    ) -> Result<ctx_history_index_query::SemanticPassageSource, HistorySemanticError> {
+        Err(HistorySemanticError::failed(
+            "semantic passage resolver is unavailable",
+        ))
+    }
+
     /// Prepare one normalized alternative in caller order.
     ///
     /// Implementations retain the resulting vector on the query session so a

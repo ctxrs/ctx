@@ -199,6 +199,15 @@ rust.repository_set(
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.annotation(
+    # Share the macOS shutdown correction with the Cargo release factory.
+    # Remove both applications when notify releases the lost-stop fix.
+    crate = "notify",
+    patch_args = ["-p1"],
+    patches = ["//tools/bazel/patches:notify-fsevents-stop.patch"],
+    repositories = ["crates"],
+    version = "9.0.0-rc.4",
+)
+crate.annotation(
     # ort's generic ELF .fini_array cleanup runs too late on FreeBSD, after
     # ONNX Runtime's C++ teardown has started. Register ReleaseEnv after the
     # environment is created so it runs first, matching ort's macOS ordering.
@@ -311,6 +320,13 @@ register_toolchains("@ctx_llvm_mingw//:windows_x64_gnu_toolchain")
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "ctx_notify_archive",
+    downloaded_file_path = "notify.crate",
+    sha256 = "b44b771d4dd781ef14c84078693e67495da6b47f609f72e8a4da8420a861240e",
+    urls = ["https://static.crates.io/crates/notify/notify-9.0.0-rc.4.crate"],
+)
 
 http_jar = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_jar")
 

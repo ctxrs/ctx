@@ -80,6 +80,7 @@ pub fn mux_jsonl_adapter_with_source_root_lineage<B>(value: B) -> ProviderJsonlR
     "mux/native_path/source_backed.rs": "ProviderBaseEventLookup<B>\n",
     "mux/native_path/source_backed/projection.rs": "mux-content-occurrence-v1\n",
     "mux/native_path/source_backed/projection/seam.rs": "",
+    "mux/native_path/source_backed/projection/tests.rs": "",
     "mux/native_path/source_backed/tests.rs": "",
     "mux/normalization.rs": "",
     "mux/source.rs": "",

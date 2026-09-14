@@ -9,7 +9,7 @@ use ctx_history_capture::{
 };
 use ctx_history_read_application::{HistoryHealthReport, HistoryRootCoverage};
 
-use crate::config;
+use ctx_app_config as config;
 
 /// Joins the verified-generation view to one current, bounded discovery
 /// inventory for human presentation. This does not alter command JSON or

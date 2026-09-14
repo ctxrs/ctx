@@ -1,0 +1,18 @@
+{
+  "contractVersion": "agent-history-v2",
+  "schemaVersion": 1,
+  "operation": "error",
+  "backend": {
+    "kind": "local",
+    "dataRoot": "/tmp/ctx-sdk-fixture"
+  },
+  "error": {
+    "code": "adapter_error",
+    "message": "local ctx adapter failed",
+    "retryable": false,
+    "details": {
+      "adapter": "local-cli"
+    },
+    "cause": "exit status 2"
+  }
+}

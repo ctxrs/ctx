@@ -20,6 +20,16 @@ version, channel, binary SHA-256, metadata URL, and artifact URL. Source builds,
 `cargo install`, package-manager installs, and copied binaries without that
 marker are unmanaged and will not self-upgrade. A present but invalid marker
 is an inconsistent managed installation and also fails closed.
+
+On Unix, new official managed installations record the canonical man-page
+directory and exact file names and hashes installed there. After the managed
+binary changes, ctx makes one best-effort refresh of only those recorded pages;
+it never searches for or glob-deletes `ctx*.1`. Missing, malformed, legacy, or
+disabled receipts are ignored. Modified, missing, symlinked, unsafe, or
+unexpected paths are also left alone without affecting the command. An
+interrupted refresh may remain stale; regenerate explicitly with `ctx docs man
+--out DIR` when needed. `--no-man` and custom installer directories remain
+respected. Windows and unmanaged installations do nothing.
 `ctx upgrade status --format json` also lists every `ctx` binary found on `PATH` and
 warns when another binary shadows the managed install.
 
@@ -56,8 +66,17 @@ authority, config, and process overrides.
 
 If a diagnostic says another `ctx` shadows the managed executable on `PATH`,
 put the managed install directory before the reported shadowing directory and
-restart the shell. On POSIX shells, `command -v -a ctx` shows the resolution
-order; in PowerShell, use `Get-Command ctx -All`.
+restart the shell. In a POSIX shell, `command -v ctx` shows the selected command.
+In Bash or Zsh, `type -a ctx` lists all matches; in PowerShell, use
+`Get-Command ctx -All`.
+
+After a failed download or interrupted managed install, keep the installed
+files and marker in place, address the reported network, disk-space, or
+permission problem, and rerun the same installer. If the installer says the
+binary was installed but setup did not finish, retry `ctx setup` instead.
+A Pro activation warning does not mean the installed companion is missing;
+follow the reported `ctx pro` action. A version check alone does not establish
+that setup completed.
 
 An absent install marker is normal for a source build or package-manager
 install and leaves ctx unmanaged. The hosted installer will not silently adopt
@@ -104,10 +123,13 @@ Manual `ctx upgrade` verifies signed release metadata, explicit self-upgrade
 policy, artifact SHA-256, the current managed install marker, and the staged
 binary's `ctx --version` output before replacing the installed binary.
 
-The production binary fixes release metadata under
-`https://cli.ctx.rs/functions/v1/releases/<channel>/`, derives the detached
-signature URL from that metadata URL, verifies with its embedded release public
-key, and accepts artifact URLs only under the compiled
+The production binary reads stable release metadata from
+`https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env`.
+Staging retains
+`https://cli.ctx.rs/functions/v1/releases/staging/ctx-release-metadata.env`.
+The binary derives the detached signature URL from that metadata URL, verifies
+with its embedded release public key, and accepts artifact URLs only under the
+compiled
 `https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/` authority.
 Config files and process environment variables cannot replace those origins or
 the verification key. A key or authority change therefore requires a new ctx

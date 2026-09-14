@@ -16,7 +16,7 @@ struct AnalyticsEnvironment {
 
 impl AnalyticsEnvironment {
     fn new() -> Self {
-        let lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+        let lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let saved = ANALYTICS_ENVIRONMENT_NAMES
@@ -67,19 +67,22 @@ fn paid_cli_environment(forwards_core_setup: bool) -> CompanionEnvironment {
 }
 
 #[test]
-fn paid_gate_forwards_the_original_arguments_without_paid_parsing() {
-    let arguments = [
-        OsString::from("ctx"),
-        OsString::from("--data-root"),
-        OsString::from("opaque-root"),
-        OsString::from("blame"),
-        OsString::from("--private-option"),
-        OsString::from("opaque-value"),
-    ];
-    assert_eq!(
-        paid_family_arguments(&arguments),
-        Some(arguments[1..].to_vec())
-    );
+fn paid_gate_forwards_ordinary_paid_families_without_parsing() {
+    for family in ["pro", "blame", "referral"] {
+        let arguments = [
+            OsString::from("ctx"),
+            OsString::from("--data-root"),
+            OsString::from("opaque-root"),
+            OsString::from(family),
+            OsString::from("--private-option"),
+            OsString::from("opaque-value"),
+        ];
+        assert_eq!(
+            paid_family_arguments(&arguments),
+            Some(arguments[1..].to_vec()),
+            "{family}"
+        );
+    }
 }
 
 #[test]
@@ -100,12 +103,142 @@ fn core_routes_never_enter_the_companion_gate() {
 }
 
 #[test]
-fn explicit_pro_selector_routes_setup_and_other_core_families() {
+fn router_owned_pro_selector_is_removed_before_companion_forwarding() {
+    for (arguments, expected) in [
+        (
+            vec!["ctx", "--pro", "status", "--format", "json"],
+            vec!["status", "--format", "json"],
+        ),
+        (
+            vec!["ctx", "--data-root", "opaque-root", "--pro", "status"],
+            vec!["--data-root", "opaque-root", "status"],
+        ),
+        (vec!["ctx", "--pro", "setup"], vec!["setup"]),
+        (vec!["ctx", "--pro", "pro"], vec!["pro"]),
+        (vec!["ctx", "--pro", "blame"], vec!["blame"]),
+        (vec!["ctx", "--pro", "referral"], vec!["referral"]),
+        (vec!["ctx", "--pro", "--help"], vec!["--help"]),
+    ] {
+        let arguments = arguments
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paid_family_arguments(&arguments),
+            Some(expected.into_iter().map(OsString::from).collect())
+        );
+    }
+}
+
+#[test]
+fn core_route_pro_selector_is_removed_after_the_command() {
+    for family in ["status", "doctor", "upgrade", "uninstall"] {
+        for (arguments, expected) in [
+            (
+                vec!["ctx", family, "--pro", "--format", "json"],
+                vec![family, "--format", "json"],
+            ),
+            (vec!["ctx", "help", family, "--pro"], vec!["help", family]),
+            (
+                vec!["ctx", family, "--data-root", "--pro", "--pro"],
+                vec![family, "--data-root", "--pro"],
+            ),
+            (
+                vec!["ctx", family, "--pro", "--", "--pro"],
+                vec![family, "--", "--pro"],
+            ),
+        ] {
+            let arguments = arguments
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                paid_family_arguments(&arguments),
+                Some(expected.into_iter().map(OsString::from).collect()),
+                "{arguments:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn pro_values_and_delimited_arguments_do_not_select_a_companion_route() {
     for arguments in [
-        vec!["ctx", "--pro", "setup"],
-        vec!["ctx", "setup", "--pro"],
-        vec!["ctx", "--pro", "status"],
-        vec!["ctx", "--pro", "--help"],
+        vec!["ctx", "--data-root", "--pro", "status"],
+        vec!["ctx", "status", "--data-root", "--pro"],
+        vec!["ctx", "--color", "--pro", "status"],
+        vec!["ctx", "status", "--color", "--pro"],
+        vec!["ctx", "--data-root=--pro", "status"],
+        vec!["ctx", "--data-root", "--", "status", "--pro"],
+        vec!["ctx", "status", "--data-root", "--", "--pro"],
+        vec!["ctx", "--color", "--", "status", "--pro"],
+        vec!["ctx", "status", "--color", "--", "--pro"],
+        vec!["ctx", "--data-root", "--pro", "--help"],
+        vec!["ctx", "--help", "status", "--pro"],
+        vec!["ctx", "status", "--", "--pro"],
+        vec!["ctx", "--", "status", "--pro"],
+    ] {
+        let arguments = arguments
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert!(paid_family_arguments(&arguments).is_none(), "{arguments:?}");
+    }
+}
+
+#[test]
+fn removing_a_router_selector_preserves_command_arguments() {
+    for (arguments, expected) in [
+        (
+            vec!["ctx", "--pro", "--pro", "status"],
+            vec!["--pro", "status"],
+        ),
+        (
+            vec!["ctx", "status", "--pro", "--pro"],
+            vec!["status", "--pro"],
+        ),
+        (
+            vec!["ctx", "--pro", "status", "--pro"],
+            vec!["status", "--pro"],
+        ),
+        (
+            vec!["ctx", "--data-root", "--pro", "--pro", "status"],
+            vec!["--data-root", "--pro", "status"],
+        ),
+        (
+            vec!["ctx", "--pro", "status", "--color", "--pro"],
+            vec!["status", "--color", "--pro"],
+        ),
+        (
+            vec!["ctx", "--pro", "setup", "--pro"],
+            vec!["setup", "--pro"],
+        ),
+        (
+            vec!["ctx", "--pro", "--", "status", "--pro"],
+            vec!["--", "status", "--pro"],
+        ),
+        (
+            vec!["ctx", "pro", "--private-option", "--pro"],
+            vec!["pro", "--private-option", "--pro"],
+        ),
+    ] {
+        let arguments = arguments
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paid_family_arguments(&arguments),
+            Some(expected.into_iter().map(OsString::from).collect()),
+            "{arguments:?}"
+        );
+    }
+}
+
+#[test]
+fn command_owned_setup_pro_is_preserved() {
+    for arguments in [
+        vec!["ctx", "setup", "--pro", "--format", "json"],
+        vec!["ctx", "--data-root", "opaque-root", "setup", "--pro"],
         vec!["ctx", "help", "setup", "--pro"],
     ] {
         let arguments = arguments
@@ -237,7 +370,7 @@ fn mcp_analytics_consent_is_resolved_from_authoritative_config() {
 
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
-        root.path().join(crate::config::CONFIG_FILE),
+        root.path().join(ctx_app_config::CONFIG_FILE),
         "[analytics]\nenabled = true\n",
     )
     .unwrap();
@@ -267,7 +400,7 @@ fn mcp_analytics_consent_is_resolved_from_authoritative_config() {
 
     std::env::set_var("CTX_ANALYTICS_ENABLED", "true");
     std::fs::write(
-        root.path().join(crate::config::CONFIG_FILE),
+        root.path().join(ctx_app_config::CONFIG_FILE),
         "[analytics]\nenabled = false\n",
     )
     .unwrap();
@@ -279,7 +412,7 @@ fn mcp_analytics_consent_is_resolved_from_authoritative_config() {
     );
 
     std::fs::write(
-        root.path().join(crate::config::CONFIG_FILE),
+        root.path().join(ctx_app_config::CONFIG_FILE),
         "[analytics]\nenabled = true\n",
     )
     .unwrap();
@@ -325,7 +458,7 @@ fn mcp_analytics_consent_is_resolved_from_authoritative_config() {
 
     std::env::set_var("CTX_ANALYTICS_ENABLED", "true");
     std::fs::write(
-        root.path().join(crate::config::CONFIG_FILE),
+        root.path().join(ctx_app_config::CONFIG_FILE),
         "[analytics]\nenabled = malformed\n",
     )
     .unwrap();
@@ -716,69 +849,6 @@ fn blame_usage_root_preserves_non_utf8_native_paths() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn paid_blame_wrapper_records_after_companion_exit_and_remains_controlled() {
-    use std::os::unix::fs::PermissionsExt as _;
-    use std::process::Command;
-
-    let temp = tempfile::tempdir().unwrap();
-    let pro = temp.path().join("ctx-pro");
-    std::fs::write(
-        &pro,
-        b"#!/bin/sh\nif [ \"$1\" = \"--ctx-pro-protocol-v3\" ] && [ \"$2\" = \"handshake\" ]; then\n  printf '{\"protocol_version\":3}\\n'\n  exit 0\nfi\n[ \"$1\" = \"--ctx-pro-protocol-v3\" ] && [ \"$2\" = \"cli\" ] && exit 0\nexit 91\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&pro, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-    let enabled = temp.path().join("enabled");
-    std::fs::create_dir(&enabled).unwrap();
-    ctx_history_platform::platform_security::restrict_private_directory(&enabled).unwrap();
-
-    let status = Command::new(env!("CARGO_BIN_EXE_ctx"))
-        .arg("--data-root")
-        .arg(&enabled)
-        .arg("blame")
-        .arg("opaque-target")
-        .env("CTX_PRO_PATH", &pro)
-        .env_remove("CTX_LOCAL_USAGE_ENABLED")
-        .status()
-        .unwrap();
-    assert!(status.success());
-
-    let authority = ctx_client_observability::local_usage::LocalUsageStorageAuthority::new(
-        enabled.join("usage.sqlite"),
-        "1.0.0",
-    );
-    let report = ctx_client_observability::local_usage::read_report_authorized(
-        &authority,
-        &ctx_client_observability::local_usage::UsageControlSnapshot::unversioned(true),
-        true,
-    );
-    let definition = &report.definitions.unwrap()[0];
-    assert_eq!(definition.definition_version, 3);
-    assert_eq!(definition.summary.calls, 1);
-    assert_eq!(definition.summary.successful_calls, 1);
-    assert_eq!(definition.summary.not_applicable_calls, 1);
-    assert_eq!(definition.summary.result_count, 0);
-    assert_eq!(definition.summary.delivered_output_bytes, 0);
-
-    let disabled = temp.path().join("disabled");
-    std::fs::create_dir(&disabled).unwrap();
-    ctx_history_platform::platform_security::restrict_private_directory(&disabled).unwrap();
-    let status = Command::new(env!("CARGO_BIN_EXE_ctx"))
-        .arg("--data-root")
-        .arg(&disabled)
-        .arg("blame")
-        .arg("opaque-target")
-        .env("CTX_PRO_PATH", &pro)
-        .env("CTX_LOCAL_USAGE_ENABLED", "false")
-        .status()
-        .unwrap();
-    assert!(status.success());
-    assert!(!disabled.join("usage.sqlite").exists());
-}
-
 #[test]
 fn data_root_options_after_delimiter_remain_opaque_pro_arguments() {
     for trailing in [
@@ -814,6 +884,22 @@ fn opaque_paid_arguments_are_preserved_byte_for_byte() {
     assert_eq!(
         forwarded[1].as_os_str().as_bytes(),
         opaque.as_os_str().as_bytes()
+    );
+
+    let arguments = [
+        OsString::from("ctx"),
+        OsString::from("status"),
+        OsString::from("--data-root"),
+        opaque.clone(),
+        OsString::from("--pro"),
+    ];
+    assert_eq!(
+        paid_family_arguments(&arguments),
+        Some(vec![
+            OsString::from("status"),
+            OsString::from("--data-root"),
+            opaque
+        ])
     );
 }
 

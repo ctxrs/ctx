@@ -202,6 +202,63 @@ pub fn daemon_lock_is_owned_by(data_root: &Path, pid: u32) -> bool {
     read_pid_lock_file(&path) == Some(pid) && !daemon_lock_is_stale(&path)
 }
 
+/// Marks only an exact reaped daemon owner as released and removes only its
+/// endpoint identities. A replacement which acquires ownership first makes
+/// this a no-op.
+pub fn cleanup_reaped_daemon_owner(
+    data_root: &Path,
+    owner_pid: u32,
+    owner_id: &str,
+    endpoint_paths: &[PathBuf],
+) -> Result<bool> {
+    let Some(_quiescence) = DaemonQuiescenceGuard::acquire(data_root)? else {
+        return Ok(false);
+    };
+    let lock_path = daemon_lock_path(data_root);
+    let Some(mut lock) = read_pid_lock_json(&lock_path) else {
+        return Ok(false);
+    };
+    if !pid_lock_uses_advisory_protocol(&lock)
+        || pid_from_lock_json(&lock) != Some(owner_pid)
+        || lock.get("owner_id").and_then(Value::as_str) != Some(owner_id)
+    {
+        return Ok(false);
+    }
+    if let Some(object) = lock.as_object_mut() {
+        object.insert("released".to_owned(), Value::Bool(true));
+    }
+    if !publish_pid_lock_metadata(&lock_path, &lock)? {
+        return Ok(false);
+    }
+    for endpoint_path in endpoint_paths {
+        let identity = crate::read_daemon_service_endpoint_identity_at(endpoint_path)?;
+        let Some(identity) = identity.filter(|identity| identity.owner_pid == owner_pid) else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            let crate::DaemonQueryEndpoint::Unix { path, .. } = identity.endpoint;
+            remove_reaped_artifact(&path)
+                .with_context(|| format!("remove reaped daemon socket {}", path.display()))?;
+        }
+        remove_reaped_artifact(endpoint_path).with_context(|| {
+            format!(
+                "remove reaped daemon endpoint identity {}",
+                endpoint_path.display()
+            )
+        })?;
+    }
+    Ok(true)
+}
+
+fn remove_reaped_artifact(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn pid_lock_file_is_stale(path: &Path) -> bool {
     if let Some(observation) = observe_pid_advisory_lock(path) {
         return !observation.held;
@@ -277,24 +334,22 @@ pub fn observe_pid_advisory_lock(path: &Path) -> Option<PidAdvisoryLockObservati
 }
 
 fn pid_lock_error_is_contended(error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(windows)]
-    {
+    pid_lock_error_is_contended_on(error, cfg!(windows))
+}
+
+fn pid_lock_error_is_contended_on(error: &std::io::Error, windows: bool) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
         // fs2 forwards LockFileEx's ERROR_LOCK_VIOLATION without mapping it
         // to WouldBlock. It is the exact nonblocking contention result.
-        return error.raw_os_error() == Some(crate::WINDOWS_ERROR_LOCK_VIOLATION);
-    }
-    #[cfg(not(windows))]
-    false
+        || (windows
+            && error.raw_os_error() == Some(crate::WINDOWS_ERROR_LOCK_VIOLATION))
 }
 
 pub fn try_lock_pid_file(file: &fs::File) -> std::io::Result<bool> {
     for attempt in 0..PID_LOCK_ACQUIRE_ATTEMPTS {
         match fs2::FileExt::try_lock_exclusive(file) {
             Ok(()) => return Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if pid_lock_error_is_contended(&error) => {
                 if attempt + 1 < PID_LOCK_ACQUIRE_ATTEMPTS {
                     std::thread::sleep(PID_LOCK_ACQUIRE_RETRY);
                 }
@@ -383,12 +438,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn windows_lock_violation_is_lock_contention_for_acquisition_and_observation() {
+        let error = std::io::Error::from_raw_os_error(crate::WINDOWS_ERROR_LOCK_VIOLATION);
+
+        assert!(pid_lock_error_is_contended_on(&error, true));
+        assert!(!pid_lock_error_is_contended_on(&error, false));
+        assert!(pid_lock_error_is_contended_on(
+            &std::io::Error::from(std::io::ErrorKind::WouldBlock),
+            false,
+        ));
+    }
+
+    #[test]
+    fn held_pid_lock_returns_contention_and_succeeds_after_unlock() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("pid.guard");
+        let (owner, _) = open_or_create_pid_lock_file(&path)?;
+        let (waiter, _) = open_or_create_pid_lock_file(&path)?;
+
+        assert!(try_lock_pid_file(&owner)?);
+        assert!(!try_lock_pid_file(&waiter)?);
+
+        fs2::FileExt::unlock(&owner)?;
+        assert!(try_lock_pid_file(&waiter)?);
+        fs2::FileExt::unlock(&waiter)?;
+        Ok(())
+    }
+
+    #[test]
     fn quiescence_guard_excludes_daemon_replacement_until_cleanup_finishes() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let quiescence = DaemonQuiescenceGuard::acquire(temp.path())?.expect("quiescence guard");
         assert!(DaemonLock::acquire(temp.path())?.is_none());
         drop(quiescence);
         assert!(DaemonLock::acquire(temp.path())?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn reaped_cleanup_rejects_a_same_pid_replacement_owner() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let data_root = temp.path();
+        ctx_history_platform::platform_security::establish_private_data_root(data_root)?;
+        create_private_dir_all(&daemon_root_path(data_root))?;
+        let lock_path = daemon_lock_path(data_root);
+        let payload = pid_lock_payload(json!({}));
+        let pid = pid_from_lock_json(&payload).expect("test lock pid");
+        let owner_id = payload["owner_id"].as_str().expect("test owner id");
+        assert!(publish_pid_lock_metadata(&lock_path, &payload)?);
+
+        assert!(!cleanup_reaped_daemon_owner(
+            data_root,
+            pid,
+            "replacement-owner",
+            &[],
+        )?);
+        let unchanged = read_pid_lock_json(&lock_path).expect("unchanged lock");
+        assert_eq!(unchanged["owner_id"], owner_id);
+        assert_eq!(unchanged["released"], false);
+
+        assert!(cleanup_reaped_daemon_owner(data_root, pid, owner_id, &[],)?);
+        let released = read_pid_lock_json(&lock_path).expect("released lock");
+        assert_eq!(released["owner_id"], owner_id);
+        assert_eq!(released["released"], true);
         Ok(())
     }
 }

@@ -95,14 +95,29 @@ pub enum DaemonSupervisor {
     CliAutostart,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DaemonConfigSnapshot {
     pub daemon: DaemonProductConfig,
     pub semantic_enabled: bool,
     pub semantic_executor: SemanticEmbeddingExecutorConfig,
+    pub semantic_builtin_throttling_configured: bool,
     pub automatic_upgrade_enabled: bool,
     pub automatic_upgrade_interval: Duration,
     pub upgrade_channel: String,
+}
+
+impl Default for DaemonConfigSnapshot {
+    fn default() -> Self {
+        Self {
+            daemon: DaemonProductConfig::default(),
+            semantic_enabled: false,
+            semantic_executor: SemanticEmbeddingExecutorConfig::default(),
+            semantic_builtin_throttling_configured: true,
+            automatic_upgrade_enabled: false,
+            automatic_upgrade_interval: Duration::default(),
+            upgrade_channel: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -114,6 +129,10 @@ pub struct DaemonProductConfig {
 impl DaemonConfigSnapshot {
     pub const fn semantic_search_enabled(&self) -> bool {
         self.semantic_enabled
+    }
+
+    pub const fn semantic_builtin_throttling_effective(&self) -> Option<bool> {
+        self.semantic_executor.builtin_throttling()
     }
 }
 
@@ -155,6 +174,27 @@ pub trait DaemonAvailabilityPort: Sync {
         trigger: DaemonTrigger,
         demand: DaemonAvailabilityDemand,
     ) -> Result<DaemonAvailability>;
+
+    /// Operation-scoped foreground cancellation seam. Non-foreground callers
+    /// retain the existing inert default; the final binary adapter injects its
+    /// interrupt epoch without adding durable protocol state.
+    fn checkpoint(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Classifies the operation-local typed cancellation without coupling this
+    /// service layer to the final CLI's concrete error type.
+    fn interrupted(&self, _error: &anyhow::Error) -> bool {
+        false
+    }
+
+    /// Injectable wait seam used by retry and observation loops. Tests can
+    /// advance a fake clock or trip a deterministic barrier without sleeping.
+    fn pause(&self, duration: std::time::Duration) -> Result<()> {
+        self.checkpoint()?;
+        std::thread::sleep(duration);
+        self.checkpoint()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,9 +348,12 @@ pub trait CoreGenerationPublishedPort: Sync {
 }
 
 pub trait DaemonObservationPort: Sync {
+    /// Effective consent decision used before collecting optional observations.
+    fn analytics_enabled(&self, data_root: &Path) -> bool;
     fn provider_refresh_event(&self, job: &Value, successor_pending: bool)
         -> Option<PublicEventV1>;
-    fn deliver(&self, data_root: &Path, events: &[PublicEventV1]);
+    fn append(&self, data_root: &Path, events: &[PublicEventV1]);
+    fn append_and_upload(&self, data_root: &Path, events: &[PublicEventV1]);
 }
 
 pub struct DaemonServicePorts<'a, C: ?Sized, A: ?Sized, I, N: ?Sized, O: ?Sized> {
@@ -417,6 +460,7 @@ mod tests {
             },
             semantic_enabled: true,
             semantic_executor: Default::default(),
+            semantic_builtin_throttling_configured: true,
             automatic_upgrade_enabled: true,
             automatic_upgrade_interval: Duration::from_secs(3_600),
             upgrade_channel: "stable".to_owned(),

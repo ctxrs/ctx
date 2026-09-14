@@ -57,6 +57,95 @@ identity, ctx stops semantic indexing and querying until the user reruns
 deletes and rebuilds only the derived semantic index. Imported history and the
 lexical index remain intact.
 
+## Built-in document coverage
+
+The built-in executor checks each complete document input, including the derived
+metadata header, passage prefix and special tokens, against its loaded
+tokenizer's 512-token limit. It retains the existing 1,200-character windows and
+200-character overlap when they fit. Otherwise it shortens optional repeated
+metadata and tests smaller body windows. Stored spans retain their original
+source coordinates and cover the body within the existing 65,536-character
+source cap. Original Core records are unchanged.
+
+Planning has finite input, trial and chunk limits. If no fitting window can be
+established within those limits, semantic work returns an input-budget failure
+without acknowledging that page as complete; lexical search remains available.
+The backend checks inputs again before inference, including after runtime
+recovery. This changes the built-in semantic chunking policy and rebuilds its derived
+semantic vectors without reimporting history or rebuilding the lexical index.
+Query truncation is unchanged. HTTP executors retain their endpoint-owned
+preprocessing and chunking policy; ctx does not impose the built-in tokenizer on
+V2 spaces. Switching between retained fixed-E5 HTTP and built-in execution
+rebuilds semantic vectors because their document chunk policies now differ.
+
+## Built-in indexing throttling
+
+The built-in executor deliberately paces semantic document indexing by
+default. `builtin_throttling` defaults to `true` when it is absent. To disable
+that pacing for one data root, edit `config.toml`:
+
+```toml
+[semantic]
+builtin_throttling = false
+```
+
+This is a built-in-only configuration setting, not a semantic enablement or
+executor-selection control. `ctx semantic enable` and
+`ctx semantic enable --executor builtin|URL` retain their existing behavior;
+there is no corresponding CLI throttling flag. A config file that explicitly
+selects an HTTP executor and also sets `builtin_throttling` is invalid and is
+rejected instead of silently ignoring the setting.
+
+With throttling disabled, built-in document indexing adds no deliberate delay
+between inference batches. It uses batches of up to 512 inputs and up to eight
+threads, never exceeding the process's available parallelism. This does not
+make semantic work unbounded: existing work admission, model and runtime
+integrity checks, cancellation boundaries, source-page atomicity, and hard
+resource, input, and platform limits still apply. The built-in model and vector
+contract remain pinned to `intfloat/multilingual-e5-small`; the setting does not
+select another model or affect HTTP executor behavior.
+
+`ctx semantic status` reports the configured and effective built-in throttling
+values in human output and JSON, including the default when the key is absent.
+The effective value is not applicable for an HTTP executor.
+
+## Passive manual-mode queries
+
+With automatic indexing disabled, direct CLI searches using `--refresh off` or
+`--refresh background` are read-only for Core and semantic storage. Before ctx
+constructs an embedding executor or contacts an HTTP endpoint, it pins Core and
+checks that the exact semantic projection for that Core generation is complete
+and compatible.
+
+If that projection is missing, stale, partial, unreadable, or incompatible, a
+semantic-only search returns its typed semantic readiness error. A hybrid
+search returns lexical results with that same stable reason code and retryable
+classification. Neither case contacts an
+executor, starts a daemon, waits for IPC, acquires a model, embeds documents,
+or changes Core or semantic state.
+
+An exact empty projection succeeds without constructing the selected executor.
+For a nonempty projection, the built-in executor may load only an already
+verified local model cache; it never acquires a model or runtime asset. Core ML
+uses only an existing validated compiled artifact, Windows ML only an
+already-ready provider, and ONNX only existing cache/runtime files. Auto may
+fall back from a non-integrity accelerator load or authorization failure to an
+already-cached CPU model; cached-artifact integrity failures remain fatal.
+An HTTP executor uses the exact selected endpoint and its endpoint-bound
+authentication. It may send the normal conformance probes and query embedding
+request after preflight, so
+`--refresh off` means no indexing or mutation, not necessarily no network when
+HTTP was explicitly selected. ctx never substitutes the built-in executor for
+an HTTP selection.
+
+Direct CLI passive preflight takes a shared lock on the semantic store's existing Flat
+transaction lock, refuses a SQLite WAL or rollback journal, opens the main
+database read-only with immutable semantics, validates control metadata, and
+pins the exact Flat generation before releasing the lock. The passive path
+does not create a lock, database, WAL, SHM, journal, directory, or cache file.
+Daemon and explicit Reconcile paths instead retain ordinary SQLite read-only
+semantics so they can observe committed WAL state.
+
 ## V2 HTTP protocol
 
 The base URL exposes JSON routes:

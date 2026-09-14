@@ -96,6 +96,8 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
         .is_file();
     command.env("CTX_DATA_ROOT", data_root(temp));
     command.env("HOME", temp.path());
+    // Human timestamp output must not inherit the developer or CI host zone.
+    command.env("TZ", "UTC");
     command.env("CTX_ANALYTICS_ENABLED", "false");
     // Existing integration tests do not exercise local usage unless they opt in
     // explicitly. This keeps their temporary roots and output expectations stable.
@@ -133,6 +135,7 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("ASTRBOT_ROOT");
     command.env_remove("SHELLEY_DB");
     command.env_remove("KILO_DB");
+    command.env_remove("KIRO_HOME");
     command.env_remove("MIMOCODE_HOME");
     command.env_remove("MIMOCODE_CONFIG_DIR");
     command.env_remove("MIMOCODE_DB");
@@ -159,6 +162,7 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
         ] {
             fs::create_dir_all(path).unwrap();
         }
+        command.env("CTX_PRO_DATA_ROOT", temp.path().join("pro"));
         command.env("USERPROFILE", temp.path());
         command.env("XDG_CONFIG_HOME", &xdg_config);
         command.env("XDG_DATA_HOME", &xdg_data);
@@ -188,7 +192,6 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
             "GOOSE_PATH_ROOT",
             "JUNIE_HOME",
             "KIMI_CODE_HOME",
-            "KIRO_HOME",
             "MUX_ROOT",
             "OH_PERSISTENCE_DIR",
             "OPENCLAW_HOME",
@@ -209,6 +212,7 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
             "VIBE_SESSION_LOGGING__SAVE_DIR",
             "ZED_STATELESS",
             "CTX_HISTORY_PLUGIN_PATH",
+            "CTX_PRO_HELPER",
             "CTX_RUNTIME_DIR",
             "CTX_SEARCH_SEMANTIC",
             "CTX_SEMANTIC_MODEL_ONNX",
@@ -374,7 +378,7 @@ pub(crate) fn hosted_install_marker_path(binary: &Path) -> PathBuf {
 pub(crate) fn initialize_empty_store(temp: &TempDir) {
     fs::create_dir_all(temp.path().join(".codex").join("sessions")).unwrap();
     ctx_with_enabled_daemon(temp)
-        .args(["setup", "--catalog-only", "--wait", "--progress", "none"])
+        .args(["setup", "--wait", "--progress", "none"])
         .assert()
         .success();
 }
@@ -387,7 +391,7 @@ pub(crate) fn initialize_empty_store_with_env(
 ) {
     fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
     ctx(temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
+        .args(["setup", "--progress", "none"])
         .env("CTX_DATA_ROOT", data_root)
         .env("HOME", home)
         .env("XDG_STATE_HOME", state)

@@ -57,7 +57,7 @@ where
     let discovery = CliSourceDiscoveryPort::new(home.clone(), data_root.to_path_buf())
         .with_automatic_provider_discovery(automatic_provider_discovery)
         .with_provider_roots(provider_roots.clone());
-    let show_all_sources = request.all || request.show_missing || provider_filter.is_some();
+    let show_all_sources = request.all || provider_filter.is_some();
     let listing = ctx_history_ingest_application::assemble_source_listing(
         &discovery,
         data_root,

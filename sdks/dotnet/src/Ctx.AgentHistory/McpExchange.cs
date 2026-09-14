@@ -511,7 +511,7 @@ internal static class McpExchangeWire
         string? field = null,
         Exception? exception = null) =>
         new(
-            $"agent-history-v1 MCP exchange {message}",
+            $"agent-history-v2 MCP exchange {message}",
             ErrorDetails(message, field),
             exception);
 

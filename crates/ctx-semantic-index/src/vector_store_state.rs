@@ -21,10 +21,28 @@ impl SemanticVectorStore {
 
     /// Publishes all replacements and retirements for one bounded source page
     /// in a single flat-store generation.
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn publish_chunk_replacements(
         &mut self,
         items: &[(SemanticChunkDocument, Vec<f32>)],
         event_ids: &[Uuid],
+    ) -> Result<usize> {
+        self.publish_chunk_replacements_with_coordination(items, event_ids, false)
+    }
+
+    fn publish_chunk_replacements_coordinated(
+        &mut self,
+        items: &[(SemanticChunkDocument, Vec<f32>)],
+        event_ids: &[Uuid],
+    ) -> Result<usize> {
+        self.publish_chunk_replacements_with_coordination(items, event_ids, true)
+    }
+
+    fn publish_chunk_replacements_with_coordination(
+        &mut self,
+        items: &[(SemanticChunkDocument, Vec<f32>)],
+        event_ids: &[Uuid],
+        transaction_held: bool,
     ) -> Result<usize> {
         let dimensions = self.contract().dimensions();
         semantic_owned_sidecar_result((|| {
@@ -61,12 +79,15 @@ impl SemanticVectorStore {
                     ))
                 })
             })?;
-            self.flat
-                .publish_replacement_event_chunks(
-                    &replacements,
-                    &tombstones.into_iter().collect::<Vec<_>>(),
-                )
-                .map_err(anyhow::Error::new)?;
+            let tombstones = tombstones.into_iter().collect::<Vec<_>>();
+            if transaction_held {
+                self.flat
+                    .publish_replacement_event_chunks_coordinated(&replacements, &tombstones)
+            } else {
+                self.flat
+                    .publish_replacement_event_chunks(&replacements, &tombstones)
+            }
+            .map_err(anyhow::Error::new)?;
             self.flat_compact_if_needed()?;
             Ok(deleted)
         })())
@@ -98,6 +119,16 @@ impl SemanticVectorStore {
         })())
     }
 
+    pub(super) fn delete_events_coordinated(&mut self, event_ids: &[Uuid]) -> Result<usize> {
+        semantic_owned_sidecar_result((|| {
+            if event_ids.is_empty() {
+                return Ok(0);
+            }
+            self.publish_chunk_replacements_coordinated(&[], event_ids)
+        })())
+    }
+
+    #[cfg(test)]
     pub(super) fn delete_events(&mut self, event_ids: &[Uuid]) -> Result<usize> {
         semantic_owned_sidecar_result((|| {
             if event_ids.is_empty() {

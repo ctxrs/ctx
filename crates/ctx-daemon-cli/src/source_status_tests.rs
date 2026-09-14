@@ -13,10 +13,45 @@ use ctx_semantic_index::{
 };
 use ctx_semantic_model::SEMANTIC_DIMENSIONS;
 
+#[test]
+fn source_status_reports_semantic_startup_failure_without_losing_lexical_readiness() {
+    let (_temp, data_root, _) = core_publication_fixture();
+    fs::write(
+        data_root.join(ctx_app_config::CONFIG_FILE),
+        "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
+    )
+    .unwrap();
+    let config = crate::composition::load_runtime_config(&data_root).unwrap();
+    let detail = "failed to load ONNX Runtime: library is missing";
+    super::super::paths_status::write_daemon_job_status(
+        &daemon_semantic_job_path(&data_root),
+        &json!({
+            "status": "skipped", "reason": "model_load_failed",
+            "last_error": detail, "failure_class": "retryable", "retryable": true,
+        }),
+    )
+    .unwrap();
+
+    let report = source_epoch_status_report(&data_root, &config)
+        .unwrap()
+        .report;
+    assert_eq!(report["lexical"]["status"], "ready", "{report:#}");
+    assert_eq!(
+        report["daemon"]["jobs"]["semantic_index"]["status"],
+        "failed"
+    );
+    assert_eq!(report["semantic"]["status"], "unavailable");
+    assert_eq!(report["semantic"]["reason"], "model_load_failed");
+    assert_eq!(report["semantic"]["last_error"], detail);
+    assert_eq!(
+        report["semantic"]["flat_f32"]["reason"],
+        "projection_missing"
+    );
+}
+
 fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String) {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
-    let route_identity = "ab".repeat(32);
     let publication = ctx_history_index::GenerationWriter::open(
         data_root.join("search/lexical"),
         ctx_history_index::WriterOptions::default(),
@@ -24,50 +59,9 @@ fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String)
     .unwrap()
     .into_writer()
     .unwrap()
-    .commit_with_publication_metadata(
-        |_| true,
-        |context| {
-            let generation_id = context.generation_id().to_owned();
-            let route = ctx_history_index::SourceRouteIdentity::from_sha256(
-                route_identity.clone(),
-            )
-            .map_err(|error| {
-                ctx_history_index::IndexError::PublicationMetadata(error.to_string())
-            })?;
-            let receipt = ctx_history_refresh::SourceBackedRefreshReceipt {
-                previous_generation: None,
-                published_generation: generation_id.clone(),
-                generation_changed: true,
-                published_explicit_source_catalog: None,
-                current: ctx_history_refresh::SourceBackedRefreshCurrent::default(),
-                route_results: vec![ctx_history_refresh::SourceBackedRefreshRouteResult::succeeded(
-                    route_identity.clone(),
-                    true,
-                )],
-                zero_source_authority: vec![
-                    ctx_history_refresh::SourceBackedZeroSourceAuthority {
-                        generation_id,
-                        route_identity: route,
-                        kind: ctx_history_refresh::SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
-                    },
-                ],
-                catalog_route_bindings: Vec::new(),
-            };
-            serde_json::to_vec(&json!({
-                "version": ctx_history_refresh::SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                "request_id": "core-publication",
-                "operation": "refresh",
-                "refresh_scope": {"kind": "all"},
-                "receipt": receipt.to_json(),
-                "route_observations": [null],
-                "route_controls": {},
-                "committed_rejection_diagnostics": {},
-            }))
-            .map_err(|error| ctx_history_index::IndexError::PublicationMetadata(error.to_string()))
-        },
-    )
+    .commit(|_| true)
     .unwrap();
-    let generation_id = publication.receipt().generation_id.clone();
+    let generation_id = publication.generation_id.clone();
     let catalog = ctx_history_refresh::explicit_source_catalog_authority_for_test(0);
     super::super::paths_status::write_daemon_job_status(
         &daemon_core_refresh_job_path(&data_root),
@@ -149,6 +143,10 @@ impl SemanticDocumentBuilder for StatusSemanticBuilder {
 struct StatusSemanticEmbedder;
 
 impl SemanticBatchEmbedder for StatusSemanticEmbedder {
+    fn document_fits(&mut self, _text: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> anyhow::Result<Vec<Vec<f32>>> {
         Ok(chunks
             .iter()
@@ -208,7 +206,7 @@ fn semantic_status_reports_ready_only_with_exact_projected_and_filtered_counts()
     let data_root = temp.path().join("data");
     fs::create_dir_all(&data_root).unwrap();
     fs::write(
-        data_root.join(crate::config::CONFIG_FILE),
+        data_root.join(ctx_app_config::CONFIG_FILE),
         "[search]\nsemantic = true\n",
     )
     .unwrap();
@@ -310,14 +308,47 @@ fn semantic_status_reports_ready_only_with_exact_projected_and_filtered_counts()
         }
     }
 
-    let config = AppConfig::load(&data_root).unwrap();
+    let config = crate::composition::load_runtime_config(&data_root).unwrap();
     let status = source_epoch_status_report(&data_root, &config).unwrap();
     let semantic = &status.report["semantic"];
     assert_eq!(semantic["status"], "ready");
+    assert_eq!(
+        semantic["builtin_throttling"],
+        serde_json::json!({
+            "configured": true,
+            "effective": true,
+            "config_source": "default",
+        })
+    );
     assert_eq!(semantic["flat_f32"]["semantic_documents"], 3);
     assert_eq!(semantic["flat_f32"]["projected_documents"], 1);
     assert_eq!(semantic["flat_f32"]["filtered_documents"], 2);
     assert_eq!(semantic["flat_f32"]["active_events"], 1);
+}
+
+#[test]
+fn status_reports_external_executor_throttling_as_not_applicable_with_null_effective_value() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::write(
+        data_root.join(ctx_app_config::CONFIG_FILE),
+        "[semantic]\nexecutor = \"https://embed.example.test\"\n",
+    )
+    .unwrap();
+
+    let config = crate::composition::load_runtime_config(&data_root).unwrap();
+    let status = source_epoch_status_report(&data_root, &config).unwrap();
+
+    assert_eq!(
+        status.report["semantic"]["builtin_throttling"],
+        serde_json::json!({
+            "configured": true,
+            "effective": null,
+            "config_source": "default",
+            "reason": "external_executor",
+        })
+    );
 }
 
 #[test]
@@ -333,8 +364,8 @@ fn pristine_source_status_is_read_only_and_exposes_stable_paths() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("missing");
 
-    let status =
-        source_epoch_status_report(&data_root, &AppConfig::default()).expect("source status");
+    let status = source_epoch_status_report(&data_root, &DaemonRuntimeConfig::default())
+        .expect("source status");
 
     assert!(!data_root.exists());
     assert_eq!(
@@ -457,12 +488,115 @@ fn refresh_report_preserves_automatic_retry_and_projects_its_attention_state() {
             "automatic_retry": automatic_retry,
         });
 
-        let report = refresh_report(Some(&job), Some("generation-1"), &json!({"running": true}));
+        let report = refresh_report(
+            Some(&job),
+            Some("generation-1"),
+            &json!({"enabled": true, "running": true}),
+        );
 
         assert_eq!(report["status"], expected_status, "state={state}");
         assert_eq!(report["reason"], expected_reason, "state={state}");
         assert_eq!(report["structured_outcome"], structured_outcome);
         assert_eq!(report["automatic_retry"], automatic_retry);
+    }
+}
+
+#[test]
+fn retained_retry_checkpoint_follows_current_policy_and_runtime_ownership() {
+    for checkpoint in ["confirming", "paused", "mixed"] {
+        let mut job = json!({
+            "request_state": "failed",
+            "last_error": "retained failure",
+            "automatic_retry": {"state": checkpoint, "routes": {}},
+        });
+        for (enabled, running, request_state, expected_status, expected_reason) in [
+            (
+                false,
+                false,
+                "failed",
+                "partial",
+                "refresh_requires_explicit_request",
+            ),
+            (
+                false,
+                true,
+                "failed",
+                "partial",
+                "refresh_requires_explicit_request",
+            ),
+            (false, true, "running", "pending", "core_refresh_pending"),
+            (
+                false,
+                true,
+                "admission_pending",
+                "pending",
+                "core_refresh_pending",
+            ),
+            (false, true, "queued", "pending", "core_refresh_pending"),
+            (
+                true,
+                false,
+                "failed",
+                "partial",
+                "automatic_retry_daemon_unavailable",
+            ),
+        ] {
+            job["request_state"] = json!(request_state);
+            let report = refresh_report(
+                Some(&job),
+                Some("generation-1"),
+                &json!({"enabled": enabled, "running": running}),
+            );
+            assert_eq!(report["status"], expected_status, "{report:#}");
+            assert_eq!(report["reason"], expected_reason, "{report:#}");
+            assert_eq!(report["automatic_retry"], job["automatic_retry"]);
+            assert_eq!(report["last_error"], job["last_error"]);
+            assert_eq!(report["request_state"], job["request_state"]);
+        }
+    }
+}
+
+#[test]
+fn retained_retry_checkpoint_terminal_root_keeps_admitted_successors_pending() {
+    for checkpoint in ["confirming", "paused", "mixed"] {
+        for terminal in ["published", "failed"] {
+            for successor_state in ["admission_pending", "queued", "failed"] {
+                let job = json!({
+                    "request_id": "019fcaaa-0000-7000-8000-000000000321",
+                    "request_state": terminal,
+                    "published_generation": "generation-1",
+                    "last_error": "retained failure",
+                    "automatic_retry": {"state": checkpoint, "routes": {}},
+                    "queued_successors": [{
+                        "request_id": "019fcaaa-0000-7000-8000-000000000322",
+                        "request_state": successor_state,
+                        "trigger": "import",
+                        "refresh_intent": {
+                            "kind": "selected_import",
+                            "selection": {"kind": "all"},
+                        },
+                    }],
+                });
+                for running in [true, false] {
+                    let report = refresh_report(
+                        Some(&job),
+                        Some("generation-1"),
+                        &json!({"enabled": false, "running": running}),
+                    );
+                    let (status, reason) = if running && successor_state != "failed" {
+                        ("pending", "core_refresh_pending")
+                    } else {
+                        ("partial", "refresh_requires_explicit_request")
+                    };
+                    assert_eq!(report["status"], status, "{job:#}: {report:#}");
+                    assert_eq!(report["reason"], reason, "{job:#}: {report:#}");
+                    assert_eq!(report["request_id"], job["request_id"]);
+                    assert_eq!(report["request_state"], job["request_state"]);
+                    assert_eq!(report["automatic_retry"], job["automatic_retry"]);
+                    assert_eq!(report["last_error"], job["last_error"]);
+                }
+            }
+        }
     }
 }
 
@@ -489,7 +623,11 @@ fn paused_route_does_not_claim_an_unrelated_active_refresh_is_fully_paused() {
         "automatic_retry": automatic_retry,
     });
 
-    let report = refresh_report(Some(&job), Some("generation-1"), &json!({"running": true}));
+    let report = refresh_report(
+        Some(&job),
+        Some("generation-1"),
+        &json!({"enabled": true, "running": true}),
+    );
 
     assert_eq!(report["status"], "partial");
     assert_eq!(report["reason"], "automatic_retry_partially_paused");
@@ -502,7 +640,7 @@ fn source_daemon_report_preserves_semantic_terminal_job_facts() {
     let data_root = temp.path().join("data");
     fs::create_dir_all(&data_root).unwrap();
     fs::write(
-        data_root.join(crate::config::CONFIG_FILE),
+        data_root.join(ctx_app_config::CONFIG_FILE),
         "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
     )
     .unwrap();
@@ -516,7 +654,7 @@ fn source_daemon_report_preserves_semantic_terminal_job_facts() {
     )
     .unwrap();
 
-    let config = crate::config::AppConfig::load(&data_root).unwrap();
+    let config = crate::composition::load_runtime_config(&data_root).unwrap();
     let daemon = source_daemon_report(&data_root, &config);
     let jobs = daemon["jobs"].as_object().unwrap();
     assert!(jobs.contains_key("core_refresh"), "{daemon:#}");
@@ -634,7 +772,7 @@ fn admission_pending_is_active_with_existing_and_empty_generations() {
     )
     .unwrap();
 
-    let existing = source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
+    let existing = source_epoch_status_report(&data_root, &DaemonRuntimeConfig::default()).unwrap();
     assert_eq!(existing.report["refresh"]["status"], "pending");
     assert_eq!(existing.report["lexical"]["status"], "ready");
     assert_eq!(
@@ -653,7 +791,7 @@ fn admission_pending_is_active_with_existing_and_empty_generations() {
         }),
     )
     .unwrap();
-    let empty = source_epoch_status_report(&empty_root, &AppConfig::default()).unwrap();
+    let empty = source_epoch_status_report(&empty_root, &DaemonRuntimeConfig::default()).unwrap();
     assert_eq!(empty.report["refresh"]["status"], "pending");
     assert_eq!(empty.report["lexical"]["status"], "pending");
     assert_eq!(
@@ -677,50 +815,12 @@ fn authoritative_empty_stays_query_ready_when_the_latest_refresh_failed() {
     )
     .unwrap();
 
-    let status = source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
+    let status = source_epoch_status_report(&data_root, &DaemonRuntimeConfig::default()).unwrap();
     assert_eq!(status.report["lexical"]["status"], "ready");
     assert_eq!(status.report["history_epoch"]["status"], "ready");
     assert_eq!(status.report["refresh"]["status"], "unavailable");
     assert_eq!(status.report["refresh"]["reason"], "core_refresh_failed");
     assert_eq!(status.indexed_items, Some(0));
-}
-
-#[test]
-fn legacy_zero_source_publication_is_not_projected_as_ready() {
-    let (_temp, data_root, generation_id) = core_publication_fixture();
-    let index_root = data_root.join("search/lexical");
-    let current = VerifiedIndex::open_pinned(&index_root).unwrap();
-    let mut metadata: Value =
-        serde_json::from_slice(current.publication_metadata().unwrap()).unwrap();
-    metadata["version"] = json!(1);
-    metadata["receipt"]
-        .as_object_mut()
-        .unwrap()
-        .remove("zero_source_authority");
-    let metadata_fields = metadata.as_object_mut().unwrap();
-    metadata_fields.remove("route_controls");
-    metadata_fields.remove("committed_rejection_diagnostics");
-    drop(current);
-    let writer = GenerationWriter::open(&index_root, WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    writer
-        .republish_current_publication_metadata(
-            &generation_id,
-            serde_json::to_vec(&metadata).unwrap(),
-        )
-        .unwrap();
-
-    let status = source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
-    assert_eq!(status.report["lexical"]["status"], "unavailable");
-    assert_eq!(
-        status.report["lexical"]["reason"],
-        "zero_source_publication_uncertified"
-    );
-    assert_eq!(status.report["history_epoch"]["status"], "unavailable");
-    assert_eq!(status.indexed_items, None);
-    assert_eq!(status.indexed_sources, None);
 }
 
 #[test]

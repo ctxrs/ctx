@@ -7,7 +7,10 @@ a user reviews it.
 Command result JSON uses `schema_version: 1` except for
 `ctx setup --format json`, `ctx stats --format json`,
 `ctx import --format json`, `ctx search --format json`,
-`ctx status --format json`, `ctx daemon status`, and MCP `status`.
+`ctx status --format json` (including usage controls and errors), all `ctx index`
+JSON modes, `ctx daemon status`, `ctx daemon enable`, `ctx daemon disable`, and
+MCP `status`. Generic daemon command JSON uses version 2; uninstall-quiescence
+receipts retain their separate schema.
 Progress-event JSON is stderr progress output and does not include
 `schema_version`.
 
@@ -24,7 +27,7 @@ ctx setup --format json
 ctx setup --format json --no-daemon
 ```
 
-Writes local storage and returns schema version 2:
+Writes local storage and returns schema version 3:
 
 - `schema_version`;
 - `data_root`;
@@ -38,8 +41,11 @@ Writes local storage and returns schema version 2:
 - `semantic`;
 - `daemon`;
 - `daemon_autostart`;
-- `deprecated_catalog_only_ignored`;
 - `source_rebuild_required`;
+
+The `deprecated_catalog_only_ignored` field remains present for schema-2
+compatibility and is always `false`, because the ignored `--catalog-only` option
+has been removed.
 
 In automatic indexing mode, human and machine-readable setup both health-check
 and recover the persistent daemon before returning. In manual mode, setup does
@@ -73,9 +79,7 @@ Setup does not perform a foreground provider import. `--wait` waits for the
 daemon-owned Core refresh; without it, setup requests a background Core
 refresh. When that first request finds zero sources and no prior publication,
 setup attaches long enough to certify a verified empty Core generation instead
-of returning an uncertified pending state. The deprecated `--catalog-only` flag
-is reported by `deprecated_catalog_only_ignored` and does not change the
-persistent lifecycle.
+of returning an uncertified pending state.
 Use `ctx status --format json` for complete process, supervisor, and applied
 configuration health.
 
@@ -87,7 +91,7 @@ ctx status --format json
 
 Reads local storage state and returns:
 
-- `schema_version: 2`;
+- `schema_version: 3`;
 - `initialized`;
 - `data_root`;
 - `config_path`;
@@ -104,12 +108,17 @@ Reads local storage state and returns:
 - `upgrade`;
 - compact `local_usage` health (`enabled`, state, and a content-free error when
   unavailable), without aggregates, estimates, or operation details;
-- `local_only: true`;
 - `read_only: true`.
 
 For status, `read_only: true` means the command does not mutate canonical
 history or Core search generations. Usage control modes return a separate
-action-focused JSON shape with `read_only: false` and do not read Core status.
+action-focused JSON shape with `schema_version: 2` and `read_only: false`, and
+do not read Core status. Generic status configuration errors also use version 2.
+
+Status and setup version 3, and usage/error, index, and daemon command version 2,
+remove the generic `local_only` property. Callers must update version checks and
+stop requiring or reading that property. Semantic executor diagnostics,
+standalone stats, and uninstall receipts retain their separate locality fields.
 
 `history_epoch` and `lexical` identify the verified searchable Core generation.
 `refresh` reports the latest observed daemon-owned refresh request and its exact
@@ -185,6 +194,12 @@ executor keeps ctx's first hop on the machine, but the receiving process can
 retain or forward the content. Status is credential-free and read-only: it
 reads local configuration and observed state without probing the endpoint or
 making a network request.
+`builtin_throttling.configured` is boolean and includes the default value
+`true` when the config key is absent. `builtin_throttling.effective` is boolean
+for the selected built-in executor and null for an HTTP executor.
+`config_source` is `default` or `config`; optional `reason` is
+`external_executor` when the setting is not applicable. An explicitly configured
+HTTP executor cannot also set the built-in-only config key.
 Enable and disable persist policy and report `read_only: false`. Disablement
 retains downloaded model/runtime assets and derived semantic indexes.
 
@@ -207,8 +222,8 @@ ctx index wait --format json
 ```
 
 `ctx index --format json` returns the one-shot readiness snapshot. Each watch
-line uses the same read-only shape: `schema_version`, `initialized`, `indexing`,
-`lexical`, `refresh`, `semantic`, `daemon`, `local_only`, and `read_only`.
+line uses the same read-only shape: `schema_version: 2`, `initialized`, `indexing`,
+`lexical`, `refresh`, `semantic`, `daemon`, and `read_only`.
 `indexing.mode` is `auto` or `manual`. Lexical counts and certified source bytes
 describe the currently verified generation. Refresh progress contains only
 values reported by the active refresh job; no synthetic work units, failure
@@ -216,8 +231,8 @@ counts, rates, or remaining time are added. The one-shot and watch snapshots
 preserve `refresh.structured_outcome` and `refresh.automatic_retry` with the
 same shapes and status meanings as `ctx status --format json`.
 
-`ctx index mode --format json` returns `schema_version`, `indexing.mode`,
-`config_path`, `local_only`, and `read_only: true`. Supplying `auto` or `manual`
+`ctx index mode --format json` returns `schema_version: 2`, `indexing.mode`,
+`config_path`, and `read_only: true`. Supplying `auto` or `manual`
 persists the mode and returns `read_only: false` plus
 `indexing.requested_mode`, `indexing.overridden`, `daemon.running`, optional
 `daemon.pid`, `daemon.persistent`, and `daemon.supervisor`. `overridden` is true
@@ -227,18 +242,24 @@ installs or repairs supervision and starts the persistent daemon; manual mode
 stops it and removes persistent supervision. Explicit import and search
 `--refresh wait` can still use finite workers.
 
-Wait returns one object with `schema_version`, `status` (`ready`, `blocked`, or
-`timeout`), `selection`, the final `readiness` snapshot, `local_only`, and
+Wait returns one object with `schema_version: 2`, `status` (`ready`, `blocked`, or
+`timeout`), `selection`, the final `readiness` snapshot, and
 `read_only`. Use `ctx status --format json` for the complete health contract,
 including daemon and supervisor diagnostics.
 
 Index snapshots expose the reduced
-`semantic.{status,reason,enabled,coverage.{candidate_items,searchable_items,embedded_items,filtered_items,embedded_chunks}}`
+`semantic.{status,reason,enabled,builtin_throttling.{configured,effective,config_source,reason},coverage.{candidate_items,searchable_items,embedded_items,filtered_items,embedded_chunks}}`
 shape and `daemon.{status,running,jobs.semantic_index}`. The complete semantic
 and daemon fields below describe `ctx status --format json`, not index
 snapshots.
 
 `semantic.status` is `disabled`, `pending`, `ready`, or `unavailable`.
+When enabled, a failed background semantic job makes this status `unavailable`
+with the job's `reason` and optional `semantic.last_error`. A pending configuration
+reload takes precedence over a previous job failure; resource-pressure deferral
+without an error remains pending. The retained `semantic.flat_f32` inventory
+below describes projection state separately from the background failure, and
+lexical readiness is unchanged.
 `semantic.flat_f32` reports the source-backed projection and can include its
 `status`, `reason`, `path`, Core and flat generation identity, semantic document
 count, projected and intentionally filtered document counts, active
@@ -266,6 +287,10 @@ nullable may be omitted when unavailable:
 - `running`;
 - `pid`, nullable/omitted;
 - `started_at_ms`, `heartbeat_at_ms`, and `finished_at_ms`, nullable/omitted;
+- `heartbeat_age_ms` and `heartbeat_stale`, omitted unless a non-future
+  heartbeat belongs to the live daemon PID. Stale means older than 30 seconds;
+  it is a progress warning, not proof of process death or permission to replace
+  a live owner;
 - `last_error`, nullable/omitted;
 - `start_mode`, nullable/omitted, currently `auto` for setup/import/search/semantic
   process starts or `manual` for explicit daemon runs;
@@ -284,10 +309,21 @@ nullable may be omitted when unavailable:
 therefore report history refresh as confirming, paused, or partially paused
 without reporting the daemon process itself as stopped.
 
+Its schema-1 request/status projection still emits
+`coalesced_into_request_id: null` and `coalesced_logical_demands: 0` after
+cross-request-ID coalescing was removed. Those keys may disappear only in an
+explicit successor schema after schema 1 is outside the supported client floor.
+`request_fingerprint` is not a compatibility placeholder: explicit stable
+request IDs still use it to reject a conflicting payload. No successor schema
+or calendar sunset is scheduled.
+
 `config_reload.status` is `applied`, `pending`, `failed`,
 `activation_failed`, or `unknown`. `requested` reflects the current effective
 daemon/semantic configuration read by the status command. `applied` is the last
-configuration acknowledged by the running daemon. A changed config remains
+configuration acknowledged by the running daemon. Both include
+`semantic_builtin_throttling_configured` and
+`semantic_builtin_throttling_effective`; the effective value is null when the
+selected executor is HTTP. A changed config remains
 `pending` with `out_of_sync: true` until the daemon reloads it. Parse/read
 failures report `failed`, deactivate semantic runtime ownership, stop the
 semantic query service, clear the applied semantic executor, and surface
@@ -582,6 +618,39 @@ authority. A process started for import reports `start_mode: "auto"` and
 `trigger_command: "import"` through live status surfaces.
 Import result schema version 2 does not embed daemon process state. Use
 `ctx status --format json` to inspect daemon and supervisor health.
+
+When opted-in semantic completion fails after Import has durably published
+Core, JSON mode exits nonzero, writes no import result to stdout, and writes
+one structured error object to stderr. For example:
+
+```json
+{
+  "error": "daemon semantic job failed for Core generation core-gen-42: embedding executor unavailable",
+  "error_code": "semantic_completion_failed",
+  "reason": "semantic_completion_job_failed",
+  "generation_id": "core-gen-42",
+  "core_published": true,
+  "retryable": true,
+  "detail": "daemon semantic job failed for Core generation core-gen-42: embedding executor unavailable",
+  "failure_class": "resource_pressure"
+}
+```
+
+`error_code` is the stable top-level classification. `reason` retains the
+granular `SemanticCompletionError` code, `generation_id` identifies the
+already-published Core generation, and `core_published: true` makes clear that
+semantic failure did not roll Core back. `detail` and `error` contain the same
+human-readable typed diagnostic. `retryable` comes from the typed completion
+failure. A superseded-generation failure additionally includes
+`active_generation_id`. A daemon-job failure includes `failure_class` only for
+the four recognized values: `retryable`, `permanent`, `corrupt_sidecar`, and
+`resource_pressure`. Missing, non-string, and unknown durable legacy values are
+omitted rather than echoed. The job remains a terminal typed failure, and its
+`detail` and `retryable` fields are preserved. Those variant-specific members
+are otherwise omitted.
+Clients must ignore unknown additive fields and should branch first on
+`error_code`, then on `reason` when finer recovery behavior is needed. Human
+output is unchanged.
 
 ## Progress
 
@@ -1038,6 +1107,8 @@ importer. Off mode sends no maintenance wake.
 - `semantic_status`;
 - `semantic_fallback_code`, nullable/omitted stable reason code for clients;
 - `semantic_fallback`, nullable/omitted;
+- `semantic_fallback_retryable`, nullable/omitted boolean retaining whether the
+  typed semantic failure may succeed after external state changes;
 - `embedding_model`, nullable/omitted;
 - `coverage`;
 - `worker`, using the same shape as `status.semantic`, nullable/omitted;
@@ -1058,6 +1129,8 @@ importer. Off mode sends no maintenance wake.
 `retrieval.semantic_fallback_code`, when present, is the stable machine-readable
 reason why a hybrid request used lexical fallback.
 `retrieval.semantic_fallback`, when present, is the human-readable explanation.
+`retrieval.semantic_fallback_retryable`, when present, is copied from the same
+typed semantic failure rather than inferred from its display text.
 Semantic-only unavailability is a typed command error, not a successful
 `search_results` object with `effective_mode: "lexical"`.
 
@@ -1073,7 +1146,7 @@ Ready coverage therefore satisfies
 `candidate_items = searchable_items + filtered_items` and
 `searchable_items = embedded_items`.
 
-The SDK `agent-history-v1` contract keeps schema version 1 and normalizes the
+The SDK `agent-history-v2` contract keeps schema version 1 and normalizes the
 resolved filter as `search.filters.contentScope`, with the same exact four
 values. The filters object remains extensible, so SDK consumers must continue
 to tolerate additive filter fields. The contract camel-cases the same
@@ -1082,7 +1155,7 @@ on). SDK contract
 search results expose retrieval at the top level of `search`; TypeScript and
 Python type the core retrieval/coverage fields, while Go, .NET, JVM, and Swift
 preserve retrieval as camel-cased JSON values. Per-hit retrieval details are not
-part of v1 unless a future CLI JSON shape emits them. Local diagnostic path
+part of the SDK contract unless a future CLI JSON shape emits them. Local diagnostic path
 fields such as `vector_path`/`vectorPath` can still appear as additive JSON from
 the local CLI adapter, but they are intentionally not stable SDK fields.
 
@@ -1157,7 +1230,17 @@ protocol-level parse-error or invalid-params responses.
 
 ```bash
 ctx integrations install mcp --format json
+ctx integrations remove mcp --format json
 ctx integrations status mcp --format json
+ctx integrations install skill --format json
+ctx integrations status skill --format json
+ctx integrations remove skill --format json
+ctx integrations install slash-command --format json
+ctx integrations status slash-command --format json
+ctx integrations remove slash-command --format json
+ctx integrations install plugin --format json
+ctx integrations status plugin --format json
+ctx integrations remove plugin --format json
 ```
 
 MCP integration JSON returns:
@@ -1185,6 +1268,42 @@ Each install result includes:
 Each status result uses the same target fields and includes `status` and
 `error`. Status values are `current`, `missing`, `conflict`, `invalid_config`,
 and `unsupported`.
+
+Each remove result uses the install target fields and includes `success`,
+`previous_status`, `status`, `already_absent`, `modified`, and `error`.
+Successful results have `status: "missing"`; `modified` distinguishes an
+entry removed by this invocation from an idempotent already-absent result.
+
+Skill integration JSON keeps the top-level `skill: "ctx"`, `scope`, and
+`results[]` fields. Install and status retain their existing target fields and
+status values: `current`, `stale`, `modified`, and `missing`. Remove results
+include `agent`, `agent_display_name`, `scope`, `path`, `success`,
+`previous_status`, `status`, `already_absent`, `removed`, `removed_current`,
+`removed_legacy`, and `error`. Successful removal reports `status: "missing"`.
+
+Slash-command integration JSON keeps the released top-level discriminator
+`integration: "slash-commands"`, plus `command: "ctx"`, `scope`, and
+`results[]`. Status results include target identity, nullable `scope`, `path`,
+and `legacy_path`, plus `success`, `status`, `error`, and `note`. Remove adds
+`previous_status`, `already_absent`, `modified`, `current_removed`,
+`legacy_removed`, and `metadata_removed`. Informational `skill_only` and
+`manual_only` targets have null paths and are non-mutating.
+
+Plugin integration JSON uses `integration: "plugin"`, `scope`, and
+`results[]`. Each result includes `agent`, `agent_display_name`, `scope`,
+`capability`, `detected`, `supported`, `marketplace_status`, `previous_status`,
+`status`, `action`, `installed_version`, `success`, `modified`, `instructions`,
+and `error`. Automatic status values are `installed`, `legacy_installed`, and
+`missing`; the native manager owns release selection, so `installed_version` is
+nullable and informational. `capability: "manual_required"` means the host must
+be managed through its UI; ctx does not claim an installed or missing state.
+Status invokes manager list operations only. Plugin removal does not remove the
+retained marketplace, direct skills, MCP configuration, the ctx CLI, or
+history.
+
+The canonical CLI targets are `mcp`, `skill`, `slash-command`, and `plugin`.
+The released plural spellings `skills` and `slash-commands` remain accepted as
+hidden aliases. Alias use never changes JSON discriminators or field shapes.
 
 ## Docs
 
@@ -1290,7 +1409,9 @@ Citations can include:
 ctx doctor --format json
 ```
 
-Reads local storage and returns findings:
+Reads local storage and returns findings. The outer `schema_version` remains 1.
+Its `source_epoch` contains the status report at schema version 3, without the
+removed generic `local_only` property.
 
 - `schema_version`;
 - `ok`;

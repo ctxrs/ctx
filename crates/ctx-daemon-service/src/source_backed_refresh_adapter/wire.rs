@@ -1,11 +1,9 @@
-use std::{collections::BTreeSet, path::Path};
+use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
-use ctx_history_core::CaptureProvider;
-use ctx_history_index::SourceRouteIdentity;
 use ctx_history_refresh::{
-    AdmissionResponseBarrier, ExplicitSourceCatalogAuthority, RefreshEngine, RefreshIntent,
-    RefreshOperation, RefreshRequest, RefreshRequestTrigger, RefreshSelection, RefreshStatus,
+    AdmissionResponseBarrier, RefreshEngine, RefreshIntent, RefreshRequest, RefreshRequestTrigger,
+    RefreshStatus,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -15,7 +13,6 @@ use crate::source_backed_refresh_coordinator::CoreRefreshEngine;
 
 const SOURCE_REFRESH_REQUEST_OP: &str = "source_refresh_request";
 const SOURCE_REFRESH_STATUS_OP: &str = "source_refresh_status";
-const SOURCE_REFRESH_RECOVERY_ROUTE_LIMIT: usize = 256;
 
 #[derive(Debug)]
 pub(crate) struct WireResponse {
@@ -30,21 +27,24 @@ pub(crate) fn handle_ipc_request(
 ) -> Result<Option<WireResponse>> {
     match request.get("op").and_then(Value::as_str) {
         Some(SOURCE_REFRESH_REQUEST_OP) => {
-            let response = match refresh_action(request)? {
-                WireRefreshAction::MaintenanceWake { request_id } => WireResponse {
-                    value: render_status(&engine.maintenance_wake(data_root, request_id)?),
-                    response_barrier: None,
-                },
-                WireRefreshAction::Submit(request) => {
-                    let admission = engine.submit(data_root, request)?;
-                    let (status, response_barrier) = admission.into_parts();
-                    WireResponse {
-                        value: render_status(&status),
-                        response_barrier,
-                    }
-                }
-            };
-            Ok(Some(response))
+            let admission = engine.submit(data_root, refresh_request(request)?)?;
+            let (status, response_barrier) = admission.into_parts();
+            let mut value = render_status(&status);
+            if value.get("admission_durability").is_some() {
+                // A retained replacement may survive restart, but it has not
+                // confirmed durability. Preserve its ID and response barrier
+                // without acknowledging successful admission to the caller.
+                value["ok"] = json!(false);
+                value["error_code"] = json!("source_refresh_admission_unconfirmed");
+                value["retryable"] = json!(true);
+                value["error"] = json!(
+                    "source refresh admission durability is unconfirmed; retry the same request ID"
+                );
+            }
+            Ok(Some(WireResponse {
+                value,
+                response_barrier,
+            }))
         }
         Some(SOURCE_REFRESH_STATUS_OP) => {
             let request_id = request
@@ -118,179 +118,49 @@ pub(crate) fn handle_ipc_request_for_test(
     Ok(Some(value))
 }
 
-#[derive(Debug)]
-enum WireRefreshAction {
-    MaintenanceWake { request_id: String },
-    Submit(RefreshRequest),
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum WireRefreshSelector {
-    AllAutomatic,
-    AutomaticProvider(CaptureProvider),
-    ExplicitCatalog,
-}
-
-impl WireRefreshSelector {
-    fn from_json(value: &Value) -> Result<Self> {
-        let fields = value
-            .as_object()
-            .ok_or_else(|| anyhow!("source refresh selector is not an object"))?;
-        match fields.get("kind").and_then(Value::as_str) {
-            Some("all_automatic") if fields.len() == 1 => Ok(Self::AllAutomatic),
-            Some("automatic_provider") if fields.len() == 2 => {
-                let provider = fields
-                    .get("provider")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("automatic provider selector has no provider"))?
-                    .parse()
-                    .context("parse automatic provider selector")?;
-                if provider == CaptureProvider::Unknown {
-                    bail!("automatic provider selector has an unknown provider");
-                }
-                Ok(Self::AutomaticProvider(provider))
-            }
-            Some("explicit_catalog") if fields.len() == 1 => Ok(Self::ExplicitCatalog),
-            Some(kind) => bail!("source refresh selector `{kind}` is malformed"),
-            None => bail!("source refresh selector kind is missing"),
-        }
-    }
-
-    const fn is_scoped(self) -> bool {
-        !matches!(self, Self::AllAutomatic)
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum WireRefreshScope {
-    All,
-    Exact,
-}
-
-fn refresh_action(request: &Value) -> Result<WireRefreshAction> {
+fn refresh_request(request: &Value) -> Result<RefreshRequest> {
     let mode = request.get("mode").and_then(Value::as_str).unwrap_or("");
     if !matches!(mode, "background" | "wait") {
         return Err(anyhow!("invalid daemon source refresh mode `{mode}`"));
     }
-    if let Some(intent_json) = request.get("refresh_intent") {
-        for legacy_field in [
-            "operation",
-            "refresh_selector",
-            "explicit_source_catalog",
-            "fresh_after_admitted_snapshot",
-            "refresh_scope",
-        ] {
-            if request.get(legacy_field).is_some() {
-                bail!(
-                    "canonical daemon source refresh request also carries legacy `{legacy_field}`"
-                );
-            }
+    let intent_json = request
+        .get("refresh_intent")
+        .ok_or_else(|| anyhow!("daemon source refresh intent is missing"))?;
+    for retired_field in [
+        "operation",
+        "refresh_selector",
+        "explicit_source_catalog",
+        "fresh_after_admitted_snapshot",
+        "refresh_scope",
+    ] {
+        if request.get(retired_field).is_some() {
+            bail!("canonical daemon source refresh request carries retired `{retired_field}`");
         }
-        let intent = RefreshIntent::from_json(intent_json)
-            .context("parse canonical daemon source refresh intent")?;
-        let trigger = request
-            .get("trigger")
-            .and_then(Value::as_str)
-            .map(str::parse::<RefreshRequestTrigger>)
-            .transpose()?
-            .unwrap_or(match &intent {
-                RefreshIntent::AutomaticMaintenance => RefreshRequestTrigger::Search,
-                RefreshIntent::SelectedImport(_) => RefreshRequestTrigger::Import,
-            });
-        if !matches!(
-            (&intent, trigger),
-            (
-                RefreshIntent::AutomaticMaintenance,
-                RefreshRequestTrigger::Setup
-                    | RefreshRequestTrigger::Search
-                    | RefreshRequestTrigger::Import
-            ) | (
-                RefreshIntent::SelectedImport(_),
-                RefreshRequestTrigger::Import
-            )
-        ) {
-            bail!("daemon source refresh trigger does not match its intent");
-        }
-        let request_id = match request.get("request_id") {
-            Some(Value::String(request_id)) if !request_id.is_empty() => {
-                Uuid::parse_str(request_id)
-                    .context("daemon source refresh logical request ID must be a UUID")?;
-                request_id.clone()
-            }
-            None => Uuid::now_v7().to_string(),
-            Some(_) => bail!("daemon source refresh logical request ID is invalid"),
-        };
-        if mode == "background" {
-            if intent != RefreshIntent::AutomaticMaintenance {
-                bail!("selected import requires daemon refresh mode `wait`");
-            }
-            return Ok(WireRefreshAction::MaintenanceWake { request_id });
-        }
-        return Ok(WireRefreshAction::Submit(RefreshRequest::new(
-            request_id, intent, trigger,
-        )));
     }
-
-    // Decode the pre-canonical schema for compatibility. Legacy physical
-    // scope remains rejected; it is never converted into executable authority.
-    let operation = request
-        .get("operation")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("daemon source refresh request operation is missing"))
-        .and_then(str::parse)?;
+    let intent = RefreshIntent::from_json(intent_json)
+        .context("parse canonical daemon source refresh intent")?;
     let trigger = request
         .get("trigger")
         .and_then(Value::as_str)
         .map(str::parse::<RefreshRequestTrigger>)
         .transpose()?
-        .unwrap_or(match operation {
-            RefreshOperation::Refresh => RefreshRequestTrigger::Search,
-            RefreshOperation::Import => RefreshRequestTrigger::Import,
+        .unwrap_or(match &intent {
+            RefreshIntent::AutomaticMaintenance => RefreshRequestTrigger::Search,
+            RefreshIntent::SelectedImport(_) => RefreshRequestTrigger::Import,
         });
     if !matches!(
-        (operation, trigger),
+        (&intent, trigger),
         (
-            RefreshOperation::Refresh,
+            RefreshIntent::AutomaticMaintenance,
             RefreshRequestTrigger::Setup
                 | RefreshRequestTrigger::Search
                 | RefreshRequestTrigger::Import
-        ) | (RefreshOperation::Import, RefreshRequestTrigger::Import)
+        ) | (
+            RefreshIntent::SelectedImport(_),
+            RefreshRequestTrigger::Import
+        )
     ) {
-        bail!("daemon source refresh trigger does not match its operation");
-    }
-    let explicit_catalog = request.get("explicit_source_catalog");
-    let has_typed_selector = request.get("refresh_selector").is_some();
-    let selector = match request.get("refresh_selector") {
-        Some(value) => {
-            WireRefreshSelector::from_json(value).context("parse daemon source refresh selector")?
-        }
-        None => match (operation, explicit_catalog.is_some()) {
-            (RefreshOperation::Refresh, false) => WireRefreshSelector::AllAutomatic,
-            // Legacy untyped import requests still name one exact source.
-            // Normalize that old shape to the canonical exact-source intent.
-            (RefreshOperation::Import, true) => WireRefreshSelector::ExplicitCatalog,
-            _ => bail!("daemon source refresh selector is missing"),
-        },
-    };
-    if operation == RefreshOperation::Import && mode == "background" {
-        bail!("import operation requires daemon refresh mode `wait`");
-    }
-    if operation == RefreshOperation::Refresh && selector != WireRefreshSelector::AllAutomatic {
-        bail!("refresh operation requires the all-automatic source selector");
-    }
-    match (selector, explicit_catalog.is_some()) {
-        (WireRefreshSelector::AllAutomatic, false)
-        | (WireRefreshSelector::AutomaticProvider(_), false)
-        | (WireRefreshSelector::ExplicitCatalog, true) => {}
-        (WireRefreshSelector::ExplicitCatalog, false) => {
-            bail!("explicit-catalog source refresh selector has no catalog authority")
-        }
-        (WireRefreshSelector::AutomaticProvider(_), true) => {
-            bail!("automatic provider source refresh selector carries explicit catalog authority")
-        }
-        (WireRefreshSelector::AllAutomatic, true) => {
-            bail!("all-automatic source refresh selector carries explicit catalog authority")
-        }
+        bail!("daemon source refresh trigger does not match its intent");
     }
     let request_id = match request.get("request_id") {
         Some(Value::String(request_id)) if !request_id.is_empty() => {
@@ -301,89 +171,12 @@ fn refresh_action(request: &Value) -> Result<WireRefreshAction> {
         None => Uuid::now_v7().to_string(),
         Some(_) => bail!("daemon source refresh logical request ID is invalid"),
     };
-    let fresh_after_admitted_snapshot = match request.get("fresh_after_admitted_snapshot") {
-        None | Some(Value::Bool(false)) => false,
-        Some(Value::Bool(true)) => true,
-        Some(_) => {
-            bail!("daemon source refresh fresh-after-admitted-snapshot requirement must be boolean")
-        }
-    };
-    if operation == RefreshOperation::Refresh
-        && mode == "background"
-        && fresh_after_admitted_snapshot
-    {
-        bail!("background source refresh cannot require a fresh admission snapshot");
+    if mode == "background" && intent != RefreshIntent::AutomaticMaintenance {
+        bail!("selected import requires daemon refresh mode `wait`");
     }
-    if has_typed_selector && selector.is_scoped() && !fresh_after_admitted_snapshot {
-        bail!("scoped source refresh selector requires a fresh admission snapshot");
-    }
-    let requested_catalog = explicit_catalog
-        .map(ExplicitSourceCatalogAuthority::from_json)
-        .transpose()?;
-    let requested_refresh_scope = request
-        .get("refresh_scope")
-        .filter(|value| !value.is_null());
-    if selector.is_scoped() && requested_refresh_scope.is_some() {
-        bail!("scoped source refresh selector cannot carry a physical refresh scope");
-    }
-    let refresh_scope = requested_refresh_scope
-        .map(refresh_scope_from_json)
-        .transpose()?
-        .unwrap_or(WireRefreshScope::All);
-    if refresh_scope == WireRefreshScope::Exact {
-        bail!("physical exact refresh scope is reserved for engine-owned recovery");
-    }
-
-    if mode == "background" {
-        return Ok(WireRefreshAction::MaintenanceWake { request_id });
-    }
-
-    let intent = match selector {
-        WireRefreshSelector::AllAutomatic if fresh_after_admitted_snapshot => {
-            RefreshIntent::SelectedImport(RefreshSelection::All)
-        }
-        WireRefreshSelector::AllAutomatic => RefreshIntent::AutomaticMaintenance,
-        WireRefreshSelector::AutomaticProvider(provider) => {
-            RefreshIntent::SelectedImport(RefreshSelection::Provider(provider))
-        }
-        WireRefreshSelector::ExplicitCatalog => {
-            RefreshIntent::SelectedImport(RefreshSelection::ExactSource(
-                requested_catalog.expect("validated exact-source catalog authority"),
-            ))
-        }
-    };
-    Ok(WireRefreshAction::Submit(RefreshRequest::new(
-        request_id, intent, trigger,
-    )))
-}
-
-fn refresh_scope_from_json(value: &Value) -> Result<WireRefreshScope> {
-    match value.get("kind").and_then(Value::as_str) {
-        Some("all") => Ok(WireRefreshScope::All),
-        Some("exact") => {
-            let routes = value
-                .get("routes")
-                .and_then(Value::as_array)
-                .ok_or_else(|| anyhow!("exact source refresh recovery scope has no route list"))?;
-            if routes.is_empty() || routes.len() > SOURCE_REFRESH_RECOVERY_ROUTE_LIMIT {
-                bail!(
-                    "exact source refresh recovery scope must contain 1..={SOURCE_REFRESH_RECOVERY_ROUTE_LIMIT} routes"
-                );
-            }
-            let _routes = routes
-                .iter()
-                .map(|route| {
-                    let route = route.as_str().ok_or_else(|| {
-                        anyhow!("exact source refresh recovery route is not a string")
-                    })?;
-                    SourceRouteIdentity::from_sha256(route.to_owned()).map_err(Into::into)
-                })
-                .collect::<Result<BTreeSet<_>>>()?;
-            Ok(WireRefreshScope::Exact)
-        }
-        Some(kind) => bail!("unknown source refresh recovery scope kind `{kind}`"),
-        None => bail!("source refresh recovery scope kind is missing"),
-    }
+    // Every IPC caller gets a durable identity. ID-less scheduler wakes use
+    // the engine's internal enqueue path and do not cross this boundary.
+    Ok(RefreshRequest::new(request_id, intent, trigger))
 }
 
 fn render_status(status: &RefreshStatus) -> Value {
@@ -399,9 +192,8 @@ fn unknown_refresh_request_response(request_id: &str) -> Value {
         "request_state": "request_unknown",
         "error_code": "source_refresh_request_unknown",
         "reason": "request_not_retained_after_restart",
-        // This request's durable terminal outcome is no longer observable
-        // after a daemon restart.  Re-enqueuing equivalent work would create
-        // a new request, not recover this one.
+        // The old outcome is no longer observable. This exact typed response
+        // lets a waiter readmit its original request once under the same ID.
         "retryable": false,
         "error": "source refresh request outcome is no longer observable after daemon restart",
     }))
@@ -410,21 +202,10 @@ fn unknown_refresh_request_response(request_id: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn admitted_job(request: Value) -> Value {
-        let temp = tempfile::tempdir().unwrap();
-        let engine = super::super::refresh_engine(&crate::test_support::SOURCE_REFRESH_CONFIG);
-        handle_ipc_request(&engine, temp.path(), &request)
-            .unwrap()
-            .expect("source refresh response");
-        crate::paths_status::read_daemon_job_status(
-            &crate::paths_status::daemon_source_backed_refresh_job_path(temp.path()),
-        )
-        .expect("persisted source refresh job")
-    }
+    use ctx_history_refresh::RefreshJournal;
 
     #[test]
-    fn refresh_request_requires_a_typed_operation() {
+    fn refresh_request_requires_a_canonical_intent() {
         let temp = tempfile::tempdir().unwrap();
         let engine = super::super::refresh_engine(&crate::test_support::CONFIG);
         let missing = handle_ipc_request(
@@ -433,7 +214,7 @@ mod tests {
             &json!({"op": SOURCE_REFRESH_REQUEST_OP, "mode": "wait"}),
         )
         .unwrap_err();
-        assert!(format!("{missing:#}").contains("request operation is missing"));
+        assert!(format!("{missing:#}").contains("refresh intent is missing"));
 
         let invalid = handle_ipc_request(
             &engine,
@@ -441,11 +222,11 @@ mod tests {
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
-                "operation": "strict_import",
+                "refresh_intent": {"kind": "strict_import"},
             }),
         )
         .unwrap_err();
-        assert!(format!("{invalid:#}").contains("invalid source refresh operation"));
+        assert!(format!("{invalid:#}").contains("refresh intent `strict_import` is malformed"));
         assert!(!engine.has_pending_request());
     }
 
@@ -470,7 +251,7 @@ mod tests {
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
-                "operation": "refresh",
+                "refresh_intent": {"kind": "automatic_maintenance"},
             }),
         )
         .unwrap()
@@ -499,8 +280,8 @@ mod tests {
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
-                "operation": "refresh",
                 "trigger": "setup",
+                "refresh_intent": {"kind": "automatic_maintenance"},
             }),
         )
         .unwrap()
@@ -517,311 +298,28 @@ mod tests {
     }
 
     #[test]
-    fn legacy_automatic_import_normalizes_to_selected_import_intent() {
-        let temp = tempfile::tempdir().unwrap();
-        let engine = super::super::refresh_engine(&crate::test_support::SOURCE_REFRESH_CONFIG);
-
-        let response = handle_ipc_request(
-            &engine,
-            temp.path(),
-            &json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "refresh",
-                "trigger": "import",
-                "fresh_after_admitted_snapshot": true,
-            }),
-        )
-        .unwrap()
-        .expect("automatic import refresh response");
-
-        assert_eq!(response.value["operation"], "import");
-        assert_eq!(response.value["trigger"], "import");
-        assert_eq!(response.value["trigger_provenance"], "import_command");
-    }
-
-    #[test]
-    fn typed_import_selectors_remain_distinct_after_wire_admission() {
-        let all = admitted_job(json!({
-            "op": SOURCE_REFRESH_REQUEST_OP,
-            "mode": "wait",
-            "operation": "refresh",
-            "trigger": "import",
-            "refresh_selector": {"kind": "all_automatic"},
-            "fresh_after_admitted_snapshot": true,
-        }));
-        let provider = admitted_job(json!({
-            "op": SOURCE_REFRESH_REQUEST_OP,
-            "mode": "wait",
-            "operation": "import",
-            "trigger": "import",
-            "refresh_selector": {
-                "kind": "automatic_provider",
-                "provider": "codex",
-            },
-            "fresh_after_admitted_snapshot": true,
-        }));
-        let authority = ctx_history_refresh::explicit_source_catalog_authority_for_test(0);
-        let catalog = admitted_job(json!({
-            "op": SOURCE_REFRESH_REQUEST_OP,
-            "mode": "wait",
-            "operation": "import",
-            "trigger": "import",
-            "refresh_selector": {"kind": "explicit_catalog"},
-            "explicit_source_catalog": authority.to_json(),
-            "fresh_after_admitted_snapshot": true,
-        }));
-
-        assert_eq!(
-            all["refresh_intent"],
-            json!({"kind": "selected_import", "selection": {"kind": "all"}})
-        );
-        assert_eq!(
-            provider["refresh_intent"],
-            json!({
-                "kind": "selected_import",
-                "selection": {"kind": "provider", "provider": "codex"},
-            })
-        );
-        assert_ne!(provider["refresh_intent"], all["refresh_intent"]);
-        assert_eq!(
-            catalog["refresh_intent"]["selection"]["kind"],
-            "exact_source"
-        );
-        assert_eq!(
-            catalog["refresh_intent"]["selection"]["authority"],
-            authority.to_json()
-        );
-    }
-
-    #[test]
-    fn selector_wire_validation_fails_closed() {
-        let authority = ctx_history_refresh::explicit_source_catalog_authority_for_test(0);
-        let invalid = [
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "import",
-                "trigger": "import",
-                "refresh_selector": {"kind": "provider"},
-            }),
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "import",
-                "trigger": "import",
-                "refresh_selector": {"kind": "automatic_provider"},
-            }),
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "import",
-                "trigger": "import",
-                "refresh_selector": {
-                    "kind": "automatic_provider",
-                    "provider": "unknown",
-                },
-            }),
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "refresh",
-                "trigger": "search",
-                "refresh_selector": {
-                    "kind": "automatic_provider",
-                    "provider": "codex",
-                },
-            }),
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "background",
-                "operation": "import",
-                "trigger": "import",
-                "refresh_selector": {
-                    "kind": "automatic_provider",
-                    "provider": "codex",
-                },
-            }),
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "import",
-                "trigger": "import",
-                "refresh_selector": {"kind": "all_automatic"},
-                "explicit_source_catalog": authority.to_json(),
-            }),
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "import",
-                "trigger": "import",
-                "refresh_selector": {"kind": "explicit_catalog"},
-            }),
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "import",
-                "trigger": "import",
-                "refresh_selector": {
-                    "kind": "automatic_provider",
-                    "provider": "codex",
-                },
-            }),
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "import",
-                "trigger": "import",
-                "refresh_selector": {"kind": "explicit_catalog"},
-                "explicit_source_catalog": authority.to_json(),
-                "fresh_after_admitted_snapshot": false,
-            }),
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "import",
-                "trigger": "import",
-                "refresh_selector": {
-                    "kind": "automatic_provider",
-                    "provider": "codex",
-                },
-                "refresh_scope": {"kind": "all"},
-            }),
-            json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "import",
-                "trigger": "import",
-            }),
-        ];
-
-        for (index, request) in invalid.into_iter().enumerate() {
-            let temp = tempfile::tempdir().unwrap();
-            let engine = super::super::refresh_engine(&crate::test_support::SOURCE_REFRESH_CONFIG);
-            assert!(
-                handle_ipc_request(&engine, temp.path(), &request).is_err(),
-                "invalid selector request {index} was accepted"
-            );
-            assert!(!engine.has_pending_request());
-        }
-    }
-
-    #[test]
-    fn omitted_selector_normalizes_legacy_request_shapes_once() {
-        let legacy_all = admitted_job(json!({
-            "op": SOURCE_REFRESH_REQUEST_OP,
-            "mode": "wait",
-            "operation": "refresh",
-            "trigger": "import",
-            "fresh_after_admitted_snapshot": true,
-        }));
-        let authority = ctx_history_refresh::explicit_source_catalog_authority_for_test(0);
-        let legacy_catalog = admitted_job(json!({
-            "op": SOURCE_REFRESH_REQUEST_OP,
-            "mode": "wait",
-            "operation": "import",
-            "trigger": "import",
-            "explicit_source_catalog": authority.to_json(),
-            "fresh_after_admitted_snapshot": true,
-        }));
-
-        assert_eq!(
-            legacy_all["refresh_intent"],
-            json!({"kind": "selected_import", "selection": {"kind": "all"}})
-        );
-        assert_eq!(
-            legacy_catalog["refresh_intent"]["selection"]["kind"],
-            "exact_source"
-        );
-        assert_eq!(
-            legacy_catalog["refresh_intent"]["selection"]["authority"],
-            authority.to_json()
-        );
-    }
-
-    #[test]
-    fn wire_fields_decode_to_one_canonical_request() {
-        let authority = ctx_history_refresh::explicit_source_catalog_authority_for_test(0);
-        let cases = [
-            (
-                json!({
-                    "op": SOURCE_REFRESH_REQUEST_OP,
-                    "request_id": "019fcaaa-0000-7000-8000-000000000510",
-                    "mode": "wait",
-                    "operation": "refresh",
-                    "trigger": "import",
-                    "refresh_selector": {"kind": "all_automatic"},
-                    "fresh_after_admitted_snapshot": true,
-                    "refresh_scope": {"kind": "all"},
-                }),
-                RefreshIntent::SelectedImport(RefreshSelection::All),
-            ),
-            (
-                json!({
-                    "op": SOURCE_REFRESH_REQUEST_OP,
-                    "request_id": "019fcaaa-0000-7000-8000-000000000511",
-                    "mode": "wait",
-                    "operation": "import",
-                    "trigger": "import",
-                    "refresh_selector": {
-                        "kind": "automatic_provider",
-                        "provider": "codex",
-                    },
-                    "fresh_after_admitted_snapshot": true,
-                }),
-                RefreshIntent::SelectedImport(RefreshSelection::Provider(CaptureProvider::Codex)),
-            ),
-            (
-                json!({
-                    "op": SOURCE_REFRESH_REQUEST_OP,
-                    "request_id": "019fcaaa-0000-7000-8000-000000000512",
-                    "mode": "wait",
-                    "operation": "import",
-                    "trigger": "import",
-                    "explicit_source_catalog": authority.to_json(),
-                }),
-                RefreshIntent::SelectedImport(RefreshSelection::ExactSource(authority)),
-            ),
-        ];
-
-        for (wire, expected_intent) in cases {
-            let WireRefreshAction::Submit(request) = refresh_action(&wire).unwrap() else {
-                panic!("wait request decoded as maintenance wake");
-            };
-            assert_eq!(Some(request.request_id()), wire["request_id"].as_str());
-            assert_eq!(request.intent(), &expected_intent);
-            assert_eq!(request.trigger(), RefreshRequestTrigger::Import);
-        }
-    }
-
-    #[test]
-    fn background_wire_request_decodes_as_maintenance_wake() {
+    fn background_wire_request_decodes_as_durable_submission() {
         let request_id = "019fcaaa-0000-7000-8000-000000000513";
-        let action = refresh_action(&json!({
+        let action = refresh_request(&json!({
             "op": SOURCE_REFRESH_REQUEST_OP,
             "request_id": request_id,
             "mode": "background",
-            "operation": "refresh",
             "trigger": "search",
-            "refresh_selector": {"kind": "all_automatic"},
-            "fresh_after_admitted_snapshot": false,
+            "refresh_intent": {"kind": "automatic_maintenance"},
         }))
         .unwrap();
 
-        assert!(matches!(
-            action,
-            WireRefreshAction::MaintenanceWake {
-                request_id: decoded
-            } if decoded == request_id
-        ));
+        assert_eq!(action.request_id(), request_id);
+        assert_eq!(action.intent(), &RefreshIntent::AutomaticMaintenance);
+        assert_eq!(action.trigger(), RefreshRequestTrigger::Search);
     }
 
     #[test]
-    fn physical_exact_scope_cannot_widen_through_ipc() {
-        let error = refresh_action(&json!({
+    fn canonical_request_rejects_retired_physical_scope() {
+        let error = refresh_request(&json!({
             "op": SOURCE_REFRESH_REQUEST_OP,
             "mode": "wait",
-            "operation": "refresh",
+            "refresh_intent": {"kind": "automatic_maintenance"},
             "refresh_scope": {
                 "kind": "exact",
                 "routes": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
@@ -829,6 +327,131 @@ mod tests {
         }))
         .unwrap_err();
 
-        assert!(format!("{error:#}").contains("reserved for engine-owned recovery"));
+        assert!(format!("{error:#}").contains("carries retired `refresh_scope`"));
+    }
+
+    fn background_request(request_id: &str) -> Value {
+        json!({
+            "op": SOURCE_REFRESH_REQUEST_OP,
+            "request_id": request_id,
+            "mode": "background",
+            "trigger": "search",
+            "refresh_intent": {"kind": "automatic_maintenance"},
+        })
+    }
+
+    #[test]
+    fn background_acknowledgement_is_durable_before_response_and_duplicate_survives_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = super::super::refresh_engine(&crate::test_support::CONFIG);
+        let id = "019fcaaa-0000-7000-8000-000000000514";
+        let request = background_request(id);
+        let journal = super::super::journal::DaemonRefreshJournal::default();
+
+        let first = handle_ipc_request(&engine, temp.path(), &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.value["ok"], true);
+        assert_eq!(first.value["request_id"], id);
+        assert_eq!(first.value["request_state"], "admission_pending");
+        let durable = journal.load(temp.path()).unwrap().unwrap();
+        assert_eq!(durable["request_id"], id);
+        assert!(durable.get("admission_durability").is_none());
+        assert!(!engine.prepare_next_pending_admission(temp.path()).unwrap());
+
+        let duplicate = handle_ipc_request(&engine, temp.path(), &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(duplicate.value, first.value);
+        assert_eq!(journal.load(temp.path()).unwrap(), Some(durable.clone()));
+        first.response_barrier.unwrap().release(&engine);
+        assert!(!engine.prepare_next_pending_admission(temp.path()).unwrap());
+        duplicate.response_barrier.unwrap().release(&engine);
+        drop(engine);
+
+        let restarted = super::super::refresh_engine(&crate::test_support::CONFIG);
+        assert!(restarted
+            .recover_interrupted_publication(temp.path())
+            .unwrap());
+        let response = handle_ipc_request(&restarted, temp.path(), &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.value["ok"], true);
+        assert_eq!(response.value["request_id"], id);
+        assert_eq!(
+            response.value["requested_at_ms"],
+            durable["requested_at_ms"]
+        );
+        assert_eq!(response.value["coalesced_requests"], 0);
+        response.response_barrier.unwrap().release(&restarted);
+    }
+
+    struct AdmissionFaultJournal(std::sync::atomic::AtomicU8);
+
+    impl ctx_history_refresh::RefreshJournal for AdmissionFaultJournal {
+        fn load(&self, root: &Path) -> Result<Option<Value>> {
+            super::super::journal::DaemonRefreshJournal::default().load(root)
+        }
+
+        fn store(&self, root: &Path, value: &Value) -> Result<()> {
+            super::super::journal::DaemonRefreshJournal::default().store(root, value)
+        }
+
+        fn store_before_ack(
+            &self,
+            root: &Path,
+            value: &Value,
+        ) -> ctx_history_refresh::DurableAdmissionPersistence {
+            use ctx_history_refresh::DurableAdmissionPersistence as Persistence;
+            let fault = self.0.swap(0, std::sync::atomic::Ordering::SeqCst);
+            if fault == 1 {
+                return Persistence::Failed(anyhow!("injected pre-replacement failure"));
+            }
+            let result = super::super::journal::DaemonRefreshJournal::default()
+                .store_before_ack(root, value);
+            if fault == 2 && matches!(result, Persistence::Confirmed) {
+                return Persistence::Retained(anyhow!("injected durability uncertainty"));
+            }
+            result
+        }
+    }
+
+    #[test]
+    fn background_failed_or_indeterminate_persistence_is_not_successfully_acknowledged() {
+        use std::sync::{atomic::AtomicU8, Arc};
+        for fault in [1, 2] {
+            let temp = tempfile::tempdir().unwrap();
+            let engine = RefreshEngine::new(
+                Arc::new(AdmissionFaultJournal(AtomicU8::new(fault))),
+                Arc::new(super::super::runtime::DaemonRefreshRuntime::new(
+                    &crate::test_support::CONFIG,
+                )),
+            );
+            let id = "019fcaaa-0000-7000-8000-000000000515";
+            let request = background_request(id);
+            let first = handle_ipc_request(&engine, temp.path(), &request);
+            if fault == 1 {
+                assert!(first.is_err());
+                assert!(engine.status(id).is_none());
+            } else {
+                let first = first.unwrap().unwrap();
+                assert_eq!(first.value["ok"], false);
+                assert_eq!(first.value["retryable"], true);
+                assert_eq!(first.value["request_id"], id);
+                assert_eq!(
+                    first.value["error_code"],
+                    "source_refresh_admission_unconfirmed"
+                );
+                assert!(engine.status(id).is_some());
+                first.response_barrier.unwrap().release(&engine);
+            }
+            let replay = handle_ipc_request(&engine, temp.path(), &request)
+                .unwrap()
+                .unwrap();
+            assert_eq!(replay.value["ok"], true);
+            assert_eq!(replay.value["request_id"], id);
+            assert!(replay.value.get("admission_durability").is_none());
+            replay.response_barrier.unwrap().release(&engine);
+        }
     }
 }

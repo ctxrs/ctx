@@ -6,8 +6,8 @@ use std::{
 use crate::{
     analytics::{
         count_bucket, DaemonBackoffV1, DaemonCycleFactsV1, DaemonCycleResultV1, DaemonCycleStateV1,
-        DaemonRunFactsV1, DaemonRuntimeObservationV1, DaemonRuntimeSnapshotV1, Outcome,
-        PublicEventV1, RuntimeObservationV1,
+        DaemonRunFactsV1, DaemonRuntimeObservationV1, DaemonRuntimeSnapshotV1,
+        DaemonStorageFactsV1, Outcome, PublicEventV1, RuntimeObservationV1,
     },
     DaemonObservationPort,
 };
@@ -49,10 +49,15 @@ impl DaemonTelemetry {
         }
     }
 
-    pub(super) fn ready_events(&self, recovered: bool, now: Instant) -> Vec<PublicEventV1> {
+    pub(super) fn ready_events(
+        &self,
+        recovered: bool,
+        now: Instant,
+        storage: Option<DaemonStorageFactsV1>,
+    ) -> Vec<PublicEventV1> {
         let elapsed = now.saturating_duration_since(self.started);
         let mut events = vec![runtime_event(
-            DaemonRuntimeObservationV1::ready(self.run),
+            DaemonRuntimeObservationV1::ready_with_storage(self.run, storage),
             Outcome::Success,
             elapsed,
         )];
@@ -125,14 +130,22 @@ impl DaemonTelemetry {
         events
     }
 
-    pub(super) fn liveness_events(&mut self, now: Instant) -> Vec<PublicEventV1> {
+    pub(super) fn liveness_due(&self, now: Instant) -> bool {
+        now >= self.next_liveness
+    }
+
+    pub(super) fn liveness_events(
+        &mut self,
+        now: Instant,
+        storage: Option<DaemonStorageFactsV1>,
+    ) -> Vec<PublicEventV1> {
         if now < self.next_liveness {
             return Vec::new();
         }
         let mut events = Vec::new();
         self.flush_pending_idle(&mut events);
         events.push(runtime_event(
-            DaemonRuntimeObservationV1::liveness(self.snapshot()),
+            DaemonRuntimeObservationV1::liveness_with_storage(self.snapshot(), storage),
             Outcome::Success,
             now.saturating_duration_since(self.started),
         ));
@@ -244,7 +257,23 @@ pub(super) fn runtime_event(
     PublicEventV1::RuntimeObservation(RuntimeObservationV1::daemon(observation, outcome, duration))
 }
 
-pub(super) fn send_daemon_events(
+pub(super) fn deliver_active(
+    observation: &dyn DaemonObservationPort,
+    data_root: &Path,
+    uploader_enabled: bool,
+    events: &[PublicEventV1],
+) {
+    if events.is_empty() && !uploader_enabled {
+        return;
+    }
+    if uploader_enabled {
+        observation.append_and_upload(data_root, events);
+    } else {
+        observation.append(data_root, events);
+    }
+}
+
+pub(super) fn append_terminal_events(
     observation: &dyn DaemonObservationPort,
     data_root: &Path,
     events: &[PublicEventV1],
@@ -252,12 +281,139 @@ pub(super) fn send_daemon_events(
     if events.is_empty() {
         return;
     }
-    observation.deliver(data_root, events);
+    observation.append(data_root, events);
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use super::super::super::analytics;
+
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingObservation {
+        deliveries: Mutex<Vec<(usize, bool)>>,
+    }
+
+    impl RecordingObservation {
+        fn deliveries(&self) -> Vec<(usize, bool)> {
+            self.deliveries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    impl DaemonObservationPort for RecordingObservation {
+        fn analytics_enabled(&self, _data_root: &Path) -> bool {
+            true
+        }
+
+        fn provider_refresh_event(
+            &self,
+            _job: &serde_json::Value,
+            _successor_pending: bool,
+        ) -> Option<PublicEventV1> {
+            None
+        }
+
+        fn append(&self, _data_root: &Path, events: &[PublicEventV1]) {
+            self.deliveries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((events.len(), false));
+        }
+
+        fn append_and_upload(&self, _data_root: &Path, events: &[PublicEventV1]) {
+            self.deliveries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((events.len(), true));
+        }
+    }
+
+    fn test_run() -> DaemonRunFactsV1 {
+        DaemonRunFactsV1::new(
+            analytics::DaemonStartModeV1::Manual,
+            analytics::DaemonSupervisorV1::User,
+            None,
+        )
+    }
+
+    #[test]
+    fn active_empty_tick_requests_upload() {
+        let observation = RecordingObservation::default();
+
+        deliver_active(&observation, Path::new("test-root"), true, &[]);
+
+        assert_eq!(observation.deliveries(), [(0, true)]);
+    }
+
+    #[test]
+    fn finite_worker_events_append_without_upload() {
+        let observation = RecordingObservation::default();
+        let started = Instant::now();
+        let telemetry = DaemonTelemetry::new(test_run(), started, 0);
+        let events = telemetry.ready_events(false, started, None);
+
+        deliver_active(&observation, Path::new("test-root"), false, &events);
+
+        assert_eq!(observation.deliveries(), [(1, false)]);
+    }
+
+    #[test]
+    fn ready_and_liveness_include_storage_without_copying_it_to_recovery() {
+        let started = Instant::now();
+        let mut telemetry = DaemonTelemetry::new(test_run(), started, 0);
+        let storage =
+            analytics::DaemonStorageFactsV1::from_exact(Some((1024, 512)), Some((256, 128)));
+        let events = telemetry.ready_events(true, started, storage);
+        assert_eq!(events.len(), 2);
+        let PublicEventV1::RuntimeObservation(ready) = &events[0] else {
+            panic!("ready event has wrong family");
+        };
+        let mut ready_properties = serde_json::Map::new();
+        ready.kind.insert_properties(&mut ready_properties);
+        assert!(ready_properties.contains_key("filesystem_total_bytes_bucket"));
+        let PublicEventV1::RuntimeObservation(recovered) = &events[1] else {
+            panic!("recovered event has wrong family");
+        };
+        let mut recovered_properties = serde_json::Map::new();
+        recovered.kind.insert_properties(&mut recovered_properties);
+        assert!(!recovered_properties.contains_key("filesystem_total_bytes_bucket"));
+
+        let due = started + DAEMON_LIVENESS_MIN_INTERVAL;
+        let liveness = telemetry.liveness_events(due, storage);
+        let PublicEventV1::RuntimeObservation(liveness) = &liveness[0] else {
+            panic!("liveness event has wrong family");
+        };
+        let mut liveness_properties = serde_json::Map::new();
+        liveness.kind.insert_properties(&mut liveness_properties);
+        assert!(liveness_properties.contains_key("core_active_logical_bytes_bucket"));
+    }
+
+    #[test]
+    fn fatal_and_stopped_events_append_without_upload() {
+        let observation = RecordingObservation::default();
+        let started = Instant::now();
+        let mut fatal = DaemonTelemetry::new(test_run(), started, 0);
+        let mut stopped = DaemonTelemetry::new(test_run(), started, 1);
+
+        append_terminal_events(
+            &observation,
+            Path::new("test-root"),
+            &fatal.fatal_events(started),
+        );
+        append_terminal_events(
+            &observation,
+            Path::new("test-root"),
+            &stopped.stopped_events(false, started),
+        );
+
+        assert_eq!(observation.deliveries(), [(1, false), (1, false)]);
+    }
 
     #[test]
     fn safety_reconciliation_admits_a_sixty_minute_hermes_deadline_within_eighty_minutes() {
@@ -265,11 +421,14 @@ mod tests {
         let profile_source_descriptor = [4_u8; 32];
         let database_identity = [1_u8; 32];
         let schema_evidence = [2_u8; 32];
+        let physical_revision = [3_u8; 32];
         let control = serde_json::to_vec(&serde_json::json!({
             "kind": "hermes-route-control-v1",
-            "version": 2,
+            "version": 3,
+            "parser_revision": "hermes-source-backed-v5-optional-admission",
             "profile_source_descriptor": profile_source_descriptor,
             "database_identity": database_identity,
+            "physical_revision": physical_revision,
             "schema_evidence": schema_evidence,
             "session_rowid": 4,
             "message_rowid": 9,

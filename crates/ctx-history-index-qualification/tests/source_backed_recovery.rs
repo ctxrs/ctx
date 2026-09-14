@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+mod manifest_failure;
+
 use std::{
     collections::HashSet,
     env,

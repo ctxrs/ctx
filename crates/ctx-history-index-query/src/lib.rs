@@ -9,13 +9,13 @@ pub use contract::*;
 pub use ctx_history_index_format::{IndexError, Result};
 pub use event_range::*;
 use filtering::*;
-pub use reader::VerifiedIndex;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use reader::{
     reset_verified_index_publication_construction_count, reset_verified_index_reopen_count,
     verified_index_publication_construction_count, verified_index_reopen_count,
 };
+pub use reader::{VerifiedGenerationSnapshot, VerifiedIndex};
 pub(crate) use records::stored_event_record;
 use records::{
     core_event_fast_preflight, core_event_identity_fast_preflight, stored_core_event_record,

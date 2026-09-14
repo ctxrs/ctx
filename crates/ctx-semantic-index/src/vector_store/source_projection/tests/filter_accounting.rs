@@ -108,15 +108,21 @@ fn all_filtered_generation_is_ready_empty_with_exact_accounting() -> Result<()> 
         )],
     )?;
     let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
-    let outcome = reconcile_all(
-        &mut store,
+    let mut progress = Vec::new();
+    let outcome = store.reconcile_source_backed_index_with_checkpoint_and_progress(
         &index,
         &mut CoreBuilder::default(),
         &mut MarkerEmbedder::default(),
+        &mut || Ok(()),
+        &mut |sequence| {
+            progress.push(sequence);
+            Ok(())
+        },
     )?;
 
     assert_eq!(outcome.records_embedded, 0);
     assert_eq!(outcome.records_filtered, 3);
+    assert_eq!(progress, vec![1, 2, 3]);
     assert_eq!(active_events(&store)?, 0);
     let acknowledgement = store
         .source_acknowledgement()?
@@ -244,15 +250,21 @@ fn vector_reuse_preserves_intentional_filter_accounting() -> Result<()> {
         &mut MarkerEmbedder::default(),
     )?;
 
-    let outcome = reconcile_all(
-        &mut store,
+    let mut progress = Vec::new();
+    let outcome = store.reconcile_source_backed_index_with_checkpoint_and_progress(
         &target,
         &mut CoreBuilder::default(),
         &mut MarkerEmbedder::default(),
+        &mut || Ok(()),
+        &mut |sequence| {
+            progress.push(sequence);
+            Ok(())
+        },
     )?;
     assert_eq!(outcome.records_reused, 1);
     assert_eq!(outcome.records_embedded, 0);
     assert_eq!(outcome.records_filtered, 1);
+    assert_eq!(progress, vec![1, 2, 3]);
     let acknowledgement = store
         .source_acknowledgement()?
         .ok_or_else(|| anyhow!("reuse projection acknowledgement is missing"))?;

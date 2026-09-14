@@ -45,12 +45,13 @@ public sealed class CtxAgentHistoryCliException : CtxAgentHistoryException
         string stderr,
         string code = "adapter_error",
         bool retryable = false,
-        Exception? innerException = null)
+        Exception? innerException = null,
+        JsonObject? producerError = null)
         : base(
             message,
             code,
             retryable: retryable,
-            details: BuildDetails(command, exitCode, stdout, stderr),
+            details: BuildDetails(command, exitCode, stdout, stderr, producerError),
             innerException)
     {
         Command = command.ToArray();
@@ -64,14 +65,15 @@ public sealed class CtxAgentHistoryCliException : CtxAgentHistoryException
     public string Stdout { get; }
     public string Stderr { get; }
 
-    private static JsonObject BuildDetails(IReadOnlyList<string> command, int exitCode, string stdout, string stderr)
+    private static JsonObject BuildDetails(IReadOnlyList<string> command, int exitCode, string stdout, string stderr, JsonObject? producerError)
     {
         return new JsonObject
         {
             ["command"] = JsonHelpers.ToJsonArray(command),
             ["exitCode"] = exitCode,
             ["stdout"] = stdout,
-            ["stderr"] = stderr
+            ["stderr"] = stderr,
+            ["producerError"] = producerError?.DeepClone()
         };
     }
 }

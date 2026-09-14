@@ -34,8 +34,14 @@ impl FlatSegmentStore {
     }
 
     pub(crate) fn compact(&self) -> FlatResult<FlatPublishOutcome> {
-        self.require_writable()?;
         let _transaction = self.lock_transaction()?;
+        self.compact_coordinated()
+    }
+
+    /// Compacts while the caller retains `flat_transaction.lock` across a
+    /// larger Flat/control handoff.
+    pub(crate) fn compact_coordinated(&self) -> FlatResult<FlatPublishOutcome> {
+        self.require_writable()?;
         let _guard = self.lock_exclusive()?;
         let Some(current) = self.load_current_locked()? else {
             return Ok(noop_outcome(None));
@@ -190,8 +196,7 @@ impl FlatSegmentStore {
         Ok(())
     }
 
-    pub(super) fn recover_internal(&self) -> FlatResult<FlatRecoveryReport> {
-        let _transaction = self.lock_transaction()?;
+    pub(super) fn recover_internal_coordinated(&self) -> FlatResult<FlatRecoveryReport> {
         let _guard = self.lock_exclusive()?;
         let mut report = remove_temporary_files(&self.root)?;
         let selected = match select_manifest_any(&self.root) {
@@ -305,7 +310,7 @@ fn reset_legacy_store(
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if name.starts_with(SEGMENT_PREFIX) {
+        if name.starts_with(SEGMENT_PREFIX) || is_catalog_page_name(&name) {
             remove_recoverable_file(
                 &entry.path(),
                 &mut report.removed_orphan_segments,
@@ -545,6 +550,14 @@ pub(super) fn cleanup_obsolete_locked(
         })
         .map(str::to_owned)
         .collect::<HashSet<_>>();
+    active_segments.extend(
+        selected
+            .envelope
+            .manifest
+            .catalog_pages
+            .iter()
+            .map(CatalogPageDescriptor::file_name),
+    );
 
     let manifest_directory = manifests_directory(root);
     let entries = fs::read_dir(&manifest_directory)
@@ -578,6 +591,13 @@ pub(super) fn cleanup_obsolete_locked(
     let previous_path = if let Some((generation, digest, path)) = previous {
         let envelope = read_manifest(&path)?;
         validate_manifest(&envelope, generation, &digest)?;
+        active_segments.extend(
+            envelope
+                .manifest
+                .catalog_pages
+                .iter()
+                .map(CatalogPageDescriptor::file_name),
+        );
         active_segments.extend(envelope.manifest.segments.iter().flat_map(|segment| {
             [
                 segment.vectors.file.clone(),
@@ -629,7 +649,9 @@ pub(super) fn cleanup_obsolete_locked(
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !name.starts_with(SEGMENT_PREFIX) || active_segments.contains(name.as_str()) {
+        if (!name.starts_with(SEGMENT_PREFIX) && !is_catalog_page_name(&name))
+            || active_segments.contains(name.as_str())
+        {
             continue;
         }
         remove_recoverable_file(
@@ -654,7 +676,7 @@ pub(super) fn cleanup_without_manifest(root: &Path) -> FlatResult<FlatRecoveryRe
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !name.starts_with(SEGMENT_PREFIX) {
+        if !name.starts_with(SEGMENT_PREFIX) && !is_catalog_page_name(&name) {
             continue;
         }
         remove_recoverable_file(

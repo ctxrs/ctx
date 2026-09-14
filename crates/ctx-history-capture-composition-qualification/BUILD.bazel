@@ -37,7 +37,10 @@ ctx_rust_test(
     crate_root = "tests/jsonl_publication.rs",
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
-    data = ["//:gemini_resume_test_fixtures"],
+    data = [
+        "//:gemini_resume_test_fixtures",
+        "//:omp_parent_session_test_fixtures",
+    ],
     deps = all_crate_deps(normal_dev = True) + [
         "//crates/ctx-history-capture-composition:test_support_lib",
         "//crates/ctx-history-capture-model:lib",

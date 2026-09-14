@@ -10,7 +10,7 @@ use ctx_agent_integrations::skill::{parse_picker_selection, SkillAgentSelection}
 use super::{
     agents::{picker_agents, SkillAgentArg},
     paths::PathContext,
-    SkillInstallArgs, SkillStatusArgs,
+    SkillInstallArgs, SkillRemoveArgs, SkillStatusArgs,
 };
 use crate::ui::Ui;
 
@@ -40,6 +40,13 @@ pub(super) fn install_agent_selection(
 
 pub(super) fn status_agent_selection(
     args: &SkillStatusArgs,
+    context: &PathContext,
+) -> Result<SkillAgentSelection> {
+    status_selection(&args.agent, args.all_agents, args.project, context)
+}
+
+pub(super) fn remove_agent_selection(
+    args: &SkillRemoveArgs,
     context: &PathContext,
 ) -> Result<SkillAgentSelection> {
     status_selection(&args.agent, args.all_agents, args.project, context)
@@ -128,33 +135,12 @@ fn picker_prompt_lines(prompt: &SkillPickerPrompt) -> Vec<String> {
 #[cfg(test)]
 mod prompt_tests {
     use super::*;
-    use std::{
-        io,
-        path::Path,
-        sync::{Arc, Mutex},
+    use std::{io, path::Path};
+
+    use crate::{
+        test_support::SharedWriter,
+        ui::{ColorMode, RenderContext, StreamKind, TestContext},
     };
-
-    use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext};
-
-    #[derive(Clone, Default)]
-    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl SharedWriter {
-        fn bytes(&self) -> Vec<u8> {
-            self.0.lock().unwrap().clone()
-        }
-    }
-
-    impl io::Write for SharedWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 
     fn test_ui() -> (Ui, SharedWriter, SharedWriter) {
         let stdout = SharedWriter::default();

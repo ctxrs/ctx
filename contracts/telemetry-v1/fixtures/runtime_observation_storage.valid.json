@@ -1,0 +1,22 @@
+{
+  "event_id": "123e4567-e89b-42d3-a456-426614174001",
+  "event_name": "runtime_observation",
+  "event_version": 1,
+  "occurred_at": "2026-07-22T12:34:00Z",
+  "surface": "daemon",
+  "operation": "ready",
+  "outcome": "success",
+  "duration_bucket": "lt_5s",
+  "properties": {
+    "start_mode": "auto",
+    "supervisor": "cli_autostart",
+    "trigger_command": "search",
+    "filesystem_total_bytes_bucket": "1tb-2tb",
+    "filesystem_available_bytes_bucket": "250gb-500gb",
+    "filesystem_available_fraction_bucket": "20pct-40pct",
+    "core_active_logical_bytes_bucket": "5gb-10gb",
+    "core_certified_source_bytes_bucket": "10gb-25gb",
+    "core_logical_amplification_bucket": "0_25x-0_35x",
+    "filesystem_available_to_active_core_ratio_bucket": "4x+"
+  }
+}

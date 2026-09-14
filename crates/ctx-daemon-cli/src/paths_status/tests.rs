@@ -1,16 +1,121 @@
 use super::*;
 
 #[test]
+fn inactive_semantic_runtime_preserves_persisted_failure_instead_of_pending() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = DaemonRuntimeConfig::new(
+        true,
+        true,
+        "stable".to_owned(),
+        std::time::Duration::from_secs(24 * 60 * 60),
+        crate::DaemonConfig {
+            enabled: true,
+            mode: crate::DaemonMode::Full,
+        },
+        true,
+        "config",
+    );
+    for (last_status, reason, error, expected) in [
+        (
+            "skipped",
+            "model_load_failed",
+            Some("failed to load ONNX Runtime: library is missing"),
+            "failed",
+        ),
+        (
+            "failed",
+            "model_integrity_failed",
+            Some("model checksum mismatch"),
+            "failed",
+        ),
+        ("skipped", "memory_pressure", None, "pending"),
+    ] {
+        write_private_json_file(
+            &daemon_semantic_job_path(temp.path()),
+            &json!({
+                "status": last_status, "reason": reason,
+                "last_error": error, "last_run_at_ms": 1234,
+            }),
+        )
+        .unwrap();
+        let context = ctx_daemon_application::DaemonSemanticStatusContext {
+            daemon_mode: ctx_daemon_application::DaemonMode::Full,
+            daemon_running: true,
+            semantic_runtime_active: false,
+            config_reload: ctx_daemon_application::DaemonConfigReloadContext {
+                status: "applied",
+                out_of_sync: false,
+                requested_daemon_enabled: Some(true),
+                requested_semantic_enabled: Some(true),
+                requested_semantic_executor: Some("builtin"),
+                requested_semantic_contract_fingerprint: Some(
+                    config.semantic_model_contract().fingerprint(),
+                ),
+                requested_semantic_builtin_throttling_configured: Some(true),
+                requested_semantic_builtin_throttling_effective: Some(true),
+                applied_daemon_enabled: Some(true),
+                applied_semantic_enabled: Some(true),
+                applied_semantic_executor: Some("builtin"),
+                applied_semantic_contract_fingerprint: Some(
+                    config.semantic_model_contract().fingerprint(),
+                ),
+                applied_semantic_builtin_throttling_configured: Some(true),
+                applied_semantic_builtin_throttling_effective: Some(true),
+                last_error: None,
+            },
+        };
+        let report = daemon_semantic_job_report(temp.path(), true, context, Some(&config));
+        assert_eq!(report["status"], expected, "{report:#}");
+        assert_eq!(
+            report["reason"],
+            if error.is_some() {
+                reason
+            } else {
+                "semantic_runtime_inactive"
+            }
+        );
+        assert_eq!(report["last_run_status"], last_status);
+        assert_eq!(report["last_run_reason"], reason);
+        assert_eq!(report["last_error"].as_str(), error);
+
+        // A new configuration transition supersedes the previous job state.
+        let pending = ctx_daemon_application::DaemonSemanticStatusContext {
+            config_reload: ctx_daemon_application::DaemonConfigReloadContext {
+                status: "pending",
+                out_of_sync: true,
+                ..context.config_reload
+            },
+            ..context
+        };
+        let report = daemon_semantic_job_report(temp.path(), true, pending, Some(&config));
+        assert_eq!(report["status"], "pending");
+        assert_eq!(report["reason"], "daemon_config_reload_pending");
+
+        let disabled = ctx_daemon_application::DaemonSemanticStatusContext {
+            config_reload: ctx_daemon_application::DaemonConfigReloadContext {
+                requested_semantic_enabled: Some(false),
+                applied_semantic_enabled: Some(false),
+                ..context.config_reload
+            },
+            ..context
+        };
+        let report = daemon_semantic_job_report(temp.path(), true, disabled, Some(&config));
+        assert_eq!(report["status"], "disabled");
+        assert_eq!(report["reason"], "semantic_disabled");
+    }
+}
+
+#[test]
 fn daemon_application_snapshot_tracks_same_endpoint_space_changes() {
     let endpoint = "https://embed.example.test/base";
-    let first = AppConfig::default().with_semantic_embedding_executor(
+    let first = DaemonRuntimeConfig::default().with_semantic_embedding_executor(
         crate::SemanticEmbeddingExecutorConfig::http(
             endpoint,
             crate::ExternalSemanticSpace::new("space-a", 384).unwrap(),
         )
         .unwrap(),
     );
-    let second = AppConfig::default().with_semantic_embedding_executor(
+    let second = DaemonRuntimeConfig::default().with_semantic_embedding_executor(
         crate::SemanticEmbeddingExecutorConfig::http(
             endpoint,
             crate::ExternalSemanticSpace::new("space-b", 768).unwrap(),
@@ -25,6 +130,21 @@ fn daemon_application_snapshot_tracks_same_endpoint_space_changes() {
         first.semantic_contract_fingerprint,
         second.semantic_contract_fingerprint
     );
+}
+
+#[test]
+fn daemon_application_snapshot_tracks_explicitly_unthrottled_builtin_executor() {
+    let config = DaemonRuntimeConfig::default()
+        .with_semantic_embedding_executor(
+            crate::SemanticEmbeddingExecutorConfig::builtin_with_throttling(false),
+        )
+        .with_semantic_builtin_throttling(false, "config");
+
+    let snapshot = application_config(&config);
+
+    assert_eq!(snapshot.semantic_executor, "builtin");
+    assert!(!snapshot.semantic_builtin_throttling_configured);
+    assert_eq!(snapshot.semantic_builtin_throttling_effective, Some(false));
 }
 use std::sync::{Arc, Barrier};
 
@@ -151,10 +271,10 @@ fn activation_failure_does_not_reuse_the_previous_executors_failure_class() {
         }),
     )
     .unwrap();
-    let config = AppConfig::new(
+    let config = DaemonRuntimeConfig::new(
         true,
         true,
-        std::borrow::Cow::Borrowed("stable"),
+        "stable".to_owned(),
         std::time::Duration::from_secs(24 * 60 * 60),
         crate::DaemonConfig {
             enabled: true,
@@ -186,10 +306,14 @@ fn activation_failure_does_not_reuse_the_previous_executors_failure_class() {
                 requested_semantic_contract_fingerprint: Some(
                     config.semantic_model_contract().fingerprint(),
                 ),
+                requested_semantic_builtin_throttling_configured: Some(true),
+                requested_semantic_builtin_throttling_effective: None,
                 applied_daemon_enabled: Some(true),
                 applied_semantic_enabled: Some(false),
                 applied_semantic_executor: None,
                 applied_semantic_contract_fingerprint: None,
+                applied_semantic_builtin_throttling_configured: None,
+                applied_semantic_builtin_throttling_effective: None,
                 last_error: Some("new endpoint activation failed"),
             },
         },
@@ -227,10 +351,14 @@ fn config_load_failure_surfaces_failed_instead_of_stale_semantic_readiness() {
                 requested_semantic_enabled: Some(true),
                 requested_semantic_executor: Some("https://old.example.test/"),
                 requested_semantic_contract_fingerprint: Some("sha256:old-space"),
+                requested_semantic_builtin_throttling_configured: Some(true),
+                requested_semantic_builtin_throttling_effective: None,
                 applied_daemon_enabled: Some(true),
                 applied_semantic_enabled: Some(false),
                 applied_semantic_executor: None,
                 applied_semantic_contract_fingerprint: None,
+                applied_semantic_builtin_throttling_configured: None,
+                applied_semantic_builtin_throttling_effective: None,
                 last_error: Some("parse config.toml: invalid value"),
             },
         },

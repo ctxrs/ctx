@@ -41,6 +41,7 @@ HISTORY_TEST_SUPPORT_DEPS = (
     "//crates/ctx-client-observability:test_support_lib",
     "//crates/ctx-terminal:lib",
 )
+HISTORY_UNIT_TEST_DEPS = ("//crates/ctx-semantic-index:lib",)
 HISTORY_LABEL = "//crates/ctx-history-cli:lib"
 HISTORY_TEST_SUPPORT_LABEL = "//crates/ctx-history-cli:test_support_lib"
 HISTORY_CARGO_DATA_LABEL = "//crates/ctx-history-cli:cargo_package_data"
@@ -206,10 +207,16 @@ def _validate_cargo(workspace_path: Path, history_path: Path, final_path: Path, 
         raise BoundaryError("history Cargo package identity drifted")
     if _package_name(final_manifest, final_path) != FINAL_PACKAGE:
         raise BoundaryError("final Cargo package identity drifted")
-    history_dependencies = {name for _, name in _resolved_dependencies(history_manifest, HISTORY_PACKAGE, workspace)}
+    resolved_history_dependencies = _resolved_dependencies(history_manifest, HISTORY_PACKAGE, workspace)
+    history_dependencies = {name for _, name in resolved_history_dependencies}
     forbidden = sorted(name for name in history_dependencies if name in FORBIDDEN_HISTORY_CARGO or name.startswith("ctx-agent-"))
     if forbidden:
         raise BoundaryError("ctx-history-cli has forbidden Cargo dependencies: " + ", ".join(forbidden))
+    # Cargo dev scope is package-wide; the exact unit target is checked in Bazel.
+    # Resolve renames and workspace inheritance before checking every table.
+    semantic_scopes = [table for table, name in resolved_history_dependencies if name == "ctx-semantic-index"]
+    if semantic_scopes != ["dev-dependencies"]:
+        raise BoundaryError("ctx-history-cli Cargo ctx-semantic-index must appear exactly once in dev-dependencies")
 
     members = _workspace_members(workspace_manifest)
     expected = {(workspace_path.parent / member / "Cargo.toml").resolve() for member in members}
@@ -357,6 +364,15 @@ def _assignment(tokens: Sequence[Token], name: str, package: str) -> list[list[T
             elif value_token.value == "]":
                 depth -= 1
                 if depth == 0:
+                    following = value[end + 1:]
+                    # Do not authenticate only the first list of a composed
+                    # assignment. A literal must end before the next statement.
+                    if following and not (
+                        len(following) >= 2
+                        and following[0].kind == "identifier"
+                        and following[1].value in {"=", "("}
+                    ):
+                        raise BoundaryError(f"{package} Bazel {name} inventory drifted: must be a standalone literal string list")
                     values.append(value[:end + 1])
                     break
         else:
@@ -455,13 +471,16 @@ def _rule_name(call: Sequence[Token], package: str, context: str) -> str:
 def _validate_history_build(path: Path) -> None:
     package = HISTORY_PACKAGE
     tokens = _tokenize(path.read_text(encoding="utf-8"), package)
-    _validate_loads(tokens, package, HISTORY_LOADS, {"HISTORY_CLI_DEPS", "HISTORY_CLI_TEST_SUPPORT_DEPS"})
+    _validate_loads(tokens, package, HISTORY_LOADS, {"HISTORY_CLI_DEPS", "HISTORY_CLI_TEST_SUPPORT_DEPS", "HISTORY_CLI_UNIT_TEST_DEPS"})
     _validate_call_surface(tokens, package, {"aliases", "all_crate_deps", "crate_edition", "ctx_rust_test", "exports_files", "filegroup", "glob", "load", "package", "rust_library"})
-    for variable, expected in (("HISTORY_CLI_DEPS", HISTORY_DEPS), ("HISTORY_CLI_TEST_SUPPORT_DEPS", HISTORY_TEST_SUPPORT_DEPS)):
+    for variable, expected, expected_uses in (
+        ("HISTORY_CLI_DEPS", HISTORY_DEPS, 4),
+        ("HISTORY_CLI_TEST_SUPPORT_DEPS", HISTORY_TEST_SUPPORT_DEPS, 2),
+        ("HISTORY_CLI_UNIT_TEST_DEPS", HISTORY_UNIT_TEST_DEPS, 2),
+    ):
         values = _assignment(tokens, variable, package)
         if len(values) != 1 or _literal_list(values[0], package, variable) != expected:
             raise BoundaryError(f"{package} Bazel {variable} inventory drifted")
-        expected_uses = 4 if variable == "HISTORY_CLI_DEPS" else 2
         if sum(token.kind == "identifier" and token.value == variable for token in tokens) != expected_uses:
             raise BoundaryError(f"{package} Bazel {variable} may only be assigned and used by its reviewed targets")
     libraries = _calls(tokens, "rust_library", package)
@@ -491,7 +510,7 @@ def _validate_history_build(path: Path) -> None:
     if len(tests) != 2:
         raise BoundaryError(f"{package} Bazel must define exactly two ctx_rust_test targets")
     expected_tests = {
-        "unit_tests": ("HISTORY_CLI_DEPS",),
+        "unit_tests": ("HISTORY_CLI_DEPS", "HISTORY_CLI_UNIT_TEST_DEPS"),
         "request_parity_tests": ("HISTORY_CLI_DEPS", "[SELF]"),
     }
     seen_tests: set[str] = set()
@@ -506,7 +525,7 @@ def _validate_history_build(path: Path) -> None:
             _dependency_expression(dependencies[:-5], package, "request_parity_tests deps", {"normal": "True", "normal_dev": "True"}, expected)
             _dependency_expression(arguments.get("proc_macro_deps", []), package, "request_parity_tests proc_macro_deps", {"proc_macro": "True", "proc_macro_dev": "True"}, ())
         else:
-            _validate_rule(call, package, "ctx_rust_test", {"normal": "True", "normal_dev": "True"}, {"proc_macro": "True", "proc_macro_dev": "True"}, ("HISTORY_CLI_DEPS",))
+            _validate_rule(call, package, "ctx_rust_test", {"normal": "True", "normal_dev": "True"}, {"proc_macro": "True", "proc_macro_dev": "True"}, expected_tests["unit_tests"])
         seen_tests.add(name)
     if set(expected_tests) != seen_tests:
         raise BoundaryError(f"{package} Bazel ctx_rust_test names drifted")

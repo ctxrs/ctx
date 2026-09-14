@@ -94,7 +94,14 @@ public class CtxAgentHistoryException extends RuntimeException {
                 String stdout,
                 String stderr,
                 Throwable cause) {
-            super(code, message, retryable, cliDetails(command, args, exitCode, stdout, stderr), cause);
+            this(code, message, retryable, command, args, exitCode, stdout, stderr, cause, producerError(stderr));
+        }
+
+        private Cli(String code, String message, boolean retryable, String command,
+                java.util.List<String> args, int exitCode, String stdout, String stderr,
+                Throwable cause, Map<String, Object> producer) {
+            super(code, message, retryable || Boolean.TRUE.equals(producer.get("retryable")),
+                    cliDetails(command, args, exitCode, stdout, stderr, producer), cause);
             this.command = command;
             this.args = Collections.unmodifiableList(new java.util.ArrayList<>(args));
             this.exitCode = exitCode;
@@ -122,13 +129,23 @@ public class CtxAgentHistoryException extends RuntimeException {
             return stderr;
         }
 
+        private static Map<String, Object> producerError(String stderr) {
+            try {
+                Map<String, Object> producer = Json.parseObject(stderr);
+                Object code = producer.get("error_code");
+                if (code instanceof String && !((String) code).isEmpty() && (!producer.containsKey("retryable") || producer.get("retryable") instanceof Boolean)) return producer;
+            } catch (RuntimeException malformed) { /* Plain diagnostic fallback. */ }
+            return Collections.emptyMap();
+        }
+
         private static Map<String, Object> cliDetails(
                 String command,
                 java.util.List<String> args,
                 int exitCode,
                 String stdout,
-                String stderr) {
+                String stderr, Map<String, Object> producer) {
             Map<String, Object> details = new LinkedHashMap<>();
+            if (!producer.isEmpty()) details.put("producerError", producer);
             details.put("command", command);
             details.put("args", new java.util.ArrayList<>(args));
             details.put("exitCode", exitCode);

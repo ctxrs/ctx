@@ -126,31 +126,6 @@ fn core_projection_failures_emit_row_diagnostics() {
     assert!(rejection.detail.contains("Core projection limits"));
 }
 
-pub(super) fn create_current_fixture(path: &Path) -> Connection {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let connection = Connection::open(path).unwrap();
-    connection
-        .execute_batch(
-            "create table session (
-                 id text primary key,
-                 time_created integer not null,
-                 time_updated integer not null
-             );
-             create table session_message (
-                 id text primary key,
-                 session_id text not null,
-                 type text not null,
-                 seq integer not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             insert into session values ('session-1', 1, 1);",
-        )
-        .unwrap();
-    connection
-}
-
 #[test]
 fn current_11811_shape_selects_populated_message_part_over_empty_session_message() {
     let temp = crate::test_support_paths::tempdir().unwrap();

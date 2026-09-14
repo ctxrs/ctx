@@ -6,10 +6,13 @@
 //! byte-range locks; they never refresh, migrate, repair, or select a replacement
 //! generation.
 
-use std::{collections::VecDeque, path::Path};
+use std::{
+    collections::{HashSet, VecDeque},
+    path::Path,
+};
 
 use ctx_history_core::{
-    CoreRecord, SourceKey, StableEntityId, CORE_RECORD_VERSION, IDENTITY_VERSION,
+    CoreRecord, SourceKey, StableEntityId, StableEntityKind, CORE_RECORD_VERSION, IDENTITY_VERSION,
 };
 use ctx_history_index_format::{
     current_core_record_contract_fingerprint, current_source_generation_policy_hash,
@@ -17,16 +20,28 @@ use ctx_history_index_format::{
     LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
 };
 use ctx_history_index_generation::{
-    acquire_generation_read_lease_from_root, acquire_retained_generation_read_lease_from_root,
-    GenerationReadLease, GenerationReadRoot, GenerationRetentionLease,
+    acquire_generation_read_lease_from_root,
+    acquire_generation_retention_lease as acquire_canonical_retention_lease,
+    acquire_retained_generation_read_lease_from_root, load_active_generation_id_from_read_root,
+    load_generation_retention_lease as load_canonical_retention_lease,
+    release_generation_retention_lease as release_canonical_retention_lease, GenerationReadLease,
+    GenerationReadRoot,
 };
 use ctx_history_index_query::{
-    CoreEventPageBudget, IndexError, SourceEventCursor, VerifiedIndex,
-    DEFAULT_CORE_EVENT_PAGE_BUDGET, MAX_SOURCE_EVENT_PAGE_ITEMS,
+    IndexError, SourceEventCursor, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use ctx_history_index_generation::GenerationRetentionLease as SnapshotRetentionLease;
+pub use ctx_history_index_query::{
+    CoreEventPageBudget as SnapshotPageBudget,
+    DEFAULT_CORE_EVENT_PAGE_BUDGET as DEFAULT_SNAPSHOT_PAGE_BUDGET,
+};
+
+/// Maximum records in one exact-ID lookup. This small, reader-owned cap keeps
+/// preview reads independently bounded from source-record paging.
+pub const MAX_EXACT_CORE_RECORD_BATCH_ITEMS: usize = 3;
 pub const MAX_SOURCE_MANIFEST_PAGE_ITEMS: usize = 256;
 pub const MAX_SOURCE_DELTA_PAGE_ITEMS: usize = 256;
 pub const MAX_SOURCE_DELTA_SCANNED_ITEMS: usize = 1_024;
@@ -104,6 +119,56 @@ pub enum SnapshotError {
 
 pub type Result<T> = std::result::Result<T, SnapshotError>;
 
+/// Loads the active generation ID below `data_root/search/lexical` without
+/// exposing or reopening the publication pointer.
+pub fn load_active_generation_id(data_root: impl AsRef<Path>) -> Result<Option<String>> {
+    let Some(root) = open_data_root_if_present(data_root)? else {
+        return Ok(None);
+    };
+    load_active_generation_id_from_read_root(&root)
+        .map_err(|error| map_generation_error(error, "active generation"))
+}
+
+/// Acquires the sole durable retention authority for one currently retained
+/// generation. Exact replay by the same owner is idempotent. After validating
+/// the private lexical root, this delegates to index-generation's established
+/// path-based retention operation.
+pub fn acquire_snapshot_retention_lease(
+    data_root: impl AsRef<Path>,
+    generation_id: &str,
+    owner_kind: &str,
+    owner_id: &str,
+) -> Result<SnapshotRetentionLease> {
+    let root = GenerationReadRoot::open_data_root(data_root).map_err(map_generation_root_error)?;
+    acquire_canonical_retention_lease(root.path(), generation_id, owner_kind, owner_id)
+        .map_err(|error| map_generation_error(error, generation_id))
+}
+
+/// Loads and validates the sole durable retention authority, if one exists.
+pub fn load_snapshot_retention_lease(
+    data_root: impl AsRef<Path>,
+) -> Result<Option<SnapshotRetentionLease>> {
+    let Some(root) = open_data_root_if_present(data_root)? else {
+        return Ok(None);
+    };
+    load_canonical_retention_lease(root.path())
+        .map_err(|error| map_generation_error(error, "retention lease"))
+}
+
+/// Releases exactly the observed durable retention authority. After validating
+/// the private lexical root, this delegates to index-generation's established
+/// path-based retention operation.
+pub fn release_snapshot_retention_lease(
+    data_root: impl AsRef<Path>,
+    expected: &SnapshotRetentionLease,
+) -> Result<bool> {
+    let Some(root) = open_data_root_if_present(data_root)? else {
+        return Ok(false);
+    };
+    release_canonical_retention_lease(root.path(), expected)
+        .map_err(|error| map_generation_error(error, expected.generation_id()))
+}
+
 pub struct CoreSnapshot {
     index: VerifiedIndex,
     contract: SnapshotContract,
@@ -134,7 +199,7 @@ impl CoreSnapshot {
     /// path performs one full read-only physical audit before opening.
     pub fn open_retained(
         data_root: impl AsRef<Path>,
-        authority: &GenerationRetentionLease,
+        authority: &SnapshotRetentionLease,
         expected: &SnapshotContract,
     ) -> Result<Self> {
         let generation_id = authority.generation_id();
@@ -342,7 +407,7 @@ impl CoreSnapshot {
         source: &SourceKey,
         cursor: Option<&CoreRecordPageCursor>,
         limit: usize,
-        budget: CoreEventPageBudget,
+        budget: SnapshotPageBudget,
     ) -> Result<CoreRecordPage> {
         if !(1..=MAX_SOURCE_EVENT_PAGE_ITEMS).contains(&limit) {
             return Err(SnapshotError::Bounds(format!(
@@ -398,11 +463,82 @@ impl CoreSnapshot {
         })
     }
 
+    /// Resolves a bounded exact-ID set from this immutable generation.
+    ///
+    /// The complete batch is returned in requested order only when every ID
+    /// exists and both the aggregate and each individual record fit their
+    /// strict byte ceilings. Otherwise a missing or over-budget batch returns
+    /// `None`; no partial records are exposed.
+    pub fn core_records_by_ids_if_bounded(
+        &self,
+        event_ids: &[StableEntityId],
+        aggregate_budget: SnapshotPageBudget,
+        per_record_budget: SnapshotPageBudget,
+    ) -> Result<Option<CoreRecordBatch>> {
+        if event_ids.len() > MAX_EXACT_CORE_RECORD_BATCH_ITEMS {
+            return Err(SnapshotError::Bounds(format!(
+                "Core record batch size {} exceeds {MAX_EXACT_CORE_RECORD_BATCH_ITEMS}",
+                event_ids.len()
+            )));
+        }
+        let mut unique = HashSet::with_capacity(event_ids.len());
+        let mut unique_compact_ids = HashSet::with_capacity(event_ids.len());
+        let mut compact_ids = Vec::with_capacity(event_ids.len());
+        for event_id in event_ids {
+            event_id
+                .validate_contract()
+                .map_err(|error| SnapshotError::Bounds(error.to_string()))?;
+            if event_id.entity_kind() != StableEntityKind::Event {
+                return Err(SnapshotError::Bounds(
+                    "Core record batch IDs must identify events".to_owned(),
+                ));
+            }
+            if !unique.insert(*event_id) {
+                return Err(SnapshotError::Bounds(format!(
+                    "Core record batch contains duplicate event {}",
+                    event_id.as_uuid()
+                )));
+            }
+            if !unique_compact_ids.insert(event_id.as_uuid()) {
+                return Ok(None);
+            }
+            compact_ids.push(event_id.as_uuid());
+        }
+
+        let Some(batch) = self
+            .index
+            .core_events_by_ids_with_strict_per_record_budget(
+                &compact_ids,
+                MAX_EXACT_CORE_RECORD_BATCH_ITEMS,
+                aggregate_budget,
+                per_record_budget,
+            )
+            .map_err(|error| map_index_error(error, self.generation_id(), self.contract()))?
+        else {
+            return Ok(None);
+        };
+        let mut records = Vec::with_capacity(event_ids.len());
+        for (item, expected) in batch.items.into_iter().zip(event_ids) {
+            if item.core_record.event_id != *expected {
+                return Ok(None);
+            }
+            records.push(item.core_record);
+        }
+        if records.len() != event_ids.len() {
+            return Ok(None);
+        }
+        Ok(Some(CoreRecordBatch {
+            records,
+            encoded_core_bytes: batch.encoded_core_bytes,
+            content_bytes: batch.content_bytes,
+        }))
+    }
+
     pub fn records<'a>(
         &'a self,
         source: SourceKey,
         page_items: usize,
-        budget: CoreEventPageBudget,
+        budget: SnapshotPageBudget,
     ) -> Result<CoreRecordStream<'a>> {
         if !(1..=MAX_SOURCE_EVENT_PAGE_ITEMS).contains(&page_items) {
             return Err(SnapshotError::Bounds(format!(
@@ -422,7 +558,7 @@ impl CoreSnapshot {
     }
 
     pub fn records_with_default_bounds(&self, source: SourceKey) -> Result<CoreRecordStream<'_>> {
-        self.records(source, 64, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        self.records(source, 64, DEFAULT_SNAPSHOT_PAGE_BUDGET)
     }
 
     fn source_state(&self, index: usize) -> Result<SourceState> {
@@ -589,11 +725,20 @@ pub struct CoreRecordPage {
     pub terminal: bool,
 }
 
+/// Canonical Core records from one exact requested-ID lookup plus the exact
+/// retained byte totals enforced by the reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreRecordBatch {
+    pub records: Vec<CoreRecord>,
+    pub encoded_core_bytes: usize,
+    pub content_bytes: usize,
+}
+
 pub struct CoreRecordStream<'a> {
     snapshot: &'a CoreSnapshot,
     source: SourceKey,
     page_items: usize,
-    budget: CoreEventPageBudget,
+    budget: SnapshotPageBudget,
     cursor: Option<CoreRecordPageCursor>,
     buffered: VecDeque<CoreRecord>,
     terminal: bool,
@@ -645,6 +790,16 @@ fn map_generation_root_error(
     SnapshotError::UnsafePath(error.to_string())
 }
 
+fn open_data_root_if_present(data_root: impl AsRef<Path>) -> Result<Option<GenerationReadRoot>> {
+    match GenerationReadRoot::open_data_root(data_root) {
+        Ok(root) => Ok(Some(root)),
+        Err(ctx_history_index_generation::GenerationError::MissingActiveGenerationPointer) => {
+            Ok(None)
+        }
+        Err(error) => Err(map_generation_root_error(error)),
+    }
+}
+
 fn map_generation_error(
     error: ctx_history_index_generation::GenerationError,
     generation_id: &str,
@@ -655,7 +810,8 @@ fn map_generation_error(
         | GenerationError::GenerationRetentionLeaseTargetNotRetained { .. }
         | GenerationError::MissingActiveGenerationPointer
         | GenerationError::MissingManifest(_) => SnapshotError::NotFound(generation_id.to_owned()),
-        GenerationError::GenerationRetentionLeaseConflict { .. } => {
+        GenerationError::GenerationRetentionLeaseConflict { .. }
+        | GenerationError::GenerationRetentionLeaseOwnerMismatch => {
             SnapshotError::LeaseConflict(generation_id.to_owned())
         }
         error @ GenerationError::ConcurrentGenerationChange => {
@@ -677,7 +833,8 @@ fn map_index_error(
         IndexError::MissingActiveGenerationPointer
         | IndexError::PinnedGenerationNotRetained { .. }
         | IndexError::MissingManifest(_) => SnapshotError::NotFound(generation_id.to_owned()),
-        IndexError::GenerationRetentionLeaseConflict { .. } => {
+        IndexError::GenerationRetentionLeaseConflict { .. }
+        | IndexError::GenerationRetentionLeaseOwnerMismatch => {
             SnapshotError::LeaseConflict(generation_id.to_owned())
         }
         error @ IndexError::ConcurrentGenerationChange => {

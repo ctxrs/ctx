@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/ctx-app-config",
     "crates/ctx-agent-application",
     "crates/ctx-agent-integrations",
     "crates/ctx-companion-bridge",
@@ -77,11 +78,10 @@ ignored-paths = [
     "crates/ctx-history-refresh/src/explicit_source_catalog/codex_union.rs",
     "crates/ctx-upgrade-engine/tests/contracts/support.rs",
     "crates/ctx-upgrade-engine/tests/contracts/upgrade.rs",
-    "crates/ctx-upgrade-engine/tests/fixtures/v025_upgrade_fixture.rs",
 ]
 
 [workspace.package]
-version = "1.2.4"
+version = "1.4.3"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/ctxrs/ctx"
@@ -100,6 +100,7 @@ clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 clap_mangen = "0.2"
 ctrlc = { version = "3.5.2", features = ["termination"] }
 directories = "5.0"
+dirs = "6.0"
 json5 = { version = "0.4", default-features = false }
 jsonc-parser = { version = "0.33", default-features = false, features = ["serde", "serde_json"] }
 libc = "0.2"

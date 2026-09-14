@@ -20,7 +20,9 @@ use crate::{
     config,
     local_usage::{CliUsage, ResultObservationAction, SearchContextObservation},
     output::JsonOutputFormat,
-    semantic::coordinate_source_backed_refresh,
+    semantic::{
+        coordinate_source_backed_refresh, coordinate_source_backed_refresh_with_retained_peer,
+    },
     ui::{
         canonical_human_output_bytes, diagnostic, Action, Diagnostic, DiagnosticLevel, Document,
         RenderContext, Ui,
@@ -28,9 +30,9 @@ use crate::{
     HistoryCliConfig, RefreshMode, SearchExecutionObservation, SearchFailurePhase,
 };
 use ctx_daemon_cli::{
-    wait_for_daemon_query_service, wait_for_daemon_semantic_generation,
-    PinnedSourceBackedGeneration, SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
-    SourceBackedRefreshObservation,
+    wait_for_daemon_query_service_cancellable, wait_for_daemon_semantic_generation,
+    wait_for_daemon_semantic_generation_with_retained_peer, PinnedSourceBackedGeneration,
+    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
 };
 
 use super::{
@@ -40,7 +42,7 @@ use super::{
         render_active_generation_race, ActiveGenerationRaceCommand,
     },
 };
-use ctx_history_read_application::SearchBackend;
+use ctx_history_read_application::{RetainedPeerRead, SearchBackend};
 
 pub(in crate::source_index) use hydration::SearchPresentation;
 use observation::{
@@ -60,7 +62,7 @@ use test_support::collect_search_hits_with_port;
 #[cfg(test)]
 pub(super) use test_support::{
     collect_search_hits_with_backend, collect_search_hits_with_backend_using,
-    search_existing_generation,
+    search_existing_generation, search_existing_generation_with_compact_projection,
 };
 
 const MAX_USAGE_CONTEXT_EVENTS_PER_SESSION: usize = 256;
@@ -68,15 +70,13 @@ const SEMANTIC_GENERATION_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 type RefreshArg = RefreshMode;
 pub(super) const MISSING_INDEX_ERROR: &str =
     "the Core index does not exist; retry with daemon refresh enabled";
-const QUEUED_WITHOUT_GENERATION_ERROR: &str =
-    "daemon source refresh was queued but no published generation exists; retry with --refresh wait";
+const QUEUED_WITHOUT_GENERATION_ERROR: &str = "daemon source refresh was queued but no published generation exists; retry with --refresh wait";
 
 #[derive(Debug)]
 pub(super) enum SourceSearchFailure {
     Semantic(HistorySemanticError),
     SourceUnavailable,
     GenerationChanged,
-    GenerationAuthority(ctx_history_refresh::GenerationQueryAuthorityError),
     Other(anyhow::Error),
 }
 
@@ -96,8 +96,6 @@ pub enum McpSearchError {
         "History changed while ctx was opening the searchable generation. Retry the same request."
     )]
     GenerationChanged,
-    #[error(transparent)]
-    GenerationAuthority(ctx_history_refresh::GenerationQueryAuthorityError),
     #[error("{detail}")]
     Application { detail: String },
 }
@@ -124,7 +122,6 @@ impl SourceSearchFailure {
             Self::GenerationChanged => {
                 anyhow::Error::new(ctx_history_index::IndexError::ConcurrentGenerationChange)
             }
-            Self::GenerationAuthority(error) => anyhow::Error::new(error),
             Self::Other(error) => error,
         }
     }
@@ -145,7 +142,6 @@ impl SourceSearchFailure {
             }
             Self::SourceUnavailable => McpSearchError::SourceUnavailable,
             Self::GenerationChanged => McpSearchError::GenerationChanged,
-            Self::GenerationAuthority(error) => McpSearchError::GenerationAuthority(error),
             Self::Other(error) => McpSearchError::Application {
                 detail: error.to_string(),
             },
@@ -153,14 +149,17 @@ impl SourceSearchFailure {
     }
 }
 
-fn semantic_error_into_anyhow(error: HistorySemanticError) -> anyhow::Error {
+pub(super) fn semantic_error_into_anyhow(error: HistorySemanticError) -> anyhow::Error {
     match error {
-        HistorySemanticError::NotReady { reason, detail, .. } => {
-            anyhow::Error::new(crate::semantic::SemanticNotReady::new(
-                semantic_reason_code(reason),
-                semantic_external_detail(reason, &detail),
-            ))
-        }
+        HistorySemanticError::NotReady {
+            reason,
+            detail,
+            retryable,
+        } => anyhow::Error::new(crate::semantic::SemanticNotReady::new_with_retryable(
+            semantic_reason_code(reason),
+            semantic_external_detail(reason, &detail),
+            retryable,
+        )),
         HistorySemanticError::Failed { detail } => anyhow::anyhow!(detail),
     }
 }
@@ -173,6 +172,8 @@ pub(super) const fn semantic_reason_code(reason: SemanticReason) -> &'static str
         SemanticReason::ContentScopeUnsupported => "semantic_content_scope_unsupported",
         SemanticReason::EventTypeUnsupported => "semantic_event_type_unsupported",
         SemanticReason::QueryServiceUnavailable => "semantic_query_service_unavailable",
+        SemanticReason::ExecutorUnavailable => "semantic_executor_unavailable",
+        SemanticReason::ExecutorConfigurationInvalid => "semantic_executor_configuration_invalid",
         SemanticReason::StoreUnavailable => "semantic_store_unavailable",
         SemanticReason::StoreMissing => "semantic_store_missing",
         SemanticReason::GenerationUnreadable => "semantic_generation_unreadable",
@@ -205,7 +206,6 @@ impl std::fmt::Display for SourceSearchFailure {
             Self::GenerationChanged => formatter.write_str(
                 "History changed while ctx was opening the searchable generation. Retry the same request.",
             ),
-            Self::GenerationAuthority(error) => std::fmt::Display::fmt(error, formatter),
             Self::Other(error) => std::fmt::Display::fmt(error, formatter),
         }
     }
@@ -229,10 +229,7 @@ impl From<anyhow::Error> for SourceSearchFailure {
             Ok(error) => return Self::from(error),
             Err(error) => error,
         };
-        match error.downcast::<ctx_history_refresh::GenerationQueryAuthorityError>() {
-            Ok(error) => Self::GenerationAuthority(error),
-            Err(error) => Self::Other(externalize_query_error(error)),
-        }
+        Self::Other(externalize_query_error(error))
     }
 }
 
@@ -299,6 +296,32 @@ struct SearchRefreshContext<'a> {
     source_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::source_index) enum ForegroundSemanticExecution {
+    ReadOnly,
+    Reconcile,
+}
+
+pub(in crate::source_index) fn foreground_semantic_execution(
+    refresh_mode: RefreshArg,
+    daemon_enabled: bool,
+) -> Option<ForegroundSemanticExecution> {
+    if daemon_enabled {
+        return None;
+    }
+    match refresh_mode {
+        RefreshArg::Off | RefreshArg::Background => Some(ForegroundSemanticExecution::ReadOnly),
+        RefreshArg::Wait => Some(ForegroundSemanticExecution::Reconcile),
+    }
+}
+
+pub(in crate::source_index) fn should_wait_for_daemon_query_service(
+    refresh_mode: RefreshArg,
+    daemon_enabled: bool,
+) -> bool {
+    refresh_mode == RefreshArg::Background && daemon_enabled
+}
+
 pub fn run_search(
     args: SearchArgs,
     data_root: PathBuf,
@@ -311,19 +334,26 @@ pub fn run_search(
     let config = config::AppConfig::from_snapshot(config);
     let request = crate::SearchRequest::from(args);
     let refresh_mode = request.refresh;
-    let foreground_semantic = refresh_mode == RefreshArg::Wait && !config.daemon.enabled;
-    let semantic_port = if foreground_semantic {
-        crate::semantic::SemanticQueryAdapter::foreground(
-            &data_root,
-            config.semantic_embedding_executor().clone(),
-        )
-    } else {
-        crate::semantic::SemanticQueryAdapter::new(&data_root)
+    let foreground_semantic = foreground_semantic_execution(refresh_mode, config.daemon.enabled);
+    let semantic_port = match foreground_semantic {
+        Some(ForegroundSemanticExecution::ReadOnly) => {
+            crate::semantic::SemanticQueryAdapter::foreground_read_only(
+                &data_root,
+                config.semantic_embedding_executor().clone(),
+            )
+        }
+        Some(ForegroundSemanticExecution::Reconcile) => {
+            crate::semantic::SemanticQueryAdapter::foreground(
+                &data_root,
+                config.semantic_embedding_executor().clone(),
+            )
+        }
+        None => crate::semantic::SemanticQueryAdapter::new(&data_root),
     };
     let json_output = request.format == crate::OutputFormat::Json;
     let verbose = request.verbose;
     let request = SourceSearchRequest::from(request);
-    let policy = source_search_policy(&config, foreground_semantic);
+    let policy = source_search_policy(&config, foreground_semantic.is_some());
     let mut observation = initial_search_observation();
     let result = run_search_inner(
         request,
@@ -372,6 +402,8 @@ fn run_search_inner<P: HistorySemanticPort>(
     let compact_projection = compact_search_projection(json_output, verbose);
     let plan = ctx_history_read_application::plan_search(request, policy)?;
     let request = plan.request();
+    let retained_peer =
+        ctx_history_read_application::retained_peer_read_for_search(request, compact_projection);
     let requested_backend = request.backend.unwrap_or(policy.default_backend);
     observation.backend_requested = Some(requested_backend);
     let semantic_weight = request.semantic_weight;
@@ -381,16 +413,31 @@ fn run_search_inner<P: HistorySemanticPort>(
         semantic_weight,
         policy.semantic,
     );
-    if refresh_mode == RefreshArg::Background && needs_semantic {
-        wait_for_daemon_query_service(&data_root, Duration::from_secs(3));
+    if should_wait_for_daemon_query_service(refresh_mode, config.daemon.enabled) && needs_semantic {
+        let _ = wait_for_daemon_query_service_cancellable(&data_root, Duration::from_secs(3))?;
     }
-    let mut refresh = observed_refresh_for_search(request, refresh_mode, &data_root, observation)?;
+    let mut refresh = observed_refresh_for_search(
+        request,
+        refresh_mode,
+        &data_root,
+        retained_peer,
+        observation,
+    )?;
     if refresh_mode == RefreshArg::Wait && config.daemon.enabled && needs_semantic {
-        refresh.pin = wait_for_daemon_semantic_generation(
-            &data_root,
-            refresh.pin,
-            SEMANTIC_GENERATION_WAIT_TIMEOUT,
-        )?;
+        refresh.pin = match retained_peer {
+            RetainedPeerRead::Omit => wait_for_daemon_semantic_generation(
+                &data_root,
+                refresh.pin,
+                SEMANTIC_GENERATION_WAIT_TIMEOUT,
+            )?,
+            RetainedPeerRead::IfAvailable => {
+                wait_for_daemon_semantic_generation_with_retained_peer(
+                    &data_root,
+                    refresh.pin,
+                    SEMANTIC_GENERATION_WAIT_TIMEOUT,
+                )?
+            }
+        };
     }
     let search_result = search_pinned_generation(
         plan,
@@ -692,8 +739,15 @@ fn mcp_search_inner<P: HistorySemanticPort>(
     let plan = ctx_history_read_application::plan_search(request, policy)?;
     let requested_backend = plan.request().backend.unwrap_or(policy.default_backend);
     observation.backend_requested = Some(requested_backend);
-    let refresh =
-        observed_refresh_for_search(plan.request(), RefreshArg::Off, data_root, observation)?;
+    let retained_peer =
+        ctx_history_read_application::retained_peer_read_for_search(plan.request(), true);
+    let refresh = observed_refresh_for_search(
+        plan.request(),
+        RefreshArg::Off,
+        data_root,
+        retained_peer,
+        observation,
+    )?;
     let result = search_pinned_generation(
         plan,
         data_root,
@@ -761,7 +815,7 @@ pub(super) fn search_context_observation(
         .result_window
         .hits
         .iter()
-        .map(|hit| hit.event.session_id)
+        .map(|hit| hit.event.session_id.as_uuid())
         .collect::<BTreeSet<_>>();
     let mut matched_normalized_session_bytes = 0_usize;
     for session_id in session_ids {
@@ -784,13 +838,22 @@ pub(super) fn refresh_for_search(
     request: &SourceSearchRequest,
     refresh: RefreshArg,
     data_root: &Path,
+    retained_peer: RetainedPeerRead,
 ) -> SourceSearchResult<RefreshOutcome> {
-    refresh_for_search_with(
-        request,
-        refresh,
-        data_root,
-        coordinate_source_backed_refresh,
-    )
+    match retained_peer {
+        RetainedPeerRead::Omit => refresh_for_search_with(
+            request,
+            refresh,
+            data_root,
+            coordinate_source_backed_refresh,
+        ),
+        RetainedPeerRead::IfAvailable => refresh_for_search_with(
+            request,
+            refresh,
+            data_root,
+            coordinate_source_backed_refresh_with_retained_peer,
+        ),
+    }
 }
 
 pub(super) fn refresh_for_search_with<Coordinate>(
@@ -806,20 +869,6 @@ where
     let mode = source_backed_refresh_mode(refresh);
     let observation = match coordinate(data_root, mode) {
         Ok(observation) => observation,
-        Err(error) if mode == SourceBackedRefreshMode::Background => {
-            // Background refresh may report an uncertified empty generation as
-            // unavailable. At the query gateway, preserve the stricter typed
-            // R1 authority error instead of replacing it with refresh state.
-            if let Err(authority_error) = crate::semantic::pin_active_verified_generation(data_root)
-            {
-                if let Ok(authority_error) =
-                    authority_error.downcast::<ctx_history_refresh::GenerationQueryAuthorityError>()
-                {
-                    return Err(SourceSearchFailure::GenerationAuthority(authority_error));
-                }
-            }
-            return Err(SourceSearchFailure::from(error));
-        }
         Err(error) => return Err(SourceSearchFailure::from(error)),
     };
     if observation.mode != mode {
@@ -832,6 +881,9 @@ where
     }
     let status = match mode {
         SourceBackedRefreshMode::Off => "existing_generation",
+        SourceBackedRefreshMode::Background if observation.status == "admission_rejected" => {
+            "admission_rejected"
+        }
         SourceBackedRefreshMode::Background if observation.daemon_available => "daemon_background",
         SourceBackedRefreshMode::Background => "daemon_unavailable",
         SourceBackedRefreshMode::Wait => "completed",
@@ -898,3 +950,6 @@ pub(super) fn collect_search_hits_with_semantic_availability(
         &crate::semantic::SemanticQueryAdapter::new(data_root),
     )
 }
+
+#[cfg(test)]
+mod admission_rejected_tests;

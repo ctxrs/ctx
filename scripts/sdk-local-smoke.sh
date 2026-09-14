@@ -30,7 +30,7 @@ client = AgentHistoryClient.local(
     timeout=30,
 )
 
-assert client.init(catalog_only=True, progress="none")["operation"] == "init"
+assert client.init(progress="none")["operation"] == "init"
 assert client.sources()["operation"] == "sources"
 assert client.import_(provider="codex", path=str(fixture), progress="none")["operation"] == "import"
 

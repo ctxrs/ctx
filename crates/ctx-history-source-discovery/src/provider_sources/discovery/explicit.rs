@@ -25,8 +25,6 @@ const CODEX_AMBIGUOUS_JSONL_REASON: &str =
 const PI_INVALID_JSONL_REASON: &str = "Pi explicit JSONL file has no valid session header";
 const DEEPSEEK_HARNESS_INVALID_SOURCE_REASON: &str =
     "DeepSeek Harness explicit history must be session.jsonl, session.jsonl.zstd, or a session tree containing an exact nested leaf";
-const UNSUPPORTED_EXPLICIT_ROOT_REASON: &str =
-    "the explicit provider path uses an unsupported, non-local, or unsafe source root";
 const PI_HEADER_PROBE_MAX_RECORDS: usize = 64;
 const PI_HEADER_PROBE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
@@ -58,7 +56,6 @@ fn provider_source_for_path_with_optional_data_root(
 ) -> ProviderSource {
     let unknown_spec = ProviderSourceSpec {
         provider,
-        default_locations: &[],
         import_support: ProviderImportSupport::Unsupported,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: Some("provider is not registered for native local-history import"),
@@ -244,7 +241,7 @@ fn provider_source_for_path_with_optional_data_root(
         import_support: explicit_import_support,
         catalog_support: spec.catalog_support,
         status: if matches!(explicit_import_support, ProviderImportSupport::Unsupported)
-            || matches!(observed, Err(SourcePathError::Unsupported))
+            || matches!(observed, Err(SourcePathError::Unsupported(_)))
         {
             ProviderSourceStatus::Unsupported
         } else if let Some(status) = exact_fx_status {
@@ -256,8 +253,8 @@ fn provider_source_for_path_with_optional_data_root(
         } else {
             ProviderSourceStatus::Unknown
         },
-        unsupported_reason: if matches!(observed, Err(SourcePathError::Unsupported)) {
-            Some(UNSUPPORTED_EXPLICIT_ROOT_REASON)
+        unsupported_reason: if let Err(SourcePathError::Unsupported(reason)) = observed {
+            Some(reason)
         } else {
             spec.unsupported_reason
         },

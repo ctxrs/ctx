@@ -27,23 +27,64 @@ fn test_config(cache_dir: &Path) -> SemanticModelConfig {
 }
 
 #[test]
-fn cpu_model_load_defers_before_cache_or_runtime_access() {
+fn cpu_model_load_defers_before_cache_or_runtime_access_regardless_of_throttling() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config = test_config(temp.path());
-    let policy = semantic_embed_policy_from_config_and_resources(
-        SemanticComputeClass::Cpu,
-        &config,
-        SemanticSystemResources {
-            total_memory_bytes: Some(8 * 1024 * 1024 * 1024),
-            available_memory_bytes: Some(1024),
-            available_parallelism: 8,
-        },
-    );
-    let error = match acquire_cpu_backend(&config, policy, SemanticBackendPreference::Cpu) {
-        Ok(_) => panic!("low-memory acquisition should defer"),
-        Err(error) => error,
+    for throttling in [true, false] {
+        let config = test_config(temp.path()).with_builtin_throttling(throttling);
+        let policy = semantic_embed_policy_from_config_and_resources(
+            SemanticComputeClass::Cpu,
+            &config,
+            SemanticSystemResources {
+                total_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+                available_memory_bytes: Some(1024),
+                available_parallelism: 8,
+            },
+        );
+        let error = match acquire_cpu_backend(&config, policy, SemanticBackendPreference::Cpu) {
+            Ok(_) => panic!("low-memory acquisition should defer with throttling={throttling}"),
+            Err(error) => error,
+        };
+        assert!(error.downcast_ref::<SemanticModelLoadDeferred>().is_some());
+    }
+}
+
+#[test]
+fn unthrottled_policy_ignores_internal_overrides_for_deterministic_maxima() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let resources = SemanticSystemResources {
+        total_memory_bytes: Some(16 * 1024 * 1024 * 1024),
+        available_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+        available_parallelism: 64,
     };
-    assert!(error.downcast_ref::<SemanticModelLoadDeferred>().is_some());
+    let throttled = test_config(temp.path())
+        .with_thread_override(Some(2))
+        .with_batch_size_override(Some(4));
+    let throttled_policy = semantic_embed_policy_from_config_and_resources(
+        SemanticComputeClass::Cpu,
+        &throttled,
+        resources,
+    );
+    assert_eq!(throttled_policy.threads, 2);
+    assert_eq!(throttled_policy.batch_size, 4);
+
+    let unthrottled = throttled.with_builtin_throttling(false);
+    let unthrottled_policy = semantic_embed_policy_from_config_and_resources(
+        SemanticComputeClass::Cpu,
+        &unthrottled,
+        resources,
+    );
+    assert_eq!(
+        unthrottled_policy.threads,
+        crate::resource_policy::SEMANTIC_EMBED_THREADS_MAX
+    );
+    assert_eq!(
+        unthrottled_policy.batch_size,
+        crate::resource_policy::SEMANTIC_EMBED_BATCH_MAX
+    );
+    assert_eq!(
+        unthrottled_policy.available_memory_bytes,
+        resources.available_memory_bytes
+    );
 }
 
 fn write_test_semantic_cache_variant(root: &Path, variant: SemanticOrtModelVariant) -> Result<()> {

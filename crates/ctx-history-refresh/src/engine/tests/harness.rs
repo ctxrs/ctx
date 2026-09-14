@@ -119,32 +119,13 @@ fn test_refresh_submission_from_json(request: &Value) -> Result<RefreshRequest> 
     if !matches!(mode, "background" | "wait") {
         bail!("invalid daemon source refresh mode `{mode}`");
     }
-    let operation = request
-        .get("operation")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("daemon source refresh request operation is missing"))
-        .and_then(|operation| match operation {
-            "refresh" => Ok(RefreshOperation::Refresh),
-            "import" => Ok(RefreshOperation::Import),
-            operation => bail!("invalid daemon source refresh operation `{operation}`"),
-        })?;
-    let explicit_catalog = request.get("explicit_source_catalog");
-    let all_selection = request
-        .get("refresh_selector")
-        .and_then(|selector| selector.get("kind"))
-        .and_then(Value::as_str)
-        == Some("all_automatic");
-    match (operation, mode, explicit_catalog) {
-        (RefreshOperation::Refresh, _, Some(_)) => {
-            bail!("refresh operation cannot carry explicit source catalog authority")
-        }
-        (RefreshOperation::Import, "background", _) => {
-            bail!("import operation requires daemon refresh mode `wait`")
-        }
-        (RefreshOperation::Import, _, None) if !all_selection => {
-            bail!("import operation requires explicit source catalog authority")
-        }
-        _ => {}
+    let intent = RefreshIntent::from_json(
+        request
+            .get("refresh_intent")
+            .ok_or_else(|| anyhow!("daemon source refresh intent is missing"))?,
+    )?;
+    if mode == "background" && intent != RefreshIntent::AutomaticMaintenance {
+        bail!("selected import requires daemon refresh mode `wait`");
     }
     let request_id = match request.get("request_id") {
         Some(Value::String(request_id)) if !request_id.is_empty() => {
@@ -155,41 +136,12 @@ fn test_refresh_submission_from_json(request: &Value) -> Result<RefreshRequest> 
         None => Uuid::now_v7().to_string(),
         Some(_) => bail!("daemon source refresh logical request ID is invalid"),
     };
-    let fresh_after_admitted_snapshot = match request.get("fresh_after_admitted_snapshot") {
-        None | Some(Value::Bool(false)) => false,
-        Some(Value::Bool(true)) => true,
-        Some(_) => {
-            bail!("daemon source refresh fresh-after-admitted-snapshot requirement must be boolean")
-        }
-    };
-    if operation == RefreshOperation::Refresh
-        && mode == "background"
-        && fresh_after_admitted_snapshot
-    {
-        bail!("background source refresh cannot require a fresh admission snapshot");
-    }
-    let requested_catalog = explicit_catalog
-        .map(ExplicitSourceCatalogAuthority::from_json)
-        .transpose()?;
-    let intent = match (operation, requested_catalog, fresh_after_admitted_snapshot) {
-        (RefreshOperation::Import, Some(authority), _) => {
-            RefreshIntent::SelectedImport(RefreshSelection::ExactSource(authority))
-        }
-        (RefreshOperation::Import, None, _) => RefreshIntent::SelectedImport(RefreshSelection::All),
-        (RefreshOperation::Refresh, None, true) => {
-            RefreshIntent::SelectedImport(RefreshSelection::All)
-        }
-        (RefreshOperation::Refresh, None, false) => RefreshIntent::AutomaticMaintenance,
-        (RefreshOperation::Refresh, Some(_), _) => {
-            unreachable!("validated request authority")
-        }
-    };
     let trigger = request
         .get("trigger")
         .and_then(Value::as_str)
         .map(str::parse)
         .transpose()?
-        .unwrap_or(match intent {
+        .unwrap_or(match &intent {
             RefreshIntent::AutomaticMaintenance => RefreshRequestTrigger::Search,
             RefreshIntent::SelectedImport(_) => RefreshRequestTrigger::Import,
         });

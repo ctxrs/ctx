@@ -11,20 +11,22 @@ use std::{
 
 use anyhow::{anyhow, Context as _, Result};
 use ctx_companion_bridge::{
-    verify_signed_managed_pair_envelope, SignedManagedPairIdentity, SignedManagedPairTarget,
-    CORE_PRO_PROTOCOL_VERSION,
+    verify_signed_managed_pair_envelope, ReleaseChannel, SignedManagedPairIdentity,
+    SignedManagedPairTarget, CORE_PRO_PROTOCOL_VERSION,
 };
 use ctx_history_cli::HistoryConfigPort;
 use ctx_upgrade_engine::{
-    ManagedPairComponentIdentity, ManagedPairEngine, ManagedPairTarget,
-    ManagedPairTransactionStatus, ManagedPairVerifier, VerifiedManagedPairIdentity,
+    ManagedPairComponentIdentity, ManagedPairTarget, ManagedPairVerifier,
+    VerifiedManagedPairIdentity,
 };
 use serde_json::{json, Value};
 #[cfg(test)]
 use sha2::{Digest as _, Sha256};
 
 mod failure;
-mod hosted_pair_install;
+mod managed_pair_apply;
+#[cfg(unix)]
+mod managed_pair_reconcile;
 mod progress_events;
 mod setup_options;
 mod setup_refresh;
@@ -41,16 +43,18 @@ use setup_refresh::{
 };
 
 const INVOCATION: &str = "--ctx-core-capability-v1";
-const HOSTED_PAIR_INSTALL_INVOCATION: &str = "--ctx-core-hosted-pair-install-v1";
-const POST_EXIT_INVOCATION: &str = "--ctx-core-managed-pair-swap-v1";
-const POST_EXIT_UNINSTALL_INVOCATION: &str = "--ctx-core-managed-pair-uninstall-v1";
+const MANAGED_PAIR_APPLY_INVOCATION: &str = "--ctx-core-managed-pair-apply-v1";
+#[cfg(unix)]
+const MANAGED_PAIR_RECONCILE_INVOCATION: &str = "--ctx-core-managed-pair-reconcile-integration-v1";
+const HOSTED_UNINSTALL_POST_EXIT_INVOCATION: &str = "--ctx-core-hosted-uninstall-after-parent-v1";
+const DISABLE_MAN_PAGES_INVOCATION: &str = "--ctx-core-disable-managed-man-pages-v1";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 48 * 1024;
 #[cfg(test)]
-const API_INVENTORY: &str = r#"{"event_frames":{"Refresh":{"current_source_progress_keys":["logical_certified_bytes","logical_rows_scanned","snapshot_bytes_completed","snapshot_bytes_total","snapshot_pages_completed","snapshot_pages_total","stage"],"frame_keys":["event","operation","protocol_version","refresh","schema_version","sequence","type"],"refresh_keys":["completed_bytes","completed_records","completed_sources","current_source","current_source_progress","elapsed_millis","estimated_remaining_millis","logical_phase","maintenance_wake","phase","physical_attempt_id","physical_attempt_state","processed_bytes","processed_messages","processed_sessions","processed_tool_calls","progress_owner_attempt_state","progress_owner_request_id","providers","request_id","request_state","terminal_state","total_sources","total_sources_known","whole_run_stage"],"terminal_state_details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","published_generation","retained_generation","retry_advice","retryable_routes"],"terminal_state_keys":["details","error_code","retryable"]}},"operations":{"CoreDoctor":{"request_keys":[],"response_keys":["facts"]},"CoreSetup":{"request_keys":["catalog_only","defer_fresh_empty_wait","no_daemon","notice_lines","progress","semantic","wait"],"request_values":{"progress":["auto","events","json","none","plain"]},"response_keys":["facts","generation_id"]},"CoreStatus":{"request_keys":["usage"],"response_keys":["facts"]},"LocalUsageSummary":{"request_keys":[],"response_keys":["facts"]},"ManagedPairAbort":{"request_keys":["attempt_id"],"response_keys":["aborted"]},"ManagedPairBegin":{"request_keys":[],"response_keys":["attempt_id","candidate_root"]},"ManagedPairStage":{"request_keys":["attempt_id"],"response_keys":["attempt_id","release_name","rollback_generation","status"]},"ManagedPairStatus":{"request_keys":["attempt_id"],"response_keys":["status"]},"ManagedPairUninstall":{"request_keys":[],"response_keys":["attempt_id","cleanup_mode","status"]},"RefreshAndWait":{"optional_request_keys":["progress"],"request_keys":[],"request_values":{"progress":["events"]},"response_keys":["facts","generation_id"]},"WakeRefresh":{"request_keys":[],"response_keys":["accepted","analytics_enabled"]}},"protocol":"ctx-core-capability","schema_version":1,"terminal_failure":{"classes":["control_plane","corruption","coverage","incompatible","internal","mixed","resource_unavailable","source_changed","unavailable","unreadable"],"details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","retained_generation","retry_advice","retryable_routes"],"error_codes":["all_provider_terminal_coverage_unavailable","index_corruption","index_incompatible","logical_source_failures","malformed_source","resource_unavailable","source_changed","source_failures","source_refresh_admission_failed","source_refresh_failed","source_refresh_internal","source_unavailable","source_unclaimed","unsupported_schema"],"response_keys":["details","error_code","ok","operation","protocol_version","retryable","schema_version"],"retry_advice":["inspect_sources","rebuild_index","retry_admission","retry_affected_routes","retry_finalization","retry_request","retry_retryable_routes_and_inspect_blocked","upgrade_or_reconfigure"]}}"#;
+const API_INVENTORY: &str = r#"{"event_frames":{"Refresh":{"current_source_progress_keys":["logical_certified_bytes","logical_rows_scanned","snapshot_bytes_completed","snapshot_bytes_total","snapshot_pages_completed","snapshot_pages_total","stage"],"frame_keys":["event","operation","protocol_version","refresh","schema_version","sequence","type"],"refresh_keys":["completed_bytes","completed_records","completed_sources","current_source","current_source_progress","elapsed_millis","estimated_remaining_millis","logical_phase","maintenance_wake","phase","physical_attempt_id","physical_attempt_state","processed_bytes","processed_messages","processed_sessions","processed_tool_calls","progress_owner_attempt_state","progress_owner_request_id","providers","request_id","request_state","terminal_state","total_sources","total_sources_known","whole_run_stage"],"terminal_state_details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","published_generation","retained_generation","retry_advice","retryable_routes"],"terminal_state_keys":["details","error_code","retryable"]}},"operations":{"CoreDoctor":{"request_keys":[],"response_keys":["facts"]},"CoreSetup":{"request_keys":["defer_fresh_empty_wait","no_daemon","notice_lines","progress","semantic","wait"],"request_values":{"progress":["auto","events","json","none","plain"]},"response_keys":["facts","generation_id"]},"CoreStatus":{"request_keys":["usage"],"response_keys":["facts"]},"LocalUsageSummary":{"request_keys":[],"response_keys":["facts"]},"RefreshAndWait":{"optional_request_keys":["progress"],"request_keys":[],"request_values":{"progress":["events"]},"response_keys":["facts","generation_id"]},"WakeRefresh":{"request_keys":[],"response_keys":["accepted","analytics_enabled"]}},"protocol":"ctx-core-capability","schema_version":1,"terminal_failure":{"classes":["control_plane","corruption","coverage","incompatible","internal","mixed","resource_unavailable","source_changed","unavailable","unreadable"],"details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","retained_generation","retry_advice","retryable_routes"],"error_codes":["all_provider_terminal_coverage_unavailable","index_corruption","index_incompatible","logical_source_failures","malformed_source","resource_unavailable","source_changed","source_failures","source_refresh_admission_failed","source_refresh_failed","source_refresh_internal","source_unavailable","source_unclaimed","unsupported_schema"],"response_keys":["details","error_code","ok","operation","protocol_version","retryable","schema_version"],"retry_advice":["inspect_sources","rebuild_index","retry_admission","retry_affected_routes","retry_finalization","retry_request","retry_retryable_routes_and_inspect_blocked","upgrade_or_reconfigure"]}}"#;
 #[cfg(test)]
 pub(crate) const API_FINGERPRINT: &str =
-    "73e1caffd18462f24f16bfedf99581b4d3062a22e2ecfbd00110cd61fbd66352";
+    "4be5325aa95a6fdd22e59340abfbadefd8b73ffd2a1e3f55ea75deef9e956e34";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Operation {
@@ -60,11 +64,6 @@ enum Operation {
     LocalUsageSummary,
     RefreshAndWait,
     WakeRefresh,
-    ManagedPairBegin,
-    ManagedPairStage,
-    ManagedPairAbort,
-    ManagedPairStatus,
-    ManagedPairUninstall,
 }
 
 impl Operation {
@@ -76,11 +75,6 @@ impl Operation {
             "LocalUsageSummary" => Ok(Self::LocalUsageSummary),
             "RefreshAndWait" => Ok(Self::RefreshAndWait),
             "WakeRefresh" => Ok(Self::WakeRefresh),
-            "ManagedPairBegin" => Ok(Self::ManagedPairBegin),
-            "ManagedPairStage" => Ok(Self::ManagedPairStage),
-            "ManagedPairAbort" => Ok(Self::ManagedPairAbort),
-            "ManagedPairStatus" => Ok(Self::ManagedPairStatus),
-            "ManagedPairUninstall" => Ok(Self::ManagedPairUninstall),
             _ => Err(anyhow!("unknown operation")),
         }
     }
@@ -93,11 +87,6 @@ impl Operation {
             Self::LocalUsageSummary => "LocalUsageSummary",
             Self::RefreshAndWait => "RefreshAndWait",
             Self::WakeRefresh => "WakeRefresh",
-            Self::ManagedPairBegin => "ManagedPairBegin",
-            Self::ManagedPairStage => "ManagedPairStage",
-            Self::ManagedPairAbort => "ManagedPairAbort",
-            Self::ManagedPairStatus => "ManagedPairStatus",
-            Self::ManagedPairUninstall => "ManagedPairUninstall",
         }
     }
 }
@@ -105,34 +94,57 @@ impl Operation {
 /// Intercepts only the fixed hidden invocation. Any spelling variation stays in
 /// the ordinary public parser and receives no privileged transport.
 pub(crate) fn intercept(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
+    if arguments.len() == 2
+        && arguments
+            .get(1)
+            .is_some_and(|value| value == DISABLE_MAN_PAGES_INVOCATION)
+    {
+        return Some(if ctx_upgrade_engine::disable_current_man_pages().is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
     if arguments
         .get(1)
-        .is_some_and(|value| value == HOSTED_PAIR_INSTALL_INVOCATION)
+        .is_some_and(|value| value == MANAGED_PAIR_APPLY_INVOCATION)
     {
-        return Some(match hosted_pair_install::run(arguments) {
+        let result =
+            crate::output::with_stdout_writer(|writer| managed_pair_apply::run(arguments, writer));
+        return Some(match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("{error:#}");
+                crate::output::write_stderr_line(format_args!("{error:#}"));
+                ExitCode::FAILURE
+            }
+        });
+    }
+    #[cfg(unix)]
+    if arguments
+        .get(1)
+        .is_some_and(|value| value == MANAGED_PAIR_RECONCILE_INVOCATION)
+    {
+        let result = crate::output::with_stdout_writer(|writer| {
+            managed_pair_reconcile::run(arguments, writer)
+        });
+        return Some(match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                crate::output::write_stderr_line(format_args!("{error:#}"));
                 ExitCode::FAILURE
             }
         });
     }
     if arguments
         .get(1)
-        .is_some_and(|value| value == POST_EXIT_INVOCATION)
+        .is_some_and(|value| value == HOSTED_UNINSTALL_POST_EXIT_INVOCATION)
     {
-        return Some(match run_post_exit(arguments) {
+        return Some(match run_hosted_uninstall_post_exit(arguments) {
             Ok(()) => ExitCode::SUCCESS,
-            Err(_) => ExitCode::FAILURE,
-        });
-    }
-    if arguments
-        .get(1)
-        .is_some_and(|value| value == POST_EXIT_UNINSTALL_INVOCATION)
-    {
-        return Some(match run_post_exit_uninstall(arguments) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(_) => ExitCode::FAILURE,
+            Err(error) => {
+                crate::output::write_stderr_line(format_args!("{error:#}"));
+                ExitCode::FAILURE
+            }
         });
     }
     if arguments.len() != 2 || arguments.get(1).is_none_or(|value| value != INVOCATION) {
@@ -141,15 +153,30 @@ pub(crate) fn intercept(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
     Some(capability_exit_code(run()))
 }
 
+fn run_hosted_uninstall_post_exit(arguments: &[std::ffi::OsString]) -> Result<()> {
+    if arguments.len() != 3 {
+        return Err(anyhow!("invalid hosted uninstall post-exit invocation"));
+    }
+    let parent_pid = arguments[2]
+        .to_str()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 1)
+        .ok_or_else(|| anyhow!("invalid hosted uninstall parent PID"))?;
+    ctx_upgrade_engine::run_hosted_uninstall_after_parent_exit(parent_pid)
+}
+
 fn capability_exit_code(result: Result<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if ctx_daemon_cli::finite_worker_interrupted(&error) => ExitCode::from(130),
         Err(_) => ExitCode::FAILURE,
     }
 }
 
 fn run() -> Result<()> {
-    run_with_protocol_io(std::io::stdin().lock(), std::io::stdout().lock(), execute)
+    crate::output::with_stdout_writer(|writer| {
+        run_with_protocol_io(std::io::stdin().lock(), writer, execute)
+    })
 }
 
 fn run_with_protocol_io(
@@ -160,7 +187,11 @@ fn run_with_protocol_io(
     let input = read_frame_from(reader)?;
     let (bytes, terminal_error) = produce_response(input, |request| {
         let mut events = ProtocolEventWriter::new(request.operation, &mut writer);
-        execute_request(request, &mut events)
+        if request.operation == Operation::RefreshAndWait {
+            crate::foreground_interrupt::with_scope(|| execute_request(request, &mut events))
+        } else {
+            execute_request(request, &mut events)
+        }
     })?;
     write_response_frame(&mut writer, &bytes)?;
     if let Some(error) = terminal_error {
@@ -195,12 +226,10 @@ enum Options {
     Setup(CoreSetupOptions),
     Status { usage: Option<UsageAction> },
     Refresh { events: bool },
-    PairAttempt { attempt_id: String },
     Empty,
 }
 
 struct CoreSetupOptions {
-    catalog_only: bool,
     defer_fresh_empty_wait: bool,
     no_daemon: bool,
     notice_lines: Vec<String>,
@@ -271,15 +300,7 @@ fn parse_frame(bytes: Vec<u8>) -> Result<Request> {
 }
 
 fn execute(request: Request, events: &mut dyn CapabilityEventSink) -> Result<Value> {
-    if !matches!(
-        request.operation,
-        Operation::LocalUsageSummary
-            | Operation::ManagedPairBegin
-            | Operation::ManagedPairStage
-            | Operation::ManagedPairAbort
-            | Operation::ManagedPairStatus
-            | Operation::ManagedPairUninstall
-    ) {
+    if request.operation != Operation::LocalUsageSummary {
         crate::semantic::initialize()?;
     }
     let facts = match (request.operation, request.options) {
@@ -302,44 +323,6 @@ fn execute(request: Request, events: &mut dyn CapabilityEventSink) -> Result<Val
             refresh_and_facts(&request.data_root, &mut IgnoreEvents)?
         }
         (Operation::WakeRefresh, Options::Empty) => wake_refresh_facts(&request.data_root),
-        (Operation::ManagedPairBegin, Options::Empty) => {
-            let verifier = CoreManagedPairVerifier::new()?;
-            let attempt = managed_pair_engine()?.begin(&verifier)?;
-            json!({
-                "attempt_id": attempt.attempt_id(),
-                "candidate_root": attempt.candidate_root(),
-            })
-        }
-        (Operation::ManagedPairStage, Options::PairAttempt { attempt_id }) => {
-            let verifier = CoreManagedPairVerifier::new()?;
-            let prepared = managed_pair_engine()?.stage_attempt(&attempt_id, &verifier)?;
-            json!({
-                "attempt_id": prepared.attempt_id(),
-                "release_name": prepared.identity().release_name(),
-                "rollback_generation": prepared.identity().rollback_generation(),
-                "status": "staged",
-            })
-        }
-        (Operation::ManagedPairAbort, Options::PairAttempt { attempt_id }) => {
-            json!({"aborted": managed_pair_engine()?.abort(&attempt_id)?})
-        }
-        (Operation::ManagedPairStatus, Options::PairAttempt { attempt_id }) => {
-            let status = managed_pair_engine()?.status(&attempt_id)?;
-            json!({"status": managed_pair_status_name(status)})
-        }
-        (Operation::ManagedPairUninstall, Options::Empty) => {
-            let verifier = CoreManagedPairVerifier::new()?;
-            let attempt = managed_pair_engine()?.prepare_uninstall(&verifier)?;
-            json!({
-                "attempt_id": attempt.attempt_id(),
-                "cleanup_mode": if attempt.retry_or_reboot_may_be_required() {
-                    "retry_or_reboot_required_if_running_core_is_locked"
-                } else {
-                    "post_exit"
-                },
-                "status": "armed",
-            })
-        }
         _ => return Err(anyhow!("operation options are inconsistent")),
     };
     Ok(json!({
@@ -352,10 +335,10 @@ fn execute(request: Request, events: &mut dyn CapabilityEventSink) -> Result<Val
 }
 
 fn wake_refresh_facts(data_root: &Path) -> Value {
-    let config = crate::config::AppConfig::load(data_root);
+    let config = ctx_app_config::AppConfig::load(data_root);
     let analytics_enabled = config
         .as_ref()
-        .is_ok_and(crate::config::resolved_analytics_consent);
+        .is_ok_and(crate::analytics::effective_analytics_enabled);
     if let Ok(config) = config {
         crate::semantic::maybe_autostart_daemon(
             data_root,
@@ -367,7 +350,7 @@ fn wake_refresh_facts(data_root: &Path) -> Value {
 }
 
 fn status_facts(data_root: &Path) -> Result<Value> {
-    let config = crate::config::AppConfig::load(data_root)?;
+    let config = ctx_app_config::AppConfig::load(data_root)?;
     let storage = crate::observability_composition::local_usage_storage_authority(data_root);
     let control =
         crate::observability_composition::usage_control_snapshot(config.local_usage.enabled);
@@ -392,8 +375,8 @@ fn core_status_facts(data_root: &Path, usage: Option<UsageAction>) -> Result<Val
     let usage_action = match usage {
         Some(UsageAction::Enable | UsageAction::Disable) => {
             let enabled = matches!(usage, Some(UsageAction::Enable));
-            crate::config::set_local_usage_enabled(data_root, enabled)?;
-            let control = crate::config::read_local_usage_control(data_root)?;
+            ctx_app_config::set_local_usage_enabled(data_root, enabled)?;
+            let control = ctx_app_config::read_local_usage_control(data_root)?;
             Some(json!({
                 "action": if enabled { "enable" } else { "disable" },
                 "effective_enabled": control.effective_enabled,
@@ -423,7 +406,6 @@ fn core_setup_facts(
     events: &mut dyn CapabilityEventSink,
 ) -> Result<Value> {
     let CoreSetupOptions {
-        catalog_only,
         defer_fresh_empty_wait,
         no_daemon,
         notice_lines,
@@ -431,10 +413,10 @@ fn core_setup_facts(
         semantic,
         wait,
     } = options;
-    let mut config = crate::config::AppConfig::load(data_root)?;
+    let mut config = ctx_app_config::AppConfig::load(data_root)?;
     if semantic {
-        crate::config::set_semantic_search_enabled(data_root, true)?;
-        config = crate::config::AppConfig::load(data_root)?;
+        ctx_app_config::set_semantic_search_enabled(data_root, true)?;
+        config = ctx_app_config::AppConfig::load(data_root)?;
     }
     crate::history_config::CliHistoryConfigAdapter::new(data_root, &mut config)
         .write_default_config()?;
@@ -470,7 +452,6 @@ fn core_setup_facts(
     let source_epoch = crate::semantic::source_epoch_status_report(data_root, &config)?;
     bounded_setup_facts(
         json!({
-            "deprecated_catalog_only_ignored": catalog_only,
             "daemon_requested": daemon_requested,
             "refresh_request": refresh_request,
             "semantic_enabled": config.semantic_search_enabled(),
@@ -516,6 +497,11 @@ fn refresh_and_facts(data_root: &Path, events: &mut dyn CapabilityEventSink) -> 
     let observation = match result {
         Ok(observation) => observation,
         Err(error) => {
+            // Progress replay is secondary to process interruption. Parsing or
+            // writing a buffered terminal event must not replace exit 130.
+            if ctx_daemon_cli::finite_worker_interrupted(&error) {
+                return Err(error);
+            }
             if let Some(terminal) = terminal_progress.take() {
                 let terminal = crate::semantic::RefreshStatus::parse_schema_v1(terminal)?;
                 events.refresh(&terminal)?;
@@ -546,7 +532,6 @@ fn parse_options(operation: Operation, value: &Value) -> Result<Options> {
     }
     let expected: &[&str] = match operation {
         Operation::CoreSetup => &[
-            "catalog_only",
             "defer_fresh_empty_wait",
             "no_daemon",
             "notice_lines",
@@ -555,20 +540,12 @@ fn parse_options(operation: Operation, value: &Value) -> Result<Options> {
             "wait",
         ],
         Operation::CoreStatus => &["usage"],
-        Operation::CoreDoctor
-        | Operation::LocalUsageSummary
-        | Operation::WakeRefresh
-        | Operation::ManagedPairBegin
-        | Operation::ManagedPairUninstall => &[],
-        Operation::ManagedPairStage
-        | Operation::ManagedPairAbort
-        | Operation::ManagedPairStatus => &["attempt_id"],
+        Operation::CoreDoctor | Operation::LocalUsageSummary | Operation::WakeRefresh => &[],
         Operation::RefreshAndWait => unreachable!("refresh options returned above"),
     };
     exact_keys(object.keys().map(String::as_str), expected.iter().copied())?;
     match operation {
         Operation::CoreSetup => Ok(Options::Setup(CoreSetupOptions {
-            catalog_only: required_bool(object, "catalog_only")?,
             defer_fresh_empty_wait: required_bool(object, "defer_fresh_empty_wait")?,
             no_daemon: required_bool(object, "no_daemon")?,
             notice_lines: setup_notice_lines(object)?,
@@ -585,21 +562,6 @@ fn parse_options(operation: Operation, value: &Value) -> Result<Options> {
                 _ => return Err(anyhow!("status usage option is invalid")),
             },
         }),
-        Operation::ManagedPairStage
-        | Operation::ManagedPairAbort
-        | Operation::ManagedPairStatus => Ok(Options::PairAttempt {
-            attempt_id: object
-                .get("attempt_id")
-                .and_then(Value::as_str)
-                .filter(|value| {
-                    value.len() == 32
-                        && value
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-                })
-                .ok_or_else(|| anyhow!("managed-pair attempt ID is invalid"))?
-                .to_owned(),
-        }),
         _ => Ok(Options::Empty),
     }
 }
@@ -609,10 +571,10 @@ struct CoreManagedPairVerifier {
 }
 
 impl CoreManagedPairVerifier {
-    fn new() -> Result<Self> {
-        let expectations = crate::companion::managed_pair_expectations()
-            .map_err(|error| anyhow!("{}", error.code()))?;
-        Ok(Self { expectations })
+    fn for_channel(channel: ReleaseChannel) -> Self {
+        Self {
+            expectations: ctx_companion_bridge::ManagedPairExpectations::new(channel),
+        }
     }
 }
 
@@ -649,100 +611,6 @@ fn engine_identity(identity: &SignedManagedPairIdentity) -> Result<VerifiedManag
             identity.companion().size_bytes(),
         )?,
     )
-}
-
-fn managed_pair_engine() -> Result<ManagedPairEngine> {
-    let root = std::env::current_dir().context("resolve managed-pair install root")?;
-    ManagedPairEngine::new(root)
-}
-
-fn managed_pair_status_name(status: ManagedPairTransactionStatus) -> &'static str {
-    match status {
-        ManagedPairTransactionStatus::Absent => "absent",
-        ManagedPairTransactionStatus::Begun => "begun",
-        ManagedPairTransactionStatus::Staging => "staging",
-        ManagedPairTransactionStatus::Staged => "staged",
-        ManagedPairTransactionStatus::Deferred => "deferred",
-        ManagedPairTransactionStatus::Activating => "activating",
-        ManagedPairTransactionStatus::Committed => "committed",
-        ManagedPairTransactionStatus::Aborted => "aborted",
-        ManagedPairTransactionStatus::Failed => "failed",
-        ManagedPairTransactionStatus::RollingBack => "rolling_back",
-    }
-}
-
-fn run_post_exit(arguments: &[std::ffi::OsString]) -> Result<()> {
-    if arguments.len() != 5 {
-        return Err(anyhow!("invalid managed-pair post-exit invocation"));
-    }
-    let attempt_id = arguments[2]
-        .to_str()
-        .filter(|value| value.len() == 32)
-        .ok_or_else(|| anyhow!("invalid managed-pair attempt ID"))?;
-    let parent_pid = arguments[3]
-        .to_str()
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| *value > 1)
-        .ok_or_else(|| anyhow!("invalid managed-pair parent PID"))?;
-    let parent_creation_time = match arguments[4].to_str() {
-        Some("-") => None,
-        Some(value) => Some(
-            value
-                .parse::<u64>()
-                .ok()
-                .filter(|value| *value != 0)
-                .ok_or_else(|| anyhow!("invalid managed-pair parent identity"))?,
-        ),
-        None => return Err(anyhow!("invalid managed-pair parent identity")),
-    };
-    managed_pair_engine()?.run_post_exit_swapper_after_parent_exit(
-        attempt_id,
-        &CoreManagedPairVerifier::new()?,
-        parent_pid,
-        parent_creation_time,
-    )
-}
-
-fn run_post_exit_uninstall(arguments: &[std::ffi::OsString]) -> Result<()> {
-    let (attempt_id, parent_pid, parent_creation_time) = post_exit_arguments(arguments)?;
-    managed_pair_engine()?.run_post_exit_uninstall_after_parent_exit(
-        attempt_id,
-        parent_pid,
-        parent_creation_time,
-    )?;
-    Ok(())
-}
-
-fn post_exit_arguments(arguments: &[std::ffi::OsString]) -> Result<(&str, u32, Option<u64>)> {
-    if arguments.len() != 5 {
-        return Err(anyhow!("invalid managed-pair post-exit invocation"));
-    }
-    let attempt_id = arguments[2]
-        .to_str()
-        .filter(|value| {
-            value.len() == 32
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        })
-        .ok_or_else(|| anyhow!("invalid managed-pair attempt ID"))?;
-    let parent_pid = arguments[3]
-        .to_str()
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| *value > 1)
-        .ok_or_else(|| anyhow!("invalid managed-pair parent PID"))?;
-    let parent_creation_time = match arguments[4].to_str() {
-        Some("-") => None,
-        Some(value) => Some(
-            value
-                .parse::<u64>()
-                .ok()
-                .filter(|value| *value != 0)
-                .ok_or_else(|| anyhow!("invalid managed-pair parent identity"))?,
-        ),
-        None => return Err(anyhow!("invalid managed-pair parent identity")),
-    };
-    Ok((attempt_id, parent_pid, parent_creation_time))
 }
 
 fn required_bool(object: &serde_json::Map<String, Value>, key: &str) -> Result<bool> {

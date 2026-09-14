@@ -11,7 +11,10 @@ use ctx_daemon_service::{
 use ctx_history_capture::DiscoveryContext;
 use ctx_semantic_model::{ArtifactFetchRequest, ArtifactFetcher, SemanticModelConfig};
 
-use crate::{config::AppConfig, DaemonTriggerCommandArg};
+use crate::{
+    composition::{load_runtime_config, DaemonRuntimeConfig},
+    DaemonTriggerCommandArg,
+};
 
 mod provider_refresh;
 
@@ -39,29 +42,30 @@ pub(super) static PORTS: DaemonServicePorts<
     artifact_fetcher: &ARTIFACT_FETCHER,
 };
 
-pub fn config_snapshot(config: &AppConfig<'_>) -> DaemonConfigSnapshot {
+pub fn config_snapshot(config: &DaemonRuntimeConfig) -> DaemonConfigSnapshot {
     config_snapshot_with_channel(config, config.upgrade_channel().to_owned())
 }
 
-fn into_config_snapshot(mut config: AppConfig<'static>) -> DaemonConfigSnapshot {
-    let upgrade_channel = std::mem::take(&mut config.upgrade.channel).into_owned();
+fn into_config_snapshot(mut config: DaemonRuntimeConfig) -> DaemonConfigSnapshot {
+    let upgrade_channel = std::mem::take(&mut config.upgrade.channel);
     config_snapshot_with_channel(&config, upgrade_channel)
 }
 
 fn config_snapshot_with_channel(
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     upgrade_channel: String,
 ) -> DaemonConfigSnapshot {
     DaemonConfigSnapshot {
         daemon: DaemonProductConfig {
             enabled: config.daemon.enabled,
             mode: match config.daemon.mode {
-                crate::config::DaemonMode::Full => DaemonMode::Full,
-                crate::config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
+                crate::composition::DaemonMode::Full => DaemonMode::Full,
+                crate::composition::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
             },
         },
         semantic_enabled: config.semantic_search_enabled(),
         semantic_executor: config.semantic_embedding_executor().clone(),
+        semantic_builtin_throttling_configured: config.semantic_builtin_throttling_configured(),
         automatic_upgrade_enabled: config.auto_upgrade_enabled(),
         automatic_upgrade_interval: config.upgrade.interval,
         upgrade_channel,
@@ -71,7 +75,7 @@ fn config_snapshot_with_channel(
 pub fn run_daemon_service<D, AP, UO>(
     request: ctx_daemon_application::DaemonHostRunRequest,
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     upgrade: &ctx_daemon_service::DaemonUpgradePorts<'_, D, AP, UO>,
 ) -> Result<()>
 where
@@ -130,7 +134,7 @@ pub(super) struct CliDaemonConfigPort;
 
 impl DaemonConfigPort for CliDaemonConfigPort {
     fn load(&self, data_root: &Path) -> Result<DaemonConfigSnapshot> {
-        AppConfig::load(data_root).map(into_config_snapshot)
+        load_runtime_config(data_root).map(into_config_snapshot)
     }
 
     fn semantic_model_config(&self, data_root: &Path) -> SemanticModelConfig {
@@ -142,7 +146,7 @@ impl DaemonConfigPort for CliDaemonConfigPort {
     }
 
     fn discovery_context(&self, data_root: &Path) -> Result<DiscoveryContext> {
-        let config = AppConfig::load(data_root)
+        let config = load_runtime_config(data_root)
             .context("load configured provider roots for source-backed discovery")?;
         let home = crate::identity::home_dir();
         let home_available = home.is_some();
@@ -165,7 +169,11 @@ impl DaemonAvailabilityPort for CliDaemonAvailabilityPort {
         trigger: DaemonTrigger,
         demand: DaemonAvailabilityDemand,
     ) -> Result<DaemonAvailability> {
-        let config = AppConfig::load(data_root)
+        // This checkpoint is deliberately before any finite-worker lifecycle
+        // mutation. A Ctrl-C observed by the final-binary broker can therefore
+        // never turn into a late manual-worker spawn.
+        super::finite_worker_owner::checkpoint()?;
+        let config = load_runtime_config(data_root)
             .context("load daemon configuration before availability check")?;
         if config.daemon.enabled {
             super::daemon_autostart::autostart_core_daemon_and_wait(
@@ -178,12 +186,22 @@ impl DaemonAvailabilityPort for CliDaemonAvailabilityPort {
         if demand == DaemonAvailabilityDemand::Background || trigger == DaemonTrigger::Setup {
             return Ok(DaemonAvailability::Disabled);
         }
-        super::daemon_autostart::start_finite_core_worker_and_wait(
+        super::finite_worker_owner::checkpoint()?;
+        let lease = super::daemon_autostart::start_finite_core_worker_and_wait(
             data_root,
             &config,
             cli_trigger(trigger),
         )?;
+        super::finite_worker_owner::retain(lease)?;
         Ok(DaemonAvailability::Available)
+    }
+
+    fn checkpoint(&self) -> Result<()> {
+        super::finite_worker_owner::checkpoint()
+    }
+
+    fn interrupted(&self, error: &anyhow::Error) -> bool {
+        super::finite_worker_owner::finite_worker_interrupted(error)
     }
 }
 
@@ -264,6 +282,13 @@ impl CoreGenerationPublishedPort for CliCoreGenerationPublishedPort {
 pub(crate) struct CliDaemonObservationPort;
 
 impl DaemonObservationPort for CliDaemonObservationPort {
+    fn analytics_enabled(&self, data_root: &Path) -> bool {
+        ctx_app_config::AppConfig::load(data_root).is_ok_and(|config| {
+            config.analytics.enabled
+                && ctx_app_config::normalized_analytics_environment_override() != Some(false)
+        })
+    }
+
     fn provider_refresh_event(
         &self,
         job: &serde_json::Value,
@@ -272,16 +297,17 @@ impl DaemonObservationPort for CliDaemonObservationPort {
         provider_refresh::provider_refresh_event(job, successor_pending)
     }
 
-    fn deliver(&self, data_root: &Path, events: &[PublicEventV1]) {
-        if events.is_empty() {
-            return;
-        }
-        crate::analytics::send_batch(data_root, events);
+    fn append(&self, data_root: &Path, events: &[PublicEventV1]) {
+        crate::analytics::append_batch(data_root, events);
+    }
+
+    fn append_and_upload(&self, data_root: &Path, events: &[PublicEventV1]) {
+        crate::analytics::append_and_upload_batch(data_root, events);
     }
 }
 
 pub fn deliver_daemon_events(data_root: &Path, events: &[PublicEventV1]) {
-    OBSERVATION.deliver(data_root, events);
+    OBSERVATION.append(data_root, events);
 }
 
 pub(super) struct CliDaemonArtifactFetcher;

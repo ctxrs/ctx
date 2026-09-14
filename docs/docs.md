@@ -23,7 +23,13 @@ do not read provider history, Core/Tantivy generations, or semantic data.
 
 `ctx docs man --print PAGE` prints one generated man page to stdout. `ctx docs
 man --out DIR` writes generated section-1 man pages for `ctx` and its public
-subcommands.
+subcommands. New official Unix installer-managed installations record the exact
+directory, file names, and hashes they own. After the managed binary changes,
+ctx makes one best-effort refresh of only those pages. Missing or invalid
+receipts, modified files, and interrupted partial refreshes are left alone;
+regenerate explicitly with `ctx docs man --out DIR` when needed. Other
+installations and manually chosen output directories are never discovered or
+changed automatically.
 
 Agents should usually use `ctx docs search` or `ctx docs show` rather than
 shelling through `man`, because the docs commands return concise markdown,

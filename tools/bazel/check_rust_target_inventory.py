@@ -15,6 +15,28 @@ from typing import Any
 
 DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 TARGET_KINDS = ("bin", "test", "example", "bench")
+# These src-based macros forward to ctx_rust_test with its default harness:
+# tools/bazel/binary_contracts.bzl and the owning crates' test_targets.bzl.
+LIBTEST_CONTRACT_RULES = {
+    "ctx_binary_contract_test",
+    "ctx_cli_contract_test",
+    "ctx_cli_integration_test",
+    "agent_application_binary_contract",
+    "daemon_cli_binary_contract",
+    "history_ingest_binary_contract",
+    "history_read_binary_contract",
+    "observability_binary_contract",
+}
+VISIBILITY_RESTRICTED_LOCAL_LABELS = {
+    "ctx-history-jsonl": {
+        "//crates/ctx-history-jsonl:lib",
+        "//crates/ctx-history-jsonl:test_support_lib",
+    },
+    "ctx-history-source-sqlite": {
+        "//crates/ctx-history-source-sqlite:lib",
+        "//crates/ctx-history-source-sqlite:test_support_lib",
+    },
+}
 
 
 class InventoryError(RuntimeError):
@@ -193,18 +215,13 @@ def cargo_targets(package_dir: Path, data: dict[str, Any]) -> dict[str, Path]:
 
 
 def package_bazel_modules(root: Path, package_dir: Path) -> list[ast.Module]:
-    files = [package_dir / "BUILD.bazel", *sorted(package_dir.glob("*.bzl"))]
-    if not files[0].is_file():
+    path = package_dir / "BUILD.bazel"
+    if not path.is_file():
         fail(f"Cargo package has no BUILD.bazel: {package_dir.relative_to(root)}")
-    modules: list[ast.Module] = []
-    for path in files:
-        if not path.is_file():
-            continue
-        try:
-            modules.append(ast.parse(path.read_text(encoding="utf-8"), path.as_posix()))
-        except (OSError, UnicodeError, SyntaxError) as error:
-            fail(f"cannot parse Bazel metadata {path.relative_to(root)}: {error}")
-    return modules
+    try:
+        return [ast.parse(path.read_text(encoding="utf-8"), path.as_posix())]
+    except (OSError, UnicodeError, SyntaxError) as error:
+        fail(f"cannot parse Bazel metadata {path.relative_to(root)}: {error}")
 
 
 def assignments(module: ast.Module) -> dict[str, ast.AST]:
@@ -463,8 +480,14 @@ def assert_target_ownership(
             if expected_name is not None
             else []
         )
+        owning_rules = [
+            rule for rule in owning_rules if rule_executes_target(rule[0], target, data)
+        ]
         if not owning_rules and target.startswith(("test:", "example:", "bench:")):
-            owning_rules = rust_rules_for_target(modules, path)
+            owning_rules = [
+                rule for rule in rust_rules_for_target(modules, path)
+                if rule_executes_target(rule[0], target, data)
+            ]
         owned = bool(owning_rules)
         if target == "custom-build:build-script-build":
             workspace_path = (package_dir.relative_to(root) / relative).as_posix()
@@ -474,6 +497,32 @@ def assert_target_ownership(
         if not owned:
             fail(f"{package_name} Cargo target is not owned by Bazel: {target} ({path})")
     return len(targets)
+
+
+def rule_executes_target(node: ast.Call, target: str, data: dict[str, Any]) -> bool:
+    kind, name = target.split(":", 1)
+    function = call_name(node)
+    if kind == "bin":
+        return function in {"rust_binary", "ctx_rust_binary"}
+    if kind != "test":
+        return True
+
+    harness = next(
+        (item.get("harness", True) for item in explicit_targets(data, "test")
+         if item.get("name") == name),
+        True,
+    )
+    if function in LIBTEST_CONTRACT_RULES:
+        return harness is True
+    if function not in {"rust_test", "ctx_rust_test"}:
+        return False
+    # A harness=false Cargo test still needs a Bazel test action. A binary alone
+    # only builds it, and the default libtest harness would replace its main.
+    bazel_harness = next(
+        (keyword.value for keyword in node.keywords if keyword.arg == "use_libtest_harness"),
+        ast.Constant(value=True),
+    )
+    return isinstance(bazel_harness, ast.Constant) and bazel_harness.value is harness
 
 
 def dependency_entries(data: dict[str, Any]) -> list[tuple[str, str, Any]]:
@@ -497,25 +546,78 @@ def dependency_entries(data: dict[str, Any]) -> list[tuple[str, str, Any]]:
     return result
 
 
+def workspace_dependencies(root: Path) -> dict[str, Any]:
+    workspace = load_toml(root / "Cargo.toml").get("workspace")
+    if not isinstance(workspace, dict):
+        fail("root Cargo.toml must define [workspace]")
+    dependencies = workspace.get("dependencies", {})
+    if not isinstance(dependencies, dict):
+        fail("[workspace.dependencies] must be a table")
+    return dependencies
+
+
+def resolved_local_dependency(
+    root: Path,
+    package_dir: Path,
+    package_name: str,
+    dependency_name: str,
+    value: Any,
+    inherited_dependencies: dict[str, Any],
+) -> tuple[str, Path] | None:
+    if not isinstance(value, dict):
+        return None
+    definition = value
+    base = None
+    if value.get("workspace") is True:
+        if dependency_name not in inherited_dependencies:
+            fail(
+                f"{package_name} workspace dependency {dependency_name} is not defined "
+                "by [workspace.dependencies]"
+            )
+        definition = inherited_dependencies[dependency_name]
+        base = root
+    if not isinstance(definition, dict) or "path" not in definition:
+        return None
+    path = definition["path"]
+    if not isinstance(path, str):
+        fail(f"{package_name} dependency {dependency_name} has a non-string path")
+    canonical_name = definition.get("package", dependency_name)
+    if not isinstance(canonical_name, str) or not canonical_name:
+        fail(f"{package_name} dependency {dependency_name} has an invalid package name")
+    return canonical_name, ((base or package_dir).resolve() / path).resolve()
+
+
 def local_graph(
     root: Path,
     packages: dict[str, tuple[Path, dict[str, Any]]],
 ) -> dict[str, set[str]]:
     by_root = {directory.resolve(): name for name, (directory, _) in packages.items()}
+    inherited_dependencies = workspace_dependencies(root)
     graph = {name: set() for name in packages}
     for name, (directory, data) in packages.items():
         modules = package_bazel_modules(root, directory)
         targets = cargo_targets(directory, data)
         for table, dependency_name, value in dependency_entries(data):
-            if not isinstance(value, dict) or "path" not in value:
+            resolved_dependency = resolved_local_dependency(
+                root, directory, name, dependency_name, value, inherited_dependencies
+            )
+            if resolved_dependency is None:
                 continue
-            path = value["path"]
-            if not isinstance(path, str):
-                fail(f"{name} dependency {dependency_name} has a non-string path")
-            resolved = (directory / path).resolve()
+            canonical_name, resolved = resolved_dependency
             target = by_root.get(resolved)
             if target is None:
-                fail(f"{name} dependency {dependency_name} escapes the workspace: {path}")
+                fail(
+                    f"{name} dependency {dependency_name} escapes the workspace: "
+                    f"{resolved_dependency[1]}"
+                )
+            manifest = load_toml(resolved / "Cargo.toml")
+            package = manifest.get("package")
+            actual_name = package.get("name") if isinstance(package, dict) else None
+            if actual_name != canonical_name or target != canonical_name:
+                fail(
+                    f"{name} dependency {dependency_name} resolves to {actual_name!r}, "
+                    f"not package {canonical_name!r}"
+                )
             if table != "dev-dependencies":
                 graph[name].add(target)
             package_label = f"//{resolved.relative_to(root).as_posix()}:"
@@ -547,10 +649,17 @@ def local_graph(
             if not checks:
                 fail(f"{name} has no Bazel {table} target for Cargo path dependency {target}")
             for cargo_target, dependency_labels, dependency_flags in checks:
-                if (
-                    not any(label.startswith(package_label) for label in dependency_labels)
-                    and required_flag not in dependency_flags
-                ):
+                has_explicit_label = any(
+                    label.startswith(package_label) for label in dependency_labels
+                )
+                protected_labels = VISIBILITY_RESTRICTED_LOCAL_LABELS.get(target)
+                if protected_labels and not protected_labels & dependency_labels:
+                    fail(
+                        f"{name} Bazel {cargo_target} must explicitly declare "
+                        "the visibility-restricted library label for "
+                        f"Cargo path dependency {target}"
+                    )
+                if not has_explicit_label and required_flag not in dependency_flags:
                     fail(
                         f"{name} Bazel {cargo_target} omits Cargo path dependency {target}"
                     )

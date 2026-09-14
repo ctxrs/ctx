@@ -2,13 +2,13 @@ use std::{path::Path, time::Instant};
 
 use ctx_history_index::VerifiedIndex;
 use ctx_history_read_application::{
-    SearchCollection, SearchFailurePhase as ApplicationFailurePhase,
+    RetainedPeerRead, SearchCollection, SearchFailurePhase as ApplicationFailurePhase,
 };
 use serde_json::Value;
 
 use super::super::{compact_presentation::generation_read, render::search_json_document};
 use super::{
-    application_search_failure, index_root, refresh_for_search, HistorySemanticPort, RefreshArg,
+    application_search_failure, refresh_for_search, HistorySemanticPort, RefreshArg,
     RefreshOutcome, SearchRefreshContext, SourceSearchRequest, SourceSearchResult,
 };
 use crate::{SearchExecutionObservation, SearchFailurePhase, SearchRefreshStatus};
@@ -25,6 +25,7 @@ fn search_refresh_status(status: &str) -> SearchRefreshStatus {
         "existing_generation" => SearchRefreshStatus::ExistingGeneration,
         "daemon_background" => SearchRefreshStatus::DaemonBackground,
         "daemon_unavailable" => SearchRefreshStatus::DaemonUnavailable,
+        "admission_rejected" => SearchRefreshStatus::Failed,
         _ => SearchRefreshStatus::Completed,
     }
 }
@@ -33,11 +34,12 @@ pub(super) fn observed_refresh_for_search(
     request: &SourceSearchRequest,
     mode: RefreshArg,
     data_root: &Path,
+    retained_peer: RetainedPeerRead,
     observation: &mut SearchExecutionObservation,
 ) -> SourceSearchResult<RefreshOutcome> {
     observation.failure_phase = Some(SearchFailurePhase::Refresh);
     let started = Instant::now();
-    let result = refresh_for_search(request, mode, data_root);
+    let result = refresh_for_search(request, mode, data_root, retained_peer);
     observation.refresh_duration = Some(started.elapsed());
     match result {
         Ok(refresh) => {
@@ -91,7 +93,6 @@ pub(super) fn search_existing_generation_with_port<P: HistorySemanticPort>(
     let mut generation_port = |request: &ctx_history_read_application::GenerationReadRequest| {
         generation_read(
             index.take().expect("generation port is invoked once"),
-            &index_root(data_root),
             request,
         )
     };
@@ -129,4 +130,25 @@ pub(super) fn search_existing_generation_with_port<P: HistorySemanticPort>(
     )?;
     observation.failure_phase = None;
     Ok((value, result))
+}
+
+#[cfg(test)]
+mod admission_rejected_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_optional_admission_is_failed_refresh_not_completed_telemetry() {
+        assert_eq!(
+            search_refresh_status("admission_rejected"),
+            SearchRefreshStatus::Failed
+        );
+        assert_eq!(
+            search_refresh_status("daemon_background"),
+            SearchRefreshStatus::DaemonBackground
+        );
+        assert_eq!(
+            search_refresh_status("completed"),
+            SearchRefreshStatus::Completed
+        );
+    }
 }

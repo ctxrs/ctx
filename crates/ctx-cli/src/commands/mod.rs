@@ -12,10 +12,9 @@ pub(crate) mod show;
 /// execution itself lives in `ctx-history-cli`.
 pub(crate) mod source_index {
     pub(crate) use ctx_history_cli::{
-        generation_query_authority_error_json, mcp_search_with_compact, mcp_show_event_application,
-        mcp_show_session_application, normalize_mcp_search_request,
-        validate_explicit_semantic_scope, McpSearchError, ShowApplicationError,
-        SourceSearchRequest,
+        mcp_search_with_compact, mcp_show_event_application, mcp_show_session_application,
+        normalize_mcp_search_request, validate_explicit_semantic_scope, McpSearchError,
+        ShowApplicationError, SourceSearchRequest,
     };
 }
 pub(crate) mod sources;

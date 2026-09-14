@@ -269,6 +269,7 @@ pub struct SqliteSourceEvidence {
     length: u64,
     wal_length: Option<u64>,
     shared_memory_length: Option<u64>,
+    physical_revision: [u8; 32],
     schema: SqliteSchemaEvidence,
     source: SqliteConnectionEvidence,
     revision: [u8; 32],
@@ -286,6 +287,16 @@ impl SqliteSourceEvidence {
 
     pub fn revision(&self) -> &[u8; 32] {
         &self.revision
+    }
+
+    /// Returns the move-stable bounded DB/WAL content revision that can be
+    /// reobserved without copying or opening a logical SQLite snapshot.
+    ///
+    /// This token is suitable only for exact replay. Callers must reobserve it
+    /// through [`SqliteSourceReplayFence::revalidate`] at terminal validation
+    /// before publishing retained logical content.
+    pub fn physical_revision(&self) -> &[u8; 32] {
+        &self.physical_revision
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -364,9 +375,32 @@ impl SqliteSourceDirectoryAuthority {
         self.snapshot_context.snapshot()
     }
 
-    /// Observes one bounded physical DB/WAL family revision without copying or
-    /// opening a logical SQLite snapshot. The returned token is valid only for
-    /// exact replay and must be observed again during terminal revalidation.
+    /// Retains one exact physical DB/WAL revision for no-copy replay.
+    ///
+    /// Provider policy must first establish that its prior logical receipt or
+    /// frontier is eligible for replay. The returned fence owns physical
+    /// authority only and must be revalidated before retained logical content
+    /// is published.
+    pub fn observe_replay_fence(
+        &self,
+        database_name: &OsStr,
+    ) -> SqliteSourceAccessResult<SqliteSourceReplayFence> {
+        let family = SqliteSourceFamily::open(self, database_name, || {})?;
+        let evidence = family.capture_revision_evidence()?;
+        family.revalidate_revision(&evidence)?;
+        let revision = evidence.content_revision_token();
+        Ok(SqliteSourceReplayFence {
+            authority: self.clone(),
+            database_name: database_name.to_os_string(),
+            revision,
+            evidence,
+        })
+    }
+
+    /// Observes one bounded physical DB/WAL family revision without retaining
+    /// a fence. This lower-level API exists for bounded inventory routes that
+    /// cannot retain one directory authority per leaf; single-database replay
+    /// routes should prefer [`Self::observe_replay_fence`].
     pub fn observe_physical_revision(
         &self,
         database_name: &OsStr,
@@ -471,6 +505,38 @@ impl SqliteSourceDirectoryAuthority {
         } else {
             Err(SqliteSourceAccessError::SourceChanged)
         }
+    }
+}
+
+/// Retained physical authority for exact replay of one unchanged SQLite
+/// DB/WAL family.
+///
+/// This fence proves only that the provider-owned physical source is still the
+/// revision observed at construction. Parser, logical-source, and publication
+/// policy remain the responsibility of the provider adapter.
+#[derive(Debug)]
+#[must_use = "exact replay requires terminal revalidation before publication"]
+pub struct SqliteSourceReplayFence {
+    authority: SqliteSourceDirectoryAuthority,
+    database_name: OsString,
+    revision: [u8; 32],
+    evidence: SqliteFamilyEvidence,
+}
+
+impl SqliteSourceReplayFence {
+    pub fn revision(&self) -> &[u8; 32] {
+        &self.revision
+    }
+
+    /// Reobserves the retained DB/WAL family and fails closed unless its exact
+    /// native objects, metadata, and bounded content evidence still match the
+    /// admitted replay family.
+    pub fn revalidate(&self) -> SqliteSourceAccessResult<()> {
+        let family = SqliteSourceFamily::open(&self.authority, &self.database_name, || {})
+            .map_err(map_revalidation_error)?;
+        family
+            .revalidate_revision(&self.evidence)
+            .map_err(map_revalidation_error)
     }
 }
 

@@ -1,0 +1,29 @@
+{
+  "contractVersion": "agent-history-v2",
+  "schemaVersion": 1,
+  "operation": "init",
+  "backend": {
+    "kind": "local",
+    "dataRoot": "/tmp/ctx-sdk-fixture"
+  },
+  "status": {
+    "initialized": true,
+    "dataRoot": "/tmp/ctx-sdk-fixture",
+    "indexedItems": 0,
+    "indexedSessions": 0,
+    "indexedEvents": 0,
+    "indexedSources": 0,
+    "lexical": {
+      "status": "ready",
+      "generationId": "fixture-empty-generation",
+      "indexedDocuments": 0,
+      "certifiedSources": 0
+    },
+    "refresh": {
+      "status": "ready",
+      "requestState": "published",
+      "publishedGeneration": "fixture-empty-generation",
+      "generationMatches": true
+    }
+  }
+}

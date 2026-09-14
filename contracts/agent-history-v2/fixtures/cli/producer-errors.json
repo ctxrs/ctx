@@ -1,0 +1,42 @@
+[
+  {
+    "error_code": "generation_changed",
+    "failure_kind": "active_generation_race",
+    "retryable": true,
+    "detail": "producer detail",
+    "error": "generation_changed",
+    "extra": {
+      "snake_key": null
+    }
+  },
+  {
+    "error_code": "semantic_executor_unavailable",
+    "failure_kind": "executor_unavailable",
+    "retryable": true,
+    "detail": "producer detail",
+    "error": "semantic_executor_unavailable",
+    "extra": {
+      "snake_key": null
+    }
+  },
+  {
+    "error_code": "cursor_stale",
+    "failure_kind": "stale",
+    "retryable": false,
+    "detail": "producer detail",
+    "error": "cursor_stale",
+    "extra": {
+      "snake_key": null
+    }
+  },
+  {
+    "error_code": "not_found",
+    "failure_kind": "missing_event",
+    "retryable": false,
+    "detail": "producer detail",
+    "error": "not_found",
+    "extra": {
+      "snake_key": null
+    }
+  }
+]

@@ -196,6 +196,33 @@ missing selection, or widen selected work. Interrupted requests persist their
 logical intent and are re-admitted through the same resolver before execution,
 so missing or changed selected routes fail closed.
 
+Every v1.0.0-through-v1.3.1 binary carried the pre-canonical durable
+selector/catalog decoder and matching daemon IPC adapter. In those same
+released tags, however, daemon clients and durable job writers emitted canonical
+`refresh_intent`, and request fingerprints were computed from that canonical
+intent plus its trigger. No supported release producer emitted the retired
+request shape or a fingerprint of that shape. Current readers therefore require
+canonical `refresh_intent`; removing the old decoder does not discard a released
+producer format.
+
+Schema-1 jobs and status still retain released physical-attempt, coalescing, and
+legacy terminal fields. Those fields can be removed only after a successor
+schema is released and schema 1 is outside the supported upgrade floor; neither
+that release nor a date has been assigned.
+
+Publication metadata has a different release history. v1.0.0 through v1.1.1
+wrote metadata version 3, while v1.2.0 through v1.3.1 wrote version 4. Those
+released generations used manifest version 8 or 10 and commit payload version
+2; the current format uses manifest version 11 and commit payload version 3.
+Core is disposable derived storage, so an unsupported predecessor generation
+remains opaque and authoritative while ctx rebuilds a complete current
+candidate from provider sources, verifies it, and atomically replaces the old
+generation. The upgrade path neither migrates the predecessor nor decodes its
+old metadata; when required source history is unavailable, ctx reports it as
+unavailable instead of recovering content from the predecessor. The version-3
+and version-4 metadata decoder therefore remains deleted under the documented
+source-authoritative rebuild policy, not because those formats were unreleased.
+
 Request receipts describe only the routes and rejections observed by that
 request. Generation metadata separately describes the complete retained
 publication. A selected no-op can therefore report its own rejection outcome
@@ -208,6 +235,14 @@ without changing generation-wide totals or the daemon's global watch catalog.
   plaintext transcript chunks.
 - `usage.sqlite` contains only the bounded content-free aggregates documented
   above. It is product state, not history or search authority.
+
+Flat-F32 manifest schema 5 keeps source receipts and segment descriptors in
+immutable, checksummed catalog pages. The root manifest and each page retain
+the 16 MiB safety bound; adding sources no longer appends all their metadata to
+one root file. Unchanged pages are reused. New pages are synced before the root
+is published, and existing readers retain their pinned generation. Schema-4
+inline manifests remain readable and upgrade on the next publication without
+rebuilding their vectors. Older clients cannot read schema-5 manifests.
 
 A selected Core event may carry content-governed `activity` with exact typed
 provider call identity, invocation and/or result channels, and ordered literal
@@ -344,10 +379,17 @@ generation; a failed refresh leaves the prior verified generation active.
 
 ## Command Read/Write Behavior
 
-This table describes core command effects. It excludes the independent
+This table describes direct command effects. It excludes the independent
 best-effort daily aggregate upsert to `usage.sqlite` and the optional
 first-party analytics marker described under network behavior. Disable the
-local upsert as described above.
+local upsert as described above. It also excludes two startup maintenance paths
+for hosted-managed binaries. An eligible ordinary command may silently refresh
+an existing metadata-owned ctx skill in a recognized global agent directory;
+that path skips `status` and `search --refresh off`. Separately, after the
+managed binary changes, any ordinary command except `ctx docs man` may silently
+refresh exact receipt-owned, unmodified man pages and advance their receipt.
+Missing, legacy, malformed, modified, or unsafe man-page state is left alone.
+Neither maintenance path changes the command result.
 
 | Command | Reads | Writes |
 | --- | --- | --- |
@@ -360,10 +402,10 @@ local upsert as described above.
 | `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, local history-source plugin manifests, and configured named history roots | none |
 | `ctx sources add [--replace]` / `ctx sources remove` | `config.toml` and named provider history root path metadata used for validation | atomically updates `config.toml`; provider history is never modified |
-| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; finite workers do not run semantic work |
+| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; when semantic search is enabled, the exact published generation may also create or update its semantic projection through the selected executor (including built-in model/runtime acquisition or an explicitly selected HTTP executor); finite workers remain Core-only |
 | `ctx show session` / `ctx show event` | complete policy-selected records in the active verified Core/Tantivy generation | selected `--out` path for `show session` when provided |
 | `ctx list events` | complete policy-selected records and existing index terms in one pinned verified Core/Tantivy generation | none; event enumeration is read-only |
-| `ctx search` | active verified Core/Tantivy generation and existing semantic generation; when refresh has authority, bounded provider discovery/path metadata | candidate Core publication and daemon state only when refresh has authority; manual background and `--refresh off` do not start or wake a process |
+| `ctx search` | active verified Core/Tantivy generation and existing semantic generation; direct CLI passive semantic/hybrid queries may also read selected-executor metadata and verified cached model/runtime assets, or call an explicitly selected HTTP executor after preflight; when refresh has authority, bounded provider discovery/path metadata | a refresh-authorized search may publish a candidate Core generation and daemon state, and an exact semantic `--refresh wait` may create or update the semantic projection through the selected executor (including built-in model/runtime acquisition); manual background and `--refresh off` do not start or wake a ctx daemon or worker and do not mutate Core or semantic projection state |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
 | `ctx doctor` | source epoch, lexical/semantic generation metadata, and ctx-owned daemon lock/status/job metadata | none |
@@ -372,26 +414,43 @@ local upsert as described above.
 Setup, import, and default lexical search do not require source repository
 writes, embedding APIs, executor credentials, or remote accounts. Without
 semantic opt-in they do not download models or runtime assets or contact an
-embedding executor. With semantic enabled, daemon maintenance uses the selected
-executor and may acquire the built-in ONNX Runtime asset and embedding model
-when the installed build supports that path. In automatic indexing mode,
-setup and import may start the persistent ctx-owned daemon regardless of output
-format. In manual mode, setup starts no worker; explicit imports may start only
-a finite Core worker using the same source-refresh endpoint and publication
-engine. Use `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run
-opt-out; an explicit provider-source import with that opt-out requires an
-existing endpoint.
-The deprecated `ctx setup --catalog-only` flag is ignored and does not change
-daemon-autostart behavior.
+embedding executor. With semantic enabled, exact import completion and
+refresh-authorized semantic search use the selected executor and may acquire
+the built-in ONNX Runtime asset and embedding model when the installed build
+supports that path; an explicitly selected HTTP executor may make its normal
+conformance or embedding requests. In automatic indexing mode, setup and
+import may start the persistent ctx-owned daemon regardless of output format.
+In manual mode, setup starts no worker; explicit imports may start only a
+finite Core worker using the same source-refresh endpoint and publication
+engine, then reconcile the exact semantic generation in the foreground. Use
+`ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out; an
+explicit provider-source import with that opt-out requires an existing endpoint.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
 daemon maintenance, start semantic workers, schedule semantic indexing, or
-write any derived generation. It serves results from the active Core
-generation. Default `--backend hybrid --refresh off`
-uses semantic evidence only when semantic coverage is complete and dirty work is
-drained, and otherwise falls back to lexical. Explicit semantic searches with
-`--refresh off` may ask the daemon query service to use the selected executor
-for the query and read partial existing semantic generation coverage, but they
-do not download a model or write semantic catch-up work.
+write any derived generation. It serves the active Core generation and may use
+semantic evidence only after exact-generation preflight confirms that the
+compatible semantic projection is complete. Hybrid otherwise falls back to
+lexical with a typed reason; semantic-only returns that readiness error.
+
+Ordinary daemon and explicit Reconcile preflight use read-only SQLite access
+that observes committed WAL state; the retained daemon query service uses the
+selected executor. With automatic indexing disabled, direct CLI `off` and
+`background` passive preflight shares the existing `flat_transaction.lock` from
+SQLite sidecar inspection through control/schema validation and exact Flat
+generation pinning, refuses WAL and rollback-journal state, and opens only the
+main database with immutable read-only semantics. That path does not create a
+lock, database, WAL, SHM, journal, directory, compiled model, runtime, or cache
+artifact. Hybrid preserves the typed fallback code and retryability; semantic
+only preserves the same typed error. A selected built-in executor may load only
+verified cached model/runtime assets; an explicitly selected HTTP executor may
+send its normal conformance probes and query request after preflight. Neither
+path acquires a model, reconciles coverage, or writes semantic catch-up work.
+System-call qualification for this promise scopes write assertions to
+semantic storage, model/runtime caches, and indexing state. An ordinary search
+also opens and locks Tantivy's pre-existing lexical query lock with
+write-capable flags; full-tree snapshots show that mechanism makes no durable
+change. Redesigning lexical query locking is outside the passive semantic
+contract.
 Semantic coverage is exact across the content-filter boundary. Persisted
 flat-F32 source receipts account for every pre-filter Core candidate as either
 an active projected event or an intentionally filtered event. Query metadata
@@ -603,6 +662,20 @@ semantic = true
 ```
 
 The built-in executor is also the default and is omitted from `config.toml`.
+Its semantic document-index throttling likewise defaults to enabled and can be
+omitted. The built-in-only opt-out is:
+
+```toml
+[semantic]
+builtin_throttling = false
+```
+
+This setting does not enable semantic search or select an executor. A config
+file that explicitly selects an HTTP executor and also contains
+`builtin_throttling` is invalid. `ctx semantic enable` and its existing
+`--executor builtin|URL` option retain their lifecycle and selection behavior.
+Human and JSON semantic status report configured and effective throttling.
+
 Prefer `ctx semantic enable --executor URL`, which tries V2 first and writes
 the complete V2 identity below. Fixed-E5 V1 is considered only when the V2
 contract route returns 404 and remains endpoint-only. Selecting `--executor
@@ -885,22 +958,48 @@ random UUID used only for analytics events; it lives outside the ctx data root
 in OS user state, such as `$XDG_STATE_HOME/ctx/device.json` or
 `~/.local/state/ctx/device.json` on Linux. When a capability snapshot is
 eligible, ctx creates a private versioned claim in that state directory and
-promotes it to a version marker after network acceptance or durable local
-queueing. A failed or uncertain local handoff does not change command output or
-exit status and leaves the claim in place to avoid replay.
+promotes it to a version marker after durable local queueing. A failed or
+uncertain local handoff does not change command output or exit status and leaves
+the claim in place to avoid replay.
 
-If delivery fails, ctx stores the exact already-serialized content-free batch
-in the same OS user-state directory as `analytics-outbox-v1.json`. The file is
+Foreground CLI and MCP commands never open a telemetry connection. They
+serialize each eligible event once, preserving its UUIDv4 event ID in the exact
+content-free batch body, and durably append that body to
+`analytics-outbox-v1.json` in the same OS user-state directory. The file is
 owner-private, is never stored under the ctx data root, and contains no response
 body or raw error. It stores a one-way endpoint fingerprint plus queue time and
-attempt bookkeeping so a payload is not replayed to a different endpoint. ctx
-retries up to 10 queued batches per delivery call and bounds the outbox to 128
-entries, 2 MiB total, 512 KiB per batch, and 30 days. Oldest entries are dropped
-when a bound is reached, and the drop is reported only through the closed
-delivery-health fields. If this owner-private file is malformed or oversized,
-ctx replaces it with an empty valid outbox and reports one `local_io` drop on
-the next successful delivery. Unsafe paths, links, and permissions still fail
-closed instead of being replaced.
+attempt bookkeeping so a payload is not replayed to a different endpoint. Each
+entry belongs to the existing random data-root identifier. Enqueue, delivery,
+purge, and delivery counters use that same owner: an enabled root cannot upload
+another root's entries. Older shared outboxes without this ownership are
+discarded, including their counters, rather than replayed under another root's
+consent. If the persistent daemon is disabled or absent, entries remain local until a later
+daemon run delivers them or the bounds below expire them.
+
+The enabled persistent daemon is the sole telemetry network uploader. It drains
+on startup, active wakes, and periodic cycles. Each drain briefly locks and
+snapshots up to 10 entries, releases the state lock while HTTP executes under
+one approximately two-second deadline, then re-locks to reconcile exact outbox
+entry IDs. Foreground writers therefore never wait behind a slow request. Only
+a final 2xx response removes an accepted entry; a crash after server acceptance
+replays the unchanged event IDs and relies on server idempotency. Network
+failures, HTTP 408/429, and 5xx responses retry under persisted capped
+exponential backoff with jitter. A valid bounded `Retry-After` can extend the
+delay. Other permanent HTTP rejections are dropped, and daemon shutdown appends
+its terminal event without starting another request.
+
+Each root's delivery retry, drop, age, and failure counters are coalesced into
+one closed
+`analytics_delivery_observation@1` only after an ordinary payload is accepted.
+Failure to deliver that health event never recursively creates another health
+event. Across all roots, the shared outbox is bounded to 128 entries, 2 MiB
+total, 512 KiB per batch, and 30 days. Oldest entries are dropped when a bound
+is reached, with drops charged to their owning root. At most 128 root counter
+records are retained; under metadata capacity pressure, counter-only records
+may be discarded while counters for roots with queued entries are preserved. If
+this owner-private file is malformed or oversized, ctx replaces it with an empty
+valid outbox and reports one `local_io` drop after delivery recovers. Unsafe
+paths, links, and permissions still fail closed instead of being replaced.
 
 For an official hosted installation, eligible product-analytics
 events may also carry the installer attempt identifier for less than seven days
@@ -922,8 +1021,15 @@ export CTX_ANALYTICS_ENABLED=false
 
 Either explicit opt-out disables CLI analytics. A config opt-out wins over
 `CTX_ANALYTICS_ENABLED=true` and over an endpoint override. The next ctx process
-that opens analytics state removes any existing analytics outbox without
-creating an analytics identity or making a telemetry request.
+that opens analytics state removes that root's queued entries and counters
+when the original root identity is still readable, without creating an analytics
+identity or making a telemetry request. If that identity is missing, invalid,
+or replaced, entries whose owner cannot be identified remain subject to the
+normal bounded expiry and eviction. They are never reassigned to another
+identity. Other roots' permitted entries remain queued. Before each request,
+ctx checks that the current root identity still matches the captured owner;
+a missing, invalid, or different identity stops further delivery. An opt-out
+cannot recall a request already sent.
 
 ### Installer diagnostics
 

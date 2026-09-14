@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Result};
-use ctx_history_core::{
-    AgentScope, CaptureProvider, EventType, ProviderNativeEventCopy,
-    ProviderNativeSessionRelationship,
-};
+#[cfg(test)]
+use ctx_history_core::AgentScope;
+use ctx_history_core::{CaptureProvider, EventType};
 #[cfg(test)]
 use ctx_history_index_query::SearchContentScope;
 use ctx_history_index_query::{
@@ -159,6 +158,9 @@ pub type SearchExecutionResult<T> = std::result::Result<T, SearchExecutionError>
 
 #[derive(Debug)]
 pub struct SearchCollection<Event = SearchEventMetadata> {
+    /// Bounded semantic presentations resolved after final selection, before the
+    /// semantic query session releases its captured contract and pin.
+    pub semantic_presentations: Vec<crate::SearchPresentation>,
     pub result_window: SearchResultWindow<Event>,
     pub candidate_pool: usize,
     pub candidate_pool_truncated: bool,
@@ -197,12 +199,15 @@ pub struct SearchResultWindow<Event = SearchEventMetadata> {
 
 #[derive(Debug, Clone)]
 pub struct SemanticFallbackDiagnostics {
+    pub code: Option<&'static str>,
     pub reason: Option<SemanticReason>,
     pub detail: String,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct SearchHit<Event = SearchEventMetadata> {
+    pub semantic_evidence: Option<ctx_history_index_query::SemanticSearchEvidence>,
     pub event: Event,
     pub score: f32,
     pub more_matches_in_session: usize,
@@ -211,53 +216,8 @@ pub struct SearchHit<Event = SearchEventMetadata> {
 pub(crate) type RankedSearchCollection = SearchCollection<RankedEventRef>;
 pub(crate) type RankedSearchResultWindow = SearchResultWindow<RankedEventRef>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchEventMetadata {
-    pub event_id: Uuid,
-    pub session_id: Uuid,
-    pub parent_session_id: Option<Uuid>,
-    pub root_session_id: Option<Uuid>,
-    pub session_relationship: Option<ProviderNativeSessionRelationship>,
-    pub event_copy: Option<ProviderNativeEventCopy>,
-    pub provider: String,
-    pub provider_key: Option<String>,
-    pub source_id: Option<String>,
-    pub source_format: String,
-    pub provider_session_id: Option<String>,
-    pub agent_scope: Option<AgentScope>,
-    pub event_sequence: u64,
-    pub occurred_at_unix_ms: Option<i64>,
-    pub event_type: String,
-    pub role: Option<String>,
-}
-
-impl From<&EventRecord> for SearchEventMetadata {
-    fn from(event: &EventRecord) -> Self {
-        let (provider_key, source_id) = event
-            .custom_source_identity()
-            .map_or((None, None), |(provider_key, source_id)| {
-                (Some(provider_key.to_owned()), Some(source_id.to_owned()))
-            });
-        Self {
-            event_id: event.event_id.as_uuid(),
-            session_id: event.session_id.as_uuid(),
-            parent_session_id: event.parent_session_id.map(|id| id.as_uuid()),
-            root_session_id: event.root_session_id.map(|id| id.as_uuid()),
-            session_relationship: event.session_relationship,
-            event_copy: event.event_copy.clone(),
-            provider: event.provider.clone(),
-            provider_key,
-            source_id,
-            source_format: event.source_format.clone(),
-            provider_session_id: event.provider_session_id.clone(),
-            agent_scope: event.agent_scope,
-            event_sequence: event.event_sequence,
-            occurred_at_unix_ms: event.occurred_at_unix_ms,
-            event_type: event.event_type.clone(),
-            role: event.role.clone(),
-        }
-    }
-}
+/// Compatibility name for the directly retained Core event metadata.
+pub type SearchEventMetadata = EventRecord;
 
 fn collect_search_hits_with_receipt<P: HistorySemanticPort>(
     request: &SearchRequest,
@@ -439,17 +399,22 @@ fn lexical_fallback_with_diagnostics(
         "query_count": queries.len(),
         "queries": semantic_query_diagnostics,
         "fallback": {
+            "code": fallback.code,
             "reason": format!("{:?}", fallback.reason),
             "detail": fallback.detail,
+            "retryable": fallback.retryable,
         },
     }));
     Ok(collection)
 }
 
 fn semantic_fallback_diagnostics(error: &HistorySemanticError) -> SemanticFallbackDiagnostics {
+    let reason = error.reason();
     SemanticFallbackDiagnostics {
-        reason: error.reason(),
+        code: reason.and_then(SemanticReason::adapter_code),
+        reason,
         detail: error.detail().to_owned(),
+        retryable: error.retryable(),
     }
 }
 
@@ -549,6 +514,7 @@ where
         result_window.more_available = true;
     }
     Ok(SearchCollection {
+        semantic_presentations: Vec::new(),
         result_window,
         candidate_pool,
         candidate_pool_truncated,
@@ -567,6 +533,7 @@ where
 
 fn empty_lexical_collection(limit: usize, work: SearchWorkReceipt) -> RankedSearchCollection {
     SearchCollection {
+        semantic_presentations: Vec::new(),
         result_window: SearchResultWindow {
             limit,
             hits: Vec::new(),

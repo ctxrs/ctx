@@ -5,8 +5,13 @@ fn refresh_off_uses_the_existing_generation_without_activation() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
 
-    let outcome =
-        refresh_for_search(&request(RefreshArg::Off), RefreshArg::Off, temp.path()).unwrap();
+    let outcome = refresh_for_search(
+        &request(RefreshArg::Off),
+        RefreshArg::Off,
+        temp.path(),
+        ctx_history_read_application::RetainedPeerRead::Omit,
+    )
+    .unwrap();
 
     assert_eq!(outcome.status, "existing_generation");
     assert_eq!(
@@ -20,7 +25,7 @@ fn core_search_consumes_the_coordinator_pin_after_active_generation_pointer_dele
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let requested_mode = Cell::new(None);
-    let pin = crate::semantic::pin_active_verified_generation(temp.path()).unwrap();
+    let pin = ctx_daemon_cli::pin_active_verified_generation(temp.path()).unwrap();
     let outcome = refresh_for_search_with(
         &request(RefreshArg::Off),
         RefreshArg::Off,
@@ -62,12 +67,13 @@ fn core_search_consumes_the_coordinator_pin_after_active_generation_pointer_dele
 }
 
 #[test]
-fn two_rotations_keep_full_id_machine_reads_pinned_and_retry_compact_or_human_reads() {
+fn two_rotations_keep_machine_compact_and_human_reads_pinned() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let machine_pin = open_index(temp.path()).unwrap();
-    let compact_pin = open_index(temp.path()).unwrap();
-    let human_pin = open_index(temp.path()).unwrap();
+    let compact_pin =
+        VerifiedIndex::open_pinned_with_retained_peer(index_root(temp.path())).unwrap();
+    let human_pin = VerifiedIndex::open_pinned_with_retained_peer(index_root(temp.path())).unwrap();
     let session_id = machine_pin
         .sessions_by_provider_session_id(TEST_SESSION_ID, Some("codex"), None, None)
         .unwrap()[0]
@@ -110,7 +116,7 @@ fn two_rotations_keep_full_id_machine_reads_pinned_and_retry_compact_or_human_re
     let mut compact_request = request(RefreshArg::Off);
     compact_request.session = Some(session_id.simple().to_string()[..8].to_owned());
     compact_request.events = true;
-    let compact_error = search_existing_generation(
+    let (_, compact_collection, compact_pinned) = search_existing_generation(
         &compact_request,
         compact_pin,
         temp.path(),
@@ -118,14 +124,18 @@ fn two_rotations_keep_full_id_machine_reads_pinned_and_retry_compact_or_human_re
         "existing_generation",
         1,
     )
-    .err()
-    .expect("expired compact input must request a concurrent-generation retry");
-    assert!(super::shared::is_active_generation_race(&compact_error));
+    .unwrap();
+    assert_eq!(compact_collection.result_window.hits.len(), 1);
+    assert_ne!(
+        compact_pinned.generation_id(),
+        open_index(temp.path()).unwrap().generation_id()
+    );
 
-    let human_error = generation_with_retained_peer(temp.path(), human_pin)
-        .err()
-        .expect("expired human presentation must request a concurrent-generation retry");
-    assert!(super::shared::is_active_generation_race(&human_error));
+    let human = generation_with_retained_peer(human_pin).unwrap();
+    assert_ne!(
+        human.index().generation_id(),
+        open_index(temp.path()).unwrap().generation_id()
+    );
 }
 
 #[test]
@@ -214,7 +224,7 @@ fn search_context_bytes_use_core_snippets_and_indexed_complete_session_sizes_not
         .iter()
         .map(|result| result["snippet"].as_str().unwrap().len())
         .sum::<usize>();
-    let session_id = collection.result_window.hits[0].event.session_id;
+    let session_id = collection.result_window.hits[0].event.session_id.as_uuid();
     let complete_bytes = index
         .core_events_for_session(session_id)
         .unwrap()
@@ -542,7 +552,7 @@ fn mcp_source_route_applies_the_semantic_config_default_to_source_generations() 
 }
 
 #[test]
-fn daemon_disabled_cli_default_and_hybrid_fall_back_but_semantic_is_typed() {
+fn daemon_disabled_passive_policy_falls_back_and_semantic_is_typed() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let config = history_config(false, true);
@@ -586,7 +596,7 @@ fn daemon_disabled_cli_default_and_hybrid_fall_back_but_semantic_is_typed() {
 }
 
 #[test]
-fn manual_wait_makes_semantic_execution_available_only_for_that_cli_search() {
+fn manual_foreground_search_makes_semantic_execution_available_only_for_that_cli_search() {
     let config = history_config(false, true);
     let passive = super::search::source_search_policy(&config, false);
     assert_eq!(
@@ -597,14 +607,10 @@ fn manual_wait_makes_semantic_execution_available_only_for_that_cli_search() {
     );
 
     let foreground = super::search::source_search_policy(&config, true);
-    let expected = if ctx_daemon_cli::semantic_query_service_supported() {
+    assert_eq!(
+        foreground.semantic,
         ctx_history_read_application::SemanticAvailability::Available
-    } else {
-        ctx_history_read_application::SemanticAvailability::Unavailable(
-            ctx_history_read_application::SemanticReason::PlatformUnsupported,
-        )
-    };
-    assert_eq!(foreground.semantic, expected);
+    );
 }
 
 #[test]
@@ -654,6 +660,36 @@ fn semantic_generation_wait_is_limited_to_queries_that_need_semantic_evidence() 
         ctx_history_read_application::SemanticAvailability::Unavailable(
             ctx_history_read_application::SemanticReason::PolicyDisabled,
         ),
+    ));
+}
+
+#[test]
+fn manual_cli_selects_read_only_semantic_for_passive_refresh_and_reconciliation_for_wait() {
+    use super::search::ForegroundSemanticExecution;
+
+    assert_eq!(
+        super::search::foreground_semantic_execution(RefreshArg::Off, false),
+        Some(ForegroundSemanticExecution::ReadOnly)
+    );
+    assert_eq!(
+        super::search::foreground_semantic_execution(RefreshArg::Wait, false),
+        Some(ForegroundSemanticExecution::Reconcile)
+    );
+    assert_eq!(
+        super::search::foreground_semantic_execution(RefreshArg::Background, false),
+        Some(ForegroundSemanticExecution::ReadOnly)
+    );
+    assert_eq!(
+        super::search::foreground_semantic_execution(RefreshArg::Off, true),
+        None
+    );
+    assert!(!super::search::should_wait_for_daemon_query_service(
+        RefreshArg::Background,
+        false
+    ));
+    assert!(super::search::should_wait_for_daemon_query_service(
+        RefreshArg::Background,
+        true
     ));
 }
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from typing import Any, Mapping, Optional, Sequence
 
 
@@ -47,6 +49,13 @@ class CtxAgentHistoryCliError(CtxAgentHistoryError):
         stdout: str = "",
         cause: Optional[BaseException] = None,
     ) -> None:
+        try:
+            producer = json.loads(stderr)
+        except (ValueError, TypeError):
+            producer = None
+        if not (isinstance(producer, dict) and isinstance(producer.get("error_code"), str)
+                and producer["error_code"] and isinstance(producer.get("retryable", False), bool)):
+            producer = None
         self.command = list(command)
         self.exit_code = exit_code
         self.stderr = stderr
@@ -59,14 +68,15 @@ class CtxAgentHistoryCliError(CtxAgentHistoryError):
                 "exit_code": exit_code,
                 "stderr": stderr,
                 "stdout": stdout,
+                **({"producerError": producer} if producer is not None else {}),
             },
-            retryable=False,
+            retryable=producer.get("retryable", False) if producer is not None else False,
             cause=cause,
         )
 
 
 class CtxAgentHistoryProtocolError(CtxAgentHistoryError):
-    """Raised when ctx does not return the expected agent-history-v1 JSON."""
+    """Raised when ctx does not return the expected agent-history-v2 JSON."""
 
     def __init__(
         self,

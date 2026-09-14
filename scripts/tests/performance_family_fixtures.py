@@ -37,6 +37,7 @@ PROVIDER_SUPPORT_MATRIX = (
 PROVIDER_FAMILY_COVERAGE = (
     ("custom", PROVIDER_SPECIFIC_EXCEPTION, "explicit custom-history JSONL"),
     ("codex", JSONL_FAMILY, None),
+    ("fx", JSONL_FAMILY, "compound session tree"),
     ("grok_build", JSONL_FAMILY, None),
     ("deepseek_harness", JSONL_FAMILY, None),
     ("claude", JSONL_FAMILY, None),

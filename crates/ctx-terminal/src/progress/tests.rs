@@ -108,7 +108,7 @@ fn terminal_status() -> RefreshProgressSnapshot {
         crate::ui::RefreshRequestState::Published,
         "completed",
         "completed",
-        false,
+        crate::ui::RefreshTerminalPresentation::Complete,
     )
 }
 
@@ -116,7 +116,7 @@ fn terminal_status_with(
     state: crate::ui::RefreshRequestState,
     code: &str,
     class: &str,
-    failure: bool,
+    presentation: crate::ui::RefreshTerminalPresentation,
 ) -> RefreshProgressSnapshot {
     RefreshProgressSnapshot::new(
         Some("logical-request".to_owned()),
@@ -139,7 +139,7 @@ fn terminal_status_with(
                 published_generation: None,
                 retry_advice: None,
                 detail: None,
-                failure,
+                presentation,
             })),
         }),
         crate::ui::RefreshProgress {
@@ -373,7 +373,7 @@ fn failed_setup_snapshot_is_failed_in_json_and_live_presentation() {
         crate::ui::RefreshRequestState::Failed,
         "source_refresh_failed",
         "internal",
-        true,
+        crate::ui::RefreshTerminalPresentation::Failed,
     );
     snapshot.use_setup_live_presentation();
     let context = crate::ui::RenderContext::for_test(crate::ui::TestContext::tty(

@@ -22,8 +22,8 @@ use super::{
         SEMANTIC_REQUIRED_MODEL_FILES,
     },
     resource_policy::{
-        semantic_quiet_policy, throttle_semantic_batch, SemanticComputeClass, SemanticQuietPolicy,
-        SemanticSystemResources,
+        semantic_builtin_policy, throttle_semantic_batch, SemanticComputeClass,
+        SemanticQuietPolicy, SemanticSystemResources,
     },
 };
 
@@ -53,7 +53,6 @@ pub struct SemanticRuntimeBusyGuard<'a> {
 pub fn semantic_query_service_supported() -> bool {
     cfg!(ctx_semantic_fastembed)
 }
-
 impl SharedSemanticRuntime {
     pub fn is_loaded(&self) -> bool {
         self.embedder
@@ -61,7 +60,6 @@ impl SharedSemanticRuntime {
             .map(|embedder| embedder.is_some())
             .unwrap_or(false)
     }
-
     pub fn release_if_idle(&self) -> Result<bool> {
         match self.embedder.try_lock() {
             Ok(mut embedder) => Ok(embedder.take().is_some()),
@@ -71,13 +69,11 @@ impl SharedSemanticRuntime {
             }
         }
     }
-
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Option<SemanticEmbedder>>> {
         self.embedder
             .lock()
             .map_err(|_| anyhow!("semantic embedder lock is poisoned"))
     }
-
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn lock_for_test(&self) -> Result<SemanticRuntimeBusyGuard<'_>> {
@@ -88,6 +84,17 @@ impl SharedSemanticRuntime {
 
     pub fn ensure_loaded_from_cache(&self, config: &SemanticModelConfig) -> Result<Option<u64>> {
         self.ensure_loaded(config, None)
+    }
+
+    pub fn ensure_loaded_passively(&self, config: &SemanticModelConfig) -> Result<Option<u64>> {
+        let mut embedder = self.lock()?;
+        if embedder.is_some() {
+            return Ok(None);
+        }
+        let started = Instant::now();
+        let acquired = passive::acquire_semantic_embedder_passively(config)?;
+        *embedder = Some(acquired);
+        Ok(Some(started.elapsed().as_millis() as u64))
     }
 
     pub fn acquire_for_daemon(
@@ -497,27 +504,6 @@ impl SemanticEmbeddingBackend {
             .ok_or_else(|| anyhow!("semantic query embedding was empty"))
     }
 
-    pub(super) fn embed_prepared_documents(
-        &mut self,
-        documents: Vec<String>,
-        batch_size: usize,
-    ) -> Result<Vec<Vec<f32>>> {
-        let expected = documents.len();
-        if expected == 0 {
-            return Ok(Vec::new());
-        }
-        let raw = match self {
-            Self::Ort { model, .. } => {
-                model.embed(documents, Some(batch_size)).with_context(|| {
-                    format!("embed documents with semantic model {SEMANTIC_MODEL_ID}")
-                })?
-            }
-            #[cfg(target_os = "macos")]
-            Self::CoreMl(model) => model.embed_documents(documents)?,
-        };
-        normalize_and_validate_embeddings(raw, expected)
-    }
-
     pub(super) fn kind(&self) -> SemanticBackendKind {
         match self {
             Self::Ort { kind, .. } => *kind,
@@ -622,10 +608,11 @@ impl SemanticEmbedder {
         }
     }
 
-    pub(super) fn quiet_policy(&self) -> SemanticQuietPolicy {
-        semantic_quiet_policy(
+    pub(super) fn quiet_policy(&self, throttling: bool) -> SemanticQuietPolicy {
+        semantic_builtin_policy(
             SemanticSystemResources::current(),
             self.backend.compute_class(),
+            throttling,
         )
     }
 }
@@ -952,7 +939,10 @@ use coreml::{
 #[cfg(all(test, ctx_semantic_fastembed))]
 pub(super) use coreml::{pad_texts_to_exact_batch, semantic_fixed_shape_from_values};
 mod cache;
+#[cfg(ctx_semantic_fastembed)]
+mod input_fit;
 mod onnx;
+mod passive;
 mod windows_ml;
 #[cfg(ctx_semantic_fastembed)]
 pub(super) use cache::{
@@ -963,6 +953,7 @@ pub(super) use cache::{
 #[allow(unused_imports)]
 #[cfg(all(any(test, feature = "test-support"), ctx_semantic_fastembed))]
 pub(crate) use onnx::load_missing_semantic_onnxruntime_for_test;
+pub use passive::{SemanticPassiveConfigurationError, SemanticPassiveLoadUnavailable};
 
 #[cfg(not(ctx_semantic_fastembed))]
 pub(super) struct SemanticEmbedder;

@@ -582,4 +582,14 @@ fn parser_revision_forces_unchanged_source_replacement() {
         upgraded_receipt.manifest().sources[0].parser_revision(),
         "identity-revision-test-parser-v2"
     );
+    let (repeated, activity) = capture_parallel_test_generation(&upgraded, &root, &index, 1);
+    assert_eq!(
+        repeated.manifest().sources,
+        upgraded_receipt.manifest().sources
+    );
+    assert_eq!(
+        activity,
+        JsonlFamilyScannerActivity::default(),
+        "revision replay runs once"
+    );
 }

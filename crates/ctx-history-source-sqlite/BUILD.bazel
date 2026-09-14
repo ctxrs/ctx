@@ -43,6 +43,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + CTX_HISTORY_SOURCE_SQLITE_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
+    visibility = ["//tools/bazel:history_source_sqlite_consumers"],
 )
 
 rust_library(
@@ -57,6 +58,7 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_flags = ['--cfg=feature="test-support"'],
+    visibility = ["//tools/bazel:history_source_sqlite_consumers"],
 )
 
 ctx_rust_test(

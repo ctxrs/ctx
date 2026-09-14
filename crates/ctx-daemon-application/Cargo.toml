@@ -19,5 +19,8 @@ ctx-daemon-service = { path = "../ctx-daemon-service" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-platform = { path = "../ctx-history-platform" }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

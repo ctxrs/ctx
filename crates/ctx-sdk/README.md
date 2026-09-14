@@ -1,6 +1,6 @@
 # ctx-sdk for Rust
 
-Experimental in-repo Rust SDK for the ctx `agent-history-v1` contract.
+Experimental in-repo Rust SDK for the ctx `agent-history-v2` contract.
 
 This crate is not published to crates.io. Its API may change while the SDK
 contract is being shaped in-repo.
@@ -22,8 +22,9 @@ let results = client.search(SearchOptions {
 
 ## Backends
 
-- Local backend: shells out to `ctx` JSON commands and never performs network
-  calls or provider API calls.
+- Local backend: invokes `ctx` JSON commands. The CLI honors explicitly
+  configured external semantic execution, which can send bounded semantic text
+  to the selected executor. See [SDK locality](../../docs/sdks.md#local-and-hosted-backends).
 - Hosted backend: Hosted SDK placeholders are deprecated and will be removed in
   the next breaking SDK revision; hosted operations remain unsupported. Valid
   operations continue to return a structured `not_supported` error.
@@ -34,7 +35,7 @@ let results = client.search(SearchOptions {
 and `show_session`.
 
 The SDK returns `AgentHistoryEnvelope` values from `ctx-protocol` with stable
-`agent-history-v1` fields. CLI JSON remains an adapter detail.
+`agent-history-v2` fields. CLI JSON remains an adapter detail.
 
 Search hits, shown events, and typed session summaries expose Core `provider`,
 `provider_session_id`, and `source_format` identity where applicable. For

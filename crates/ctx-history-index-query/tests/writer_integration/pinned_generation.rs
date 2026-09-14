@@ -1,4 +1,8 @@
 use super::*;
+use ctx_history_index_generation::{
+    certification_file_for_active, checksum_walks, hashed_artifact_bytes,
+    reset_physical_verification_activity,
+};
 
 fn publish_pinned_test_generation(
     root: &Path,
@@ -140,15 +144,15 @@ fn pinned_generation_rejects_a_pointer_payload_generation_mismatch() {
     let error = pinned_generation_open_error(temp.path(), &expected);
     assert!(matches!(
         error,
-        IndexError::PinnedGenerationMismatch {
-            expected_generation_id,
-            actual_generation_id,
-        } if expected_generation_id == expected && actual_generation_id == actual.generation_id
+        IndexError::GenerationRetentionLeaseTargetNotRetained {
+            requested_generation_id,
+        } if requested_generation_id == expected
     ));
+    assert_ne!(expected, actual.generation_id);
 }
 
 #[test]
-fn pinned_generation_preserves_manifest_corruption_errors() {
+fn pinned_generation_preserves_stable_manifest_corruption_errors() {
     let temp = tempdir().unwrap();
     let source = source("pinned-corrupt-manifest.jsonl");
     let active = publish_pinned_test_generation(temp.path(), &source, 1, "active evidence");
@@ -161,6 +165,29 @@ fn pinned_generation_preserves_manifest_corruption_errors() {
     assert!(matches!(
         VerifiedIndex::open_pinned_generation(temp.path(), &active.generation_id),
         Err(IndexError::ManifestDigestMismatch { .. })
+    ));
+}
+
+#[test]
+fn pinned_generation_preserves_stable_missing_generation_errors() {
+    let temp = tempdir().unwrap();
+    let source = source("pinned-missing-generation.jsonl");
+    let active = publish_pinned_test_generation(temp.path(), &source, 1, "active evidence");
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    fs::remove_dir_all(
+        temp.path()
+            .join(INDEX_GENERATIONS_DIRECTORY)
+            .join(pointer.active().directory()),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        VerifiedIndex::open_pinned_generation(temp.path(), &active.generation_id),
+        Err(IndexError::GenerationRetentionLeaseTargetNotRetained {
+            requested_generation_id,
+        }) if requested_generation_id == active.generation_id
     ));
 }
 
@@ -201,39 +228,39 @@ fn pinned_generation_retries_once_when_the_publication_pointer_changes() {
 }
 
 #[test]
-fn retained_peer_retry_pairs_a_pinned_generation_with_the_new_active_generation() {
+fn active_generation_open_retries_after_selected_generation_is_evicted() {
     let temp = tempdir().unwrap();
-    let source = source("retained-peer-pointer-race.jsonl");
-    let pinned = publish_pinned_test_generation(temp.path(), &source, 1, "pinned evidence");
-    let before_publication = load_active_generation_pointer(temp.path())
-        .unwrap()
-        .unwrap();
-    let published =
-        publish_pinned_test_generation(temp.path(), &source, 2, "published peer evidence");
-    let after_publication = load_active_generation_pointer(temp.path())
+    let source = source("active-selection-race.jsonl");
+    publish_pinned_test_generation(temp.path(), &source, 1, "first evidence");
+    let first_pointer = load_active_generation_pointer(temp.path())
         .unwrap()
         .unwrap();
     let mut pointer_reads = 0;
+    let mut newest = None;
 
-    let peer = VerifiedIndex::open_retained_generation_peer_with_pointer_loader(
-        temp.path(),
-        &pinned.generation_id,
-        |_| {
-            pointer_reads += 1;
-            Ok(Some(if pointer_reads == 1 {
-                before_publication.clone()
-            } else {
-                after_publication.clone()
-            }))
-        },
-    )
-    .unwrap()
+    let index = VerifiedIndex::open_pinned_with_pointer_loader(temp.path(), |root| {
+        pointer_reads += 1;
+        if pointer_reads == 1 {
+            publish_pinned_test_generation(root, &source, 2, "second evidence");
+            newest = Some(publish_pinned_test_generation(
+                root,
+                &source,
+                3,
+                "third evidence",
+            ));
+            return Ok(Some(first_pointer.clone()));
+        }
+        load_active_generation_pointer(root)
+    })
     .unwrap();
 
-    assert_eq!(pointer_reads, 3, "peer resolution did not retry once");
-    assert_eq!(peer.generation_id(), published.generation_id);
-    assert_eq!(peer.count_term("published").unwrap(), 1);
-    assert_eq!(peer.count_term("pinned").unwrap(), 0);
+    let newest = newest.expect("the selection hook did not publish replacements");
+    assert_eq!(
+        pointer_reads, 3,
+        "active selection did not verify its retried pointer"
+    );
+    assert_eq!(index.generation_id(), newest.generation_id);
+    assert_eq!(index.count_term("third").unwrap(), 1);
 }
 
 #[test]
@@ -273,7 +300,7 @@ fn pinned_generation_fails_closed_after_a_second_pointer_change() {
     ));
     assert_eq!(
         pointer_reads, 3,
-        "resolution chased more than one publication change"
+        "resolution did not verify the pointer after its bounded retry"
     );
 }
 
@@ -383,17 +410,24 @@ fn pinned_generation_real_publication_evicts_previous_and_fails_closed_with_vali
     );
     #[cfg(not(windows))]
     assert!(
-        !expected_path.exists(),
-        "the evicted generation directory was not reclaimed"
+        expected_path.exists(),
+        "the exact reader did not retain its generation"
     );
     assert!(first_reader_valid_during_reclamation);
     assert_eq!(first_reader.count_term("first").unwrap(), 1);
     assert_eq!(first_reader.count_term("second").unwrap(), 0);
     assert_eq!(first_reader.count_term("third").unwrap(), 0);
+    drop(first_reader);
+    publish_pinned_test_generation(temp.path(), &source, 4, "fourth evidence");
+    #[cfg(not(windows))]
+    assert!(
+        !expected_path.exists(),
+        "the generation was not reclaimed after its exact reader dropped"
+    );
 }
 
 #[test]
-fn open_previous_generation_decodes_core_body_after_real_reclamation() {
+fn active_reader_lease_retains_generation_until_drop() {
     const BODY: &str = "complete generation-owned body survives real reclamation";
 
     let temp = tempdir().unwrap();
@@ -402,8 +436,7 @@ fn open_previous_generation_decodes_core_body_after_real_reclamation() {
     let first = publish_pinned_test_generation(temp.path(), &source, 1, BODY);
     #[cfg(not(windows))]
     let first_path = active_generation_path(temp.path());
-    let first_reader =
-        VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id).unwrap();
+    let first_reader = VerifiedIndex::open_pinned(temp.path()).unwrap();
 
     let second = publish_pinned_test_generation(temp.path(), &source, 2, "second body");
     let pointer_with_first_retained = load_active_generation_pointer(temp.path())
@@ -434,8 +467,8 @@ fn open_previous_generation_decodes_core_body_after_real_reclamation() {
     );
     #[cfg(not(windows))]
     assert!(
-        !first_path.exists(),
-        "the evicted generation directory was not reclaimed"
+        first_path.exists(),
+        "the live reader generation was reclaimed"
     );
 
     let decoded = first_reader
@@ -459,4 +492,184 @@ fn open_previous_generation_decodes_core_body_after_real_reclamation() {
             && active_generation_id == third.generation_id
             && previous_generation_id == second.generation_id
     ));
+
+    drop(first_reader);
+    publish_pinned_test_generation(temp.path(), &source, 4, "fourth body");
+    #[cfg(not(windows))]
+    assert!(
+        !first_path.exists(),
+        "the dropped reader generation was not reclaimed"
+    );
+}
+
+#[test]
+fn generation_snapshot_releases_handles_before_lease_and_reclaims_retired_generation() {
+    let temp = tempdir().unwrap();
+    let source = source("metadata-snapshot-reclamation.jsonl");
+    let first = publish_pinned_test_generation(temp.path(), &source, 1, "first body");
+    let first_path = active_generation_path(temp.path());
+    let reader = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let shared_manifest = Arc::clone(reader.test_shared_manifest());
+    let snapshot = reader.into_generation_snapshot();
+
+    assert_eq!(snapshot.generation_id(), first.generation_id);
+    assert!(Arc::ptr_eq(
+        &shared_manifest,
+        snapshot.test_shared_manifest()
+    ));
+    drop(shared_manifest);
+
+    let second = publish_pinned_test_generation(temp.path(), &source, 2, "second body");
+    let third = publish_pinned_test_generation(temp.path(), &source, 3, "third body");
+    let fourth = publish_pinned_test_generation(temp.path(), &source, 4, "fourth body");
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(pointer.active().generation_id(), fourth.generation_id);
+    assert_eq!(
+        pointer.previous().unwrap().generation_id(),
+        third.generation_id
+    );
+    assert_ne!(second.generation_id, first.generation_id);
+    assert!(
+        !first_path.exists(),
+        "snapshot conversion left a protected handle live after releasing its target lease"
+    );
+    assert_eq!(
+        snapshot.manifest().generation_id().unwrap(),
+        first.generation_id
+    );
+    assert_eq!(snapshot.manifest().sources.len(), 1);
+}
+
+#[test]
+fn reader_owned_peer_lease_survives_parent_drop_after_integrity_verification() {
+    let temp = tempdir().unwrap();
+    let source = source("leased-verification-pointer-race.jsonl");
+    let first = publish_pinned_test_generation(temp.path(), &source, 1, "first evidence");
+    let first_certification = certification_file_for_active(temp.path()).unwrap();
+    let second = publish_pinned_test_generation(temp.path(), &source, 2, "second evidence");
+    #[cfg(not(windows))]
+    let first_path = {
+        let pointer = load_active_generation_pointer(temp.path())
+            .unwrap()
+            .unwrap();
+        temp.path()
+            .join(INDEX_GENERATIONS_DIRECTORY)
+            .join(pointer.previous().unwrap().directory())
+    };
+    let mut reader = VerifiedIndex::open_pinned_generation_with_retained_peer(
+        temp.path(),
+        &second.generation_id,
+    )
+    .unwrap();
+    let mut second_reader = VerifiedIndex::open_pinned_generation_with_retained_peer(
+        temp.path(),
+        &second.generation_id,
+    )
+    .unwrap();
+    let cached_peer = second_reader
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .expect("the cache-warming peer was not retained");
+    assert_eq!(cached_peer.generation_id(), first.generation_id);
+    drop((cached_peer, second_reader));
+    // Make the checksum-walk assertions independent of a matching prior cache.
+    assert!(first_certification.is_file());
+    fs::remove_file(first_certification).unwrap();
+    let mut second_reader = VerifiedIndex::open_pinned_generation_with_retained_peer(
+        temp.path(),
+        &second.generation_id,
+    )
+    .unwrap();
+
+    reset_physical_verification_activity();
+    let peer = reader
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .expect("the reader-owned peer lease was not retained");
+    assert_eq!(checksum_walks(), 1);
+    assert!(hashed_artifact_bytes() > 0);
+
+    let second_peer = second_reader
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .expect("the cached reader-owned peer was not retained");
+    assert_eq!(
+        checksum_walks(),
+        1,
+        "the first verified peer open did not cache its physical proof"
+    );
+    assert_eq!(second_peer.generation_id(), first.generation_id);
+    drop((second_peer, second_reader));
+
+    drop(reader);
+    publish_pinned_test_generation(temp.path(), &source, 3, "third evidence");
+    let fourth = publish_pinned_test_generation(temp.path(), &source, 4, "fourth evidence");
+
+    #[cfg(not(windows))]
+    assert!(
+        first_path.exists(),
+        "the returned peer lost its retained generation"
+    );
+    assert_eq!(peer.generation_id(), first.generation_id);
+    assert_ne!(peer.generation_id(), fourth.generation_id);
+    assert_eq!(peer.count_term("first").unwrap(), 1);
+
+    drop(peer);
+    publish_pinned_test_generation(temp.path(), &source, 5, "fifth evidence");
+    #[cfg(not(windows))]
+    assert!(
+        !first_path.exists(),
+        "the returned peer generation was not reclaimed after it dropped"
+    );
+}
+
+#[test]
+fn reader_owned_peer_rejects_corrupt_physical_integrity() {
+    let temp = tempdir().unwrap();
+    let source = source("leased-verification-corrupt-peer.jsonl");
+    let _first = publish_pinned_test_generation(temp.path(), &source, 1, "first evidence");
+    let second = publish_pinned_test_generation(temp.path(), &source, 2, "second evidence");
+    let mut reader = VerifiedIndex::open_pinned_generation_with_retained_peer(
+        temp.path(),
+        &second.generation_id,
+    )
+    .unwrap();
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let first_path = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(pointer.previous().unwrap().directory());
+    let artifact = fs::read_dir(first_path)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "store")
+        })
+        .expect("the generation did not contain a stored-field artifact");
+    let mut permissions = fs::metadata(&artifact).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(&artifact, permissions).unwrap();
+    let mut bytes = fs::read(&artifact).unwrap();
+    bytes[0] ^= 1;
+    fs::write(&artifact, bytes).unwrap();
+
+    reset_physical_verification_activity();
+    assert!(matches!(
+        reader.take_retained_generation_peer_for_reader(),
+        Err(IndexError::ChecksumMismatch)
+    ));
+    assert_eq!(checksum_walks(), 1);
+    assert!(hashed_artifact_bytes() > 0);
 }

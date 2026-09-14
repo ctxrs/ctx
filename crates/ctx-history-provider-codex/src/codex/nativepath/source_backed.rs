@@ -43,7 +43,7 @@ const CODEX_NATIVE_SESSION_NAMESPACE: &str = "codex.session";
 const CODEX_LOGICAL_SESSION_KIND: &str = "codex-session";
 const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-activity-v10-item-completed-plan";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-activity-v11-item-call-identity";
 
 type CodexSessionPlanV0 = (CodexCatalogSource, SourceKey, String);
 
@@ -100,7 +100,7 @@ pub use catalog::{
 };
 pub use generation::{CodexGenerationNormalizationCoordinatorV0, CodexGenerationRouteV0};
 pub(in crate::codex::nativepath) use identity::{
-    codex_core_record, codex_session_identity, codex_source_key_in_root, CodexEventIdentityStateV0,
+    codex_core_record, codex_session_identity, codex_source_key_for_path, CodexEventIdentityStateV0,
 };
 pub use jsonl_family::CodexSessionJsonlFamilyAdapterV0;
 

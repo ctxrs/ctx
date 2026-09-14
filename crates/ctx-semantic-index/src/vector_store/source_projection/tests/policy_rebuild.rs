@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "policy_rebuild/checkpoints.rs"]
+mod checkpoints;
+
 #[test]
 fn high_odd_dimension_external_projection_preserves_full_ordinary_batches() -> Result<()> {
     let fixture = Fixture::new(1)?;
@@ -14,10 +17,7 @@ fn high_odd_dimension_external_projection_preserves_full_ordinary_batches() -> R
         .max_inputs_per_request();
     assert_eq!(page_limit, 64);
     assert_eq!(source_event_page_limit(&contract), page_limit);
-    assert_eq!(
-        source_event_page_limit(semantic_model_contract()),
-        MAX_SOURCE_EVENT_PAGE_ITEMS
-    );
+    assert_eq!(source_event_page_limit(semantic_model_contract()), 512);
     let record_count = page_limit + 1;
     let index = fixture.publish(
         "external-high-dimension-pages",
@@ -123,6 +123,10 @@ impl InterruptingDimensionEmbedder {
 }
 
 impl SemanticBatchEmbedder for InterruptingDimensionEmbedder {
+    fn document_fits(&mut self, _text: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         self.calls = self.calls.saturating_add(1);
         self.requested_batch_sizes.push(chunks.len());
@@ -410,6 +414,14 @@ fn flat_contract_reset_survives_both_control_handoff_crash_windows() -> Result<(
     assert!(changed.model_contract_reset_pending()?);
     drop(changed); // Crash after Flat publication and before the control handoff.
 
+    assert_eq!(
+        SemanticVectorStore::source_backed_reconciliation_contract_matches_at(
+            &fixture.semantic_path,
+            contract,
+        )?,
+        Some(false),
+        "a matching control receipt must not hide a mismatched Flat publication"
+    );
     assert!(SemanticVectorStore::open_read_only(&fixture.semantic_path, contract)?.is_none());
     let store = SemanticVectorStore::open(&fixture.semantic_path, contract)?;
     assert!(store.source_acknowledgement()?.is_none());
@@ -436,6 +448,69 @@ fn flat_contract_reset_survives_both_control_handoff_crash_windows() -> Result<(
         store.source_backed_generation_pin_exact(index.generation_id(), 3)?,
         SourceBackedGenerationPin::Ready(_)
     ));
+    Ok(())
+}
+
+#[test]
+fn matching_external_admission_excludes_contract_reset_race() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let index = fixture.publish("external-admission-race", &[(0, bodies("first", 1))])?;
+    let endpoint = "http://127.0.0.1:43129/v1/embeddings";
+    let current = external_contract(endpoint, "space-current", 6)?;
+    let replacement = external_contract(endpoint, "space-replacement", 6)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, &current)?;
+    reconcile_all(
+        &mut store,
+        &index,
+        &mut CoreBuilder::default(),
+        &mut DimensionEmbedder::new(&current),
+    )?;
+    drop(store);
+
+    let (start_reset, await_start) = std::sync::mpsc::channel();
+    let (reset_started, await_reset_started) = std::sync::mpsc::channel();
+    let (reset_finished, await_reset_finished) = std::sync::mpsc::channel();
+    let racing_path = fixture.semantic_path.clone();
+    let racing = std::thread::spawn(move || {
+        await_start.recv().expect("receive reset start");
+        let result =
+            SemanticVectorStore::open_after_private_root_ready(&racing_path, &replacement, || {
+                reset_started.send(()).expect("report reset lock attempt")
+            })
+            .map(drop);
+        reset_finished.send(result).expect("report reset result");
+    });
+
+    let admitted =
+        SemanticVectorStore::open_source_backed_reconciliation_if_contract_matches_after_match(
+            &fixture.semantic_path,
+            &current,
+            || {
+                start_reset.send(()).expect("start competing reset");
+                await_reset_started
+                    .recv()
+                    .expect("competing reset reached writer admission");
+                assert!(
+                    await_reset_finished
+                        .recv_timeout(std::time::Duration::from_millis(100))
+                        .is_err(),
+                    "a competing contract reset must wait through matching writable admission"
+                );
+            },
+        )?;
+    assert!(admitted.is_some());
+    drop(admitted);
+    await_reset_finished
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("competing reset remained blocked")?;
+    racing.join().expect("join competing reset");
+    assert_eq!(
+        SemanticVectorStore::source_backed_reconciliation_contract_matches_at(
+            &fixture.semantic_path,
+            &current,
+        )?,
+        Some(false)
+    );
     Ok(())
 }
 
@@ -580,7 +655,7 @@ fn fixed_e5_http_migrates_legacy_receipts_without_reembedding_across_restart() -
     );
     let legacy = SourceBackedSemanticGeneration::from_verified_index_with_authority(
         &index,
-        current_semantic_generation_policy(),
+        semantic_generation_policy(model_contract),
         legacy_descriptor.to_owned(),
     )?;
     let current = SourceBackedSemanticGeneration::from_verified_index(&index, model_contract)?;
@@ -805,11 +880,46 @@ fn control_reset_retires_unowned_flat_vectors_before_rebuild() -> Result<()> {
     drop(control);
     let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     builder.calls.clear();
-    let first_drain = store.reconcile_source_backed_index(&target, &mut builder, &mut embedder)?;
+    let mut deletion_progress = Vec::new();
+    let first_drain = store.reconcile_source_backed_index_with_checkpoint_and_progress(
+        &target,
+        &mut builder,
+        &mut embedder,
+        &mut || Ok(()),
+        &mut |sequence| {
+            deletion_progress.push(sequence);
+            Ok(())
+        },
+    )?;
     assert_eq!(first_drain.deleted_chunks, MAX_SOURCE_EVENT_PAGE_ITEMS);
     assert!(first_drain.work_remaining);
+    assert_eq!(deletion_progress, vec![1]);
+    assert_eq!(first_drain.semantic_progress_sequence(), Some(1));
 
     drop(store);
+    // Simulate a crash after the deletion receipt is durable but before the
+    // enclosing source view refreshes its Flat publication. Recovery must
+    // resume without regressing the already-published sequence.
+    let control = rusqlite::Connection::open(fixture.semantic_path.join("state.sqlite"))?;
+    let frontier_json = control.query_row(
+        "SELECT value FROM semantic_maintenance_state WHERE key = 'core_semantic_frontier_v1'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    let mut frontier: serde_json::Value = serde_json::from_str(&frontier_json)?;
+    let publication = frontier["flat_publication"]["generation"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("test frontier has no Flat publication generation"))?;
+    assert!(
+        publication > 0,
+        "test fixture must have a newer Flat publication"
+    );
+    frontier["flat_publication"]["generation"] = serde_json::json!(publication - 1);
+    control.execute(
+        "UPDATE semantic_maintenance_state SET value = ?1 WHERE key = 'core_semantic_frontier_v1'",
+        [serde_json::to_string(&frontier)?],
+    )?;
+    drop(control);
     let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     store.reset_flat_active_event_snapshot_count();
     let rebuilt = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;

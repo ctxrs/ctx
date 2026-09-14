@@ -17,6 +17,11 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        if (Environment.GetEnvironmentVariable("CTX_SDK_TEST_PRODUCER_ERROR") is { } producerError)
+        {
+            Console.Error.Write(producerError);
+            return 1;
+        }
         if (Environment.GetEnvironmentVariable(ProcessFixtureMode) is { } processFixture)
         {
             return await RunMcp289ProcessFixture(processFixture);
@@ -43,7 +48,9 @@ internal static class Program
 
         var tests = new (string Name, Func<Task> Body)[]
         {
-            ("wraps status as agent-history-v1", WrapsStatus),
+            ("preserves current payloads and producer errors", CurrentPayloadsAndProducerErrors),
+            ("removes generic status locality and accepts status schema three", DropsGenericStatusLocality),
+            ("wraps status as agent-history-v2", WrapsStatus),
             ("filters status to the current readiness contract", FiltersStatusFields),
             ("preserves legitimate source semantics", PreservesLegitimateSourceSemantics),
             ("builds local CLI operation arguments", BuildsOperationArguments),
@@ -70,9 +77,9 @@ internal static class Program
             ("rejects raw MCP contract violations", RejectsRawMcpContractViolations),
             ("strictly decodes spawned stdout UTF-8", StrictlyDecodesSpawnedStdoutUtf8),
             ("reports versioning metadata", ReportsVersioning),
-            ("uses agent-history-v1 error codes", UsesAgentHistoryV1ErrorCodes),
+            ("uses agent-history-v2 error codes", UsesAgentHistoryV2ErrorCodes),
             ("raises structured hosted placeholder errors", HostedPlaceholderError),
-            ("loads shared agent-history-v1 fixtures", LoadsSharedFixtures)
+            ("loads shared agent-history-v2 fixtures", LoadsSharedFixtures)
         };
 
         var failures = 0;
@@ -92,6 +99,45 @@ internal static class Program
         }
 
         return failures == 0 ? 0 : 1;
+    }
+
+    private static async Task CurrentPayloadsAndProducerErrors()
+    {
+        var fixture = JsonNode.Parse(File.ReadAllText(Path.Combine(FindFixtures(), "cli/opaque-event.json")))!.AsObject();
+        for (int variant = 0; variant < 3; variant++)
+        {
+            var current = fixture.DeepClone().AsObject();
+            if (variant == 1) current["structured_content"] = null;
+            if (variant == 2) current.Remove("structured_content");
+            var raw = new JsonObject { ["event"] = current.DeepClone(), ["events"] = new JsonArray(current.DeepClone()), ["session"] = new JsonObject() };
+            var client = ClientFor(raw);
+            var single = (await client.ShowEventAsync("event-1")).Event.Event!.ToJsonObject();
+            var session = (await client.ShowSessionAsync("session-1")).Session.Events[0].ToJsonObject();
+            foreach (var actual in new[] { single, session })
+            {
+                True(JsonNode.DeepEquals(actual["activity"], fixture["activity"]), "activity changed");
+                Equal(current.ContainsKey("structured_content"), actual.ContainsKey("structuredContent"));
+                True(JsonNode.DeepEquals(actual["structuredContent"], current["structured_content"]), "structured content changed");
+            }
+        }
+        foreach (var query in new[] { "--help", "--refresh=off", "-needle", "two words", "a'雪" })
+        {
+            var transport = new RecordingTransport("{\"results\":[]}");
+            await new AgentHistoryClient(transport).SearchAsync(new SearchOptions { Query = query });
+            True(transport.Calls[0].TakeLast(2).SequenceEqual(new[] { "--", query }), "unsafe argv");
+        }
+        foreach (var producer in JsonNode.Parse(File.ReadAllText(Path.Combine(FindFixtures(), "cli/producer-errors.json")))!.AsArray())
+        {
+            var adapter = new LocalCliAdapter(new LocalAgentHistoryConfig {
+                CtxBinary = TestExecutable(), Environment = new Dictionary<string, string?> { ["CTX_SDK_TEST_PRODUCER_ERROR"] = producer!.ToJsonString() }
+            });
+            try { await new AgentHistoryClient(adapter).ShowEventAsync("event-1"); throw new Exception("expected producer failure"); }
+            catch (CtxAgentHistoryCliException error)
+            {
+                Equal(producer!["retryable"]!.GetValue<bool>(), error.Retryable);
+                True(JsonNode.DeepEquals(producer, error.Details["producerError"]), "producer detail changed");
+            }
+        }
     }
 
     private static async Task<int> RunMcp289ProcessFixture(string mode)
@@ -518,6 +564,36 @@ internal static class Program
         }
     }
 
+    private static async Task DropsGenericStatusLocality()
+    {
+        foreach (var flags in new[] { "", ",\"local_only\":true", ",\"localOnly\":false", ",\"local_only\":null,\"localOnly\":\"legacy\"" })
+        {
+            foreach (var schema in new[] { 2, 3 })
+            {
+                var wire = "{\"schema_version\":" + schema
+                    + ",\"initialized\":true,\"semantic\":{\"local_only\":false,\"diagnostics\":{\"localOnly\":null}}"
+                    + flags + "}";
+                var client = new AgentHistoryClient(new RecordingTransport(wire));
+                var status = await client.StatusAsync();
+                var init = await client.InitAsync();
+                foreach (var output in new[] { status.ToJsonObject()["status"]!.AsObject(),
+                    status.Status.ToJsonObject(), init.ToJsonObject()["status"]!.AsObject(), init.Status.ToJsonObject() })
+                {
+                    Equal(false, output.ContainsKey("localOnly"));
+                    Equal(false, output.ContainsKey("local_only"));
+                    Equal(true, output["initialized"]!.GetValue<bool>());
+                    Equal(false, output["semantic"]!["localOnly"]!.GetValue<bool>());
+                    Equal(true, output["semantic"]!["diagnostics"]!.AsObject().ContainsKey("localOnly"));
+                    Equal(true, output["semantic"]!["diagnostics"]!["localOnly"] is null);
+                }
+            }
+        }
+        var unsupported = new AgentHistoryClient(new RecordingTransport("""{"schema_version":3,"sources":[]}"""));
+        await ThrowsAsync<CtxAgentHistoryProtocolException>(() => unsupported.SourcesAsync());
+        var fallback = await new AgentHistoryClient(new RecordingTransport("{}")).StatusAsync();
+        Equal("{\"initialized\":false}", fallback.Status.ToJsonObject().ToJsonString());
+    }
+
     private static async Task NormalizesSetupInitStatus()
     {
         var transport = new RecordingTransport("""{"schema_version":2,"initialized":true,"data_root":"/tmp/ctx","mode":"ready","indexed_items":9007199254740991,"indexed_sessions":9007199254740991,"indexed_events":9007199254740991,"indexed_sources":9007199254740991,"lexical":{"status":"ready","generation_id":"gen-64"},"refresh":{"status":"ready","generation_id":"gen-64"},"network_required":false}""");
@@ -527,7 +603,8 @@ internal static class Program
 
         Equal("init", response.Operation);
         Equal(true, response.Status.Initialized);
-        Equal(true, response.Status.LocalOnly);
+        Equal(false, response.Status.ToJsonObject().ContainsKey("localOnly"));
+        Equal(false, response.Status.ToJsonObject().ContainsKey("local_only"));
         Equal(9007199254740991UL, response.Status.IndexedItems ?? 0UL);
         Equal(9007199254740991UL, response.Status.IndexedSessions ?? 0UL);
         Equal(9007199254740991UL, response.Status.IndexedEvents ?? 0UL);
@@ -551,14 +628,14 @@ internal static class Program
 
         var status = await client.StatusAsync();
 
-        Equal("agent-history-v1", status.ContractVersion);
+        Equal("agent-history-v2", status.ContractVersion);
         Equal("status", status.Operation);
         Equal("local", status.Backend.Kind);
         Equal(true, status.Status.Initialized);
         Equal(4UL, status.Status.IndexedItems ?? 0UL);
 
         var envelope = status.ToJsonObject();
-        Equal("agent-history-v1", envelope["contractVersion"]!.GetValue<string>());
+        Equal("agent-history-v2", envelope["contractVersion"]!.GetValue<string>());
         Equal(4UL, envelope["status"]!["indexedItems"]!.GetValue<ulong>());
     }
 
@@ -633,7 +710,7 @@ internal static class Program
             IncludeCurrentSession = true
         });
 
-        Equal("search retry --term timeout --term backoff --limit 5 --backend hybrid --semantic-weight 0.35 --provider codex --workspace ctx --since 30d --primary-only --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --format=json", Join(transport.Calls[0]));
+        Equal("search --term timeout --term backoff --limit 5 --backend hybrid --semantic-weight 0.35 --provider codex --workspace ctx --since 30d --primary-only --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --format=json -- retry", Join(transport.Calls[0]));
         Equal("search", response.Operation);
         Equal("retry", response.Search.Query ?? "");
         Equal("off", response.Search.Freshness!.Mode ?? "");
@@ -1153,7 +1230,7 @@ internal static class Program
         Equal(false, obsolete.IsError);
     }
 
-    private static Task UsesAgentHistoryV1ErrorCodes()
+    private static Task UsesAgentHistoryV2ErrorCodes()
     {
         Equal("invalid_request", new CtxAgentHistoryValidationException("bad").Code);
         Equal("decode_error", new CtxAgentHistoryProtocolException("bad").Code);
@@ -1173,7 +1250,7 @@ internal static class Program
             seen++;
             var node = JsonNode.Parse(File.ReadAllText(path))?.AsObject()
                 ?? throw new InvalidOperationException($"{path} did not contain a JSON object");
-            Equal("agent-history-v1", node["contractVersion"]!.GetValue<string>());
+            Equal("agent-history-v2", node["contractVersion"]!.GetValue<string>());
             Equal(1, node["schemaVersion"]!.GetValue<int>());
             var operation = node["operation"]!.GetValue<string>();
             switch (operation)
@@ -1228,7 +1305,7 @@ internal static class Program
                     throw new InvalidOperationException($"unknown fixture operation {operation} in {path}");
             }
         }
-        True(seen > 0, "expected shared agent-history-v1 fixtures");
+        True(seen > 0, "expected shared agent-history-v2 fixtures");
     }
 
     private static AgentHistoryClient ClientFor(JsonNode? payload)
@@ -1248,7 +1325,7 @@ internal static class Program
             var dir = new DirectoryInfo(start);
             while (dir is not null)
             {
-                var candidate = Path.Combine(dir.FullName, "contracts", "agent-history-v1", "fixtures");
+                var candidate = Path.Combine(dir.FullName, "contracts", "agent-history-v2", "fixtures");
                 if (Directory.Exists(candidate))
                 {
                     return candidate;
@@ -1256,7 +1333,7 @@ internal static class Program
                 dir = dir.Parent;
             }
         }
-        throw new DirectoryNotFoundException("contracts/agent-history-v1/fixtures");
+        throw new DirectoryNotFoundException("contracts/agent-history-v2/fixtures");
     }
 
     private static string Join(IReadOnlyList<string> values) => string.Join(" ", values);

@@ -31,7 +31,7 @@ use windows_sys::{
             FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
             FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
             FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, SYNCHRONIZE,
+            FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
         },
         System::IO::IO_STATUS_BLOCK,
     },
@@ -96,7 +96,13 @@ pub(super) fn create_directory_at(
     nt_open_at(
         parent,
         name,
-        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | DELETE | SYNCHRONIZE,
+        FILE_LIST_DIRECTORY
+            | FILE_READ_ATTRIBUTES
+            | FILE_WRITE_ATTRIBUTES
+            | READ_CONTROL
+            | WRITE_DAC
+            | DELETE
+            | SYNCHRONIZE,
         FILE_CREATE,
         FILE_ATTRIBUTE_DIRECTORY,
         FILE_DIRECTORY_FILE,
@@ -308,9 +314,8 @@ fn wide_path(path: &OsStr) -> io::Result<Vec<u16>> {
     Ok(wide)
 }
 
-pub(super) fn restrict_destination_directory(_file: &File) -> io::Result<()> {
-    // The candidate inherits the already-private managed generations ACL.
-    Ok(())
+pub(super) fn restrict_destination_directory(file: &File) -> io::Result<()> {
+    ctx_history_platform::platform_security::restrict_private_directory_handle(file)
 }
 
 pub(super) fn sync_directory(_file: &File) -> io::Result<()> {
@@ -381,6 +386,31 @@ fn delete_by_handle(file: &File) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inherited_destination_acl_is_protected_through_retained_handle() -> io::Result<()> {
+        use ctx_history_platform::platform_security::{
+            ensure_private_directory, verify_private_directory, verify_private_directory_handle,
+        };
+
+        let temporary = tempfile::tempdir()?;
+        ensure_private_directory(temporary.path())?;
+        let parent = open_directory_path(temporary.path())?;
+        let generation_name = Path::new("generation-inherited-acl");
+        let destination = create_directory_at(&parent, temporary.path(), generation_name)?;
+
+        let inherited_error = verify_private_directory_handle(&destination).unwrap_err();
+        assert_eq!(
+            inherited_error.kind(),
+            io::ErrorKind::PermissionDenied,
+            "new inherited directory should initially lack a protected private DACL: {inherited_error}"
+        );
+
+        restrict_destination_directory(&destination)?;
+        verify_private_directory_handle(&destination)?;
+        drop(destination);
+        verify_private_directory(&temporary.path().join(generation_name))
+    }
 
     #[test]
     fn proof_capture_handle_blocks_destination_substitution() -> io::Result<()> {

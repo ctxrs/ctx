@@ -36,6 +36,7 @@ fn dense_hits<'candidate>(
     candidates
         .into_iter()
         .map(|candidate| SearchHit {
+            semantic_evidence: candidate.semantic_evidence.clone(),
             event: candidate.event.clone(),
             score: candidate.score,
             more_matches_in_session: 0,
@@ -131,6 +132,7 @@ pub(super) fn shape_family_result_window(
 
 fn session_champion_hit(session: &SessionChampion<'_>) -> SearchHit<RankedEventRef> {
     SearchHit {
+        semantic_evidence: session.candidate.semantic_evidence.clone(),
         event: session.candidate.event.clone(),
         score: session.candidate.score,
         more_matches_in_session: session.match_count.saturating_sub(1),

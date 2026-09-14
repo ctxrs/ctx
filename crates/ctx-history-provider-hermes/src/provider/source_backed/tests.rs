@@ -387,8 +387,10 @@ fn renamed_profile_control_is_rejected_for_a_different_profile_descriptor() {
     let receipt = HermesRefreshReceipt {
         kind: HERMES_ROUTE_CONTROL_KIND.to_owned(),
         version: HERMES_ROUTE_CONTROL_VERSION,
+        parser_revision: HERMES_SOURCE_PARSER_REVISION.to_owned(),
         profile_source_descriptor: [1; 32],
         database_identity: [2; 32],
+        physical_revision: [4; 32],
         schema_evidence: [3; 32],
         session_rowid: 10,
         message_rowid: 20,
@@ -406,6 +408,79 @@ fn renamed_profile_control_is_rejected_for_a_different_profile_descriptor() {
     assert_eq!(
         hermes_route_control_exact_due_for_profile(&control, [1; 32], 1500),
         Some(false)
+    );
+}
+
+#[test]
+fn legacy_v2_control_forces_refresh_but_preserves_rename_retirement_identity() {
+    let profile_source_descriptor = [1_u8; 32];
+    let database_identity = [2_u8; 32];
+    let schema_evidence = [3_u8; 32];
+    let control = serde_json::to_vec(&serde_json::json!({
+        "kind": HERMES_ROUTE_CONTROL_KIND,
+        "version": HERMES_LEGACY_ROUTE_CONTROL_VERSION,
+        "profile_source_descriptor": profile_source_descriptor,
+        "database_identity": database_identity,
+        "schema_evidence": schema_evidence,
+        "session_rowid": 10,
+        "message_rowid": 20,
+        "last_successful_exhaustive_at_ms": 1000,
+        "exact_due_at_ms": 2000,
+        "exhaustive_sequence": 1,
+        "mode": "incremental",
+        "outcome": "successful",
+    }))
+    .unwrap();
+
+    assert_eq!(hermes_route_control_exact_due(&control, 1500), Some(true));
+    assert_eq!(
+        hermes_route_control_exact_due_for_profile(&control, profile_source_descriptor, 1500),
+        None
+    );
+    assert_eq!(
+        hermes_route_control_database_identity(&control),
+        Some(database_identity)
+    );
+
+    let mut malformed: serde_json::Value = serde_json::from_slice(&control).unwrap();
+    malformed["unexpected"] = serde_json::json!(true);
+    assert_eq!(
+        hermes_route_control_database_identity(&serde_json::to_vec(&malformed).unwrap()),
+        None
+    );
+
+    let prior_parser_v3 = HermesRefreshReceipt {
+        kind: HERMES_ROUTE_CONTROL_KIND.to_owned(),
+        version: HERMES_ROUTE_CONTROL_VERSION,
+        parser_revision: "retired-hermes-parser".to_owned(),
+        profile_source_descriptor,
+        database_identity,
+        physical_revision: [4; 32],
+        schema_evidence,
+        session_rowid: 10,
+        message_rowid: 20,
+        last_successful_exhaustive_at_ms: 1000,
+        exact_due_at_ms: 2000,
+        exhaustive_sequence: 1,
+        mode: "exhaustive".to_owned(),
+        outcome: "successful".to_owned(),
+    };
+    let prior_parser_v3 = serde_json::to_vec(&prior_parser_v3).unwrap();
+    assert_eq!(
+        hermes_route_control_exact_due(&prior_parser_v3, 1500),
+        Some(true)
+    );
+    assert_eq!(
+        hermes_route_control_exact_due_for_profile(
+            &prior_parser_v3,
+            profile_source_descriptor,
+            1500
+        ),
+        None
+    );
+    assert_eq!(
+        hermes_route_control_database_identity(&prior_parser_v3),
+        Some(database_identity)
     );
 }
 

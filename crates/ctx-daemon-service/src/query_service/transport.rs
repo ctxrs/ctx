@@ -155,6 +155,52 @@ pub fn daemon_source_refresh_request(
     )
 }
 
+const FOREGROUND_IPC_WAIT_QUANTUM: StdDuration = StdDuration::from_millis(25);
+
+struct SourceRefreshIpcWait<'a>(&'a dyn crate::DaemonAvailabilityPort);
+
+impl ctx_daemon_runtime::DaemonIpcWaitControl for SourceRefreshIpcWait<'_> {
+    fn checkpoint(&mut self) -> Result<()> {
+        self.0.checkpoint()
+    }
+
+    fn pause(&mut self, duration: StdDuration) -> Result<()> {
+        self.0.pause(duration)
+    }
+
+    fn blocking_quantum(&self) -> Option<StdDuration> {
+        Some(FOREGROUND_IPC_WAIT_QUANTUM)
+    }
+}
+
+pub(crate) fn daemon_source_refresh_request_with_cancellation(
+    availability: &dyn crate::DaemonAvailabilityPort,
+    data_root: &Path,
+    request: Value,
+    timeout: StdDuration,
+    max_response_bytes: u64,
+) -> Result<Option<Value>> {
+    let service = DaemonIpcService::SourceRefresh;
+    let mut control = SourceRefreshIpcWait(availability);
+    match ctx_daemon_runtime::daemon_service_request_with_control(
+        &daemon_lock_path(data_root),
+        &daemon_service_endpoint_path(data_root, service),
+        request,
+        timeout,
+        max_response_bytes,
+        &mut control,
+    ) {
+        Err(error)
+            if error
+                .downcast_ref::<ctx_daemon_runtime::IpcServiceUnavailable>()
+                .is_some() =>
+        {
+            Err(DaemonSourceRefreshServiceUnavailable.into())
+        }
+        result => result,
+    }
+}
+
 pub fn daemon_service_request(
     data_root: &Path,
     service: DaemonIpcService,

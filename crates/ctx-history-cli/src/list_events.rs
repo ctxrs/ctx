@@ -6,7 +6,6 @@ use ctx_history_index::{
     CoreEventRangeFilters, CoreEventRangePage, CoreEventRangeScope, CoreEventRangeSelection,
     IndexError, VerifiedIndex,
 };
-use ctx_history_refresh::{verify_generation_query_authority, GenerationQueryAuthorityError};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -32,8 +31,6 @@ pub use request::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum EventQueryError {
-    #[error(transparent)]
-    GenerationAuthority(#[from] GenerationQueryAuthorityError),
     #[error(transparent)]
     GenerationReadAuthority(#[from] ctx_history_read_application::GenerationReadAuthorityError),
     #[error(transparent)]
@@ -210,7 +207,6 @@ pub(crate) fn open_event_range_index(
     }
     .map_err(CoreEventRangeError::from)
     .map_err(EventQueryError::from)?;
-    verify_generation_query_authority(&index)?;
     Ok(index)
 }
 
@@ -229,7 +225,6 @@ fn open_event_range_generation(
     }
     .map_err(CoreEventRangeError::from)
     .map_err(EventQueryError::from)?;
-    verify_generation_query_authority(&index)?;
     Ok(ctx_history_read_application::GenerationRead::new(
         index, None,
     ))
@@ -675,7 +670,6 @@ pub fn event_query_error_value(error: &EventQueryError) -> Value {
         ))
     );
     let error_code = match error {
-        EventQueryError::GenerationAuthority(error) => error.error_code(),
         EventQueryError::GenerationReadAuthority(_) => "event_query_failed",
         EventQueryError::Range(error) => event_range_error_code(error),
         EventQueryError::Application(error) => list_events_error_code(error),
@@ -686,8 +680,7 @@ pub fn event_query_error_value(error: &EventQueryError) -> Value {
         EventQueryError::Io(_) => "output_failed",
         _ => "event_query_failed",
     };
-    let retryable = output_limit_exceeded
-        || matches!(error, EventQueryError::GenerationAuthority(error) if error.retryable());
+    let retryable = output_limit_exceeded;
     json!({
         "schema_version": EVENT_QUERY_SCHEMA_VERSION,
         "error_code": error_code,

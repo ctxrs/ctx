@@ -1,8 +1,8 @@
 import Foundation
 
-public let AGENT_HISTORY_V1_VERSION = "agent-history-v1"
+public let AGENT_HISTORY_V2_VERSION = "agent-history-v2"
 public let CTX_AGENT_HISTORY_SWIFT_SDK_VERSION = "0.0.0"
-public let AGENT_HISTORY_V1_SCHEMA_VERSION = 1
+public let AGENT_HISTORY_V2_SCHEMA_VERSION = 1
 
 public enum AgentHistoryOperation: String, Codable, Sendable {
     case status
@@ -94,8 +94,8 @@ public struct AgentHistoryEnvelope: Codable, Equatable, Sendable {
     public var error: AgentHistoryContractError?
 
     public init(
-        contractVersion: String = AGENT_HISTORY_V1_VERSION,
-        schemaVersion: Int = AGENT_HISTORY_V1_SCHEMA_VERSION,
+        contractVersion: String = AGENT_HISTORY_V2_VERSION,
+        schemaVersion: Int = AGENT_HISTORY_V2_SCHEMA_VERSION,
         operation: AgentHistoryOperation,
         backend: AgentHistoryBackend? = nil,
         status: AgentHistoryStatus? = nil,

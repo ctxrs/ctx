@@ -549,6 +549,31 @@ fn mcp_global_all_agents_json_covers_the_complete_supported_matrix() {
         fake_zed_global(&xdg_config),
         Some(CommandServer::ctx_stdio())
     );
+
+    let removed = json_output(
+        ctx(&temp)
+            .env("XDG_CONFIG_HOME", &xdg_config)
+            .env("CODEX_HOME", &codex_home)
+            .env("CLAUDE_CONFIG_DIR", &claude_config)
+            .env("COPILOT_HOME", &copilot_home)
+            .args([
+                "integrations",
+                "remove",
+                "mcp",
+                "--all-agents",
+                "--format=json",
+            ]),
+    );
+    assert_eq!(output_agents(&removed), GLOBAL_MCP_AGENTS);
+    for agent in GLOBAL_MCP_AGENTS {
+        assert_removed_result(&removed, agent, "global");
+    }
+    assert_eq!(fake_codex_global(&codex_home), None);
+    assert_eq!(fake_opencode_global(&xdg_config), None);
+    assert_eq!(fake_qwen_global(temp.path()), None);
+    assert_eq!(fake_goose_global(&xdg_config), None);
+    assert_eq!(fake_continue_global(temp.path()), None);
+    assert_eq!(fake_github_copilot_global(&copilot_home), None);
 }
 
 #[test]
@@ -622,6 +647,33 @@ fn mcp_project_all_agents_json_covers_the_complete_supported_matrix() {
     );
     assert_eq!(fake_zed_project(&project), Some(CommandServer::ctx_stdio()));
     assert_eq!(fake_roo_project(&project), Some(CommandServer::ctx_stdio()));
+
+    let removed = json_output(
+        ctx(&temp)
+            .env("XDG_CONFIG_HOME", &xdg_config)
+            .current_dir(&project)
+            .args([
+                "integrations",
+                "remove",
+                "mcp",
+                "--all-agents",
+                "--project",
+                "--format=json",
+            ]),
+    );
+    assert_eq!(output_agents(&removed), PROJECT_MCP_AGENTS);
+    for agent in PROJECT_MCP_AGENTS {
+        assert_removed_result(&removed, agent, "project");
+    }
+    assert_eq!(
+        codex_toml_server(&project.join(".codex").join("config.toml")),
+        None
+    );
+    assert_eq!(fake_claude_project(&project), None);
+    assert_eq!(fake_opencode_project(&project), None);
+    assert_eq!(fake_qwen_project(&project), None);
+    assert_eq!(fake_continue_project(&project), None);
+    assert_eq!(fake_roo_project(&project), None);
 }
 
 #[test]
@@ -1006,6 +1058,16 @@ fn assert_current_install_result(output: &Value, agent: &str, scope: &str) {
     assert_eq!(result["already_installed"], false);
     assert_eq!(result["modified"], true);
     assert!(result["path"].as_str().is_some());
+}
+
+fn assert_removed_result(output: &Value, agent: &str, scope: &str) {
+    let result = result_for_agent(output, agent);
+    assert_eq!(result["scope"], scope, "{agent} scope");
+    assert_eq!(result["success"], true, "{agent} success");
+    assert_eq!(result["previous_status"], "current", "{agent} previous");
+    assert_eq!(result["status"], "missing", "{agent} status");
+    assert_eq!(result["already_absent"], false, "{agent} absent");
+    assert_eq!(result["modified"], true, "{agent} modified");
 }
 
 fn assert_result_paths_under(output: &Value, roots: &[&Path]) {

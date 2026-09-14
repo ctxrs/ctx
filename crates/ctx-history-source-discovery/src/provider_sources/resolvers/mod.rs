@@ -35,6 +35,8 @@ mod manual_unsupported;
 mod platform;
 mod profile_project;
 mod simple;
+#[cfg(test)]
+mod test_support;
 
 pub use config_project::{
     resolve_crush_released_project_inventories, resolve_crush_released_project_inventory,
@@ -81,7 +83,7 @@ pub fn path_presence(path: &Path) -> PathPresence {
     match source_path_kind(path) {
         Ok(_) => PathPresence::Present,
         Err(SourcePathError::Missing) => PathPresence::Missing,
-        Err(SourcePathError::Unsupported) => PathPresence::Unsupported,
+        Err(SourcePathError::Unsupported(_)) => PathPresence::Unsupported,
         Err(SourcePathError::Unavailable(kind)) => PathPresence::Unknown(kind),
     }
 }

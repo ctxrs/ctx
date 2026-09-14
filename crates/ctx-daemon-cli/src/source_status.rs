@@ -10,13 +10,12 @@ use ctx_semantic_index::{
 };
 use serde_json::{json, Value};
 
-use crate::{compact_json, config::AppConfig};
+use crate::{compact_json, composition::DaemonRuntimeConfig};
 
 use super::paths_status::{
     daemon_core_refresh_job_path, daemon_report_with_config, daemon_semantic_job_path,
     read_daemon_job_status,
 };
-use super::source_backed_refresh_coordinator::verified_generation_is_query_ready;
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
@@ -69,7 +68,7 @@ pub struct SourceEpochStatus {
 
 pub fn source_epoch_status_report(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
 ) -> Result<SourceEpochStatus> {
     let current_policy = current_source_generation_policy();
     let current_policy_hash = current_source_generation_policy_hash()?;
@@ -93,6 +92,25 @@ pub fn source_epoch_status_report(
     let daemon = source_daemon_report(data_root, config);
     let catalog = catalog_report(admitted_generation_id.as_deref(), admitted_index);
     let mut semantic = semantic_report(data_root, config, admitted_index);
+    // Projection readiness and a background failure are independent facts.
+    // Keep the projection inventory, but do not call a failed startup progress.
+    if semantic.get("enabled").and_then(Value::as_bool) == Some(true) {
+        if let Some(job) = daemon.pointer("/jobs/semantic_index").filter(|job| {
+            matches!(
+                job.get("status").and_then(Value::as_str),
+                Some("failed" | "unavailable")
+            )
+        }) {
+            semantic["status"] = json!("unavailable");
+            semantic["reason"] = job
+                .get("reason")
+                .cloned()
+                .unwrap_or_else(|| json!("daemon_semantic_job_failed"));
+            if let Some(error) = job.get("last_error") {
+                semantic["last_error"] = error.clone();
+            }
+        }
+    }
     attach_catch_up_status(
         &mut semantic,
         read_daemon_job_status(&daemon_semantic_job_path(data_root)),
@@ -111,6 +129,45 @@ pub fn source_epoch_status_report(
         .map(|index| index.session_count())
         .transpose()?;
 
+    let mut report = compact_json(json!({
+        "schema_version": 3,
+        "initialized": initialized,
+        "data_root": data_root,
+        "config_path": data_root.join(ctx_app_config::CONFIG_FILE),
+        "history_epoch": history_epoch,
+        "lexical": lexical,
+        "catalog": catalog,
+        "refresh": refresh,
+        "semantic": semantic,
+        "daemon": daemon,
+        "indexed_items": indexed_items,
+        "indexed_sessions": indexed_sessions,
+        "indexed_events": indexed_events,
+        "indexed_sources": indexed_sources,
+        "read_only": true,
+    }));
+    if config.semantic_builtin_throttling_effective().is_none() {
+        report["semantic"]["builtin_throttling"]["effective"] = Value::Null;
+        if report
+            .pointer("/daemon/config_reload/requested/semantic_builtin_throttling_configured")
+            .is_some()
+        {
+            report["daemon"]["config_reload"]["requested"]
+                ["semantic_builtin_throttling_effective"] = Value::Null;
+        }
+    }
+    if report
+        .pointer("/daemon/config_reload/applied/semantic_executor")
+        .and_then(Value::as_str)
+        .is_some_and(|executor| executor != "builtin")
+        && report
+            .pointer("/daemon/config_reload/applied/semantic_builtin_throttling_configured")
+            .is_some()
+    {
+        report["daemon"]["config_reload"]["applied"]["semantic_builtin_throttling_effective"] =
+            Value::Null;
+    }
+
     Ok(SourceEpochStatus {
         initialized,
         indexed_items,
@@ -118,24 +175,7 @@ pub fn source_epoch_status_report(
         indexed_events,
         indexed_sources,
         health,
-        report: compact_json(json!({
-            "schema_version": 2,
-            "initialized": initialized,
-            "data_root": data_root,
-            "config_path": data_root.join(crate::config::CONFIG_FILE),
-            "history_epoch": history_epoch,
-            "lexical": lexical,
-            "catalog": catalog,
-            "refresh": refresh,
-            "semantic": semantic,
-            "daemon": daemon,
-            "indexed_items": indexed_items,
-            "indexed_sessions": indexed_sessions,
-            "indexed_events": indexed_events,
-            "indexed_sources": indexed_sources,
-            "local_only": true,
-            "read_only": true,
-        })),
+        report,
     })
 }
 
@@ -159,7 +199,7 @@ fn attach_catch_up_status(report: &mut Value, status: Option<Value>) {
     }
 }
 
-fn source_daemon_report(data_root: &Path, config: &AppConfig<'_>) -> Value {
+fn source_daemon_report(data_root: &Path, config: &DaemonRuntimeConfig) -> Value {
     let mut daemon = daemon_report_with_config(data_root, true, config);
     if let Some(jobs) = daemon.get_mut("jobs").and_then(Value::as_object_mut) {
         jobs.retain(|name, _| matches!(name.as_str(), "core_refresh" | "semantic_index"));
@@ -181,12 +221,12 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
     let request_state = job.get("request_state").and_then(Value::as_str);
     let published_generation = job.get("published_generation").and_then(Value::as_str);
     let generation_matches = generation_id.is_some() && generation_id == published_generation;
-    let request_outcome = job.get("request_outcome").or_else(|| job.get("receipt"));
-    let outcome = request_outcome
+    let receipt = job.get("receipt");
+    let outcome = receipt
         .and_then(|receipt| receipt.get("outcome"))
         .or_else(|| job.get("outcome"))
         .and_then(Value::as_str);
-    let source_failures = request_outcome
+    let source_failures = receipt
         .and_then(|receipt| receipt.get("source_failure_total"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
@@ -207,7 +247,35 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         .get("automatic_retry")
         .and_then(|automatic_retry| automatic_retry.get("state"))
         .and_then(Value::as_str);
+    let daemon_enabled = daemon.get("enabled").and_then(Value::as_bool) == Some(true);
+    let daemon_running = daemon.get("running").and_then(Value::as_bool) == Some(true);
     let (status, reason) = match automatic_retry_state {
+        Some("confirming" | "paused" | "mixed") if !daemon_enabled || !daemon_running => {
+            if daemon_running
+                && (matches!(
+                    request_state,
+                    Some("admission_pending" | "queued" | "running")
+                ) || job
+                    .get("queued_successors")
+                    .and_then(Value::as_array)
+                    .is_some_and(|successors| {
+                        // Terminal roots retain admitted successors until the
+                        // finite owner advances; the root alone is historical.
+                        successors.iter().any(|successor| {
+                            matches!(
+                                successor.get("request_state").and_then(Value::as_str),
+                                Some("admission_pending" | "queued")
+                            )
+                        })
+                    }))
+            {
+                ("pending", Some("core_refresh_pending"))
+            } else if daemon_enabled {
+                ("partial", Some("automatic_retry_daemon_unavailable"))
+            } else {
+                ("partial", Some("refresh_requires_explicit_request"))
+            }
+        }
         Some("confirming") => ("pending", Some("automatic_retry_confirming")),
         Some("paused") if current_internal_failure_is_fully_paused(job) => {
             ("paused", Some("automatic_retry_paused"))
@@ -256,12 +324,12 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         "trigger": job.get("trigger"),
         "trigger_provenance": job.get("trigger_provenance"),
         "last_error": job.get("last_error"),
-        "current": request_outcome.and_then(|receipt| receipt.get("current")),
-        "source_failure_total": request_outcome
+        "current": receipt.and_then(|receipt| receipt.get("current")),
+        "source_failure_total": receipt
             .and_then(|receipt| receipt.get("source_failure_total")),
-        "rejected_record_total": request_outcome
+        "rejected_record_total": receipt
             .and_then(|receipt| receipt.get("rejected_record_total")),
-        "diagnostics": refresh_diagnostics_report(request_outcome),
+        "diagnostics": refresh_diagnostics_report(receipt),
     }))
 }
 
@@ -400,23 +468,7 @@ fn lexical_report(
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;
             let generation_matches =
                 published_generation.map(|generation| generation == index.generation_id());
-            let readiness = verified_generation_is_query_ready(&index);
-            let (status, reason, authority_error) = match readiness {
-                Ok(true) => {
-                    let (status, reason) = lexical_state(policy_matches);
-                    (status, reason, None)
-                }
-                Ok(false) => (
-                    "unavailable",
-                    Some("zero_source_publication_uncertified"),
-                    None,
-                ),
-                Err(error) => (
-                    "unavailable",
-                    Some("publication_authority_invalid"),
-                    Some(format!("{error:#}")),
-                ),
-            };
+            let (status, reason) = lexical_state(policy_matches);
             let value = compact_json(json!({
                 "status": status,
                 "reason": reason,
@@ -428,7 +480,6 @@ fn lexical_report(
                 "indexed_documents": index.document_count(),
                 "certified_sources": manifest.sources.len(),
                 "certified_source_bytes": manifest.certified_source_bytes,
-                "publication_authority_error": authority_error,
                 "manifest_version": manifest.manifest_version,
                 "identity_version": manifest.identity_version,
                 "lexical_schema_version": manifest.lexical_schema_version,
@@ -513,7 +564,7 @@ fn catalog_report(generation_id: Option<&str>, index: Option<&VerifiedIndex>) ->
 
 fn semantic_report(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     index: Option<&VerifiedIndex>,
 ) -> Value {
     let enabled = config.semantic_search_enabled();
@@ -528,6 +579,7 @@ fn semantic_report(
             },
             "enabled": enabled,
             "config_source": config.semantic_search_source(),
+            "builtin_throttling": builtin_throttling_report(config),
             "flat_f32": {
                 "status": "unavailable",
                 "reason": "lexical_generation_unavailable",
@@ -545,6 +597,7 @@ fn semantic_report(
             },
             "enabled": enabled,
             "config_source": config.semantic_search_source(),
+            "builtin_throttling": builtin_throttling_report(config),
             "flat_f32": {
                 "status": if enabled { "pending" } else { "disabled" },
                 "reason": if enabled {
@@ -568,6 +621,7 @@ fn semantic_report(
                 "reason": "semantic_contract_invalid",
                 "enabled": enabled,
                 "config_source": config.semantic_search_source(),
+                "builtin_throttling": builtin_throttling_report(config),
                 "flat_f32": typed_unavailable_with_error(
                     "semantic_contract_invalid",
                     path,
@@ -681,8 +735,18 @@ fn semantic_report(
         },
         "enabled": enabled,
         "config_source": config.semantic_search_source(),
+        "builtin_throttling": builtin_throttling_report(config),
         "flat_f32": flat_f32,
     }))
+}
+
+fn builtin_throttling_report(config: &DaemonRuntimeConfig) -> Value {
+    json!({
+        "configured": config.semantic_builtin_throttling_configured(),
+        "effective": config.semantic_builtin_throttling_effective(),
+        "config_source": config.semantic_builtin_throttling_source(),
+        "reason": config.semantic_builtin_throttling_reason(),
+    })
 }
 
 #[cfg(test)]

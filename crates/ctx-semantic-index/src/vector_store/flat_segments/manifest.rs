@@ -2,7 +2,8 @@ use super::*;
 
 pub(super) const STORE_FORMAT: &str = "ctx-flat-f32";
 pub(super) const MANIFEST_ENVELOPE_VERSION: u32 = 1;
-pub(super) const MANIFEST_SCHEMA_VERSION: u32 = 4;
+pub(super) const MANIFEST_SCHEMA_VERSION: u32 = 5;
+pub(super) const INLINE_MANIFEST_SCHEMA_VERSION: u32 = 4;
 pub(super) const SEGMENT_FORMAT_VERSION: u32 = 2;
 pub(super) const HEADER_BYTES: usize = 4_096;
 pub(super) const HEADER_BYTES_U64: u64 = HEADER_BYTES as u64;
@@ -49,6 +50,8 @@ pub(super) struct Manifest {
     #[serde(default)]
     pub(super) source_snapshots: Vec<SourceSnapshot>,
     pub(super) segments: Vec<SegmentDescriptor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) catalog_pages: Vec<CatalogPageDescriptor>,
 }
 
 impl Manifest {
@@ -62,6 +65,7 @@ impl Manifest {
             active_chunks: 0,
             source_snapshots: Vec::new(),
             segments: Vec::new(),
+            catalog_pages: Vec::new(),
         }
     }
 }
@@ -117,6 +121,7 @@ pub(super) struct PreparedManifest {
     pub(super) envelope: ManifestEnvelope,
     pub(super) generation_hash: String,
     pub(super) bytes: Vec<u8>,
+    pub(super) pages: Vec<(CatalogPageDescriptor, Vec<u8>)>,
 }
 
 pub(super) struct StagedSegment {
@@ -272,22 +277,17 @@ pub(super) fn select_manifest_any(root: &Path) -> FlatResult<Option<SelectedMani
 }
 
 pub(super) fn read_manifest(path: &Path) -> FlatResult<ManifestEnvelope> {
-    let metadata = symlink_metadata_file(path)?;
-    if metadata.len() == 0 || metadata.len() > MAX_MANIFEST_BYTES {
-        return Err(FlatStoreError::Corrupt(format!(
-            "manifest {} has unsafe size {}",
-            path.display(),
-            metadata.len()
-        )));
+    let bytes = read_bounded_metadata(path, MAX_MANIFEST_BYTES)?;
+    let mut envelope: ManifestEnvelope = serde_json::from_slice(&bytes)
+        .map_err(|error| FlatStoreError::Corrupt(format!("invalid manifest JSON: {error}")))?;
+    if envelope.manifest.schema_version == MANIFEST_SCHEMA_VERSION {
+        let root = path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| FlatStoreError::Corrupt("manifest has no store root".to_owned()))?;
+        load_catalog_pages(root, &mut envelope)?;
     }
-    let mut file =
-        File::open(path).map_err(|source| io_error("open flat manifest", path, source))?;
-    let capacity = usize_from_u64(metadata.len(), "manifest size")?;
-    let mut bytes = Vec::with_capacity(capacity);
-    file.read_to_end(&mut bytes)
-        .map_err(|source| io_error("read flat manifest", path, source))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| FlatStoreError::Corrupt(format!("invalid manifest JSON: {error}")))
+    Ok(envelope)
 }
 
 pub(super) fn manifest_name(generation: u64, digest: &str) -> String {

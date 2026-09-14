@@ -92,7 +92,7 @@ private final class FakeSmokeRunner: CommandRunner, @unchecked Sendable {
         let arguments = request.arguments.filter { $0 != "--data-root" && $0 != "/tmp/ctx-swift-local-agent-history-smoke" }
         switch Array(arguments.prefix(2)) {
         case ["status", "--format=json"]:
-            return CommandResult(stdout: #"{"initialized":true,"local_only":true,"data_root":"/tmp/ctx-swift-local-agent-history-smoke","indexed_items":3,"indexed_sessions":1,"indexed_events":2,"indexed_sources":1,"lexical":{"status":"ready","generation_id":"gen-3"},"refresh":{"status":"ready","generation_id":"gen-3"}}"#)
+            return CommandResult(stdout: #"{"initialized":true,"data_root":"/tmp/ctx-swift-local-agent-history-smoke","indexed_items":3,"indexed_sessions":1,"indexed_events":2,"indexed_sources":1,"lexical":{"status":"ready","generation_id":"gen-3"},"refresh":{"status":"ready","generation_id":"gen-3"}}"#)
         case ["setup", "--format=json"]:
             return CommandResult(stdout: #"{"schema_version":1,"data_root":"/tmp/ctx-swift-local-agent-history-smoke","indexed_items":3,"lexical":{"status":"ready","generation_id":"gen-3"},"refresh":{"status":"ready","generation_id":"gen-3"},"network_required":false}"#)
         case ["import", "--format=json"]:

@@ -12,7 +12,8 @@ use std::{ffi::OsString, os::windows::ffi::OsStringExt as _, path::PathBuf, proc
 use super::{
     absent_install_marker_error, classify_install_marker_at, install_fingerprint,
     install_marker_path, installation_is_unmanaged_at, invalid_install_marker_recovery_guidance,
-    is_valid_install_attempt_id, unmanaged_install_conversion_guidance, ManagedInstallMarker,
+    is_valid_install_attempt_id, preserve_owned_extensions_from_existing_marker,
+    unmanaged_install_conversion_guidance, ManagedInstallMarker,
 };
 use crate::upgrade::sha256_hex;
 
@@ -206,6 +207,41 @@ fn valid_marker_uses_the_canonical_executable_path() -> Result<()> {
         }
         other => panic!("expected valid marker, got {other:?}"),
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn upgraded_marker_preserves_validated_owned_extensions() -> Result<()> {
+    let fixture = tempdir()?;
+    let install_path = fixture.path().join("ctx");
+    let existing_path = install_marker_path(&install_path);
+    let receipt = json!({"schema_version": 1, "status": "installed"});
+    let ownership = b"owned integrations";
+    let ownership_digest = sha256_hex(ownership);
+    let ownership_path = fixture
+        .path()
+        .join(format!("ctx.install-integrations.{ownership_digest}"));
+    fs::write(&ownership_path, ownership)?;
+    fs::write(
+        &existing_path,
+        serde_json::to_vec(&json!({
+            "man_pages": receipt,
+            "integrations_path": ownership_path,
+            "integrations_sha256": ownership_digest,
+        }))?,
+    )?;
+    let mut replacement = json!({"manager": "ctx-hosted-installer"});
+
+    preserve_owned_extensions_from_existing_marker(
+        &mut replacement,
+        &existing_path,
+        &install_path,
+    )?;
+
+    assert_eq!(replacement["man_pages"], receipt);
+    assert_eq!(replacement["integrations_path"], json!(ownership_path));
+    assert_eq!(replacement["integrations_sha256"], ownership_digest);
     Ok(())
 }
 

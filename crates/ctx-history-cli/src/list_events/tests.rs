@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use super::*;
 use crate::{
     analytics::{RenderFormat, ShowTelemetry, TargetKind},
-    test_query_authority::{publish_empty_generation, EmptyPublicationAuthority},
+    test_query_authority::publish_empty_generation,
     ui::{RenderContext, StreamKind, TestContext},
 };
 
@@ -93,59 +93,21 @@ fn compound_invalid_list_requests_preserve_selection_cursor_limit_precedence() {
 }
 
 #[test]
-fn query_authority_list_gateway_accepts_authoritative_empty_and_rejects_invalid_empty() {
-    let authoritative = tempfile::tempdir().unwrap();
-    let generation_id = publish_empty_generation(
-        authoritative.path(),
-        EmptyPublicationAuthority::AuthoritativeCurrent,
-    );
-    let index = open_event_range_index(authoritative.path(), None).unwrap();
+fn list_gateway_opens_a_verified_empty_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation_id = publish_empty_generation(temp.path());
+    let index = open_event_range_index(temp.path(), None).unwrap();
     assert_eq!(index.generation_id(), generation_id);
     assert_eq!(index.document_count(), 0);
-
-    for (authority, error_code, retryable) in [
-        (
-            EmptyPublicationAuthority::Missing,
-            "source_unavailable",
-            true,
-        ),
-        (
-            EmptyPublicationAuthority::LegacyV1,
-            "source_unavailable",
-            true,
-        ),
-        (
-            EmptyPublicationAuthority::Malformed,
-            "publication_authority_invalid",
-            false,
-        ),
-        (
-            EmptyPublicationAuthority::UnknownVersion,
-            "publication_authority_invalid",
-            false,
-        ),
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        publish_empty_generation(temp.path(), authority);
-        let error = match open_event_range_index(temp.path(), None) {
-            Ok(_) => panic!("invalid empty generation must not open for list"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, EventQueryError::GenerationAuthority(_)));
-        let value = event_query_error_value(&error);
-        assert_eq!(value["error_code"], error_code);
-        assert_eq!(value["retryable"], retryable);
-    }
 }
 
 #[test]
-fn query_authority_list_cursor_rechecks_the_retained_generation() {
+fn list_cursor_opens_its_exact_verified_retained_generation() {
     let temp = tempfile::tempdir().unwrap();
-    let legacy_generation =
-        publish_empty_generation(temp.path(), EmptyPublicationAuthority::LegacyV1);
+    let retained_generation = publish_empty_generation(temp.path());
     publish_fixture(temp.path(), &["active nonempty successor".to_owned()]);
     let active = open_event_range_index(temp.path(), None).unwrap();
-    assert_ne!(active.generation_id(), legacy_generation);
+    assert_ne!(active.generation_id(), retained_generation);
     let selection = all_selection(CoreEventRangeDirection::Ascending);
     let event = ctx_history_read_application::PinnedHistoryQuery::new(&active, None)
         .list_events_page(&ctx_history_read_application::ListEventsPageRequest {
@@ -162,22 +124,11 @@ fn query_authority_list_cursor_rechecks_the_retained_generation() {
         .into_iter()
         .next()
         .unwrap();
-    let cursor = selection.cursor_for(&legacy_generation, &event).unwrap();
+    let cursor = selection.cursor_for(&retained_generation, &event).unwrap();
 
-    let error = match open_event_range_index(temp.path(), Some(&cursor)) {
-        Ok(_) => panic!("uncertified retained generation must not open from a list cursor"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        EventQueryError::GenerationAuthority(
-            ctx_history_refresh::GenerationQueryAuthorityError::UncertifiedEmpty { .. }
-        )
-    ));
-    assert_eq!(
-        event_query_error_value(&error)["error_code"],
-        "source_unavailable"
-    );
+    let retained = open_event_range_index(temp.path(), Some(&cursor)).unwrap();
+    assert_eq!(retained.generation_id(), retained_generation);
+    assert_eq!(retained.document_count(), 0);
 }
 
 fn test_source() -> SourceKey {
@@ -690,6 +641,96 @@ fn full_projection_admits_a_valid_oversized_singleton_under_the_wire_cap() {
 
 #[derive(Clone, Default)]
 struct SharedBytes(Arc<Mutex<Vec<u8>>>);
+
+#[test]
+fn mcp_metadata_pages_advance_past_content_larger_than_the_response_cap() {
+    const RESPONSE_CAP: usize = 8 * 1024 * 1024;
+    let temp = tempfile::tempdir().unwrap();
+    let body = "\0".repeat(1_400_000);
+    assert!(
+        test_record(&test_source(), 1, &body)
+            .encode_stored()
+            .unwrap()
+            .len()
+            > RESPONSE_CAP
+    );
+    publish_fixture(
+        temp.path(),
+        &["before".to_owned(), body, "after".to_owned()],
+    );
+    for direction in [
+        CoreEventRangeDirection::Ascending,
+        CoreEventRangeDirection::Descending,
+    ] {
+        for providers in [vec![], vec!["codex".to_owned()]] {
+            let selected = CoreEventRangeSelection::all(CoreEventRangeFilters {
+                direction,
+                providers,
+                ..CoreEventRangeFilters::default()
+            })
+            .unwrap();
+            let wire =
+                EventQueryWireRequest::from_selection(&selected, EventContentProjection::None, 100);
+            let record_bytes = mcp_event_query_core_record_bytes(RESPONSE_CAP, wire.content);
+            let budget = CoreEventPageBudget::new(
+                record_bytes,
+                record_bytes.min(ctx_history_core::MAX_CORE_CONTENT_BYTES),
+            );
+            let mut cursor = None;
+            let mut sequences = Vec::new();
+            for _ in 0..3 {
+                let page = event_range_page_value(
+                    temp.path(),
+                    &selected,
+                    cursor.as_ref(),
+                    &wire,
+                    Some(budget),
+                )
+                .unwrap();
+                assert!(serde_json::to_vec(&page).unwrap().len() < RESPONSE_CAP);
+                let events = page["events"].as_array().unwrap();
+                assert_eq!(events.len(), 1);
+                let event = &events[0];
+                assert!(event["text"].is_null());
+                assert!(event["structured_content"].is_null());
+                assert!(event.get("activity").is_none());
+                assert_eq!(event["provider_session_id"], "provider-session");
+                assert_eq!(event["parser_revision"], "event-query-test-v1");
+                assert_eq!(event["content"]["policy_status"], "selected");
+                assert_eq!(event["content"]["complete"], true);
+                sequences.push(event["sequence"].as_u64().unwrap());
+                let next = page["next_cursor"]
+                    .as_str()
+                    .map(|value| decode_cursor(value).unwrap());
+                assert_eq!(page["terminal"], next.is_none());
+                if next.is_none() {
+                    break;
+                }
+                assert_ne!(next, cursor);
+                cursor = next;
+            }
+            let expected = match direction {
+                CoreEventRangeDirection::Ascending => [0, 1, 2],
+                CoreEventRangeDirection::Descending => [2, 1, 0],
+            };
+            assert_eq!(sequences, expected);
+            for projection in [EventContentProjection::Full, EventContentProjection::Text] {
+                let wire = EventQueryWireRequest::from_selection(&selected, projection, 100);
+                let record_bytes = mcp_event_query_core_record_bytes(RESPONSE_CAP, projection);
+                let budget = CoreEventPageBudget::new(
+                    record_bytes,
+                    record_bytes.min(ctx_history_core::MAX_CORE_CONTENT_BYTES),
+                );
+                assert!(matches!(
+                    event_range_page_value(temp.path(), &selected, None, &wire, Some(budget)),
+                    Err(EventQueryError::Range(
+                        CoreEventRangeError::RecordExceedsStrictBudget { .. }
+                    ))
+                ));
+            }
+        }
+    }
+}
 
 impl SharedBytes {
     fn bytes(&self) -> Vec<u8> {

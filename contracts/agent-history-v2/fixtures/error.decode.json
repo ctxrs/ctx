@@ -1,0 +1,18 @@
+{
+  "contractVersion": "agent-history-v2",
+  "schemaVersion": 1,
+  "operation": "error",
+  "backend": {
+    "kind": "local",
+    "dataRoot": "/tmp/ctx-sdk-fixture"
+  },
+  "error": {
+    "code": "decode_error",
+    "message": "ctx returned invalid JSON",
+    "retryable": false,
+    "details": {
+      "adapter": "local-cli"
+    },
+    "cause": "expected value at line 1 column 1"
+  }
+}

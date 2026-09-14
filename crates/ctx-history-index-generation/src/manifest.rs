@@ -18,7 +18,7 @@ use crate::retention::{
 use crate::{
     is_generation_id, manifest_path, sha256_hex, sync_directory, DurableMmapDirectory,
     GenerationError, Result, ACTIVE_GENERATION_POINTER_FILE, GENERATION_WRITER_LOCK_FILE,
-    MANIFEST_DIRECTORY,
+    INDEX_GENERATIONS_DIRECTORY, MANIFEST_DIRECTORY,
 };
 
 /// Repairs legacy generation control files before any reader captures their
@@ -46,6 +46,7 @@ pub fn ensure_generation_control_files_private_with_writer_lock_held(root: &Path
     ensure_private_directory(root)?;
     let manifest_directory = root.join(MANIFEST_DIRECTORY);
     ensure_private_directory(&manifest_directory)?;
+    ensure_private_directory(&root.join(INDEX_GENERATIONS_DIRECTORY))?;
     ensure_optional_private_file(&root.join(ACTIVE_GENERATION_POINTER_FILE))?;
     for entry in fs::read_dir(&manifest_directory)? {
         let entry = entry?;
@@ -302,7 +303,7 @@ mod tests {
     #[test]
     fn manifest_roundtrip_preserves_exact_bytes() {
         let root = tempfile::tempdir().unwrap();
-        let bytes = br#"{"manifest_version":8,"indexed_documents":0}"#;
+        let bytes = br#"{"manifest_version":11,"indexed_documents":0}"#;
         let generation_id = sha256_hex(bytes);
 
         write_manifest_bytes(root.path(), &generation_id, bytes).unwrap();

@@ -93,10 +93,11 @@ pub(super) fn search_json_document(
     query_duration: Duration,
 ) -> Result<Value> {
     let commands = search_result_commands(request, collection, data_root);
-    let fallback_code = collection
-        .semantic_fallback
-        .as_ref()
-        .map(semantic_fallback_code);
+    let fallback_code = collection.semantic_fallback.as_ref().and_then(|fallback| {
+        fallback
+            .code
+            .or_else(|| fallback.reason.map(semantic_reason_code))
+    });
     let fallback_detail = collection
         .semantic_fallback
         .as_ref()
@@ -152,7 +153,7 @@ fn search_result_commands(
             }
             if !query_arguments.is_empty() {
                 suggested_next_commands.push(format!(
-                    "{command_prefix} search {query_arguments} --session {session_id}"
+                    "{command_prefix} search --session {session_id} {query_arguments}"
                 ));
             }
             ctx_history_read_application::SearchResultCommands {
@@ -160,15 +161,6 @@ fn search_result_commands(
             }
         })
         .collect()
-}
-
-fn semantic_fallback_code(
-    fallback: &ctx_history_read_application::SemanticFallbackDiagnostics,
-) -> &'static str {
-    fallback
-        .reason
-        .map(semantic_reason_code)
-        .unwrap_or("semantic_query_failed")
 }
 
 fn semantic_fallback_detail(
@@ -194,11 +186,11 @@ fn semantic_fallback_detail(
 
 fn search_query_command_arguments(query: &NormalizedSearchQuery) -> String {
     let mut arguments = Vec::new();
-    if let Some(positional) = query.positional() {
-        arguments.push(shell_quote_arg(positional));
-    }
     for term in query.terms() {
         arguments.push(format!("--term={}", shell_quote_arg(term)));
+    }
+    if let Some(positional) = query.positional() {
+        arguments.push(format!("-- {}", shell_quote_arg(positional)));
     }
     arguments.join(" ")
 }
@@ -244,15 +236,16 @@ fn render_show_jsonl(value: &Value) -> Result<String> {
         .iter()
         .map(|event| {
             if value["target"] == "session" {
-                serde_json::to_string(&compact_json(json!({
+                let mut line = compact_json(json!({
                     "schema_version": 1,
                     "payload_type": "session_transcript_event",
                     "mode": value["mode"],
                     "ctx_session_id": value["ctx_session_id"],
                     "provider": value["provider"],
                     "provider_session_id": value["provider_session_id"],
-                    "event": event,
-                })))
+                }));
+                line["event"] = event.clone();
+                serde_json::to_string(&line)
             } else {
                 serde_json::to_string(event)
             }

@@ -90,6 +90,11 @@ fn walk_private_directory_nofollow(
     };
     let mut created_private_ancestor = false;
     let mut saw_component = false;
+    let mut containing_directory: Option<File> = None;
+    let mut current_link_confirmed = false;
+    // Generic private scratch/staging creation has no persistence contract.
+    // Root establishment owns the cold ancestry needed by durable consumers.
+    let confirm_created_links = matches!(existing_final, ExistingFinalPolicy::EstablishExact);
 
     while let Some(component) = components.next() {
         let Component::Normal(name) = component else {
@@ -97,7 +102,19 @@ fn walk_private_directory_nofollow(
         };
         saw_component = true;
         let is_final = components.peek().is_none();
-        let (next, created, raced_existing) = open_or_create_directory(&current, name)?;
+        let (next, created, raced_existing) =
+            open_or_create_directory_after_missing(&current, name, || {
+                // An interrupted creator can leave its last directory visible
+                // before syncing its link. Repair that deepest existing prefix
+                // before extending it; earlier links precede descent below.
+                if confirm_created_links && !current_link_confirmed {
+                    if let Some(parent) = containing_directory.as_ref() {
+                        current.sync_all()?;
+                        parent.sync_all()?;
+                    }
+                }
+                Ok(())
+            })?;
         if created {
             clear_extended_acl(&next)?;
             verify_exact_private_directory(&next.metadata()?)?;
@@ -111,6 +128,14 @@ fn walk_private_directory_nofollow(
         } else if created_private_ancestor || raced_existing {
             verify_owner_only_directory(&next.metadata()?)?;
         }
+        if confirm_created_links && (created || raced_existing) {
+            // Confirm private metadata and the new name before descending.
+            // A concurrent creator's visible name carries the same obligation.
+            next.sync_all()?;
+            current.sync_all()?;
+        }
+        current_link_confirmed = created || raced_existing;
+        containing_directory = Some(current);
         current = next;
     }
 
@@ -178,9 +203,14 @@ pub(super) fn clear_extended_acl(_directory: &File) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 pub(super) fn verify_no_extended_acl(file: &File) -> io::Result<()> {
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    verify_empty_acl(acl)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn verify_empty_acl(acl: Acl) -> io::Result<()> {
     const ACL_FIRST_ENTRY: libc::c_int = 0;
 
-    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
     if acl.is_null() {
         let error = io::Error::last_os_error();
         // Darwin reports ENOENT when a regular file has no extended ACL.
@@ -219,10 +249,15 @@ pub(super) fn verify_no_extended_acl(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn open_or_create_directory(parent: &File, name: &OsStr) -> io::Result<(File, bool, bool)> {
+fn open_or_create_directory_after_missing(
+    parent: &File,
+    name: &OsStr,
+    after_missing: impl FnOnce() -> io::Result<()>,
+) -> io::Result<(File, bool, bool)> {
     match open_directory(parent.as_raw_fd(), name) {
         Ok(directory) => Ok((directory, false, false)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            after_missing()?;
             let name = path_component(name)?;
             // mkdirat applies umask only by removing bits from 0700, so a new
             // directory is never exposed to group or other while it is made
@@ -345,7 +380,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nested_creation_is_exact_and_usable_under_umask_0777() {
+    fn private_data_root_creation_is_exact_and_usable_under_umask_0777() {
         const CHILD_ENV: &str = "CTX_TEST_PRIVATE_DIRECTORY_UMASK_CHILD";
         if let Some(target) = std::env::var_os(CHILD_ENV) {
             // SAFETY: this is a single-test child process, so changing its
@@ -355,7 +390,7 @@ mod tests {
             }
             let first = Path::new(&target).join("private");
             let nested = first.join("state");
-            create_private_directory_all(&nested).unwrap();
+            ensure_private_directory(&nested).unwrap();
             assert_eq!(
                 fs::metadata(&first).unwrap().permissions().mode() & 0o777,
                 0o700
@@ -371,7 +406,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg("nested_creation_is_exact_and_usable_under_umask_0777")
+            .arg(
+                "platform_security::unix_private_directory::tests::private_data_root_creation_is_exact_and_usable_under_umask_0777",
+            )
             .arg("--nocapture")
             .env(CHILD_ENV, temp.path())
             .status()
@@ -412,8 +449,36 @@ mod tests {
     }
 
     #[test]
+    fn create_race_refuses_a_symlink_winner_without_repair() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = temp.path().join("target");
+        let raced = temp.path().join("raced");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let parent = File::open(temp.path()).unwrap();
+
+        let result = open_or_create_directory_after_missing(&parent, OsStr::new("raced"), || {
+            symlink(&target, &raced)
+        });
+
+        assert!(result.is_err());
+        assert!(fs::symlink_metadata(&raced)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
     fn establishing_data_root_repairs_existing_mode_before_use() {
         let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
         let target = temp.path().join("data");
         fs::create_dir(&target).unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
@@ -423,6 +488,11 @@ mod tests {
         assert_eq!(
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+        assert_eq!(
+            fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "establishing a legacy final root must not chmod existing ancestors"
         );
         fs::write(target.join("first-write"), b"private").unwrap();
     }

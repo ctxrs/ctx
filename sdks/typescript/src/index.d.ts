@@ -1,4 +1,4 @@
-export declare const AGENT_HISTORY_V1_VERSION = "agent-history-v1";
+export declare const AGENT_HISTORY_V2_VERSION = "agent-history-v2";
 export declare const SDK_VERSION = "0.0.0";
 
 export type Provider =
@@ -179,7 +179,6 @@ export interface Freshness {
 
 export interface AgentHistoryStatus {
   initialized: boolean;
-  localOnly: boolean;
   readOnly?: boolean;
   dataRoot?: string | null;
   /** Exact operational counter in the inclusive range 0..Number.MAX_SAFE_INTEGER. */
@@ -354,6 +353,7 @@ export interface AgentHistoryEvent {
   text?: string | null;
   mcpToolCall?: McpToolCall;
   mcpExchange?: McpExchange;
+  activity?: JsonValue;
   structuredContent?: JsonValue;
   content?: CoreContentMetadata;
   citations?: Citation[];
@@ -405,7 +405,7 @@ export interface AgentHistoryErrorRecord {
 }
 
 export interface AgentHistoryEnvelopeBase<TOperation extends AgentHistoryOperation> {
-  contractVersion: typeof AGENT_HISTORY_V1_VERSION;
+  contractVersion: typeof AGENT_HISTORY_V2_VERSION;
   schemaVersion: 1;
   operation: TOperation;
   backend?: AgentHistoryBackend;
@@ -460,7 +460,7 @@ export type AgentHistoryEnvelope = AgentHistoryEnvelopeByOperation[AgentHistoryO
 
 export interface VersionInfo {
   schema_version: 1;
-  api_version: typeof AGENT_HISTORY_V1_VERSION;
+  api_version: typeof AGENT_HISTORY_V2_VERSION;
   sdk_version: typeof SDK_VERSION;
   adapter: "local-cli" | "hosted-placeholder";
   ctx_version?: string;
@@ -469,8 +469,9 @@ export interface VersionInfo {
 
 export declare class CtxError extends Error {
   code: string;
+  retryable: boolean;
   details?: unknown;
-  constructor(message: string, options?: { code?: string; details?: unknown; cause?: unknown });
+  constructor(message: string, options?: { code?: string; retryable?: boolean; details?: unknown; cause?: unknown });
 }
 
 export declare class CtxCliError extends CtxError {

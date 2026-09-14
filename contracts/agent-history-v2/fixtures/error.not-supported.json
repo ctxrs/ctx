@@ -1,0 +1,18 @@
+{
+  "contractVersion": "agent-history-v2",
+  "schemaVersion": 1,
+  "operation": "error",
+  "backend": {
+    "kind": "hosted",
+    "baseUrl": "https://ctx.example.invalid"
+  },
+  "error": {
+    "code": "not_supported",
+    "message": "hosted ctx agent history backend is not available in this in-repo SDK",
+    "retryable": false,
+    "details": {
+      "backend": "hosted"
+    },
+    "cause": null
+  }
+}

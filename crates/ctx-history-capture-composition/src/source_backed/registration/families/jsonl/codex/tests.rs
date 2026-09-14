@@ -62,3 +62,5 @@ fn codex_session_tree_registration_does_not_inventory_the_root() {
     let targets = catalog.route_targets().next().unwrap().1;
     assert!(targets.contains(&archived_sessions));
 }
+
+mod typed_activity;

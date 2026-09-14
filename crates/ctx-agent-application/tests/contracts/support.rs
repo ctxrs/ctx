@@ -25,6 +25,7 @@ pub(crate) use mcp::*;
 const BOUND_CTX_BINARY_TEST_ROOT_MARKER: &str = ".ctx-test-bound-binary";
 const READY_CTX_BINARY_TEST_ROOT_MARKER: &str = ".ctx-test-copy-ready";
 const PERSISTENT_DAEMON_TEST_ROOT_MARKER: &str = ".ctx-test-owned-daemon";
+const ANALYTICS_OUTBOX_FILE: &str = "analytics-outbox-v1.json";
 const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -382,11 +383,68 @@ pub(crate) fn ctx_product_version(temp: &TempDir) -> String {
         .to_owned()
 }
 
-pub(crate) fn read_analytics_events(path: &Path) -> Vec<Value> {
-    fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+pub(crate) fn analytics_outbox_paths(root: &Path) -> Vec<PathBuf> {
+    fn visit(directory: &Path, outboxes: &mut Vec<PathBuf>) {
+        let entries = fs::read_dir(directory).unwrap_or_else(|error| {
+            panic!(
+                "inspect hermetic analytics root {}: {error}",
+                directory.display()
+            )
+        });
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|error| {
+                panic!(
+                    "inspect analytics entry under {}: {error}",
+                    directory.display()
+                )
+            });
+            let file_type = entry.file_type().unwrap_or_else(|error| {
+                panic!("inspect analytics path {}: {error}", entry.path().display())
+            });
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                visit(&entry.path(), outboxes);
+            } else if file_type.is_file() && entry.file_name() == ANALYTICS_OUTBOX_FILE {
+                outboxes.push(entry.path());
+            }
+        }
+    }
+
+    let mut outboxes = Vec::new();
+    if root.is_dir() {
+        visit(root, &mut outboxes);
+    }
+    outboxes.sort();
+    outboxes
+}
+
+pub(crate) fn read_queued_analytics_events(root: &Path) -> Vec<Value> {
+    analytics_outbox_paths(root)
+        .into_iter()
+        .flat_map(|outbox| {
+            let state: Value = serde_json::from_slice(&fs::read(&outbox).unwrap_or_else(|error| {
+                panic!("read analytics outbox {}: {error}", outbox.display())
+            }))
+            .unwrap_or_else(|error| panic!("parse analytics outbox {}: {error}", outbox.display()));
+            state["entries"]
+                .as_array()
+                .unwrap_or_else(|| panic!("analytics outbox has no entries array: {state:#}"))
+                .iter()
+                .map(|entry| {
+                    let payload = entry["payload"].as_str().unwrap_or_else(|| {
+                        panic!("analytics outbox entry has no JSON payload: {entry:#}")
+                    });
+                    serde_json::from_str(payload).unwrap_or_else(|error| {
+                        panic!(
+                            "parse queued analytics payload in {}: {error}",
+                            outbox.display()
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 
@@ -572,55 +630,7 @@ pub(crate) fn initialize_authoritative_empty_core(data_root: &Path) -> String {
     let core_receipt = writer.commit(|_| true).unwrap();
     let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(verified.generation_id(), core_receipt.generation_id);
-    let generation_id = core_receipt.generation_id;
-    let route_identity = "ab".repeat(32);
-    let receipt = json!({
-        "published_generation": generation_id,
-        "generation_changed": true,
-        "current": {
-            "current_source_count": 0,
-            "current_indexed_documents": 0,
-            "current_complete_records": 0,
-            "current_retained_records": 0,
-            "current_rejected_records": 0,
-            "current_ignored_records": 0,
-            "current_certified_source_bytes": 0,
-            "current_sources_with_rejections": 0,
-            "removed_source_count": 0,
-        },
-        "outcome": "completed",
-        "selected_route_total": 1,
-        "successful_route_total": 1,
-        "source_failure_total": 0,
-        "source_failures_omitted": 0,
-        "rejected_record_total": 0,
-        "rejection_diagnostics_omitted": 0,
-        "route_results": {(route_identity): ["s", true]},
-        "zero_source_authority": {
-            "generation_id": generation_id,
-            "route_kinds": "e",
-        },
-        "catalog_route_bindings": {},
-    });
-    GenerationWriter::open(&index_root, WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap()
-        .republish_current_publication_metadata(
-            &generation_id,
-            serde_json::to_vec(&json!({
-                "version": 3,
-                "request_id": "mcp-authoritative-empty-fixture",
-                "operation": "refresh",
-                "refresh_scope": {"kind": "all"},
-                "receipt": receipt,
-                "route_observations": [null],
-                "route_controls": {},
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-    generation_id
+    core_receipt.generation_id
 }
 
 #[cfg(ctx_agent_application_contract_fixtures)]

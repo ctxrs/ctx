@@ -4,13 +4,30 @@ use std::{fs, path::Path};
 use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::{Context, Result};
-use ctx_history_platform::platform_security::{restrict_private_directory, restrict_private_file};
+use ctx_history_platform::platform_security::{
+    establish_private_data_root, restrict_private_directory, restrict_private_file,
+};
 
 pub fn create_private_dir_all(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
+    // The existing platform owner creates missing components privately and
+    // repairs only the final directory, never external pre-existing ancestors.
+    establish_private_data_root(path)
         .with_context(|| format!("create private directory {}", path.display()))?;
-    secure_private_dir_permissions(path)?;
     Ok(())
+}
+
+/// Establishes one journal directory and confirms its final containing link.
+/// Call at journal initialization, including retries: existence alone does not
+/// confirm a prior creator's last link. Ordinary mutable status uses the
+/// existing-directory path above without these extra flushes.
+pub fn create_private_dir_all_before_ack(path: &Path) -> Result<()> {
+    create_private_dir_all(path)?;
+    #[cfg(not(windows))]
+    fs::File::open(path)
+        .with_context(|| format!("open private directory {}", path.display()))?
+        .sync_all()
+        .with_context(|| format!("sync private directory {}", path.display()))?;
+    crate::sync_private_file_parent(path)
 }
 
 pub fn private_create_new_file(path: &Path) -> std::io::Result<fs::File> {
@@ -106,3 +123,6 @@ pub fn secure_private_file_permissions(path: &Path) -> Result<()> {
         .with_context(|| format!("secure private file {}", path.display()))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

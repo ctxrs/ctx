@@ -31,9 +31,105 @@ mod sqlite_diagnostics;
 #[path = "tests/temp_authority.rs"]
 mod temp_authority;
 
-use current_schema::create_current_fixture;
-
 const OVER_LIMIT_OPTIONAL_METADATA_BYTES: usize = 64 * 1024 + 1;
+
+fn create_minimal_session_table(connection: &Connection) {
+    connection
+        .execute_batch(
+            "create table session (
+                 id text primary key,
+                 time_created integer not null,
+                 time_updated integer not null
+             );",
+        )
+        .unwrap();
+}
+
+fn create_routed_session_table(connection: &Connection) {
+    connection
+        .execute_batch(
+            "create table session (
+                 id text primary key,
+                 parent_id text,
+                 directory text,
+                 branch text,
+                 agent text,
+                 time_created integer not null,
+                 time_updated integer not null
+             );",
+        )
+        .unwrap();
+}
+
+fn create_session_message_table(connection: &Connection) {
+    connection
+        .execute_batch(
+            "create table session_message (
+                 id text primary key,
+                 session_id text not null,
+                 type text not null,
+                 seq integer not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );",
+        )
+        .unwrap();
+}
+
+fn create_message_part_tables(connection: &Connection) {
+    connection
+        .execute_batch(
+            "create table message (
+                 id text primary key,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create table part (
+                 id text primary key,
+                 message_id text not null,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );",
+        )
+        .unwrap();
+}
+
+fn create_message_part_indexes(connection: &Connection, include_time_index: bool) {
+    connection
+        .execute_batch(
+            "create index message_session_time_created_id_idx
+                 on message(session_id, time_created, id);
+             create index part_message_id_id_idx on part(message_id, id);",
+        )
+        .unwrap();
+    if include_time_index {
+        connection
+            .execute(
+                "create index part_message_time_id_idx on part(message_id, time_created, id)",
+                [],
+            )
+            .unwrap();
+    }
+    connection
+        .execute("create index part_session_idx on part(session_id)", [])
+        .unwrap();
+}
+
+fn create_current_fixture(path: &Path) -> Connection {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let connection = Connection::open(path).unwrap();
+    create_minimal_session_table(&connection);
+    create_session_message_table(&connection);
+    connection
+        .execute("insert into session values ('session-1', 1, 1)", [])
+        .unwrap();
+    connection
+}
 
 #[test]
 fn root_scope_separates_identical_opencode_family_sessions_and_unqualified_is_released() {
@@ -97,36 +193,15 @@ fn write_current_schema(
                  agent text,
                  time_created integer not null,
                  time_updated integer not null
-             );
-             create table session_message (
-                 id text primary key,
-                 session_id text not null,
-                 type text not null,
-                 seq integer not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create table message (
-                 id text primary key,
-                 session_id text not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create table part (
-                 id text primary key,
-                 message_id text not null,
-                 session_id text not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create index message_session_time_created_id_idx
-                 on message(session_id, time_created, id);
-             create index part_message_id_id_idx on part(message_id, id);
-             create index part_session_idx on part(session_id);
-             create table event (
+             );",
+        )
+        .unwrap();
+    create_session_message_table(&connection);
+    create_message_part_tables(&connection);
+    create_message_part_indexes(&connection, false);
+    connection
+        .execute_batch(
+            "create table event (
                  id text primary key,
                  aggregate_id text not null,
                  seq integer not null,
@@ -654,23 +729,11 @@ fn admitted_copy_stays_stable_across_later_wal_commit_and_next_open_advances() {
     let writer = Connection::open(&database).unwrap();
     writer.pragma_update(None, "journal_mode", "wal").unwrap();
     writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    create_minimal_session_table(&writer);
+    create_session_message_table(&writer);
     writer
         .execute_batch(
-            "create table session (
-                 id text primary key,
-                 time_created integer not null,
-                 time_updated integer not null
-             );
-             create table session_message (
-                 id text primary key,
-                 session_id text not null,
-                 type text not null,
-                 seq integer not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create unique index session_message_session_seq_idx
+            "create unique index session_message_session_seq_idx
                  on session_message(session_id, seq);
              insert into session values ('session-1', 1, 1);",
         )
@@ -775,27 +838,11 @@ fn unrelated_sibling_creation_does_not_invalidate_source_family() {
 fn create_indexed_synthetic_fixture(path: &Path, rows: i64) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut connection = Connection::open(path).unwrap();
+    create_routed_session_table(&connection);
+    create_session_message_table(&connection);
     connection
         .execute_batch(
-            "create table session (
-                 id text primary key,
-                 parent_id text,
-                 directory text,
-                 branch text,
-                 agent text,
-                 time_created integer not null,
-                 time_updated integer not null
-             );
-             create table session_message (
-                 id text primary key,
-                 session_id text not null,
-                 type text not null,
-                 seq integer not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create unique index session_message_session_seq_idx
+            "create unique index session_message_session_seq_idx
                  on session_message(session_id, seq);
              insert into session values (
                  'session-1', null, '/tmp/project', 'main', 'build', 0, 0
@@ -823,48 +870,13 @@ fn create_indexed_synthetic_fixture(path: &Path, rows: i64) {
 fn create_indexed_message_part_fixture(path: &Path, rows: i64) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut connection = Connection::open(path).unwrap();
+    create_routed_session_table(&connection);
+    create_session_message_table(&connection);
+    create_message_part_tables(&connection);
+    create_message_part_indexes(&connection, true);
     connection
         .execute_batch(
-            "create table session (
-                 id text primary key,
-                 parent_id text,
-                 directory text,
-                 branch text,
-                 agent text,
-                 time_created integer not null,
-                 time_updated integer not null
-             );
-             create table session_message (
-                 id text primary key,
-                 session_id text not null,
-                 type text not null,
-                 seq integer not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create table message (
-                 id text primary key,
-                 session_id text not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create table part (
-                 id text primary key,
-                 message_id text not null,
-                 session_id text not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create index message_session_time_created_id_idx
-                 on message(session_id, time_created, id);
-             create index part_message_id_id_idx on part(message_id, id);
-             create index part_message_time_id_idx
-                 on part(message_id, time_created, id);
-             create index part_session_idx on part(session_id);
-             insert into session values (
+            "insert into session values (
                  'session-1', null, '/tmp/project', 'main', 'build', 0, 0
              );",
         )
@@ -904,40 +916,9 @@ fn create_indexed_message_part_fixture(path: &Path, rows: i64) {
 fn create_multisession_message_part_fixture(path: &Path, sessions: i64) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut connection = Connection::open(path).unwrap();
-    connection
-        .execute_batch(
-            "create table session (
-                 id text primary key,
-                 parent_id text,
-                 directory text,
-                 branch text,
-                 agent text,
-                 time_created integer not null,
-                 time_updated integer not null
-             );
-             create table message (
-                 id text primary key,
-                 session_id text not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create table part (
-                 id text primary key,
-                 message_id text not null,
-                 session_id text not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create index message_session_time_created_id_idx
-                 on message(session_id, time_created, id);
-             create index part_message_id_id_idx on part(message_id, id);
-             create index part_message_time_id_idx
-                 on part(message_id, time_created, id);
-             create index part_session_idx on part(session_id);",
-        )
-        .unwrap();
+    create_routed_session_table(&connection);
+    create_message_part_tables(&connection);
+    create_message_part_indexes(&connection, true);
     let metadata_padding = "m".repeat(4 * 1024);
     let payload_padding = "p".repeat(4 * 1024);
     let transaction = connection.transaction().unwrap();
@@ -1412,24 +1393,10 @@ fn projected_order(records: &[CoreRecord]) -> Vec<(u64, String)> {
 
 fn create_metadata_and_message_part_fixture(path: &Path) {
     let connection = create_current_fixture(path);
+    create_message_part_tables(&connection);
     connection
         .execute_batch(
-            r#"create table message (
-                 id text primary key,
-                 session_id text not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             create table part (
-                 id text primary key,
-                 message_id text not null,
-                 session_id text not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             insert into session_message values (
+            r#"insert into session_message values (
                  'metadata-agent', 'session-1', 'agent-switched', 1, 1, 1,
                  '{"text":"metadata agent notice must not be emitted"}'
              );

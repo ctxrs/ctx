@@ -6,6 +6,8 @@ use crate::ui::{
     fields, outcome, section, Document, Field, Line, Outcome, OutcomeState, Span, Token,
 };
 
+use super::doctor_presentation::bounded_terminal_detail;
+
 #[derive(Debug, Args)]
 pub struct SemanticArgs {
     #[command(subcommand)]
@@ -101,6 +103,13 @@ pub fn render_semantic_status(context: &crate::ui::RenderContext, report: &Value
             ),
         }
     };
+    // Surface the persisted background failure text so a missing ONNX Runtime,
+    // model, or provisioning error is visible instead of only a state word.
+    let background_error = semantic_background_error(report);
+    let detail = match background_error.as_deref() {
+        Some(error) if matches!(status, "failed" | "unavailable") => Some(error),
+        _ => detail,
+    };
     let mut document = outcome(
         context,
         Outcome {
@@ -114,11 +123,13 @@ pub fn render_semantic_status(context: &crate::ui::RenderContext, report: &Value
         .pointer("/reason")
         .and_then(Value::as_str)
         .filter(|reason| !reason.is_empty());
+    let builtin_throttling = builtin_throttling_display(report);
     let mut values = vec![
         Field::new("Status", status),
         Field::new("Indexing", indexing_mode),
         Field::new("Background", daemon_status),
         Field::new("Executor", str_at(report, "/executor/kind", "builtin")),
+        Field::new("Built-in throttling", &builtin_throttling),
     ];
     if let Some(endpoint) = report
         .pointer("/executor/endpoint")
@@ -228,11 +239,47 @@ fn bool_at(report: &Value, pointer: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn builtin_throttling_display(report: &Value) -> String {
+    let configured = report
+        .pointer("/builtin_throttling/configured")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let configured = if configured { "enabled" } else { "disabled" };
+    let effective = match report.pointer("/builtin_throttling/effective") {
+        Some(Value::Bool(true)) => "enabled",
+        Some(Value::Bool(false)) => "disabled",
+        Some(Value::Null) => "not applicable",
+        _ if report
+            .pointer("/builtin_throttling/reason")
+            .and_then(Value::as_str)
+            == Some("external_executor") =>
+        {
+            "not applicable"
+        }
+        _ if report.pointer("/executor/kind").and_then(Value::as_str) == Some("http") => {
+            "not applicable"
+        }
+        _ => configured,
+    };
+    format!("{effective} (configured: {configured})")
+}
+
 fn str_at<'a>(report: &'a Value, pointer: &str, fallback: &'a str) -> &'a str {
     report
         .pointer(pointer)
         .and_then(Value::as_str)
         .unwrap_or(fallback)
+}
+
+/// Persisted error text from the last background semantic iteration, bounded
+/// for terminal rendering. Successful runs and resource deferrals omit it.
+fn semantic_background_error(report: &Value) -> Option<String> {
+    report
+        .pointer("/daemon/semantic_index/last_error")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+        .map(bounded_terminal_detail)
 }
 
 #[cfg(test)]
@@ -241,6 +288,39 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn failed_status_shows_the_background_runtime_error() {
+        let rendered = render_semantic_status(
+            &context(),
+            &json!({
+                "enabled": true,
+                "status": "failed",
+                "reason": "model_load_failed",
+                "indexing": {"mode": "auto"},
+                "daemon": {
+                    "status": "running",
+                    "semantic_index": {
+                        "status": "pending",
+                        "last_run_status": "skipped",
+                        "last_run_reason": "model_load_failed",
+                        "last_error": "no ONNX Runtime dynamic library candidates were found for linux-x64; set an absolute path with CTX_ONNXRUNTIME_DYLIB",
+                    },
+                },
+            }),
+        )
+        .render_plain();
+
+        assert!(
+            rendered.contains("Semantic search needs attention"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("no ONNX Runtime dynamic library candidates were found"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("model_load_failed"), "{rendered}");
+    }
 
     fn context() -> RenderContext {
         RenderContext::for_test(TestContext::pipe(StreamKind::Stdout))
@@ -298,7 +378,7 @@ mod tests {
         assert!(rendered.contains("ctx index mode auto"), "{rendered}");
         assert!(
             rendered.contains(
-                "Content     can be sent to the configured executor when semantic work runs"
+                "Content              can be sent to the configured executor when semantic work runs"
             ),
             "{rendered}"
         );
@@ -319,12 +399,18 @@ mod tests {
                     "space_id": "acme/multilingual-v2",
                     "dimensions": 768
                 },
+                "builtin_throttling": {
+                    "configured": true,
+                    "effective": null,
+                    "config_source": "default",
+                    "reason": "external_executor"
+                },
                 "local_only": false,
             }),
         )
         .render_plain();
 
-        assert!(rendered.contains("Executor    http"), "{rendered}");
+        assert!(rendered.contains("Executor             http"), "{rendered}");
         assert!(
             rendered.contains("https://embed.example.test"),
             "{rendered}"
@@ -333,11 +419,42 @@ mod tests {
         assert!(rendered.contains("Dimensions"), "{rendered}");
         assert!(rendered.contains("768"), "{rendered}");
         assert!(
+            rendered.contains("not applicable (configured: enabled)"),
+            "{rendered}"
+        );
+        assert!(
             rendered.contains(
-                "Content     can be sent to the configured executor when semantic work runs"
+                "Content              can be sent to the configured executor when semantic work runs"
             ),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn builtin_throttling_human_status_distinguishes_enabled_and_disabled() {
+        for (configured, expected) in [
+            (true, "enabled (configured: enabled)"),
+            (false, "disabled (configured: disabled)"),
+        ] {
+            let rendered = render_semantic_status(
+                &context(),
+                &json!({
+                    "enabled": true,
+                    "status": "pending",
+                    "indexing": {"mode": "manual"},
+                    "daemon": {"status": "disabled"},
+                    "executor": {"kind": "builtin"},
+                    "builtin_throttling": {
+                        "configured": configured,
+                        "effective": configured,
+                        "config_source": if configured { "default" } else { "config" },
+                    },
+                }),
+            )
+            .render_plain();
+
+            assert!(rendered.contains(expected), "{rendered}");
+        }
     }
 
     #[test]
@@ -360,12 +477,12 @@ mod tests {
 
         assert!(
             rendered.contains(
-                "Content     remote transfer is configured for when semantic search is enabled"
+                "Content              remote transfer is configured for when semantic search is enabled"
             ),
             "{rendered}"
         );
         assert!(
-            !rendered.contains("Content     sent to the configured executor"),
+            !rendered.contains("Content              sent to the configured executor"),
             "{rendered}"
         );
     }
@@ -393,7 +510,7 @@ mod tests {
 
         assert!(
             rendered.contains(
-                "Content     is sent to the loopback executor; trust it not to retain or forward"
+                "Content              is sent to the loopback executor; trust it not to retain or forward"
             ),
             "{rendered}"
         );

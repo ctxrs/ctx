@@ -27,10 +27,10 @@ use crate::{
         decode_cursor, event_range_page_value, mcp_event_query_core_record_bytes, selection,
         validated_limit, EventContentProjection, EventQueryError, EventQueryWireRequest,
     },
-    config,
     observability_composition::{local_usage_storage_authority, usage_control_snapshot},
     ProviderArg,
 };
+use ctx_app_config as config;
 
 #[derive(Debug, Clone)]
 pub(crate) struct LocalToolBackend {
@@ -137,7 +137,7 @@ impl LocalToolBackend {
             .map_err(classify_mcp_search_error)?;
         let config = config::AppConfig::load(&self.data_root);
         if let Ok(config) = &config {
-            config::bind_semantic_embedding_auth_endpoint(config);
+            crate::semantic::bind_embedding_auth_endpoint(config);
             self.recover_enabled_daemon_before_search(config);
         }
         let config = match config {
@@ -288,7 +288,7 @@ impl LocalToolBackend {
             ToolEventContent::None => EventContentProjection::None,
         };
         let wire = EventQueryWireRequest::from_selection(&selection, content, limit);
-        let record_bytes = mcp_event_query_core_record_bytes(request.output_limit_bytes);
+        let record_bytes = mcp_event_query_core_record_bytes(request.output_limit_bytes, content);
         let strict_budget =
             CoreEventPageBudget::new(record_bytes, record_bytes.min(MAX_CORE_CONTENT_BYTES));
         event_range_page_value(
@@ -490,14 +490,6 @@ fn classify_mcp_search_error(
         crate::commands::source_index::McpSearchError::GenerationChanged => {
             ToolBackendError::GenerationChanged
         }
-        crate::commands::source_index::McpSearchError::GenerationAuthority(error) => {
-            ToolBackendError::GenerationAuthority(StructuredToolError {
-                structured: crate::commands::source_index::generation_query_authority_error_json(
-                    &error,
-                ),
-                detail: error.to_string(),
-            })
-        }
         crate::commands::source_index::McpSearchError::Application { detail } => {
             if detail.contains("unknown provider root selector in the pinned generation")
                 || detail.contains("unknown provider root selector `")
@@ -526,14 +518,6 @@ fn classify_show_error(
     match error {
         crate::commands::source_index::ShowApplicationError::GenerationChanged => {
             ToolBackendError::GenerationChanged
-        }
-        crate::commands::source_index::ShowApplicationError::GenerationAuthority(error) => {
-            ToolBackendError::GenerationAuthority(StructuredToolError {
-                structured: crate::commands::source_index::generation_query_authority_error_json(
-                    &error,
-                ),
-                detail: error.to_string(),
-            })
         }
         crate::commands::source_index::ShowApplicationError::CursorStale { detail } => {
             ToolBackendError::Cursor {
@@ -705,7 +689,7 @@ mod tests {
         let root = private_tempdir();
         let backend = LocalToolBackend::new(root.path().to_path_buf());
         let ((result, metadata_reads), config_loads) =
-            crate::config::count_app_config_loads(|| {
+            ctx_app_config::count_app_config_loads(|| {
                 crate::observability_composition::count_usage_control_metadata_reads(|| {
                     backend.status()
                 })
@@ -722,7 +706,7 @@ mod tests {
         let backend = LocalToolBackend::new(root.path().to_path_buf());
 
         let (result, config_loads) =
-            crate::config::count_app_config_loads(|| backend.search(lexical_search_request()));
+            ctx_app_config::count_app_config_loads(|| backend.search(lexical_search_request()));
 
         assert!(matches!(
             result,
@@ -769,21 +753,6 @@ mod tests {
                 kind: CursorFailureKind::Mismatch,
                 detail: observed,
             } if observed == detail
-        ));
-    }
-
-    #[test]
-    fn typed_search_generation_authority_maps_without_anyhow_flattening() {
-        let error = ctx_history_refresh::GenerationQueryAuthorityError::UncertifiedEmpty {
-            generation_id: "11".repeat(32),
-        };
-        let mapped = classify_mcp_search_error(
-            crate::commands::source_index::McpSearchError::GenerationAuthority(error),
-        );
-        assert!(matches!(
-            mapped,
-            ToolBackendError::GenerationAuthority(StructuredToolError { structured, .. })
-                if structured["error_code"] == "source_unavailable"
         ));
     }
 }

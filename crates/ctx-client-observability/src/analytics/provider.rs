@@ -1,6 +1,9 @@
 #[cfg(any(test, feature = "test-support"))]
 use std::time::Duration;
 
+mod diagnostics;
+pub use diagnostics::*;
+
 use ctx_history_core::CaptureProvider;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -262,6 +265,47 @@ pub struct ProviderRefreshCompletedV1 {
     pub duration: DurationBucket,
     pub foreground: Option<ForegroundProviderRefreshV1>,
     pub terminal_health: Option<ProviderRefreshTerminalHealthV1>,
+    pub failure_diagnostic: Option<(ProviderRefreshFailureStage, ProviderRefreshFailureKind)>,
+    pub coverage_reason: Option<ProviderRefreshCoverageReason>,
+    pub source_failure_class: Option<ProviderRefreshSourceFailureClass>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRefreshFailureStage {
+    Admission,
+    Execution,
+    Verification,
+    Finalization,
+}
+
+impl ProviderRefreshFailureStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admission => "admission",
+            Self::Execution => "execution",
+            Self::Verification => "verification",
+            Self::Finalization => "finalization",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRefreshFailureKind {
+    Io,
+    Index,
+    Provider,
+    Unknown,
+}
+
+impl ProviderRefreshFailureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Io => "io",
+            Self::Index => "index",
+            Self::Provider => "provider",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 impl ProviderRefreshCompletedV1 {
@@ -273,6 +317,9 @@ impl ProviderRefreshCompletedV1 {
             duration: duration_bucket(duration),
             foreground: None,
             terminal_health: None,
+            failure_diagnostic: None,
+            coverage_reason: None,
+            source_failure_class: None,
         }
     }
 
@@ -288,6 +335,9 @@ impl ProviderRefreshCompletedV1 {
             duration: duration_bucket(duration),
             foreground: Some(foreground),
             terminal_health: None,
+            failure_diagnostic: None,
+            coverage_reason: None,
+            source_failure_class: None,
         }
     }
 
@@ -311,6 +361,9 @@ impl ProviderRefreshCompletedV1 {
             duration,
             foreground: Some(foreground),
             terminal_health: None,
+            failure_diagnostic: None,
+            coverage_reason: None,
+            source_failure_class: None,
         }
     }
 
@@ -321,6 +374,27 @@ impl ProviderRefreshCompletedV1 {
         self.terminal_health = Some(terminal_health);
         self
     }
+
+    pub fn with_failure_diagnostic(
+        mut self,
+        diagnostic: Option<(ProviderRefreshFailureStage, ProviderRefreshFailureKind)>,
+    ) -> Self {
+        self.failure_diagnostic = diagnostic;
+        self
+    }
+
+    pub fn with_coverage_reason(mut self, reason: Option<ProviderRefreshCoverageReason>) -> Self {
+        self.coverage_reason = reason;
+        self
+    }
+
+    pub fn with_source_failure_class(
+        mut self,
+        class: Option<ProviderRefreshSourceFailureClass>,
+    ) -> Self {
+        self.source_failure_class = class;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -329,6 +403,75 @@ mod tests {
 
     use super::*;
     use crate::analytics::{sender::serialize_event, PublicEventV1};
+
+    #[test]
+    fn failure_diagnostic_is_an_optional_pair_only_on_failed_daemon_refresh() {
+        let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:34:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for (stage, stage_text) in [
+            (ProviderRefreshFailureStage::Admission, "admission"),
+            (ProviderRefreshFailureStage::Execution, "execution"),
+            (ProviderRefreshFailureStage::Verification, "verification"),
+            (ProviderRefreshFailureStage::Finalization, "finalization"),
+        ] {
+            for (kind, kind_text) in [
+                (ProviderRefreshFailureKind::Io, "io"),
+                (ProviderRefreshFailureKind::Index, "index"),
+                (ProviderRefreshFailureKind::Provider, "provider"),
+                (ProviderRefreshFailureKind::Unknown, "unknown"),
+            ] {
+                for (surface, outcome) in [
+                    (Surface::Daemon, Outcome::Failure),
+                    (Surface::Daemon, Outcome::Success),
+                    (Surface::Cli, Outcome::Failure),
+                    (Surface::Mcp, Outcome::Failure),
+                ] {
+                    for structured in [false, true] {
+                        for diagnostic in [None, Some((stage, kind))] {
+                            let mut typed = ProviderRefreshCompletedV1::new(
+                                surface,
+                                outcome,
+                                Duration::from_secs(1),
+                            );
+                            typed.foreground = structured.then_some(ForegroundProviderRefreshV1 {
+                                provider: None,
+                                trigger: ProviderRefreshTrigger::Daemon,
+                                change: ProviderRefreshChange::NoOp,
+                                refresh_result: ProviderRefreshResult::Failure,
+                                core_result: ProviderCoreResult::Failure,
+                                failure_scope: ProviderRefreshFailureScope::System,
+                                failure_type: ProviderRefreshFailureType::System,
+                                failure_code: ProviderRefreshFailureCode::SourceRefreshFailed,
+                                retryable: true,
+                                work_remaining: true,
+                                counts: None,
+                            });
+                            let mut event = PublicEventV1::ProviderRefreshCompleted(typed);
+                            let mut expected = serialize_event(&event, occurred_at, None, None)
+                                ["properties"]
+                                .clone();
+                            if let PublicEventV1::ProviderRefreshCompleted(typed) = &mut event {
+                                typed.failure_diagnostic = diagnostic;
+                            }
+                            let wire = serialize_event(&event, occurred_at, None, None);
+                            if surface == Surface::Daemon
+                                && outcome == Outcome::Failure
+                                && diagnostic.is_some()
+                                && structured
+                            {
+                                expected["refresh_failure_stage"] = json!(stage_text);
+                                expected["refresh_failure_kind"] = json!(kind_text);
+                            }
+                            assert_eq!(wire["event_name"], "provider_refresh_completed");
+                            assert_eq!(wire["event_version"], 1);
+                            assert_eq!(wire["properties"], expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn provider_refresh_serializes_only_terminal_decisions_and_coarse_work() {

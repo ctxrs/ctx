@@ -40,7 +40,21 @@ impl CoreRefreshEngine {
     }
 
     pub(super) fn write_status(&self, data_root: &Path, job: &Value) -> Result<()> {
-        self.journal.store(data_root, job)
+        let terminal = job
+            .get("request_state")
+            .and_then(Value::as_str)
+            .and_then(|state| state.parse::<SourceBackedRefreshState>().ok())
+            .is_some_and(SourceBackedRefreshState::is_terminal);
+        if !terminal {
+            return self.journal.store(data_root, job);
+        }
+        // A later overlay replaces terminal authority too. Reuse the existing
+        // durable writer, but retained/indeterminate is not terminal success.
+        match self.journal.store_before_ack(data_root, job) {
+            DurableAdmissionPersistence::Confirmed => Ok(()),
+            DurableAdmissionPersistence::Retained(error)
+            | DurableAdmissionPersistence::Failed(error) => Err(error),
+        }
     }
 
     pub(super) fn write_durable_admission_status(
@@ -130,9 +144,9 @@ impl CoreRefreshEngine {
         let attempt = find_attempt(&state, request_id)
             .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
         let retry_admission = attempt.state == SourceBackedRefreshState::Failed
-            && attempt.failure_outcome.as_ref().is_some_and(|outcome| {
-                outcome.code == RefreshOutcomeCode::SourceRefreshAdmissionFailed
-                    && outcome.retry_advice == Some(RefreshRetryAdvice::RetryAdmission)
+            && attempt.terminal_outcome.as_ref().is_some_and(|outcome| {
+                outcome.code() == RefreshOutcomeCode::SourceRefreshAdmissionFailed
+                    && outcome.retry_advice() == Some(RefreshRetryAdvice::RetryAdmission)
             });
         if !retry_admission {
             bail!("source refresh request `{request_id}` has no terminal retry-admission handoff");
@@ -301,8 +315,8 @@ fn authoritative_route_terminal_job(
     request_id: &str,
 ) -> Option<Value> {
     let attempt = find_attempt(state, request_id)?;
-    let outcome = attempt.failure_outcome.as_ref()?;
-    if outcome.affected_routes.is_empty() {
+    let outcome = attempt.terminal_outcome.as_ref()?;
+    if outcome.affected_routes().is_empty() {
         return None;
     }
     durable_job_json(state, request_id)
@@ -310,8 +324,8 @@ fn authoritative_route_terminal_job(
 
 pub(super) fn durable_job_json(state: &CoreRefreshEngineState, request_id: &str) -> Option<Value> {
     if let Some(pending) = state.pending_terminal_persistence.as_ref() {
-        // Every ordinary writer preserves the exact terminal root until the
-        // dedicated route-finalization writer commits its markerless image.
+        // Every ordinary writer preserves the exact terminal response while
+        // its one journal write is retried in process.
         return Some(job_with_queued_successors(
             state,
             pending.terminal_job.clone(),
@@ -385,14 +399,11 @@ pub(super) fn recover_queued_successors(job: &Value) -> Result<Vec<SourceBackedR
     let successors = successors
         .as_array()
         .ok_or_else(|| anyhow!("durable source refresh successors must be an array"))?;
-    let root_state = job
-        .get("request_state")
+    job.get("request_state")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("durable source refresh job has no request state"))?;
-    match root_state {
-        "admission_pending" | "queued" | "running" | "failed" | "published" => {}
-        _ => bail!("durable source refresh job has an invalid request state"),
-    }
+        .ok_or_else(|| anyhow!("durable source refresh job has no request state"))?
+        .parse::<SourceBackedRefreshState>()
+        .map_err(|_| anyhow!("durable source refresh job has an invalid request state"))?;
     if successors.len().saturating_add(1) > SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
         bail!("durable source refresh successor queue exceeds its bounded capacity");
     }
@@ -434,11 +445,20 @@ fn recover_pending_attempt(
     role: &str,
     is_root: bool,
 ) -> Result<SourceBackedRefreshAttempt> {
-    let request_state = job.get("request_state").and_then(Value::as_str);
-    if !(matches!(request_state, Some("admission_pending" | "queued"))
-        || is_root && request_state == Some("running"))
+    let request_state = job
+        .get("request_state")
+        .and_then(Value::as_str)
+        // Preserve the bounded not-queued error for missing or unknown states.
+        .and_then(|state| state.parse::<SourceBackedRefreshState>().ok());
+    if !(matches!(
+        request_state,
+        Some(SourceBackedRefreshState::AdmissionPending | SourceBackedRefreshState::Queued)
+    ) || is_root && request_state == Some(SourceBackedRefreshState::Running))
     {
         bail!("durable source refresh {role} is not queued");
+    }
+    if job.get("status").and_then(Value::as_str) != Some("running") {
+        bail!("durable source refresh {role} has mismatched status");
     }
     let request_id = job
         .get("request_id")
@@ -447,7 +467,7 @@ fn recover_pending_attempt(
         .ok_or_else(|| anyhow!("durable source refresh {role} has no request ID"))?;
     let operation = SourceBackedRefreshOperation::from_request_json(job)
         .with_context(|| format!("recover durable source refresh {role} operation"))?;
-    let intent = recover_refresh_intent(job, operation, false, is_root)
+    let intent = recover_refresh_intent(job, operation)
         .with_context(|| format!("recover durable source refresh {role} intent"))?;
     let daemon_mode = job
         .get("daemon_mode")
@@ -486,7 +506,7 @@ fn recover_pending_attempt(
     attempt.request_id = request_id.to_owned();
     attempt.reconciliation_demand = recover_reconciliation_demand(job, operation)?;
     let _legacy_physical_attempt_id = optional_pending_string(job, "physical_attempt_id")?;
-    attempt.state = if request_state == Some("admission_pending") {
+    attempt.state = if request_state == Some(SourceBackedRefreshState::AdmissionPending) {
         SourceBackedRefreshState::AdmissionPending
     } else {
         SourceBackedRefreshState::Queued
@@ -587,7 +607,7 @@ pub(super) fn install_recovered_successors(
 }
 
 #[cfg(test)]
-mod cadence_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -613,5 +633,20 @@ mod cadence_tests {
             "request-a",
             started + DURABLE_PROGRESS_PERSIST_INTERVAL,
         ));
+    }
+
+    #[test]
+    fn malformed_successor_state_keeps_bounded_recovery_error() {
+        let job = json!({
+            "request_state": SourceBackedRefreshState::Queued.as_str(),
+            "request_id": "root",
+            "queued_successors": [{ "request_state": "unknown" }],
+        });
+
+        let error = recover_queued_successors(&job).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "durable source refresh successor is not queued"
+        );
     }
 }

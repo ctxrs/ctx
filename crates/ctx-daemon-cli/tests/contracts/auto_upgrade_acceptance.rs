@@ -16,6 +16,7 @@ mod unix {
 
     const FIXTURE_TARGET_VERSION: &str = "9.9.9";
     const FIXTURE_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(45);
+    const TERMINAL_UPGRADE_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(45);
 
     fn installation_sibling(binary: &Path, suffix: &str) -> PathBuf {
         let name = binary
@@ -65,23 +66,6 @@ mod unix {
         }
     }
 
-    fn configured_v025_fixture() -> PathBuf {
-        let configured = PathBuf::from(
-            std::env::var_os("CTX_V025_UPGRADE_FIXTURE")
-                .expect("Bazel must provide the v0.25-like upgrade fixture"),
-        );
-        if configured.is_absolute() {
-            configured
-        } else {
-            std::env::current_dir().unwrap().join(configured)
-        }
-    }
-
-    fn hermetic_std_command(temp: &tempfile::TempDir, binary: &Path) -> StdCommand {
-        let prepared = ctx_from_binary(temp, binary);
-        std_command_from_assert(&prepared)
-    }
-
     fn std_command_from_assert(prepared: &assert_cmd::Command) -> StdCommand {
         let mut command = StdCommand::new(prepared.get_program());
         command.args(prepared.get_args());
@@ -113,6 +97,45 @@ mod unix {
     fn stop_persistent_daemon(child: Child) -> std::process::Output {
         stop_daemon(child.id());
         child.wait_with_output().unwrap()
+    }
+
+    struct PausedDaemonOwner(Option<Child>);
+
+    impl PausedDaemonOwner {
+        fn pause(child: Child) -> Self {
+            let mut paused = Self(Some(child));
+            let pid = paused.0.as_ref().unwrap().id() as libc::pid_t;
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+            wait_for("test-owned daemon pause", Duration::from_secs(5), || {
+                let mut status = 0;
+                let observed =
+                    unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED | libc::WNOHANG) };
+                if observed == pid && !libc::WIFSTOPPED(status) {
+                    paused.0.take();
+                    panic!("test-owned daemon exited before its pause: {status}");
+                }
+                observed == pid && libc::WIFSTOPPED(status)
+            });
+            paused
+        }
+
+        fn is_alive(&mut self) -> bool {
+            if self.0.as_mut().unwrap().try_wait().unwrap().is_some() {
+                self.0.take();
+                false
+            } else {
+                true
+            }
+        }
+    }
+
+    impl Drop for PausedDaemonOwner {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.take() {
+                unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGCONT) };
+                stop_persistent_daemon(child);
+            }
+        }
     }
 
     fn run_daemon_until(
@@ -157,146 +180,6 @@ mod unix {
             || shutdown_request.exists(),
         );
         stop_persistent_daemon(child)
-    }
-
-    fn install_v025_fixture(temp: &DaemonTestRoot) -> PathBuf {
-        let target = copied_ctx_binary(temp);
-        fs::remove_file(&target).unwrap();
-        fs::copy(configured_v025_fixture(), &target).unwrap();
-        make_file_executable(&target);
-        fs::write(
-            install_marker_path(&target),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "schema_version": 1,
-                "manager": "ctx-hosted-installer",
-                "install_attempt_id": "ia_v025_fixture_install",
-                "install_path": target,
-                "platform": test_platform_key().replace('_', "-"),
-                "channel": "stable",
-                "version": "0.25.0",
-                "sha256": sha256_hex(&fs::read(&target).unwrap()),
-                "installed_at": "2026-07-30T00:00:00Z",
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        target
-    }
-
-    fn v1_v025_candidate(temp: &DaemonTestRoot) -> PathBuf {
-        let candidate = temp.path().join("v025-next/ctx");
-        if candidate.exists() {
-            return candidate;
-        }
-        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
-        fs::copy(configured_hook_fixture(), &candidate).unwrap();
-        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)).unwrap();
-        ensure_managed_test_binary_is_bounded(&candidate);
-        make_file_executable(&candidate);
-        candidate
-    }
-
-    fn start_v025_daemon(temp: &DaemonTestRoot, target: &Path) -> Child {
-        let root = data_root(temp);
-        start_v025_daemon_at_root(temp, target, &root)
-    }
-
-    fn start_v025_daemon_at_root(temp: &DaemonTestRoot, target: &Path, root: &Path) -> Child {
-        fs::create_dir_all(root).unwrap();
-        fs::write(
-            root.join("config.toml"),
-            "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[upgrade]\nauto = \"apply\"\n",
-        )
-        .unwrap();
-        let mut command = hermetic_std_command(temp, target);
-        let child = command
-            .args([
-                "--data-root",
-                root.to_str().unwrap(),
-                "daemon",
-                "run",
-                "--loop-interval-seconds",
-                "2",
-                "--json",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        wait_for("v0.25 fixture daemon owner", Duration::from_secs(5), || {
-            fs::read(root.join("daemon/daemon.lock"))
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .is_some_and(|value| {
-                    value["pid"].as_u64() == Some(u64::from(child.id()))
-                        && value.get("binary_sha256").is_none()
-                })
-        });
-        child
-    }
-
-    fn read_v025_daemon_lock(root: &Path) -> Value {
-        serde_json::from_slice(&fs::read(root.join("daemon/daemon.lock")).unwrap()).unwrap()
-    }
-
-    fn write_v025_daemon_lock(root: &Path, value: &Value) {
-        let mut bytes = serde_json::to_vec_pretty(value).unwrap();
-        bytes.push(b'\n');
-        fs::write(root.join("daemon/daemon.lock"), bytes).unwrap();
-    }
-
-    fn stop_v025_daemon(child: &mut Child) {
-        if process_is_running(child.id()) {
-            stop_daemon(child.id());
-        }
-        let status = child.wait().unwrap();
-        assert!(!status.success());
-    }
-
-    fn run_v025_upgrade(
-        temp: &DaemonTestRoot,
-        target: &Path,
-        abort_after_probe: bool,
-    ) -> std::process::Output {
-        let candidate = v1_v025_candidate(temp);
-        let root = data_root(temp);
-        let mut command = hermetic_std_command(temp, target);
-        command
-            .env_remove("CTX_DATA_ROOT")
-            .env("CTX_UPGRADE_BACKGROUND_CHILD", "1")
-            .args(["--data-root", root.to_str().unwrap(), "upgrade"])
-            .arg("--candidate")
-            .arg(candidate);
-        if abort_after_probe {
-            command.env("CTX_V025_ABORT_AFTER_PROBE_FOR_TESTS", "1");
-            command.env("CTX_LEGACY_UPGRADE_HELPER_TIMEOUT_MS_FOR_TESTS", "300");
-        }
-        command.output().unwrap()
-    }
-
-    fn v025_staged_binaries(target: &Path) -> Vec<PathBuf> {
-        let mut staged = fs::read_dir(target.parent().unwrap())
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .and_then(|name| name.strip_prefix(".ctx-upgrade-"))
-                    .and_then(|name| name.strip_suffix(".new"))
-                    .is_some_and(|identity| {
-                        let mut parts = identity.split('.');
-                        parts.next().is_some_and(|pid| pid.parse::<u32>().is_ok())
-                            && parts
-                                .next()
-                                .is_some_and(|nonce| nonce.parse::<u64>().is_ok())
-                            && parts.next().is_none()
-                    })
-            })
-            .collect::<Vec<_>>();
-        staged.sort();
-        staged
     }
 
     fn managed_hook_candidate(temp: &tempfile::TempDir, install_attempt_id: &str) -> PathBuf {
@@ -1027,218 +910,62 @@ mod unix {
     }
 
     #[test]
-    fn v025_automatic_upgrade_quiesces_before_replacement_and_restarts_persistent_owner() {
+    fn status_and_autostart_fail_closed_for_unverifiable_deleted_owner_image() {
         let temp = daemon_test_root();
-        let target = install_v025_fixture(&temp);
-        let old_bytes = fs::read(&target).unwrap();
-        let mut old_daemon = start_v025_daemon(&temp, &target);
+        let target = managed_bound_hook_candidate(&temp, "ia_stale_owner_original");
+        let root = data_root(&temp);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("config.toml"),
+            "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[upgrade]\nauto = \"off\"\n",
+        )
+        .unwrap();
+        let mut command = ctx_from_binary(&temp, &target);
+        command
+            .args([
+                "daemon",
+                "run",
+                "--loop-interval-seconds",
+                "2",
+                "--start-mode",
+                "auto",
+                "--trigger-command",
+                "setup",
+                "--format=json",
+            ])
+            .env("CTX_DAEMON_BACKGROUND_CHILD", "1");
+        let old_daemon = spawn_persistent_daemon(&command);
         let old_pid = old_daemon.id();
-
-        let output = run_v025_upgrade(&temp, &target, false);
-        assert!(output.status.success(), "{output:?}");
-        assert_ne!(fs::read(&target).unwrap(), old_bytes);
-        assert!(!old_daemon.wait().unwrap().success());
-        assert!(!process_is_running(old_pid));
-
-        let root = data_root(&temp);
-        let mut replacement_pid = None;
-        wait_for(
-            "identity-verified v1 persistent daemon",
-            Duration::from_secs(15),
-            || {
-                replacement_pid = running_daemon_pid(&root, Some(old_pid));
-                replacement_pid.is_some()
-            },
-        );
-        let status = json_output(ctx_from_binary(&temp, &target).args([
-            "daemon",
-            "status",
-            "--format=json",
-        ]));
-        assert_eq!(status["daemon"]["running"], true);
-        assert_eq!(
-            status["daemon"]["lock_identity"]["owner_image_matches"],
-            true
-        );
-        assert_eq!(status["daemon"]["pid"], replacement_pid.unwrap());
-        let human = ctx_from_binary(&temp, &target)
-            .args(["daemon", "status"])
-            .output()
-            .unwrap();
-        assert!(human.status.success(), "{human:?}");
-        let human_stdout = String::from_utf8(human.stdout).unwrap();
-        assert!(!human_stdout.trim().is_empty());
-        assert!(serde_json::from_str::<Value>(&human_stdout).is_err());
-        assert!(!root.join("Store").exists());
-        stop_daemon(replacement_pid.unwrap());
-    }
-
-    #[test]
-    fn v025_automatic_upgrade_rejects_unrelated_same_binary_lock_pid() {
-        let temp = daemon_test_root();
-        let target = install_v025_fixture(&temp);
-        let old_bytes = fs::read(&target).unwrap();
-        let root = data_root(&temp);
-        let unrelated_root = temp.path().join("unrelated-data");
-        let mut owner = start_v025_daemon(&temp, &target);
-        let mut unrelated = start_v025_daemon_at_root(&temp, &target, &unrelated_root);
-
-        let original_lock = read_v025_daemon_lock(&root);
-        let mut spoofed_lock = original_lock.clone();
-        spoofed_lock["pid"] = Value::from(unrelated.id());
-        write_v025_daemon_lock(&root, &spoofed_lock);
-
-        let output = run_v025_upgrade(&temp, &target, false);
-        let owner_survived = process_is_running(owner.id());
-        let unrelated_survived = process_is_running(unrelated.id());
-        let target_unchanged = fs::read(&target).unwrap() == old_bytes;
-        write_v025_daemon_lock(&root, &original_lock);
-        stop_v025_daemon(&mut owner);
-        stop_v025_daemon(&mut unrelated);
-
-        assert!(!output.status.success(), "{output:?}");
-        assert!(owner_survived, "the actual lock owner was signaled");
-        assert!(
-            unrelated_survived,
-            "an unrelated same-binary daemon was signaled"
-        );
-        assert!(
-            target_unchanged,
-            "managed executable changed after rejection"
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("process data root does not match its held lock"),
-            "{output:?}"
-        );
-    }
-
-    #[test]
-    fn v025_automatic_upgrade_rejects_same_bytes_different_inode_owner() {
-        use std::os::unix::fs::MetadataExt as _;
-
-        let temp = daemon_test_root();
-        let target = install_v025_fixture(&temp);
-        let old_bytes = fs::read(&target).unwrap();
-        let mut owner = start_v025_daemon(&temp, &target);
-        let owner_inode = fs::metadata(format!("/proc/{}/exe", owner.id()))
-            .unwrap()
-            .ino();
-        let replacement = target.with_extension("same-image");
-        fs::copy(&target, &replacement).unwrap();
-        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::rename(&replacement, &target).unwrap();
-        assert_ne!(fs::metadata(&target).unwrap().ino(), owner_inode);
-
-        let output = run_v025_upgrade(&temp, &target, false);
-        let owner_survived = process_is_running(owner.id());
-        let target_unchanged = fs::read(&target).unwrap() == old_bytes;
-        stop_v025_daemon(&mut owner);
-
-        assert!(!output.status.success(), "{output:?}");
-        assert!(owner_survived, "the stale-inode owner was signaled");
-        assert!(
-            target_unchanged,
-            "managed executable changed after rejection"
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("executable inode does not match"),
-            "{output:?}"
-        );
-    }
-
-    #[test]
-    fn v025_automatic_upgrade_does_not_downgrade_recorded_digest_verification() {
-        let temp = daemon_test_root();
-        let target = install_v025_fixture(&temp);
-        let old_bytes = fs::read(&target).unwrap();
-        let root = data_root(&temp);
-        let mut owner = start_v025_daemon(&temp, &target);
-        let original_lock = read_v025_daemon_lock(&root);
-        let mut mismatched_lock = original_lock.clone();
-        mismatched_lock["binary_sha256"] = Value::String("0".repeat(64));
-        write_v025_daemon_lock(&root, &mismatched_lock);
-
-        let output = run_v025_upgrade(&temp, &target, false);
-        let owner_survived = process_is_running(owner.id());
-        let target_unchanged = fs::read(&target).unwrap() == old_bytes;
-        write_v025_daemon_lock(&root, &original_lock);
-        stop_v025_daemon(&mut owner);
-
-        assert!(!output.status.success(), "{output:?}");
-        assert!(owner_survived, "digest-mismatched owner was signaled");
-        assert!(
-            target_unchanged,
-            "managed executable changed after rejection"
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("owner image does not match its held ctx daemon lock"),
-            "{output:?}"
-        );
-    }
-
-    #[test]
-    fn v025_interrupted_probe_is_fix_forward_and_retry_restarts_once() {
-        let temp = daemon_test_root();
-        let target = install_v025_fixture(&temp);
-        let mut old_daemon = start_v025_daemon(&temp, &target);
-        let old_pid = old_daemon.id();
-
-        let interrupted = run_v025_upgrade(&temp, &target, true);
-        assert_eq!(interrupted.status.code(), Some(86), "{interrupted:?}");
-        assert!(!old_daemon.wait().unwrap().success());
-        assert!(!process_is_running(old_pid));
-        std::thread::sleep(Duration::from_millis(400));
-        let stale_lock_pid = fs::read_to_string(data_root(&temp).join("upgrade.lock"))
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .parse::<u32>()
-            .unwrap();
-        assert!(!process_is_running(stale_lock_pid));
-        assert!(
-            running_daemon_pid(&data_root(&temp), Some(old_pid)).is_none(),
-            "the interrupted fix-forward helper relaunched v0.25"
-        );
-        let interrupted_stages = v025_staged_binaries(&target);
-        assert_eq!(interrupted_stages.len(), 1, "{interrupted_stages:?}");
-        let interrupted_stage = interrupted_stages[0].clone();
-        let active_stage =
-            target.with_file_name(format!(".ctx-upgrade-{}.2.new", std::process::id()));
-        fs::copy(v1_v025_candidate(&temp), &active_stage).unwrap();
-
-        let retried = run_v025_upgrade(&temp, &target, false);
-        assert!(retried.status.success(), "{retried:?}");
-        let root = data_root(&temp);
-        let mut replacement_pid = None;
-        wait_for("retry replacement daemon", Duration::from_secs(15), || {
-            replacement_pid = running_daemon_pid(&root, Some(old_pid));
-            replacement_pid.is_some()
+        wait_for("current daemon owner", Duration::from_secs(15), || {
+            running_daemon_pid(&root, None) == Some(old_pid)
         });
-        assert!(!root.join("upgrade.lock").exists());
-        wait_for(
-            "abandoned v0.25 stage cleanup",
-            Duration::from_secs(5),
-            || !interrupted_stage.exists(),
-        );
-        assert!(
-            active_stage.exists(),
-            "cleanup deleted a stage owned by a live process"
-        );
-        stop_daemon(replacement_pid.unwrap());
-    }
+        let lock: Value =
+            serde_json::from_slice(&fs::read(root.join("daemon/daemon.lock")).unwrap()).unwrap();
+        assert!(lock["binary_sha256"].as_str().is_some());
 
-    #[test]
-    fn status_and_autostart_fail_closed_for_deleted_legacy_owner_image() {
-        let temp = daemon_test_root();
-        let target = install_v025_fixture(&temp);
-        let mut old_daemon = start_v025_daemon(&temp, &target);
-        let old_pid = old_daemon.id();
-        let candidate = v1_v025_candidate(&temp);
+        // Hold the current owner alive while its executable is replaced. Without
+        // this fixture pause, its health loop can discover the deleted image and
+        // exit before another command observes the ambiguous live owner.
+        let mut old_daemon = PausedDaemonOwner::pause(old_daemon);
+
+        // The ordinary harness and automatic-upgrade fixture are distinct
+        // current images. The conflicting digest below must not authorize
+        // signaling the still-running owner of the deleted executable.
         let staged = target.with_extension("new");
-        fs::copy(&candidate, &staged).unwrap();
+        let replacement = assert_cmd::Command::cargo_bin("ctx").unwrap();
+        fs::copy(replacement.get_program(), &staged).unwrap();
+        // Bazel's executable is read-only; strip needs to write this private copy.
+        let permissions = fs::metadata(&staged).unwrap().permissions();
+        fs::set_permissions(
+            &staged,
+            fs::Permissions::from_mode(permissions.mode() | 0o200),
+        )
+        .unwrap();
+        ensure_managed_test_binary_is_bounded(&staged);
+        assert_ne!(
+            sha256_hex(&fs::read(&target).unwrap()),
+            sha256_hex(&fs::read(&staged).unwrap())
+        );
         fs::rename(&staged, &target).unwrap();
         fs::write(
             install_marker_path(&target),
@@ -1257,15 +984,30 @@ mod unix {
         )
         .unwrap();
 
+        // A valid current digest can authorize handoff of a deleted image via
+        // the retained process identity. Make that identity unverifiable here:
+        // the lock has a conflicting digest while its guard is still held by
+        // the paused original process.
+        let mut conflicting_lock = lock;
+        conflicting_lock["binary_sha256"] = Value::String("0".repeat(64));
+        fs::write(
+            root.join("daemon/daemon.lock"),
+            serde_json::to_vec(&conflicting_lock).unwrap(),
+        )
+        .unwrap();
+
         let stale = json_output(ctx_from_binary(&temp, &target).args([
             "daemon",
             "status",
             "--format=json",
         ]));
-        assert_eq!(stale["daemon"]["running"], false);
-        assert_eq!(stale["daemon"]["status"], "stale_lock");
-        assert_eq!(stale["daemon"]["recoverable"], true);
-        assert_eq!(stale["daemon"]["reason"], "daemon_owner_identity_mismatch");
+        assert_eq!(stale["daemon"]["running"], false, "{stale:#}");
+        assert_eq!(stale["daemon"]["status"], "stale_lock", "{stale:#}");
+        assert_eq!(stale["daemon"]["recoverable"], true, "{stale:#}");
+        assert_eq!(
+            stale["daemon"]["reason"], "daemon_owner_identity_mismatch",
+            "{stale:#}"
+        );
 
         let rejected = ctx_from_binary(&temp, &target)
             .args(["daemon", "enable", "--format=json"])
@@ -1278,10 +1020,10 @@ mod unix {
             "{rejected:?}"
         );
         assert!(
-            process_is_running(old_pid),
+            old_daemon.is_alive(),
             "ambiguous deleted-inode owner was signaled"
         );
-        stop_v025_daemon(&mut old_daemon);
+        drop(old_daemon);
         assert!(!process_is_running(old_pid));
 
         ctx_from_binary(&temp, &target)
@@ -1290,7 +1032,7 @@ mod unix {
             .success();
         let root = data_root(&temp);
         let mut replacement_pid = None;
-        wait_for("recovered v1 owner", Duration::from_secs(15), || {
+        wait_for("recovered current owner", Duration::from_secs(15), || {
             replacement_pid = running_daemon_pid(&root, Some(old_pid));
             replacement_pid.is_some()
         });
@@ -1298,57 +1040,52 @@ mod unix {
     }
 
     #[test]
+    #[ignore = "spawned only by the bounded disable-command contract"]
+    fn bounded_disable_stall_fixture() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn review_guard_disable_timeout_contract() {
+        assert_bounded_disable_command_timeout("unix::bounded_disable_stall_fixture");
+    }
+
+    #[test]
+    fn review_guard_raw_overlap_contract() {
+        assert_terminal_upgrade_raw_overlap_contract();
+    }
+
+    #[test]
     fn daemon_reports_one_terminal_upgrade_event_after_durable_state() {
-        let temp = tempdir();
+        let temp = daemon_test_root_with_data_root("data");
         let mut release = fake_release(&temp, FIXTURE_TARGET_VERSION);
-        let binary = managed_hook_candidate(&temp, "ia_daemon_telemetry");
+        // Keep the managed executable at the identity checked by
+        // DaemonTestRoot's panic-safe process guard.
+        let binary = managed_bound_hook_candidate(&temp, "ia_daemon_telemetry");
         patch_release_artifact_with_next_ctx(&mut release, &binary, FIXTURE_TARGET_VERSION);
         let events_path = temp.path().join("analytics.jsonl");
-        let data_root = temp.path().join("data");
+        let data_root = temp.daemon_data_root();
         let home = temp.path().join("home");
         let state_root = temp.path().join("state");
         fs::create_dir(&home).unwrap();
         seed_authoritative_codex_source(&home);
 
-        let output = managed_daemon(&temp, &release, &binary)
-            .env("CTX_DATA_ROOT", &data_root)
+        let mut command = managed_daemon(&temp, &release, &binary);
+        command
+            .env("CTX_DATA_ROOT", data_root)
             .env("HOME", &home)
             .env("XDG_STATE_HOME", &state_root)
             .env("LOCALAPPDATA", &state_root)
             .env_remove("CTX_ANALYTICS_ENABLED")
             .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-            .env("CTX_DAEMON_AUTOSTART_OFF", "1")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert!(
-            events_path.exists(),
-            "daemon emitted no telemetry file; stderr={}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let state: Value =
-            serde_json::from_slice(&fs::read(scheduler_state_path(&binary)).unwrap()).unwrap();
-        assert_eq!(state["status"], "applied");
-        let events = read_analytics_events(&events_path);
-        let upgrades = events
-            .iter()
-            .filter(|batch| {
-                batch["events"].as_array().is_some_and(|events| {
-                    events.iter().any(|event| event["operation"] == "upgrade")
-                })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(upgrades.len(), 1);
-        assert_operation_event(upgrades[0], "upgrade", "success");
-        let properties = analytics_event_properties(upgrades[0]);
-        assert_eq!(properties["upgrade_mode"], "auto");
-        assert_eq!(properties["upgrade_status"], "applied");
-        assert_eq!(properties["upgrade_applied"], true);
-        assert_eq!(
-            properties["upgrade_attempt_id"],
-            state["attempt_id"].as_str().unwrap()
-        );
+            .env_remove("CTX_DAEMON_AUTOSTART_OFF");
+        temp.observe_terminal_upgrade_handoff(
+            spawn_persistent_daemon(&command),
+            &scheduler_state_path(&binary),
+            &events_path,
+            TERMINAL_UPGRADE_OBSERVATION_TIMEOUT,
+        )
+        .assert_applied_auto_upgrade();
     }
 
     #[test]

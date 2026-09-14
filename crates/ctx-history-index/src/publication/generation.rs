@@ -5,12 +5,13 @@ use tantivy::Index;
 use crate::{lexical_schema, Result};
 use ctx_history_index_format::register_body_analyzer;
 
-pub(crate) use ctx_history_index_generation::{
-    lexical_index_settings, slot_path, ActiveGenerationPointer, GenerationSlot,
-    PointerPublicationOutcome, INDEX_GENERATIONS_DIRECTORY,
-};
 #[cfg(test)]
-pub(crate) use ctx_history_index_generation::{ReclamationStage, ReclamationTestHookGuard};
+pub(crate) use ctx_history_index_generation::{
+    lexical_index_settings, slot_path, ReclamationStage, ReclamationTestHookGuard,
+};
+pub(crate) use ctx_history_index_generation::{
+    ActiveGenerationPointer, GenerationSlot, PointerPublicationOutcome, INDEX_GENERATIONS_DIRECTORY,
+};
 
 pub(crate) fn load_active_generation_pointer(
     root: &Path,
@@ -41,6 +42,7 @@ pub(crate) fn create_candidate_generation(
     Ok(candidate)
 }
 
+#[cfg(test)]
 pub(crate) fn publish_active_generation_pointer(
     root: &Path,
     pointer: &ActiveGenerationPointer,
@@ -48,6 +50,7 @@ pub(crate) fn publish_active_generation_pointer(
     Ok(ctx_history_index_generation::publish_active_generation_pointer(root, pointer)?)
 }
 
+#[cfg(not(windows))]
 pub(crate) fn publish_active_generation_pointer_validated<F, T>(
     root: &Path,
     pointer: &ActiveGenerationPointer,

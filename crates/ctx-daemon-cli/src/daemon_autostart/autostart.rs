@@ -2,7 +2,9 @@
 
 use super::*;
 
-fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonConfigSnapshot {
+fn application_config(
+    config: &DaemonRuntimeConfig,
+) -> ctx_daemon_application::DaemonConfigSnapshot {
     ctx_daemon_application::DaemonConfigSnapshot {
         enabled: config.daemon.enabled,
         mode: super::super::daemon_supervisor::daemon_mode(config.daemon.mode),
@@ -13,6 +15,8 @@ fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonC
             .unwrap_or("builtin")
             .to_owned(),
         semantic_contract_fingerprint: config.semantic_model_contract().fingerprint().to_owned(),
+        semantic_builtin_throttling_configured: config.semantic_builtin_throttling_configured(),
+        semantic_builtin_throttling_effective: config.semantic_builtin_throttling_effective(),
     }
 }
 
@@ -21,7 +25,7 @@ fn application_trigger(trigger: DaemonTriggerCommandArg) -> ctx_daemon_applicati
 }
 
 #[cfg(test)]
-pub(super) fn daemon_autostart_allowed(data_root: &Path, config: &AppConfig<'_>) -> bool {
+pub(super) fn daemon_autostart_allowed(data_root: &Path, config: &DaemonRuntimeConfig) -> bool {
     ctx_daemon_application::daemon_autostart_allowed(data_root, &application_config(config))
 }
 
@@ -31,7 +35,7 @@ pub fn daemon_autostart_suppression_reason() -> Option<&'static str> {
 
 pub fn maybe_autostart_daemon(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) {
     if !config.daemon.enabled {
@@ -64,38 +68,45 @@ pub fn maybe_autostart_daemon(
 
 pub fn start_finite_core_worker_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
-) -> Result<DaemonHandoff> {
+) -> Result<ctx_daemon_application::FiniteCoreWorkerLease> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
         let mut effective = application_config(config);
         effective.enabled = false;
         effective.mode = ctx_daemon_application::DaemonMode::SourceRefreshOnly;
         effective.semantic_enabled = false;
         let handoff = application
-            .start_finite_core_worker_and_wait(data_root, &effective, application_trigger(trigger))
+            .start_finite_core_worker_and_wait_with_cancellation(
+                data_root,
+                &effective,
+                application_trigger(trigger),
+                &mut super::super::finite_worker_owner::checkpoint,
+            )
             .map_err(|error| match error {
                 ctx_daemon_application::DaemonStartError::Suppressed(reason) => anyhow!(
                     "ctx finite Core worker start was suppressed ({reason}); retry after it clears"
                 ),
                 ctx_daemon_application::DaemonStartError::BinaryIdentity(error) => error,
+                ctx_daemon_application::DaemonStartError::Start(error)
+                    if super::super::finite_worker_owner::finite_worker_interrupted(&error) =>
+                {
+                    error
+                }
                 ctx_daemon_application::DaemonStartError::Start(error) => {
                     anyhow!("ctx finite Core worker did not start: {error:#}")
                 }
                 ctx_daemon_application::DaemonStartError::Ready(error) => {
-                    anyhow!("ctx finite Core worker did not become ready: {error}")
+                    error.context("ctx finite Core worker did not become ready")
                 }
             })?;
-        Ok(DaemonHandoff {
-            pid: handoff.pid,
-            heartbeat_at_ms: handoff.heartbeat_at_ms,
-        })
+        Ok(handoff)
     })
 }
 
 pub fn autostart_daemon_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     Ok(autostart_daemon_for_setup_and_wait(data_root, config, trigger)?.handoff)
@@ -103,7 +114,7 @@ pub fn autostart_daemon_and_wait(
 
 pub fn autostart_core_daemon_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     Ok(autostart_persistent_daemon_and_wait(
@@ -111,13 +122,14 @@ pub fn autostart_core_daemon_and_wait(
         config,
         trigger,
         PersistentDaemonReadiness::Core,
+        &mut super::super::finite_worker_owner::checkpoint,
     )?
     .handoff)
 }
 
 pub fn restart_daemon_with_current_environment_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
@@ -148,7 +160,7 @@ pub fn restart_daemon_with_current_environment_and_wait(
 
 pub fn autostart_daemon_for_setup_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonSetupHandoff> {
     autostart_persistent_daemon_and_wait(
@@ -156,6 +168,7 @@ pub fn autostart_daemon_for_setup_and_wait(
         config,
         trigger,
         PersistentDaemonReadiness::Full,
+        &mut || Ok(()),
     )
 }
 
@@ -167,11 +180,13 @@ enum PersistentDaemonReadiness {
 
 fn autostart_persistent_daemon_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
     readiness: PersistentDaemonReadiness,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<DaemonSetupHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
+        checkpoint()?;
         if application.daemon_start_is_fenced() {
             return Err(anyhow!(
                 "ctx daemon start was suppressed (hosted_uninstall_active); retry after it clears or run `ctx setup --no-daemon`"
@@ -181,17 +196,20 @@ fn autostart_persistent_daemon_and_wait(
             super::super::daemon_supervisor::ensure_daemon_supervisor(application, data_root)
                 .context("establish ctx daemon supervision")?;
         }
+        checkpoint()?;
         let application_config = application_config(config);
         let handoff = match readiness {
-            PersistentDaemonReadiness::Full => application.start_daemon_and_wait(
+            PersistentDaemonReadiness::Full => application.start_daemon_and_wait_with_cancellation(
                 data_root,
                 &application_config,
                 application_trigger(trigger),
+                checkpoint,
             ),
-            PersistentDaemonReadiness::Core => application.start_core_daemon_and_wait(
+            PersistentDaemonReadiness::Core => application.start_core_daemon_and_wait_with_cancellation(
                 data_root,
                 &application_config,
                 application_trigger(trigger),
+                checkpoint,
             ),
         }
             .map_err(|error| match error {
@@ -199,11 +217,17 @@ fn autostart_persistent_daemon_and_wait(
                     "ctx daemon start was suppressed ({reason}); retry after it clears or run `ctx setup --no-daemon`"
                 ),
                 ctx_daemon_application::DaemonStartError::BinaryIdentity(error) => error,
-                ctx_daemon_application::DaemonStartError::Start(error) => anyhow!(
-                    "ctx daemon did not start: {error:#}. Run `ctx status --format json`, then `ctx daemon run` for details"
+                ctx_daemon_application::DaemonStartError::Start(error)
+                | ctx_daemon_application::DaemonStartError::Ready(error)
+                    if super::super::finite_worker_owner::finite_worker_interrupted(&error) =>
+                {
+                    error
+                }
+                ctx_daemon_application::DaemonStartError::Start(error) => error.context(
+                    "ctx daemon did not start. Run `ctx status --format json`, then `ctx daemon run` for details",
                 ),
-                ctx_daemon_application::DaemonStartError::Ready(error) => anyhow!(
-                    "ctx daemon did not become ready: {error}. Run `ctx status --format json`, then `ctx daemon run` for details"
+                ctx_daemon_application::DaemonStartError::Ready(error) => error.context(
+                    "ctx daemon did not become ready. Run `ctx status --format json`, then `ctx daemon run` for details",
                 ),
             })?;
         Ok(DaemonSetupHandoff {
@@ -217,7 +241,7 @@ fn autostart_persistent_daemon_and_wait(
 
 pub fn observe_daemon_for_setup_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
 ) -> Result<DaemonSetupHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
         let handoff = application

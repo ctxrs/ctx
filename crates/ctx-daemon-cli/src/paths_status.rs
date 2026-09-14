@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::{compact_json, config::AppConfig};
+use crate::{
+    compact_json,
+    composition::{load_runtime_config, DaemonRuntimeConfig},
+};
 
 use super::health_search::{json_i64, json_string};
 
@@ -19,7 +22,9 @@ pub(super) fn daemon_semantic_job_path(data_root: &Path) -> PathBuf {
     ctx_daemon_service::daemon_semantic_job_path(data_root)
 }
 
-fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonConfigSnapshot {
+fn application_config(
+    config: &DaemonRuntimeConfig,
+) -> ctx_daemon_application::DaemonConfigSnapshot {
     ctx_daemon_application::DaemonConfigSnapshot {
         enabled: config.daemon.enabled,
         mode: super::daemon_supervisor::daemon_mode(config.daemon.mode),
@@ -30,6 +35,8 @@ fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonC
             .unwrap_or("builtin")
             .to_owned(),
         semantic_contract_fingerprint: config.semantic_model_contract().fingerprint().to_owned(),
+        semantic_builtin_throttling_configured: config.semantic_builtin_throttling_configured(),
+        semantic_builtin_throttling_effective: config.semantic_builtin_throttling_effective(),
     }
 }
 
@@ -50,7 +57,7 @@ pub(super) fn daemon_report_with_disabled_status(
 pub(super) fn daemon_report_with_config(
     data_root: &Path,
     disabled_overrides_lifecycle: bool,
-    current_config: &AppConfig<'_>,
+    current_config: &DaemonRuntimeConfig,
 ) -> Value {
     super::daemon_supervisor::with_daemon_run_application(current_config, false, |application| {
         daemon_report_with_config_and_application(
@@ -67,7 +74,7 @@ pub(crate) fn daemon_report_with_application(
     data_root: &Path,
     disabled_overrides_lifecycle: bool,
 ) -> Value {
-    let current_config = AppConfig::load(data_root).ok();
+    let current_config = load_runtime_config(data_root).ok();
     daemon_report_with_config_and_application(
         application,
         data_root,
@@ -80,14 +87,14 @@ fn daemon_report_with_config_and_application(
     application: &ctx_daemon_application::DaemonApplication<'_>,
     data_root: &Path,
     disabled_overrides_lifecycle: bool,
-    current_config: Option<&AppConfig<'_>>,
+    current_config: Option<&DaemonRuntimeConfig>,
 ) -> Value {
     let current_application_config = current_config.map(application_config);
     let preparation = application.prepare_daemon_status(
         data_root,
         disabled_overrides_lifecycle,
         current_application_config.as_ref(),
-        crate::config::DAEMON_DEFAULT_ENABLED,
+        crate::composition::DAEMON_DEFAULT_ENABLED,
     );
     let semantic_job = daemon_semantic_job_report(
         data_root,
@@ -106,17 +113,17 @@ fn daemon_semantic_job_report(
     data_root: &Path,
     disabled_overrides_lifecycle: bool,
     context: ctx_daemon_application::DaemonSemanticStatusContext<'_>,
-    current_config: Option<&AppConfig<'_>>,
+    current_config: Option<&DaemonRuntimeConfig>,
 ) -> Value {
     let reload = context.config_reload;
     let current_daemon_enabled = current_config.map(|config| config.daemon.enabled);
-    let current_semantic_enabled = current_config.map(AppConfig::semantic_search_enabled);
+    let current_semantic_enabled = current_config.map(DaemonRuntimeConfig::semantic_search_enabled);
     let applied_daemon_enabled = if context.daemon_running {
         reload.applied_daemon_enabled.or(current_daemon_enabled)
     } else {
         current_daemon_enabled.or(reload.applied_daemon_enabled)
     }
-    .unwrap_or_else(|| AppConfig::default().daemon.enabled);
+    .unwrap_or_else(|| DaemonRuntimeConfig::default().daemon.enabled);
     let applied_semantic_enabled =
         if context.daemon_running || reload.status == "activation_failed" {
             reload.applied_semantic_enabled.or(current_semantic_enabled)
@@ -155,14 +162,23 @@ fn daemon_semantic_job_report(
     let last_run_reason = status_value
         .as_ref()
         .and_then(|value| json_string(value, "reason"));
+    let run_failed = enabled
+        && (matches!(last_run_status.as_deref(), Some("failed" | "unavailable"))
+            || status_value
+                .as_ref()
+                .and_then(|value| value.get("last_error"))
+                .and_then(Value::as_str)
+                .is_some_and(|error| !error.trim().is_empty()));
     let status = if activation_failed || reload_failed {
         "failed"
-    } else if reload_pending
-        || (context.daemon_running && enabled && !context.semantic_runtime_active)
-    {
+    } else if reload_pending {
         "pending"
     } else if disabled {
         "disabled"
+    } else if run_failed {
+        "failed"
+    } else if context.daemon_running && enabled && !context.semantic_runtime_active {
+        "pending"
     } else {
         last_run_status.as_deref().unwrap_or("unknown")
     };
@@ -172,6 +188,10 @@ fn daemon_semantic_job_report(
         Some("daemon_config_reload_failed".to_owned())
     } else if reload_pending {
         Some("daemon_config_reload_pending".to_owned())
+    } else if run_failed {
+        last_run_reason
+            .clone()
+            .or_else(|| Some("daemon_semantic_job_failed".to_owned()))
     } else if context.daemon_running && enabled && !context.semantic_runtime_active {
         Some("semantic_runtime_inactive".to_owned())
     } else if disabled {

@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Result;
 use ctx_history_index::{SemanticGenerationPolicy, SourceCoreRecordAggregate, VerifiedIndex};
 use ctx_semantic_model::SemanticModelContract;
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -15,19 +15,26 @@ use super::manifest::{
     SOURCE_FRONTIER_STATE,
 };
 use super::{
-    SemanticVectorStore, SourceBackedGenerationPin, SourceBackedSemanticGeneration,
-    SourceBackedSemanticOutcome, SourceBackedSemanticSource,
+    SemanticVectorStore, SourceBackedSemanticGeneration, SourceBackedSemanticOutcome,
+    SourceBackedSemanticSource,
 };
 use crate::{
     vector_store::control::FULL_REBUILD_STATE,
     vector_store::flat_segments::{
         FlatPublicationToken, FlatPublishOutcome, FlatSourceReceipt, FlatSourceState,
+        PinnedFlatGeneration,
     },
     vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
 };
 
 const SOURCE_RECONCILIATION_DOMAIN: &[u8] = b"ctx-semantic-source-reconciliation-v1\0";
 const RECEIPT_SET_DOMAIN: &[u8] = b"ctx-semantic-source-receipt-set-v1\0";
+
+pub enum SourceBackedGenerationPin {
+    NotReady,
+    ReadyEmpty,
+    Ready(PinnedFlatGeneration),
+}
 
 pub(super) type SourceProjectionStates = BTreeMap<String, Option<FlatSourceReceipt>>;
 
@@ -87,6 +94,75 @@ impl SourceBackedSemanticGeneration {
 }
 
 impl SemanticVectorStore {
+    pub fn source_backed_reconciliation_contract_matches_at(
+        path: &Path,
+        contract: &SemanticModelContract,
+    ) -> Result<Option<bool>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let store = match Self::open_read_only(path, contract) {
+            Ok(Some(store)) => store,
+            Ok(None) => return Ok(Some(false)),
+            Err(error)
+                if crate::vector_store_schema::semantic_vector_failure_kind(&error)
+                    == Some(
+                        crate::vector_store_schema::SemanticVectorFailureKind::ResetRequired,
+                    ) =>
+            {
+                return Ok(Some(false));
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Some(store.source_backed_reconciliation_contract_matches()?))
+    }
+
+    pub fn open_source_backed_reconciliation_if_contract_matches_at(
+        path: &Path,
+        contract: &SemanticModelContract,
+    ) -> Result<Option<Self>> {
+        Self::open_writable_if_matching(path, contract, |store| {
+            store.source_backed_reconciliation_contract_matches()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_source_backed_reconciliation_if_contract_matches_after_match(
+        path: &Path,
+        contract: &SemanticModelContract,
+        matched: impl FnOnce(),
+    ) -> Result<Option<Self>> {
+        Self::open_writable_if_matching_after_match(
+            path,
+            contract,
+            |store| store.source_backed_reconciliation_contract_matches(),
+            matched,
+        )
+    }
+
+    fn source_backed_reconciliation_contract_matches(&self) -> Result<bool> {
+        match self.flat.active_stats() {
+            Ok(_) => {}
+            Err(
+                crate::vector_store::flat_segments::FlatStoreError::Corrupt(_)
+                | crate::vector_store::flat_segments::FlatStoreError::Incompatible(_)
+                | crate::vector_store::flat_segments::FlatStoreError::LegacySchema(_),
+            ) => return Ok(false),
+            Err(error) => return Err(anyhow::Error::new(error)),
+        }
+        let expected = source_contract_fingerprint(&self.contract)?;
+        let frontier: Option<SourceProjectionFrontier> =
+            maintenance_json_from_connection(&self.conn, SOURCE_FRONTIER_STATE)?;
+        let acknowledgement: Option<SourceProjectionAcknowledgement> =
+            maintenance_json_from_connection(&self.conn, SOURCE_ACKNOWLEDGEMENT_STATE)?;
+        let persisted = frontier
+            .map(|frontier| frontier.contract_fingerprint)
+            .or_else(|| {
+                acknowledgement.map(|acknowledgement| acknowledgement.contract_fingerprint)
+            });
+        Ok(persisted.as_deref() == Some(expected.as_str()))
+    }
+
     pub(crate) fn record_flat_model_contract_reset(&self) -> Result<()> {
         let transaction = self.conn.unchecked_transaction()?;
         transaction.execute(
@@ -128,6 +204,18 @@ impl SemanticVectorStore {
                     transaction.commit()?;
                 }
                 std::cmp::Ordering::Less => {
+                    if self.full_rebuild_pending()?
+                        && frontier.active_source_identity_digest.is_none()
+                    {
+                        // A full-rebuild deletion page commits Flat before its
+                        // separate frontier/sequence receipt. That crash window
+                        // must resume from the durable Flat publication without
+                        // inventing a sequence for the interrupted page.
+                        frontier.flat_publication = current;
+                        frontier.flat_staging = None;
+                        self.store_source_frontier(&frontier)?;
+                        return Ok(());
+                    }
                     let source = frontier
                         .active_source_identity_digest
                         .as_deref()
@@ -193,24 +281,7 @@ impl SemanticVectorStore {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let value = self
-            .conn
-            .query_row(
-                "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        value
-            .map(|value| {
-                serde_json::from_str(&value).map_err(|error| {
-                    SemanticVectorStoreError::reset_required(format!(
-                        "semantic vector store has invalid {key} state: {error}"
-                    ))
-                    .into()
-                })
-            })
-            .transpose()
+        maintenance_json_from_connection(&self.conn, key)
     }
 
     pub(super) fn store_source_frontier(&self, frontier: &SourceProjectionFrontier) -> Result<()> {
@@ -313,6 +384,8 @@ impl SemanticVectorStore {
         frontier: &SourceProjectionFrontier,
         generation: &SourceBackedSemanticGeneration,
         states: &SourceProjectionStates,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(u64) -> Result<()>,
     ) -> Result<SourceBackedSemanticOutcome> {
         let contract_fingerprint = &generation.contract_fingerprint;
         if states.len() != generation.sources.len()
@@ -374,6 +447,14 @@ impl SemanticVectorStore {
             flat_generation_hash: stats.generation_hash.unwrap_or_default(),
             flat_active_events: stats.active_events as u64,
             flat_active_chunks: stats.active_chunks as u64,
+            semantic_progress_sequence: frontier
+                .semantic_progress_sequence
+                .checked_add(1)
+                .ok_or_else(|| {
+                    SemanticVectorStoreError::reset_required(
+                        "semantic progress sequence overflowed",
+                    )
+                })?,
         };
         let transaction = self.conn.transaction()?;
         transaction.execute(
@@ -388,6 +469,7 @@ impl SemanticVectorStore {
             "DELETE FROM semantic_maintenance_state WHERE key = ?1",
             [SOURCE_FRONTIER_STATE],
         )?;
+        checkpoint()?;
         transaction.commit()?;
         #[cfg(test)]
         if self.flat.take_source_acknowledgement_failure() {
@@ -395,8 +477,10 @@ impl SemanticVectorStore {
                 "injected failure after semantic source acknowledgement"
             ));
         }
+        progress(acknowledgement.semantic_progress_sequence)?;
         Ok(SourceBackedSemanticOutcome {
             ready: true,
+            semantic_progress_sequence: Some(acknowledgement.semantic_progress_sequence),
             ..SourceBackedSemanticOutcome::default()
         })
     }
@@ -406,7 +490,8 @@ impl SemanticVectorStore {
         core_generation_id: &str,
         semantic_documents: u64,
     ) -> Result<SourceBackedGenerationPin> {
-        semantic_owned_sidecar_result((|| {
+        self.validate_passive_snapshot_coordination()?;
+        let pin = semantic_owned_sidecar_result((|| {
             let Some(projection) = self.acknowledged_source_projection(
                 core_generation_id,
                 Some(semantic_documents),
@@ -429,7 +514,9 @@ impl SemanticVectorStore {
                     )
                     .into()
                 })
-        })())
+        })())?;
+        self.validate_passive_snapshot_coordination()?;
+        Ok(pin)
     }
 
     pub(super) fn acknowledged_source_projection(
@@ -584,6 +671,7 @@ impl SemanticVectorStore {
                 .active_publication_token()
                 .map_err(anyhow::Error::new)?,
             flat_staging: None,
+            semantic_progress_sequence: 0,
         };
         let transaction = self.conn.unchecked_transaction()?;
         store_frontier(&transaction, &frontier)?;
@@ -647,12 +735,51 @@ pub(super) fn commit_frontier_after_flat(
     transaction: &Transaction<'_>,
     frontier: &mut SourceProjectionFrontier,
     publication: Option<&FlatPublishOutcome>,
-) -> Result<()> {
+    advance_semantic_progress: bool,
+) -> Result<Option<u64>> {
     if let Some(publication) = publication {
         frontier.flat_publication = publication.token();
         frontier.flat_staging = None;
     }
-    store_frontier(transaction, frontier)
+    let sequence = if advance_semantic_progress {
+        frontier.semantic_progress_sequence = frontier
+            .semantic_progress_sequence
+            .checked_add(1)
+            .ok_or_else(|| {
+                SemanticVectorStoreError::reset_required("semantic progress sequence overflowed")
+            })?;
+        Some(frontier.semantic_progress_sequence)
+    } else {
+        None
+    };
+    store_frontier(transaction, frontier)?;
+    Ok(sequence)
+}
+
+/// Records progress after a Flat operation whose own coordinated commit has
+/// already completed. A crash before this second durable write is conservative:
+/// completed work may be replayed, but never reported as having advanced.
+pub(super) fn advance_frontier_progress(
+    store: &SemanticVectorStore,
+    frontier: &mut SourceProjectionFrontier,
+) -> Result<u64> {
+    // Full-rebuild deletion pages publish a new Flat generation outside the
+    // source-page helper. Bind the frontier to that committed publication
+    // before recording its sequence so restart recovery observes one coherent
+    // durable boundary.
+    frontier.flat_publication = store
+        .flat
+        .active_publication_token()
+        .map_err(anyhow::Error::new)?;
+    frontier.flat_staging = None;
+    frontier.semantic_progress_sequence = frontier
+        .semantic_progress_sequence
+        .checked_add(1)
+        .ok_or_else(|| {
+            SemanticVectorStoreError::reset_required("semantic progress sequence overflowed")
+        })?;
+    store.store_source_frontier(frontier)?;
+    Ok(frontier.semantic_progress_sequence)
 }
 
 fn publication_order(
@@ -705,7 +832,31 @@ fn frontier_from_acknowledgement(
         last_failure: None,
         flat_publication: current,
         flat_staging: None,
+        semantic_progress_sequence: acknowledgement.semantic_progress_sequence,
     }
+}
+
+fn maintenance_json_from_connection<T>(conn: &Connection, key: &str) -> Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let value = conn
+        .query_row(
+            "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
+            [key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    value
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                SemanticVectorStoreError::reset_required(format!(
+                    "semantic vector store has invalid {key} state: {error}"
+                ))
+                .into()
+            })
+        })
+        .transpose()
 }
 
 pub(super) fn store_frontier(
