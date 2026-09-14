@@ -162,7 +162,7 @@ fn decode_change_token(value: &str) -> Result<[u8; 32], &'static str> {
         return Err("Codex catalog change token is malformed");
     }
     let mut decoded = [0_u8; 32];
-    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
         let high = decode_hex_nibble(pair[0])
             .ok_or("Codex catalog change token contains invalid hexadecimal")?;
         let low = decode_hex_nibble(pair[1])

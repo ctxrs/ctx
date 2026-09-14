@@ -1,4 +1,4 @@
-use clap::{error::ErrorKind, Parser as _};
+use clap::{error::ErrorKind, Parser as _, ValueEnum as _};
 use sha2::{Digest as _, Sha256};
 
 use super::*;

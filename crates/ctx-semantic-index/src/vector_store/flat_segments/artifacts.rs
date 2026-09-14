@@ -555,7 +555,7 @@ pub(super) fn encode_vector(vector: &[f32], scratch: &mut [u8]) -> FlatResult<()
     scratch.fill(0);
     for (value, destination) in vector
         .iter()
-        .zip(scratch[..vector_bytes].as_chunks_mut::<4>().0.iter_mut())
+        .zip(scratch[..vector_bytes].chunks_exact_mut(4))
     {
         destination.copy_from_slice(&value.to_le_bytes());
     }

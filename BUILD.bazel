@@ -498,7 +498,16 @@ py_test(
     srcs = ["//tools/bazel:check_rust_toolchain_module_policy.py"],
     main = "//tools/bazel:check_rust_toolchain_module_policy.py",
     args = ["$(rootpath MODULE.bazel)"],
-    data = ["MODULE.bazel"],
+    data = [
+        ".buildkite/pipeline.yml",
+        "Cargo.toml",
+        "MODULE.bazel",
+        "rust-toolchain.toml",
+        "scripts/buildkite-public-ci.sh",
+        "scripts/real-harness-common.sh",
+        "scripts/release/build-public-candidate-on-linux.sh",
+    ],
+    deps = ["@ctx_tomli//:lib"],
     tags = ["build-graph", "rust"],
 )
 

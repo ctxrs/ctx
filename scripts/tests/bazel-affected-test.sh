@@ -192,6 +192,7 @@ for global_input in \
   "${repo_root}/MODULE.bazel" \
   "${repo_root}/MODULE.bazel.lock" \
   "${repo_root}/Cargo.lock" \
+  "${repo_root}/rust-toolchain.toml" \
   "${repo_root}/.bazelrc" \
   "${repo_root}/scripts/bazel/workspace-status.sh"; do
   assert_global_fallback "${global_input}"

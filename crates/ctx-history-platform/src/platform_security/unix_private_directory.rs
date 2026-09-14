@@ -372,7 +372,10 @@ fn private_directory_error() -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt as _, PermissionsExt as _},
+    };
 
     use super::*;
 

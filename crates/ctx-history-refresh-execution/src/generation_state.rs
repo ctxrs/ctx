@@ -471,9 +471,7 @@ fn decode_route_control(encoded: &str) -> Option<Vec<u8>> {
     }
     encoded
         .as_bytes()
-        .as_chunks::<2>()
-        .0
-        .iter()
+        .chunks_exact(2)
         .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
 }

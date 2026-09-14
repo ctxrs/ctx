@@ -444,6 +444,7 @@ pub fn read_daemon_query_response_unix(
 
 #[cfg(test)]
 mod cancellation_tests {
+    use std::io::Read as _;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,

@@ -338,7 +338,7 @@ fn generation_keys(generation_id: &str) -> Result<Vec<u64>> {
         return Err(IndexError::InvalidGenerationId);
     }
     let mut keys = Vec::with_capacity(4);
-    for chunk in generation_id.as_bytes().as_chunks::<16>().0 {
+    for chunk in generation_id.as_bytes().chunks_exact(16) {
         let chunk = std::str::from_utf8(chunk).map_err(|_| IndexError::InvalidGenerationId)?;
         let value = u64::from_str_radix(chunk, 16).map_err(|_| IndexError::InvalidGenerationId)?;
         keys.push(value & KEY_VALUE_MASK);
@@ -351,9 +351,7 @@ fn generation_keys(generation_id: &str) -> Result<Vec<u64>> {
 fn directory_keys(directory: &str) -> Vec<u64> {
     let digest = Sha256::digest(directory.as_bytes());
     let mut keys = digest
-        .as_chunks::<8>()
-        .0
-        .iter()
+        .chunks_exact(8)
         .map(|chunk| {
             let mut bytes = [0_u8; 8];
             bytes.copy_from_slice(chunk);

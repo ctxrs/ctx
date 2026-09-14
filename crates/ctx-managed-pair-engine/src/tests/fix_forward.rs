@@ -5,6 +5,8 @@ use std::{
     path::PathBuf,
 };
 
+use fs2::FileExt as _;
+
 use super::*;
 
 #[test]

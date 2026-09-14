@@ -357,7 +357,7 @@ fn decode_sqlite_text(encoding: SqliteEncoding, bytes: &[u8]) -> Option<String> 
                 return None;
             }
             let little_endian = encoding == SqliteEncoding::Utf16Le;
-            let units = bytes.as_chunks::<2>().0.iter().map(|pair| {
+            let units = bytes.chunks_exact(2).map(|pair| {
                 if little_endian {
                     u16::from_le_bytes([pair[0], pair[1]])
                 } else {

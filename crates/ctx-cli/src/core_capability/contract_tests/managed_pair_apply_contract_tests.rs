@@ -5,7 +5,7 @@ use ctx_upgrade_engine::{
     ManagedPairTarget, VerifiedManagedPairIdentity, MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH,
 };
 use serde_json::{json, Value};
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 
 use super::super::managed_pair_apply::{
     managed_core_destination, marker_channel, read_install_marker, success_receipt,

@@ -1,3 +1,5 @@
+use std::io::Read as _;
+
 use super::*;
 
 struct PointerFileSnapshot {

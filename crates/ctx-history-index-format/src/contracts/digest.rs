@@ -12,10 +12,7 @@ pub(super) fn decode_sha256_hex(value: &str) -> Result<[u8; 32]> {
         return Err(IndexError::InvalidGenerationId);
     }
     let mut decoded = [0_u8; 32];
-    for (output, pair) in decoded
-        .iter_mut()
-        .zip(value.as_bytes().as_chunks::<2>().0.iter())
-    {
+    for (output, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
         let high = hex_nibble(pair[0]).ok_or(IndexError::InvalidGenerationId)?;
         let low = hex_nibble(pair[1]).ok_or(IndexError::InvalidGenerationId)?;
         *output = (high << 4) | low;

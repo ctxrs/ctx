@@ -84,10 +84,12 @@ mod terminal_fingerprints_base64 {
             return Err(D::Error::custom("Codex terminal authority is malformed"));
         }
         packed
-            .as_chunks::<FINGERPRINT_BYTES>()
-            .0
-            .iter()
-            .map(|bytes| Ok(u64::from_be_bytes(*bytes)))
+            .chunks_exact(FINGERPRINT_BYTES)
+            .map(|bytes| {
+                <[u8; FINGERPRINT_BYTES]>::try_from(bytes)
+                    .map(u64::from_be_bytes)
+                    .map_err(|_| D::Error::custom("Codex terminal authority is malformed"))
+            })
             .collect()
     }
 }

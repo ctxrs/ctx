@@ -98,12 +98,7 @@ pub(super) fn validate_and_dot_le_bytes(
     tolerance: f64,
 ) -> Result<f32, FlatScanError> {
     let mut norm_squared = 0.0_f64;
-    for (dimension, bytes) in vector
-        .as_chunks::<{ std::mem::size_of::<f32>() }>()
-        .0
-        .iter()
-        .enumerate()
-    {
+    for (dimension, bytes) in vector.chunks_exact(std::mem::size_of::<f32>()).enumerate() {
         let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         if !value.is_finite() {
             return Err(FlatScanError::NonFinite {

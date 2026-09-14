@@ -21,7 +21,7 @@ impl Sha256Digest {
             ));
         }
         let mut bytes = [0_u8; 32];
-        for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
             let high = hex_nibble(chunk[0]);
             let low = hex_nibble(chunk[1]);
             bytes[index] = (high << 4) | low;

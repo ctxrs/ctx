@@ -24,6 +24,14 @@ network. Buildkite enables the same bootstrap path in its isolated job tool
 environment. Bazel is used for reproducible development, tests, and
 qualification; public CLI candidates are constructed by the Linux factory.
 
+`rust-toolchain.toml` pins the compiler used by repository-local Cargo commands,
+with the minimal rustup profile plus rustfmt and Clippy. It matches the Bazel,
+CI, harness, and Linux factory pins. Update those declarations and the Bazel
+archive checksums together when deliberately changing the compiler, then run
+`scripts/bazelw test //:rust_toolchain_module_policy --config=test` and the
+normal CI gate. The maintained compiler is separate from the Rust 1.88 minimum
+supported version in `Cargo.toml`; a compiler update does not raise that floor.
+
 ## Fast Linux loop
 
 Start with the narrowest real Bazel test that covers the change:

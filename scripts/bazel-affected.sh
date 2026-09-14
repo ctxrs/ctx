@@ -59,7 +59,7 @@ generate_selection() {
     return 0
   fi
   if grep -Eq \
-    '(^|/)(BUILD|BUILD\.bazel|MODULE\.bazel|MODULE\.bazel\.lock|WORKSPACE|WORKSPACE\.bazel|Cargo\.lock|Cargo\.toml|\.bazelignore|\.bazelrc|\.bazelversion|[^/]+\.bzl)$|^scripts/(bazel-affected\.sh|bazelw|ci-common\.sh|bazel/workspace-status\.sh)$|^tools/bazel/' \
+    '(^|/)(BUILD|BUILD\.bazel|MODULE\.bazel|MODULE\.bazel\.lock|WORKSPACE|WORKSPACE\.bazel|Cargo\.lock|Cargo\.toml|rust-toolchain\.toml|\.bazelignore|\.bazelrc|\.bazelversion|[^/]+\.bzl)$|^scripts/(bazel-affected\.sh|bazelw|ci-common\.sh|bazel/workspace-status\.sh)$|^tools/bazel/' \
     "${changed}"; then
     return 12
   fi
