@@ -481,6 +481,10 @@ impl CoreRefreshEngine {
 
         let execution = execute(&request_id, self);
         self.runtime.refresh_execution_finished();
+        let mut failure_diagnostic = execution.as_ref().err().map_or(
+            RefreshFailureDiagnostic::new(FailureStage::Verification, None),
+            |error| RefreshFailureDiagnostic::new(FailureStage::Execution, Some(error)),
+        );
         let attempted_routes = {
             let state = self.lock_state();
             state
@@ -543,13 +547,17 @@ impl CoreRefreshEngine {
                 )),
                 observed,
             ),
-            (Ok(publication), Err(error)) => (
-                Err(format!(
+            (Ok(publication), Err(error)) => {
+                failure_diagnostic = RefreshFailureDiagnostic::new(
+                    FailureStage::Verification,
+                    Some(&error),
+                );
+                let message = format!(
                     "source-backed refresh returned generation {}, but publication verification failed: {error:#}",
                     publication.generation_id
-                )),
-                None,
-            ),
+                );
+                (Err(message), None)
+            }
             (Err(error), Ok(observed)) => {
                 (Err(source_backed_refresh_error_summary(&error)), observed)
             }
@@ -588,7 +596,11 @@ impl CoreRefreshEngine {
                         observed.clone(),
                         &publication,
                     )
-                    .map_err(|error| format!("validate terminal Core publication: {error:#}"))
+                    .map_err(|error| {
+                        failure_diagnostic =
+                            RefreshFailureDiagnostic::new(FailureStage::Verification, Some(&error));
+                        format!("validate terminal Core publication: {error:#}")
+                    })
                     .map(|request_receipt| (observed, publication, request_receipt))
                 }
             }
@@ -605,7 +617,11 @@ impl CoreRefreshEngine {
                         coverage_fence,
                     )
                 })
-                .map_err(|error| format!("finalize verified Core publication: {error:#}"))
+                .map_err(|error| {
+                    failure_diagnostic =
+                        RefreshFailureDiagnostic::new(FailureStage::Finalization, Some(&error));
+                    format!("finalize verified Core publication: {error:#}")
+                })
         });
         let verified = match verified {
             Ok(verified) => Ok(verified),
@@ -654,6 +670,7 @@ impl CoreRefreshEngine {
                     attempt.failure_type = None;
                     attempt.terminal_outcome = None;
                     attempt.last_error = None;
+                    attempt.failure_diagnostic = None;
                     attempt.published_generation != previous_generation
                 };
                 terminal.install(&mut state);
@@ -700,6 +717,7 @@ impl CoreRefreshEngine {
                     attempt.failure_type = execution_failure_type;
                     attempt.terminal_outcome = Some(terminal_outcome);
                     attempt.last_error = Some(error);
+                    attempt.failure_diagnostic = Some(failure_diagnostic);
                 }
                 update_automatic_retry_after_failure(&mut state, &request_id);
                 // Reserve a scheduler handoff only for failures that are not

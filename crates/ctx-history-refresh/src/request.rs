@@ -35,6 +35,20 @@ macro_rules! string_enum {
     };
 }
 
+string_enum!(RefreshFailureStage, "diagnostic stage", {
+    Admission => "admission",
+    Execution => "execution",
+    Verification => "verification",
+    Finalization => "finalization",
+});
+
+string_enum!(RefreshFailureKind, "diagnostic kind", {
+    Io => "io",
+    Index => "index",
+    Provider => "provider",
+    Unknown => "unknown",
+});
+
 string_enum!(RefreshOutcomeCode, "code", {
     Completed => "completed",
     CompletedWithRejections => "completed_with_rejections",

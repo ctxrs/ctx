@@ -184,6 +184,16 @@ pub(super) fn serialize_event(
             if let Some(health) = event.terminal_health {
                 insert_provider_refresh_terminal_health_properties(&mut properties, &health);
             }
+            if event.surface == Surface::Daemon
+                && event.outcome == Outcome::Failure
+                && properties.contains_key("failure_code")
+                && properties.contains_key("retryable")
+            {
+                if let Some((stage, kind)) = event.failure_diagnostic {
+                    properties.insert("refresh_failure_stage".to_owned(), json!(stage.as_str()));
+                    properties.insert("refresh_failure_kind".to_owned(), json!(kind.as_str()));
+                }
+            }
             (
                 "provider_refresh_completed",
                 event.surface,

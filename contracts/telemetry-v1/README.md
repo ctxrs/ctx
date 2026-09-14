@@ -58,6 +58,13 @@ bytes. Per-provider duration is independently bucketed; a
 multi-provider refresh never copies one aggregate duration into every provider
 event. Daemon terminals may additionally report only whether a successor is
 pending and, for failures, whether the previous generation was retained.
+Failed daemon terminals with `failure_code` and `retryable` may also carry
+the optional pair `refresh_failure_stage` (`admission`, `execution`,
+`verification`, `finalization`) and `refresh_failure_kind` (`io`, `index`,
+`provider`, `unknown`). Both are omitted when the durable job lacks a complete
+known pair. These content-free diagnostics do not change the terminal outcome
+or retry policy and do not identify a provider or copy error text.
+
 `runtime_observation@1` is reserved for low-frequency lifecycle and liveness
 observations. Daemon `ready` and jittered 23–24-hour `liveness` observations may
 carry one best-effort storage sidecar. No other runtime operation carries it,
