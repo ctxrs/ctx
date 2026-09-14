@@ -116,10 +116,12 @@ impl VerifiedIndex {
             }
 
             for candidate in candidates {
-                let event = stored_event_record(&self.searcher, candidate.address, fields)?;
+                let (event, _) =
+                    ranked_event_ref_at_address(&self.searcher, candidate.address, fields)?;
                 if candidate.order <= after
-                    || event.session_id != session_id
-                    || event.event_id.as_uuid() != candidate.order.event_id()
+                    || event.session_id != session_id.as_uuid()
+                    || event.source_owner_digest != session_id.source_digest()
+                    || event.event_id != candidate.order.event_id()
                     || event.event_sequence != candidate.order.event_sequence()
                     || event.occurred_at_unix_ms != candidate.order.occurred_at_unix_ms()
                 {
@@ -128,10 +130,31 @@ impl VerifiedIndex {
                     ));
                 }
                 after = candidate.order;
-                if event.event_type == "message" && event.role.as_deref() == Some("user") {
+                // These exact projections are audited at publication and pinned
+                // with the generation. Probe postings without loading Core bodies.
+                let has_term =
+                    |field, value: &str| -> Result<bool> {
+                        let segment = segments.get(candidate.address.segment_ord as usize).ok_or(
+                            IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD),
+                        )?;
+                        let inverted = segment.inverted_index(field)?;
+                        let term = Term::from_field_text(field, value);
+                        let Some(mut postings) =
+                            inverted.read_postings(&term, IndexRecordOption::Basic)?
+                        else {
+                            return Ok(false);
+                        };
+                        let doc = candidate.address.doc_id;
+                        Ok(postings.doc() == doc
+                            || (postings.doc() < doc && postings.seek(doc) == doc))
+                    };
+                if !has_term(fields.event_type, "message")? {
+                    continue;
+                }
+                if has_term(fields.role, "user")? {
                     return Ok(assistant_messages);
                 }
-                if event.event_type != "message" || event.role.as_deref() != Some("assistant") {
+                if !has_term(fields.role, "assistant")? {
                     continue;
                 }
                 if remaining_budget.maximum_encoded_core_bytes == 0
@@ -141,7 +164,7 @@ impl VerifiedIndex {
                 }
 
                 let Some(batch) = self.core_events_by_ids_with_strict_budget(
-                    &[event.event_id.as_uuid()],
+                    &[event.event_id],
                     1,
                     remaining_budget,
                 )?
@@ -153,7 +176,12 @@ impl VerifiedIndex {
                 let assistant = batch.items.into_iter().next().ok_or(
                     IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD),
                 )?;
-                if assistant.session_id != session_id {
+                if SessionEventOrderKey::for_core_record(&assistant.core_record)? != candidate.order
+                    || assistant.event_id.digest() != event.event_identity_digest
+                    || assistant.source.identity().digest() != event.source_owner_digest
+                    || assistant.event_type != "message"
+                    || assistant.role.as_deref() != Some("assistant")
+                {
                     return Err(IndexError::InvalidStoredDocumentField(
                         SESSION_EVENT_ORDER_FIELD,
                     ));
