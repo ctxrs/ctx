@@ -4,6 +4,7 @@ use ctx_history_capture_model::{
     ProviderRootDefinition, ProviderRootKind, ProviderRouteRole, ProviderSourceRouteProvenance,
 };
 use ctx_history_core::CaptureProvider;
+use ctx_history_source_io::SYMLINK_PROVIDER_SOURCE_REASON;
 
 use super::{
     context::DiscoveryContext,
@@ -614,8 +615,10 @@ fn inspect_configured_path(
             Some(ConfiguredRootAvailability::Unsafe(reason))
         }
         Err(SourcePathError::Missing) => Some(ConfiguredRootAvailability::Missing),
-        Err(SourcePathError::Unsupported) => {
-            let reason = if is_root {
+        Err(SourcePathError::Unsupported(reason)) => {
+            let reason = if reason != SYMLINK_PROVIDER_SOURCE_REASON {
+                reason
+            } else if is_root {
                 CONFIGURED_ROOT_SYMLINK_REASON
             } else {
                 CONFIGURED_SOURCE_SYMLINK_REASON
