@@ -307,7 +307,7 @@ fn unrelated_native_strings_and_nested_calls_are_not_argument_envelopes() {
 }
 
 #[test]
-fn command_patch_and_result_prose_remain_literal_content_not_file_effects() {
+fn complete_patch_headers_add_references_without_interpreting_command_or_result_prose() {
     let arguments = serde_json::json!({
         "cmd": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: shell.rs\n+x\n*** End Patch\nPATCH",
         "code": "await tools.apply_patch('*** Begin Patch\\n*** Add File: nested.rs\\n+x\\n*** End Patch')",
@@ -317,9 +317,15 @@ fn command_patch_and_result_prose_remain_literal_content_not_file_effects() {
     });
     let row = argument_row(&arguments.to_string());
     let facts = row.activity.unwrap().facts;
-    assert_eq!(facts.len(), 1);
+    assert_eq!(facts.len(), 4);
     assert_eq!(facts[0].kind, LiteralFactKind::Command);
     assert_eq!(facts[0].value, arguments["cmd"].as_str().unwrap());
+    assert_eq!(facts[1].kind, LiteralFactKind::File);
+    assert_eq!(facts[1].value, "shell.rs");
+    assert_eq!(facts[2].kind, LiteralFactKind::File);
+    assert_eq!(facts[2].value, "nested.rs");
+    assert_eq!(facts[3].kind, LiteralFactKind::File);
+    assert_eq!(facts[3].value, "direct.rs");
 }
 
 #[test]

@@ -92,12 +92,12 @@ pub(crate) struct CodexCoreRecordDraft {
     pub(crate) discovery_exclusion: Option<CoreDiscoveryExclusion>,
     pub(crate) activity: Option<CoreActivity>,
     // Transient provenance for optional additions; never persisted in Core.
-    pub(crate) decoded_argument_facts: Option<std::ops::Range<usize>>,
+    pub(crate) optional_argument_facts: Vec<std::ops::Range<usize>>,
 }
 
 impl CodexCoreRecordDraft {
-    pub(crate) fn omit_decoded_argument_facts(&mut self) {
-        let Some(range) = self.decoded_argument_facts.take() else {
+    pub(crate) fn omit_last_optional_argument_facts(&mut self) {
+        let Some(range) = self.optional_argument_facts.pop() else {
             return;
         };
         if let Some(activity) = self.activity.as_mut() {
@@ -111,9 +111,10 @@ impl CodexCoreRecordDraft {
         }
     }
 
-    pub(crate) fn fit_decoded_argument_facts(&mut self) {
-        // Optional decoded facts must not displace already captured content.
-        if self.decoded_argument_facts.is_some()
+    pub(crate) fn fit_optional_argument_facts(&mut self) {
+        // Drop newer additions first: patch facts must not displace the
+        // decoded argument facts that already fit before patch capture.
+        while !self.optional_argument_facts.is_empty()
             && !ctx_history_jsonl::selected_content_fits(
                 &self.lexical_body,
                 self.structured_content.as_ref(),
@@ -121,7 +122,7 @@ impl CodexCoreRecordDraft {
                 ctx_history_core::MAX_CORE_CONTENT_BYTES,
             )
         {
-            self.omit_decoded_argument_facts();
+            self.omit_last_optional_argument_facts();
         }
     }
 
@@ -146,6 +147,9 @@ impl CodexCoreRecordDraft {
                 .and_then(encoded_json_len)
                 .unwrap_or(0),
             self.session_cwd.as_ref().map_or(0, String::capacity),
+            self.optional_argument_facts
+                .capacity()
+                .checked_mul(size_of::<std::ops::Range<usize>>())?,
             OWNED_ALLOCATION_OVERHEAD_BYTES.checked_mul(5)?,
         ]
         .into_iter()
@@ -256,6 +260,11 @@ pub(super) fn build_source_backed_event_row(
     let discovery_exclusion = (kind == CodexRetainedKind::ToolCall)
         .then(|| codex_invocation_discovery_exclusion(&retained.payload, &audit, activity.as_ref()))
         .flatten();
+    let optional_argument_facts = if activity.is_some() {
+        audit.optional_argument_facts()
+    } else {
+        Vec::new()
+    };
     let mut built = CodexSourceBackedBuiltRowV0 {
         row: CodexCoreRecordDraft {
             raw_ordinal,
@@ -272,11 +281,11 @@ pub(super) fn build_source_backed_event_row(
             structured_content: (!audit.any_selector_ambiguous()).then(|| retained.payload.clone()),
             discovery_exclusion,
             activity,
-            decoded_argument_facts: audit.decoded_argument_facts(),
+            optional_argument_facts,
         },
     };
     // Bound additions before the scanner measures and admits the draft page.
-    built.row.fit_decoded_argument_facts();
+    built.row.fit_optional_argument_facts();
     Ok(Ok(built))
 }
 
@@ -339,7 +348,7 @@ pub(super) fn build_source_backed_sparse_output_row(
             .flatten(),
         discovery_exclusion,
         activity,
-        decoded_argument_facts: None,
+        optional_argument_facts: Vec::new(),
     }))
 }
 

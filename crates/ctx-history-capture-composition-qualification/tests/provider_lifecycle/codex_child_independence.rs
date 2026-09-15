@@ -19,11 +19,13 @@ use ctx_history_index::{
     GenerationStateEnvelope, GenerationWriter, RevalidationTarget, WriterOptions,
 };
 
-const CURRENT_PARSER_REVISION: &str =
-    "codex-nativepath-core-activity-v13-bounded-json-argument-facts";
+const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v14-literal-patch-file-facts";
 
 #[path = "codex_child_independence/quarantine.rs"]
 mod quarantine;
+
+#[path = "codex_child_independence/patch_files.rs"]
+mod patch_files;
 
 fn writer_options() -> WriterOptions {
     WriterOptions {

@@ -85,8 +85,26 @@ fn search_refresh_off_requires_existing_core_generation_without_creating_one() {
 
 #[test]
 fn file_only_search_does_not_infer_a_file_fact_from_activity_text() {
+    check_patch_file_reference(false);
+}
+
+#[test]
+fn file_only_search_finds_a_literal_patch_header_without_claiming_file_effects() {
+    check_patch_file_reference(true);
+}
+
+fn check_patch_file_reference(complete_patch: bool) {
     let temp = tempdir();
     let fixture = repository_backed_rich_fixture(&temp);
+    if !complete_patch {
+        let transcript = Path::new(&fixture).join("2026/06/24/rich.jsonl");
+        let original = fs::read_to_string(&transcript).unwrap();
+        fs::write(
+            transcript,
+            original.replace("*** Begin Patch", "plain activity text"),
+        )
+        .unwrap();
+    }
     json_output(ctx(&temp).args([
         "import",
         "--provider",
@@ -108,14 +126,21 @@ fn file_only_search_does_not_infer_a_file_fact_from_activity_text() {
             .is_some_and(|arguments| arguments.contains("src/main.rs")),
         "complete provider activity was not preserved: {shown:#}"
     );
-    assert!(shown["event"]["activity"]["facts"]
-        .as_array()
-        .is_none_or(|facts| facts.iter().all(|fact| fact["kind"] != "file")));
+    assert_eq!(
+        shown["event"]["activity"]["facts"]
+            .as_array()
+            .is_some_and(|facts| facts.iter().any(|fact| fact["kind"] == "file")),
+        complete_patch
+    );
 
     let filtered =
         json_output(ctx(&temp).args(["search", "--file", "src/main.rs", "--format=json"]));
     assert_eq!(filtered["query"], "");
-    assert!(filtered["results"].as_array().unwrap().is_empty());
+    let results = filtered["results"].as_array().unwrap();
+    assert_eq!(results.len(), usize::from(complete_patch));
+    if complete_patch {
+        assert_eq!(results[0]["ctx_event_id"], event_id);
+    }
 }
 
 #[test]
@@ -180,7 +205,10 @@ fn search_trims_whitespace_padded_workspace_and_file_filters() {
         with_file["filters"],
     );
 
-    assert!(with_file["results"].as_array().unwrap().is_empty());
+    let without_padding =
+        json_output(ctx(&temp).args(["search", "--file", "src/main.rs", "--format=json"]));
+    assert!(!with_file["results"].as_array().unwrap().is_empty());
+    assert_eq!(with_file["results"], without_padding["results"]);
 }
 
 fn repository_backed_rich_fixture(temp: &TempDir) -> String {

@@ -288,11 +288,13 @@ pub(in crate::codex::nativepath) fn codex_core_record(
             }
         }
     }
-    if row.activity.as_ref().is_some_and(|activity| {
-        activity.facts.len().saturating_add(session_facts.len())
-            > ctx_history_core::MAX_PROVIDER_DECLARED_FACTS
-    }) {
-        row.omit_decoded_argument_facts();
+    while !row.optional_argument_facts.is_empty()
+        && row.activity.as_ref().is_some_and(|activity| {
+            activity.facts.len().saturating_add(session_facts.len())
+                > ctx_history_core::MAX_PROVIDER_DECLARED_FACTS
+        })
+    {
+        row.omit_last_optional_argument_facts();
     }
     let session_fact_count = session_facts.len();
     if !session_facts.is_empty() {
@@ -304,7 +306,7 @@ pub(in crate::codex::nativepath) fn codex_core_record(
                 .is_none_or(|count| count > ctx_history_core::MAX_PROVIDER_DECLARED_FACTS)
             {
                 activity.facts.clear();
-                row.decoded_argument_facts = None;
+                row.optional_argument_facts.clear();
             }
             activity.facts.splice(0..0, session_facts);
         } else {
@@ -317,13 +319,13 @@ pub(in crate::codex::nativepath) fn codex_core_record(
             });
         }
     }
-    if let Some(range) = row.decoded_argument_facts.as_mut() {
+    for range in &mut row.optional_argument_facts {
         range.start += session_fact_count;
         range.end += session_fact_count;
     }
     if content_omission.is_none() {
         // Session facts participate in the same exact final-record budget.
-        row.fit_decoded_argument_facts();
+        row.fit_optional_argument_facts();
         if !ctx_history_jsonl::selected_content_fits(
             &row.lexical_body,
             row.structured_content.as_ref(),
@@ -362,7 +364,7 @@ pub(in crate::codex::nativepath) fn codex_core_record(
         structured_content,
         discovery_exclusion,
         activity,
-        decoded_argument_facts: _,
+        optional_argument_facts: _,
     } = row;
     let mut record = CoreRecord::new_selected(
         event_id,
