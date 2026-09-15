@@ -8,7 +8,8 @@ use std::{
 
 use anyhow::{bail, Context as _, Result};
 use ctx_client_observability::analytics::{
-    AnalyticsDeliveryFailureClass, AnalyticsDeliveryObservationV1, CountBucket,
+    AnalyticsDeliveryFailureClass, AnalyticsDeliveryFailureReason, AnalyticsDeliveryObservationV1,
+    CountBucket,
 };
 use ctx_history_core::utc_now;
 use ctx_history_platform::platform_security::{restrict_private_file_handle, verify_private_file};
@@ -16,6 +17,10 @@ use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+
+mod private_file;
+mod reason_metadata;
+use private_file::{sync_parent, write_private_file_durably, write_private_file_via};
 
 const OUTBOX_SCHEMA_VERSION: u16 = 3;
 const OUTBOX_MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -64,19 +69,31 @@ struct RootDeliveryState {
     dropped: u64,
     failure_sequence: u64,
     last_failure_class: Option<AnalyticsDeliveryFailureClass>,
+    // Optional evidence is hydrated from the sidecar, never from the v3 envelope.
+    #[serde(skip)]
+    last_failure_reason: Option<AnalyticsDeliveryFailureReason>,
     observation_due: bool,
 }
 
 impl RootDeliveryState {
-    fn record_failure(&mut self, class: AnalyticsDeliveryFailureClass) {
+    fn record_failure(
+        &mut self,
+        class: AnalyticsDeliveryFailureClass,
+        reason: Option<AnalyticsDeliveryFailureReason>,
+    ) {
         self.failure_sequence = self.failure_sequence.saturating_add(1);
         self.last_failure_class = Some(class);
+        self.last_failure_reason = reason.filter(|reason| reason.permits(class));
         self.observation_due = false;
     }
 
-    fn record_ordinary_drop(&mut self, class: AnalyticsDeliveryFailureClass) {
+    fn record_ordinary_drop(
+        &mut self,
+        class: AnalyticsDeliveryFailureClass,
+        reason: Option<AnalyticsDeliveryFailureReason>,
+    ) {
         self.dropped = self.dropped.saturating_add(1);
-        self.record_failure(class);
+        self.record_failure(class, reason);
     }
 
     fn has_counters(&self) -> bool {
@@ -103,9 +120,10 @@ impl OutboxState {
 
     fn recovered(data_root_id: &str) -> Self {
         let mut state = Self::empty();
-        state
-            .root_mut(data_root_id)
-            .record_ordinary_drop(AnalyticsDeliveryFailureClass::LocalIo);
+        state.root_mut(data_root_id).record_ordinary_drop(
+            AnalyticsDeliveryFailureClass::LocalIo,
+            Some(AnalyticsDeliveryFailureReason::OutboxCorrupt),
+        );
         state
     }
 
@@ -118,7 +136,10 @@ impl OutboxState {
                 self.roots
                     .entry(entry.data_root_id.clone())
                     .or_default()
-                    .record_ordinary_drop(AnalyticsDeliveryFailureClass::LocalIo);
+                    .record_ordinary_drop(
+                        AnalyticsDeliveryFailureClass::LocalIo,
+                        Some(AnalyticsDeliveryFailureReason::OutboxExpired),
+                    );
             }
             keep
         });
@@ -138,7 +159,10 @@ impl OutboxState {
                 self.roots
                     .entry(entry.data_root_id.clone())
                     .or_default()
-                    .record_failure(AnalyticsDeliveryFailureClass::LocalIo);
+                    .record_failure(
+                        AnalyticsDeliveryFailureClass::LocalIo,
+                        Some(AnalyticsDeliveryFailureReason::OutboxClock),
+                    );
                 normalized = true;
             }
         }
@@ -189,8 +213,10 @@ impl OutboxState {
     fn drop_oldest_for_bound(&mut self) {
         let entry = self.entries.remove(0);
         if entry.kind == OutboxEntryKind::Ordinary {
-            self.root_mut(&entry.data_root_id)
-                .record_ordinary_drop(AnalyticsDeliveryFailureClass::LocalIo);
+            self.root_mut(&entry.data_root_id).record_ordinary_drop(
+                AnalyticsDeliveryFailureClass::LocalIo,
+                Some(AnalyticsDeliveryFailureReason::OutboxCapacity),
+            );
         }
     }
 }
@@ -245,10 +271,12 @@ pub(crate) enum DeliveryDisposition {
     Accepted,
     Retry {
         class: AnalyticsDeliveryFailureClass,
+        reason: Option<AnalyticsDeliveryFailureReason>,
         retry_after: Option<Duration>,
     },
     Permanent {
         class: AnalyticsDeliveryFailureClass,
+        reason: Option<AnalyticsDeliveryFailureReason>,
     },
 }
 
@@ -299,6 +327,7 @@ impl AnalyticsOutbox {
             Err(error) => return Err(error).context("inspect analytics outbox directory"),
         }
         let _lock = OutboxLock::acquire(&path.with_extension("lock"))?;
+        reason_metadata::discard(path);
         let mut changed = cleanup_orphan_temps(parent)?;
         if let StoredOutbox::State(mut state, _) = read_state(path)? {
             if validate_state(&state).is_ok() {
@@ -345,7 +374,10 @@ impl AnalyticsOutbox {
             loaded
                 .state
                 .root_mut(&self.data_root_id)
-                .record_ordinary_drop(AnalyticsDeliveryFailureClass::LocalIo);
+                .record_ordinary_drop(
+                    AnalyticsDeliveryFailureClass::LocalIo,
+                    Some(AnalyticsDeliveryFailureReason::OutboxOversized),
+                );
             loaded.state.enforce_bounds()?;
             self.persist(&loaded.state)?;
             bail!("analytics payload exceeds the outbox body bound");
@@ -458,11 +490,15 @@ impl AnalyticsOutbox {
                         root.observation_due = true;
                     }
                 }
-                DeliveryDisposition::Retry { class, retry_after } => {
+                DeliveryDisposition::Retry {
+                    class,
+                    retry_after,
+                    reason,
+                } => {
                     if snapshot.kind == OutboxEntryKind::Ordinary {
                         let root = loaded.state.root_mut(&self.data_root_id);
                         root.retry_attempts = root.retry_attempts.saturating_add(1);
-                        root.record_failure(class);
+                        root.record_failure(class, reason);
                     }
                     let entry = &mut loaded.state.entries[index];
                     entry.attempts = entry.attempts.saturating_add(1);
@@ -470,13 +506,13 @@ impl AnalyticsOutbox {
                     entry.next_attempt_at_epoch_seconds = now_epoch_seconds
                         .saturating_add(i64::try_from(delay.as_secs()).unwrap_or(i64::MAX));
                 }
-                DeliveryDisposition::Permanent { class } => {
+                DeliveryDisposition::Permanent { class, reason } => {
                     let rejected = loaded.state.entries.remove(index);
                     if rejected.kind == OutboxEntryKind::Ordinary {
                         loaded
                             .state
                             .root_mut(&self.data_root_id)
-                            .record_ordinary_drop(class);
+                            .record_ordinary_drop(class, reason);
                     }
                 }
             }
@@ -534,7 +570,8 @@ impl AnalyticsOutbox {
                 Duration::from_secs(oldest_age_seconds),
                 root.last_failure_class
                     .unwrap_or(AnalyticsDeliveryFailureClass::None),
-            ),
+            )
+            .with_failure_reason(root.last_failure_reason),
             retry_attempts: root.retry_attempts,
             dropped: root.dropped,
             failure_sequence: root.failure_sequence,
@@ -596,6 +633,7 @@ impl AnalyticsOutbox {
         root.dropped = root.dropped.saturating_sub(observation.dropped);
         if root.failure_sequence == observation.failure_sequence {
             root.last_failure_class = None;
+            root.last_failure_reason = None;
             // A partial recovery still owes a zero-queue report when the rest drains.
             root.observation_due = observation.event.queued != CountBucket::Zero;
         } else {
@@ -643,7 +681,9 @@ impl AnalyticsOutbox {
         if body.len() as u64 > OUTBOX_MAX_BYTES {
             bail!("analytics outbox exceeds its size bound");
         }
-        write_private_file_durably(&self.path, &body)
+        write_private_file_durably(&self.path, &body)?;
+        reason_metadata::save(&self.path, &body, state);
+        Ok(())
     }
 }
 
@@ -737,7 +777,8 @@ fn read_state(path: &Path) -> Result<StoredOutbox> {
     }
     let file = fs::File::open(path).context("open analytics outbox")?;
     let mut body = Vec::with_capacity(metadata.len() as usize);
-    file.take(OUTBOX_MAX_BYTES.saturating_add(1))
+    (&file)
+        .take(OUTBOX_MAX_BYTES.saturating_add(1))
         .read_to_end(&mut body)
         .context("read analytics outbox")?;
     if body.len() as u64 > OUTBOX_MAX_BYTES {
@@ -752,7 +793,10 @@ fn read_state(path: &Path) -> Result<StoredOutbox> {
         .and_then(|value| u16::try_from(value).ok());
     match schema_version {
         Some(OUTBOX_SCHEMA_VERSION) => Ok(serde_json::from_value(value)
-            .map(|state| StoredOutbox::State(state, false))
+            .map(|mut state| {
+                reason_metadata::restore(path, &file, &body, &mut state);
+                StoredOutbox::State(state, false)
+            })
             .unwrap_or(StoredOutbox::Corrupt)),
         // Older shared entries and counters have no consent owner. Do not
         // infer ownership from their payloads or replay them under this root.
@@ -852,105 +896,10 @@ fn cleanup_orphan_temps(parent: &Path) -> Result<bool> {
     Ok(removed)
 }
 
-fn write_private_file_durably(path: &Path, body: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("analytics outbox path has no parent")?;
-    let temp = parent.join(format!(
-        "{OUTBOX_TEMP_PREFIX}{}{OUTBOX_TEMP_SUFFIX}",
-        uuid::Uuid::new_v4()
-    ));
-    let result = (|| -> Result<()> {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt as _;
-            use windows_sys::Win32::{
-                Foundation::{GENERIC_READ, GENERIC_WRITE},
-                Storage::FileSystem::{
-                    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, READ_CONTROL, WRITE_DAC,
-                },
-            };
-
-            options
-                .access_mode(GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC)
-                .share_mode(FILE_SHARE_READ)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        }
-        let mut file = options
-            .open(&temp)
-            .context("create analytics outbox temporary file")?;
-        restrict_private_file_handle(&file).context("protect analytics outbox temporary file")?;
-        file.write_all(body)
-            .context("write analytics outbox temporary file")?;
-        file.sync_all()
-            .context("sync analytics outbox temporary file")?;
-        drop(file);
-        replace_file(&temp, path).context("publish analytics outbox")?;
-        verify_private_file(path).context("verify analytics outbox permissions")?;
-        sync_parent(parent)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-#[cfg(not(windows))]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    fs::rename(source, target)
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let target = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-fn sync_parent(path: &Path) -> Result<()> {
-    fs::File::open(path)
-        .context("open analytics outbox directory")?
-        .sync_all()
-        .context("sync analytics outbox directory")
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
+#[cfg(test)]
+mod diagnostics_tests;
+#[cfg(test)]
+mod legacy_v3_tests;
 #[cfg(test)]
 #[path = "analytics_outbox/tests.rs"]
 mod tests;

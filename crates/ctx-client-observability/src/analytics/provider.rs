@@ -266,6 +266,7 @@ pub struct ProviderRefreshCompletedV1 {
     pub foreground: Option<ForegroundProviderRefreshV1>,
     pub terminal_health: Option<ProviderRefreshTerminalHealthV1>,
     pub failure_diagnostic: Option<(ProviderRefreshFailureStage, ProviderRefreshFailureKind)>,
+    pub failure_reason: Option<ProviderRefreshFailureReason>,
     pub coverage_reason: Option<ProviderRefreshCoverageReason>,
     pub source_failure_class: Option<ProviderRefreshSourceFailureClass>,
 }
@@ -319,6 +320,7 @@ impl ProviderRefreshCompletedV1 {
             terminal_health: None,
             failure_diagnostic: None,
             coverage_reason: None,
+            failure_reason: None,
             source_failure_class: None,
         }
     }
@@ -337,6 +339,7 @@ impl ProviderRefreshCompletedV1 {
             terminal_health: None,
             failure_diagnostic: None,
             coverage_reason: None,
+            failure_reason: None,
             source_failure_class: None,
         }
     }
@@ -363,6 +366,7 @@ impl ProviderRefreshCompletedV1 {
             terminal_health: None,
             failure_diagnostic: None,
             coverage_reason: None,
+            failure_reason: None,
             source_failure_class: None,
         }
     }
@@ -380,6 +384,11 @@ impl ProviderRefreshCompletedV1 {
         diagnostic: Option<(ProviderRefreshFailureStage, ProviderRefreshFailureKind)>,
     ) -> Self {
         self.failure_diagnostic = diagnostic;
+        self
+    }
+
+    pub fn with_failure_reason(mut self, reason: Option<ProviderRefreshFailureReason>) -> Self {
+        self.failure_reason = reason;
         self
     }
 

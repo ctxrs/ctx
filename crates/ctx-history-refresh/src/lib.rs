@@ -95,11 +95,12 @@ pub use publication::{
     published_refresh_receipt, MissingActiveGeneration, PinnedSourceBackedGeneration,
 };
 pub use request::{
-    AdmissionResponseBarrier, RefreshAdmission, RefreshFailureKind, RefreshFailureStage,
-    RefreshIntent, RefreshLogicalPhase, RefreshLogicalStatus, RefreshMaintenanceWakeStatus,
-    RefreshOperation, RefreshOutcomeClass, RefreshOutcomeCode, RefreshRequest, RefreshRequestState,
-    RefreshRequestTrigger, RefreshRetryAdvice, RefreshSelection, RefreshStatus, RefreshStatusKind,
-    RefreshTerminalFailureScope, RefreshTerminalFailureType, RefreshTerminalOutcome,
+    AdmissionResponseBarrier, RefreshAdmission, RefreshFailureKind, RefreshFailureReason,
+    RefreshFailureStage, RefreshIntent, RefreshLogicalPhase, RefreshLogicalStatus,
+    RefreshMaintenanceWakeStatus, RefreshOperation, RefreshOutcomeClass, RefreshOutcomeCode,
+    RefreshRequest, RefreshRequestState, RefreshRequestTrigger, RefreshRetryAdvice,
+    RefreshSelection, RefreshStatus, RefreshStatusKind, RefreshTerminalFailureScope,
+    RefreshTerminalFailureType, RefreshTerminalOutcome,
 };
 pub use route_ledger::EventWatermark;
 

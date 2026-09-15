@@ -368,6 +368,9 @@ impl SourceBackedRefreshAttempt {
                     "refresh_failure_kind".to_owned(),
                     json!(diagnostic.kind.as_str()),
                 );
+                if let Some(reason) = diagnostic.reason {
+                    fields.insert("refresh_failure_reason".to_owned(), json!(reason.as_str()));
+                }
                 if let Some(reason) = diagnostic.coverage_reason {
                     fields.insert("refresh_coverage_reason".to_owned(), json!(reason.as_str()));
                 }
@@ -558,6 +561,7 @@ pub(super) fn projected_status_json(
             "refresh_failure_stage",
             "refresh_failure_kind",
             "refresh_coverage_reason",
+            "refresh_failure_reason",
             "automatic_retry",
         ] {
             fields.remove(field);

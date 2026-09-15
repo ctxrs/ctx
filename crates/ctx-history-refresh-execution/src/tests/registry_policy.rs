@@ -346,6 +346,9 @@ fn systemic_registration_failures_keep_exact_admission_route_authority() {
         let issue = SourceBackedAutomaticRegistryIssue::Unavailable {
             source,
             reason: SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+                diagnostic: Some(ctx_history_capture::SourceBackedRouteFailureDiagnostic::Io(
+                    std::io::ErrorKind::StorageFull,
+                )),
                 kind,
                 detail: "injected Shelley registration systemic failure".to_owned(),
             },
@@ -366,6 +369,12 @@ fn systemic_registration_failures_keep_exact_admission_route_authority() {
         assert_eq!(failures.failures().len(), 1);
         assert_eq!(failures.failures()[0].route_identity(), &expected_route);
         assert_eq!(failures.failures()[0].kind(), kind);
+        assert_eq!(
+            failures.failures()[0].diagnostic(),
+            Some(ctx_history_capture::SourceBackedRouteFailureDiagnostic::Io(
+                std::io::ErrorKind::StorageFull
+            ))
+        );
         assert!(failures.failures()[0]
             .detail()
             .contains("registration systemic failure"));
@@ -487,6 +496,7 @@ fn distinct_nanoclaw_registry_failures_match_retained_automatic_routes() {
     let issues = sources.map(|source| SourceBackedAutomaticRegistryIssue::Unavailable {
         source,
         reason: SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+            diagnostic: None,
             kind: SourceBackedRouteErrorKind::Unsupported,
             detail: "injected NanoClaw registration failure".to_owned(),
         },

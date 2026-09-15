@@ -1107,6 +1107,7 @@ fn detailed_progress_callback_failure_remains_systemic() {
         OpenCodeSourceBackedError::Route(SourceBackedRouteError {
             kind: SourceBackedRouteErrorKind::Unavailable,
             detail,
+            diagnostic: None,
         }) if detail.contains("injected OpenCode progress callback failure")
     ));
 }

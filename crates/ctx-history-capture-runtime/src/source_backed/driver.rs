@@ -1,6 +1,11 @@
+#[cfg(test)]
+mod diagnostic_tests;
+
+mod cleanup;
 mod ownership;
 mod route;
 
+pub use cleanup::combine_primary_and_cleanup_route_errors;
 pub use ownership::*;
 pub use route::*;
 
@@ -88,6 +93,15 @@ impl SourceBackedRouteErrorKind {
 pub struct SourceBackedRouteError {
     pub kind: SourceBackedRouteErrorKind,
     pub detail: String,
+    /// Content-free typed evidence only; never changes route policy.
+    pub diagnostic: Option<SourceBackedRouteFailureDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBackedRouteFailureDiagnostic {
+    Io(std::io::ErrorKind),
+    OutputLimit,
+    ScratchLimit,
 }
 
 impl SourceBackedRouteError {
@@ -95,28 +109,29 @@ impl SourceBackedRouteError {
         Self {
             kind,
             detail: detail.into(),
+            diagnostic: None,
         }
     }
-}
 
-/// Preserves both failures from an explicit source cleanup while retaining the
-/// stronger route-level failure class for coordinator policy.
-pub fn combine_primary_and_cleanup_route_errors(
-    primary: SourceBackedRouteError,
-    cleanup: SourceBackedRouteError,
-) -> SourceBackedRouteError {
-    let kind = if route_error_severity(primary.kind) >= route_error_severity(cleanup.kind) {
-        primary.kind
-    } else {
-        cleanup.kind
-    };
-    SourceBackedRouteError::new(
-        kind,
-        format!(
-            "{}; explicit SQLite snapshot cleanup also failed: {}",
-            primary.detail, cleanup.detail
-        ),
-    )
+    pub fn from_error(
+        kind: SourceBackedRouteErrorKind,
+        error: &(dyn std::error::Error + 'static),
+    ) -> Self {
+        let mut result = Self::new(kind, error.to_string());
+        let mut cause = Some(error);
+        while let Some(error) = cause {
+            if let Some(error) = error.downcast_ref::<Self>() {
+                result.diagnostic = error.diagnostic;
+                break;
+            }
+            if let Some(error) = error.downcast_ref::<std::io::Error>() {
+                result.diagnostic = Some(SourceBackedRouteFailureDiagnostic::Io(error.kind()));
+                break;
+            }
+            cause = error.source();
+        }
+        result
+    }
 }
 
 const fn route_error_severity(kind: SourceBackedRouteErrorKind) -> u8 {
@@ -132,10 +147,23 @@ const fn route_error_severity(kind: SourceBackedRouteErrorKind) -> u8 {
 
 impl From<CoreRouteResourceError> for SourceBackedRouteError {
     fn from(error: CoreRouteResourceError) -> Self {
-        Self::new(
+        let diagnostic = match error {
+            CoreRouteResourceError::Unavailable {
+                kind: crate::CoreRouteResourceKind::CoreOutput,
+                ..
+            } => Some(SourceBackedRouteFailureDiagnostic::OutputLimit),
+            CoreRouteResourceError::Unavailable {
+                kind: crate::CoreRouteResourceKind::LogicalSourceScratch,
+                ..
+            } => Some(SourceBackedRouteFailureDiagnostic::ScratchLimit),
+            CoreRouteResourceError::AccountingOverflow { .. } => None,
+        };
+        let mut result = Self::new(
             SourceBackedRouteErrorKind::ResourceUnavailable,
             error.to_string(),
-        )
+        );
+        result.diagnostic = diagnostic;
+        result
     }
 }
 

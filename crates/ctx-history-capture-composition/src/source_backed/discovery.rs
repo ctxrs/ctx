@@ -46,6 +46,7 @@ pub enum SourceBackedAutomaticUnavailableReason {
         detail: &'static str,
     },
     RegistrationRejected {
+        diagnostic: Option<ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic>,
         kind: SourceBackedRouteErrorKind,
         detail: String,
     },

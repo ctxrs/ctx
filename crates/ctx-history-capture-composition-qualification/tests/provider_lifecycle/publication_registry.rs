@@ -1415,6 +1415,7 @@ fn cross_route_duplicate_source_ownership_remains_rejected() {
             source: SourceBackedRouteError {
                 kind: SourceBackedRouteErrorKind::Internal,
                 detail,
+                diagnostic: None,
             },
             ..
         }) if detail.contains("staged by more than one provider route")

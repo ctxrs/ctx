@@ -10,9 +10,9 @@ pub(super) fn route_discovery<R: JsonlFamilyRuntime>(
     adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
     error: JsonlRuntimeError<R>,
 ) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(
+    SourceBackedRouteError::from_error(
         normalized_jsonl_error_kind(&error).unwrap_or_else(|| adapter.discovery_error_kind(&error)),
-        error.to_string(),
+        &error,
     )
 }
 
@@ -26,7 +26,7 @@ pub(super) fn route_scan<R: JsonlFamilyRuntime>(
         normalized_jsonl_error_kind(&error)
     }
     .unwrap_or_else(|| adapter.scan_error_kind(&error));
-    SourceBackedRouteError::new(kind, error.to_string())
+    SourceBackedRouteError::from_error(kind, &error)
 }
 
 pub(super) fn normalized_jsonl_error_kind<E: JsonlFamilyError>(

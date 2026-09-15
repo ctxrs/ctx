@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn provider_policy_severity_does_not_supply_a_missing_reason() {
+    // The route owner's cleanup-combination test exercises the actual merge.
+    // At this boundary its dominant class must not stand in for a known cause.
+    let error: anyhow::Error = SourceBackedCoordinatorError::RouteScan {
+        provider: CaptureProvider::Codex,
+        source: SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::ResourceUnavailable,
+            "primary unavailable; cleanup StorageFull /private/token",
+        ),
+    }
+    .into();
+    let diagnostic = RefreshFailureDiagnostic::new(RefreshFailureStage::Execution, Some(&error));
+    assert_eq!(diagnostic.kind, RefreshFailureKind::Provider);
+    assert_eq!(diagnostic.reason, None);
+}
+
+#[test]
 fn failure_diagnostic_uses_typed_causes_not_error_text() {
     let cases: Vec<(anyhow::Error, RefreshFailureKind)> = vec![
         (
@@ -59,6 +76,7 @@ fn failure_diagnostic_recovery_requires_a_complete_closed_pair() {
             stage: RefreshFailureStage::Admission,
             kind: RefreshFailureKind::Provider,
             coverage_reason: None,
+            reason: None,
         })
     );
     for value in [
@@ -69,6 +87,74 @@ fn failure_diagnostic_recovery_requires_a_complete_closed_pair() {
         json!({"refresh_failure_stage": "execution", "refresh_failure_kind": "private error"}),
     ] {
         assert!(RefreshFailureDiagnostic::from_job(&value).is_none());
+    }
+}
+
+#[test]
+fn io_evidence_survives_route_and_admission_wrappers_but_mixed_causes_do_not() {
+    use ctx_history_refresh_execution::SourceBackedAdmissionRouteFailure as Failure;
+    for kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::StorageFull,
+        std::io::ErrorKind::ReadOnlyFilesystem,
+        std::io::ErrorKind::OutOfMemory,
+        std::io::ErrorKind::TimedOut,
+    ] {
+        let route = SourceBackedRouteError::from_error(
+            SourceBackedRouteErrorKind::ResourceUnavailable,
+            &std::io::Error::new(kind, "/private/token"),
+        );
+        let error: anyhow::Error = SourceBackedCoordinatorError::RouteRegistration {
+            provider: CaptureProvider::Codex,
+            source: route.clone(),
+        }
+        .into();
+        assert_eq!(
+            RefreshFailureDiagnostic::new(RefreshFailureStage::Admission, Some(&error)).reason,
+            RefreshFailureReason::from_io(kind)
+        );
+        let failure = Failure::new(
+            SourceRouteIdentity::from_sha256("aa".repeat(32)).unwrap(),
+            route.kind,
+            route.detail,
+        )
+        .with_diagnostic(route.diagnostic);
+        let error: anyhow::Error =
+            SourceBackedAdmissionRouteFailures::try_from_failures([failure.clone()])
+                .unwrap()
+                .into();
+        assert_eq!(
+            RefreshFailureDiagnostic::new(RefreshFailureStage::Admission, Some(&error)).reason,
+            RefreshFailureReason::from_io(kind)
+        );
+        let unknown = Failure::new(
+            SourceRouteIdentity::from_sha256("bb".repeat(32)).unwrap(),
+            failure.kind(),
+            "io_storage_full",
+        );
+        let error: anyhow::Error =
+            SourceBackedAdmissionRouteFailures::try_from_failures([failure, unknown])
+                .unwrap()
+                .into();
+        assert!(
+            RefreshFailureDiagnostic::new(RefreshFailureStage::Admission, Some(&error))
+                .reason
+                .is_none()
+        );
+    }
+    for text in [
+        "io_storage_full",
+        "index_writer_invariant",
+        "route_output_limit",
+        "/private/token",
+    ] {
+        let error = anyhow!(text);
+        assert!(
+            RefreshFailureDiagnostic::new(RefreshFailureStage::Execution, Some(&error))
+                .reason
+                .is_none()
+        );
     }
 }
 

@@ -26,6 +26,73 @@ fn event() -> ProviderRefreshCompletedV1 {
     )))
 }
 
+#[test]
+fn failure_reason_wire_matrix_is_closed_and_contextual() {
+    for reason in [
+        ProviderRefreshFailureReason::IoNotFound,
+        ProviderRefreshFailureReason::IoPermissionDenied,
+        ProviderRefreshFailureReason::IoStorageFull,
+        ProviderRefreshFailureReason::IoReadOnlyFilesystem,
+        ProviderRefreshFailureReason::IoOutOfMemory,
+        ProviderRefreshFailureReason::IoTimedOut,
+        ProviderRefreshFailureReason::RouteOutputLimit,
+        ProviderRefreshFailureReason::RouteScratchLimit,
+        ProviderRefreshFailureReason::IndexMemoryLimit,
+        ProviderRefreshFailureReason::IndexScratchLimit,
+        ProviderRefreshFailureReason::IndexWriterInvariant,
+    ] {
+        for kind in [
+            ProviderRefreshFailureKind::Io,
+            ProviderRefreshFailureKind::Index,
+            ProviderRefreshFailureKind::Provider,
+            ProviderRefreshFailureKind::Unknown,
+        ] {
+            for invalid in ["none", "success", "partial", "cli", "mcp", "legacy", "pair"] {
+                let mut event = event().with_failure_reason(Some(reason));
+                event.failure_diagnostic = Some((ProviderRefreshFailureStage::Execution, kind));
+                match invalid {
+                    "success" => event.outcome = Outcome::Success,
+                    "partial" => {
+                        event.foreground.as_mut().unwrap().refresh_result =
+                            ProviderRefreshResult::Partial
+                    }
+                    "cli" => event.surface = Surface::Cli,
+                    "mcp" => event.surface = Surface::Mcp,
+                    "legacy" => event.foreground = None,
+                    "pair" => event.failure_diagnostic = None,
+                    _ => {}
+                }
+                let wire = properties(event);
+                assert_eq!(
+                    wire.get("refresh_failure_reason")
+                        .and_then(serde_json::Value::as_str),
+                    (invalid == "none" && reason.permits(kind)).then_some(reason.as_str())
+                );
+            }
+        }
+    }
+    for text in ["future", "/private/token", "permission denied", ""] {
+        assert!(ProviderRefreshFailureReason::parse(text).is_none());
+    }
+}
+
+#[test]
+fn failed_refresh_reason_matches_the_public_fixture() {
+    let mut diagnosed =
+        event().with_failure_reason(Some(ProviderRefreshFailureReason::IndexWriterInvariant));
+    diagnosed.foreground.as_mut().unwrap().failure_code =
+        ProviderRefreshFailureCode::SourceRefreshFailed;
+    diagnosed.failure_diagnostic = Some((
+        ProviderRefreshFailureStage::Execution,
+        ProviderRefreshFailureKind::Index,
+    ));
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../../contracts/telemetry-v1/fixtures/provider_refresh_reason.valid.json"
+    ))
+    .unwrap();
+    assert_eq!(properties(diagnosed), fixture["properties"]);
+}
+
 fn properties(event: ProviderRefreshCompletedV1) -> serde_json::Value {
     let at = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:34:00Z")
         .unwrap()

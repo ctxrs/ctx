@@ -167,6 +167,7 @@ pub struct SourceBackedAdmissionRouteFailure {
     route_identity: SourceRouteIdentity,
     kind: SourceBackedRouteErrorKind,
     detail: String,
+    diagnostic: Option<ctx_history_capture::SourceBackedRouteFailureDiagnostic>,
 }
 
 impl SourceBackedAdmissionRouteFailure {
@@ -180,7 +181,20 @@ impl SourceBackedAdmissionRouteFailure {
             route_identity,
             kind,
             detail: detail.into(),
+            diagnostic: None,
         }
+    }
+
+    pub fn with_diagnostic(
+        mut self,
+        diagnostic: Option<ctx_history_capture::SourceBackedRouteFailureDiagnostic>,
+    ) -> Self {
+        self.diagnostic = diagnostic;
+        self
+    }
+
+    pub fn diagnostic(&self) -> Option<ctx_history_capture::SourceBackedRouteFailureDiagnostic> {
+        self.diagnostic
     }
 
     pub fn route_identity(&self) -> &SourceRouteIdentity {
