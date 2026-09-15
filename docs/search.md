@@ -116,9 +116,14 @@ Search filters narrow text and JSON output:
 - `--include-current-session`.
 
 `--since` accepts RFC 3339 timestamps or a day window such as `30d`.
-`--file` searches structured file-path metadata captured from provider records;
-it does not inspect the current filesystem or match every filename mentioned
-in patch or command text. Zero file-filtered results do not prove that no
+`--file` searches file-path metadata captured from provider records. For Codex,
+this includes literal filenames declared in complete `apply_patch` blocks in
+tool inputs: added, updated, deleted, and both old and new names for moved files.
+These are file references, not proof that a patch succeeded. Stored programs
+are not executed, and computed filenames are not resolved.
+
+The filter does not inspect the current filesystem or match every filename
+mentioned in ordinary text. Zero file-filtered results do not prove that no
 history mentions the file. To search those mentions, use the filename as a
 normal query without `--file`, for example `ctx search "example.rs" --backend lexical`.
 

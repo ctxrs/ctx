@@ -37,7 +37,7 @@ pub(crate) struct RawJsonAudit {
     duplicate_selectors: u16,
     facts: Vec<ProviderDeclaredFact>,
     facts_available: bool,
-    decoded_argument_facts: Option<std::ops::Range<usize>>,
+    optional_argument_facts: Vec<std::ops::Range<usize>>,
 }
 
 impl RawJsonAudit {
@@ -57,8 +57,8 @@ impl RawJsonAudit {
         }
     }
 
-    pub(crate) fn decoded_argument_facts(&self) -> Option<std::ops::Range<usize>> {
-        self.decoded_argument_facts.clone()
+    pub(crate) fn optional_argument_facts(&self) -> Vec<std::ops::Range<usize>> {
+        self.optional_argument_facts.clone()
     }
 
     fn mark_duplicate(&mut self, group: SelectorGroup) {
@@ -68,7 +68,7 @@ impl RawJsonAudit {
     fn mark_facts_unavailable(&mut self) {
         self.facts_available = false;
         self.facts.clear();
-        self.decoded_argument_facts = None;
+        self.optional_argument_facts.clear();
     }
 
     fn push_fact(&mut self, kind: LiteralFactKind, value: &str) {
@@ -91,12 +91,28 @@ pub(crate) fn audit_json(
     selector_group: fn(&str) -> Option<SelectorGroup>,
     fact_kind: fn(&str) -> Option<LiteralFactKind>,
 ) -> serde_json::Result<RawJsonAudit> {
-    audit_json_value(
+    let mut audit = audit_json_value(
         bytes,
         selector_group,
         fact_kind,
         native_argument_path(bytes),
-    )
+    )?;
+    if audit.facts_available && !audit.any_selector_ambiguous() {
+        let paths = super::patch_literals::declared_files(bytes);
+        let start = audit.facts.len();
+        // Patch declarations are optional additions. Their absence or size
+        // must never remove pre-existing literal facts or retained content.
+        if !paths.is_empty() && paths.len() <= MAX_PROVIDER_DECLARED_FACTS - start {
+            audit
+                .facts
+                .extend(paths.into_iter().map(|value| ProviderDeclaredFact {
+                    kind: LiteralFactKind::File,
+                    value,
+                }));
+            audit.optional_argument_facts.push(start..audit.facts.len());
+        }
+    }
+    Ok(audit)
 }
 
 // RawValue preserves duplicate keys for the literal audit. Derive rejects
@@ -434,7 +450,10 @@ impl<'de> Visitor<'de> for AuditVisitor<'_> {
                         self.0.audit.push_fact(fact.kind, &fact.value);
                     }
                     if self.0.audit.facts_available && start < self.0.audit.facts.len() {
-                        self.0.audit.decoded_argument_facts = Some(start..self.0.audit.facts.len());
+                        self.0
+                            .audit
+                            .optional_argument_facts
+                            .push(start..self.0.audit.facts.len());
                     }
                 }
             }

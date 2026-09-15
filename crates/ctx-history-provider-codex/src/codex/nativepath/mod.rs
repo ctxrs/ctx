@@ -1,6 +1,7 @@
 //! Provider-owned Codex source discovery, parsing, and direct Core indexing.
 
 mod checkpoint;
+mod patch_literals;
 pub mod prompt_history;
 mod raw_json;
 mod reader;
