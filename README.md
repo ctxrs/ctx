@@ -36,6 +36,24 @@ or prompt your agent:
 Please install and set up ctx CLI (see github.com/ctxrs/ctx)
 ```
 
+### Building from source
+
+Use the [source-build instructions](docs/unmanaged-installs.md#source-builds)
+for the repository's Bazel build command and prerequisites. Native dependencies
+also need C/C++ build tools: `rusqlite` compiles bundled SQLite to read
+SQLite-based agent histories.
+
+For native Windows builds using MSVC, ensure your Visual Studio installation
+includes **Desktop development with C++**, the MSVC x64/x86 tools, and a Windows
+SDK. If these are not already installed, use the standalone
+[Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+Installing Rust alone does not provide these tools; installing a prebuilt ctx
+release does not require them.
+
+Run the repository's shell scripts from Bash. See
+[Bazel's Windows setup guide](https://bazel.build/install/windows)
+for MSYS2 setup and troubleshooting if Bazel cannot find Bash or Visual C++.
+
 ## 50x more token-efficient than raw transcript search
 
 By structuring agent history into sessions, events, metadata, and indexed fields, then returning ranked cited matches, agents can access meaningful history with far fewer tokens than raw search. Results vary by query and corpus, but raw search is often so token-heavy that it can be effectively the same as not having usable history.
