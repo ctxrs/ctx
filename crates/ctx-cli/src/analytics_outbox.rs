@@ -8,8 +8,7 @@ use std::{
 
 use anyhow::{bail, Context as _, Result};
 use ctx_client_observability::analytics::{
-    AnalyticsDeliveryFailureClass, AnalyticsDeliveryFailureReason, AnalyticsDeliveryObservationV1,
-    CountBucket,
+    AnalyticsDeliveryFailureClass, AnalyticsDeliveryObservationV1, CountBucket,
 };
 use ctx_history_core::utc_now;
 use ctx_history_platform::platform_security::{restrict_private_file_handle, verify_private_file};
@@ -20,6 +19,7 @@ use sha2::{Digest as _, Sha256};
 
 mod private_file;
 mod reason_metadata;
+use ctx_client_observability::analytics::AnalyticsDeliveryFailureReason;
 use private_file::{sync_parent, write_private_file_durably, write_private_file_via};
 
 const OUTBOX_SCHEMA_VERSION: u16 = 3;
@@ -630,10 +630,12 @@ impl AnalyticsOutbox {
         root.retry_attempts = root
             .retry_attempts
             .saturating_sub(observation.retry_attempts);
+        root.last_failure_reason = root
+            .last_failure_reason
+            .filter(|_| root.failure_sequence != observation.failure_sequence);
         root.dropped = root.dropped.saturating_sub(observation.dropped);
         if root.failure_sequence == observation.failure_sequence {
             root.last_failure_class = None;
-            root.last_failure_reason = None;
             // A partial recovery still owes a zero-queue report when the rest drains.
             root.observation_due = observation.event.queued != CountBucket::Zero;
         } else {
