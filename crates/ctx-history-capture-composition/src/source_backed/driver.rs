@@ -1,3 +1,5 @@
+pub use ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic;
+
 mod parallel;
 mod receipts;
 

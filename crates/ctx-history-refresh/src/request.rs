@@ -49,6 +49,35 @@ string_enum!(RefreshFailureKind, "diagnostic kind", {
     Unknown => "unknown",
 });
 
+string_enum!(RefreshFailureReason, "diagnostic reason", {
+    IoNotFound => "io_not_found",
+    IoPermissionDenied => "io_permission_denied",
+    IoStorageFull => "io_storage_full",
+    IoReadOnlyFilesystem => "io_read_only_filesystem",
+    IoOutOfMemory => "io_out_of_memory",
+    IoTimedOut => "io_timed_out",
+    RouteOutputLimit => "route_output_limit",
+    RouteScratchLimit => "route_scratch_limit",
+    IndexMemoryLimit => "index_memory_limit",
+    IndexScratchLimit => "index_scratch_limit",
+    IndexWriterInvariant => "index_writer_invariant",
+});
+
+impl RefreshFailureReason {
+    pub(crate) fn from_io(kind: std::io::ErrorKind) -> Option<Self> {
+        use std::io::ErrorKind;
+        Some(match kind {
+            ErrorKind::NotFound => Self::IoNotFound,
+            ErrorKind::PermissionDenied => Self::IoPermissionDenied,
+            ErrorKind::StorageFull => Self::IoStorageFull,
+            ErrorKind::ReadOnlyFilesystem => Self::IoReadOnlyFilesystem,
+            ErrorKind::OutOfMemory => Self::IoOutOfMemory,
+            ErrorKind::TimedOut => Self::IoTimedOut,
+            _ => return None,
+        })
+    }
+}
+
 string_enum!(RefreshOutcomeCode, "code", {
     Completed => "completed",
     CompletedWithRejections => "completed_with_rejections",

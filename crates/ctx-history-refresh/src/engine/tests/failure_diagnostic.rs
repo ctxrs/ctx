@@ -141,6 +141,114 @@ fn failure_diagnostic_survives_terminal_retry_and_restart() {
     }
 }
 
+#[test]
+fn typed_failure_reasons_survive_terminal_retry_and_restart() {
+    use ctx_history_capture::SourceBackedRouteFailureDiagnostic as RouteDiagnostic;
+    use std::io::ErrorKind;
+    let mut cases: Vec<(anyhow::Error, &str)> = [
+        (ErrorKind::NotFound, "io_not_found"),
+        (ErrorKind::PermissionDenied, "io_permission_denied"),
+        (ErrorKind::StorageFull, "io_storage_full"),
+        (ErrorKind::ReadOnlyFilesystem, "io_read_only_filesystem"),
+        (ErrorKind::OutOfMemory, "io_out_of_memory"),
+        (ErrorKind::TimedOut, "io_timed_out"),
+    ]
+    .into_iter()
+    .map(|(kind, reason)| (std::io::Error::new(kind, "/private/token").into(), reason))
+    .collect();
+    cases.extend([
+        (
+            SourceBackedCoordinatorError::Index(IndexError::IndexMemoryTooSmall {
+                actual: 1,
+                minimum: 2,
+            })
+            .into(),
+            "index_memory_limit",
+        ),
+        (
+            SourceBackedCoordinatorError::Index(IndexError::VerificationScratchLimitExceeded {
+                required_bytes: 2,
+                maximum_bytes: 1,
+            })
+            .into(),
+            "index_scratch_limit",
+        ),
+        (
+            SourceBackedCoordinatorError::Index(IndexError::WriterInvariant("/private/token"))
+                .into(),
+            "index_writer_invariant",
+        ),
+    ]);
+    for (diagnostic, reason) in [
+        (RouteDiagnostic::OutputLimit, "route_output_limit"),
+        (RouteDiagnostic::ScratchLimit, "route_scratch_limit"),
+    ] {
+        let mut route = SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::ResourceUnavailable,
+            "/private/token",
+        );
+        route.diagnostic = Some(diagnostic);
+        cases.push((
+            SourceBackedCoordinatorError::CoreEmission(route).into(),
+            reason,
+        ));
+    }
+    for (error, reason) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = CoreRefreshEngine::new();
+        let request_id = request_id(&engine.enqueue(None));
+        let first = engine
+            .run_next_with(
+                |_, _| Err(error),
+                || Ok(None),
+                |_| Err(anyhow!("terminal persistence unavailable")),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(first.failed && first.terminal_persistence_pending);
+        assert_eq!(first.job["refresh_failure_reason"], reason);
+        assert!(engine
+            .status(&request_id)
+            .unwrap()
+            .get("refresh_failure_reason")
+            .is_none());
+        let retry = engine
+            .run_next_with(
+                |_, _| panic!("must not recapture"),
+                || panic!("must not reopen"),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(!retry.terminal_persistence_pending);
+        assert_eq!(retry.job["refresh_failure_reason"], reason);
+        write_daemon_job_status(
+            &daemon_source_backed_refresh_job_path(temp.path()),
+            &retry.job,
+        )
+        .unwrap();
+        let recovered = CoreRefreshEngine::new();
+        assert!(!recovered.recover(temp.path()).unwrap());
+        let status = recovered.status(&request_id).unwrap();
+        assert_eq!(status["refresh_failure_reason"], reason);
+        assert_eq!(
+            status["structured_outcome"],
+            retry.job["structured_outcome"]
+        );
+        let mut future = retry.job.clone();
+        future["refresh_failure_reason"] = json!("/private/token");
+        write_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path()), &future)
+            .unwrap();
+        let recovered = CoreRefreshEngine::new();
+        recovered.recover(temp.path()).unwrap();
+        assert!(recovered
+            .status(&request_id)
+            .unwrap()
+            .get("refresh_failure_reason")
+            .is_none());
+    }
+}
+
 fn diagnostic_pair(job: &Value) -> Value {
     json!([
         job.get("refresh_failure_stage"),

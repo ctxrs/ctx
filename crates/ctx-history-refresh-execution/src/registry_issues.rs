@@ -176,8 +176,11 @@ pub(super) fn automatic_registry_admission_failures(
             let SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } = issue else {
                 return None;
             };
-            let SourceBackedAutomaticUnavailableReason::RegistrationRejected { kind, detail } =
-                reason
+            let SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+                kind,
+                detail,
+                diagnostic,
+            } = reason
             else {
                 return None;
             };
@@ -194,9 +197,9 @@ pub(super) fn automatic_registry_admission_failures(
             ) {
                 return None;
             }
-            Some((source, *kind, detail))
+            Some((source, *kind, detail, *diagnostic))
         })
-        .filter_map(|(source, kind, detail)| {
+        .filter_map(|(source, kind, detail, diagnostic)| {
             let route_identity = match automatic_registry_issue_route_identity(source) {
                 Ok(route_identity) => route_identity,
                 Err(error) => return Some(Err(error)),
@@ -212,7 +215,8 @@ pub(super) fn automatic_registry_admission_failures(
                 route_identity,
                 kind,
                 detail.clone(),
-            )))
+            )
+            .with_diagnostic(diagnostic)))
         })
         .collect::<Result<Vec<_>>>()?;
     if failures.is_empty() {

@@ -65,10 +65,52 @@ pub(super) fn source_failure_class(
     }
 }
 
+pub(super) fn failure_reason(
+    job: &Value,
+) -> Option<ctx_client_observability::analytics::ProviderRefreshFailureReason> {
+    let (_, kind) = refresh_failure_diagnostic(job)?;
+    let reason = ctx_client_observability::analytics::ProviderRefreshFailureReason::parse(
+        job.get("refresh_failure_reason")?.as_str()?,
+    )?;
+    reason.permits(kind).then_some(reason)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reason_projection_requires_closed_kind_and_ignores_local_text() {
+        for (reason, kind) in [
+            ("io_not_found", "io"),
+            ("io_permission_denied", "io"),
+            ("io_storage_full", "io"),
+            ("io_read_only_filesystem", "io"),
+            ("io_out_of_memory", "io"),
+            ("io_timed_out", "io"),
+            ("route_output_limit", "provider"),
+            ("route_scratch_limit", "provider"),
+            ("index_memory_limit", "index"),
+            ("index_scratch_limit", "index"),
+            ("index_writer_invariant", "index"),
+        ] {
+            let mut job = json!({"refresh_failure_stage": "admission", "refresh_failure_kind": kind, "refresh_failure_reason": reason, "last_error": "/private/token"});
+            assert_eq!(failure_reason(&job).unwrap().as_str(), reason);
+            job["refresh_failure_kind"] = json!("unknown");
+            assert!(failure_reason(&job).is_none());
+            job["refresh_failure_kind"] = json!(kind);
+            for value in [
+                json!(null),
+                json!("future"),
+                json!("/private/token"),
+                json!(12),
+            ] {
+                job["refresh_failure_reason"] = value;
+                assert!(failure_reason(&job).is_none());
+            }
+        }
+    }
 
     #[test]
     fn coverage_projection_requires_the_exact_closed_context() {

@@ -346,7 +346,12 @@ fn retryable_admission_failure_schedules_exact_route_without_restart() {
                     failed_route.clone(),
                     SourceBackedRouteErrorKind::ResourceUnavailable,
                     "Shelley registration exhausted a bounded resource",
-                ),
+                )
+                .with_diagnostic(Some(
+                    ctx_history_capture::SourceBackedRouteFailureDiagnostic::Io(
+                        std::io::ErrorKind::StorageFull,
+                    ),
+                )),
             ])
             .unwrap()
             .into())
@@ -361,6 +366,8 @@ fn retryable_admission_failure_schedules_exact_route_without_restart() {
     let run = coordinator.run_next(&data_root).expect("admission failure");
 
     assert!(run.failed, "{:#}", run.job);
+    assert_eq!(run.job["refresh_failure_reason"], "io_storage_full");
+    assert_eq!(run.job["refresh_failure_stage"], "admission");
     assert_eq!(run.job["error_code"], "resource_unavailable");
     assert_eq!(run.job["reason"], "resource_unavailable");
     assert_eq!(run.job["structured_outcome"]["retryable"], true);

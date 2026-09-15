@@ -1,7 +1,9 @@
 use super::*;
 
+mod diagnostics;
 mod fx;
 mod platform_roots;
+use diagnostics::{automatic_registration_rejected, warp_discovery_unavailable_detail};
 use fx::register_configured_fx_route;
 pub(super) use platform_roots::goose_platform_root;
 
@@ -552,6 +554,7 @@ pub(super) fn build_automatic_source_backed_registry_from_parts_with_probes(
                     issues.push(SourceBackedAutomaticRegistryIssue::Unavailable {
                         source,
                         reason: SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+                            diagnostic: None,
                             kind: SourceBackedRouteErrorKind::Internal,
                             detail: error.to_string(),
                         },
@@ -568,6 +571,7 @@ pub(super) fn build_automatic_source_backed_registry_from_parts_with_probes(
                 issues.push(SourceBackedAutomaticRegistryIssue::Unavailable {
                     source,
                     reason: SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+                        diagnostic: None,
                         kind: SourceBackedRouteErrorKind::Internal,
                         detail: error.to_string(),
                     },
@@ -664,6 +668,7 @@ fn register_discovered_automatic_route(
     if scoped.routes.len() != 1 {
         return Err(
             SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+                diagnostic: None,
                 kind: SourceBackedRouteErrorKind::Internal,
                 detail: format!(
                     "{} automatic coexistence registration produced {} routes instead of one",
@@ -760,6 +765,7 @@ fn register_discovered_automatic_route_scoped(
                     }
                     ctx_history_providers_sqlite_inventory::registration::LingmaRegistrationError::RegistrationRejected(detail) => {
                         SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+        diagnostic: None,
                             kind: SourceBackedRouteErrorKind::Unsupported,
                             detail,
                         }
@@ -866,49 +872,6 @@ fn register_discovered_automatic_route_scoped(
     result.map_err(automatic_registration_rejected)
 }
 
-fn automatic_registration_rejected(
-    error: SourceBackedCoordinatorError,
-) -> SourceBackedAutomaticUnavailableReason {
-    let kind = match &error {
-        SourceBackedCoordinatorError::RouteScan { source, .. }
-        | SourceBackedCoordinatorError::RouteRegistration { source, .. }
-        | SourceBackedCoordinatorError::Progress(source)
-        | SourceBackedCoordinatorError::CoreEmission(source) => source.kind,
-        SourceBackedCoordinatorError::UnavailableRoute { .. } => {
-            SourceBackedRouteErrorKind::Unavailable
-        }
-        SourceBackedCoordinatorError::InvalidRoute { .. }
-        | SourceBackedCoordinatorError::InvalidRefreshScope { .. } => {
-            SourceBackedRouteErrorKind::Unsupported
-        }
-        _ => SourceBackedRouteErrorKind::Internal,
-    };
-    SourceBackedAutomaticUnavailableReason::RegistrationRejected {
-        kind,
-        detail: error.to_string(),
-    }
-}
-
-const fn warp_discovery_unavailable_detail(error: WarpDiscoveryUnavailable) -> &'static str {
-    match error {
-        WarpDiscoveryUnavailable::UnsupportedPlatform { .. } => {
-            "Warp installed-surface authority is unavailable on this platform"
-        }
-        WarpDiscoveryUnavailable::WindowsLocalDataRootUnavailable => {
-            "Warp installed-surface authority has no Windows local-data root"
-        }
-        WarpDiscoveryUnavailable::ProviderSpecUnavailable => {
-            "Warp provider discovery specification is unavailable"
-        }
-        WarpDiscoveryUnavailable::SourceCandidateRejected { .. } => {
-            "Warp installed-surface discovery rejected the selected source within fixed bounds"
-        }
-        WarpDiscoveryUnavailable::SourceNotSelected => {
-            "Warp source is absent from authoritative installed-surface discovery"
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct DiscoveredCrushInventorySource {
     selector: CrushProjectInventorySelector,
@@ -961,6 +924,7 @@ fn discovered_crush_inventory_source(
     }
     crush_adapter_inventory(opening).map_err(|error| {
         SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+            diagnostic: None,
             kind: SourceBackedRouteErrorKind::Unsupported,
             detail: error.to_string(),
         }

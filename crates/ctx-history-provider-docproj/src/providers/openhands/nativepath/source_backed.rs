@@ -366,6 +366,32 @@ pub(crate) fn openhands_owns_source(source: &SourceKey) -> bool {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn openhands_route_keeps_only_typed_io_evidence() {
+    for kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::StorageFull,
+        std::io::ErrorKind::ReadOnlyFilesystem,
+        std::io::ErrorKind::OutOfMemory,
+        std::io::ErrorKind::TimedOut,
+    ] {
+        let route = openhands_route_error(OpenHandsSourceBackedErrorV2::Capture(CaptureError::Io(
+            std::io::Error::new(kind, "/private/token"),
+        )));
+        assert_eq!(route.kind, SourceBackedRouteErrorKind::InvalidSource);
+        assert_eq!(
+            route.diagnostic,
+            Some(ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic::Io(kind))
+        );
+    }
+    let route = openhands_route_error(OpenHandsSourceBackedErrorV2::Capture(
+        CaptureError::InvalidPayload("io_storage_full".into()),
+    ));
+    assert!(route.diagnostic.is_none());
+}
+
 pub(crate) fn openhands_route_error(error: OpenHandsSourceBackedErrorV2) -> SourceBackedRouteError {
     let kind = match &error {
         OpenHandsSourceBackedErrorV2::EventFiles(EventFileInventoryError::Unavailable {
@@ -379,7 +405,7 @@ pub(crate) fn openhands_route_error(error: OpenHandsSourceBackedErrorV2) -> Sour
         }
         _ => SourceBackedRouteErrorKind::InvalidSource,
     };
-    SourceBackedRouteError::new(kind, error.to_string())
+    SourceBackedRouteError::from_error(kind, &error)
 }
 
 fn classify_openhands_event(

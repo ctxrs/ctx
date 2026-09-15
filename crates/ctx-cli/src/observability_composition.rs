@@ -174,11 +174,13 @@ pub(crate) fn drain_analytics_outbox(data_root: &Path, timeout: Duration) -> any
             Err(error) if error.retryable() => {
                 crate::analytics_outbox::DeliveryDisposition::Retry {
                     class: error.class(),
+                    reason: error.reason(),
                     retry_after: error.retry_after(),
                 }
             }
             Err(error) => crate::analytics_outbox::DeliveryDisposition::Permanent {
                 class: error.class(),
+                reason: error.reason(),
             },
         };
         let retry_later = matches!(

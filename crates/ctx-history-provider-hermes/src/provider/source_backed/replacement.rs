@@ -752,9 +752,16 @@ pub(super) fn hermes_route_error(error: HermesSourceBackedError) -> SourceBacked
         {
             SourceBackedRouteErrorKind::ResourceUnavailable
         }
-        _ => return default_route_error(error),
+        _ => {
+            let diagnostic =
+                SourceBackedRouteError::from_error(SourceBackedRouteErrorKind::Internal, &error)
+                    .diagnostic;
+            let mut result = default_route_error(error);
+            result.diagnostic = diagnostic;
+            return result;
+        }
     };
-    SourceBackedRouteError::new(kind, error.to_string())
+    SourceBackedRouteError::from_error(kind, &error)
 }
 
 pub(super) fn hermes_sqlite_route_error(error: SqliteSourceAccessError) -> SourceBackedRouteError {
@@ -836,6 +843,30 @@ mod route_tests {
     use super::*;
     use crate::provider_sources::SqliteRetryDecision;
     use rusqlite::ffi;
+
+    #[test]
+    fn hermes_keeps_io_kind_before_display_erases_the_typed_cause() {
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::StorageFull,
+            std::io::ErrorKind::ReadOnlyFilesystem,
+            std::io::ErrorKind::OutOfMemory,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let route = hermes_route_error(HermesSourceBackedError::Capture(CaptureError::Io(
+                std::io::Error::new(kind, "/private/token"),
+            )));
+            assert_eq!(
+                route.diagnostic,
+                Some(ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic::Io(kind))
+            );
+        }
+        let route = hermes_route_error(HermesSourceBackedError::Capture(
+            CaptureError::InvalidPayload("io_storage_full".into()),
+        ));
+        assert!(route.diagnostic.is_none());
+    }
 
     #[test]
     fn successful_overdue_exact_check_advances_the_next_deadline() {

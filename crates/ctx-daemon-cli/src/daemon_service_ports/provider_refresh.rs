@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 mod diagnostics;
-use diagnostics::{coverage_reason, source_failure_class};
+use diagnostics::{coverage_reason, failure_reason, source_failure_class};
 
 use ctx_history_core::CaptureProvider;
 use ctx_history_refresh::{
@@ -137,7 +137,8 @@ fn failed_provider_refresh_event(
             Some(retained_previous_generation),
         ))
         .with_failure_diagnostic(refresh_failure_diagnostic(job))
-        .with_coverage_reason(coverage_reason(job, outcome.code())),
+        .with_coverage_reason(coverage_reason(job, outcome.code()))
+        .with_failure_reason(failure_reason(job)),
     ))
 }
 

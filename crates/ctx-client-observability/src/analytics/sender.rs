@@ -130,7 +130,7 @@ fn serialize_delivery_observation(
     observation: AnalyticsDeliveryObservationV1,
     occurred_at: chrono::DateTime<chrono::Utc>,
 ) -> Value {
-    json!({
+    let mut value = json!({
         "event_id": Uuid::new_v4().to_string(),
         "event_name": "analytics_delivery_observation",
         "event_version": 1,
@@ -146,7 +146,14 @@ fn serialize_delivery_observation(
             "oldest_queued_age_bucket": observation.oldest_queued_age.as_str(),
             "failure_class": observation.failure_class.as_str(),
         },
-    })
+    });
+    if let Some(reason) = observation
+        .failure_reason
+        .filter(|reason| reason.permits(observation.failure_class))
+    {
+        value["properties"]["delivery_failure_reason"] = json!(reason.as_str());
+    }
+    value
 }
 
 pub(super) fn serialize_event(
@@ -192,6 +199,15 @@ pub(super) fn serialize_event(
                 if let Some((stage, kind)) = event.failure_diagnostic {
                     properties.insert("refresh_failure_stage".to_owned(), json!(stage.as_str()));
                     properties.insert("refresh_failure_kind".to_owned(), json!(kind.as_str()));
+                    if let Some(reason) = event.failure_reason.filter(|reason| {
+                        reason.permits(kind)
+                            && event.foreground.is_some_and(|facts| {
+                                facts.refresh_result == ProviderRefreshResult::Failure
+                            })
+                    }) {
+                        properties
+                            .insert("refresh_failure_reason".to_owned(), json!(reason.as_str()));
+                    }
                     if kind == ProviderRefreshFailureKind::Provider
                         && event.foreground.is_some_and(|facts| facts.failure_code == ProviderRefreshFailureCode::AllProviderTerminalCoverageUnavailable)
                     {
@@ -837,117 +853,4 @@ fn insert_optional_provider(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn numbered_events(count: usize) -> Vec<Value> {
-        (0..count).map(|index| json!({ "index": index })).collect()
-    }
-
-    #[test]
-    fn delivery_observation_is_closed_bucketed_and_content_free() {
-        let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:34:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let event = serialize_delivery_observation(
-            AnalyticsDeliveryObservationV1::new(
-                3,
-                4,
-                1,
-                std::time::Duration::from_secs(7 * 60),
-                AnalyticsDeliveryFailureClass::Transport,
-            ),
-            occurred_at,
-        );
-        let mut expected: Value = serde_json::from_str(include_str!(
-            "../../../../contracts/telemetry-v1/fixtures/analytics_delivery_observation.valid.json"
-        ))
-        .unwrap();
-        expected["event_id"] = event["event_id"].clone();
-
-        assert_eq!(event, expected);
-        let encoded = event.to_string();
-        for forbidden in ["endpoint", "response", "error_message", "path", "command"] {
-            assert!(!encoded.contains(forbidden));
-        }
-    }
-
-    #[test]
-    fn outbound_payloads_never_exceed_fifty_events_and_preserve_order() {
-        for (event_count, expected_chunk_sizes) in [
-            (1, vec![1]),
-            (49, vec![49]),
-            (50, vec![50]),
-            (51, vec![50, 1]),
-            (100, vec![50, 50]),
-            (101, vec![50, 50, 1]),
-            (123, vec![50, 50, 23]),
-        ] {
-            let events = numbered_events(event_count);
-            let mut payloads = Vec::new();
-
-            post_event_chunks(
-                &events,
-                false,
-                |chunk| {
-                    let body = serialize_batch_body("1.0.0", "client", "root", chunk)?;
-                    payloads.push(serde_json::from_slice::<Value>(&body)?);
-                    Ok(())
-                },
-                || panic!("a batch without a capability snapshot must not acknowledge one"),
-            )
-            .unwrap();
-
-            assert_eq!(
-                payloads
-                    .iter()
-                    .map(|payload| payload["events"].as_array().unwrap().len())
-                    .collect::<Vec<_>>(),
-                expected_chunk_sizes
-            );
-            assert!(payloads.iter().all(|payload| {
-                payload["events"].as_array().unwrap().len() <= MAX_EVENTS_PER_REQUEST
-            }));
-            assert_eq!(
-                payloads
-                    .iter()
-                    .flat_map(|payload| payload["events"].as_array().unwrap())
-                    .map(|event| event["index"].as_u64().unwrap())
-                    .collect::<Vec<_>>(),
-                (0..event_count as u64).collect::<Vec<_>>()
-            );
-        }
-    }
-
-    #[test]
-    fn capability_ack_tracks_the_snapshot_bearing_chunk_not_later_chunks() {
-        for (failure_on_post, expected_posts, expected_acks, should_succeed) in [
-            (Some(1), 1, 0, false),
-            (Some(2), 2, 1, false),
-            (None, 3, 1, true),
-        ] {
-            let events = numbered_events(101);
-            let mut posts = 0;
-            let mut acknowledgements = 0;
-            let result = post_event_chunks(
-                &events,
-                true,
-                |_chunk| {
-                    posts += 1;
-                    if failure_on_post == Some(posts) {
-                        return Err(anyhow::anyhow!("injected post failure"));
-                    }
-                    Ok(())
-                },
-                || {
-                    acknowledgements += 1;
-                    Ok(())
-                },
-            );
-
-            assert_eq!(result.is_ok(), should_succeed);
-            assert_eq!(posts, expected_posts);
-            assert_eq!(acknowledgements, expected_acks);
-        }
-    }
-}
+mod tests;

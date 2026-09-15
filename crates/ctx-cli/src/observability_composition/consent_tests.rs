@@ -336,6 +336,7 @@ fn recovery_queueing_rechecks_the_captured_owner_without_creating_a_replacement(
             (
                 snapshot[0].clone(),
                 DeliveryDisposition::Permanent {
+                    reason: None,
                     class: crate::analytics::AnalyticsDeliveryFailureClass::ClientRejection,
                 },
             ),

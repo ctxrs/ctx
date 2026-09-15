@@ -4,12 +4,12 @@ use ctx_client_observability::analytics::CountBucket;
 
 use super::*;
 
-const ENDPOINT: &str = "https://cli.ctx.rs/functions/v1/analytics";
-const ROOT: &str = "00000000-0000-4000-8000-000000000002";
+pub(super) const ENDPOINT: &str = "https://cli.ctx.rs/functions/v1/analytics";
+pub(super) const ROOT: &str = "00000000-0000-4000-8000-000000000002";
 const OTHER_ROOT: &str = "00000000-0000-4000-8000-000000000003";
-const NOW: i64 = 1_800_000_000;
+pub(super) const NOW: i64 = 1_800_000_000;
 
-fn body(event_id: &str) -> Vec<u8> {
+pub(super) fn body(event_id: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "client_profile_id": "00000000-0000-4000-8000-000000000001",
         "data_root_id": "00000000-0000-4000-8000-000000000002",
@@ -18,23 +18,27 @@ fn body(event_id: &str) -> Vec<u8> {
     .unwrap()
 }
 
-fn event_id(index: usize) -> String {
+pub(super) fn event_id(index: usize) -> String {
     format!("00000000-0000-4000-8000-{index:012}")
 }
 
-fn test_outbox() -> (tempfile::TempDir, PathBuf, AnalyticsOutbox) {
+pub(super) fn test_outbox() -> (tempfile::TempDir, PathBuf, AnalyticsOutbox) {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("outbox.json");
     let outbox = AnalyticsOutbox::open_at(path.clone(), ROOT, NOW).unwrap();
     (root, path, outbox)
 }
 
-fn read_current(path: &Path) -> OutboxState {
-    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+pub(super) fn read_current(path: &Path) -> OutboxState {
+    match read_state(path).unwrap() {
+        StoredOutbox::State(state, _) => state,
+        _ => panic!("expected a valid authoritative outbox"),
+    }
 }
 
 fn retry(class: AnalyticsDeliveryFailureClass) -> DeliveryDisposition {
     DeliveryDisposition::Retry {
+        reason: None,
         class,
         retry_after: None,
     }
@@ -222,6 +226,7 @@ fn retry_is_retained_with_backoff_while_permanent_rejection_is_dropped() {
                 (
                     snapshot[1].clone(),
                     DeliveryDisposition::Permanent {
+                        reason: None,
                         class: AnalyticsDeliveryFailureClass::ClientRejection,
                     },
                 ),
@@ -466,6 +471,7 @@ fn health_is_created_only_after_retry_recovery_and_never_recurses() {
             &[(
                 health,
                 DeliveryDisposition::Permanent {
+                    reason: None,
                     class: AnalyticsDeliveryFailureClass::ClientRejection,
                 },
             )],
@@ -845,6 +851,7 @@ fn expiration_and_recovery_observations_remain_owned_by_each_root() {
                 &[(
                     snapshot[0].clone(),
                     DeliveryDisposition::Permanent {
+                        reason: None,
                         class: AnalyticsDeliveryFailureClass::ClientRejection,
                     },
                 )],

@@ -55,5 +55,66 @@ impl ProviderRefreshSourceFailureClass {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRefreshFailureReason {
+    IoNotFound,
+    IoPermissionDenied,
+    IoStorageFull,
+    IoReadOnlyFilesystem,
+    IoOutOfMemory,
+    IoTimedOut,
+    RouteOutputLimit,
+    RouteScratchLimit,
+    IndexMemoryLimit,
+    IndexScratchLimit,
+    IndexWriterInvariant,
+}
+
+impl ProviderRefreshFailureReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IoNotFound => "io_not_found",
+            Self::IoPermissionDenied => "io_permission_denied",
+            Self::IoStorageFull => "io_storage_full",
+            Self::IoReadOnlyFilesystem => "io_read_only_filesystem",
+            Self::IoOutOfMemory => "io_out_of_memory",
+            Self::IoTimedOut => "io_timed_out",
+            Self::RouteOutputLimit => "route_output_limit",
+            Self::RouteScratchLimit => "route_scratch_limit",
+            Self::IndexMemoryLimit => "index_memory_limit",
+            Self::IndexScratchLimit => "index_scratch_limit",
+            Self::IndexWriterInvariant => "index_writer_invariant",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "io_not_found" => Self::IoNotFound,
+            "io_permission_denied" => Self::IoPermissionDenied,
+            "io_storage_full" => Self::IoStorageFull,
+            "io_read_only_filesystem" => Self::IoReadOnlyFilesystem,
+            "io_out_of_memory" => Self::IoOutOfMemory,
+            "io_timed_out" => Self::IoTimedOut,
+            "route_output_limit" => Self::RouteOutputLimit,
+            "route_scratch_limit" => Self::RouteScratchLimit,
+            "index_memory_limit" => Self::IndexMemoryLimit,
+            "index_scratch_limit" => Self::IndexScratchLimit,
+            "index_writer_invariant" => Self::IndexWriterInvariant,
+            _ => return None,
+        })
+    }
+
+    pub const fn permits(self, kind: super::ProviderRefreshFailureKind) -> bool {
+        use super::ProviderRefreshFailureKind as Kind;
+        match self {
+            Self::RouteOutputLimit | Self::RouteScratchLimit => matches!(kind, Kind::Provider),
+            Self::IndexMemoryLimit | Self::IndexScratchLimit | Self::IndexWriterInvariant => {
+                matches!(kind, Kind::Index)
+            }
+            _ => matches!(kind, Kind::Io | Kind::Index | Kind::Provider),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -38,6 +38,8 @@ ctx_cli_contract_test(
 ctx_rust_test(
     name = "grok_build_tests",
     testonly = True,
+    # These cases copy and execute private binaries; do not overlap copy/fork.
+    args = ["--test-threads=1"],
     srcs = ["tests/grok_build.rs"],
     crate_name = "ctx_grok_build_qualification",
     crate_root = "tests/grok_build.rs",

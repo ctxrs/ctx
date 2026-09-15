@@ -988,6 +988,10 @@ exponential backoff with jitter. A valid bounded `Retry-After` can extend the
 delay. Other permanent HTTP rejections are dropped, and daemon shutdown appends
 its terminal event without starting another request.
 
+Optional [typed failure reasons](../contracts/telemetry-v1/failure-reasons.md)
+add closed cause/operation detail to failed refresh and delivery observations.
+They never include local error text and do not control retry or queue policy.
+
 Each root's delivery retry, drop, age, and failure counters are coalesced into
 one closed
 `analytics_delivery_observation@1` only after an ordinary payload is accepted.
