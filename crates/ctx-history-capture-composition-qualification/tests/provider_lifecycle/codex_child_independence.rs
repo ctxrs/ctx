@@ -19,7 +19,7 @@ use ctx_history_index::{
     GenerationStateEnvelope, GenerationWriter, RevalidationTarget, WriterOptions,
 };
 
-const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v11-item-call-identity";
+const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v12-json-argument-facts";
 
 #[path = "codex_child_independence/quarantine.rs"]
 mod quarantine;

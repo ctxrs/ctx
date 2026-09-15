@@ -62,7 +62,7 @@ fn dual_item_ids_retain_tool_output_and_rewrite_removes_previous_events() {
     for (record, item_id) in initial.iter().zip(["item-call", "item-output"]) {
         assert_eq!(
             record.parser_revision,
-            "codex-nativepath-core-activity-v11-item-call-identity"
+            "codex-nativepath-core-activity-v12-json-argument-facts"
         );
         assert!(
             serde_json::to_string(record.native_event_id.as_ref().unwrap())
