@@ -927,8 +927,9 @@ Filters:
   `vcs_change`, `artifact`, `summary`, or `notice`;
 - `--content-scope all|transcript|calls|outputs`, a class-aware query-time
   selection that cannot be combined with `--event-type`;
-- `--file <path>`, indexed touched-file path metadata, not the current
-  filesystem;
+- `--file <path>`, indexed structured file-path metadata, not the current
+  filesystem or every filename mentioned in patch or command text. If no
+  metadata matches, try the filename as a normal query without `--file`;
 - `--session <ctx-session-id-or-prefix>`, for dense event results within one session;
 - repeatable `--exclude-session <ctx-session-id-or-prefix>`, for exact named
   sessions to omit;

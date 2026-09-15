@@ -4,6 +4,8 @@ use ctx_history_core::{
     LiteralFactKind, ProviderDeclaredFact, MAX_CORE_CONTENT_BYTES, MAX_PROVIDER_DECLARED_FACTS,
 };
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::Deserialize;
+use serde_json::value::RawValue;
 
 const MAX_RECOGNIZED_FACT_KEYS_PER_OBJECT: usize = 64;
 
@@ -35,6 +37,7 @@ pub(crate) struct RawJsonAudit {
     duplicate_selectors: u16,
     facts: Vec<ProviderDeclaredFact>,
     facts_available: bool,
+    decoded_argument_facts: Option<std::ops::Range<usize>>,
 }
 
 impl RawJsonAudit {
@@ -54,6 +57,10 @@ impl RawJsonAudit {
         }
     }
 
+    pub(crate) fn decoded_argument_facts(&self) -> Option<std::ops::Range<usize>> {
+        self.decoded_argument_facts.clone()
+    }
+
     fn mark_duplicate(&mut self, group: SelectorGroup) {
         self.duplicate_selectors |= group.bit();
     }
@@ -61,6 +68,7 @@ impl RawJsonAudit {
     fn mark_facts_unavailable(&mut self) {
         self.facts_available = false;
         self.facts.clear();
+        self.decoded_argument_facts = None;
     }
 
     fn push_fact(&mut self, kind: LiteralFactKind, value: &str) {
@@ -83,6 +91,45 @@ pub(crate) fn audit_json(
     selector_group: fn(&str) -> Option<SelectorGroup>,
     fact_kind: fn(&str) -> Option<LiteralFactKind>,
 ) -> serde_json::Result<RawJsonAudit> {
+    audit_json_value(
+        bytes,
+        selector_group,
+        fact_kind,
+        native_argument_path(bytes),
+    )
+}
+
+// RawValue preserves duplicate keys for the literal audit. Derive rejects
+// duplicate envelope fields (including argument aliases), independently of
+// field order. Only these native function-call locations authorize decoding.
+fn native_argument_path(bytes: &[u8]) -> Option<&'static [&'static str]> {
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(borrow)]
+        payload: Option<&'a RawValue>,
+        #[serde(borrow, rename = "arguments", alias = "input", alias = "args")]
+        _arguments: Option<&'a RawValue>,
+    }
+
+    let envelope: Envelope<'_> = serde_json::from_slice(bytes).ok()?;
+    match envelope.kind.as_str() {
+        "function_call" => Some(&["arguments"]),
+        "response_item" => {
+            let payload: Envelope<'_> = serde_json::from_str(envelope.payload?.get()).ok()?;
+            (payload.kind == "function_call").then_some(&["payload", "arguments"][..])
+        }
+        _ => None,
+    }
+}
+
+fn audit_json_value(
+    bytes: &[u8],
+    selector_group: fn(&str) -> Option<SelectorGroup>,
+    fact_kind: fn(&str) -> Option<LiteralFactKind>,
+    argument_path: Option<&'static [&'static str]>,
+) -> serde_json::Result<RawJsonAudit> {
     let mut audit = RawJsonAudit {
         facts_available: true,
         ..RawJsonAudit::default()
@@ -93,6 +140,7 @@ pub(crate) fn audit_json(
         selector_group,
         fact_kind,
         direct_fact_kind: None,
+        argument_path,
     }
     .deserialize(&mut deserializer)?;
     deserializer.end()?;
@@ -256,6 +304,7 @@ struct AuditSeed<'a> {
     selector_group: fn(&str) -> Option<SelectorGroup>,
     fact_kind: fn(&str) -> Option<LiteralFactKind>,
     direct_fact_kind: Option<LiteralFactKind>,
+    argument_path: Option<&'static [&'static str]>,
 }
 
 impl<'de> DeserializeSeed<'de> for AuditSeed<'_> {
@@ -286,6 +335,7 @@ impl<'de> Visitor<'de> for AuditVisitor<'_> {
             audit,
             selector_group,
             fact_kind,
+            argument_path,
             ..
         } = self.0;
         let mut seen_selectors = 0_u16;
@@ -311,6 +361,9 @@ impl<'de> Visitor<'de> for AuditVisitor<'_> {
                 }
                 seen_selectors |= group.bit();
             }
+            let child_argument_path = argument_path
+                .and_then(|path| path.split_first())
+                .and_then(|(head, tail)| (*head == key).then_some(tail));
             let direct_fact_kind = fact_kind(&key);
             if direct_fact_kind.is_some() {
                 if seen_fact_keys.iter().any(|seen| seen == &key)
@@ -326,6 +379,7 @@ impl<'de> Visitor<'de> for AuditVisitor<'_> {
                 selector_group,
                 fact_kind,
                 direct_fact_kind,
+                argument_path: child_argument_path,
             })?;
         }
         Ok(())
@@ -340,6 +394,7 @@ impl<'de> Visitor<'de> for AuditVisitor<'_> {
             selector_group,
             fact_kind,
             direct_fact_kind,
+            ..
         } = self.0;
         while sequence
             .next_element_seed(AuditSeed {
@@ -347,31 +402,48 @@ impl<'de> Visitor<'de> for AuditVisitor<'_> {
                 selector_group,
                 fact_kind,
                 direct_fact_kind,
+                argument_path: None,
             })?
             .is_some()
         {}
         Ok(())
     }
 
-    fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E> {
-        if let Some(kind) = self.0.direct_fact_kind {
-            self.0.audit.push_fact(kind, value);
-        }
-        Ok(())
+    fn visit_borrowed_str<E: serde::de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+        self.visit_str(value)
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
         if let Some(kind) = self.0.direct_fact_kind {
             self.0.audit.push_fact(kind, value);
         }
+        if self.0.argument_path == Some(&[]) {
+            if value.len() > MAX_CORE_CONTENT_BYTES {
+                self.0.audit.mark_facts_unavailable();
+            } else if let Ok(arguments) =
+                audit_json_value(value.as_bytes(), |_| None, self.0.fact_kind, None)
+            {
+                // Decode once, with the existing duplicate/count/byte/depth
+                // bounds. Argument keys never become native envelope selectors.
+                // A malformed argument document contributes no partial facts.
+                if !arguments.facts_available {
+                    self.0.audit.mark_facts_unavailable();
+                } else {
+                    let start = self.0.audit.facts.len();
+                    for fact in arguments.facts {
+                        self.0.audit.push_fact(fact.kind, &fact.value);
+                    }
+                    if self.0.audit.facts_available && start < self.0.audit.facts.len() {
+                        self.0.audit.decoded_argument_facts = Some(start..self.0.audit.facts.len());
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        if let Some(kind) = self.0.direct_fact_kind {
-            self.0.audit.push_fact(kind, &value);
-        }
-        Ok(())
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+        self.visit_str(&value)
     }
 
     fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {

@@ -1007,4 +1007,5 @@ fn duplicate_selectors_withhold_linkage_and_preserve_raw_fact_order() {
     );
 }
 
+mod argument_file_facts;
 mod item_call_identity;

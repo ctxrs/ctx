@@ -105,6 +105,7 @@ fn pending_call_carries_retrieval_exclusion_without_changing_activity() {
         structured_content: Some(json!({"call_id": call_id})),
         discovery_exclusion: Some(CoreDiscoveryExclusion::CtxRetrievalDerived),
         activity: Some(activity.clone()),
+        decoded_argument_facts: None,
     };
 
     let (_, pending) = pending_call_for_row(&forked_owner(), true, 7, &row).unwrap();

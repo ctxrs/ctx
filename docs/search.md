@@ -116,9 +116,14 @@ Search filters narrow text and JSON output:
 - `--include-current-session`.
 
 `--since` accepts RFC 3339 timestamps or a day window such as `30d`.
-`--file` searches normalized touched-file metadata; it does not inspect the
-current filesystem. Repeatable `--term` values broaden the query with OR-style
-semantics rather than acting as required terms.
+`--file` searches structured file-path metadata captured from provider records;
+it does not inspect the current filesystem or match every filename mentioned
+in patch or command text. Zero file-filtered results do not prove that no
+history mentions the file. To search those mentions, use the filename as a
+normal query without `--file`, for example `ctx search "example.rs" --backend lexical`.
+
+Repeatable `--term` values broaden the query with OR-style semantics rather
+than acting as required terms.
 
 Root and group selectors use the exact case-sensitive names reported by
 `ctx sources`; each name is 1 to 64 ASCII letters, digits, hyphens, or
