@@ -23,6 +23,12 @@ requires an OS sandbox or a distinct service identity. Generation fences still
 fail closed on ordinary concurrent mutation, replacement, truncation, and
 corruption within the supported single-owner lifecycle.
 
+On Unix, managed installation accepts user-owned executable directories with
+ordinary `755` or `775` permissions and rejects world-writable directories.
+Existing group and ACL grants are preserved: accounts granted write access
+there are trusted to replace installed programs. Private ctx data keeps its
+separate confidentiality requirements.
+
 The default-enabled persistent daemon and explicit provider-source import route
 write Core generations and derived state only under the configured ctx data
 root. Search and MCP may send a bounded, content-free daemon wake, but query

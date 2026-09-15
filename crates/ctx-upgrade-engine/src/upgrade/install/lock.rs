@@ -145,18 +145,8 @@ fn installation_root_path_is_canonical(supplied: &Path, canonical: &Path) -> boo
 
 #[cfg(unix)]
 fn validate_owner_safe_directory(path: &Path, label: &str) -> Result<()> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("inspect {label} {}", path.display()))?;
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o022 != 0
-    {
-        bail!("{label} is not owner-safe: {}", path.display());
-    }
-    Ok(())
+    ctx_history_platform::platform_security::verify_install_directory(path)
+        .with_context(|| format!("{label} is not owner-safe: {}", path.display()))
 }
 
 #[cfg(windows)]
@@ -310,7 +300,7 @@ pub(super) fn canonical_recovery_executable(path: &Path) -> Result<PathBuf> {
         Err(error) => {
             return Err(error).with_context(|| {
                 format!("inspect ctx recovery executable {}", candidate.display())
-            })
+            });
         }
     }
     Ok(candidate)
@@ -410,20 +400,7 @@ fn validate_mutable_executable(path: &Path, allow_recovery_hardlink: bool) -> Re
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("ctx executable has no parent: {}", path.display()))?;
-    let parent_metadata = fs::symlink_metadata(parent)
-        .with_context(|| format!("inspect ctx executable directory {}", parent.display()))?;
-    use std::os::unix::fs::PermissionsExt as _;
-    if !parent_metadata.is_dir()
-        || parent_metadata.file_type().is_symlink()
-        || parent_metadata.uid() != unsafe { libc::geteuid() }
-        || parent_metadata.permissions().mode() & 0o022 != 0
-    {
-        bail!(
-            "ctx executable directory is not owner-safe: {}",
-            parent.display()
-        );
-    }
-    Ok(())
+    validate_owner_safe_directory(parent, "ctx executable directory")
 }
 
 #[cfg(not(unix))]

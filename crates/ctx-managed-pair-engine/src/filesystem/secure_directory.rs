@@ -103,17 +103,8 @@ impl SecureDirectory {
                 _ => bail!("managed-pair directory is not a safe absolute path"),
             }
         }
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        let metadata = current.metadata()?;
-        if !metadata.is_dir()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.permissions().mode() & 0o022 != 0
-        {
-            bail!(
-                "managed-pair directory is not owner-safe: {}",
-                path.display()
-            );
-        }
+        ctx_history_platform::platform_security::verify_install_directory_handle(&current)
+            .with_context(|| format!("unsafe managed-pair directory {}", path.display()))?;
         Ok(Self { file: current })
     }
 
@@ -183,7 +174,6 @@ impl SecureDirectory {
             ffi::CString,
             os::unix::{
                 ffi::OsStrExt as _,
-                fs::{MetadataExt as _, PermissionsExt as _},
                 io::{AsRawFd as _, FromRawFd as _},
             },
         };
@@ -201,13 +191,8 @@ impl SecureDirectory {
                 .context("open managed-pair child directory by retained parent");
         }
         let file = unsafe { File::from_raw_fd(fd) };
-        let metadata = file.metadata()?;
-        if !metadata.is_dir()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.permissions().mode() & 0o022 != 0
-        {
-            bail!("managed-pair child directory is not owner-safe");
-        }
+        ctx_history_platform::platform_security::verify_install_directory_handle(&file)
+            .context("unsafe managed-pair child directory")?;
         Ok(Self { file })
     }
 
@@ -372,7 +357,7 @@ impl SecureDirectory {
                     .downcast_ref::<std::io::Error>()
                     .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
             {
-                return Ok(None)
+                return Ok(None);
             }
             Err(error) => return Err(error).context("inspect managed-pair directory entry"),
         };
