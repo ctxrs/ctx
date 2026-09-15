@@ -37,6 +37,7 @@ pub(crate) struct RawJsonAudit {
     duplicate_selectors: u16,
     facts: Vec<ProviderDeclaredFact>,
     facts_available: bool,
+    decoded_argument_facts: Option<std::ops::Range<usize>>,
 }
 
 impl RawJsonAudit {
@@ -56,6 +57,10 @@ impl RawJsonAudit {
         }
     }
 
+    pub(crate) fn decoded_argument_facts(&self) -> Option<std::ops::Range<usize>> {
+        self.decoded_argument_facts.clone()
+    }
+
     fn mark_duplicate(&mut self, group: SelectorGroup) {
         self.duplicate_selectors |= group.bit();
     }
@@ -63,6 +68,7 @@ impl RawJsonAudit {
     fn mark_facts_unavailable(&mut self) {
         self.facts_available = false;
         self.facts.clear();
+        self.decoded_argument_facts = None;
     }
 
     fn push_fact(&mut self, kind: LiteralFactKind, value: &str) {
@@ -423,8 +429,12 @@ impl<'de> Visitor<'de> for AuditVisitor<'_> {
                 if !arguments.facts_available {
                     self.0.audit.mark_facts_unavailable();
                 } else {
+                    let start = self.0.audit.facts.len();
                     for fact in arguments.facts {
                         self.0.audit.push_fact(fact.kind, &fact.value);
+                    }
+                    if self.0.audit.facts_available && start < self.0.audit.facts.len() {
+                        self.0.audit.decoded_argument_facts = Some(start..self.0.audit.facts.len());
                     }
                 }
             }

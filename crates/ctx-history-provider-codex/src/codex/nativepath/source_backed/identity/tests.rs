@@ -1,6 +1,8 @@
 use super::*;
 use ctx_history_capture_model::{ProviderRootDefinition, ProviderRootSourceIdentity};
 
+mod argument_fact_retention;
+
 fn canonical_identity_hex(identity: StableEntityId) -> String {
     use std::fmt::Write as _;
 

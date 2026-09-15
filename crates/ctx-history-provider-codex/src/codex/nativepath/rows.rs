@@ -91,9 +91,40 @@ pub(crate) struct CodexCoreRecordDraft {
     pub(crate) structured_content: Option<Value>,
     pub(crate) discovery_exclusion: Option<CoreDiscoveryExclusion>,
     pub(crate) activity: Option<CoreActivity>,
+    // Transient provenance for optional additions; never persisted in Core.
+    pub(crate) decoded_argument_facts: Option<std::ops::Range<usize>>,
 }
 
 impl CodexCoreRecordDraft {
+    pub(crate) fn omit_decoded_argument_facts(&mut self) {
+        let Some(range) = self.decoded_argument_facts.take() else {
+            return;
+        };
+        if let Some(activity) = self.activity.as_mut() {
+            activity.facts.drain(range);
+            if activity.facts.is_empty()
+                && activity.invocation.is_none()
+                && activity.result.is_none()
+            {
+                self.activity = None;
+            }
+        }
+    }
+
+    pub(crate) fn fit_decoded_argument_facts(&mut self) {
+        // Optional decoded facts must not displace already captured content.
+        if self.decoded_argument_facts.is_some()
+            && !ctx_history_jsonl::selected_content_fits(
+                &self.lexical_body,
+                self.structured_content.as_ref(),
+                self.activity.as_ref(),
+                ctx_history_core::MAX_CORE_CONTENT_BYTES,
+            )
+        {
+            self.omit_decoded_argument_facts();
+        }
+    }
+
     pub(crate) fn estimated_owned_bytes(&self) -> Option<usize> {
         [
             size_of::<Self>(),
@@ -225,7 +256,7 @@ pub(super) fn build_source_backed_event_row(
     let discovery_exclusion = (kind == CodexRetainedKind::ToolCall)
         .then(|| codex_invocation_discovery_exclusion(&retained.payload, &audit, activity.as_ref()))
         .flatten();
-    Ok(Ok(CodexSourceBackedBuiltRowV0 {
+    let mut built = CodexSourceBackedBuiltRowV0 {
         row: CodexCoreRecordDraft {
             raw_ordinal,
             provider_event_identity: (!audit.selector_ambiguous(SelectorGroup::CallId)
@@ -241,8 +272,12 @@ pub(super) fn build_source_backed_event_row(
             structured_content: (!audit.any_selector_ambiguous()).then(|| retained.payload.clone()),
             discovery_exclusion,
             activity,
+            decoded_argument_facts: audit.decoded_argument_facts(),
         },
-    }))
+    };
+    // Bound additions before the scanner measures and admits the draft page.
+    built.row.fit_decoded_argument_facts();
+    Ok(Ok(built))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -304,6 +339,7 @@ pub(super) fn build_source_backed_sparse_output_row(
             .flatten(),
         discovery_exclusion,
         activity,
+        decoded_argument_facts: None,
     }))
 }
 
