@@ -10,6 +10,10 @@ use std::fs;
 
 mod path_overlap;
 #[cfg(unix)]
+mod unix_install_directory;
+#[cfg(unix)]
+pub use unix_install_directory::{verify_install_directory, verify_install_directory_handle};
+#[cfg(unix)]
 mod unix_private_directory;
 #[cfg(unix)]
 mod unix_private_file;

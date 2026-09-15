@@ -49,7 +49,7 @@ pub(super) fn validate_install_path(path: &Path) -> Result<PathBuf> {
             bail!("hosted transaction install path is not canonical");
         }
     }
-    validate_private_directory(&canonical_parent)?;
+    validate_install_directory(&canonical_parent)?;
     let canonical = canonical_parent.join(file_name);
     #[cfg(not(windows))]
     if canonical != path {
@@ -59,27 +59,23 @@ pub(super) fn validate_install_path(path: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(unix)]
-pub(super) fn validate_private_directory(path: &Path) -> Result<()> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_dir()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o077 != 0
-    {
-        bail!("hosted transaction install directory is not owner-private");
-    }
-    Ok(())
+pub(super) fn validate_install_directory(path: &Path) -> Result<()> {
+    ctx_history_platform::platform_security::verify_install_directory(path).with_context(|| {
+        format!(
+            "unsafe hosted transaction install directory {}",
+            path.display()
+        )
+    })
 }
 
 #[cfg(windows)]
-pub(super) fn validate_private_directory(path: &Path) -> Result<()> {
+pub(super) fn validate_install_directory(path: &Path) -> Result<()> {
     ctx_history_platform::platform_security::verify_private_directory(path)
         .context("verify hosted transaction install directory")
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(super) fn validate_private_directory(_path: &Path) -> Result<()> {
+pub(super) fn validate_install_directory(_path: &Path) -> Result<()> {
     bail!("hosted transactions are unsupported on this platform")
 }
 

@@ -1124,3 +1124,36 @@ fn unowned_sidecar_is_never_removed() {
     assert!(!install_marker_path(&install).exists());
     assert!(!path.exists());
 }
+
+#[test]
+fn hosted_uninstall_preserves_shared_directory_permissions_and_unrelated_tools() {
+    for mode in [0o755, 0o775] {
+        let fixture = pair_fixture();
+        let directories = ["", "bin", "libexec", "share", "share/ctx"];
+        for directory in directories {
+            fs::set_permissions(
+                fixture.root.join(directory),
+                fs::Permissions::from_mode(mode),
+            )
+            .unwrap();
+        }
+        let unrelated = fixture.root.join("bin/unrelated-tool");
+        fs::write(&unrelated, b"keep").unwrap();
+        validate_install_path(&fixture.install).unwrap();
+        let (helper, path, mut journal) = arm_pair_uninstall(&fixture);
+        complete_uninstall_commit(&helper, &path, &mut journal, &mut |_| Ok(())).unwrap();
+        assert!(!fixture.install.exists());
+        assert!(!fixture.companion.exists());
+        assert_eq!(fs::read(unrelated).unwrap(), b"keep");
+        for directory in directories {
+            assert_eq!(
+                fs::metadata(fixture.root.join(directory))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                mode
+            );
+        }
+    }
+}

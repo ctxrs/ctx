@@ -499,3 +499,41 @@ fn narrow_routing_apis_preserve_generic_pending_and_stage_without_publication() 
         ManagedPairInstallationStatus::RepairRequired
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn install_rerun_and_upgrade_preserve_shared_directory_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for mode in [0o755, 0o775] {
+        let fixture = Fixture::new();
+        let directories = ["", "bin", "libexec", "share", "share/ctx"];
+        for directory in directories {
+            let path = fixture.install.join(directory);
+            fs::create_dir_all(&path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let unrelated = fixture.install.join("bin/unrelated-tool");
+        fs::write(&unrelated, b"keep").unwrap();
+        let old = fixture.candidate("old", 1, b"old-core", b"old-companion", b"old-marker");
+        let new = fixture.candidate("new", 2, b"new-core", b"new-companion", b"new-marker");
+        let verifier = TestVerifier::new([
+            (old.envelope.clone(), old.identity.clone()),
+            (new.envelope.clone(), new.identity.clone()),
+        ]);
+        for candidate in [&old, &old, &new] {
+            apply(&fixture, candidate, &verifier);
+            assert_active(&fixture, candidate, &verifier);
+            for directory in directories {
+                assert_eq!(
+                    fs::metadata(fixture.install.join(directory))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    mode
+                );
+            }
+            assert_eq!(fs::read(&unrelated).unwrap(), b"keep");
+        }
+    }
+}
