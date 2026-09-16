@@ -112,16 +112,18 @@ pub(super) fn revalidated_supervisor_report_with(
             match backend.verify_registration(data_root, &executable) {
                 Ok(()) => match backend.verify_live_owner(data_root, &executable) {
                     Ok(owner_pid) => (true, Some(owner_pid), None),
-                    Err(error) => (true, None, Some(format!("{error:#}"))),
+                    Err(error) => (true, None, Some(error)),
                 },
-                Err(error) => (false, None, Some(format!("{error:#}"))),
+                Err(error) => (false, None, Some(error)),
             }
         }
-        (Err(error), _) => (false, None, Some(format!("{error:#}"))),
+        (Err(error), _) => (false, None, Some(error)),
         (Ok(_installation_lock), None) => (
             false,
             None,
-            Some("supervisor receipt has no installed executable identity".to_owned()),
+            Some(anyhow!(
+                "supervisor receipt has no installed executable identity"
+            )),
         ),
     };
     let live_owner_verified = live_owner.is_some();
@@ -146,6 +148,10 @@ pub(super) fn revalidated_supervisor_report_with(
                     "stale_registration"
                 } else if live_owner_verified {
                     "installed"
+                } else if error.as_ref().is_some_and(|error| {
+                    error.is::<ctx_daemon_runtime::ProcessExecutableInspectionDenied>()
+                }) {
+                    "registered_unverified"
                 } else {
                     "registered_not_running"
                 }
@@ -154,7 +160,7 @@ pub(super) fn revalidated_supervisor_report_with(
         );
         object.insert(
             "revalidation_error".to_owned(),
-            error.map_or(Value::Null, Value::String),
+            error.map_or(Value::Null, |error| Value::String(format!("{error:#}"))),
         );
     }
     report

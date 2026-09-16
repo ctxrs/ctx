@@ -308,6 +308,14 @@ impl<'a> DaemonApplication<'a> {
         lifecycle::active_daemon_matches_current_executable(data_root)
     }
 
+    pub fn observe_ready_core_daemon(
+        &self,
+        data_root: &Path,
+        config: &DaemonConfigSnapshot,
+    ) -> Result<Option<DaemonHandoff>> {
+        lifecycle::observe_ready_core_daemon(self.host, data_root, config)
+    }
+
     pub fn request_daemon_start(
         &self,
         data_root: &Path,

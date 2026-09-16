@@ -399,11 +399,57 @@ pub(super) fn daemon_query_roundtrip_unix_with_control(
     let deadline = UnixIoDeadline::new(timeout);
     let mut stream = connect_daemon_query_unix(path, &deadline, control)
         .with_context(|| format!("connect daemon query socket {}", path.display()))?;
+    roundtrip_connected_unix(&mut stream, request, max_response_bytes, &deadline, control)
+}
+
+/// Read-only ownership probe: verify the kernel's peer identity before sending
+/// even the endpoint token. This does not clean up or recreate endpoint files.
+#[cfg(target_os = "linux")]
+pub fn daemon_query_roundtrip_linux_owner(
+    path: &Path,
+    owner_pid: u32,
+    request: &[u8],
+    timeout: Duration,
+    max_response_bytes: u64,
+) -> Result<Vec<u8>> {
+    let deadline = UnixIoDeadline::new(timeout);
+    let control = &mut UninterruptedIpcWait;
+    let mut stream = connect_daemon_query_unix(path, &deadline, control)?;
+    let mut credentials = unsafe { std::mem::zeroed::<libc::ucred>() };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut credentials).cast(),
+            &raw mut length,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if length as usize != std::mem::size_of::<libc::ucred>()
+        || u32::try_from(credentials.pid).ok() != Some(owner_pid)
+        || credentials.uid != unsafe { libc::geteuid() }
+    {
+        anyhow::bail!("daemon socket peer does not match the same-user lock owner");
+    }
+    roundtrip_connected_unix(&mut stream, request, max_response_bytes, &deadline, control)
+}
+
+fn roundtrip_connected_unix(
+    stream: &mut UnixStream,
+    request: &[u8],
+    max_response_bytes: u64,
+    deadline: &UnixIoDeadline,
+    control: &mut dyn DaemonIpcWaitControl,
+) -> Result<Vec<u8>> {
     let mut request_may_have_been_submitted = false;
     if let Err(error) = write_daemon_query_request_unix(
-        &mut stream,
+        stream,
         request,
-        &deadline,
+        deadline,
         &mut request_may_have_been_submitted,
         control,
     ) {
@@ -415,14 +461,9 @@ pub(super) fn daemon_query_roundtrip_unix_with_control(
         });
     }
     let _ = stream.shutdown(std::net::Shutdown::Write);
-    read_daemon_query_response_unix_with_deadline(
-        &mut stream,
-        max_response_bytes,
-        &deadline,
-        control,
-    )
-    .context("read daemon query response")
-    .map_err(mark_request_may_have_been_submitted)
+    read_daemon_query_response_unix_with_deadline(stream, max_response_bytes, deadline, control)
+        .context("read daemon query response")
+        .map_err(mark_request_may_have_been_submitted)
 }
 
 pub fn read_daemon_query_response_unix(
@@ -451,6 +492,48 @@ mod cancellation_tests {
     };
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ownership_probe_checks_kernel_peer_before_sending_credentials() {
+        for matches in [true, false] {
+            let temp = tempfile::tempdir_in("/tmp").unwrap();
+            let socket = temp.path().join("owner.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).unwrap();
+                if matches {
+                    assert_eq!(request, b"private-token\n");
+                    stream.write_all(b"ok").unwrap();
+                } else {
+                    assert!(request.is_empty(), "wrong peer must receive no token");
+                }
+            });
+            let pid = if matches {
+                std::process::id()
+            } else {
+                u32::MAX
+            };
+            let result = daemon_query_roundtrip_linux_owner(
+                &socket,
+                pid,
+                b"private-token\n",
+                Duration::from_secs(2),
+                16,
+            );
+            if matches {
+                assert_eq!(result.unwrap(), b"ok");
+            } else {
+                assert!(result.unwrap_err().to_string().contains("socket peer"));
+            }
+            server.join().unwrap();
+        }
+    }
 
     #[derive(Debug)]
     struct TestCancelled;

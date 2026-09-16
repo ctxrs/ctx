@@ -315,7 +315,13 @@ fn ensure_native_supervisor_with(
             };
             let receipt = SupervisorReceipt {
                 kind: native_supervisor_kind().to_owned(),
-                status: "registered_not_running",
+                status: if recovery_error
+                    .is::<ctx_daemon_runtime::ProcessExecutableInspectionDenied>()
+                {
+                    "registered_unverified"
+                } else {
+                    "registered_not_running"
+                },
                 autostart_supported: true,
                 restart_supported: true,
                 registration_verified: true,

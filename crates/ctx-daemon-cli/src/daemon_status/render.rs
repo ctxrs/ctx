@@ -4,21 +4,13 @@ use serde_json::Value;
 
 use super::{job_error, job_status};
 
+mod service;
+use service::{service_state, DaemonPresentation};
+
 use ctx_terminal::{
     fields, format_bytes, format_count, hint, outcome, section, Action, Document, Field, Hint,
     Outcome, OutcomeState, RenderContext, Token,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DaemonPresentation {
-    Healthy,
-    Partial,
-    Failed,
-    Completed,
-    NotStarted,
-    Stopped,
-    Disabled,
-}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DaemonStatusView<'a> {
@@ -81,8 +73,14 @@ pub(crate) fn render_daemon_status_human(
         .and_then(Value::as_str)
         .is_some_and(|error| !error.is_empty());
     let heartbeat_stale = daemon.get("heartbeat_stale").and_then(Value::as_bool) == Some(true);
-    let service_issue =
-        config_issue || supervisor_issue.is_some() || daemon_error || heartbeat_stale;
+    let image_unavailable = daemon
+        .pointer("/lock_identity/owner_image_status")
+        .and_then(Value::as_str);
+    let service_issue = config_issue
+        || supervisor_issue.is_some()
+        || daemon_error
+        || heartbeat_stale
+        || image_unavailable.is_some();
     let service_failed =
         recoverable || matches!(status, "failed" | "stale_lock") || (!running && enabled);
 
@@ -92,6 +90,8 @@ pub(crate) fn render_daemon_status_human(
         DaemonPresentation::Disabled
     } else if !running && status == "unknown" {
         DaemonPresentation::NotStarted
+    } else if status == "unverified" {
+        DaemonPresentation::Unverified
     } else if service_failed {
         DaemonPresentation::Failed
     } else if running
@@ -157,6 +157,11 @@ pub(crate) fn render_daemon_status_human(
             "Daemon is partially healthy",
             Some("Semantic search is using a fallback backend."),
         ),
+        DaemonPresentation::Partial if image_unavailable.is_some() => (
+            OutcomeState::Warning,
+            "Daemon is running; executable inspection is unavailable",
+            Some("The live owner responded. This does not verify its executable image or authorize a restart."),
+        ),
         DaemonPresentation::Partial => (
             OutcomeState::Warning,
             "Daemon is partially healthy",
@@ -188,6 +193,11 @@ pub(crate) fn render_daemon_status_human(
             "Daemon is enabled but has not started",
             Some("No daemon lifecycle state has been observed yet."),
         ),
+        DaemonPresentation::Unverified => (
+            OutcomeState::Warning,
+            "Daemon ownership could not be verified",
+            Some("Executable inspection is unavailable. This does not mean the daemon is stale or safe to restart."),
+        ),
         DaemonPresentation::Stopped => (OutcomeState::Neutral, "Daemon is not running", None),
         DaemonPresentation::Disabled => (
             OutcomeState::Neutral,
@@ -207,6 +217,17 @@ pub(crate) fn render_daemon_status_human(
     let (service_state, service_token) = service_state(enabled, running, recoverable, status);
     let mut service = vec![state_field("Status", service_state, service_token)];
     let mut service_details = Vec::new();
+    if let Some(image_status) = image_unavailable {
+        service.push(state_field(
+            "Executable",
+            if image_status == "permission_denied" {
+                "permission denied"
+            } else {
+                "unavailable"
+            },
+            Token::Warning,
+        ));
+    }
     if heartbeat_stale {
         service.push(state_field("Heartbeat", "stale", Token::Warning));
         if let Some(age) = daemon.get("heartbeat_age_ms").and_then(Value::as_u64) {
@@ -658,27 +679,6 @@ pub(crate) fn render_daemon_prepare_uninstall_receipt(
     document
 }
 
-fn service_state(
-    enabled: bool,
-    running: bool,
-    recoverable: bool,
-    status: &str,
-) -> (&'static str, Token) {
-    if status == "completed" && !enabled {
-        ("completed", Token::Success)
-    } else if !enabled || status == "disabled" {
-        ("disabled", Token::Text)
-    } else if recoverable {
-        ("failed (recoverable)", Token::Error)
-    } else if running {
-        ("running", Token::Success)
-    } else if status == "unknown" {
-        ("not started", Token::Warning)
-    } else {
-        ("failed", Token::Error)
-    }
-}
-
 fn core_refresh_state(
     core_refresh: Option<&Value>,
     enabled: bool,
@@ -794,6 +794,9 @@ fn recovery_action(
         history_partially_paused,
         service_issue,
     } = signals;
+    if presentation == DaemonPresentation::Unverified {
+        return None;
+    }
     if presentation == DaemonPresentation::Disabled {
         return Some((
             "Use automatic indexing to resume background history refresh.",

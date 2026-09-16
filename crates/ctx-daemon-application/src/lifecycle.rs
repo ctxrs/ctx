@@ -25,6 +25,12 @@ mod finite_worker;
 #[cfg(test)]
 mod finite_worker_bounded_tests;
 mod launch;
+mod owner_observation;
+#[cfg(target_os = "linux")]
+pub(super) use owner_observation::verify_inspection_denied_owner;
+pub use owner_observation::{active_daemon_matches_current_executable, observe_ready_core_daemon};
+#[cfg(all(test, target_os = "linux"))]
+mod owner_inspection_tests;
 mod readiness_receipt;
 #[cfg(test)]
 mod tests;
@@ -181,19 +187,6 @@ fn hosted_uninstall_fences_daemon_autostart(host: &dyn DaemonApplicationHost) ->
 
 pub fn daemon_start_is_fenced(host: &dyn DaemonApplicationHost) -> bool {
     hosted_uninstall_fences_daemon_autostart(host)
-}
-
-/// Returns whether a live daemon is already owned by this exact executable.
-///
-/// Ordinary foreground commands use this to reuse a healthy installed daemon
-/// without reconciling native supervision from the invoking shell's ambient
-/// environment. Explicit setup and binary-mismatch repair still follow the
-/// full supervisor handoff path.
-pub fn active_daemon_matches_current_executable(data_root: &Path) -> Result<bool> {
-    if !daemon_lock_is_active(data_root) {
-        return Ok(false);
-    }
-    daemon_lock_matches_executable(data_root, &daemon_autostart_exe()?)
 }
 
 fn read_daemon_owner_identity(data_root: &Path) -> Result<Option<DaemonOwnerIdentity>> {

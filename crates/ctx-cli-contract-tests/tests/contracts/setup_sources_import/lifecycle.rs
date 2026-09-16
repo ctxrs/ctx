@@ -969,7 +969,7 @@ fn setup_background_refresh_and_wait_publish_the_same_codex_source() {
     assert!(
         matches!(
             setup["refresh_request"]["status"].as_str(),
-            Some("queued" | "pending" | "running" | "published")
+            Some("admission_pending" | "queued" | "pending" | "running" | "published")
         ),
         "{setup:#}"
     );
