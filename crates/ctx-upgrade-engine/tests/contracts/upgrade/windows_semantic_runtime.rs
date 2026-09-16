@@ -43,6 +43,23 @@ fn semantic_enabled_same_version_upgrade_publishes_legacy_runtime_via_windows_he
     assert_eq!(fs::read(&marker_path).unwrap(), marker_before);
     assert_windows_runtime_tree(&release);
 
+    // No second upgrade command may be needed to release daemon admission.
+    let state_path = target.with_file_name(".ctx.exe.upgrade-state.json");
+    let deadline = Instant::now() + HELPER_TERMINAL_TIMEOUT;
+    loop {
+        let state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        if state["status"] == "applied" {
+            assert_eq!(state["attempt_id"], scheduled["upgrade_attempt_id"]);
+            assert_eq!(state["attempt_source"], "manual_apply");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "terminal Windows helper left daemon admission blocked: {state:#}"
+        );
+        thread::sleep(HELPER_TERMINAL_POLL);
+    }
+
     let repeated = json_output(
         windows_runtime_repair_release_env(
             ctx_from_binary(&temp, &target).args(["upgrade", "--format=json"]),
@@ -54,7 +71,7 @@ fn semantic_enabled_same_version_upgrade_publishes_legacy_runtime_via_windows_he
     assert_eq!(repeated["applied"], false, "{repeated:#}");
     assert!(
         !journal_path.exists(),
-        "the second command must reconcile the helper terminal journal"
+        "the next command removes the already-recorded helper terminal journal"
     );
     assert_eq!(fs::read(&target).unwrap(), binary_before);
     assert_eq!(fs::read(&marker_path).unwrap(), marker_before);

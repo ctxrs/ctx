@@ -462,7 +462,7 @@ fn missing_pending_record_after_windows_scheduler_publication_records_terminal_f
     fs::write(&install_path, b"core")?;
     let installation = InstallationLock::try_acquire(&install_path)?
         .ok_or_else(|| anyhow!("test installation lock is unavailable"))?;
-    let lock = UpgradeLock::from_installation_for_test(install_path.clone(), installation);
+    let lock = UpgradeLock::from_installation(install_path.clone(), installation);
     let recovery = ManagedPairRecovery {
         attempt_id: "recovery-boundary".to_owned(),
         data_root: data_root.clone(),

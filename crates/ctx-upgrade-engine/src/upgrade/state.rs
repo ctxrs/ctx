@@ -26,6 +26,7 @@ use super::{
 };
 
 mod managed_pair;
+mod replacement;
 #[cfg(any(windows, test))]
 pub(super) use managed_pair::validate_helper_file as validate_managed_pair_helper_file;
 #[cfg(windows)]
@@ -40,6 +41,10 @@ pub(super) use managed_pair::{
     try_acquire_recovery_lock as try_acquire_managed_pair_recovery_lock,
     write_attempt_locked as write_managed_pair_attempt_locked, ManagedPairRecovery,
 };
+use replacement::applied_state_write_failure_injected;
+#[cfg(any(windows, test))]
+pub(super) use replacement::finish_manual_replacement_locked;
+pub(super) use replacement::reconcile_replacement_terminal_locked;
 
 pub const STATE_FILE: &str = "upgrade-state.json";
 pub const STATE_SCHEMA_VERSION: u64 = 1;
@@ -556,63 +561,6 @@ pub(super) fn write_state_error_locked(
     Ok(true)
 }
 
-pub(super) fn reconcile_replacement_terminal_locked(
-    lock: &UpgradeLock,
-    attempt_id: &str,
-    applied: bool,
-    warning_or_error: Option<&str>,
-    interval: Duration,
-) -> Result<bool> {
-    if applied && applied_state_write_failure_injected(attempt_id) {
-        return Err(anyhow!("injected applied-state write failure"));
-    }
-    let mut state = read_state_object(&lock.install_path);
-    let automatic = state.attempt_id.as_deref() == Some(attempt_id)
-        && state
-            .attempt_source
-            .as_deref()
-            .is_some_and(is_automatic_attempt_source);
-    if state.attempt_id.as_deref() != Some(attempt_id) {
-        state.schema_version = STATE_SCHEMA_VERSION;
-        state.attempt_id = Some(attempt_id.to_owned());
-        state.attempt_source = Some("recovery".to_owned());
-        state.last_attempt_at = Some(utc_now());
-    }
-    let attempt = UpgradeAttempt {
-        id: attempt_id.to_owned(),
-    };
-    if applied {
-        state.terminal(&attempt, "applied", interval, now_unix_s());
-        if let Some(latest) = state.plan.get("latest_version").cloned() {
-            state.plan.insert("current_version".to_owned(), latest);
-        }
-        state
-            .plan
-            .insert("update_available".to_owned(), Value::Bool(false));
-        if let Some(warning) = warning_or_error {
-            state.plan.insert("warning".to_owned(), json!(warning));
-        }
-    } else {
-        state.fail(
-            &attempt,
-            warning_or_error.unwrap_or("replacement failed"),
-            now_unix_s(),
-        );
-    }
-    write_state_object_locked(lock, state)?;
-    Ok(automatic)
-}
-
-fn applied_state_write_failure_injected(attempt_id: &str) -> bool {
-    crate::upgrade::test_harness_enabled()
-        && std::env::var("CTX_UPGRADE_FAIL_APPLIED_STATE_WRITE_FOR_TESTS").is_ok_and(|value| {
-            value == attempt_id
-                || (!value.starts_with("ua_")
-                    && !["", "0", "false", "no", "off"]
-                        .contains(&value.trim().to_ascii_lowercase().as_str()))
-        })
-}
-
 fn write_plan(state: &mut UpgradeState, plan: &UpgradePlan, applied: bool) {
     state.plan.insert(
         "current_version".to_owned(),
@@ -848,11 +796,8 @@ pub(super) struct UpgradeLock {
 }
 
 impl UpgradeLock {
-    #[cfg(test)]
-    pub(super) fn from_installation_for_test(
-        install_path: PathBuf,
-        installation: InstallationLock,
-    ) -> Self {
+    #[cfg(any(windows, test))]
+    pub(super) fn from_installation(install_path: PathBuf, installation: InstallationLock) -> Self {
         Self {
             install_path,
             installation,

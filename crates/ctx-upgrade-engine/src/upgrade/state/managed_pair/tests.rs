@@ -74,7 +74,7 @@ impl RecoveryFixture {
     fn lock(&self) -> Result<UpgradeLock> {
         let installation = InstallationLock::try_acquire_at_root(&self.root)?
             .ok_or_else(|| anyhow!("fixture installation lock held"))?;
-        Ok(UpgradeLock::from_installation_for_test(
+        Ok(UpgradeLock::from_installation(
             self.install_path.clone(),
             installation,
         ))
