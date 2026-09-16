@@ -89,6 +89,18 @@ mod native {
                     }
                 }
             }
+            for (name, suffix) in [
+                ("XDG_CONFIG_HOME", ".config"),
+                ("XDG_DATA_HOME", ".local/share"),
+                ("XDG_STATE_HOME", ".local/state"),
+                ("CTX_PRO_DATA_ROOT", "pro"),
+                ("CTX_RUNTIME_DIR", ""),
+                ("XDG_RUNTIME_DIR", ""),
+            ] {
+                let path = self.temp.path().join(suffix);
+                fs::create_dir_all(&path).unwrap();
+                command.env(name, path);
+            }
             command
         }
 

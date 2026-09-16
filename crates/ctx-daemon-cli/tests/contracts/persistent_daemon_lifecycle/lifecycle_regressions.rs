@@ -1,6 +1,80 @@
 use super::*;
 
 #[test]
+fn abandoned_daemon_lock_and_status_recover_after_binary_relocation() {
+    let _serial = TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for retain_lock in [true, false] {
+        let mut harness = Harness::new();
+        let old_binary = harness.binary.clone();
+        let mut original = harness.spawn(&["daemon", "run", "--format=json"], None);
+        let old_pid = original.id();
+        assert_eq!(live_pid(&wait_for_daemon(&harness, None)), old_pid);
+        let old_lock = read_lock(harness.root()).expect("original daemon lock");
+
+        let new_bin = harness.home().join("relocated-bin");
+        fs::create_dir(&new_bin).unwrap();
+        harness.binary = new_bin.join(old_binary.file_name().unwrap());
+        fs::copy(&old_binary, &harness.binary).unwrap();
+
+        // A second image must leave the live owner alone, even though its
+        // reported identity does not match the invoking binary.
+        let _ = harness.output(&["daemon", "run", "--format=json"]);
+        assert!(process_is_running(old_pid));
+        assert_eq!(read_lock(harness.root()).unwrap(), old_lock);
+
+        original
+            .terminate()
+            .expect("crash and reap original daemon");
+        fs::remove_file(&old_binary).unwrap();
+        assert_eq!(read_lock(harness.root()).unwrap(), old_lock);
+        assert_eq!(old_lock["released"], false);
+        assert_eq!(old_lock["lock_protocol"], "advisory-v1");
+        let status_path = harness.root().join("daemon/status.json");
+        let abandoned_status = fs::read(&status_path).unwrap();
+        let status: Value = serde_json::from_slice(&abandoned_status).unwrap();
+        assert_eq!(status["status"], "running", "{status:#}");
+        assert_eq!(json_u32(&status, "pid"), Some(old_pid));
+        if !retain_lock {
+            fs::remove_file(harness.root().join("daemon/daemon.lock")).unwrap();
+        }
+
+        let stale = harness.daemon_status();
+        assert_eq!(stale["running"], false, "{stale:#}");
+        assert_eq!(stale["recoverable"], true, "{stale:#}");
+        assert_eq!(
+            stale["reason"],
+            if retain_lock {
+                "daemon_lock_stale"
+            } else {
+                "daemon_status_stale"
+            },
+            "{stale:#}"
+        );
+        assert_eq!(fs::read(&status_path).unwrap(), abandoned_status);
+        assert_eq!(
+            read_lock(harness.root()),
+            retain_lock.then_some(old_lock.clone())
+        );
+
+        let replacement = harness.spawn(&["daemon", "run", "--format=json"], None);
+        let ready = wait_for_daemon(&harness, Some(old_pid));
+        assert_eq!(live_pid(&ready), replacement.id(), "{ready:#}");
+        assert_replaced_stale_owner(&harness, &old_lock, replacement.id());
+        let replacement_lock = read_lock(harness.root()).unwrap();
+        assert_eq!(replacement_lock["binary"], json!(harness.binary));
+        let replacement_status = read_json_file(&status_path);
+        assert_eq!(json_u32(&replacement_status, "pid"), Some(replacement.id()));
+        assert_eq!(replacement_status["status"], "running");
+
+        harness.json(&["daemon", "disable", "--format=json"]);
+        let output = wait_for_output(replacement, COMMAND_TIMEOUT, &["daemon", "run"]);
+        assert!(output.status.success(), "{output:?}");
+    }
+}
+
+#[test]
 fn long_lived_mcp_search_recovers_daemon_after_startup() {
     let _serial = TEST_SERIAL
         .lock()
