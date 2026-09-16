@@ -304,3 +304,92 @@ fn retry_waits_only_while_target_and_staged_remain_safe() {
     assert_eq!(calls.get(), 2);
     assert_eq!(waits.get(), 1);
 }
+
+#[test]
+fn helper_records_manual_terminal_under_lock_before_daemon_restart() {
+    use crate::upgrade::{
+        install::InstallationLock,
+        state::{atomic_write_json, UpgradeLock},
+    };
+
+    for (source, phase, expected, restart_fails) in [
+        ("manual_apply", JournalPhase::Committed, "applied", false),
+        ("manual_apply", JournalPhase::Committed, "applied", true),
+        ("manual_recovery", JournalPhase::RolledBack, "error", false),
+        ("manual_apply", JournalPhase::Failed, "error", false),
+        ("automatic", JournalPhase::Committed, "scheduled", false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut transaction = transaction(temp.path(), Vec::new());
+        transaction.phase = phase;
+        if phase == JournalPhase::Failed {
+            transaction.paths.push(path_record(
+                "Semantic model",
+                &temp.path().join("model.new"),
+                &temp.path().join("missing-model"),
+                &temp.path().join("missing-backup"),
+                JournalPathState::Published,
+            ));
+        }
+        fs::write(&transaction.install_path, b"installed executable").unwrap();
+        let state_path = temp.path().join(".ctx.upgrade-state.json");
+        atomic_write_json(
+            &state_path,
+            &serde_json::json!({
+                "schema_version": 1,
+                "status": "scheduled",
+                "attempt_source": source,
+                "attempt_id": transaction.attempt_id,
+            }),
+        )
+        .unwrap();
+        let lock = UpgradeLock::from_installation(
+            transaction.install_path.clone(),
+            InstallationLock::try_acquire(&transaction.install_path)
+                .unwrap()
+                .unwrap(),
+        );
+        let restarted = Cell::new(false);
+        let outcome = execute_and_finish_transaction(&lock, &mut transaction, |transaction| {
+            let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?).unwrap();
+            assert_eq!(state["status"], expected);
+            assert_eq!(state["attempt_id"], transaction.attempt_id);
+            assert!(InstallationLock::try_acquire(&transaction.install_path)?.is_none());
+            assert!(journal::read(&transaction.install_path)?
+                .unwrap()
+                .windows_helper
+                .unwrap()
+                .terminal
+                .is_some());
+            restarted.set(true);
+            if restart_fails {
+                anyhow::bail!("native supervisor unavailable");
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(restarted.get(), phase != JournalPhase::Failed);
+        if phase == JournalPhase::Failed {
+            assert!(matches!(outcome, HelperOutcome::Failed { .. }));
+            assert_eq!(transaction.phase, JournalPhase::Failed);
+        }
+        if restart_fails {
+            let HelperOutcome::Applied {
+                warning: Some(warning),
+            } = outcome
+            else {
+                panic!("restart failure must retain applied replacement outcome");
+            };
+            assert!(warning.contains("native supervisor unavailable"));
+            let terminal = journal::read(&transaction.install_path)
+                .unwrap()
+                .unwrap()
+                .windows_helper
+                .unwrap()
+                .terminal
+                .unwrap();
+            assert_eq!(terminal.outcome, WindowsTerminalOutcome::Applied);
+            assert_eq!(terminal.warning_or_error.as_deref(), Some(warning.as_str()));
+        }
+    }
+}

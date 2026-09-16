@@ -88,6 +88,12 @@ file and verifies it before replacing the process environment. Unix supervisor
 definitions are also mode `0600`; the Windows task definition remains under
 the owner-private daemon root and current-user scheduler registration.
 
+Status verifies this installed snapshot, independently of the observing shell.
+Changes to provider roots, policy, proxy/CA settings, or endpoint-bound credentials
+still report that a restart is required. Differences in locale, temporary
+directories, or session-manager environment do not make the registration stale.
+Explicit `ctx index mode auto` captures the current launch environment again.
+
 ## Local Usage Product State
 
 `usage.sqlite` is an owner-private SQLite sidecar under the selected ctx data

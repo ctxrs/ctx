@@ -20,6 +20,7 @@ use super::{
     journal::{WindowsDaemonRestart, WindowsHelperJournal},
     ApplyResult, RecoveryOutcome,
 };
+#[cfg(windows)]
 use crate::upgrade::DaemonUpgradePort;
 #[cfg(windows)]
 use crate::upgrade::{DaemonRestart, ReleaseProcessPort, SemanticLayoutPort};
@@ -174,8 +175,14 @@ pub(in crate::upgrade) fn run_replacement_helper<D: DaemonUpgradePort + ?Sized>(
     }
     // Publishing and rollback phases are intentionally never regressed.
     parent.wait()?;
-    let outcome = execute_transaction(daemon, &mut transaction);
-    drop(installation_lock);
+    let lock = crate::upgrade::state::UpgradeLock::from_installation(
+        install_path.to_owned(),
+        installation_lock,
+    );
+    let outcome = execute_and_finish_transaction(&lock, &mut transaction, |transaction| {
+        restart_daemon(daemon, transaction)
+    });
+    drop(lock);
     if outcome.is_ok() {
         // Terminal state and daemon readiness are already durable. Handoff
         // cleanup is best-effort and cannot turn recovery into a failure.
@@ -204,22 +211,63 @@ pub(super) fn recover_transaction(
     })
 }
 
-fn execute_transaction<D: DaemonUpgradePort + ?Sized>(
-    daemon: &D,
+fn execute_and_finish_transaction(
+    lock: &crate::upgrade::state::UpgradeLock,
     transaction: &mut InstallTransactionJournal,
+    restart: impl FnOnce(&InstallTransactionJournal) -> Result<()>,
 ) -> Result<HelperOutcome> {
-    match transaction.phase {
-        JournalPhase::Committed | JournalPhase::CleanupPending => {
-            finalize_committed(daemon, transaction)
+    let mut outcome = execute_transaction(transaction)?;
+    let (applied, detail) = match &outcome {
+        HelperOutcome::Applied { warning } => (true, warning.as_deref()),
+        HelperOutcome::Failed { error } => (false, Some(error.as_str())),
+    };
+    // Native supervision starts without the helper's handoff token, so
+    // publish manual completion before asking it to restart the daemon.
+    crate::upgrade::state::finish_manual_replacement_locked(
+        lock,
+        &transaction.attempt_id,
+        applied,
+        detail,
+    )?;
+    // Preserve the existing refusal to restart after an incomplete rollback.
+    if transaction.phase.committed() || transaction.phase == JournalPhase::RolledBack {
+        if let Err(error) = restart(transaction) {
+            let detail = format!("replacement daemon restart remains pending: {error:#}");
+            let warning_or_error = match &mut outcome {
+                HelperOutcome::Applied { warning } => {
+                    *warning = merge_warnings(warning.take(), Some(detail));
+                    warning.clone()
+                }
+                HelperOutcome::Failed { error } => {
+                    error.push_str(&format!("; {detail}"));
+                    Some(error.clone())
+                }
+            };
+            transaction
+                .windows_helper
+                .as_mut()
+                .unwrap()
+                .terminal
+                .as_mut()
+                .unwrap()
+                .warning_or_error = warning_or_error;
+            journal::write(transaction)?;
         }
-        JournalPhase::RolledBack => finalize_rollback(daemon, transaction),
+    }
+    Ok(outcome)
+}
+
+fn execute_transaction(transaction: &mut InstallTransactionJournal) -> Result<HelperOutcome> {
+    match transaction.phase {
+        JournalPhase::Committed | JournalPhase::CleanupPending => finalize_committed(transaction),
+        JournalPhase::RolledBack => finalize_rollback(transaction),
         JournalPhase::RollingBack | JournalPhase::Failed => {
             let failure = transaction
                 .windows_helper
                 .as_ref()
                 .and_then(|helper| helper.failure.clone())
                 .unwrap_or_else(|| "previous Windows replacement publication failed".to_owned());
-            rollback_after_failure(daemon, transaction, failure)
+            rollback_after_failure(transaction, failure)
         }
         JournalPhase::Prepared | JournalPhase::HelperReady | JournalPhase::Publishing => {
             let publication = (|| -> Result<()> {
@@ -238,15 +286,14 @@ fn execute_transaction<D: DaemonUpgradePort + ?Sized>(
                 journal::write(transaction)
             })();
             match publication {
-                Ok(()) => finalize_committed(daemon, transaction),
-                Err(error) => rollback_after_failure(daemon, transaction, format!("{error:#}")),
+                Ok(()) => finalize_committed(transaction),
+                Err(error) => rollback_after_failure(transaction, format!("{error:#}")),
             }
         }
     }
 }
 
-fn rollback_after_failure<D: DaemonUpgradePort + ?Sized>(
-    daemon: &D,
+fn rollback_after_failure(
     transaction: &mut InstallTransactionJournal,
     failure: String,
 ) -> Result<HelperOutcome> {
@@ -273,33 +320,20 @@ fn rollback_after_failure<D: DaemonUpgradePort + ?Sized>(
     }
     transaction.phase = JournalPhase::RolledBack;
     journal::write(transaction)?;
-    finalize_rollback(daemon, transaction)
+    finalize_rollback(transaction)
 }
 
-fn finalize_rollback<D: DaemonUpgradePort + ?Sized>(
-    daemon: &D,
-    transaction: &mut InstallTransactionJournal,
-) -> Result<HelperOutcome> {
-    let mut failure = transaction
+fn finalize_rollback(transaction: &mut InstallTransactionJournal) -> Result<HelperOutcome> {
+    let failure = transaction
         .windows_helper
         .as_ref()
         .and_then(|helper| helper.failure.clone())
         .unwrap_or_else(|| "Windows replacement was rolled back".to_owned());
-    if let Err(error) = restart_daemon(daemon, transaction) {
-        failure.push_str(&format!("; daemon restart remains pending: {error:#}"));
-    }
     finish_failed(transaction, failure)
 }
 
-fn finalize_committed<D: DaemonUpgradePort + ?Sized>(
-    daemon: &D,
-    transaction: &mut InstallTransactionJournal,
-) -> Result<HelperOutcome> {
-    let cleanup_warning = layout::finish_committed(transaction)?;
-    let restart_warning = restart_daemon(daemon, transaction)
-        .err()
-        .map(|error| format!("replacement daemon restart remains pending: {error:#}"));
-    let warning = merge_warnings(cleanup_warning, restart_warning);
+fn finalize_committed(transaction: &mut InstallTransactionJournal) -> Result<HelperOutcome> {
+    let warning = layout::finish_committed(transaction)?;
     finish_terminal(
         transaction,
         WindowsTerminalOutcome::Applied,

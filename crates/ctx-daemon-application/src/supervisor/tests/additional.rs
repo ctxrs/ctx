@@ -48,6 +48,9 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
         None,
         &enabled_http,
     )?;
+    assert!(input_a
+        .daemon_environment
+        .requires_restart(&input_b.daemon_environment));
     backend.expect_environment(&input_b.daemon_environment);
     assert_eq!(
         ensure_native_supervisor_with(&TestHost, &input_b, &backend)?,
@@ -85,6 +88,9 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
         None,
         &disabled_config,
     )?;
+    assert!(input_b
+        .daemon_environment
+        .requires_restart(&disabled.daemon_environment));
     backend.expect_environment(&disabled.daemon_environment);
     assert_eq!(
         ensure_native_supervisor_with(&TestHost, &disabled, &backend)?,
@@ -116,6 +122,9 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
         None,
         &enabled_http,
     )?;
+    assert!(disabled
+        .daemon_environment
+        .requires_restart(&reenabled.daemon_environment));
     backend.expect_environment(&reenabled.daemon_environment);
     assert_eq!(
         ensure_native_supervisor_with(&TestHost, &reenabled, &backend)?,
@@ -194,6 +203,12 @@ fn unavailable_manager_falls_back_before_native_mutation_under_the_installation_
     assert_eq!(report["restart_supported"], false);
     assert_eq!(report["registration_verified"], false);
     assert_eq!(report["live_owner_verified"], false);
+    assert!(report["artifact_path"].is_null());
+    // No service was installed, so status must not require an environment file.
+    report::supervisor_environment_snapshot_for_registration(&TestHost, temp.path())?;
+    let observed = revalidated_supervisor_report_with(&TestHost, temp.path(), &backend);
+    assert_eq!(observed["status"], "manager_unavailable");
+    assert_eq!(observed["environment_snapshot"]["restart_required"], false);
     assert!(report["limitation"]
         .as_str()
         .is_some_and(|value| value.contains("persistent detached daemon")));

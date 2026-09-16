@@ -26,14 +26,11 @@ const SUPERVISOR_DAEMON_POLICY_ENV_ALLOWLIST: &[&str] = &[
     "CTX_UPGRADE_AUTO",
     "CTX_UPGRADE_CHANNEL",
     "CTX_UPGRADE_INTERVAL_SECONDS",
-    "DBUS_SESSION_BUS_ADDRESS",
     "HOMEDRIVE",
     "HOMEPATH",
     "HOME",
     "HTTPS_PROXY",
     "HTTP_PROXY",
-    "LANG",
-    "LC_ALL",
     "LOCALAPPDATA",
     "MIMOCODE_CONFIG_DIR",
     "NO_PROXY",
@@ -41,17 +38,24 @@ const SUPERVISOR_DAEMON_POLICY_ENV_ALLOWLIST: &[&str] = &[
     "SSL_CERT_DIR",
     "SSL_CERT_FILE",
     "SystemRoot",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
-    "TZ",
     "USERPROFILE",
     "WINDIR",
-    "XDG_RUNTIME_DIR",
     "all_proxy",
     "https_proxy",
     "http_proxy",
     "no_proxy",
+];
+// Captured for process startup, but a different observing shell does not
+// change provider discovery, daemon policy, or network/authentication inputs.
+const SUPERVISOR_PROCESS_CONTEXT_ENV_ALLOWLIST: &[&str] = &[
+    "DBUS_SESSION_BUS_ADDRESS",
+    "LANG",
+    "LC_ALL",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+    "XDG_RUNTIME_DIR",
 ];
 const DAEMON_LOOP_INTERVAL_ENV: &str = "CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS";
 pub(super) const HOSTED_INSTALLER_SETUP_ENV: &str = "CTX_HOSTED_INSTALLER_SETUP";
@@ -138,6 +142,17 @@ pub(super) struct SupervisorEnvironmentSnapshot {
 }
 
 impl SupervisorEnvironmentSnapshot {
+    pub(super) fn requires_restart(&self, current: &Self) -> bool {
+        let relevant =
+            |name: &String| !SUPERVISOR_PROCESS_CONTEXT_ENV_ALLOWLIST.contains(&name.as_str());
+        self.loop_interval_seconds != current.loop_interval_seconds
+            || !self
+                .values
+                .iter()
+                .filter(|(name, _)| relevant(name))
+                .eq(current.values.iter().filter(|(name, _)| relevant(name)))
+    }
+
     pub(super) fn loop_interval_seconds(&self) -> Option<u64> {
         self.loop_interval_seconds
     }
@@ -196,6 +211,7 @@ pub(super) fn supervisor_environment_snapshot(
     for name in DISCOVERY_ENV_ALLOWLIST
         .iter()
         .chain(SUPERVISOR_DAEMON_POLICY_ENV_ALLOWLIST)
+        .chain(SUPERVISOR_PROCESS_CONTEXT_ENV_ALLOWLIST)
     {
         if hosted_installer_setup && HOSTED_INSTALLER_TRANSIENT_POLICY_ENV.contains(name) {
             continue;
@@ -236,6 +252,47 @@ pub(super) fn supervisor_environment_snapshot(
         captured_at_ms: utc_now().timestamp_millis(),
         sha256,
     })
+}
+
+pub(super) fn installed_supervisor_environment_snapshot(
+    data_root: &Path,
+    receipt: &Value,
+) -> Result<SupervisorEnvironmentSnapshot> {
+    let values = ctx_daemon_runtime::read_supervisor_environment(
+        &ctx_daemon_runtime::supervisor_environment_path(data_root),
+    )?
+    .into_iter()
+    .map(|(name, value)| {
+        let name = name
+            .into_string()
+            .map_err(|_| anyhow!("supervisor environment name is not Unicode"))?;
+        let value = validated_supervisor_environment_value(&name, value)?;
+        Ok((name, value))
+    })
+    .collect::<Result<Vec<_>>>()?;
+    let loop_interval_seconds = receipt
+        .pointer("/environment_snapshot/loop_interval_seconds")
+        .and_then(Value::as_u64);
+    let sha256 = supervisor_environment_sha256(&values, loop_interval_seconds);
+    if receipt
+        .pointer("/environment_snapshot/sha256")
+        .and_then(Value::as_str)
+        != Some(sha256.as_str())
+    {
+        return Err(anyhow!(
+            "installed supervisor environment does not match its receipt"
+        ));
+    }
+    SupervisorEnvironmentSnapshot {
+        values,
+        loop_interval_seconds,
+        captured_at_ms: receipt
+            .pointer("/environment_snapshot/captured_at_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        sha256,
+    }
+    .with_loop_interval_seconds(loop_interval_seconds)
 }
 
 fn supervisor_environment_sha256(
@@ -375,6 +432,7 @@ pub(super) fn validated_supervisor_artifact_text<'a>(
 pub(crate) fn supervisor_environment_allowlist_names() -> Vec<&'static str> {
     let mut names = DISCOVERY_ENV_ALLOWLIST.to_vec();
     names.extend_from_slice(SUPERVISOR_DAEMON_POLICY_ENV_ALLOWLIST);
+    names.extend_from_slice(SUPERVISOR_PROCESS_CONTEXT_ENV_ALLOWLIST);
     names.push("PATH");
     names.sort_unstable();
     names.dedup();

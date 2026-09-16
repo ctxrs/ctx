@@ -510,3 +510,86 @@ fn atomic_json_write_replaces_without_partial_content() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn manual_helper_terminal_releases_installation_without_another_upgrade_command() -> Result<()> {
+    for (source, applied, expected_status) in [
+        ("manual_apply", true, "applied"),
+        ("manual_recovery", true, "applied"),
+        ("manual_apply", false, "error"),
+    ] {
+        let (_temp, install_path) = test_installation()?;
+        let installation = InstallationLock::try_acquire(&install_path)?.unwrap();
+        let mut state = UpgradeState {
+            next_check_unix_s: Some(2_000),
+            next_retry_unix_s: Some(1_500),
+            consecutive_failures: 3,
+            ..UpgradeState::default()
+        };
+        let attempt = state.begin(source);
+        state.status = "scheduled".to_owned();
+        state
+            .plan
+            .insert("latest_version".to_owned(), json!("1.4.4"));
+        atomic_write_json(&state_path(&install_path), &serde_json::to_value(state)?)?;
+        assert!(installation_upgrade_is_active_for(&install_path)?);
+
+        let lock = UpgradeLock::from_installation(install_path.clone(), installation);
+        finish_manual_replacement_locked(
+            &lock,
+            attempt.id(),
+            applied,
+            (!applied).then_some("replacement failed"),
+        )?;
+
+        drop(lock);
+        assert!(!installation_upgrade_is_active_for(&install_path)?);
+        let finished = read_state_object(&install_path);
+        assert_eq!(finished.status, expected_status);
+        assert_eq!(finished.attempt_id.as_deref(), Some(attempt.id()));
+        assert_eq!(finished.attempt_source.as_deref(), Some(source));
+        assert!(finished.last_attempt_finished_at.is_some());
+        assert_eq!(finished.next_check_unix_s, Some(2_000));
+        assert_eq!(finished.next_retry_unix_s, Some(1_500));
+        assert_eq!(finished.consecutive_failures, 3);
+        if applied {
+            assert_eq!(finished.plan["current_version"], "1.4.4");
+            assert_eq!(finished.plan["update_available"], false);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn manual_helper_completion_preserves_automatic_and_other_attempts() -> Result<()> {
+    for (source, matching_attempt) in [
+        ("automatic", true),
+        ("daemon", true),
+        ("manual_apply", false),
+    ] {
+        let (_temp, install_path) = test_installation()?;
+        let installation = InstallationLock::try_acquire(&install_path)?.unwrap();
+        let mut state = UpgradeState::default();
+        let attempt = state.begin(source);
+        state.status = "scheduled".to_owned();
+        let original = serde_json::to_value(state)?;
+        atomic_write_json(&state_path(&install_path), &original)?;
+
+        let lock = UpgradeLock::from_installation(install_path.clone(), installation);
+        finish_manual_replacement_locked(
+            &lock,
+            if matching_attempt {
+                attempt.id()
+            } else {
+                "ua_previous"
+            },
+            true,
+            None,
+        )?;
+
+        drop(lock);
+        assert!(installation_upgrade_is_active_for(&install_path)?);
+        assert_eq!(read_state_json_for_path(&install_path), Some(original));
+    }
+    Ok(())
+}

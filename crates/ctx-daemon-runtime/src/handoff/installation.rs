@@ -8,7 +8,8 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 
 use crate::{
-    open_or_create_pid_lock_file, process_state, secure_private_file_permissions, ProcessState,
+    daemon_lock_path, observe_pid_advisory_lock, open_or_create_pid_lock_file, process_state,
+    secure_private_file_permissions, ProcessState,
 };
 
 pub struct InstallationQuiescence {
@@ -65,7 +66,17 @@ pub fn wait_for_installation_quiescence(
     }
     let result =
         read_installation_restart_records(registration_root, attempt_id, true, loop_interval_cap)
-            .map(|_| ());
+            .and_then(|_| {
+                // Validation proved these owners stopped. The exclusive lease
+                // prevents a daemon from publishing a new live registration.
+                for (path, value) in read_installation_registrations(registration_root)? {
+                    if value["status"] == "live" {
+                        // Cleanup failure cannot make a stopped owner live again.
+                        let _ = fs::remove_file(path);
+                    }
+                }
+                Ok(())
+            });
     let _ = fs2::FileExt::unlock(&lock);
     result
 }
@@ -104,6 +115,12 @@ pub fn read_installation_restart_records(
                     process_state(pid),
                     ProcessState::Running | ProcessState::Unknown
                 )
+                // An unlocked daemon guard proves ownership ended even if an
+                // unrelated process has since reused the recorded PID.
+                && !observe_pid_advisory_lock(&daemon_lock_path(Path::new(
+                    value["data_root"].as_str().unwrap_or_default(),
+                )))
+                .is_some_and(|owner| !owner.held)
             {
                 return Err(anyhow!(
                     "ctx daemon registration remains live after installation quiescence"
@@ -329,5 +346,139 @@ mod tests {
         assert_eq!(records[0].data_root, data_root);
         assert_eq!(records[0].opaque_trigger, "setup");
         assert_eq!(records[0].loop_interval_seconds, None);
+    }
+
+    #[test]
+    fn quiescence_prunes_crash_registration_with_reused_pid_without_restarting_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let registrations = temp.path().join("registrations");
+        let data_root = temp.path().join("crashed");
+        let lock_path = temp.path().join("installation.lock");
+        crate::create_private_dir_all(&crate::daemon_root_path(&data_root)).unwrap();
+        let daemon_lock = crate::daemon_lock_path(&data_root);
+        let (owner, _) =
+            open_or_create_pid_lock_file(&crate::pid_lock_guard_path(&daemon_lock)).unwrap();
+        fs2::FileExt::lock_exclusive(&owner).unwrap();
+        assert!(crate::publish_pid_lock_metadata(
+            &daemon_lock,
+            &crate::pid_lock_payload(json!({})),
+        )
+        .unwrap());
+        let mut crashed = registration(&data_root, None);
+        crashed["status"] = json!("live");
+        crashed["attempt_id"] = Value::Null;
+        // The test process stands in for an unrelated process reusing the PID.
+        crashed["pid"] = json!(std::process::id());
+        write_registration(&registrations, "crashed.json", crashed);
+        write_registration(
+            &registrations,
+            "current.json",
+            registration(&temp.path().join("current"), None),
+        );
+        let mut stale = registration(&temp.path().join("stale"), None);
+        stale["attempt_id"] = json!("previous-attempt");
+        write_registration(&registrations, "stale.json", stale);
+
+        // A still-held daemon guard cannot be dismissed on PID evidence alone.
+        assert!(read_installation_restart_records(&registrations, "attempt", true, 3_600).is_err());
+        // A crash releases the OS lock without updating its ownership metadata.
+        drop(owner);
+        assert_eq!(
+            crate::read_pid_lock_json(&daemon_lock).unwrap()["released"],
+            false
+        );
+        assert_eq!(process_state(std::process::id()), ProcessState::Running);
+        assert_eq!(
+            read_installation_restart_records(&registrations, "attempt", true, 3_600)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(registrations.join("crashed.json").exists());
+        wait_for_installation_quiescence(
+            &lock_path,
+            &registrations,
+            "attempt",
+            Duration::ZERO,
+            Duration::ZERO,
+            3_600,
+        )
+        .unwrap();
+
+        assert!(!registrations.join("crashed.json").exists());
+        let records =
+            read_installation_restart_records(&registrations, "attempt", false, 3_600).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].data_root, temp.path().join("current"));
+        assert_eq!(process_state(std::process::id()), ProcessState::Running);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quiescence_prunes_stopped_pid_without_advisory_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let registrations = temp.path().join("registrations");
+        let mut crashed = registration(&temp.path().join("data"), None);
+        crashed["status"] = json!("live");
+        crashed["attempt_id"] = Value::Null;
+        crashed["pid"] = json!(u32::MAX);
+        write_registration(&registrations, "crashed.json", crashed);
+
+        wait_for_installation_quiescence(
+            &temp.path().join("installation.lock"),
+            &registrations,
+            "attempt",
+            Duration::ZERO,
+            Duration::ZERO,
+            3_600,
+        )
+        .unwrap();
+        assert!(read_installation_registrations(&registrations)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn quiescence_preserves_registration_while_a_daemon_holds_its_installation_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let registrations = temp.path().join("registrations");
+        let lock_path = temp.path().join("installation.lock");
+        let lease = open_installation_quiescence_lock(&lock_path).unwrap();
+        fs2::FileExt::lock_shared(&lease).unwrap();
+        let mut live = registration(&temp.path().join("data"), None);
+        live["status"] = json!("live");
+        live["attempt_id"] = Value::Null;
+        live["pid"] = json!(std::process::id());
+        write_registration(&registrations, "live.json", live.clone());
+
+        assert!(wait_for_installation_quiescence(
+            &lock_path,
+            &registrations,
+            "attempt",
+            Duration::ZERO,
+            Duration::ZERO,
+            3_600,
+        )
+        .is_err());
+        assert_eq!(
+            read_installation_registrations(&registrations).unwrap()[0].1,
+            live
+        );
+
+        drop(lease);
+        // Without advisory ownership evidence, a running PID remains uncertain.
+        assert!(wait_for_installation_quiescence(
+            &lock_path,
+            &registrations,
+            "attempt",
+            Duration::ZERO,
+            Duration::ZERO,
+            3_600,
+        )
+        .is_err());
+        assert_eq!(
+            read_installation_registrations(&registrations).unwrap()[0].1,
+            live
+        );
     }
 }

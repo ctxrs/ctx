@@ -134,7 +134,7 @@ fn automatic_fixture(
         semantic_provisioning: None,
     };
     let installation = InstallationLock::try_acquire(&install).unwrap().unwrap();
-    let lock = UpgradeLock::from_installation_for_test(install.clone(), installation);
+    let lock = UpgradeLock::from_installation(install.clone(), installation);
     let attempt = begin_automatic_attempt_locked(&lock, ().interval())
         .unwrap()
         .unwrap();
@@ -203,7 +203,7 @@ fn post_apply_state_and_restart_faults_recover_one_truthful_applied_event() {
     assert_eq!(state_value(&install)["status"], "applying");
 
     let installation = InstallationLock::try_acquire(&install).unwrap().unwrap();
-    let recovery_lock = UpgradeLock::from_installation_for_test(install.clone(), installation);
+    let recovery_lock = UpgradeLock::from_installation(install.clone(), installation);
     let recovery = managed_pair_recovery_locked(&recovery_lock, attempt.id()).unwrap();
     finalize_automatic_recovery(
         recovery_lock,
