@@ -536,9 +536,17 @@ pub fn verify_daemon_owner_identity(
             "native supervisor daemon lock identifies a different ctx binary image"
         ));
     }
+    #[cfg(target_os = "linux")]
+    if !crate::daemon_owner_binary_identity_matches(&lock, executable)? {
+        return Err(anyhow!(
+            "native supervisor live process is not the installed ctx binary image"
+        ));
+    }
+    #[cfg(not(target_os = "linux"))]
     let process_executable = supervisor_process_executable(pid).ok_or_else(|| {
         anyhow!("native supervisor live process executable identity is unavailable")
     })?;
+    #[cfg(not(target_os = "linux"))]
     if !same_canonical_path(&process_executable, executable) {
         return Err(anyhow!(
             "native supervisor live process is not the installed ctx executable"
@@ -549,11 +557,6 @@ pub fn verify_daemon_owner_identity(
 
 fn same_canonical_path(left: &Path, right: &Path) -> bool {
     fs::canonicalize(left).ok() == fs::canonicalize(right).ok()
-}
-
-#[cfg(target_os = "linux")]
-fn supervisor_process_executable(pid: u32) -> Option<PathBuf> {
-    fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 
 #[cfg(target_os = "macos")]

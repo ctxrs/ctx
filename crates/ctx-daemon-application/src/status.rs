@@ -27,8 +27,10 @@ pub struct DaemonStatusPreparation<'a> {
     status_path: PathBuf,
     lock_value: Option<Value>,
     lock_pid: Option<u32>,
-    owner_identity_matches: bool,
+    owner_identity_matches: Option<bool>,
     owner_identity_mismatch: bool,
+    owner_identity_unavailable: bool,
+    owner_inspection_denied: bool,
     running: bool,
     stale_lock_overrides_lifecycle: bool,
     stale_running_status: bool,
@@ -94,25 +96,64 @@ pub(super) fn prepare_daemon_status<'a>(
     let lock_state = lock_pid.map(process_state);
     let lock_reports_running =
         pid_lock_file_reports_running(&lock_path, lock_state, status.as_str());
-    let owner_identity_matches = lock_reports_running
-        && lock_value.as_ref().is_some_and(|identity| {
+    let owner_identity = lock_value
+        .as_ref()
+        .filter(|_| lock_reports_running)
+        .map(|identity| {
             identity
                 .get("binary")
                 .and_then(Value::as_str)
                 .map(Path::new)
-                .and_then(|executable| {
-                    daemon_owner_binary_identity_matches(identity, executable).ok()
-                })
-                .unwrap_or(false)
+                .map(|executable| daemon_owner_binary_identity_matches(identity, executable))
+                .unwrap_or(Ok(false))
         });
-    let owner_identity_mismatch = lock_reports_running && !owner_identity_matches;
-    let running = lock_reports_running && owner_identity_matches;
+    let owner_identity_matches = match &owner_identity {
+        Some(Ok(matches)) => Some(*matches),
+        Some(Err(_)) => None,
+        None => Some(false),
+    };
+    let owner_inspection_denied = owner_identity.as_ref().is_some_and(|identity| {
+        identity
+            .as_ref()
+            .is_err_and(|error| error.is::<ctx_daemon_runtime::ProcessExecutableInspectionDenied>())
+    });
+    let owner_identity_unavailable = lock_reports_running
+        && owner_identity_matches.is_none()
+        && lock_state != Some(ctx_daemon_runtime::ProcessState::NotRunning);
+    #[cfg(target_os = "linux")]
+    let endpoint_verified = owner_identity
+        .as_ref()
+        .and_then(|identity| identity.as_ref().err())
+        .and_then(|error| {
+            error.downcast_ref::<ctx_daemon_runtime::ProcessExecutableInspectionDenied>()
+        })
+        .zip(
+            lock_value
+                .as_ref()
+                .and_then(|identity| identity.get("binary"))
+                .and_then(Value::as_str),
+        )
+        .is_some_and(|(denied, executable)| {
+            crate::lifecycle::verify_inspection_denied_owner(
+                data_root,
+                Path::new(executable),
+                denied,
+            )
+            .is_ok()
+        });
+    #[cfg(not(target_os = "linux"))]
+    let endpoint_verified = false;
+    let owner_identity_mismatch = lock_reports_running && owner_identity_matches == Some(false);
+    let running =
+        lock_reports_running && (owner_identity_matches == Some(true) || endpoint_verified);
     let stale_lock = lock_path.exists() && pid_lock_file_is_orphaned(&lock_path);
     let stale_lock_overrides_lifecycle = (stale_lock || owner_identity_mismatch)
         && !["completed", "stopped", "failed"].contains(&status.as_str());
-    let stale_running_status = !running && status == "running";
+    let stale_running_status = !running && !owner_identity_unavailable && status == "running";
     if running {
         status = "running".to_owned();
+    } else if owner_identity_unavailable {
+        status = "unverified".to_owned();
     } else if stale_lock_overrides_lifecycle || stale_running_status {
         status = "stale_lock".to_owned();
     } else if !enabled && (disabled_overrides_lifecycle || status == "unknown") {
@@ -165,6 +206,8 @@ pub(super) fn prepare_daemon_status<'a>(
         lock_pid,
         owner_identity_matches,
         owner_identity_mismatch,
+        owner_identity_unavailable,
+        owner_inspection_denied,
         running,
         stale_lock_overrides_lifecycle,
         stale_running_status,
@@ -253,6 +296,13 @@ impl DaemonStatusPreparation<'_> {
                 .as_ref()
                 .and_then(|value| json_string(value, "binary_sha256")),
             "owner_image_matches": self.owner_identity_matches,
+            "owner_image_status": if self.owner_inspection_denied {
+                Some("permission_denied")
+            } else if self.owner_identity_unavailable {
+                Some("unavailable")
+            } else {
+                None
+            },
             "protocol": self
                 .lock_value
                 .as_ref()
@@ -282,6 +332,10 @@ impl DaemonStatusPreparation<'_> {
                 "recoverable": self.stale_lock_overrides_lifecycle || self.stale_running_status,
                 "reason": if self.owner_identity_mismatch {
                     Some("daemon_owner_identity_mismatch".to_owned())
+                } else if self.owner_inspection_denied {
+                    Some("daemon_owner_inspection_denied".to_owned())
+                } else if self.owner_identity_unavailable {
+                    Some("daemon_owner_identity_unavailable".to_owned())
                 } else if self.stale_lock_overrides_lifecycle {
                     Some("daemon_lock_stale".to_owned())
                 } else if self.stale_running_status {

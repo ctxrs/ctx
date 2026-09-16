@@ -15,6 +15,8 @@ mod unix_response;
 #[cfg(windows)]
 use submission::mark_windows_pending_submission;
 use submission::{mark_request_may_have_been_submitted, request_may_have_been_submitted};
+#[cfg(target_os = "linux")]
+pub use unix_response::daemon_query_roundtrip_linux_owner;
 #[cfg(unix)]
 pub use unix_response::daemon_query_roundtrip_unix;
 #[cfg(unix)]

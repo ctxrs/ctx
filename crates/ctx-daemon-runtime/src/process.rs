@@ -6,6 +6,9 @@ use serde_json::{json, Value};
 
 use crate::{daemon_lock_path, pid_lock_payload, read_pid_lock_json};
 
+#[cfg(all(test, target_os = "linux"))]
+mod linux_inspection_tests;
+
 pub fn current_daemon_lock_identity(data_root: &Path) -> Result<Value> {
     let binary = env::current_exe().context("resolve ctx daemon executable identity")?;
     Ok(pid_lock_payload(json!({
@@ -49,7 +52,42 @@ pub fn daemon_owner_binary_identity_matches(value: &Value, executable: &Path) ->
     let Some(recorded_sha256) = value.get("binary_sha256").and_then(Value::as_str) else {
         return Ok(false);
     };
-    Ok(process_executable_sha256(pid).as_deref() == Some(recorded_sha256))
+    let Some(path) = process_executable_path(pid) else {
+        return Ok(false);
+    };
+    let digest = executable_sha256(&path)
+        .map_err(|error| process_executable_inspection_error(pid, error))?;
+    Ok(digest == recorded_sha256)
+}
+
+/// Denied inspection is not evidence that the live process has a different
+/// image. Callers may report this distinction; it never authorizes signalling.
+#[derive(Debug)]
+pub struct ProcessExecutableInspectionDenied {
+    pub pid: u32,
+}
+
+impl std::fmt::Display for ProcessExecutableInspectionDenied {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "permission denied inspecting executable of daemon process {}",
+            self.pid
+        )
+    }
+}
+
+impl std::error::Error for ProcessExecutableInspectionDenied {}
+
+pub(crate) fn process_executable_inspection_error(pid: u32, error: anyhow::Error) -> anyhow::Error {
+    if error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        error.context(ProcessExecutableInspectionDenied { pid })
+    } else {
+        error
+    }
 }
 
 pub fn process_executable_sha256(pid: u32) -> Option<String> {

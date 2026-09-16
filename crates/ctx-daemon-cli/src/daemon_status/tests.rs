@@ -618,6 +618,31 @@ fn recoverable_failure_surfaces_error_and_one_restart_action() {
 }
 
 #[test]
+fn unavailable_image_is_not_presented_as_a_stale_daemon_or_restart_advice() {
+    for running in [false, true] {
+        let report = json!({
+            "enabled": true, "status": if running { "running" } else { "unverified" },
+            "running": running, "recoverable": false,
+            "reason": "daemon_owner_inspection_denied",
+            "lock_identity": {"owner_image_status": "permission_denied"},
+        });
+        let rendered = render_status(&context(100), &report).render_plain();
+        assert!(rendered.contains("permission denied"), "{rendered}");
+        assert!(!rendered.contains("Daemon failed"), "{rendered}");
+        assert!(!rendered.contains("ctx index mode auto"), "{rendered}");
+        assert!(!rendered.contains("Restart the daemon"), "{rendered}");
+        assert!(
+            rendered.contains(if running {
+                "Daemon is running"
+            } else {
+                "could not be verified"
+            }),
+            "{rendered}"
+        );
+    }
+}
+
+#[test]
 fn enabled_daemon_without_observed_lifecycle_is_not_a_failure() {
     let report = json!({
         "enabled": true,

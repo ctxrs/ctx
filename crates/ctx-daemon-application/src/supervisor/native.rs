@@ -133,15 +133,31 @@ impl NativeSupervisorBackend<SupervisorEnvironmentSnapshot> for PlatformNativeSu
     fn prepare_start(&self, data_root: &Path, executable: &Path) -> Result<Option<u32>> {
         // Close the manager-startup window in which the daemon lock exists
         // before manager-specific ownership provenance becomes visible.
-        if let Ok(owner_pid) = self.verify_live_owner(data_root, executable) {
-            return Ok(Some(owner_pid));
-        }
-        migrate_existing_daemon_to_supervisor(self.host, data_root)?;
-        Ok(None)
+        prepare_owner_handoff(self.verify_live_owner(data_root, executable), || {
+            migrate_existing_daemon_to_supervisor(self.host, data_root)
+        })
     }
 
     fn start(&self, data_root: &Path) -> Result<()> {
         start_native_supervisor(data_root, self.manager_environment, self.identity()?)
+    }
+}
+
+fn prepare_owner_handoff(
+    verification: Result<u32>,
+    handoff: impl FnOnce() -> Result<()>,
+) -> Result<Option<u32>> {
+    match verification {
+        Ok(owner_pid) => Ok(Some(owner_pid)),
+        // An unreadable image does not make a running manager child a
+        // detached owner. Do not stop it merely to try inspection again.
+        Err(error) if error.is::<ctx_daemon_runtime::ProcessExecutableInspectionDenied>() => {
+            Err(error)
+        }
+        Err(_) => {
+            handoff()?;
+            Ok(None)
+        }
     }
 }
 
@@ -421,4 +437,33 @@ fn start_native_supervisor(
     identity: &SupervisorIdentity,
 ) -> Result<()> {
     ctx_daemon_runtime::start_windows_supervisor(identity, manager_environment)
+}
+
+#[cfg(test)]
+mod owner_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn denied_inspection_never_stops_the_owner_or_claims_image_verification() {
+        let denied = ctx_daemon_runtime::ProcessExecutableInspectionDenied { pid: 123 };
+        let error = prepare_owner_handoff(Err(denied.into()), || {
+            panic!("must not hand off a denied owner")
+        })
+        .unwrap_err();
+        assert!(error.is::<ctx_daemon_runtime::ProcessExecutableInspectionDenied>());
+        assert_eq!(
+            prepare_owner_handoff(Ok(123), || panic!("verified owner is retained")).unwrap(),
+            Some(123)
+        );
+        let mut handed_off = false;
+        assert_eq!(
+            prepare_owner_handoff(Err(anyhow!("detached owner")), || {
+                handed_off = true;
+                Ok(())
+            })
+            .unwrap(),
+            None
+        );
+        assert!(handed_off);
+    }
 }

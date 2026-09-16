@@ -192,7 +192,13 @@ fn autostart_persistent_daemon_and_wait(
                 "ctx daemon start was suppressed (hosted_uninstall_active); retry after it clears or run `ctx setup --no-daemon`"
             ));
         }
-        if daemon_autostart_suppression_reason().is_none() {
+        let reuse_ready_owner = readiness == PersistentDaemonReadiness::Core
+            && application
+                .observe_ready_core_daemon(data_root, &application_config(config))?
+                .is_some();
+        // Reuse skips only native reconciliation. The ordinary start request
+        // below still owns upgrade deferral, cancellation and readiness waiting.
+        if !reuse_ready_owner && daemon_autostart_suppression_reason().is_none() {
             super::super::daemon_supervisor::ensure_daemon_supervisor(application, data_root)
                 .context("establish ctx daemon supervision")?;
         }
