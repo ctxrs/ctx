@@ -76,17 +76,33 @@ pub fn render_outcome(upgrade: &UpgradeOutcome, json_output: bool, ui: &mut Ui) 
     let document = render_upgrade_outcome_human(ui.stdout_context(), upgrade);
     ui.write_stdout(&document)?;
     for warning in upgrade.warnings() {
-        let warning = outcome(
-            ui.stderr_context(),
-            UiOutcome {
-                state: OutcomeState::Warning,
-                title: warning,
-                detail: None,
-            },
-        );
+        let warning = render_warning(ui.stderr_context(), warning);
         ui.write_stderr(&warning)?;
     }
     Ok(())
+}
+
+/// Renders an upgrade warning with explicit logical lines and escaped controls.
+pub fn render_warning(context: &RenderContext, warning: &str) -> Document {
+    // Only actual LF authors a boundary; literal backslash-n and all other
+    // controls still pass through the shared terminal sanitizer.
+    let mut lines = warning.split('\n');
+    let mut document = outcome(
+        context,
+        UiOutcome {
+            state: OutcomeState::Warning,
+            title: lines.next().unwrap_or_default(),
+            detail: None,
+        },
+    );
+    for line in lines {
+        if line.is_empty() {
+            document.push_blank();
+        } else {
+            document.append(fields(context, &[Field::continuation(line)]));
+        }
+    }
+    document
 }
 
 fn outcome_json(upgrade: &UpgradeOutcome) -> Value {
@@ -250,12 +266,162 @@ fn displayed_current_version<'a>(
 mod tests {
     use super::*;
     use crate::{
-        test_support::assert_fits,
+        test_support::{assert_fits, strip_ansi, SharedWriter},
         ui::{ColorMode, StreamKind, TestContext},
     };
 
     fn context(width: usize) -> RenderContext {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
+    }
+
+    fn capture_warnings(
+        warnings: &[&str],
+        json_output: bool,
+        stderr_context: TestContext,
+    ) -> (String, String) {
+        let upgrade =
+            UpgradeOutcome::for_test("upgrade", "applied", "Upgraded ctx 1.0.0 to 1.1.0.", true)
+                .with_warnings_for_test(
+                    warnings
+                        .iter()
+                        .map(|warning| (*warning).to_owned())
+                        .collect(),
+                );
+        let stdout = SharedWriter::default();
+        let stderr = SharedWriter::default();
+        let mut ui = Ui::with_writers(
+            stdout.clone(),
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always)),
+            stderr.clone(),
+            RenderContext::for_test(stderr_context),
+        );
+        render_outcome(&upgrade, json_output, &mut ui).unwrap();
+        ui.flush().unwrap();
+        (stdout.text(), stderr.text())
+    }
+
+    #[test]
+    fn upgrade_warnings_preserve_lines_and_escape_unsafe_controls() {
+        let warnings = [
+            concat!(
+                "ctx upgrade applied; restart pending:\n",
+                "Start request repeated too quickly.\n\n",
+                "literal \\n stays literal\r\n",
+                "\tcontrol \x1b[31mred\x1b[0m \x1b]0;title\x07",
+                "\u{0000}\u{007f}\u{0085}\u{009f}\rEnd\n",
+            ),
+            "Another warning: café 路径.",
+            "Unsafe title: \x1b[2J\u{001f}",
+        ];
+        let expected = concat!(
+            "! ctx upgrade applied; restart pending:\n",
+            "  Start request repeated too quickly.\n\n",
+            "  literal \\n stays literal\\r\n",
+            "  \\tcontrol \\x1b[31mred\\x1b[0m \\x1b]0;title\\u{0007}",
+            "\\u{0000}\\u{007f}\\u{0085}\\u{009f}\\rEnd\n\n",
+            "! Another warning: café 路径.\n",
+            "! Unsafe title: \\x1b[2J\\u{001f}\n",
+        );
+        for unicode in [false, true] {
+            for color in [ColorMode::Auto, ColorMode::Always, ColorMode::Never] {
+                let (stdout, stderr) = capture_warnings(
+                    &warnings,
+                    false,
+                    TestContext::pipe(StreamKind::Stderr)
+                        .color(color)
+                        .unicode(unicode),
+                );
+                assert_eq!(strip_ansi(&stdout), "✓ Upgraded ctx 1.0.0 to 1.1.0.\n");
+                assert_eq!(strip_ansi(&stderr), expected);
+                assert_eq!(stderr.contains('\x1b'), color == ColorMode::Always);
+                assert!(!stderr.contains("\x1b[31m"));
+                assert!(!stderr.contains("\x1b]"));
+            }
+        }
+    }
+
+    #[test]
+    fn upgrade_warnings_wrap_on_stderr_without_losing_logical_boundaries() {
+        let warning = concat!(
+            "ctx upgrade applied, but daemon restart is pending:\n",
+            "Service could not start because repeated attempts reached the limit.\n",
+            "literal \\n and \t stay safe",
+        );
+        let expected_words = concat!(
+            "! ctx upgrade applied, but daemon restart is pending: ",
+            "Service could not start because repeated attempts reached the limit. ",
+            "literal \\n and \\t stay safe",
+        );
+        for width in [32, 48, 80, 120] {
+            let (_, expected_plain) = capture_warnings(
+                &[warning],
+                false,
+                TestContext::tty(StreamKind::Stderr, width).color(ColorMode::Never),
+            );
+            for color in [ColorMode::Auto, ColorMode::Always, ColorMode::Never] {
+                let (stdout, stderr) = capture_warnings(
+                    &[warning],
+                    false,
+                    TestContext::tty(StreamKind::Stderr, width).color(color),
+                );
+                let plain = strip_ansi(&stderr);
+                assert_eq!(plain, expected_plain);
+                assert_eq!(strip_ansi(&stdout), "✓ Upgraded ctx 1.0.0 to 1.1.0.\n");
+                assert_eq!(
+                    plain.split_whitespace().collect::<Vec<_>>().join(" "),
+                    expected_words
+                );
+                assert!(plain.contains("\n  Service"), "{plain}");
+                assert!(plain.contains("\n  literal \\n"), "{plain}");
+                assert!(plain.lines().skip(1).all(|line| line.starts_with("  ")));
+                assert!(plain
+                    .lines()
+                    .all(|line| crate::ui::display_width(line) < width));
+                assert_eq!(stderr.contains('\x1b'), color != ColorMode::Never);
+            }
+        }
+    }
+
+    #[test]
+    fn upgrade_warning_json_is_exact_and_has_no_human_stderr() {
+        let warnings = [
+            "restart pending:\nreal line\r\n",
+            "literal \\n\t\x1b[31m\u{0085}",
+        ];
+        let (stdout, stderr) = capture_warnings(
+            &warnings,
+            true,
+            TestContext::tty(StreamKind::Stderr, 32).color(ColorMode::Always),
+        );
+        let expected = serde_json::json!({
+            "schema_version": 1,
+            "command": "upgrade",
+            "ok": true,
+            "status": "applied",
+            "message": "Upgraded ctx 1.0.0 to 1.1.0.",
+            "current_version": null,
+            "latest_version": null,
+            "update_available": false,
+            "update_was_available": false,
+            "channel": null,
+            "platform": null,
+            "metadata_url": null,
+            "artifact_url": null,
+            "install_path": null,
+            "managed": false,
+            "applied": true,
+            "dry_run": false,
+            "warnings": warnings,
+            "upgrade_attempt_id": null,
+        });
+        assert_eq!(
+            stdout,
+            format!("{}\n", serde_json::to_string_pretty(&expected).unwrap())
+        );
+        let parsed: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(parsed["warnings"], serde_json::json!(warnings));
+        assert!(!stdout.contains('\x1b'));
+        assert!(stderr.is_empty());
     }
 
     #[test]

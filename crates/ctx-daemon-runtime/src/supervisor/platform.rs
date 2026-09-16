@@ -282,7 +282,25 @@ pub fn start_systemd_supervisor(
     identity: &SupervisorIdentity,
     manager_environment: &SupervisorManagerEnvironment,
 ) -> Result<()> {
+    let Err(start_error) = systemctl_user(["start", identity.name()], manager_environment) else {
+        return Ok(());
+    };
+    let result = systemctl_user_capture(
+        ["show", identity.name(), "--property=Result", "--value"],
+        manager_environment,
+    );
+    if !matches!(result, Ok(output) if output.status.success()
+        && std::str::from_utf8(&output.stdout).map(str::trim) == Ok("start-limit-hit"))
+    {
+        return Err(start_error);
+    }
+    systemctl_user(["reset-failed", identity.name()], manager_environment).with_context(|| {
+        format!("clear systemd user service start limit after start failed: {start_error:#}")
+    })?;
+    // Installation's reset-free restart can reach this recovery through ensure.
+    // Retry the command directly so that the whole operation resets at most once.
     systemctl_user(["start", identity.name()], manager_environment)
+        .context("restart systemd user service after clearing its start limit")
 }
 
 #[cfg(target_os = "linux")]
@@ -610,6 +628,9 @@ fn supervisor_process_executable(pid: u32) -> Option<PathBuf> {
 fn supervisor_process_executable(_pid: u32) -> Option<PathBuf> {
     None
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod systemd_start_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
