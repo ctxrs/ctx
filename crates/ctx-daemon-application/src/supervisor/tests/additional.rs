@@ -48,6 +48,9 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
         None,
         &enabled_http,
     )?;
+    assert!(input_a
+        .daemon_environment
+        .requires_restart(&input_b.daemon_environment));
     backend.expect_environment(&input_b.daemon_environment);
     assert_eq!(
         ensure_native_supervisor_with(&TestHost, &input_b, &backend)?,
@@ -85,6 +88,9 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
         None,
         &disabled_config,
     )?;
+    assert!(input_b
+        .daemon_environment
+        .requires_restart(&disabled.daemon_environment));
     backend.expect_environment(&disabled.daemon_environment);
     assert_eq!(
         ensure_native_supervisor_with(&TestHost, &disabled, &backend)?,
@@ -116,6 +122,9 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
         None,
         &enabled_http,
     )?;
+    assert!(disabled
+        .daemon_environment
+        .requires_restart(&reenabled.daemon_environment));
     backend.expect_environment(&reenabled.daemon_environment);
     assert_eq!(
         ensure_native_supervisor_with(&TestHost, &reenabled, &backend)?,

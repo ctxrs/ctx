@@ -202,6 +202,10 @@ pub fn verify_supervisor_environment(spec: &SupervisorSpec) -> Result<()> {
     Ok(())
 }
 
+pub fn read_supervisor_environment(path: &Path) -> Result<BTreeMap<OsString, OsString>> {
+    parse_supervisor_environment_document(&read_private_supervisor_environment(path)?)
+}
+
 pub fn remove_supervisor_environment(data_root: &Path) -> Result<()> {
     let path = supervisor_environment_path(data_root);
     match fs::remove_file(&path) {
@@ -217,8 +221,7 @@ pub fn apply_supervisor_environment_handoff() -> Result<bool> {
     let Some(path) = env::var_os(SUPERVISOR_ENVIRONMENT_FILE_ENV) else {
         return Ok(false);
     };
-    let document = read_private_supervisor_environment(Path::new(&path))?;
-    let environment = parse_supervisor_environment_document(&document)?;
+    let environment = read_supervisor_environment(Path::new(&path))?;
 
     for (name, _) in env::vars_os() {
         env::remove_var(name);

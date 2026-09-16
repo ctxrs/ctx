@@ -10,7 +10,21 @@ pub fn daemon_supervisor_report(host: &dyn DaemonApplicationHost, data_root: &Pa
     daemon_supervisor_report_with_normalized_environment(host, data_root, normalized)
 }
 
-fn supervisor_environment_snapshot_for_registration(
+pub(super) fn supervisor_environment_snapshot_for_registration(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+) -> Result<SupervisorEnvironmentSnapshot> {
+    let receipt = stored_supervisor_report(data_root);
+    if has_native_registration(&receipt) {
+        // Verify what the manager was configured to launch. The observer's
+        // environment is compared separately for actionable restart advice.
+        environment::installed_supervisor_environment_snapshot(data_root, &receipt)
+    } else {
+        current_supervisor_environment_snapshot(host, data_root)
+    }
+}
+
+fn current_supervisor_environment_snapshot(
     host: &dyn DaemonApplicationHost,
     data_root: &Path,
 ) -> Result<SupervisorEnvironmentSnapshot> {
@@ -65,7 +79,7 @@ fn invalidate_supervisor_claims_for_environment_failure(report: &mut Value) {
         object.insert(
             "revalidation_error".to_owned(),
             Value::String(
-                "current supervisor environment cannot be normalized; native registration and live-owner claims are not trusted"
+                "supervisor environment cannot be verified; native registration and live-owner claims are not trusted"
                     .to_owned(),
             ),
         );
@@ -208,26 +222,31 @@ fn suppress_environment_restart_claim(report: &mut Value) {
     }
 }
 
+fn has_native_registration(report: &Value) -> bool {
+    report.get("kind").and_then(Value::as_str) == Some(native_supervisor_kind())
+        && !matches!(
+            report.get("status").and_then(Value::as_str),
+            Some("disabled" | "degraded")
+        )
+}
+
 fn append_supervisor_environment_report(
     host: &dyn DaemonApplicationHost,
     data_root: &Path,
     report: &mut Value,
 ) {
-    let current = supervisor_environment_snapshot_for_registration(host, data_root)
+    let current_snapshot = current_supervisor_environment_snapshot(host, data_root);
+    let restart_required = has_native_registration(report)
+        && match (
+            environment::installed_supervisor_environment_snapshot(data_root, report),
+            current_snapshot.as_ref(),
+        ) {
+            (Ok(installed), Ok(current)) => installed.requires_restart(current),
+            _ => true,
+        };
+    let current = current_snapshot
         .map(|snapshot| snapshot.contract_report())
         .unwrap_or_else(|_| supervisor_environment_contract_report(host));
-    let stored_sha256 = report
-        .pointer("/environment_snapshot/sha256")
-        .and_then(Value::as_str);
-    let current_sha256 = current.get("sha256").and_then(Value::as_str);
-    let native_registration = report.get("kind").and_then(Value::as_str)
-        == Some(native_supervisor_kind())
-        && !matches!(
-            report.get("status").and_then(Value::as_str),
-            Some("disabled" | "degraded")
-        );
-    let restart_required =
-        native_registration && (stored_sha256.is_none() || stored_sha256 != current_sha256);
     let mut environment = report
         .get("environment_snapshot")
         .cloned()
