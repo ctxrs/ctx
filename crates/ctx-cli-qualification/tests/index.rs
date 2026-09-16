@@ -17,6 +17,18 @@ fn import_ready_history(temp: &TempDir) {
         .as_str()
         .expect("import should publish a Core generation");
     wait_for_test_lexical_projection(temp, generation);
+    // Watch assertions and mode changes need the background refresh to finish,
+    // not just a searchable generation retained during an in-flight refresh.
+    let ready = json_output(ctx(temp).args([
+        "index",
+        "wait",
+        "--format=json",
+        "--timeout-seconds",
+        "30",
+        "--interval-seconds",
+        "1",
+    ]));
+    assert_eq!(ready["status"], "ready", "{ready:#}");
 }
 
 fn persist_stopped_daemon_state(temp: &TempDir, semantic_enabled: bool) {
