@@ -14,14 +14,16 @@ use ctx_daemon_runtime::{
 use ctx_history_platform::{managed_data_root, PlatformError};
 use serde_json::{json, Value};
 use std::env;
+#[cfg(any(test, windows))]
+use std::fs;
+#[cfg(test)]
+use std::process::Command;
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-#[cfg(test)]
-use std::{fs, process::Command};
 
 #[cfg(test)]
 use crate::TestHost;
@@ -649,23 +651,58 @@ pub fn resume_daemon_supervisor_after_upgrade(
     loop_interval_seconds: Option<u64>,
     upgrade_fence: &mut dyn DaemonSupervisorUpgradeFence,
 ) -> Result<DaemonSupervisorUpgradeResume> {
+    let data_root = resume_supervisor_data_root(data_root);
     let daemon_environment =
-        configured_supervisor_environment(host, data_root, loop_interval_seconds)?;
+        resumed_supervisor_environment(host, &data_root, loop_interval_seconds)?;
     let manager_environment = supervisor_manager_environment(host)?;
     let backend = PlatformNativeSupervisor::new(
         host,
-        data_root,
+        &data_root,
         Some(&daemon_environment),
         &manager_environment,
     )?;
     let environment_snapshot = daemon_environment.contract_report();
     resume_daemon_supervisor_after_upgrade_with(
         host,
-        data_root,
+        &data_root,
         executable,
         &backend,
         Some(environment_snapshot),
         upgrade_fence,
+    )
+}
+
+fn resume_supervisor_data_root(data_root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    return resume_windows_supervisor_data_root(data_root, managed_data_root());
+    #[cfg(not(windows))]
+    data_root.to_path_buf()
+}
+
+#[cfg(windows)]
+fn resume_windows_supervisor_data_root(
+    data_root: &Path,
+    managed_root: ctx_history_platform::Result<PathBuf>,
+) -> PathBuf {
+    if let Ok(managed_root) = managed_root {
+        if fs::canonicalize(&managed_root).ok().as_deref() == Some(data_root) {
+            // The upgrade helper canonicalizes paths; task XML retains the managed spelling.
+            return managed_root;
+        }
+    }
+    data_root.to_path_buf()
+}
+
+fn resumed_supervisor_environment(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    loop_interval_seconds: Option<u64>,
+) -> Result<SupervisorEnvironmentSnapshot> {
+    // Resume verifies the installed contract; explicit setup owns environment recapture.
+    configured_supervisor_environment_from_snapshot(
+        report::supervisor_environment_snapshot_for_registration(host, data_root)?,
+        data_root,
+        loop_interval_seconds,
     )
 }
 
