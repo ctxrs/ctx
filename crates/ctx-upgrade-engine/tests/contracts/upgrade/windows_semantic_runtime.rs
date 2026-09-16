@@ -60,13 +60,31 @@ fn semantic_enabled_same_version_upgrade_publishes_legacy_runtime_via_windows_he
         thread::sleep(HELPER_TERMINAL_POLL);
     }
 
-    let repeated = json_output(
-        windows_runtime_repair_release_env(
+    // Manual completion precedes native restart; the helper may still own the
+    // installation lock briefly after publishing the applied state.
+    let deadline = Instant::now() + HELPER_TERMINAL_TIMEOUT;
+    let repeated: Value = loop {
+        let output = windows_runtime_repair_release_env(
             ctx_from_binary(&temp, &target).args(["upgrade", "--format=json"]),
             &release,
         )
-        .env("CTX_SEARCH_SEMANTIC", "true"),
-    );
+        .env("CTX_SEARCH_SEMANTIC", "true")
+        .output()
+        .unwrap();
+        if output.status.success() {
+            break serde_json::from_slice(&output.stdout).unwrap();
+        }
+        let detail = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            detail.contains("upgrade lock is held") && Instant::now() < deadline,
+            "subsequent upgrade failed: {detail}"
+        );
+        thread::sleep(HELPER_TERMINAL_POLL);
+    };
     assert_eq!(repeated["status"], "up_to_date", "{repeated:#}");
     assert_eq!(repeated["applied"], false, "{repeated:#}");
     assert!(
