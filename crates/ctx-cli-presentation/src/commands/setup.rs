@@ -20,7 +20,7 @@ pub struct SetupArgs {
     pub no_daemon: bool,
     #[arg(
         long,
-        help = "Wait for the daemon-owned lexical refresh to publish before returning"
+        help = "Wait for the lexical refresh to publish before returning"
     )]
     pub wait: bool,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
@@ -51,6 +51,8 @@ pub fn render_setup_human(
             refresh_status,
             "accepted" | "pending" | "queued" | "running"
         );
+    let background_disabled = matches!(daemon.reason, Some("daemon_disabled" | "explicit_opt_out"));
+    let active_queue = queued && !background_disabled;
     let partial_cause = history_partial_cause(health);
     let refresh_partial = source["refresh"]["status"] == "partial";
     let partial_detail = partial_cause.as_ref().map(|cause| {
@@ -70,9 +72,9 @@ pub fn render_setup_human(
         (
             OutcomeState::Success,
             "History is ready to search",
-            queued.then_some("A refresh is running; the current index remains searchable."),
+            active_queue.then_some("A refresh is running; the current index remains searchable."),
         )
-    } else if queued {
+    } else if active_queue {
         (
             OutcomeState::Neutral,
             "History indexing is queued",
@@ -106,7 +108,7 @@ pub fn render_setup_human(
     document.push_blank();
     document.append(section("History", fields(context, &history_fields)));
 
-    if mode != "ready" && !queued {
+    if mode != "ready" && !active_queue {
         let data_root = data_root.display().to_string();
         document.push_blank();
         document.append(section(
@@ -119,7 +121,7 @@ pub fn render_setup_human(
         "ctx doctor"
     } else if mode == "ready" {
         "ctx search \"test failure\""
-    } else if queued {
+    } else if active_queue {
         "ctx index watch"
     } else if daemon.requested && !daemon.started {
         "ctx status"
@@ -367,6 +369,52 @@ mod tests {
             assert!(!rendered.contains("ctx index watch"));
             assert_fits(&document, &context);
         }
+    }
+
+    #[test]
+    fn setup_pending_does_not_claim_queued_work_when_background_is_disabled() {
+        let source = json!({
+            "lexical": {"status": "pending"},
+            "refresh": {"status": "pending"},
+            "semantic": {"status": "disabled"},
+        });
+        let refresh = json!({
+            "status": "pending",
+            "reason": "daemon_disabled",
+        });
+        let document = render_setup_human(
+            &context(80, ColorMode::Never),
+            Path::new("/tmp/ctx"),
+            "pending",
+            &source,
+            None,
+            &refresh,
+            SetupDaemonState {
+                requested: false,
+                reason: Some("daemon_disabled"),
+                started: false,
+                persistent_supervisor_verified: false,
+            },
+        );
+        let rendered = document.render_plain();
+        assert!(
+            rendered.starts_with("! History is not ready\n"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Background  disabled\n"), "{rendered}");
+        assert!(
+            rendered.contains("Next\n  ctx index mode auto\n"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("History indexing is queued"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("Background indexing will publish"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("ctx index watch"), "{rendered}");
     }
 
     #[test]

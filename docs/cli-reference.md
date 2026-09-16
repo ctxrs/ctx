@@ -64,11 +64,13 @@ ctx daemon run
   pre-v0.26 history. Old Store files are ignored and may be removed explicitly
   by their owner. Setup does not write `config.toml` for implicit defaults or
   execute history-source plugin commands. In automatic indexing mode, setup
-  may opportunistically start the persistent ctx-owned daemon. In manual mode
-  setup never starts a worker. Its concise human summary lists only agent
-  histories that contributed indexed content and warns instead of claiming
-  clean completion when a provider root is partial, excluded, or unknown. Use
-  `setup --no-daemon` for a one-run opt-out.
+  may opportunistically start the persistent ctx-owned daemon. In manual mode,
+  plain setup never starts a worker; `setup --wait` runs one finite worker until
+  the requested refresh is published without changing the configured mode. Its
+  concise human summary lists only agent histories that contributed indexed
+  content and warns instead of claiming clean completion when a provider root
+  is partial, excluded, or unknown. Use `setup --no-daemon` for a one-run
+  opt-out.
 - `setup --quiet` performs setup without printing success status lines, import
   summaries, data-root details, or get-started tips. It still exits nonzero and
   prints errors on failure.

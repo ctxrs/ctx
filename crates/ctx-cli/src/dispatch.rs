@@ -533,7 +533,8 @@ fn should_reconcile_man_pages(command: &CommandRoot) -> bool {
 }
 
 fn command_uses_foreground_finite_wait(command: &CommandRoot) -> bool {
-    matches!(command, CommandRoot::Import(_))
+    matches!(command, CommandRoot::Setup(args) if args.wait && !args.no_daemon)
+        || matches!(command, CommandRoot::Import(_))
         || matches!(command, CommandRoot::Search(args) if args.refresh == CliRefreshArg::Wait)
 }
 

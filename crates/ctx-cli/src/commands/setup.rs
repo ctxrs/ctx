@@ -241,7 +241,7 @@ fn request_source_refresh(
     daemon_unavailable_reason: Option<&str>,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<Value> {
-    if no_daemon || !daemon_enabled {
+    if no_daemon || (!daemon_enabled && !wait) {
         return Ok(json!({
             "status": "unavailable",
             "reason": if no_daemon {

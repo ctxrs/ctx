@@ -93,8 +93,9 @@ partial, excluded, or unknown provider root produces a warning while healthy
 prior history remains searchable; use `ctx doctor` for recovery and
 `ctx status --format json` for exact diagnostics. The
 default data root is `~/.ctx`. Use `ctx index mode manual` to select manual
-indexing or `ctx setup --no-daemon` for a one-run process-start opt-out. Check or
-change the mode with:
+indexing. In manual mode, `ctx setup --wait` runs a finite foreground refresh
+without enabling persistent background indexing. Use `ctx setup --no-daemon`
+for a one-run process-start opt-out. Check or change the mode with:
 
 ```bash
 ctx index mode

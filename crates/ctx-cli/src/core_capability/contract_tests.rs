@@ -406,6 +406,7 @@ fn protocol_stream_orders_progress_before_the_single_terminal_response() {
         std::io::Cursor::new(input),
         &mut output,
         |request, events| {
+            assert!(ctx_daemon_cli::foreground_operation_active());
             events.refresh(&status)?;
             Ok(json!({
                 "facts": {"generation_id": null},
