@@ -1,5 +1,130 @@
 use super::*;
 
+#[test]
+fn upgrade_resume_preserves_installed_contract_despite_observer_drift() -> Result<()> {
+    let _env_lock = crate::test_environment_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir()?;
+    let _restore = RestoreTestEnvironment::capture(&["LANG", "CTX_SEARCH_SEMANTIC"]);
+    env::set_var("LANG", "C");
+    env::set_var("CTX_SEARCH_SEMANTIC", "false");
+    let snapshot = configured_supervisor_environment(&TestHost, temp.path(), Some(23))?;
+    let spec = install_environment_fixture(temp.path(), &snapshot)?;
+    let system_root = Path::new(r"C:\Windows");
+    let sid = "S-1-0-0";
+    let xml = ctx_daemon_runtime::windows_task_xml(&spec, system_root, sid)?;
+    let manager = supervisor_manager_environment(&TestHost)?;
+
+    env::set_var("LANG", "C.UTF-8");
+    env::set_var("CTX_SEARCH_SEMANTIC", "true");
+    let recaptured = configured_supervisor_environment(&TestHost, temp.path(), None)?;
+    assert!(snapshot.requires_restart(&recaptured));
+    let recaptured_spec = environment::supervisor_artifact_spec(
+        spec.identity().clone(),
+        spec.launch().program(),
+        temp.path(),
+        &recaptured,
+    )?;
+    assert!(ctx_daemon_runtime::verify_supervisor_environment(&recaptured_spec).is_err());
+
+    for requested_interval in [None, Some(23)] {
+        let resumed = resumed_supervisor_environment(&TestHost, temp.path(), requested_interval)?;
+        assert_eq!(resumed, snapshot);
+        let resumed_spec = environment::supervisor_artifact_spec(
+            spec.identity().clone(),
+            spec.launch().program(),
+            temp.path(),
+            &resumed,
+        )?;
+        ctx_daemon_runtime::verify_supervisor_environment(&resumed_spec)?;
+        assert!(ctx_daemon_runtime::windows_task_registration_matches(
+            &xml,
+            &resumed_spec,
+            system_root,
+            sid,
+            &manager,
+        )?);
+    }
+    assert_eq!(
+        resumed_supervisor_environment(&TestHost, temp.path(), Some(41))?.loop_interval_seconds(),
+        Some(41),
+    );
+
+    let receipt_path = ctx_daemon_runtime::daemon_root_path(temp.path()).join("supervisor.json");
+    let mut receipt = stored_supervisor_report(temp.path());
+    receipt["environment_snapshot"]["sha256"] = json!("0".repeat(64));
+    ctx_daemon_runtime::write_private_json_file(&receipt_path, &receipt)?;
+    assert!(resumed_supervisor_environment(&TestHost, temp.path(), None).is_err());
+    install_environment_fixture(temp.path(), &snapshot)?;
+    let mut changed: Value = serde_json::from_slice(&fs::read(spec.environment_path())?)?;
+    changed["environment"][0]["value"] = json!("changed after installation");
+    ctx_daemon_runtime::write_private_json_file(spec.environment_path(), &changed)?;
+    assert!(resumed_supervisor_environment(&TestHost, temp.path(), None).is_err());
+    fs::write(spec.environment_path(), b"not JSON")?;
+    assert!(resumed_supervisor_environment(&TestHost, temp.path(), None).is_err());
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn upgrade_resume_restores_only_the_canonical_managed_root_alias() -> Result<()> {
+    let _env_lock = crate::test_environment_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir()?;
+    let managed = temp.path().join(".ctx");
+    let resume_root = |root: &Path| resume_windows_supervisor_data_root(root, Ok(managed.clone()));
+    fs::create_dir_all(&managed)?;
+    let canonical = fs::canonicalize(&managed)?;
+    assert_ne!(canonical, managed);
+    assert_eq!(resume_root(&canonical), managed);
+    assert_eq!(resume_root(&managed), managed);
+    let custom = temp.path().join("custom");
+    fs::create_dir_all(&custom)?;
+    assert_eq!(resume_root(&custom), custom);
+    let custom = fs::canonicalize(custom)?;
+    assert_eq!(resume_root(&custom), custom);
+
+    let snapshot = configured_supervisor_environment(&TestHost, &managed, Some(23))?;
+    let spec = install_environment_fixture(&managed, &snapshot)?;
+    let system_root = Path::new(r"C:\Windows");
+    let sid = "S-1-0-0";
+    let xml = ctx_daemon_runtime::windows_task_xml(&spec, system_root, sid)?;
+    let manager = supervisor_manager_environment(&TestHost)?;
+    for (root, matches) in [(&canonical, false), (&resume_root(&canonical), true)] {
+        let identity = environment::supervisor_identity("ctx", root.join("native"))?;
+        let resumed_spec = environment::supervisor_artifact_spec(
+            identity,
+            spec.launch().program(),
+            root,
+            &snapshot,
+        )?;
+        ctx_daemon_runtime::verify_supervisor_environment(&resumed_spec)?;
+        assert_eq!(
+            ctx_daemon_runtime::windows_task_registration_matches(
+                &xml,
+                &resumed_spec,
+                system_root,
+                sid,
+                &manager,
+            )?,
+            matches
+        );
+    }
+    for root in [&custom, &canonical] {
+        assert_eq!(
+            resume_windows_supervisor_data_root(root, Err(PlatformError::MissingHome)),
+            *root,
+        );
+        assert_eq!(
+            resume_windows_supervisor_data_root(root, Ok(temp.path().join("missing-home"))),
+            *root,
+        );
+    }
+    Ok(())
+}
+
 fn install_environment_fixture(
     data_root: &Path,
     snapshot: &SupervisorEnvironmentSnapshot,
