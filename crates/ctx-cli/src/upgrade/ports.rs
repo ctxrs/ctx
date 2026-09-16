@@ -267,16 +267,8 @@ impl UpgradeObserver<ctx_daemon_cli::DaemonConfigSnapshot> for CliUpgradeObserve
     ) {
         let mut ui = crate::ui::Ui::stdio(crate::ui::ColorMode::Auto);
         for warning in warnings {
-            let document = crate::ui::diagnostic(
-                ui.stderr_context(),
-                crate::ui::Diagnostic {
-                    level: crate::ui::DiagnosticLevel::Warning,
-                    summary: warning,
-                    detail: None,
-                    fields: &[],
-                    action: None,
-                },
-            );
+            let document =
+                ctx_cli_presentation::upgrade::render_warning(ui.stderr_context(), warning);
             if ui.write_stderr(&document).is_err() {
                 return;
             }

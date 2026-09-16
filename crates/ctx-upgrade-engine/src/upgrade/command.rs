@@ -141,6 +141,12 @@ impl UpgradeOutcome {
             attempt_id: None,
         }
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_warnings_for_test(mut self, warnings: Vec<String>) -> Self {
+        self.warnings = warnings;
+        self
+    }
 }
 
 impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
