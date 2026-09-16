@@ -203,6 +203,12 @@ fn unavailable_manager_falls_back_before_native_mutation_under_the_installation_
     assert_eq!(report["restart_supported"], false);
     assert_eq!(report["registration_verified"], false);
     assert_eq!(report["live_owner_verified"], false);
+    assert!(report["artifact_path"].is_null());
+    // No service was installed, so status must not require an environment file.
+    report::supervisor_environment_snapshot_for_registration(&TestHost, temp.path())?;
+    let observed = revalidated_supervisor_report_with(&TestHost, temp.path(), &backend);
+    assert_eq!(observed["status"], "manager_unavailable");
+    assert_eq!(observed["environment_snapshot"]["restart_required"], false);
     assert!(report["limitation"]
         .as_str()
         .is_some_and(|value| value.contains("persistent detached daemon")));

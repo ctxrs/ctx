@@ -86,6 +86,16 @@ fn observer_shell_does_not_change_installed_supervisor_health() -> Result<()> {
     }
     assert_eq!(fs::read(&receipt_path)?, original_receipt);
     assert_eq!(fs::read(spec.environment_path())?, original_environment);
+    // A temporary manager loss can preserve an already-installed service.
+    // Its recorded artifact must still use the installed environment.
+    let mut preserved: Value = serde_json::from_slice(&original_receipt)?;
+    preserved["status"] = json!("manager_unavailable");
+    ctx_daemon_runtime::write_private_json_file(&receipt_path, &preserved)?;
+    env::set_var("LANG", "C.UTF-8");
+    let recovered = observe_installed_environment(temp.path(), &spec, &backend)?;
+    assert_eq!(recovered["status"], "installed");
+    assert_eq!(recovered["environment_snapshot"]["restart_required"], false);
+    assert_eq!(fs::read(spec.environment_path())?, original_environment);
     let state = backend.state.lock().unwrap();
     assert_eq!(
         (state.installs, state.starts, state.disables, state.handoffs),

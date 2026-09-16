@@ -228,6 +228,10 @@ fn has_native_registration(report: &Value) -> bool {
             report.get("status").and_then(Value::as_str),
             Some("disabled" | "degraded")
         )
+        // An unavailable manager can produce a receipt before any native
+        // installation. Only a preserved artifact has an installed snapshot.
+        && (report.get("status").and_then(Value::as_str) != Some("manager_unavailable")
+            || report.get("artifact_path").is_some_and(Value::is_string))
 }
 
 fn append_supervisor_environment_report(
