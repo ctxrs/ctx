@@ -356,6 +356,104 @@ fn setup_semantic_allows_manual_indexing_without_starting_a_daemon() {
 }
 
 #[test]
+fn setup_wait_indexes_in_foreground_without_changing_manual_mode() {
+    let temp = tempdir();
+    write_codex_setup_session(&temp);
+    let config_path = data_root(&temp).join("config.toml");
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    let original = "[indexing]\nmode = \"manual\"\n";
+    fs::write(&config_path, original).unwrap();
+
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(setup["daemon_autostart"]["requested"], false, "{setup:#}");
+    assert_eq!(
+        setup["daemon_autostart"]["reason"], "daemon_disabled",
+        "{setup:#}"
+    );
+    assert!(
+        setup["lexical"]["indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "{setup:#}"
+    );
+    assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+    let stopped = wait_for_daemon_status(&temp, "disabled", false, "setup");
+    assert_eq!(stopped["daemon"]["running"], false, "{stopped:#}");
+    assert_eq!(
+        stopped["daemon"]["config_reload"]["applied"]["daemon_mode"], "source-refresh-only",
+        "{stopped:#}"
+    );
+    let daemon_root = data_root(&temp).join("daemon");
+    assert!(!daemon_root.join("source-refresh-endpoint.json").exists());
+    assert!(!daemon_root.join("wakeup.json").exists());
+    assert!(!daemon_root.join("supervisor.json").exists());
+    assert!(!daemon_root.join("upgrade-restart-requests").exists());
+}
+
+#[test]
+fn managed_core_setup_wait_indexes_in_foreground_without_changing_manual_mode() {
+    let temp = tempdir();
+    write_codex_setup_session(&temp);
+    let config_path = data_root(&temp).join("config.toml");
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    let original = "[indexing]\nmode = \"manual\"\n";
+    fs::write(&config_path, original).unwrap();
+    let request = json!({
+        "data_root": data_root(&temp),
+        "operation": "CoreSetup",
+        "options": {
+            "defer_fresh_empty_wait": false,
+            "no_daemon": false,
+            "notice_lines": [],
+            "progress": "none",
+            "semantic": false,
+            "wait": true,
+        },
+        "protocol_version": 3,
+        "schema_version": 1,
+    });
+    let output = ctx(&temp)
+        .arg("--ctx-core-capability-v1")
+        .write_stdin(format!("{}\n", serde_json::to_string(&request).unwrap()))
+        .timeout(Duration::from_secs(20))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["ok"], true, "{response:#}");
+    assert!(
+        response["facts"]["generation_id"].as_str().is_some(),
+        "{response:#}"
+    );
+    assert_eq!(
+        response["facts"]["refresh_request"]["status"], "published",
+        "{response:#}"
+    );
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "setup should import",
+        "--refresh=off",
+        "--format=json",
+    ]));
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "{search:#}"
+    );
+    assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+    let stopped = wait_for_daemon_status(&temp, "disabled", false, "setup");
+    assert_eq!(stopped["daemon"]["running"], false, "{stopped:#}");
+    assert!(!data_root(&temp).join("daemon/supervisor.json").exists());
+}
+
+#[test]
 fn setup_semantic_clean_cache_queues_daemon_without_foreground_download() {
     let temp = daemon_test_root();
     write_codex_setup_session(&temp);

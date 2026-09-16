@@ -183,7 +183,7 @@ impl DaemonAvailabilityPort for CliDaemonAvailabilityPort {
             )?;
             return Ok(DaemonAvailability::Available);
         }
-        if demand == DaemonAvailabilityDemand::Background || trigger == DaemonTrigger::Setup {
+        if demand == DaemonAvailabilityDemand::Background {
             return Ok(DaemonAvailability::Disabled);
         }
         super::finite_worker_owner::checkpoint()?;

@@ -187,7 +187,12 @@ fn run_with_protocol_io(
     let input = read_frame_from(reader)?;
     let (bytes, terminal_error) = produce_response(input, |request| {
         let mut events = ProtocolEventWriter::new(request.operation, &mut writer);
-        if request.operation == Operation::RefreshAndWait {
+        let foreground_finite_wait = request.operation == Operation::RefreshAndWait
+            || matches!(
+                &request.options,
+                Options::Setup(options) if options.wait && !options.no_daemon
+            );
+        if foreground_finite_wait {
             crate::foreground_interrupt::with_scope(|| execute_request(request, &mut events))
         } else {
             execute_request(request, &mut events)
@@ -429,7 +434,8 @@ fn core_setup_facts(
             crate::DaemonTriggerCommandArg::Setup,
         )?;
     }
-    let (published_generation, refresh_request) = if daemon_requested {
+    let refresh_requested = daemon_requested || (wait && !no_daemon);
+    let (published_generation, refresh_request) = if refresh_requested {
         core_setup_refresh(
             data_root,
             wait,
