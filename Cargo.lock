@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "ctx"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anstream",
  "anstyle",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-agent-application"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-agent-integrations"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-app-config"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "ctx-history-capture-model",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-cli-qualification"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anstream",
  "assert_cmd",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-client-observability"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -766,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-companion-bridge"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "base64 0.22.1",
  "libc",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-daemon-application"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "ctx-client-observability",
@@ -797,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-daemon-cli"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "ctx-app-config",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-daemon-runtime"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-daemon-service"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-deepseek-harness-qualification"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "assert_cmd",
  "ctx-history-index-query",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-capture"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "ctx-history-capture-composition",
  "ctx-history-capture-model",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-capture-composition"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-capture-composition-qualification"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "base64 0.22.1",
  "ctx-history-capture-composition",
@@ -960,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-capture-model"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "chrono",
  "ctx-history-core",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-cli"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anstream",
  "anyhow",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-core"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "chrono",
  "serde",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-index"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "crc32fast",
  "ctx-history-core",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-index-format"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "base64 0.22.1",
  "ctx-history-capture-model",
@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-index-generation"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "crc32fast",
  "ctx-history-platform",
@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-index-qualification"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "ctx-history-core",
  "ctx-history-index",
@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-index-query"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "ctx-history-core",
  "ctx-history-index",
@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-ingest-application"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "ctx-history-capture-model",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-jsonl"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-native-jsonl-parsers"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-openclaw-schema"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "rusqlite",
  "thiserror 1.0.69",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-platform"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "dirs",
  "libc",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-provider-fx"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1262,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-provider-hermes"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-provider-openclaw-sqlite"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-providers-sqlite-inventory"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-read-application"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1475,7 +1475,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-refresh"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "ctx-history-capture",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-refresh-execution"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "ctx-history-capture",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-snapshot-reader"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "ctx-history-core",
  "ctx-history-index",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-source-discovery"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-source-discovery-qualification"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "ctx-history-capture-model",
  "ctx-history-core",
@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-source-io"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "libc",
  "serde_json",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-managed-pair-engine"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "ctx-history-platform",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-protocol"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-sdk"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "ctx-protocol",
  "serde",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-semantic-index"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "ctx-history-core",
@@ -1656,7 +1656,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-semantic-model"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "coreml-native",
@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-terminal"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-upgrade-engine"
-version = "1.4.8"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
