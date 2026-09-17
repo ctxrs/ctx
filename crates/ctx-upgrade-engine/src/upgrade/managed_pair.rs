@@ -454,7 +454,7 @@ impl ManagedPairDownloads {
             MANAGED_PAIR_ENVELOPE_MAX_BYTES as u64,
             "managed-pair signed envelope",
         )?;
-        let core = DownloadedArtifact::download_or_reuse_verified(
+        let core = DownloadedArtifact::download_verified(
             transport,
             managed_root,
             &release.core_object_url,
@@ -462,8 +462,8 @@ impl ManagedPairDownloads {
             identity.core().size_bytes(),
             RELEASE_ARTIFACT_TIMEOUT,
         )
-        .with_context(|| format!("download or reuse {}", release.core_object_url))?;
-        let companion = DownloadedArtifact::download_or_reuse_verified(
+        .with_context(|| format!("download {}", release.core_object_url))?;
+        let companion = DownloadedArtifact::download_verified(
             transport,
             managed_root,
             &release.companion_object_url,
@@ -471,7 +471,7 @@ impl ManagedPairDownloads {
             identity.companion().size_bytes(),
             RELEASE_ARTIFACT_TIMEOUT,
         )
-        .with_context(|| format!("download or reuse {}", release.companion_object_url))?;
+        .with_context(|| format!("download {}", release.companion_object_url))?;
 
         let current_marker = install::install_marker_path(&plan.install_path);
         let attribution = install::existing_install_attribution(&current_marker);

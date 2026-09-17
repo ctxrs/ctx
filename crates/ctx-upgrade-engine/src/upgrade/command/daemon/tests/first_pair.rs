@@ -133,6 +133,11 @@ fn automatic_pair_probe() -> Result<()> {
         assert!(!f.root.join("libexec/ctx-pro").exists());
     } else {
         result?;
+        assert_eq!(
+            fs::read_dir(f.data.join(".ctx-upgrade-downloads"))?.count(),
+            0,
+            "automatic pair downloads must be released after completion"
+        );
         assert_eq!(*f.trace.calls.lock().unwrap(), ["begin", "resume"]);
         assert_eq!(
             *observer.0.lock().unwrap(),

@@ -354,6 +354,11 @@ fn managed_pair_apply_binds_resumed_candidate_to_requested_identity() -> Result<
     let lock = InstallationLock::try_acquire_at_root(fixture.path())?.expect("pair lock");
     let outcome = downloads.apply_under_installation_lock(&lock, fixture.path(), &verifier)?;
     assert!(matches!(outcome, ManagedPairApplyOutcome::Applied { .. }));
+    drop(downloads);
+    assert_eq!(
+        fs::read_dir(fixture.path().join(".ctx-upgrade-downloads"))?.count(),
+        0
+    );
     assert_eq!(fs::read(&core_path)?, next_core);
     assert!(resume_or_confirm_pending_with_verifier(
         &core_path,
@@ -411,6 +416,11 @@ fn managed_pair_apply_binds_resumed_candidate_to_requested_identity() -> Result<
     let staged =
         stage_managed_pair_under_installation_lock(fixture.path(), &repair.input()?, &verifier)?;
     assert!(matches!(staged, ManagedPairStageOutcome::Staged { .. }));
+    drop(repair);
+    assert_eq!(
+        fs::read_dir(fixture.path().join(".ctx-upgrade-downloads"))?.count(),
+        0
+    );
     let mut requested_plan = repair_plan.clone();
     requested_plan.latest_version = "1.2.0".to_owned();
     requested_plan.artifact_sha256 = requested_core_sha.clone();

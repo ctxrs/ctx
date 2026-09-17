@@ -256,6 +256,7 @@ impl DownloadedArtifact {
             }
         };
         let byte_len = file.metadata()?.len();
+        lock_cached_artifact(&file)?;
         Ok(Some(Self {
             path: path.to_path_buf(),
             identity: file_identity(&file)?,
@@ -284,6 +285,7 @@ impl DownloadedArtifact {
                 });
             }
         };
+        lock_cached_artifact(&cache)?;
         let result = self
             .copy_verified_to(&mut cache)
             .and_then(|_| cache.sync_all().map_err(Into::into));
@@ -309,6 +311,99 @@ impl Drop for DownloadedArtifact {
         drop(self.file.take());
         if remove_original {
             let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+// A cache entry may be shared by installations using the same data root.
+// Windows retained handles already deny deletion; Unix readers and publishers
+// hold a shared lock so pruning cannot remove their pathname during consumption.
+fn lock_cached_artifact(file: &fs::File) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: the descriptor belongs to the live file for this call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    Ok(())
+}
+
+/// Best-effort removal of superseded downloads. Callers hold their installation
+/// lock; active readers from other installations are protected by file locks.
+/// Temporary inputs, unrelated entries, and installed/recovery files are untouched.
+pub(super) fn prune_upgrade_downloads(
+    data_root: &Path,
+    plan: &super::UpgradePlan,
+    _lock: &super::state::UpgradeLock,
+) {
+    let retained = if let Some(provisioning) = &plan.semantic_provisioning {
+        provisioning
+            .assets
+            .iter()
+            .map(|asset| asset.metadata.archive_sha256.as_str())
+            .collect::<Vec<_>>()
+    } else {
+        plan.metadata
+            .onnxruntime
+            .iter()
+            .map(|runtime| runtime.sha256.as_str())
+            .collect()
+    };
+    prune_cached_artifacts(data_root, &retained);
+}
+
+fn prune_cached_artifacts(managed_root: &Path, retained_sha256: &[&str]) {
+    let downloads = managed_root.join(DOWNLOAD_DIRECTORY);
+    if verify_private_directory(managed_root).is_err()
+        || verify_private_directory(&downloads).is_err()
+    {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&downloads) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(sha256) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("runtime-"))
+            .and_then(|name| name.strip_suffix(".artifact"))
+        else {
+            continue;
+        };
+        if validate_sha256(sha256).is_err()
+            || retained_sha256
+                .iter()
+                .any(|retained| retained.eq_ignore_ascii_case(sha256))
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(file) = open_private_file(&path) else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: the descriptor is live; contention leaves the cache alone.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                continue;
+            }
+            let _ = fs::remove_file(&path);
+        }
+        #[cfg(not(unix))]
+        {
+            // The probe itself denies delete sharing on Windows. Close it;
+            // another retained reader or publisher will still prevent deletion.
+            drop(file);
+            let _ = fs::remove_file(&path);
         }
     }
 }
