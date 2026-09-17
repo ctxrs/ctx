@@ -155,6 +155,14 @@ Running `ctx upgrade` again at the same CLI version repairs a missing or
 hash-mismatched selected semantic asset from the signed catalog without
 changing the CLI version.
 
+Upgrade downloads are temporary for the CLI and its companion. Verified model
+and runtime archives may be reused, but `ctx upgrade` removes cached downloads
+that are no longer selected by the signed release metadata. This also cleans
+downloads left by older versions, even when ctx is already up to date. After
+upgrading from a version without this cleanup, run `ctx upgrade` once more to
+clear the old cache. Check, status, and dry-run commands do not prune downloads.
+Cleanup leaves active downloads and installed model/runtime files alone.
+
 On Windows, replacement may be scheduled by a helper that finishes after the
 running `ctx.exe` exits; JSON reports `status: "scheduled"` and
 `applied: false` until replacement completes.

@@ -12,7 +12,7 @@ use ctx_history_platform::platform_security::{
     establish_private_data_root, verify_private_directory,
 };
 
-use super::download::DownloadedArtifact;
+use super::download::{prune_upgrade_downloads, DownloadedArtifact};
 use super::install::managed_install_marker_for_current_exe;
 use super::install::{
     absent_install_marker_error, capture_install_snapshot, classify_repair_requirements,
@@ -623,6 +623,9 @@ fn apply_planned_upgrade<D: DaemonUpgradePort + ?Sized>(
         data_root,
         policy.semantic_enabled,
     )?;
+    if !dry_run {
+        prune_upgrade_downloads(data_root, &plan, upgrade_lock);
+    }
     let pair_apply_required = pair_mode.pair_apply_required(&plan);
     if !plan.update_available && !pair_apply_required && !repairs.any() {
         write_state_checked_locked(

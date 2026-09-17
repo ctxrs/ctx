@@ -278,6 +278,7 @@ where
             data_root,
             policy.semantic_enabled,
         )?;
+        prune_upgrade_downloads(data_root, &plan, lock.as_ref().unwrap());
         if !plan.update_available && !pair_mode.pair_apply_required(&plan) && !repairs.any() {
             write_state_checked_locked(
                 data_root,
