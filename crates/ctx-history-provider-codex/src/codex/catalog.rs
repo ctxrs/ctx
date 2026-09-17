@@ -352,9 +352,9 @@ pub(crate) fn codex_session_relationship(
     let forked_parent = forked_from_id
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned);
-    // A reverted/paginated rollout can continue its own thread history.
-    // That history boundary is not a parent relationship. Explicit parent and
-    // fork fields retain their existing cycle/conflict validation.
+    // history_base identifies a physical paginated prefix. Revert can move it
+    // to a previous rollout without changing the logical fork/delegation
+    // parent. Use it only as a legacy fallback when no explicit parent exists.
     let history_parent = history_base_thread_id
         .filter(|id| !id.trim().is_empty() && *id != native_session_id)
         .map(str::to_owned);
@@ -368,7 +368,6 @@ pub(crate) fn codex_session_relationship(
     if let Some(parent) = delegated_parent {
         if forked_parent
             .iter()
-            .chain(history_parent.iter())
             .any(|metadata_parent| metadata_parent != &parent)
         {
             return (Some(parent), None);
@@ -379,11 +378,6 @@ pub(crate) fn codex_session_relationship(
         );
     }
 
-    if let (Some(forked_parent), Some(history_parent)) = (&forked_parent, &history_parent) {
-        if forked_parent != history_parent {
-            return (Some(forked_parent.clone()), None);
-        }
-    }
     if let Some(parent) = forked_parent {
         return (
             Some(parent),
@@ -607,5 +601,56 @@ mod tests {
                 .as_deref(),
             Some("parent")
         );
+    }
+
+    #[test]
+    fn reverted_fork_keeps_its_parent_when_history_base_names_a_previous_rollout() {
+        let value = json!({"type":"session_meta","payload":{
+            "id":"thread-owner", "timestamp":"2026-09-17T12:00:00Z",
+            "source":"cli", "forked_from_id":"original-parent",
+            "history_base":{"thread_id":"previous-rollout", "end_ordinal_exclusive":32}
+        }});
+        let identity = codex_session_meta_identity(&value).unwrap();
+        assert_eq!(
+            identity.parent_native_session_id.as_deref(),
+            Some("original-parent")
+        );
+        assert_eq!(
+            identity.session_relationship,
+            Some(ProviderNativeSessionRelationship::Forked)
+        );
+        assert_eq!(
+            select_codex_session_meta_owner(&[identity], Some("thread-owner")),
+            Some(0)
+        );
+
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let owner = read_codex_session_meta_from_reader(Cursor::new(bytes), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner["payload"]["id"], "thread-owner");
+    }
+
+    #[test]
+    fn paginated_history_does_not_override_or_hide_conflicting_explicit_parents() {
+        let mut value = json!({"type":"session_meta","payload":{
+            "id":"thread-owner", "timestamp":"2026-09-17T12:00:00Z",
+            "source":"cli", "parent_thread_id":"delegating-parent",
+            "history_base":{"thread_id":"previous-rollout"}
+        }});
+        let identity = codex_session_meta_identity(&value).unwrap();
+        assert_eq!(
+            identity.parent_native_session_id.as_deref(),
+            Some("delegating-parent")
+        );
+        assert_eq!(
+            identity.session_relationship,
+            Some(ProviderNativeSessionRelationship::Delegated)
+        );
+        assert_eq!(select_codex_session_meta_owner(&[identity], None), Some(0));
+
+        value["payload"]["forked_from_id"] = json!("conflicting-explicit-parent");
+        let identity = codex_session_meta_identity(&value).unwrap();
+        assert_eq!(select_codex_session_meta_owner(&[identity], None), None);
     }
 }
