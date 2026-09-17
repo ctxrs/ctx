@@ -183,6 +183,123 @@ fn runtime_download_cache_is_rehashed_and_reused_across_releases() {
     assert_eq!(copied, bytes);
 }
 
+#[test]
+fn cache_pruning_bounds_successive_releases_and_preserves_reuse() {
+    let root = private_tempdir();
+    let source = root.path().join("runtime.tar.gz");
+    let endpoint = format!("file://{}", source.display());
+    for generation in 0..3 {
+        let bytes = format!("runtime generation {generation}");
+        let expected = digest(bytes.as_bytes());
+        fs::write(&source, &bytes).unwrap();
+        drop(
+            DownloadedArtifact::download_or_reuse_verified(
+                &FILE_RELEASE_TRANSPORT,
+                root.path(),
+                &endpoint,
+                &expected,
+                1024,
+                Duration::from_secs(1),
+            )
+            .unwrap(),
+        );
+        prune_cached_artifacts(root.path(), &[&expected]);
+        let entries = fs::read_dir(root.path().join(DOWNLOAD_DIRECTORY))
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].metadata().unwrap().len(), bytes.len() as u64);
+        fs::remove_file(&source).unwrap();
+        let mut reused = DownloadedArtifact::download_or_reuse_verified(
+            &FILE_RELEASE_TRANSPORT,
+            root.path(),
+            &endpoint,
+            &expected,
+            1024,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let mut copied = Vec::new();
+        reused.copy_verified_to(&mut copied).unwrap();
+        assert_eq!(copied, bytes.as_bytes());
+    }
+    prune_cached_artifacts(root.path(), &[]);
+    assert_eq!(
+        fs::read_dir(root.path().join(DOWNLOAD_DIRECTORY))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn cache_pruning_preserves_active_inputs_and_unrelated_entries() {
+    let root = private_tempdir();
+    prune_cached_artifacts(root.path(), &[]);
+    assert!(!root.path().join(DOWNLOAD_DIRECTORY).exists());
+    let source = root.path().join("source");
+    fs::write(&source, b"runtime").unwrap();
+    let endpoint = format!("file://{}", source.display());
+    let expected = digest(b"runtime");
+    let download = || {
+        DownloadedArtifact::download_or_reuse_verified(
+            &FILE_RELEASE_TRANSPORT,
+            root.path(),
+            &endpoint,
+            &expected,
+            1024,
+            Duration::from_secs(1),
+        )
+        .unwrap()
+    };
+    drop(download());
+    let mut active = download();
+    let cache = active.temporary_path().to_path_buf();
+    let mut temporary = DownloadedArtifact::from_bytes(root.path(), b"input", 10, "input").unwrap();
+    let downloads = root.path().join(DOWNLOAD_DIRECTORY);
+    let unrelated = downloads.join("keep.txt");
+    fs::write(&unrelated, b"unrelated").unwrap();
+    let malformed = downloads.join("runtime-invalid.artifact");
+    fs::write(&malformed, b"unknown").unwrap();
+    let directory = downloads.join(format!("runtime-{}.artifact", digest(b"directory")));
+    fs::create_dir(&directory).unwrap();
+    prune_cached_artifacts(root.path(), &[]);
+    active.verify_unchanged().unwrap();
+    temporary.verify_unchanged().unwrap();
+    assert!(cache.exists());
+    drop(active);
+    prune_cached_artifacts(root.path(), &[]);
+    assert!(!cache.exists());
+    assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
+    assert_eq!(fs::read(malformed).unwrap(), b"unknown");
+    assert!(directory.is_dir());
+    temporary.verify_unchanged().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_pruning_does_not_follow_symlinks() {
+    use std::os::unix::fs::symlink;
+    let root = private_tempdir();
+    let outside = private_tempdir();
+    let name = format!("runtime-{}.artifact", digest(b"keep"));
+    let target = outside.path().join(&name);
+    fs::write(&target, b"keep").unwrap();
+    restrict_private_file(&target).unwrap();
+    let downloads = root.path().join(DOWNLOAD_DIRECTORY);
+    symlink(outside.path(), &downloads).unwrap();
+    prune_cached_artifacts(root.path(), &[]);
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+    fs::remove_file(&downloads).unwrap();
+    create_private_directory_all(&downloads).unwrap();
+    let link = downloads.join(name);
+    symlink(&target, &link).unwrap();
+    prune_cached_artifacts(root.path(), &[]);
+    assert!(link.is_symlink());
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+}
+
 #[cfg(windows)]
 #[test]
 fn retained_runtime_cache_allows_extractor_readers_but_denies_writers_and_delete() {

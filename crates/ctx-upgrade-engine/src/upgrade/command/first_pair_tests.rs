@@ -399,6 +399,49 @@ fn first_pair_foreground_owner_and_admission() -> Result<()> {
 }
 
 #[test]
+fn foreground_upgrade_cleans_old_downloads_when_applied_or_already_current() -> Result<()> {
+    if std::env::var("CTX_FIRST_PAIR_CASE").as_deref() != Ok("cache_cleanup") {
+        return child(
+            "cache_cleanup",
+            "upgrade::command::first_pair_tests::foreground_upgrade_cleans_old_downloads_when_applied_or_already_current",
+        );
+    }
+    let mut f = Fixture::new("newer")?;
+    let downloads = f.data.join(".ctx-upgrade-downloads");
+    create_private_directory_all(&downloads)?;
+    let old = downloads.join(format!("runtime-{}.artifact", sha256_hex(b"old-release")));
+    fs::write(&old, b"old-release")?;
+    restrict_private_file(&old)?;
+    assert_eq!(f.verified(|| f.apply(true))?.status(), "dry_run");
+    assert!(old.exists());
+    assert_eq!(f.verified(|| f.apply(false))?.status(), "applied");
+    assert_eq!(fs::read_dir(&downloads)?.count(), 0);
+    assert_eq!(fs::read(&f.plan.install_path)?, NEXT_CORE);
+    assert_eq!(fs::read(f.root.join("libexec/ctx-pro"))?, COMPANION);
+
+    // Simulate entering the new release after an older updater left its cache.
+    let mut warnings = vec![];
+    let snapshot =
+        capture_install_snapshot(true, &f.plan.platform, "stable", "1.3.3", &mut warnings)?;
+    f.plan.current_version = snapshot.marker.version;
+    f.plan.install_fingerprint = snapshot.fingerprint;
+    f.plan.update_available = false;
+    fs::write(&old, b"old-release")?;
+    restrict_private_file(&old)?;
+    let requests = f.requests();
+    assert_eq!(f.verified(|| f.apply(true))?.status(), "up_to_date");
+    assert!(old.exists());
+    assert_eq!(f.verified(|| f.apply(false))?.status(), "up_to_date");
+    assert_eq!(fs::read_dir(downloads)?.count(), 0);
+    assert_eq!(
+        f.requests(),
+        requests,
+        "cleanup must not download a healthy pair"
+    );
+    Ok(())
+}
+
+#[test]
 fn first_pair_probe() -> Result<()> {
     let Ok(case) = std::env::var("CTX_FIRST_PAIR_CASE") else {
         return Ok(());
