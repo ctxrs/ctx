@@ -67,6 +67,7 @@ pub use resources::{
     override_next_scratch_available_space_for_test, SqliteSourceSnapshotCounterObserver,
 };
 use resources::{SqliteRouteScratch, SqliteSourceSnapshotActivity, SqliteSourceSnapshotContext};
+use snapshot::SqliteSourceSnapshotPolicy;
 
 pub type SqliteSourceAccessResult<T> = Result<T, SqliteSourceAccessError>;
 
@@ -249,18 +250,7 @@ pub enum SqliteSourceSnapshotStrategy {
     #[cfg(target_os = "linux")]
     PinnedReadOnlyWal,
     CopiedFamily,
-}
-
-/// Selects how one authorized provider SQLite leaf is stabilized.
-///
-/// Both policies acquire the same physical files. The stable-copy policy keeps
-/// its private copy readable while the source's retained database identity is
-/// still present; interpretation and publication policy remain with capture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SqliteSourceSnapshotPolicy {
-    ExactRevision,
-    PinnedReadOnlyWal,
-    StablePrivateCopy,
+    SelectiveTables,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -605,7 +595,8 @@ impl SqliteSourceTerminalFence {
                     .map_err(map_revalidation_error)?;
                 family.revalidate(&self.inner.native_evidence)?;
             }
-            SqliteSourceSnapshotPolicy::StablePrivateCopy => {
+            SqliteSourceSnapshotPolicy::StablePrivateCopy
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
                 let family = SqliteSourceFamily::open(&authority, &self.inner.database_name, || {})
                     .map_err(map_revalidation_error)?;
                 family.revalidate_database_identity(&self.inner.native_evidence)?;
@@ -753,7 +744,8 @@ impl SqliteSourceReadSnapshot {
             SqliteSourceSnapshotPolicy::PinnedReadOnlyWal => {
                 family.revalidate_database_identity(&self.native_evidence)
             }
-            SqliteSourceSnapshotPolicy::StablePrivateCopy => {
+            SqliteSourceSnapshotPolicy::StablePrivateCopy
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
                 family.revalidate_database_identity(&self.native_evidence)
             }
         }

@@ -36,9 +36,10 @@ pub(in super::super) fn prepare_leaf_with_resources<R: JsonlFamilyRuntime>(
     route_resources: &ctx_history_capture_runtime::SourceBackedRouteResources,
 ) -> JsonlResult<PreparedLeaf<JsonlRuntimeError<R>>, JsonlRuntimeError<R>> {
     worker.begin_leaf();
-    let optimized_outcome = if append_only_trust_allowed
-        || adapter.append_trust_contract()
-            != super::super::JsonlFamilyAppendTrustContract::AppendOnlySameObjectV1
+    let optimized_outcome = if leaf.terminal_dependencies.compound.is_none()
+        && (append_only_trust_allowed
+            || adapter.append_trust_contract()
+                != super::super::JsonlFamilyAppendTrustContract::AppendOnlySameObjectV1)
     {
         adapter.scan_optimized_leaf(
             leaf,

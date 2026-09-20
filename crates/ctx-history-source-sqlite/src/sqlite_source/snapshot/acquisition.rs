@@ -136,6 +136,16 @@ pub(super) fn acquire_sqlite_connection_with_progress<E>(
     after_database_copy: impl FnOnce(),
     report_progress: &mut impl FnMut(SqliteSourceProgress) -> Result<(), E>,
 ) -> Result<AcquiredSqliteConnection, SqliteSourceProgressError<E>> {
+    if let SqliteSourceSnapshotPolicy::SelectivePrivateCopy(tables) = options.policy {
+        return super::selective::acquire(
+            snapshot_context,
+            family,
+            evidence,
+            options.limits,
+            tables,
+            report_progress,
+        );
+    }
     let source_limit = options.limits.maximum_source_bytes();
     let scratch_limit = options.limits.maximum_scratch_limit();
     let scratch = SqliteRouteScratch::new(snapshot_context, scratch_limit);

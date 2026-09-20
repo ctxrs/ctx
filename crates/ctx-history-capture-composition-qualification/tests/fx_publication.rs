@@ -357,6 +357,7 @@ fn authentic_v006_sessions_publish_searchable_content_and_noop_with_stable_ident
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("index");
     copy_authentic_sessions(&sessions);
+    fs::write(sessions.join(".resume-catalog"), b"resume cache").unwrap();
     let registry = registry(&sessions);
 
     let cold = refresh(&index, &registry);
@@ -403,6 +404,59 @@ fn authentic_v006_sessions_publish_searchable_content_and_noop_with_stable_ident
     assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
     assert_eq!(noop.sources, cold.sources);
     assert_eq!(records(&index), cold_records);
+}
+
+#[test]
+fn older_recovery_checkpoints_publish_cold_and_append_without_losing_siblings() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    copy_authentic_sessions(&sessions);
+    let registry = registry(&sessions);
+    assert_clean_receipt(&refresh(&index, &registry), 2);
+    let original = records(&index);
+    let session = sessions.join(TOOL_FREE_ID);
+    for (sequence, version) in [(4, 1), (5, 2)] {
+        let mut checkpoint = json!({
+            "version": version, "turn_id": 1,
+            "user": {"text": "saved request", "images": []},
+            "assistant_source": "partial response",
+            "execution": {"schema_version": 3, "tool_steps": [], "files": []},
+            "cause": "response_interrupted", "action": "paused", "tool_state": "uncertain",
+            "requested_fast_mode": false, "fast_mode": false,
+            "max_provider_attempts": 3, "consumed_provider_attempts": 0,
+            "outstanding_reservation": false
+        });
+        if version == 1 {
+            checkpoint["route_model"] = json!("test/model");
+            checkpoint["route_provider"] = json!("gateway");
+        } else {
+            checkpoint["authority"] = json!({"provider": "gateway", "model": "test/model"});
+        }
+        let id = append_envelope(
+            &session,
+            sequence,
+            1_700_001_000_000,
+            "recovery_checkpoint_set",
+            json!({"checkpoint": checkpoint}),
+        );
+        commit_through(&session, sequence, &id);
+    }
+    append_committed_turn(
+        &session,
+        "checkpoint continuation request",
+        "checkpoint continuation answer",
+    );
+    assert_clean_receipt(&refresh(&index, &registry), 2);
+    let appended = records(&index);
+    assert_eq!(appended.len(), original.len() + 2);
+    assert!(original.iter().all(|record| appended.contains(record)));
+    assert_search_hit(&index, "checkpoint continuation answer", TOOL_FREE_ID);
+    let fresh = temp.path().join("fresh-index");
+    assert_clean_receipt(&refresh(&fresh, &registry), 2);
+    assert_eq!(records(&fresh), appended);
+    assert_clean_receipt(&refresh(&index, &registry), 2);
+    assert_eq!(records(&index), appended);
 }
 
 fn fx_probes() -> StaticProviderProbeCatalog {
@@ -1003,7 +1057,8 @@ fn committed_log_compaction_replacement_rebuilds_without_changing_logical_identi
     let cold_records = records_for(&index, TOOL_FREE_ID);
     let cold_source = source_for(&index, TOOL_FREE_ID);
     let session = sessions.join(TOOL_FREE_ID);
-    let state = canonical_state(&session);
+    let mut state = canonical_state(&session);
+    state.permission_state.schema_version = 1;
     let encoded = serde_json::to_vec(&state).unwrap();
     let digest = format!("{:x}", Sha256::digest(&encoded));
     let replacement_id = "dddddddddddddddddddddddddddddddd";
@@ -1054,3 +1109,6 @@ fn committed_log_compaction_replacement_rebuilds_without_changing_logical_identi
     assert_eq!(source_for(&index, TOOL_FREE_ID), cold_source);
     assert_eq!(records_for(&index, TOOL_FREE_ID), cold_records);
 }
+
+#[path = "fx_conversation.rs"]
+mod conversation;

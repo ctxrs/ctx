@@ -381,6 +381,7 @@ pub struct UsageSnapshot {
 pub enum RecoveryCause {
     NetworkInterrupted,
     ResponseInterrupted,
+    ProviderStreamTimeout,
     ProviderUnavailable,
     RateLimited,
     SystemResumed,
@@ -396,6 +397,8 @@ pub enum RecoveryAction {
     RegeneratingTool,
     ContinuingAfterTool,
     ReconcilingTool,
+    WaitingForConnectivity,
+    Paused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,6 +422,10 @@ pub struct RecoveryAuthority {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryCheckpoint {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_identity: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
     pub version: u8,
     pub turn_id: u64,
     pub user: crate::history::UserTurn,
@@ -427,7 +434,12 @@ pub struct RecoveryCheckpoint {
     pub cause: RecoveryCause,
     pub action: RecoveryAction,
     pub tool_state: RecoveryToolState,
-    pub authority: RecoveryAuthority,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority: Option<RecoveryAuthority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_model: Option<DurableBytes>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_provider: Option<ProviderId>,
     pub requested_fast_mode: bool,
     pub fast_mode: bool,
     pub max_provider_attempts: u64,

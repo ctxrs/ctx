@@ -17,7 +17,7 @@ use super::{
     SelectorIncludeBudget, SelectorReadError, SelectorReader, StaticProviderProbeCatalog,
     MAX_FINITE_SELECTOR_ENTRIES, OPENCLAW_UNSUPPORTED_REASON,
 };
-use crate::provider_sources::probes::{has_openclaw_agent_sqlite_v17, BoundedProbe};
+use crate::provider_sources::probes::{has_openclaw_agent_sqlite, BoundedProbe};
 
 const OPENCLAW_JSONL_SOURCE_FORMAT: &str = "openclaw_session_jsonl_tree";
 
@@ -118,7 +118,7 @@ pub(super) fn resolve(
                 }
             };
         let sqlite = agent_root.join("agent/openclaw-agent.sqlite");
-        let sqlite_probe = has_openclaw_agent_sqlite_v17(context.data_root(), &sqlite);
+        let sqlite_probe = has_openclaw_agent_sqlite(context.data_root(), &sqlite);
         if sqlite_probe == BoundedProbe::Found {
             let mut source = source_from_parts_with_data_root(
                 probes,

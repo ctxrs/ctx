@@ -268,7 +268,7 @@ filegroup(
         "tests/fixtures/provider-history/fx/v0.0.6/native-v3-tool-free/.fx/sessions/1700000000001-1700000000000000001-0000000000000001/events.jsonl",
         "tests/fixtures/provider-history/fx/upstream-v0.3.73-test-source/schema-v1/.fx/sessions/legacy-v1/session.json",
         "tests/fixtures/provider-history/fx/upstream-v0.3.73-test-source/schema-v2/.fx/sessions/legacy-v2/session.json",
-    ],
+    ] + glob(["tests/fixtures/provider-history/fx/v0.0.10/**"]),
     visibility = ["//visibility:public"],
 )
 

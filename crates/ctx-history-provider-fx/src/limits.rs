@@ -191,7 +191,7 @@ pub fn validate_canonical_state(
         nested = nested.saturating_add(stats.nested_items);
         strings = strings.saturating_add(stats.string_bytes);
     }
-    if state.permission_state.schema_version != 2
+    if !matches!(state.permission_state.schema_version, 1 | 2)
         || state.permission_state.next_generation == 0
         || state.permission_state.rules.len() > 1024
     {
@@ -326,7 +326,7 @@ pub(crate) fn validate_recovery_checkpoint(
     checkpoint: &RecoveryCheckpoint,
 ) -> FxProviderResult<()> {
     checkpoint.execution.validate()?;
-    if checkpoint.version != 2
+    if !matches!(checkpoint.version, 1..=4)
         || checkpoint.turn_id == 0
         || checkpoint.max_provider_attempts == 0
         || checkpoint.consumed_provider_attempts > checkpoint.max_provider_attempts
@@ -338,21 +338,62 @@ pub(crate) fn validate_recovery_checkpoint(
     if let Some(work_id) = &checkpoint.user.work_id {
         crate::history::validate_work_id(work_id)?;
     }
-    match &checkpoint.authority.model {
+    let model = if let Some(route) = &checkpoint.route_identity {
+        validate_legacy_recovery_route(route, checkpoint.version)?;
+        if checkpoint.authority.is_some()
+            || checkpoint.route_provider.is_some()
+            || !matches!(
+                checkpoint.delivery.as_deref(),
+                Some("possibly_sent" | "definitely_unsent")
+            )
+        {
+            return Err(FxProviderError::InvalidState(
+                "invalid legacy recovery delivery",
+            ));
+        }
+        checkpoint
+            .route_model
+            .as_ref()
+            .ok_or(FxProviderError::InvalidState(
+                "missing legacy recovery model",
+            ))?
+    } else {
+        if checkpoint.delivery.is_some() {
+            return Err(FxProviderError::InvalidState(
+                "delivery without legacy route",
+            ));
+        }
+        match (
+            checkpoint.version,
+            &checkpoint.authority,
+            &checkpoint.route_model,
+            checkpoint.route_provider,
+        ) {
+            (1, None, Some(model), _) => model,
+            (2, Some(authority), None, None) => &authority.model,
+            _ => {
+                return Err(FxProviderError::InvalidState(
+                    "invalid recovery route version",
+                ))
+            }
+        }
+    };
+    match model {
         crate::DurableBytes::Utf8(model) => validate_model(model)?,
         crate::DurableBytes::NonUtf8Base64(_) => {
             return Err(FxProviderError::InvalidState("recovery model is not UTF-8"));
         }
     }
-    if checkpoint.authority.credential_identity.is_some()
-        && checkpoint.authority.credential_source.is_none()
-    {
+    let Some(authority) = &checkpoint.authority else {
+        return Ok(());
+    };
+    if authority.credential_identity.is_some() && authority.credential_source.is_none() {
         return Err(FxProviderError::InvalidState(
             "credential identity has no source",
         ));
     }
-    if let Some(source) = checkpoint.authority.credential_source {
-        let authorized = match checkpoint.authority.provider {
+    if let Some(source) = authority.credential_source {
+        let authorized = match authority.provider {
             ProviderId::Gateway => !matches!(
                 source,
                 CredentialSource::ChatgptSubscription | CredentialSource::GrokSubscription
@@ -394,6 +435,53 @@ pub(crate) fn check_limit(
             actual,
             maximum,
         });
+    }
+    Ok(())
+}
+
+// Upstream reads these retired routing shapes as history only. They never grant
+// connection or credential authority to the importer.
+fn validate_legacy_recovery_route(value: &serde_json::Value, version: u8) -> FxProviderResult<()> {
+    let invalid = || FxProviderError::InvalidState("invalid legacy recovery route");
+    let fields: &[&str] = match version {
+        2 => &[
+            "connection_id",
+            "adapter_kind",
+            "permission_review_model_id",
+        ],
+        3 => &[
+            "connection_id",
+            "adapter_kind",
+            "permission_review_model_id",
+            "vision_model_id",
+            "subagent_model_id",
+        ],
+        4 => &[
+            "version",
+            "connection_id",
+            "adapter_kind",
+            "endpoint",
+            "protocol",
+            "credential_ref",
+            "permission_review_model_id",
+            "vision_model_id",
+            "subagent_model_id",
+        ],
+        _ => return Err(invalid()),
+    };
+    let object = value.as_object().ok_or_else(invalid)?;
+    if object.len() != fields.len()
+        || fields.iter().any(|field| !object.contains_key(*field))
+        || value["connection_id"] != "vercel"
+        || value["adapter_kind"] != "vercel_ai_gateway"
+        || (version == 4 && (value["version"] != 1 || value["protocol"] != "vercel_ai_gateway"))
+    {
+        return Err(invalid());
+    }
+    for (key, value) in object {
+        if key != "version" && !value.as_str().is_some_and(|value| value.len() <= 4096) {
+            return Err(invalid());
+        }
     }
     Ok(())
 }

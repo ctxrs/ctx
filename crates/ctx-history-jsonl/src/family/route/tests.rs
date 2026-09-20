@@ -38,6 +38,8 @@ use ctx_history_source_io::{SourceIoError, MAX_PROVIDER_JSONL_LINE_BYTES};
 mod behavior;
 #[path = "tests/checkpoint_lifecycle.rs"]
 mod checkpoint_lifecycle;
+#[path = "tests/compound_input.rs"]
+mod compound_input;
 
 const TEST_SOURCE_FORMAT: &str = "terminal_witness_jsonl";
 const TEST_SCHEMA: &str = "terminal-witness-v1";

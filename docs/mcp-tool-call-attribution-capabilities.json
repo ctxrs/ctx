@@ -227,7 +227,7 @@
       "provider_id": "openclaw", "route": "native_import", "source_format": "openclaw_agent_sqlite", "source_schema": "openclaw-agent-schema-v17",
       "producer_bound": {"kind": "source_commits", "commits": ["39b39ca6eec684f0675cd93500646b578f6e7021"], "unknown_generations": "not-qualified"},
       "status": "not-qualified", "reason": "route_mismatch",
-      "detail": "The admitted v17 SQLite route preserves complete native event JSON, but it does not project an exact event-local MCP server/tool pair and terminal linkage into CoreActivity.",
+      "detail": "The admitted v17/v19 SQLite route preserves complete native event JSON, but it does not project an exact event-local MCP server/tool pair and terminal linkage into CoreActivity.",
       "evidence": ["https://github.com/openclaw/openclaw/blob/39b39ca6eec684f0675cd93500646b578f6e7021/src/state/openclaw-agent-schema.sql"]
     },
     {

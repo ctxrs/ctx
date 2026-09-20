@@ -19,6 +19,8 @@ use lexical_test_support::{search_event_candidates, search_event_candidates_with
 mod codex_child_independence;
 #[path = "provider_lifecycle/compound_root_ownership.rs"]
 mod compound_root_ownership;
+#[path = "provider_lifecycle/openclaw_v19.rs"]
+mod openclaw_v19;
 #[path = "provider_lifecycle/publication_registry.rs"]
 mod publication_registry;
 #[path = "provider_lifecycle/registry_roots.rs"]

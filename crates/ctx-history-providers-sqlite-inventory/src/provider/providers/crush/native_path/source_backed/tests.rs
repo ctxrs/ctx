@@ -112,7 +112,8 @@ fn query_time_corrupt_and_notadb_keep_provider_content_provenance() {
             ctx_history_source_sqlite::SqliteSourceSnapshotStrategy::ImmutableMain => {
                 crate::provider_sources::SqliteArtifactKind::ProviderDatabase
             }
-            ctx_history_source_sqlite::SqliteSourceSnapshotStrategy::CopiedFamily => {
+            ctx_history_source_sqlite::SqliteSourceSnapshotStrategy::CopiedFamily
+            | ctx_history_source_sqlite::SqliteSourceSnapshotStrategy::SelectiveTables => {
                 crate::provider_sources::SqliteArtifactKind::PrivateSourceCopy
             }
             #[cfg(target_os = "linux")]

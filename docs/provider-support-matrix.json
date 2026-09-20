@@ -873,7 +873,7 @@
           "source_format": "openclaw_agent_sqlite",
           "fidelity": "imported",
           "notes": [
-            "Reads the current schema-v17 per-agent database through a read-only WAL-aware snapshot after exact schema, key, index, and owner admission.",
+            "Reads the supported schema-v17 and schema-v19 per-agent database through a read-only WAL-aware snapshot after exact schema, key, index, and owner admission.",
             "Imports active-position transcript projection plus bounded reset/deleted archive generations; admitted SQLite suppresses only the same normalized agent's legacy JSONL route."
           ]
         }
@@ -902,7 +902,7 @@
         "parent_child_session_edges": false
       },
       "limitations": [
-        "Only exact schema v17 is admitted. Oversized or corrupt archives fail the whole SQLite source closed; legacy JSONL, old profiles, `.moltbot`, mounts, and remotes are not unioned."
+        "Only exact schemas v17 and v19 are admitted. Oversized or corrupt archives fail the whole SQLite source closed; legacy JSONL, old profiles, `.moltbot`, mounts, and remotes are not unioned."
       ],
       "public_docs": "docs/providers.md"
     },
@@ -2278,7 +2278,7 @@
           "source_format": "fx_sessions_tree",
           "fidelity": "imported",
           "notes": [
-            "Reads legacy marker-less schema-v1/v2 session.json snapshots accepted by current fx v0.0.6, plus current schema-v3 transactional event logs, from a sessions tree rooted at ~/.fx/sessions or an exact directory with that layout.",
+            "Reads fx v0.0.10 schema-v4 session manifests with schema-v1/v2 conversation events and retained artifacts, legacy marker-less schema-v1/v2 snapshots, and schema-v3 transactional event logs accepted by fx v0.0.6, from a sessions tree rooted at ~/.fx/sessions or an exact directory with that layout.",
             "For schema v3, authority.json establishes event-log authority, events.jsonl is canonical history, a matching commit.<generation>.json watermark establishes the committed boundary, and session.json is only a projection.",
             "Replays only the committed schema-v3 event-log boundary, including state replacements produced by compaction.",
             "A supported marker-less snapshot and the schema-v3 session created by its upstream migration retain one logical fx session, so migration alone does not duplicate history or rotate stable ctx identities."
@@ -2290,28 +2290,28 @@
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
-      "child_sessions_supported": false,
+      "child_sessions_supported": true,
       "lineage_support": {
-        "session_relationship": "unknown",
+        "session_relationship": "exact_relationship",
         "event_origin": "unknown"
       },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
-        "tool_calls": false,
-        "tool_output": false,
-        "command_output": false,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": true,
         "files_touched": false,
         "artifacts": false,
         "model_identity": false,
         "costs": false,
         "token_usage": false,
-        "parent_child_session_edges": false
+        "parent_child_session_edges": true
       },
       "limitations": [
-        "Support is limited to legacy marker-less schema-v1/v2 snapshots accepted by current fx v0.0.6 and current schema-v3 transactional event logs. Marker-less schema-v3 snapshots, future schemas, hosted history, and exact MCP server/tool attribution are not supported.",
+        "Supported formats are fx v0.0.10 conversation logs, legacy marker-less schema-v1/v2 snapshots, and schema-v3 transactional event logs. Marker-less schema-v3 snapshots, future schemas, hosted history, and exact MCP server/tool attribution are not supported.",
         "`authority.json` and a matching `commit.<generation>.json` watermark with no pending commit are required for schema-v3 admission; a schema-v3 `session.json` is not history authority and uncommitted event-log tails are excluded. Legacy snapshots larger than 16 MiB are rejected.",
-        "Current fidelity claims cover searchable user and assistant turn content only; tool, command, file-touch, per-turn model, and per-turn token fidelity are not claimed."
+        "Conversation logs retain complete available tool results, meaningful replay text, framed command output, completed-turn metadata, and literal child-owner metadata. Artifacts are bounded at 8 MiB each, replay at 65,536 frames, and Core content at 16 MiB; unavailable and omitted captures are explicit. Artifact changes force whole-session replay. Typed command/file-effect, transitive lineage, per-turn model, and token fidelity are not claimed for all supported formats."
       ],
       "public_docs": "docs/providers.md"
     }

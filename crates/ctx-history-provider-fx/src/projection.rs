@@ -9,7 +9,7 @@ use crate::{
     CanonicalState, FxProviderError, FxProviderResult, HistoryTurn, HistoryTurnKind, LogicalTurn,
 };
 
-pub const FX_PARSER_REVISION: &str = "fx-event-log-v3/v0.0.6-79666393+main-385f74e0";
+pub const FX_PARSER_REVISION: &str = "fx-conversation-v4/v0.0.10-v1";
 const FX_SESSION_KIND: &str = "fx_session";
 const FX_SESSION_NAMESPACE: &str = "fx.session_id";
 const FX_TURN_ITEM_KIND: &str = "fx_history_turn";
@@ -213,7 +213,7 @@ pub(crate) fn project_summary(
     Ok(record)
 }
 
-fn core_session_id(
+pub(crate) fn core_session_id(
     binding: ProjectionBinding<'_>,
 ) -> FxProviderResult<ctx_history_core::StableEntityId> {
     Ok(derive_native_session_id(

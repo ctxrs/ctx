@@ -151,22 +151,32 @@ Unknown required events and future format versions fail the source. Delegated
 sessions remain independently searchable, but their immediate parent header
 does not prove the transitive root identity required for typed lineage edges.
 
-fx is Supported for legacy marker-less schema-v1/v2 `session.json` snapshots
-accepted by current fx v0.0.6 and current schema-v3 transactional session
-event logs. Discovery selects
-`~/.fx/sessions`; named roots and exact imports accept a directory with the
-same sessions-tree layout. For schema v3,
-`authority.json` establishes event-log authority, `events.jsonl` is canonical
-history, and a matching `commit.<generation>.json` watermark establishes the
-committed boundary; `session.json` is only a projection. Pending commits and
-uncommitted tails are excluded. Legacy snapshots are limited to 16 MiB. A
-supported marker-less snapshot and the schema-v3 session created by its upstream
-migration remain one logical fx session, so migration alone does not duplicate
-history or rotate stable ctx identities. Marker-less schema-v3 snapshots,
-future schemas, hosted history, and exact MCP server/tool attribution are not
-supported. Current fidelity claims cover searchable user and assistant turn
-content only; they do not claim normalized tool, command, file-touch, per-turn
-model, or per-turn token fidelity.
+fx supports fx v0.0.10 schema-v4 session manifests with schema-v1/v2
+conversation events, legacy marker-less schema-v1/v2 snapshots, and schema-v3
+transactional event logs. The default root is `~/.fx/sessions`; named and exact
+imports accept the same sessions-tree layout. Ordinary root cache files are ignored.
+
+For conversation logs, ctx retains messages, tool calls and complete retained
+result text, reasoning text, interruption and completed-turn metadata, and
+context summaries. Results come from `tool-results`; command output comes from
+`logs/commands`, including framed stdout/stderr replay. Missing, unsafe, binary
+text results, and oversized content have explicit capture states; previews are
+never represented as complete results. Individual artifacts are bounded at
+8 MiB, replay metadata at 65,536 frames, and aggregate Core content at 16 MiB.
+Opaque model-resume signatures and encrypted replay fields are omitted.
+Artifact changes or late repair replay the whole session; unchanged artifacts
+permit ordinary log append. This favors complete refresh over append performance
+for sessions that frequently add artifacts. Native session and sequence identities
+remain stable through artifact repair. Literal child-owner parent metadata is
+retained without inferring transitive ancestry.
+
+Schema-v3 logs still require `authority.json` and a matching
+`commit.<generation>.json` watermark. Pending commits and uncommitted tails are
+excluded; their `session.json` is only a projection. Legacy snapshots are limited
+to 16 MiB. A supported legacy snapshot and its schema-v3 migration retain their
+existing stable identities. Conversation migration retains the native session,
+but uses the conversation log's event identities. Marker-less schema-v3 snapshots,
+future schemas, hosted history, and exact MCP server/tool attribution are unsupported.
 
 `ctx sources --format json` reports each known provider source with `import_support`
 and `importable` fields. A source is importable only when provider-specific

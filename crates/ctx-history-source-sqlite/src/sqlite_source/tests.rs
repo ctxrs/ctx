@@ -46,6 +46,8 @@ use super::{
 mod diagnostics;
 mod path_safety;
 mod scratch;
+#[cfg(target_os = "linux")]
+mod selective;
 
 fn create_database(path: &Path, value: &str) {
     let connection = Connection::open(path).unwrap();

@@ -45,7 +45,7 @@ class ProviderSupportMatrixTest(unittest.TestCase):
         self.assertEqual({provider["status"] for provider in providers}, {"supported"})
         self.assertNotIn("windsurf", {provider["id"] for provider in providers})
 
-    def test_fx_public_contract_covers_legacy_and_v3_without_overclaiming(self) -> None:
+    def test_fx_public_contract_covers_conversation_and_older_formats(self) -> None:
         fx = next(provider for provider in self.providers() if provider["id"] == "fx")
         self.assertEqual(fx["capture_provider"], "fx")
         self.assertEqual(
@@ -66,7 +66,11 @@ class ProviderSupportMatrixTest(unittest.TestCase):
             + fx["implemented_paths"][0]["notes"]
         )
         self.assertIn("v0.0.6", public_text)
-        self.assertIn("accepted by current fx v0.0.6", public_text)
+        self.assertIn("accepted by fx v0.0.6", public_text)
+        self.assertIn("v0.0.10", public_text)
+        self.assertIn("schema-v4", public_text)
+        self.assertIn("8 MiB", public_text)
+        self.assertIn("65,536", public_text)
         self.assertIn("schema-v1/v2", public_text)
         self.assertIn("schema-v3", public_text)
         self.assertIn("events.jsonl is canonical history", public_text)
@@ -75,10 +79,13 @@ class ProviderSupportMatrixTest(unittest.TestCase):
         self.assertIn("16 MiB", public_text)
         self.assertIn("Marker-less schema-v3 snapshots", public_text)
         self.assertIn("migration alone does not duplicate history", public_text)
+        for field in ("tool_calls", "tool_output", "command_output", "parent_child_session_edges"):
+            self.assertTrue(fx["fidelity"][field], field)
+        self.assertEqual(
+            fx["lineage_support"],
+            {"session_relationship": "exact_relationship", "event_origin": "unknown"},
+        )
         for field in (
-            "tool_calls",
-            "tool_output",
-            "command_output",
             "files_touched",
             "model_identity",
             "token_usage",

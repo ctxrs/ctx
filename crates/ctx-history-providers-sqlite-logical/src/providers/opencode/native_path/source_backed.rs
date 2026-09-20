@@ -854,9 +854,17 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
         loop {
             match retained
                 .sqlite_authority
-                .open_stable_snapshot_with_progress(&retained.database_leaf, |progress| {
-                    report_progress(sqlite_source_progress(progress))
-                }) {
+                .open_selected_tables_snapshot_with_progress(
+                    &retained.database_leaf,
+                    &[
+                        "session",
+                        "message",
+                        "part",
+                        "session_message",
+                        "session_entry",
+                    ],
+                    |progress| report_progress(sqlite_source_progress(progress)),
+                ) {
                 Ok(snapshot) => break snapshot,
                 Err(SqliteSourceProgressError::Source(error))
                     if sqlite_retry_decision(&error)

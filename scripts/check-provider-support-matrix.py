@@ -57,6 +57,7 @@ EXPECTED_PROVIDER_LINEAGE_SUPPORT = {
     "zed": ("exact_relationship", "explicit_no_copy"),
     "mistral_vibe": ("exact_relationship", "unknown"),
     "mux": ("exact_relationship", "explicit_no_copy"),
+    "fx": ("exact_relationship", "unknown"),
 }
 REQUIRED_FIDELITY_FIELDS = {
     "user_prompts",

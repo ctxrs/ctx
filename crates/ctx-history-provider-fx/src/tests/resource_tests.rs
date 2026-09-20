@@ -16,6 +16,8 @@ fn inventory_retains_one_root_authority_for_many_sessions() {
         )
         .unwrap();
     }
+    fs::write(root.join(".resume-catalog"), b"resume cache").unwrap();
+    fs::write(root.join("unrelated-file"), b"not a session").unwrap();
     let inventory = crate::source_backed::test_inventory(&root).unwrap();
     let authority = inventory.accepted_leaves().next().unwrap().authority();
     assert_eq!(inventory.accepted_len(), 64);

@@ -1,5 +1,7 @@
 //! Pure, path-independent replay and projection for fx event-log v3 sessions.
 
+mod conversation;
+mod conversation_replay;
 mod dto;
 mod error;
 mod history;

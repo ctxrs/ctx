@@ -72,7 +72,9 @@ use ownership::{
 };
 mod membership;
 pub use membership::{JsonlFamilyAppendTrustContract, JsonlFamilyMembershipObservation};
+mod compound;
 mod projector;
+use compound::CompoundInput;
 pub use projector::{JsonlFamilyProjector, JsonlFamilyProjectorPreflightError};
 mod resident;
 use resident::{AuthenticatedSourceObservation, FamilyResident};
@@ -516,6 +518,7 @@ impl<E: JsonlFamilyError> JsonlFamilyExactAbsentDependency<E> {
 struct JsonlFamilyLeafTerminalDependencies<E: JsonlFamilyError> {
     present: Vec<JsonlFamilyExactPresentDependency<E>>,
     absent: Vec<JsonlFamilyExactAbsentDependency<E>>,
+    compound: Option<CompoundInput<E>>,
 }
 
 impl<E: JsonlFamilyError> Default for JsonlFamilyLeafTerminalDependencies<E> {
@@ -523,6 +526,7 @@ impl<E: JsonlFamilyError> Default for JsonlFamilyLeafTerminalDependencies<E> {
         Self {
             present: Vec::new(),
             absent: Vec::new(),
+            compound: None,
         }
     }
 }
@@ -532,12 +536,18 @@ impl<E: JsonlFamilyError> Clone for JsonlFamilyLeafTerminalDependencies<E> {
         Self {
             present: self.present.clone(),
             absent: self.absent.clone(),
+            compound: self.compound.clone(),
         }
     }
 }
 
 impl<E: JsonlFamilyError> JsonlFamilyLeafTerminalDependencies<E> {
     fn revalidate(&self) -> JsonlResult<bool, E> {
+        if let Some(compound) = &self.compound {
+            if !compound.revalidate()? {
+                return Ok(false);
+            }
+        }
         for dependency in &self.present {
             dependency.revalidate()?;
         }
@@ -550,7 +560,7 @@ impl<E: JsonlFamilyError> JsonlFamilyLeafTerminalDependencies<E> {
     }
 
     fn is_empty(&self) -> bool {
-        self.present.is_empty() && self.absent.is_empty()
+        self.present.is_empty() && self.absent.is_empty() && self.compound.is_none()
     }
 
     fn contains_path(&self, authority_path: &Path) -> bool {

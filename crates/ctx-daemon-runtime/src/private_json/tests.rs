@@ -8,7 +8,7 @@ fn isolated_root() -> Result<tempfile::TempDir> {
     #[cfg(not(target_os = "linux"))]
     let parent = std::env::temp_dir();
     Ok(tempfile::Builder::new()
-        .prefix("ctx-private-json-")
+        .prefix("ctx-status-json-")
         .tempdir_in(parent)?)
 }
 

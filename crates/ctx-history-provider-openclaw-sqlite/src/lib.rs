@@ -33,9 +33,7 @@ use ctx_history_core::{
     NativeItemKey, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
     SessionIdentityInput, SourceAnchorScope, SourceKey, SourceObservation, TypedKey,
 };
-pub use ctx_history_openclaw_schema::{
-    OPENCLAW_AGENT_SCHEMA_VERSION, OPENCLAW_AGENT_SQLITE_SOURCE_FORMAT,
-};
+pub use ctx_history_openclaw_schema::OPENCLAW_AGENT_SQLITE_SOURCE_FORMAT;
 use ctx_history_provider_runtime::{
     combine_primary_and_cleanup_route_errors, open_provider_sqlite_readonly, source_io,
     CaptureError, ProviderChangedDocumentSink, ProviderRouteControlExpectation,
@@ -47,8 +45,9 @@ use thiserror::Error;
 
 const DATABASE_LEAF: &str = "openclaw-agent.sqlite";
 const DATABASE_PARENT: &str = "agent";
+// Retain the released source identity across supported native schema upgrades.
 const SOURCE_SCHEMA_VARIANT: &str = "openclaw-agent-schema-v17";
-const PARSER_REVISION: &str = "openclaw-agent-sqlite-v3";
+const PARSER_REVISION: &str = "openclaw-agent-sqlite-v4";
 const SOURCE_ANCHOR_NAMESPACE: &str = "openclaw.agent";
 const ACTIVE_SESSION_NAMESPACE: &str = "openclaw.sqlite.session";
 const ARCHIVE_SESSION_NAMESPACE: &str = "openclaw.sqlite.archive-generation";
@@ -354,7 +353,8 @@ fn project_database(
     let mut digest = Sha256::new();
     digest.update(CONTENT_DOMAIN);
     digest_field(&mut digest, agent_id.as_bytes());
-    digest_field(&mut digest, &OPENCLAW_AGENT_SCHEMA_VERSION.to_be_bytes());
+    let schema_version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    digest_field(&mut digest, &schema_version.to_be_bytes());
     let mut counts = ScannedSourceCounts::default();
 
     let mut active = connection.prepare(
@@ -597,7 +597,7 @@ fn project_event(
 }
 
 fn validate_database(connection: &Connection, path_agent_id: &str) -> Result<()> {
-    ctx_history_openclaw_schema::validate_openclaw_agent_v17(connection, path_agent_id)
+    ctx_history_openclaw_schema::validate_openclaw_agent(connection, path_agent_id)
         .map_err(Into::into)
 }
 
