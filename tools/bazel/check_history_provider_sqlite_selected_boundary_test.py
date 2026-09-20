@@ -103,6 +103,7 @@ class BoundaryMutationTests(unittest.TestCase):
         inventory = self.capture / "src/source_backed/inventory.rs"
         inventory.write_text(
             """
+sqlite_route!(Devin, "devin", true, true, DiscoveredWinner);
 sqlite_route!(Firebender, "firebender", true, true, DiscoveredWinner);
 sqlite_route!(Goose, "goose", true, true, SelectedWithRetainedExplicit, SelectedWithRetainedRoutes);
 sqlite_route!(KiroCli, "kiro", true, true, DiscoveredWinner);
@@ -235,6 +236,7 @@ sqlite_route!(Warp, "warp", true, true, NamedSurface, NamedSurface);
         facade = self.capture_facade()
         original = facade.read_text()
         mutations = {
+            "devin": ("DiscoveredWinner", "NamedSurface"),
             "firebender": ("DiscoveredWinner", "NamedSurface"),
             "kiro": ("DiscoveredWinner", "NamedSurface"),
             "warp": ("NamedSurface", "DiscoveredWinner"),

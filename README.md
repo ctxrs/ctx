@@ -220,6 +220,7 @@ Read more about [agent memory](https://ctx.rs/comparisons/agent-memory), [codeba
 | Continue | Supported |
 | Crush | Supported |
 | Deep Agents | Supported |
+| Devin | Supported |
 | Firebender | Supported |
 | ForgeCode | Supported |
 | Goose | Supported |

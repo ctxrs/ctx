@@ -336,4 +336,12 @@ pub(super) const CONFIGURED_ROOT_CAPABILITIES: &[ConfiguredRootCapability] = &[
             "fx-sessions",
         ),
     },
+    ConfiguredRootCapability {
+        provider: CaptureProvider::Devin,
+        state: exact_source(
+            ConfiguredRootPathKind::File,
+            "devin_cli_sessions_sqlite",
+            "devin-cli-sessions-database",
+        ),
+    },
 ];

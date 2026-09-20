@@ -432,6 +432,39 @@ fn goose_discovery_uses_path_root_data_sessions_db() {
 }
 
 #[test]
+fn devin_discovery_uses_xdg_data_home_sessions_db() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = tempdir();
+    let xdg = temp.path().join("xdg-data");
+    let cli_dir = xdg.join("devin/cli");
+    std::fs::create_dir_all(&cli_dir).unwrap();
+    std::fs::write(cli_dir.join("sessions.db"), b"sqlite fixture marker").unwrap();
+    let _data_home = EnvGuard::set("XDG_DATA_HOME", &xdg);
+
+    let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Devin);
+    let source = sources
+        .iter()
+        .find(|source| source.path == cli_dir.join("sessions.db"))
+        .unwrap_or_else(|| panic!("missing Devin XDG source in {sources:#?}"));
+    assert_eq!(source.status, ProviderSourceStatus::Available);
+    assert_eq!(source.source_format, "devin_cli_sessions_sqlite");
+
+    // Devin documents no path-root override, so a stale one must not move the winner.
+    let decoy = temp.path().join("devin-decoy");
+    std::fs::create_dir_all(decoy.join("cli")).unwrap();
+    std::fs::write(decoy.join("cli/sessions.db"), b"decoy").unwrap();
+    let _override_attempt = EnvGuard::set("DEVIN_PATH_ROOT", &decoy);
+    let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Devin);
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect::<Vec<_>>(),
+        [cli_dir.join("sessions.db")]
+    );
+}
+
+#[test]
 fn warp_linux_state_root_does_not_union_windows_localappdata() {
     let temp = tempdir();
     let xdg_state = temp.path().join("xdg-state");

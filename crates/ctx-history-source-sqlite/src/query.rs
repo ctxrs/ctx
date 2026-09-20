@@ -123,6 +123,91 @@ impl Drop for SqliteLengthPreflightGuard<'_> {
     }
 }
 
+/// How far a unique-index probe will walk a schema before refusing it.
+#[derive(Clone, Copy, Debug)]
+pub struct UniqueIndexProbe<'a> {
+    /// Provider display name used in bound-rejection prose.
+    pub provider: &'a str,
+    /// Maximum indexes, and maximum columns per index, to inspect.
+    pub max_rows: usize,
+}
+
+/// Finds a total, non-partial unique index whose key columns are exactly
+/// `expected`, ascending, with binary collation.
+///
+/// A partial or descending index cannot back a keyset scan, and a non-binary
+/// collation would order rows differently than the projection expects, so both
+/// are skipped rather than accepted.
+pub fn sqlite_unique_index_for_columns(
+    conn: &Connection,
+    table: &str,
+    expected: &[&str],
+    probe: &UniqueIndexProbe<'_>,
+) -> Result<Option<String>> {
+    let provider = probe.provider;
+    let max_rows = probe.max_rows;
+    let sql = format!("pragma index_list(\"{}\")", table.replace('"', "\"\""));
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? != 0,
+            row.get::<_, i64>(4)? != 0,
+        ))
+    })?;
+    let mut indexes = Vec::new();
+    for row in rows {
+        if indexes.len() >= max_rows {
+            return Err(SqliteIoError::InvalidPayload(format!(
+                "{provider} {table} schema exceeds the {max_rows}-index inspection bound"
+            )));
+        }
+        indexes.push(row?);
+    }
+    for (index, unique, partial) in indexes {
+        if !unique || partial {
+            continue;
+        }
+        let sql = format!("pragma index_xinfo(\"{}\")", index.replace('"', "\"\""));
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)? != 0,
+            ))
+        })?;
+        let mut columns = Vec::new();
+        for row in rows {
+            if columns.len() >= max_rows {
+                return Err(SqliteIoError::InvalidPayload(format!(
+                    "{provider} {table} index exceeds the {max_rows}-column inspection bound"
+                )));
+            }
+            columns.push(row?);
+        }
+        let key_columns = columns
+            .iter()
+            .filter(|(_, _, _, key)| *key)
+            .collect::<Vec<_>>();
+        if key_columns.len() == expected.len()
+            && key_columns.iter().zip(expected).all(
+                |((column, descending, collation, _), expected)| {
+                    column.as_deref() == Some(*expected)
+                        && !descending
+                        && collation
+                            .as_deref()
+                            .is_some_and(|value| value.eq_ignore_ascii_case("binary"))
+                },
+            )
+        {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
 pub fn sqlite_schema_fingerprint(conn: &Connection) -> Result<String> {
     let mut stmt = conn.prepare(
         "select name, sql from sqlite_schema where type in ('table','index') order by name",

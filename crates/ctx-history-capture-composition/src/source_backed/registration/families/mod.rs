@@ -134,6 +134,7 @@ fn register_landed_source_backed_route_inner(
         CaptureProvider::OpenCode
         | CaptureProvider::Kilo
         | CaptureProvider::KiroCli
+        | CaptureProvider::Devin
         | CaptureProvider::Zed
         | CaptureProvider::Firebender
         | CaptureProvider::ForgeCode

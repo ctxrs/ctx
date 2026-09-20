@@ -241,6 +241,84 @@ fn warp_active_wal_update_publishes_and_then_replays_exactly() {
 }
 
 #[test]
+fn devin_landed_route_publishes_the_main_chain_and_replays_exactly() {
+    const APPENDED: &str = "devin wal lifecycle append";
+
+    let temp = test_support_paths::tempdir().unwrap();
+    let provider = temp.path().join("provider");
+    fs::create_dir(&provider).unwrap();
+    let database = provider.join("sessions.db");
+    fs::copy(
+        test_support_paths::capture_repo_root()
+            .join("tests/fixtures/provider-history/devin/v17/sessions.db"),
+        &database,
+    )
+    .unwrap();
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    let source = provider_source_for_path(CaptureProvider::Devin, database.clone());
+    register_landed_source_backed_route_with_data_root(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::Automatic,
+        &temp.path().join("data-root"),
+    )
+    .unwrap();
+    let index = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_clean_refresh(&cold);
+
+    // Compaction left an identical off-chain copy of the final assistant reply
+    // behind. Only the main-chain node is published.
+    assert_eq!(
+        indexed_records_with_exact_text(&index, CaptureProvider::Devin, "devincliassistantoracle"),
+        1
+    );
+
+    connection
+        .execute(
+            "insert into message_nodes
+                 (session_id, node_id, parent_node_id, chat_message, created_at)
+             values (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "abounding-crest",
+                31,
+                30,
+                format!(
+                    r#"{{"message_id":"devin-wal-append","role":"user","content":"{APPENDED}"}}"#
+                ),
+                1_788_983_600_i64,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "update sessions set main_chain_id = 31 where id = 'abounding-crest'",
+            [],
+        )
+        .unwrap();
+    assert_active_wal(&database);
+
+    let changed = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_clean_refresh(&changed);
+    assert_ne!(changed.commit.generation_id, cold.commit.generation_id);
+    let changed_record = only_indexed_record(&index, CaptureProvider::Devin, APPENDED);
+
+    let replay = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_clean_refresh(&replay);
+    assert_eq!(replay.commit.generation_id, changed.commit.generation_id);
+    assert_eq!(replay.sources, changed.sources);
+    assert_eq!(
+        only_indexed_record(&index, CaptureProvider::Devin, APPENDED),
+        changed_record
+    );
+}
+
+#[test]
 fn kiro_schema_failure_reports_cleanup_failure_without_staging_leftovers() {
     let temp = test_support_paths::tempdir().unwrap();
     let provider = temp.path().join("provider");
@@ -283,6 +361,26 @@ fn kiro_schema_failure_reports_cleanup_failure_without_staging_leftovers() {
     let staging = data_root.join("tmp/provider-sqlite");
     assert!(staging.is_dir());
     assert_directory_empty(&staging);
+}
+
+fn indexed_records_with_exact_text(
+    index_root: &Path,
+    provider: CaptureProvider,
+    text: &str,
+) -> usize {
+    let index = VerifiedIndex::open_pinned(index_root).unwrap();
+    super::lexical_test_support::search_event_candidates(&index, text, 64)
+        .into_iter()
+        .filter_map(|candidate| {
+            index
+                .core_record_by_id(candidate.event.event_id.as_uuid())
+                .unwrap()
+        })
+        .filter(|record| {
+            record.source.provider() == provider.as_str()
+                && record.content.meaningful_text() == text
+        })
+        .count()
 }
 
 fn assert_directory_empty(path: &Path) {

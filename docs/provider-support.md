@@ -112,6 +112,7 @@ support matrix is:
 | Cline | Supported | `cline_sdk_session_store`, `cline_task_directory_json` |
 | Roo Code | Supported | `roo_task_directory_json` |
 | fx | Supported | `fx_sessions_tree` |
+| Devin | Supported | `devin_cli_sessions_sqlite` |
 
 Codex session-tree discovery and exact `--path` import accept both ordinary
 `.jsonl` rollouts and official standard-Zstandard `.jsonl.zst` rollouts. Both
@@ -177,6 +178,29 @@ to 16 MiB. A supported legacy snapshot and its schema-v3 migration retain their
 existing stable identities. Conversation migration retains the native session,
 but uses the conversation log's event identities. Marker-less schema-v3 snapshots,
 future schemas, hosted history, and exact MCP server/tool attribution are unsupported.
+
+Devin is Supported through the native `devin_cli_sessions_sqlite` route
+reading `~/.local/share/devin/cli/sessions.db`. The route is named for the CLI
+because Devin keeps per-surface state under a shared `devin/` data root, so a
+store written by another Devin surface would be a separate route rather than
+this one. Admission is structural rather than version-pinned: every table,
+column, and index the importer reads is probed, so a migration that removes or
+reshapes them is refused, while one that only adds keeps importing. The
+migration version feeds the capability digest, so any change to it rotates the
+published content digest and forces a full re-scan. Each session stores its
+messages as a forest, so the imported transcript is the walk from
+`sessions.main_chain_id` up `parent_node_id`, reversed, with pre-compaction
+history spliced in wherever a chain node records `metadata.summarized_from`.
+System prompts sit on that chain and are imported as notices; the node a
+compaction wrote is imported as a summary. Nodes off the chain are counted but
+not imported: summarizer threads, abandoned regenerated turns, and the
+pre-compaction copies Devin rewrote. Subagent threads become separate delegated
+sessions only for foreground `run_subagent` calls, which are the only ones for
+which Devin records a `subagent/chain_node_id` back-link to the subagent chain
+tip; background subagent trees carry an agent id alone, prove no lineage, and
+are not imported. Per-session model and agent mode are retained in structured
+content only, with no model, cost, or token fact projected, and exact MCP
+server/tool attribution is not supported.
 
 `ctx sources --format json` reports each known provider source with `import_support`
 and `importable` fields. A source is importable only when provider-specific

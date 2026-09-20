@@ -7,34 +7,23 @@ use std::collections::BTreeSet;
 
 use rusqlite::{Connection, Row};
 
+use ctx_history_source_sqlite::{sqlite_unique_index_for_columns, UniqueIndexProbe};
+
 use crate::source_sqlite::{
     ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
 };
 use crate::{CaptureError, Result};
 
 const HERMES_SCHEMA_INDEX_MAX_ROWS: usize = 64;
+const HERMES_INDEX_PROBE: UniqueIndexProbe<'static> = UniqueIndexProbe {
+    provider: "Hermes",
+    max_rows: HERMES_SCHEMA_INDEX_MAX_ROWS,
+};
 
-/// Provider-owned SQLite values retained only for one bounded Hermes page.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum HermesSqliteValue {
-    Null,
-    Integer(i64),
-    RealBits(u64),
-    Text(String),
-}
-
-impl HermesSqliteValue {
-    fn from_real(value: f64) -> Self {
-        Self::RealBits(value.to_bits())
-    }
-
-    fn as_real(&self) -> Option<f64> {
-        match self {
-            Self::RealBits(bits) => Some(f64::from_bits(*bits)),
-            Self::Null | Self::Integer(_) | Self::Text(_) => None,
-        }
-    }
-}
+/// Hermes retains only the four storage classes its field specs accept, but
+/// decoding into the lossless native value lets a page feed the shared
+/// logical-row digest without a re-encode.
+pub(super) use ctx_history_source_sqlite::NativeSqliteValue as HermesSqliteValue;
 
 #[derive(Clone)]
 pub(super) struct HermesSchema {
@@ -97,66 +86,12 @@ fn hermes_unique_index_for_columns(
     table: &str,
     expected: &[&str],
 ) -> Result<Option<String>> {
-    let sql = format!("pragma index_list(\"{}\")", table.replace('"', "\"\""));
-    let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)? != 0,
-            row.get::<_, i64>(4)? != 0,
-        ))
-    })?;
-    let mut indexes = Vec::new();
-    for row in rows {
-        if indexes.len() >= HERMES_SCHEMA_INDEX_MAX_ROWS {
-            return Err(CaptureError::InvalidPayload(format!(
-                "Hermes {table} schema exceeds the {HERMES_SCHEMA_INDEX_MAX_ROWS}-index inspection bound"
-            )));
-        }
-        indexes.push(row?);
-    }
-    for (index, unique, partial) in indexes {
-        if !unique || partial {
-            continue;
-        }
-        let sql = format!("pragma index_xinfo(\"{}\")", index.replace('"', "\"\""));
-        let mut statement = conn.prepare(&sql)?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)? != 0,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, i64>(5)? != 0,
-            ))
-        })?;
-        let mut columns = Vec::new();
-        for row in rows {
-            if columns.len() >= HERMES_SCHEMA_INDEX_MAX_ROWS {
-                return Err(CaptureError::InvalidPayload(format!(
-                    "Hermes {table} index exceeds the {HERMES_SCHEMA_INDEX_MAX_ROWS}-column inspection bound"
-                )));
-            }
-            columns.push(row?);
-        }
-        let key_columns = columns
-            .iter()
-            .filter(|(_, _, _, key)| *key)
-            .collect::<Vec<_>>();
-        if key_columns.len() == expected.len()
-            && key_columns.iter().zip(expected).all(
-                |((column, descending, collation, _), expected)| {
-                    column.as_deref() == Some(*expected)
-                        && !descending
-                        && collation
-                            .as_deref()
-                            .is_some_and(|value| value.eq_ignore_ascii_case("binary"))
-                },
-            )
-        {
-            return Ok(Some(index));
-        }
-    }
-    Ok(None)
+    Ok(sqlite_unique_index_for_columns(
+        conn,
+        table,
+        expected,
+        &HERMES_INDEX_PROBE,
+    )?)
 }
 
 fn hermes_table_columns(

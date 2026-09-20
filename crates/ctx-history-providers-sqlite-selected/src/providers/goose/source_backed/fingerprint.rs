@@ -1,26 +1,26 @@
 use sha2::{Digest, Sha256};
 
-use super::{checked_add, GooseSourceBackedResultV0};
-use crate::providers::goose::{
-    schema::{GooseNativeSchema, GooseSessionRow},
-    stream::{GooseMessageCellDisposition, GooseScannedMessage, GooseScannedSession},
+use super::GooseSourceBackedResultV0;
+use crate::{
+    fingerprint::{hash_optional_i64, hash_optional_text, hash_text, RelationFingerprint},
+    providers::goose::{
+        schema::{GooseNativeSchema, GooseSessionRow},
+        stream::{GooseMessageCellDisposition, GooseScannedMessage, GooseScannedSession},
+    },
 };
 
 const GOOSE_LOGICAL_DATABASE_DOMAIN: &[u8] = b"ctx.goose.logical-database.v3-neutral-activity\0";
 const GOOSE_LOGICAL_SESSION_DOMAIN: &[u8] = b"ctx.goose.logical-session.v1\0";
 const GOOSE_LOGICAL_MESSAGE_DOMAIN: &[u8] = b"ctx.goose.logical-message.v1\0";
 
-pub(super) struct GooseLogicalFingerprint {
-    digest: Sha256,
-    rows: u64,
-}
+pub(super) struct GooseLogicalFingerprint(RelationFingerprint);
 
 impl GooseLogicalFingerprint {
     pub(super) fn new(schema: &GooseNativeSchema) -> Self {
-        let mut digest = Sha256::new();
-        digest.update(GOOSE_LOGICAL_DATABASE_DOMAIN);
-        hash_bytes(&mut digest, schema.capability_digest.as_bytes());
-        Self { digest, rows: 0 }
+        Self(RelationFingerprint::new(
+            GOOSE_LOGICAL_DATABASE_DOMAIN,
+            &schema.capability_digest,
+        ))
     }
 
     pub(super) fn record_session(
@@ -38,15 +38,11 @@ impl GooseLogicalFingerprint {
     }
 
     fn record(&mut self, relation: u8, evidence: [u8; 32]) -> GooseSourceBackedResultV0<()> {
-        self.rows = checked_add(self.rows, 1)?;
-        self.digest.update([relation]);
-        self.digest.update(evidence);
-        Ok(())
+        self.0.record(relation, evidence)
     }
 
-    pub(super) fn finish(mut self) -> GooseSourceBackedResultV0<[u8; 32]> {
-        self.digest.update(self.rows.to_be_bytes());
-        Ok(self.digest.finalize().into())
+    pub(super) fn finish(self) -> GooseSourceBackedResultV0<[u8; 32]> {
+        Ok(self.0.finish())
     }
 }
 
@@ -134,34 +130,5 @@ fn message_disposition_code(disposition: GooseMessageCellDisposition) -> u8 {
         GooseMessageCellDisposition::MissingSession => 10,
         GooseMessageCellDisposition::UnsupportedStorageClass => 11,
         GooseMessageCellDisposition::DuplicateBlockType => 12,
-    }
-}
-
-fn hash_bytes(digest: &mut Sha256, value: &[u8]) {
-    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
-    digest.update(value);
-}
-
-fn hash_text(digest: &mut Sha256, value: &str) {
-    hash_bytes(digest, value.as_bytes());
-}
-
-fn hash_optional_text(digest: &mut Sha256, value: Option<&str>) {
-    match value {
-        Some(value) => {
-            digest.update([1]);
-            hash_text(digest, value);
-        }
-        None => digest.update([0]),
-    }
-}
-
-fn hash_optional_i64(digest: &mut Sha256, value: Option<i64>) {
-    match value {
-        Some(value) => {
-            digest.update([1]);
-            digest.update(value.to_be_bytes());
-        }
-        None => digest.update([0]),
     }
 }

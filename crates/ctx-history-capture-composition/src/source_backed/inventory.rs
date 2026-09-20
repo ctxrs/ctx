@@ -480,6 +480,13 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         CatalogLineage,
         CatalogLineage
     ),
+    sqlite_route!(
+        Devin,
+        "devin_cli_sessions_sqlite",
+        true,
+        true,
+        DiscoveredWinner
+    ),
 ];
 
 pub fn source_backed_route_inventory() -> &'static [SourceBackedProviderRouteMetadata] {
@@ -573,6 +580,7 @@ Warp|warp_sqlite|warp_sqlite|true|true|NamedSurface|none|NamedSurface
 CodeBuddy|codebuddy_history_json|codebuddy_history_json|true|true|DiscoveredWinner|none|ProviderSource
 MiMoCode|mimocode_sqlite|mimocode_sqlite|true|true|DiscoveredWinner|none|ProviderSource
 Fx|fx_sessions_tree|fx_sessions_tree|true|true|CatalogLineage|none|CatalogLineage
+Devin|devin_cli_sessions_sqlite|devin_cli_sessions_sqlite|true|true|DiscoveredWinner|none|ProviderSource
 ";
 
     #[test]

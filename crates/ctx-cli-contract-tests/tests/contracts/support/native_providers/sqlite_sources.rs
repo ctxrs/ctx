@@ -277,7 +277,7 @@ fn goose_v14_schema_is_rejected_as_unsupported() {
 }
 
 #[test]
-fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
+fn sqlite_cli_imports_each_selected_sqlite_provider_and_searches() {
     for (cli_provider, stored_provider, source_format, fixture, query, sessions, events) in [
         (
             "zed",
@@ -323,6 +323,15 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "forgecode oracle",
             1,
             3,
+        ),
+        (
+            "devin",
+            "devin",
+            "devin_cli_sessions_sqlite",
+            "devin/v17/sessions.db",
+            "devincliassistantoracle",
+            4,
+            50,
         ),
     ] {
         let temp = tempdir();

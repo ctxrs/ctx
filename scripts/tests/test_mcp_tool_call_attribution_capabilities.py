@@ -128,11 +128,11 @@ class CapabilityMutationTests(unittest.TestCase):
         self.assertEqual(
             self.validate(),
             {
-                "providers": 42,
-                "base_routes": 47,
-                "capability_lanes": 51,
-                "lane_statuses": {"exact": 3, "not-qualified": 47, "excluded": 1},
-                "provider_statuses": {"exact": 3, "not-qualified": 39, "excluded": 0},
+                "providers": 43,
+                "base_routes": 48,
+                "capability_lanes": 52,
+                "lane_statuses": {"exact": 3, "not-qualified": 48, "excluded": 1},
+                "provider_statuses": {"exact": 3, "not-qualified": 40, "excluded": 0},
                 "exact_suites": 3,
                 "exact_tests": 9,
                 "exact_links": 4,

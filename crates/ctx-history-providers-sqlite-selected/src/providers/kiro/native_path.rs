@@ -43,11 +43,7 @@ impl KiroSqliteDatabase {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         let database_name =
-            path.file_name()
-                .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                    path: path.to_path_buf(),
-                    reason: "Kiro SQLite source must have a database leaf name",
-                })?;
+            crate::sqlite_common::database_leaf(path, &source_backed::KIRO_SOURCE_PATH_REASONS)?;
         let root = ProviderSourceRoot::open(parent_path)?;
         let parent = root.directory()?;
         let authority_handle = parent.try_clone_authority_handle()?;

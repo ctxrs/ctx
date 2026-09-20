@@ -28,6 +28,8 @@ pub use value::NativeSqliteValue;
 pub const MAX_PROVIDER_SQLITE_VALUE_BYTES: usize = 16 * 1024 * 1024;
 
 #[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+#[cfg(any(test, feature = "test-support"))]
 mod test_support_paths;
 
 #[cfg(any(test, feature = "test-support"))]

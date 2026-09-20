@@ -56,6 +56,7 @@ pub(super) fn resolve(
         CaptureProvider::FactoryAiDroid => resolve_factory(probes, context, spec),
         CaptureProvider::ForgeCode => resolve_forgecode(probes, context, spec),
         CaptureProvider::Fx => resolve_fx(probes, context, spec),
+        CaptureProvider::Devin => resolve_devin(probes, context, spec),
         _ => DiscoveryReport::default(),
     }
 }
@@ -372,6 +373,45 @@ fn resolve_goose(
         spec,
         data.join("sessions/sessions.db"),
         "goose_sessions_sqlite",
+    )
+}
+
+/// Devin documents no history path override; `devin --help` exposes only
+/// `--config`, so the XDG-and-home default is the only automatic winner.
+fn resolve_devin(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+) -> DiscoveryReport {
+    let data = match context.platform() {
+        DiscoveryPlatform::Linux | DiscoveryPlatform::MacOS => match context.env("XDG_DATA_HOME") {
+            Some(value) if !value.is_empty() && Path::new(value).is_absolute() => {
+                PathBuf::from(value).join("devin")
+            }
+            _ => context.home().join(".local/share/devin"),
+        },
+        DiscoveryPlatform::Windows => {
+            let Some(data) = context.platform_dirs().data.as_ref() else {
+                return manual_report(spec, None, MANUAL_PATH_REASON);
+            };
+            data.join("devin")
+        }
+        DiscoveryPlatform::OtherUnix => {
+            if let Some(value) = context
+                .env("XDG_DATA_HOME")
+                .filter(|value| !value.is_empty() && Path::new(value).is_absolute())
+            {
+                PathBuf::from(value).join("devin")
+            } else {
+                return unsupported_platform_report(spec);
+            }
+        }
+    };
+    one_source(
+        probes,
+        spec,
+        data.join("cli/sessions.db"),
+        "devin_cli_sessions_sqlite",
     )
 }
 

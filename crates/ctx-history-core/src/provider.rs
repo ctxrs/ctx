@@ -98,10 +98,11 @@ pub enum ProviderId {
     #[serde(rename = "mimocode", alias = "mimo-code", alias = "mimo_code")]
     MiMoCode,
     Fx,
+    Devin,
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 53] = [
         Self::Codex,
         Self::GrokBuild,
         Self::DeepSeekHarness,
@@ -154,6 +155,7 @@ impl ProviderId {
         Self::SweAgent,
         Self::MiMoCode,
         Self::Fx,
+        Self::Devin,
     ];
 }
 
@@ -362,6 +364,7 @@ mod tests {
             ProviderId::RooCode,
             ProviderId::Shelley,
             ProviderId::Zed,
+            ProviderId::Devin,
         ]
         .into_iter()
         .collect::<BTreeSet<_>>();

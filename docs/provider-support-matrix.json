@@ -2314,6 +2314,65 @@
         "Conversation logs retain complete available tool results, meaningful replay text, framed command output, completed-turn metadata, and literal child-owner metadata. Artifacts are bounded at 8 MiB each, replay at 65,536 frames, and Core content at 16 MiB; unavailable and omitted captures are explicit. Artifact changes force whole-session replay. Typed command/file-effect, transitive lineage, per-turn model, and token fidelity are not claimed for all supported formats."
       ],
       "public_docs": "docs/providers.md"
+    },
+    {
+      "id": "devin",
+      "display_name": "Devin",
+      "status": "supported",
+      "capture_provider": "devin",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "devin_cli_sessions_sqlite",
+          "route_role": "devin-cli-sessions-database"
+        }
+      },
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "devin_cli_sessions_sqlite",
+          "fidelity": "imported",
+          "notes": [
+            "Reads Devin SQLite history from cli/sessions.db using a read-only connection.",
+            "Devin 3000.10.21 created ~/.local/share/devin/cli/sessions.db with sessions(id, working_directory, main_chain_id, ...), message_nodes(row_id, session_id, node_id, parent_node_id, chat_message, created_at, metadata), tool_call_state(session_id, tool_call_id, tool_call_json, tool_call_update_json) and subagent_heads(session_id, agent_id, chain_node_id, updated_at).",
+            "message_nodes per session is a forest; the imported transcript is the walk from sessions.main_chain_id up parent_node_id, reversed, with pre-compaction history spliced in through metadata.summarized_from.",
+            "Admission is structural rather than version-pinned: required tables, columns, and the (session_id, node_id) unique index are probed, and max(refinery_schema_history.version) feeds the capability digest so a migration rotates the published content digest."
+          ]
+        }
+      ],
+      "history_locations": [
+        "Linux and macOS winner: absolute `$XDG_DATA_HOME/devin/cli/sessions.db`, else `~/.local/share/devin/cli/sessions.db`.",
+        "Windows winner: the platform data root plus `devin/cli/sessions.db`.",
+        "Other Unix without `XDG_DATA_HOME` is reported as an unsupported platform; exact `--path` still imports."
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "exact_relationship",
+        "event_origin": "unknown"
+      },
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": true,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": true
+      },
+      "limitations": [
+        "Only the main chain and the pre-compaction history reachable from it are imported. Summarizer threads, abandoned regenerated turns, and subagent threads Devin did not back-link are counted but not imported.",
+        "Subagent lineage is imported only for foreground `run_subagent` calls, which are the only ones that record `subagent/chain_node_id`. Background subagent trees carry `subagent/agent_id` alone and claim no lineage.",
+        "Per-session model and agent mode are retained in structured content only; no model, cost, or token fact is projected. Exact MCP server/tool attribution is not supported."
+      ],
+      "public_docs": "docs/provider-support.md"
     }
   ]
 }

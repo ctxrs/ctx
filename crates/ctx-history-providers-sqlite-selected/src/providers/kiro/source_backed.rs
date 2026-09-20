@@ -53,6 +53,13 @@ const KIRO_SCHEMA_DIGEST_DOMAIN: &[u8] = b"ctx.kiro.relevant-schema.v1\0";
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 pub(super) const SOURCE_BACKED_PAGE_ROWS: usize = 64;
 
+pub(crate) const KIRO_SOURCE_PATH_REASONS: crate::sqlite_common::SqliteSourcePathReasons =
+    crate::sqlite_common::SqliteSourcePathReasons {
+        missing_parent: "Kiro SQLite source must have a parent directory",
+        missing_leaf: "Kiro SQLite source must have a database leaf name",
+        not_regular_file: "Kiro SQLite source must be a regular non-symlink file",
+    };
+
 #[derive(Debug, Error)]
 pub(crate) enum KiroSourceBackedErrorV0 {
     #[error(transparent)]
@@ -223,10 +230,10 @@ pub(super) fn require_legacy_sqlite_format(
         ));
     }
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: source_path.to_path_buf(),
-            reason: "Kiro SQLite source must be a regular non-symlink file",
-        }
+        return Err(crate::sqlite_common::invalid_database_leaf(
+            source_path,
+            &KIRO_SOURCE_PATH_REASONS,
+        )
         .into());
     }
     let opened = open_provider_source_file(source_path)?;
