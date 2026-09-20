@@ -132,6 +132,7 @@ ctx_rust_test(
     testonly = True,
     srcs = [
         "tests/fx_publication.rs",
+        "tests/fx_conversation.rs",
         "tests/support/lexical.rs",
     ],
     crate_name = "ctx_history_capture_composition_fx_publication_qualification",

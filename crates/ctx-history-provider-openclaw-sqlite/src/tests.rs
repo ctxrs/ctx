@@ -102,7 +102,7 @@ impl Fixture {
                 "INSERT INTO schema_meta\
                    (meta_key, role, schema_version, agent_id, app_version, created_at, updated_at)\
                  VALUES ('primary', 'agent', ?1, ?2, 'test', 1, 1)",
-                params![OPENCLAW_AGENT_SCHEMA_VERSION, agent_id],
+                params![17, agent_id],
             )
             .expect("insert schema owner");
         Self {
@@ -831,3 +831,103 @@ CREATE UNIQUE INDEX idx_agent_transcript_active_messages
   ON session_transcript_active_events(session_id, message_position)
   WHERE message_position IS NOT NULL;
 "#;
+
+fn upgrade_fixture_to_v19(connection: &Connection) {
+    connection
+        .execute_batch(
+            "PRAGMA user_version = 19;
+         UPDATE schema_meta SET schema_version = 19 WHERE meta_key = 'primary';
+         ALTER TABLE session_transcript_active_events ADD COLUMN context_eligible INTEGER;
+         CREATE INDEX idx_agent_session_windows_session_key
+           ON session_windows(session_key, updated_at DESC, session_id);
+         CREATE INDEX idx_agent_transcript_event_identity_sequence
+           ON transcript_event_identities(session_id, seq);
+         CREATE INDEX idx_agent_transcript_context_pending
+           ON session_transcript_active_events(session_id) WHERE context_eligible IS NULL;",
+        )
+        .unwrap();
+}
+
+#[test]
+fn v19_preserves_v17_identity_and_all_active_context_states() {
+    let fixture = Fixture::new("upgrade-agent", true);
+    for seq in 0..3 {
+        insert_active(
+            &fixture.connection,
+            "session-a",
+            seq,
+            seq,
+            &format!("event-{seq}"),
+            "history",
+        );
+    }
+    let old = fixture.read().unwrap();
+    upgrade_fixture_to_v19(&fixture.connection);
+    fixture
+        .connection
+        .execute_batch(
+            "UPDATE session_transcript_active_events SET context_eligible = 0 WHERE event_seq = 0;
+         UPDATE session_transcript_active_events SET context_eligible = 1 WHERE event_seq = 1;",
+        )
+        .unwrap();
+    let upgraded = fixture.read().unwrap();
+    assert_eq!(old.records, upgraded.records);
+    assert!(old.source.exact_descriptor_eq(&upgraded.source));
+    assert_eq!(upgraded.records.len(), 3);
+    assert_eq!(
+        upgraded.receipt.content_digest,
+        fixture.read().unwrap().receipt.content_digest
+    );
+}
+
+#[test]
+fn v19_rejects_unknown_versions_wrong_owners_and_inexact_schema() {
+    for mutation in [
+        "PRAGMA user_version = 18; UPDATE schema_meta SET schema_version = 18;",
+        "PRAGMA user_version = 20; UPDATE schema_meta SET schema_version = 20;",
+        "UPDATE schema_meta SET schema_version = 17;",
+        "UPDATE schema_meta SET role = 'global';",
+        "UPDATE schema_meta SET agent_id = 'foreign';",
+        "DELETE FROM schema_meta WHERE meta_key = 'primary';",
+        "DROP INDEX idx_agent_session_windows_session_key;",
+        "DROP INDEX idx_agent_transcript_event_identity_sequence;",
+        "DROP INDEX idx_agent_transcript_context_pending;",
+        "DROP INDEX idx_agent_transcript_context_pending;
+         CREATE INDEX idx_agent_transcript_context_pending
+           ON session_transcript_active_events(session_id) WHERE context_eligible = 0;",
+        "DROP INDEX idx_agent_session_windows_session_key;
+         CREATE INDEX idx_agent_session_windows_session_key
+           ON session_windows(session_key, updated_at, session_id);",
+        "ALTER TABLE session_transcript_active_events ADD COLUMN unknown_column TEXT;",
+        "ALTER TABLE session_transcript_active_events DROP COLUMN context_eligible;",
+    ] {
+        let fixture = Fixture::new("schema-agent", false);
+        upgrade_fixture_to_v19(&fixture.connection);
+        // The column cannot be dropped while the index references it.
+        if mutation.contains("DROP COLUMN") {
+            fixture
+                .connection
+                .execute_batch("DROP INDEX idx_agent_transcript_context_pending;")
+                .unwrap();
+        }
+        fixture.connection.execute_batch(mutation).unwrap();
+        assert!(
+            matches!(
+                fixture.read(),
+                Err(OpenClawSqliteError::Capture(
+                    CaptureError::UnsupportedSchema(_)
+                ))
+            ),
+            "accepted {mutation}"
+        );
+    }
+    let fixture = Fixture::new("marker-only-agent", false);
+    fixture
+        .connection
+        .execute_batch("PRAGMA user_version=19; UPDATE schema_meta SET schema_version=19;")
+        .unwrap();
+    assert!(
+        fixture.read().is_err(),
+        "v17 shape with v19 markers must fail"
+    );
+}

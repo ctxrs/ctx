@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
 
-pub const OPENCLAW_AGENT_SCHEMA_VERSION: i64 = 17;
+pub const OPENCLAW_AGENT_SCHEMA_VERSIONS: &[i64] = &[17, 19];
 pub const OPENCLAW_AGENT_SQLITE_SOURCE_FORMAT: &str = "openclaw_agent_sqlite";
 
 const MAX_SCHEMA_COLUMNS: i64 = 32;
@@ -110,26 +110,39 @@ struct IndexSpec {
     columns: &'static [IndexColumn],
 }
 
+#[derive(Clone, Copy)]
 struct TableSpec {
     name: &'static str,
     columns: &'static [ColumnSpec],
     indexes: &'static [IndexSpec],
 }
 
-/// Validates the exact v17 table columns, affinities, nullability, defaults,
+/// Validates the exact supported v17 or v19 table columns, affinities, nullability, defaults,
 /// primary/unique keys, named indexes, and primary ownership claim.
 ///
 /// Every schema enumeration has a fixed upper bound. Other OpenClaw tables are
 /// permitted because the agent database contains unrelated product state.
-pub fn validate_openclaw_agent_v17(connection: &Connection, expected_agent_id: &str) -> Result<()> {
+pub fn validate_openclaw_agent(connection: &Connection, expected_agent_id: &str) -> Result<()> {
     let user_version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if user_version != OPENCLAW_AGENT_SCHEMA_VERSION {
+    if !OPENCLAW_AGENT_SCHEMA_VERSIONS.contains(&user_version) {
         return mismatch(format!(
-            "OpenClaw PRAGMA user_version is {user_version}, expected {OPENCLAW_AGENT_SCHEMA_VERSION}"
+            "OpenClaw PRAGMA user_version is {user_version}, expected one of {OPENCLAW_AGENT_SCHEMA_VERSIONS:?}"
         ));
     }
     for table in TABLES {
-        validate_table(connection, table)?;
+        let mut expected = *table;
+        if user_version == 19 {
+            match expected.name {
+                "session_windows" => expected.indexes = SESSION_WINDOWS_V19_INDEXES,
+                "transcript_event_identities" => expected.indexes = EVENT_IDENTITIES_V19_INDEXES,
+                "session_transcript_active_events" => {
+                    expected.columns = ACTIVE_EVENTS_V19_COLUMNS;
+                    expected.indexes = ACTIVE_EVENTS_V19_INDEXES;
+                }
+                _ => {}
+            }
+        }
+        validate_table(connection, &expected)?;
     }
     let owner = connection
         .query_row(
@@ -147,7 +160,7 @@ pub fn validate_openclaw_agent_v17(connection: &Connection, expected_agent_id: &
     let Some((role, schema_version, agent_id)) = owner else {
         return mismatch("OpenClaw schema_meta has no primary ownership row");
     };
-    if role != "agent" || schema_version != OPENCLAW_AGENT_SCHEMA_VERSION {
+    if role != "agent" || schema_version != user_version {
         return mismatch(format!(
             "OpenClaw primary ownership is role={role:?}, schema_version={schema_version}"
         ));
@@ -161,13 +174,13 @@ pub fn validate_openclaw_agent_v17(connection: &Connection, expected_agent_id: &
     Ok(())
 }
 
-/// Returns false only for a well-read schema that does not satisfy v17.
+/// Returns false only for a well-read schema that does not satisfy a supported schema.
 /// SQLite/resource errors remain errors so discovery can fail closed.
-pub fn matches_openclaw_agent_v17(
+pub fn matches_openclaw_agent(
     connection: &Connection,
     expected_agent_id: &str,
 ) -> rusqlite::Result<bool> {
-    match validate_openclaw_agent_v17(connection, expected_agent_id) {
+    match validate_openclaw_agent(connection, expected_agent_id) {
         Ok(()) => Ok(true),
         Err(OpenClawSchemaError::Mismatch(_)) => Ok(false),
         Err(OpenClawSchemaError::Sqlite(error)) => Err(error),
@@ -230,7 +243,7 @@ fn validate_table(connection: &Connection, expected: &TableSpec) -> Result<()> {
             || hidden != 0
         {
             return mismatch(format!(
-                "OpenClaw table {:?} column {} ({name:?}) does not match schema v{OPENCLAW_AGENT_SCHEMA_VERSION}",
+                "OpenClaw table {:?} column {} ({name:?}) does not match the admitted schema",
                 expected.name, position
             ));
         }
@@ -268,7 +281,7 @@ fn validate_indexes(connection: &Connection, table: &TableSpec) -> Result<()> {
             || partial != expected.partial_predicate.is_some()
         {
             return mismatch(format!(
-                "OpenClaw table {:?} index {name:?} does not match schema v{OPENCLAW_AGENT_SCHEMA_VERSION}",
+                "OpenClaw table {:?} index {name:?} does not match the admitted schema",
                 table.name
             ));
         }
@@ -288,7 +301,7 @@ fn validate_indexes(connection: &Connection, table: &TableSpec) -> Result<()> {
                     == normalized_sql(Some(predicate)).as_deref() => {}
             _ => {
                 return mismatch(format!(
-                    "OpenClaw partial index {:?} predicate does not match schema v{OPENCLAW_AGENT_SCHEMA_VERSION}",
+                    "OpenClaw partial index {:?} predicate does not match the admitted schema",
                     expected.name
                 ));
             }
@@ -328,7 +341,7 @@ fn validate_index_columns(
             || !collation.eq_ignore_ascii_case("BINARY")
         {
             return mismatch(format!(
-                "OpenClaw table {table:?} index {:?} key columns do not match schema v{OPENCLAW_AGENT_SCHEMA_VERSION}",
+                "OpenClaw table {table:?} index {:?} key columns do not match the admitted schema",
                 expected.name
             ));
         }
@@ -653,6 +666,59 @@ const ACTIVE_EVENTS_INDEXES: &[IndexSpec] = &[
         partial_predicate: None,
         columns: SESSION_POSITION,
     },
+];
+
+// v19 keeps the transcript payload/ownership columns and adds these exact
+// query indexes plus the nullable model-context projection flag. Context
+// eligibility is not history visibility: all active events remain importable.
+const ACTIVE_EVENTS_V19_COLUMNS: &[ColumnSpec] = &[
+    ACTIVE_EVENTS_COLUMNS[0],
+    ACTIVE_EVENTS_COLUMNS[1],
+    ACTIVE_EVENTS_COLUMNS[2],
+    ACTIVE_EVENTS_COLUMNS[3],
+    ColumnSpec::optional("context_eligible", "INTEGER"),
+];
+const SESSION_WINDOWS_V19_INDEXES: &[IndexSpec] = &[
+    SESSION_WINDOWS_INDEXES[0],
+    SESSION_WINDOWS_INDEXES[1],
+    IndexSpec {
+        name: "idx_agent_session_windows_session_key",
+        unique: false,
+        origin: "c",
+        partial_predicate: None,
+        columns: &[
+            IndexColumn::ascending("session_key"),
+            IndexColumn::descending("updated_at"),
+            IndexColumn::ascending("session_id"),
+        ],
+    },
+    SESSION_WINDOWS_INDEXES[2],
+    SESSION_WINDOWS_INDEXES[3],
+];
+const EVENT_IDENTITIES_V19_INDEXES: &[IndexSpec] = &[
+    IndexSpec {
+        name: "idx_agent_transcript_event_identity_sequence",
+        unique: false,
+        origin: "c",
+        partial_predicate: None,
+        columns: SESSION_SEQ,
+    },
+    EVENT_IDENTITIES_INDEXES[0],
+    EVENT_IDENTITIES_INDEXES[1],
+    EVENT_IDENTITIES_INDEXES[2],
+    EVENT_IDENTITIES_INDEXES[3],
+];
+const ACTIVE_EVENTS_V19_INDEXES: &[IndexSpec] = &[
+    ACTIVE_EVENTS_INDEXES[0],
+    ACTIVE_EVENTS_INDEXES[1],
+    IndexSpec {
+        name: "idx_agent_transcript_context_pending",
+        unique: false,
+        origin: "c",
+        partial_predicate: Some("context_eligible IS NULL"),
+        columns: ASC_SESSION_ID,
+    },
+    ACTIVE_EVENTS_INDEXES[2],
 ];
 
 const TABLES: &[TableSpec] = &[

@@ -442,3 +442,123 @@ fn failed_tool_result_record_never_invents_file_invocation_evidence() {
         .iter()
         .any(|fact| { fact.kind == LiteralFactKind::File && fact.value == "src/result-only.rs" }));
 }
+
+#[test]
+fn expression_index_uses_conservative_plan_and_keeps_sparse_rejection_rowid() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("expression-index.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "retained expression-index conversation"}),
+    );
+    connection
+        .execute_batch(
+            "DROP INDEX message_session_time_created_id_idx;
+        CREATE INDEX message_expression ON message(lower(id));
+        UPDATE part SET rowid=401;
+        INSERT INTO part(rowid,id,message_id,session_id,time_created,time_updated,data)
+            SELECT 909,'malformed-part',message_id,session_id,time_created,time_updated,'{broken'
+            FROM part WHERE rowid=401;",
+        )
+        .unwrap();
+    drop(connection);
+    let (observation, scan, records, rejections) = scan_current_schema_with_rejections(&database);
+    assert!(!observation.schema.message_part_indexed_streaming);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].content.normalized_body.as_deref(),
+        Some("retained expression-index conversation")
+    );
+    assert_eq!(scan.certificate.counts().rejected_records, 1);
+    assert_eq!(rejections.len(), 1);
+    assert_eq!(rejections[0].line_number, 909);
+}
+
+/// Optional no-write comparison against a user-supplied native database. The
+/// ordinary suite stays hermetic; this diagnostic needs an explicit fixture.
+#[test]
+#[ignore = "requires CTX_TEST_OPENCODE_DATABASE pointing to a disposable native capture"]
+fn native_selected_snapshot_matches_full_family_capture() {
+    let database = std::path::PathBuf::from(
+        std::env::var_os("CTX_TEST_OPENCODE_DATABASE").expect("native capture path"),
+    );
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let retained = retain_root_authorized_source(temp.path(), &database).unwrap();
+    let full = retained
+        .sqlite_authority
+        .open_stable_snapshot(&retained.database_leaf)
+        .unwrap();
+    let selected = open_root_authorized_snapshot_retained(temp.path(), &database)
+        .unwrap()
+        .sqlite_snapshot;
+    let tables = [
+        "session",
+        "message",
+        "part",
+        "session_message",
+        "session_entry",
+    ];
+    for table in tables {
+        let schema = "SELECT type,name,sql FROM sqlite_schema WHERE tbl_name=?1 AND type IN ('table','index') ORDER BY name";
+        let schemas = |snapshot: &SqliteSourceReadSnapshot| {
+            snapshot
+                .connection()
+                .unwrap()
+                .prepare(schema)
+                .unwrap()
+                .query_map([table], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let expected = schemas(&full);
+        assert_eq!(expected, schemas(&selected), "schema for {table}");
+        if expected.is_empty() {
+            continue;
+        }
+        let sql = format!("SELECT rowid,* FROM {table} ORDER BY rowid");
+        let mut left = full.connection().unwrap().prepare(&sql).unwrap();
+        let mut right = selected.connection().unwrap().prepare(&sql).unwrap();
+        let columns = left.column_count();
+        let mut left = left.query([]).unwrap();
+        let mut right = right.query([]).unwrap();
+        while let Some(row) = left.next().unwrap() {
+            let copy = right.next().unwrap().expect("copied row");
+            for column in 0..columns {
+                assert_eq!(
+                    row.get_ref(column).unwrap(),
+                    copy.get_ref(column).unwrap(),
+                    "native storage-class/value/rowid mismatch in {table}"
+                );
+            }
+        }
+        assert!(right.next().unwrap().is_none());
+    }
+    let scan = |snapshot: SqliteSourceReadSnapshot| {
+        let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+        let observation = observe_logical_source(snapshot.connection().unwrap(), dialect).unwrap();
+        let mut records = Vec::new();
+        let scan = scan_pinned_source(&database, dialect, &observation, snapshot, &mut |output| {
+            if let OpenCodeScanOutput::Document(record) = output {
+                records.push(record);
+            }
+            Ok(())
+        })
+        .unwrap();
+        (scan.certificate, records)
+    };
+    let expected = scan(full);
+    let actual = scan(selected);
+    assert!(
+        !actual.1.is_empty(),
+        "capture must exercise conversation content"
+    );
+    assert_eq!(actual, expected);
+}

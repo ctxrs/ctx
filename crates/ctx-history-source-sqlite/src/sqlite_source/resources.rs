@@ -127,7 +127,8 @@ impl SqliteSourceSnapshotContext {
                     "immutable snapshot opens",
                 )?;
             }
-            SqliteSourceSnapshotStrategy::CopiedFamily => {
+            SqliteSourceSnapshotStrategy::CopiedFamily
+            | SqliteSourceSnapshotStrategy::SelectiveTables => {
                 next.copied_snapshot_opens =
                     checked_counter_add(next.copied_snapshot_opens, 1, "copied snapshot opens")?;
             }
@@ -244,6 +245,32 @@ impl SqliteRouteScratch {
             maximum_bytes,
             state: Mutex::new(SqliteRouteScratchState::default()),
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn admit_available_capacity(&self) -> SqliteSourceAccessResult<u64> {
+        let available = scratch_available_space(&self.context.data_root)?;
+        let headroom = sqlite_snapshot_free_headroom_bytes(available);
+        if available <= headroom {
+            return Err(SqliteSourceAccessError::InsufficientScratchSpace {
+                path: self.context.data_root.clone(),
+                required: headroom + 4096,
+                available,
+            });
+        }
+        let capacity = self
+            .maximum_bytes
+            .unwrap_or(u64::MAX)
+            .min(available - headroom);
+        if capacity < 4096 {
+            return Err(SqliteSourceAccessError::SnapshotTooLarge {
+                path: self.context.data_root.clone(),
+                length: 4096,
+                maximum: capacity,
+            });
+        }
+        self.context.record_scratch_admission()?;
+        Ok(capacity)
     }
 
     pub(super) fn admit_capacity(&self, capacity_bytes: u64) -> SqliteSourceAccessResult<()> {

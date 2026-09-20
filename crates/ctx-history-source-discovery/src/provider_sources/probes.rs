@@ -82,7 +82,7 @@ pub(super) fn default_location_import_probe(
             if location.source_format
                 == ctx_history_openclaw_schema::OPENCLAW_AGENT_SQLITE_SOURCE_FORMAT =>
         {
-            has_openclaw_agent_sqlite_v17(data_root, path)
+            has_openclaw_agent_sqlite(data_root, path)
         }
         CaptureProvider::OpenClaw => has_openclaw_session_jsonl(path, 10_000),
         CaptureProvider::Hermes => path_is_file_probe(path),
@@ -538,7 +538,7 @@ fn has_openclaw_session_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
     })
 }
 
-pub(super) fn has_openclaw_agent_sqlite_v17(data_root: Option<&Path>, path: &Path) -> BoundedProbe {
+pub(super) fn has_openclaw_agent_sqlite(data_root: Option<&Path>, path: &Path) -> BoundedProbe {
     let Some(agent_id) = path
         .parent()
         .filter(|parent| parent.file_name().and_then(|name| name.to_str()) == Some("agent"))
@@ -553,7 +553,7 @@ pub(super) fn has_openclaw_agent_sqlite_v17(data_root: Option<&Path>, path: &Pat
         data_root,
         path,
         SqliteProbeLimits::default(),
-        |connection| ctx_history_openclaw_schema::matches_openclaw_agent_v17(connection, agent_id),
+        |connection| ctx_history_openclaw_schema::matches_openclaw_agent(connection, agent_id),
     )
 }
 

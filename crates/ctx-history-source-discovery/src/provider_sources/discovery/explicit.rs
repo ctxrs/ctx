@@ -611,16 +611,16 @@ fn select_openclaw_sqlite(
     jsonl: PathBuf,
     data_root: Option<&Path>,
 ) -> Result<OpenClawExplicitSelection, (PathBuf, &'static str)> {
-    use super::super::probes::{has_openclaw_agent_sqlite_v17, BoundedProbe};
+    use super::super::probes::{has_openclaw_agent_sqlite, BoundedProbe};
 
     const JSONL: &str = "openclaw_session_jsonl_tree";
     const SQLITE: &str = ctx_history_openclaw_schema::OPENCLAW_AGENT_SQLITE_SOURCE_FORMAT;
     const INVALID_SQLITE: &str =
-        "OpenClaw openclaw-agent.sqlite does not satisfy the bounded current v17 schema and ownership contract";
+        "OpenClaw openclaw-agent.sqlite does not satisfy the bounded supported v17 or v19 schema and ownership contract";
     const PROBE_UNAVAILABLE: &str =
         "OpenClaw SQLite admission could not complete within the bounded read-only probe";
 
-    let admission = has_openclaw_agent_sqlite_v17(data_root, &sqlite);
+    let admission = has_openclaw_agent_sqlite(data_root, &sqlite);
     if admission != BoundedProbe::Found
         && has_supported_explicit_history(probes, CaptureProvider::OpenClaw, &jsonl)
     {

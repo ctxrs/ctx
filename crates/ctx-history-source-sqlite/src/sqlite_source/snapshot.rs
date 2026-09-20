@@ -3,6 +3,7 @@ use super::*;
 pub(super) mod acquisition;
 mod copy_progress;
 mod scratch;
+pub(super) mod selective;
 #[cfg(any(test, feature = "test-support"))]
 mod test_api;
 
@@ -32,6 +33,15 @@ pub fn fail_next_private_directory_cleanup_for_test() {
 #[cfg(any(test, feature = "test-support"))]
 fn take_private_directory_cleanup_failure_for_test() -> bool {
     FAIL_NEXT_PRIVATE_DIRECTORY_CLEANUP.with(|fail| fail.replace(false))
+}
+
+/// How one authorized provider SQLite leaf is stabilized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SqliteSourceSnapshotPolicy {
+    ExactRevision,
+    PinnedReadOnlyWal,
+    StablePrivateCopy,
+    SelectivePrivateCopy(&'static [&'static str]),
 }
 
 /// Snapshot-wide scratch policy. The aggregate includes every retained DB/WAL
@@ -206,7 +216,10 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
             ))
         })?;
     let native_evidence = match options.policy {
-        SqliteSourceSnapshotPolicy::PinnedReadOnlyWal => family.capture_revision_evidence()?,
+        SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
+        | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            family.capture_revision_evidence()?
+        }
         SqliteSourceSnapshotPolicy::ExactRevision
         | SqliteSourceSnapshotPolicy::StablePrivateCopy => family.capture_evidence()?,
     };
@@ -228,7 +241,8 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         // the exact source family on both sides of the bounded connection
         // evidence read so a concurrent write cannot escape acquisition.
         match options.policy {
-            SqliteSourceSnapshotPolicy::PinnedReadOnlyWal => {
+            SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
                 family.revalidate_database_identity(&native_evidence)?
             }
             SqliteSourceSnapshotPolicy::ExactRevision
@@ -238,7 +252,8 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         }
         let sqlite_evidence = capture_sqlite_evidence(&acquired.connection)?;
         match options.policy {
-            SqliteSourceSnapshotPolicy::PinnedReadOnlyWal => {
+            SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
                 family.revalidate_database_identity(&native_evidence)?
             }
             SqliteSourceSnapshotPolicy::ExactRevision
@@ -266,6 +281,21 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         }
     };
 
+    // A transaction may pin later than the initial physical observation. Only
+    // advertise exact replay if that physical revision survived the capture.
+    let replay_safe = match options.policy {
+        SqliteSourceSnapshotPolicy::PinnedReadOnlyWal => false,
+        SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            family.revalidate_revision(&native_evidence).is_ok()
+        }
+        _ => true,
+    };
+    let policy = match options.policy {
+        SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            SqliteSourceSnapshotPolicy::StablePrivateCopy
+        }
+        policy => policy,
+    };
     let evidence = SqliteSourceEvidence::from_snapshot(&native_evidence, &sqlite_evidence);
     let AcquiredSqliteConnection {
         connection,
@@ -282,9 +312,8 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         native_evidence,
         sqlite_evidence,
         evidence,
-        policy: options.policy,
-        admitted_revision_is_replay_safe: options.policy
-            != SqliteSourceSnapshotPolicy::PinnedReadOnlyWal,
+        policy,
+        admitted_revision_is_replay_safe: replay_safe,
         strategy,
         copied_bytes,
         _snapshot_directory: snapshot_directory,

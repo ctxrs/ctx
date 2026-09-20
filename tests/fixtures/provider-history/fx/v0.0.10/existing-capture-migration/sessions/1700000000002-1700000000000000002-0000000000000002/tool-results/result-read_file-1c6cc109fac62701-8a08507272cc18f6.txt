@@ -1,0 +1,4 @@
+<path>fixture-note-0001.txt</path>
+<content>
+1	SANITIZED_FILE______
+</content>

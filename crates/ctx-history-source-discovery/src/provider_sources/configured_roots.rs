@@ -8,7 +8,7 @@ use ctx_history_source_io::SYMLINK_PROVIDER_SOURCE_REASON;
 
 use super::{
     context::DiscoveryContext,
-    probes::{has_openclaw_agent_sqlite_v17, BoundedProbe},
+    probes::{has_openclaw_agent_sqlite, BoundedProbe},
     reasons::path_presence_unknown_reason,
     resolvers::{
         issue, openclaw_agent_ids_for_state_root, path_presence, provider_paths_equivalent,
@@ -52,7 +52,7 @@ const OPENCLAW_CONFIG_INVALID_REASON: &str =
 const OPENCLAW_CONFIG_LIMIT_REASON: &str =
     "the configured OpenClaw state root exceeds a bounded agent-registry limit";
 const OPENCLAW_UNSUPPORTED_REASON: &str =
-    "OpenClaw openclaw-agent.sqlite does not satisfy the bounded current v17 schema and ownership contract";
+    "OpenClaw openclaw-agent.sqlite does not satisfy the bounded supported v17 or v19 schema and ownership contract";
 const CONFIGURED_ROOT_MISSING_REASON: &str = "the configured provider history root is missing";
 
 /// Filesystem kind required by a configured-root capability.
@@ -482,7 +482,7 @@ fn expand_openclaw_agent(
     let sqlite = agent_root.join("agent/openclaw-agent.sqlite");
     let sessions = agent_root.join("sessions");
 
-    if has_openclaw_agent_sqlite_v17(data_root, &sqlite) == BoundedProbe::Found {
+    if has_openclaw_agent_sqlite(data_root, &sqlite) == BoundedProbe::Found {
         if let Some(source) = build_configured_source(
             probes,
             data_root,

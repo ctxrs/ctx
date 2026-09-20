@@ -371,13 +371,18 @@ pub(super) fn binding_digest<E: JsonlFamilyError>(
         digest.update(path);
         digest.update(dependency.authority.authority_fingerprint());
     }
+    if let Some(compound) = &leaf.terminal_dependencies.compound {
+        compound.hash_into(&mut digest);
+    }
     Ok(digest.finalize().into())
 }
 
 /// Stable continuation contract. The exact terminal bundle has its own digest
 /// above; continuation intentionally omits the advancing EOF value and current
 /// control contents so an already-observed physical tail can become committed
-/// through a certified append.
+/// through a certified append. Compound input observations are different:
+/// any change invalidates the checkpoint before either no-op or append, so
+/// previously projected bodies are replaced even when the primary file grew.
 pub(super) fn continuation_binding_digest<E: JsonlFamilyError>(
     leaf: &JsonlFamilyLeaf<E>,
 ) -> JsonlResult<[u8; 32], E> {
@@ -405,6 +410,9 @@ pub(super) fn continuation_binding_digest<E: JsonlFamilyError>(
         digest.update((path.len() as u64).to_be_bytes());
         digest.update(path);
         digest.update(dependency.authority.authority_fingerprint());
+    }
+    if let Some(compound) = &leaf.terminal_dependencies.compound {
+        compound.hash_into(&mut digest);
     }
     Ok(digest.finalize().into())
 }

@@ -6,7 +6,7 @@ fn isolated_root() -> Result<tempfile::TempDir> {
     #[cfg(not(target_os = "linux"))]
     let parent = std::env::temp_dir();
     Ok(tempfile::Builder::new()
-        .prefix("ctx-private-directory-")
+        .prefix("ctx-directory-permissions-")
         .tempdir_in(parent)?)
 }
 

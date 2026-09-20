@@ -576,10 +576,7 @@ impl SqliteSourceReadSnapshot {
         } else {
             SqliteArtifactKind::ProviderDatabase
         };
-        let copied_bytes = self
-            .evidence
-            .length
-            .saturating_add(self.evidence.wal_length.unwrap_or_default());
+        let copied_bytes = self.copied_bytes;
         let error = SqliteSourceAccessError::Sqlite { operation, source }.with_diagnostic(
             phase,
             artifact,
@@ -592,7 +589,8 @@ impl SqliteSourceReadSnapshot {
             | SqliteSourceSnapshotPolicy::PinnedReadOnlyWal => {
                 error.with_exact_provider_content_provenance()
             }
-            SqliteSourceSnapshotPolicy::StablePrivateCopy => error,
+            SqliteSourceSnapshotPolicy::StablePrivateCopy
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => error,
         }
     }
 }

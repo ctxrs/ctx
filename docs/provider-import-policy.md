@@ -186,7 +186,7 @@ Secondary traits are noted only to guide tests and hardening work.
 | Warp | `warp_sqlite` | SQLite encoded/blob store | SQLite rows include JSON plus decoded task protobuf blobs. |
 | CodeBuddy | `codebuddy_history_json` | JSON session/task document | JSON history documents from editor state. |
 | OpenClaw | `openclaw_session_jsonl_tree` | JSONL transcript stream/tree | Session tree with possible sidecar data. |
-| OpenClaw | `openclaw_agent_sqlite` | SQLite transcript projection | Current per-agent database. Exact bounded v17 schema/owner admission is evaluated per normalized agent; admitted SQLite suppresses only that agent's legacy JSONL route, while corrupt/foreign databases fall back to JSONL and the two families are never admitted together. |
+| OpenClaw | `openclaw_agent_sqlite` | SQLite transcript projection | Current per-agent database. Exact bounded v17 or v19 schema/owner admission is evaluated per normalized agent; admitted SQLite suppresses only that agent's legacy JSONL route, while corrupt/foreign databases fall back to JSONL and the two families are never admitted together. |
 | Hermes Agent | `hermes_state_sqlite` | SQLite message store | SQLite sessions/messages with bounded exact reconciliation. |
 | NanoClaw | `nanoclaw_project` | SQLite message store | Native project root containing central and per-session SQLite databases, discovered from exact CWD or official launchd/systemd service registration; exact `--path` remains available. |
 | AstrBot | `astrbot_data_v4_sqlite` | SQLite message store | SQLite conversation/platform rows. |
@@ -212,7 +212,7 @@ Secondary traits are noted only to guide tests and hardening work.
 | Rovo Dev | `rovodev_session_json_tree` | JSON session/task document | Session JSON tree. |
 | Cline | `cline_sdk_session_store`, `cline_task_directory_json` | JSON session/task document | Current compound session catalog plus manifest/message artifacts; legacy task directory JSON remains separate. |
 | Roo Code | `roo_task_directory_json` | JSON session/task document | Task directory JSON. |
-| fx | `fx_sessions_tree` | Compound session tree | Legacy marker-less schema-v1/v2 snapshots accepted by current fx v0.0.6, plus current schema-v3 transactional sessions. Legacy snapshots are limited to 16 MiB. For v3, `authority.json` establishes event-log authority, `events.jsonl` is canonical history, a matching `commit.<generation>.json` watermark establishes the committed boundary, and `session.json` is only a projection; pending commits and uncommitted tails are excluded. |
+| fx | `fx_sessions_tree` | Compound session tree | fx v0.0.10 schema-v4 manifests with schema-v1/v2 conversation events and retained artifacts, plus legacy schema-v1/v2 snapshots and transactional schema-v3 logs. Conversation results and command replay use their native artifact directories; artifact changes force replacement, including late repair. Schema-v3 watermarks still define committed history. |
 
 Hermes `hermes_state_sqlite` is a supported SQLite message-store route with a
 bounded consistency window. On Linux, a non-root ctx process with the certified
@@ -264,6 +264,18 @@ contract for that source family:
   available temporary disk capacity plus safety headroom, not a fixed source
   size ceiling; copy memory remains bounded and the private family is removed
   when the route finishes.
+  For OpenCode, Kilo, and MiMo Code on Linux under a non-root user, ctx instead
+  streams `session`, `message`, `part`, `session_message`, and `session_entry`
+  (when present) from one read transaction into one private SQLite snapshot.
+  Their indexes and native rowids are retained; unrelated tables such as
+  OpenCode's `event` log are not copied. The live read closes before parsing.
+  Scratch grows with these selected tables and indexes, bounded by available
+  space minus safety headroom, rather than the complete DB/WAL family. This is
+  not a fixed-size or universal SQLite import guarantee. Other platforms and
+  Linux processes running as root retain full-family snapshots: the selective
+  path depends on Linux's retained-directory SQLite `readonly_shm` reader, and
+  root can alter SHM ownership even on a read-only open. Unsupported source
+  schemas or unavailable no-write reads fail without modifying provider files.
 - JSON documents and document trees use unchanged-or-replace semantics. A
   mutation during a scan invalidates that candidate; the retry reads one
   complete replacement.

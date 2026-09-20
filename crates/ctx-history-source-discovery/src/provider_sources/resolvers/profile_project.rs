@@ -36,7 +36,7 @@ pub(in crate::provider_sources) use openclaw::{
 use validation::{valid_hermes_profile_name, valid_uuid};
 
 const OPENCLAW_UNSUPPORTED_REASON: &str =
-    "OpenClaw openclaw-agent.sqlite does not satisfy the bounded current v17 schema and ownership contract";
+    "OpenClaw openclaw-agent.sqlite does not satisfy the bounded supported v17 or v19 schema and ownership contract";
 const PATH_MANUAL_REASON: &str =
     "the selected provider path cannot be reconstructed safely; use an exact --path";
 const SELECTOR_MANUAL_REASON: &str =
