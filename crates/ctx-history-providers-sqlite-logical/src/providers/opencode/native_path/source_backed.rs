@@ -45,11 +45,14 @@ use crate::{
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "opencode-family-source-backed-v12-known-file-carriers";
+const PARSER_REVISION: &str = "opencode-family-source-backed-v13-bounded-oversized-content";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
 const SOURCE_BACKED_MAX_NATIVE_IDENTITY_BYTES: usize = 4 * 1024;
+pub(super) const SOURCE_OVERSIZED_TEXT: i64 = 1;
+pub(super) const PARENT_OVERSIZED_TEXT: i64 = 1 << 1;
+const KNOWN_OVERSIZED_TEXT: i64 = SOURCE_OVERSIZED_TEXT | PARENT_OVERSIZED_TEXT;
 const LOGICAL_SCAN_PROGRESS_ROW_CADENCE: u64 = 4_096;
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "OpenCode-family history database must be a regular file";

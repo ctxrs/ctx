@@ -1,6 +1,19 @@
 use super::*;
 use ctx_history_capture_runtime::SourceBackedRecordRejectionClass;
 
+fn padded_json_value(mut value: serde_json::Value, bytes: usize) -> String {
+    let fixed_bytes = value.to_string().len();
+    let padding = value
+        .as_object_mut()
+        .and_then(|object| object.get_mut("padding"))
+        .expect("padded JSON object must contain a padding field");
+    assert!(fixed_bytes <= bytes);
+    *padding = serde_json::Value::String("x".repeat(bytes - fixed_bytes));
+    let encoded = value.to_string();
+    assert_eq!(encoded.len(), bytes);
+    encoded
+}
+
 #[test]
 fn current_file_parts_are_ignored_without_indexing_attachment_payloads() {
     let temp = crate::test_support_paths::tempdir().unwrap();
@@ -124,6 +137,185 @@ fn core_projection_failures_emit_row_diagnostics() {
         SourceBackedRecordRejectionClass::UnsupportedRecord
     );
     assert!(rejection.detail.contains("Core projection limits"));
+}
+
+#[test]
+fn oversized_message_and_part_values_are_record_local_across_ordering_paths() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("oversized-current-schema.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "valid before oversized rows"}),
+    );
+    let cap = MAX_PROVIDER_SQLITE_VALUE_BYTES;
+    let exact_parent = padded_json_value(
+        json!({
+            "role": "assistant",
+            "time": {"created": 1782259202000_i64},
+            "padding": ""
+        }),
+        cap,
+    );
+    let exact_part = padded_json_value(json!({"type": "file", "padding": ""}), cap);
+    let oversized_parent = padded_json_value(
+        json!({
+            "role": "assistant",
+            "time": {"created": 1782259203000_i64},
+            "padding": ""
+        }),
+        cap + 1,
+    );
+    let oversized_part =
+        padded_json_value(json!({"type": "text", "text": "", "padding": ""}), cap + 1);
+    let oversized_type = "x".repeat(cap + 1);
+
+    connection
+        .execute(
+            "insert into session_message values (
+                 'oversized-metadata', 'current-session', ?1, 1,
+                 1782259200000, 1782259200000, ?2
+             )",
+            params![oversized_type.as_str(), oversized_parent.as_str()],
+        )
+        .unwrap();
+    connection
+        .execute("alter table part add column type text", [])
+        .unwrap();
+
+    for (message_id, created, data) in [
+        ("exact-message", 1782259202000_i64, exact_parent.as_str()),
+        (
+            "oversized-parent-message",
+            1782259203000_i64,
+            oversized_parent.as_str(),
+        ),
+        (
+            "oversized-part-message",
+            1782259204000_i64,
+            r#"{"role":"assistant","time":{"created":1782259204000}}"#,
+        ),
+        (
+            "valid-after-message",
+            1782259205000_i64,
+            r#"{"role":"assistant","time":{"created":1782259205000}}"#,
+        ),
+    ] {
+        connection
+            .execute(
+                "insert into message values (?1, 'current-session', ?2, ?2, ?3)",
+                params![message_id, created, data],
+            )
+            .unwrap();
+    }
+    for (rowid, part_id, message_id, created, data) in [
+        (
+            10_i64,
+            "exact-part",
+            "exact-message",
+            1782259202000_i64,
+            exact_part.as_str(),
+        ),
+        (
+            20_i64,
+            "oversized-parent-part",
+            "oversized-parent-message",
+            1782259203000_i64,
+            exact_part.as_str(),
+        ),
+        (
+            30_i64,
+            "oversized-part",
+            "oversized-part-message",
+            1782259204000_i64,
+            oversized_part.as_str(),
+        ),
+        (
+            40_i64,
+            "valid-after-part",
+            "valid-after-message",
+            1782259205000_i64,
+            r#"{"type":"text","text":"valid after oversized rows"}"#,
+        ),
+    ] {
+        connection
+            .execute(
+                "insert into part(rowid,id,message_id,session_id,time_created,time_updated,data)
+                 values (?1, ?2, ?3, 'current-session', ?4, ?4, ?5)",
+                params![rowid, part_id, message_id, created, data],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "update part set type = ?1 where id = 'oversized-parent-part'",
+            [oversized_type],
+        )
+        .unwrap();
+    drop(connection);
+
+    let indexed = scan_current_schema_with_rejections(&database);
+    assert!(indexed.0.schema.message_part_indexed_streaming);
+    Connection::open(&database)
+        .unwrap()
+        .execute("drop index part_message_id_id_idx", [])
+        .unwrap();
+    let fallback = scan_current_schema_with_rejections(&database);
+    assert!(!fallback.0.schema.message_part_indexed_streaming);
+
+    for (_, scan, records, rejections) in [&indexed, &fallback] {
+        let counts = scan.certificate.counts();
+        assert_eq!(counts.complete_records, 5);
+        assert_eq!(counts.retained_records, 2);
+        assert_eq!(counts.indexed_documents, 2);
+        assert_eq!(counts.rejected_records, 2);
+        assert_eq!(counts.ignored_records, 1);
+        assert_eq!(scan.bounds.max_buffered_payload_bytes, 2 * cap as u64);
+        assert!(scan.bounds.max_buffered_payload_bytes <= OPENCODE_HYDRATION_SINGLETON_MAX_BYTES);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.content.meaningful_text())
+                .collect::<Vec<_>>(),
+            ["valid before oversized rows", "valid after oversized rows"]
+        );
+        assert_eq!(
+            rejections
+                .iter()
+                .map(|rejection| rejection.line_number)
+                .collect::<Vec<_>>(),
+            [20, 30]
+        );
+        assert!(rejections.iter().all(|rejection| {
+            rejection.class == SourceBackedRecordRejectionClass::UnsupportedRecord
+                && rejection.detail.contains("retained-content size limit")
+        }));
+    }
+    assert_eq!(indexed.2, fallback.2);
+    assert_eq!(
+        indexed.1.certificate.counts(),
+        fallback.1.certificate.counts()
+    );
+    assert_eq!(
+        indexed.1.certificate.content_digest(),
+        fallback.1.certificate.content_digest()
+    );
+    assert_eq!(
+        indexed
+            .3
+            .iter()
+            .map(|rejection| (rejection.line_number, rejection.class))
+            .collect::<Vec<_>>(),
+        fallback
+            .3
+            .iter()
+            .map(|rejection| (rejection.line_number, rejection.class))
+            .collect::<Vec<_>>()
+    );
+    assert_ne!(
+        PARSER_REVISION,
+        "opencode-family-source-backed-v12-known-file-carriers"
+    );
 }
 
 #[test]

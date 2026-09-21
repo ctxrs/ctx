@@ -171,6 +171,13 @@ pub(super) fn decode_source_event_row(
         CaptureError::InvalidPayload("OpenCode-family content byte count is negative".to_owned())
     })?;
     let column_type: String = row.get(9)?;
+    let oversized_text = row.get::<_, i64>(10)?;
+    if oversized_text & !KNOWN_OVERSIZED_TEXT != 0 {
+        return Err(CaptureError::SystemInvariant(
+            "OpenCode source-backed row returned an unknown oversized-text disposition",
+        )
+        .into());
+    }
     let (source_data, parent_source_data) = hydrated_payload.unwrap_or((
         SqliteSourceValue::from_ref(row.get_ref(12)?),
         SqliteSourceValue::from_ref(row.get_ref(14)?),
@@ -181,6 +188,7 @@ pub(super) fn decode_source_event_row(
         &column_type,
         schema.family,
         dialect,
+        oversized_text,
     );
     let relationship_code = row.get::<_, i64>(15)?;
     if !has_explicit_event_time {
@@ -246,7 +254,14 @@ fn project_sqlite_json(
     column_type: &str,
     family: OpenCodeNativeSchemaFamily,
     dialect: &OpenCodeSqliteDialect,
+    oversized_text: i64,
 ) -> (OpenCodeJsonProjection, bool) {
+    if oversized_text & SOURCE_OVERSIZED_TEXT != 0 {
+        return (
+            OpenCodeJsonProjection::Rejected(OpenCodeNativeRejectionKind::OversizedRetainedContent),
+            false,
+        );
+    }
     let Some(source_bytes) = source_data.exact_text() else {
         return (
             OpenCodeJsonProjection::Rejected(OpenCodeNativeRejectionKind::UnsupportedStorageClass),
@@ -266,6 +281,14 @@ fn project_sqlite_json(
         );
     };
     let parent_text = if family == OpenCodeNativeSchemaFamily::MessagePart {
+        if oversized_text & PARENT_OVERSIZED_TEXT != 0 {
+            return (
+                OpenCodeJsonProjection::Rejected(
+                    OpenCodeNativeRejectionKind::OversizedRetainedContent,
+                ),
+                false,
+            );
+        }
         let Some(parent_bytes) = parent_source_data.exact_text() else {
             return (
                 OpenCodeJsonProjection::Rejected(

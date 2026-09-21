@@ -108,7 +108,7 @@ function Invoke-ManagedPairApply([string]$MarkerSource, [bool]$Required) {
     }
     [IO.File]::Copy((Join-Path $retained 'bin/ctx.exe'), $installPath, $true)
     [IO.File]::Copy($MarkerSource, $markerPath, $true)
-    Remove-Item -LiteralPath (Join-Path $BinDir '.ctx.upgrade-install-transaction.json')
+    Remove-Item -LiteralPath (Join-Path $BinDir '.ctx.upgrade-install-transaction.json') -Force
     $script:recoveryCalls += 1
     return $true
 }

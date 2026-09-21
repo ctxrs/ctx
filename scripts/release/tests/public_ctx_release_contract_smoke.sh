@@ -255,6 +255,7 @@ git -C "$repo" add \
   scripts/release-sbom.py
 git -C "$repo" commit -q -m "fixture public ctx"
 source_commit="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" remote add origin "$repo"
 git -C "$repo" tag -a v1.3.2 -m 'fixture released source'
 
 cat >"$artifacts/ctx" <<'EOF'
@@ -690,9 +691,14 @@ run_contract() {
     CTX_PUBLIC_RELEASE_VERSIONED_METADATA_URL="$versioned_metadata_url" \
     CTX_PUBLIC_RELEASE_ALLOW_CUSTOM_BASE_URL=1 \
     CTX_PUBLIC_RELEASE_SKIP_REMOTE_CHECK=1 \
+    CTX_PUBLIC_RELEASE_TAG="${CTX_TEST_PUBLIC_RELEASE_TAG:-}" \
     CTX_PUBLIC_RELEASE_EVIDENCE_PATH="$evidence" \
     PATH="$authority_git_bin:$PATH" \
     node --import "$tmp/frozen-bridge-fetch.mjs" "$contract_root/scripts/release/release-contract.cjs"
+}
+
+run_contract_with_tag() {
+  CTX_TEST_PUBLIC_RELEASE_TAG=v1.5.0 run_contract "$@"
 }
 
 expect_failure() {
@@ -829,16 +835,33 @@ write_bridge_disposition
 write_metadata
 run_contract
 test -s "$evidence"
+git -C "$repo" tag -a v1.5.0 -m 'fixture current release' "$source_commit"
+run_contract_with_tag
+node - "$evidence" <<'NODE'
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const evidence = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+assert.equal(evidence.public_source.remote_main_checked, false);
+assert.equal(evidence.public_source.release_tag, "v1.5.0");
+assert.equal(evidence.public_source.release_tag_checked, true);
+NODE
+git -C "$repo" tag -d v1.5.0 >/dev/null
+git -C "$repo" tag v1.5.0 "$source_commit"
+expect_failure_contains lightweight-release-tag "must be annotated" run_contract_with_tag
+git -C "$repo" tag -d v1.5.0 >/dev/null
+git -C "$repo" tag -a v1.5.0 -m 'fixture current release' "$source_commit"
 # A newly discovered release-branch fix must block the otherwise valid handoff.
 git -C "$repo" checkout -qb released-fix
 printf 'released repair\n' >"$repo/released-fix"
 git -C "$repo" add released-fix
 git -C "$repo" commit -qm 'fixture released repair'
+git -C "$repo" tag -d v1.5.0 >/dev/null
 git -C "$repo" tag -a v1.5.0 -m 'fixture release with repair'
 git -C "$repo" checkout -q main
 expect_failure_contains omitted-released-fix \
   "released changes are absent without a reviewed disposition" run_contract
 git -C "$repo" tag -d v1.5.0 >/dev/null
+git -C "$repo" tag -a v1.5.0 -m 'fixture current release' "$source_commit"
 run_contract
 node - "$evidence" "$stable_metadata" "$candidate_authority/release-validation.json" <<'NODE'
 const assert = require("node:assert/strict");
