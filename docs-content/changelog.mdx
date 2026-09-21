@@ -8,6 +8,41 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 1.6.0
+
+Released: 2026-09-21
+
+### Added
+
+- ctx now discovers and imports conversations from Devin CLI's standard local
+  history store. Main and compacted history, linked subagent sessions, and tool
+  activity are available to ctx search and replay. Hosted Devin history and
+  unlinked background threads are not included.
+
+### Changed
+
+- The website and documentation describe Blame as part of the open-source ctx
+  CLI and remove retired commercial-product pages.
+
+### Fixed
+
+- OpenCode-family imports reject only the affected logical record when an
+  individual SQLite value exceeds 16 MiB, while valid sibling history
+  continues to import.
+- Hosted installs accept setup results with multiline progress output, avoiding
+  false setup failures after a successful import.
+
+### Commits and PRs
+
+- Source commit: [f9574f90](https://github.com/ctxrs/ctx/commit/f9574f906f57b31f7e48529d4a45dbcecb706d44).
+- Full diff: [v1.5.0...f9574f90](https://github.com/ctxrs/ctx/compare/v1.5.0...f9574f906f57b31f7e48529d4a45dbcecb706d44).
+- [#1017](https://github.com/ctxrs/ctx/pull/1017) — add Devin as a history provider.
+- [#1024](https://github.com/ctxrs/ctx/pull/1024) — isolate oversized OpenCode-family history rows.
+- Direct commits: [ca6602a3](https://github.com/ctxrs/ctx/commit/ca6602a3743dd3b647882f5a0a9d112b2932202d)
+  updates the public Blame documentation, and
+  [45edd87c](https://github.com/ctxrs/ctx/commit/45edd87c23357949c42c0876f4449dd9d071b7e9)
+  accepts bounded multiline setup receipts.
+
 ## 1.5.0
 
 Released: 2026-09-21
