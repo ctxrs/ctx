@@ -45,12 +45,53 @@ pub(super) struct DevinSessionRow {
     pub(super) id: String,
     pub(super) working_directory: String,
     pub(super) main_chain_id: Option<i64>,
+    pub(super) malformed_main_chain_id: bool,
     pub(super) created_at_ms: Option<i64>,
     pub(super) last_activity_at_ms: Option<i64>,
     pub(super) title: Option<String>,
     pub(super) model: Option<String>,
     pub(super) agent_mode: Option<String>,
     pub(super) hidden: bool,
+}
+
+/// A node omitted from planning because its structural parent pointer is not
+/// an integer (or NULL) in the native row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DevinMalformedParentNode {
+    pub(super) node_id: i64,
+}
+
+/// A node whose JSON object contains duplicate keys, so none of those keys can
+/// establish an exact chain, splice, or subagent relationship.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DevinAmbiguousJsonNode {
+    pub(super) node_id: i64,
+    pub(super) metadata: bool,
+    pub(super) chat_message: bool,
+}
+
+/// The planning facts and any row-local shape rejections observed while
+/// reading them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct DevinSessionFacts {
+    pub(super) facts: BTreeMap<i64, DevinNodeFacts>,
+    pub(super) malformed_parent_nodes: Vec<DevinMalformedParentNode>,
+    pub(super) ambiguous_json_nodes: Vec<DevinAmbiguousJsonNode>,
+}
+
+/// A durable subagent head whose scalar shape cannot establish a lineage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DevinMalformedSubagentHead {
+    pub(super) agent_id: String,
+    pub(super) malformed_chain_node_id: bool,
+    pub(super) malformed_updated_at: bool,
+}
+
+/// Durable heads that can participate in planning, plus row-local rejections.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct DevinSubagentHeads {
+    pub(super) heads: Vec<DevinSubagentHead>,
+    pub(super) malformed_heads: Vec<DevinMalformedSubagentHead>,
 }
 
 /// One planned node's payload.
@@ -63,11 +104,17 @@ pub(super) struct DevinNodeRow {
     pub(super) metadata: Option<String>,
 }
 
-pub(super) const SUBAGENT_HEADS_SQL: &str = "select agent_id, chain_node_id, updated_at \
+pub(super) const SUBAGENT_HEADS_SQL: &str = "select agent_id, \
+     case when typeof(chain_node_id) = 'integer' then chain_node_id end, \
+     case when typeof(chain_node_id) = 'integer' then 0 else 1 end, \
+     case when typeof(updated_at) = 'integer' then updated_at end, \
+     case when typeof(updated_at) = 'integer' then 0 else 1 end \
      from subagent_heads where session_id = ?1 order by agent_id limit ?2";
 
-const SESSION_COLUMNS: &str =
-    "id, working_directory, main_chain_id, title, model, agent_mode, hidden";
+const SESSION_COLUMNS: &str = "id, working_directory, \
+     case when typeof(main_chain_id) = 'integer' then main_chain_id end, \
+     case when typeof(main_chain_id) in ('integer', 'null') then 0 else 1 end, \
+     title, model, agent_mode, hidden";
 
 /// Builds the session page query.
 ///
@@ -126,27 +173,52 @@ fn decode_session_row(row: &Row<'_>) -> rusqlite::Result<DevinSessionRow> {
         id: row.get(0)?,
         working_directory: row.get(1)?,
         main_chain_id: row.get(2)?,
-        title: row.get(3)?,
-        model: row.get(4)?,
-        agent_mode: row.get(5)?,
+        malformed_main_chain_id: row.get::<_, i64>(3)? != 0,
+        title: row.get(4)?,
+        model: row.get(5)?,
+        agent_mode: row.get(6)?,
         // `hidden` is a UI flag; a hidden session is still imported, and the
         // flag is retained so the fingerprint notices it changing.
-        hidden: row.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
-        created_at_ms: row.get(7)?,
-        last_activity_at_ms: row.get(8)?,
+        hidden: row.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
+        created_at_ms: row.get(8)?,
+        last_activity_at_ms: row.get(9)?,
     })
 }
 
-pub(super) const SESSION_FACTS_SQL: &str = "select node_id, parent_node_id, \
-     case when json_valid(metadata) then \
-       case when json_type(metadata, '$.summarized_from') = 'integer' \
-         then json_extract(metadata, '$.summarized_from') end end, \
-     case when json_valid(chat_message) then \
-       case when json_type(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"') = 'integer' \
-         then json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"') end end, \
-     case when json_valid(chat_message) then \
-       case when json_type(chat_message, '$.metadata.extensions.\"subagent/agent_id\"') = 'text' \
-         then json_extract(chat_message, '$.metadata.extensions.\"subagent/agent_id\"') end end \
+pub(super) const SESSION_FACTS_SQL: &str = "select node_id, \
+     case when typeof(parent_node_id) = 'integer' then parent_node_id end, \
+     case when typeof(parent_node_id) in ('integer', 'null') then 0 else 1 end, \
+     case when typeof(metadata) = 'text' and json_valid(metadata) then \
+       case when not exists (select 1 from json_tree(metadata) as metadata_outer \
+         where metadata_outer.key is not null and exists (select 1 from json_tree(metadata) as metadata_inner \
+           where metadata_inner.parent = metadata_outer.parent and metadata_inner.key = metadata_outer.key \
+             and metadata_inner.id > metadata_outer.id)) then \
+         case when json_type(metadata, '$.summarized_from') = 'integer' \
+           then json_extract(metadata, '$.summarized_from') end end end, \
+     case when typeof(chat_message) = 'text' and json_valid(chat_message) then \
+       case when not exists (select 1 from json_tree(chat_message) as chat_outer \
+         where chat_outer.key is not null and exists (select 1 from json_tree(chat_message) as chat_inner \
+           where chat_inner.parent = chat_outer.parent and chat_inner.key = chat_outer.key \
+             and chat_inner.id > chat_outer.id)) then \
+         case when json_type(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"') = 'integer' \
+           then json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"') end end end, \
+     case when typeof(chat_message) = 'text' and json_valid(chat_message) then \
+       case when not exists (select 1 from json_tree(chat_message) as chat_outer \
+         where chat_outer.key is not null and exists (select 1 from json_tree(chat_message) as chat_inner \
+           where chat_inner.parent = chat_outer.parent and chat_inner.key = chat_outer.key \
+             and chat_inner.id > chat_outer.id)) then \
+         case when json_type(chat_message, '$.metadata.extensions.\"subagent/agent_id\"') = 'text' \
+           then json_extract(chat_message, '$.metadata.extensions.\"subagent/agent_id\"') end end end, \
+     case when typeof(metadata) = 'text' and json_valid(metadata) and exists (\
+       select 1 from json_tree(metadata) as metadata_outer where metadata_outer.key is not null and exists (\
+         select 1 from json_tree(metadata) as metadata_inner \
+         where metadata_inner.parent = metadata_outer.parent and metadata_inner.key = metadata_outer.key \
+           and metadata_inner.id > metadata_outer.id)) then 1 else 0 end, \
+     case when typeof(chat_message) = 'text' and json_valid(chat_message) and exists (\
+       select 1 from json_tree(chat_message) as chat_outer where chat_outer.key is not null and exists (\
+         select 1 from json_tree(chat_message) as chat_inner \
+         where chat_inner.parent = chat_outer.parent and chat_inner.key = chat_outer.key \
+           and chat_inner.id > chat_outer.id)) then 1 else 0 end \
      from message_nodes where session_id = ?1 order by node_id limit ?2";
 
 /// Reads every node's planning facts for one session, plus its main chain.
@@ -154,30 +226,59 @@ pub(super) const SESSION_FACTS_SQL: &str = "select node_id, parent_node_id, \
 /// Only scalars cross the boundary: `json_extract` pulls the two fields
 /// planning needs out of `chat_message` without transferring the payload,
 /// which is what keeps a planning pass cheap on a large session.
+#[cfg(test)]
 pub(super) fn read_session_facts(
     conn: &Connection,
     session_id: &str,
 ) -> Result<(BTreeMap<i64, DevinNodeFacts>, Option<i64>)> {
     let main_chain_id = conn
         .query_row(
-            "select main_chain_id from sessions where id = ?1",
+            "select case when typeof(main_chain_id) = 'integer' then main_chain_id end \
+             from sessions where id = ?1",
             [session_id],
             |row| row.get::<_, Option<i64>>(0),
         )
         .map_err(CaptureError::from)?;
+    let session_facts = read_session_facts_with_row_shape_rejections(conn, session_id)?;
+    Ok((session_facts.facts, main_chain_id))
+}
+
+/// Reads planning facts without letting a malformed parent scalar abort the
+/// entire source. The malformed node is deliberately absent from the forest:
+/// an off-chain node stays local, while a chain walk reaches a hole and is
+/// rejected by the planner.
+pub(super) fn read_session_facts_with_row_shape_rejections(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<DevinSessionFacts> {
     let mut statement = conn.prepare(SESSION_FACTS_SQL)?;
     let row_limit = DEVIN_MAX_SESSION_NODES.saturating_add(1) as i64;
     let mut rows = statement.query(rusqlite::params![session_id, row_limit])?;
     let mut facts = BTreeMap::new();
+    let mut malformed_parent_nodes = Vec::new();
+    let mut ambiguous_json_nodes = Vec::new();
     let mut planning_text_bytes = 0_usize;
     while let Some(row) = rows.next()? {
         let node_id: i64 = row.get(0)?;
+        if row.get::<_, i64>(2)? != 0 {
+            malformed_parent_nodes.push(DevinMalformedParentNode { node_id });
+            continue;
+        }
         let entry = DevinNodeFacts {
             parent_node_id: row.get(1)?,
-            summarized_from: row.get(2)?,
-            subagent_chain_node_id: row.get(3)?,
-            subagent_agent_id: row.get(4)?,
+            summarized_from: row.get(3)?,
+            subagent_chain_node_id: row.get(4)?,
+            subagent_agent_id: row.get(5)?,
         };
+        let ambiguous_metadata = row.get::<_, i64>(6)? != 0;
+        let ambiguous_chat_message = row.get::<_, i64>(7)? != 0;
+        if ambiguous_metadata || ambiguous_chat_message {
+            ambiguous_json_nodes.push(DevinAmbiguousJsonNode {
+                node_id,
+                metadata: ambiguous_metadata,
+                chat_message: ambiguous_chat_message,
+            });
+        }
         if facts.insert(node_id, entry).is_some() {
             // UNIQUE(session_id, node_id) makes this unreachable; kept so a
             // locally modified index cannot silently collapse two nodes.
@@ -208,21 +309,36 @@ pub(super) fn read_session_facts(
             )));
         }
     }
-    Ok((facts, main_chain_id))
+    Ok(DevinSessionFacts {
+        facts,
+        malformed_parent_nodes,
+        ambiguous_json_nodes,
+    })
 }
 
 /// Reads one session's durable subagent pointers in native primary-key order.
+#[cfg(test)]
 pub(super) fn read_subagent_heads(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<DevinSubagentHead>> {
+    Ok(read_subagent_heads_with_row_shape_rejections(conn, session_id)?.heads)
+}
+
+/// Reads durable heads without allowing one malformed scalar to discard the
+/// primary transcript or another agent's valid lineage.
+pub(super) fn read_subagent_heads_with_row_shape_rejections(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<DevinSubagentHeads> {
     if !sqlite_table_exists(conn, "subagent_heads")? {
-        return Ok(Vec::new());
+        return Ok(DevinSubagentHeads::default());
     }
     let row_limit = DEVIN_MAX_SESSION_NODES.saturating_add(1) as i64;
     let mut statement = conn.prepare(SUBAGENT_HEADS_SQL)?;
     let mut rows = statement.query(rusqlite::params![session_id, row_limit])?;
     let mut heads = Vec::new();
+    let mut malformed_heads = Vec::new();
     let mut planning_text_bytes = 0_usize;
     while let Some(row) = rows.next()? {
         let agent_id: String = row.get(0)?;
@@ -238,18 +354,31 @@ pub(super) fn read_subagent_heads(
                 "Devin session {session_id} exceeds the durable-head text byte bound"
             )));
         }
-        heads.push(DevinSubagentHead {
-            agent_id,
-            chain_node_id: row.get(1)?,
-            updated_at: row.get(2)?,
-        });
+        let malformed_chain_node_id = row.get::<_, i64>(2)? != 0;
+        let malformed_updated_at = row.get::<_, i64>(4)? != 0;
+        if malformed_chain_node_id || malformed_updated_at {
+            malformed_heads.push(DevinMalformedSubagentHead {
+                agent_id,
+                malformed_chain_node_id,
+                malformed_updated_at,
+            });
+        } else {
+            heads.push(DevinSubagentHead {
+                agent_id,
+                chain_node_id: row.get(1)?,
+                updated_at: row.get(3)?,
+            });
+        }
     }
-    if heads.len() > DEVIN_MAX_SESSION_NODES {
+    if heads.len().saturating_add(malformed_heads.len()) > DEVIN_MAX_SESSION_NODES {
         return Err(CaptureError::InvalidPayload(format!(
             "Devin session {session_id} exceeds the durable subagent head bound"
         )));
     }
-    Ok(heads)
+    Ok(DevinSubagentHeads {
+        heads,
+        malformed_heads,
+    })
 }
 
 fn hydration_sql(rows: usize) -> String {
@@ -258,8 +387,8 @@ fn hydration_sql(rows: usize) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "select node_id, parent_node_id, chat_message, created_at, metadata \
-         from message_nodes where session_id = ?1 and node_id in ({parameters}) order by node_id"
+        "select node_id, parent_node_id, chat_message, created_at, metadata from message_nodes \
+         where session_id = ?1 and node_id in ({parameters}) order by node_id"
     )
 }
 

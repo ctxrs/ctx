@@ -2371,7 +2371,7 @@
       "limitations": [
         "Only the main chain and the pre-compaction history reachable from it are imported. Summarizer threads, abandoned regenerated turns, and subagent threads without a foreground back-link or durable head are counted but not imported.",
         "Foreground back-linked and durable background subagent trees are imported; a subagent forest without an exact chain tip remains unclaimed.",
-        "Native assistant payloads retain generation metadata when Devin writes it, but session-level model, agent mode, cost, and token data are not projected as Core facts. Exact MCP server/tool attribution is not supported."
+        "Native assistant messages with visible text retain generation metadata when Devin writes it; tool-only and empty-content events do not retain that payload. Session-level model, agent mode, cost, and token data are not projected as Core facts. Exact MCP server/tool attribution is not supported."
       ],
       "public_docs": "docs/provider-support.md"
     }

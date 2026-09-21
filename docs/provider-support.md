@@ -53,8 +53,8 @@ event-local Core capability has its own provider + route + source format +
 format version authority in
 [`mcp-tool-call-attribution-capabilities.json`](mcp-tool-call-attribution-capabilities.json).
 Capability revision 4 exact providers are Codex, Warp, and Copilot CLI. The
-complete evidence matrix contains 47 base routes and 51 capability lanes:
-three exact, 47 not-qualified, and one excluded. The Deep Agents hosted trace
+complete evidence matrix contains 48 base routes and 52 capability lanes:
+three exact, 48 not-qualified, and one excluded. The Deep Agents hosted trace
 is excluded from the local-only boundary, while its local SQLite history import
 remains Supported but not qualified for exact attribution. See
 [`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) for absence,
@@ -198,8 +198,9 @@ pre-compaction copies Devin rewrote. Subagent threads become separate delegated
 sessions when Devin records either a foreground `subagent/chain_node_id`
 back-link or a durable `subagent_heads` chain tip, so foreground and durable
 background subagents are imported. A subagent tree without either exact tip
-link remains unclaimed. Native assistant payloads retain generation metadata
-when Devin writes it, but session-level model, agent mode, cost, and token data
+link remains unclaimed. Native assistant messages with visible text retain
+generation metadata when Devin writes it; tool-only and empty-content events do
+not retain that payload. Session-level model, agent mode, cost, and token data
 are not projected as Core facts. Exact MCP server/tool attribution is not
 supported.
 

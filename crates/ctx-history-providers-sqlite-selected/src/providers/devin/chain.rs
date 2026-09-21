@@ -147,6 +147,10 @@ impl DevinSessionPlan {
 /// leaves several orders of magnitude of headroom while staying finite.
 pub(super) const DEVIN_MAX_SESSION_NODES: usize = 1_000_000;
 
+/// Every lineage walk in one session shares this budget. It prevents many
+/// candidate heads from turning a bounded forest into repeated full walks.
+const DEVIN_MAX_SESSION_WALK_STEPS: usize = DEVIN_MAX_SESSION_NODES * 4;
+
 /// Plans one session's transcript from its forest.
 ///
 /// `facts` must contain every node in the session.
@@ -155,8 +159,24 @@ pub(super) fn plan_session(
     main_chain_id: Option<i64>,
     subagent_heads: &[DevinSubagentHead],
 ) -> DevinSessionPlan {
+    plan_session_with_limits(
+        facts,
+        main_chain_id,
+        subagent_heads,
+        DEVIN_MAX_SESSION_NODES,
+        DEVIN_MAX_SESSION_WALK_STEPS,
+    )
+}
+
+pub(super) fn plan_session_with_limits(
+    facts: &BTreeMap<i64, DevinNodeFacts>,
+    main_chain_id: Option<i64>,
+    subagent_heads: &[DevinSubagentHead],
+    max_nodes: usize,
+    max_walk_steps: usize,
+) -> DevinSessionPlan {
     let total = facts.len() as u64;
-    if facts.len() > DEVIN_MAX_SESSION_NODES {
+    if facts.len() > max_nodes {
         return DevinSessionPlan::rejected(DevinSessionRejection::TooManyNodes, total);
     }
     // A null anchor is Devin's metadata-only state. Nothing in the forest is a
@@ -171,24 +191,17 @@ pub(super) fn plan_session(
             rejection: None,
         };
     };
-    // Ancestor-first ordering rests on this, so it is verified once up front
-    // rather than trusted per walk.
-    if let Some((&node_id, _)) = facts.iter().find(|(node_id, node)| {
-        node.parent_node_id
-            .is_some_and(|parent| parent >= **node_id)
-    }) {
-        let _ = node_id;
-        return DevinSessionPlan::rejected(DevinSessionRejection::NonMonotonicParent, total);
-    }
     if !facts.contains_key(&main_chain_id) {
         return DevinSessionPlan::rejected(DevinSessionRejection::MissingChainAnchor, total);
     }
 
     let mut counts = DevinPlanCounts::default();
     let mut claimed = BTreeSet::<i64>::new();
+    let mut walk_steps = max_walk_steps;
 
-    let primary = match collect_lineage(facts, main_chain_id, &mut counts, &claimed) {
-        Ok(nodes) => nodes,
+    let primary = match collect_lineage(facts, main_chain_id, &mut counts, None, &mut walk_steps) {
+        Ok(DevinCollectedLineage::Complete(nodes)) => nodes,
+        Ok(DevinCollectedLineage::Blocked(_)) => unreachable!("primary has no blocked nodes"),
         Err(reason) => return DevinSessionPlan::rejected(reason, total),
     };
     claimed.extend(primary.iter().copied());
@@ -215,27 +228,36 @@ pub(super) fn plan_session(
         };
         admit_subagent_candidate(
             facts,
-            &claimed,
             agent_id,
             tip,
             &mut candidate_indexes,
             &mut candidates,
             &mut counts,
+            &mut walk_steps,
         );
     }
     for head in subagent_heads {
         admit_subagent_candidate(
             facts,
-            &claimed,
             &head.agent_id,
             head.chain_node_id,
             &mut candidate_indexes,
             &mut candidates,
             &mut counts,
+            &mut walk_steps,
         );
     }
+    let mut blocked = claimed.clone();
     for candidate in candidates {
-        add_subagent_lineage(facts, candidate, &mut claimed, &mut lineages, &mut counts);
+        add_subagent_lineage(
+            facts,
+            candidate,
+            &mut claimed,
+            &mut blocked,
+            &mut lineages,
+            &mut counts,
+            &mut walk_steps,
+        );
     }
 
     counts.ignored_nodes = total - claimed.len() as u64;
@@ -249,18 +271,16 @@ pub(super) fn plan_session(
 struct DevinSubagentCandidate {
     agent_id: String,
     tip: i64,
-    nodes: BTreeSet<i64>,
-    rejected_splices: u64,
 }
 
 fn admit_subagent_candidate(
     facts: &BTreeMap<i64, DevinNodeFacts>,
-    primary: &BTreeSet<i64>,
     agent_id: &str,
     tip: i64,
     indexes: &mut BTreeMap<String, usize>,
     candidates: &mut Vec<DevinSubagentCandidate>,
     counts: &mut DevinPlanCounts,
+    walk_steps: &mut usize,
 ) {
     if agent_id.trim().is_empty() {
         counts.rejected_lineages += 1;
@@ -270,34 +290,56 @@ fn admit_subagent_candidate(
         counts.rejected_lineages += 1;
         return;
     }
-    let mut lineage_counts = DevinPlanCounts::default();
-    let Ok(nodes) = collect_lineage(facts, tip, &mut lineage_counts, primary) else {
-        counts.rejected_lineages += 1;
+    let Some(&index) = indexes.get(agent_id) else {
+        indexes.insert(agent_id.to_owned(), candidates.len());
+        candidates.push(DevinSubagentCandidate {
+            agent_id: agent_id.to_owned(),
+            tip,
+        });
         return;
     };
-    if nodes.iter().any(|node_id| primary.contains(node_id)) {
-        counts.rejected_lineages += 1;
+    if candidates[index].tip == tip {
         return;
     }
 
-    let candidate = DevinSubagentCandidate {
-        agent_id: agent_id.to_owned(),
-        tip,
-        nodes,
-        rejected_splices: lineage_counts.rejected_splices,
+    let mut lineage_counts = DevinPlanCounts::default();
+    let candidate_nodes = match collect_lineage(facts, tip, &mut lineage_counts, None, walk_steps) {
+        Ok(DevinCollectedLineage::Complete(nodes)) => nodes,
+        Ok(DevinCollectedLineage::Blocked(_)) => unreachable!("candidate has no blocked nodes"),
+        Err(_) => {
+            counts.rejected_lineages += 1;
+            return;
+        }
     };
-    let Some(&index) = indexes.get(agent_id) else {
-        indexes.insert(agent_id.to_owned(), candidates.len());
-        candidates.push(candidate);
-        return;
-    };
-    let previous = &candidates[index];
-    if previous.tip == tip {
+    if candidate_nodes.contains(&candidates[index].tip) {
+        candidates[index] = DevinSubagentCandidate {
+            agent_id: agent_id.to_owned(),
+            tip,
+        };
         return;
     }
-    if candidate.nodes.contains(&previous.tip) {
-        candidates[index] = candidate;
-    } else if !previous.nodes.contains(&tip) {
+
+    let previous_nodes = collect_lineage(
+        facts,
+        candidates[index].tip,
+        &mut DevinPlanCounts::default(),
+        None,
+        walk_steps,
+    );
+    let previous_nodes = match previous_nodes {
+        Ok(DevinCollectedLineage::Complete(nodes)) => nodes,
+        Ok(DevinCollectedLineage::Blocked(_)) => unreachable!("candidate has no blocked nodes"),
+        Err(_) => {
+            // An earlier malformed link must not hide this valid later tip.
+            counts.rejected_lineages += 1;
+            candidates[index] = DevinSubagentCandidate {
+                agent_id: agent_id.to_owned(),
+                tip,
+            };
+            return;
+        }
+    };
+    if !previous_nodes.contains(&tip) {
         // Disjoint tips under one exact agent id are ambiguous. Keep the
         // first native link and reject only the conflicting candidate.
         counts.rejected_lineages += 1;
@@ -308,56 +350,83 @@ fn add_subagent_lineage(
     facts: &BTreeMap<i64, DevinNodeFacts>,
     candidate: DevinSubagentCandidate,
     claimed: &mut BTreeSet<i64>,
+    blocked: &mut BTreeSet<i64>,
     lineages: &mut Vec<DevinLineagePlan>,
     counts: &mut DevinPlanCounts,
+    walk_steps: &mut usize,
 ) {
-    if candidate
-        .nodes
-        .iter()
-        .any(|node_id| claimed.contains(node_id))
-    {
+    if blocked.contains(&candidate.tip) {
         counts.rejected_lineages += 1;
         return;
     }
-    counts.rejected_splices += candidate.rejected_splices;
-    claimed.extend(candidate.nodes.iter().copied());
+    let mut lineage_counts = DevinPlanCounts::default();
+    let nodes = match collect_lineage(
+        facts,
+        candidate.tip,
+        &mut lineage_counts,
+        Some(blocked),
+        walk_steps,
+    ) {
+        Ok(DevinCollectedLineage::Complete(nodes)) => nodes,
+        Ok(DevinCollectedLineage::Blocked(nodes)) => {
+            blocked.extend(nodes);
+            counts.rejected_lineages += 1;
+            return;
+        }
+        Err(_) => {
+            counts.rejected_lineages += 1;
+            return;
+        }
+    };
+    counts.rejected_splices += lineage_counts.rejected_splices;
+    blocked.extend(nodes.iter().copied());
+    claimed.extend(nodes.iter().copied());
     lineages.push(DevinLineagePlan {
         key: DevinLineageKey::Subagent(candidate.agent_id),
         lineage_ord: lineages.len() as u32,
-        nodes: ordered_nodes(facts, &candidate.nodes, candidate.tip),
+        nodes: ordered_nodes(facts, &nodes, candidate.tip),
     });
+}
+
+enum DevinCollectedLineage {
+    Complete(BTreeSet<i64>),
+    Blocked(BTreeSet<i64>),
 }
 
 /// Walks one lineage from `tip`, following parents and splicing transitively.
 ///
-/// `claimed` is only consulted to stop a walk re-entering another lineage; the
-/// returned set may still overlap it, which the caller treats as a rejection.
 fn collect_lineage(
     facts: &BTreeMap<i64, DevinNodeFacts>,
     tip: i64,
     counts: &mut DevinPlanCounts,
-    claimed: &BTreeSet<i64>,
-) -> Result<BTreeSet<i64>, DevinSessionRejection> {
+    blocked: Option<&BTreeSet<i64>>,
+    walk_steps: &mut usize,
+) -> Result<DevinCollectedLineage, DevinSessionRejection> {
     let mut collected = BTreeSet::<i64>::new();
     // Anchors still to expand. Bounded by the node count because an anchor is
     // only ever pushed when its node is first reached.
     let mut pending = vec![tip];
     while let Some(anchor) = pending.pop() {
         let mut cursor = Some(anchor);
-        let mut steps = 0_usize;
         while let Some(node_id) = cursor {
+            if blocked.is_some_and(|nodes| nodes.contains(&node_id)) {
+                return Ok(DevinCollectedLineage::Blocked(collected));
+            }
             let Some(node) = facts.get(&node_id) else {
                 return Err(DevinSessionRejection::BrokenChainParent);
             };
-            steps += 1;
-            if steps > facts.len() {
-                // Unreachable while parents strictly decrease, which is
-                // verified before planning; kept so the walk is bounded on its
-                // own terms rather than by a caller's invariant.
-                return Err(DevinSessionRejection::BrokenChainParent);
+            if *walk_steps == 0 {
+                return Err(DevinSessionRejection::TooManyNodes);
+            }
+            *walk_steps -= 1;
+            if node
+                .parent_node_id
+                .is_some_and(|parent_node_id| parent_node_id >= node_id)
+            {
+                return Err(DevinSessionRejection::NonMonotonicParent);
             }
             let first_visit = collected.insert(node_id);
-            if first_visit && !claimed.contains(&node_id) {
+            if first_visit {
                 if let Some(summarized_from) = node.summarized_from {
                     if facts.contains_key(&summarized_from) {
                         pending.push(summarized_from);
@@ -375,7 +444,7 @@ fn collect_lineage(
             cursor = node.parent_node_id;
         }
     }
-    Ok(collected)
+    Ok(DevinCollectedLineage::Complete(collected))
 }
 
 /// Orders a lineage's nodes and marks which were on the recorded chain.

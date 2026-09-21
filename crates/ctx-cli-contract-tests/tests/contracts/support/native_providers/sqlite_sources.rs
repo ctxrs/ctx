@@ -331,7 +331,7 @@ fn sqlite_cli_imports_each_selected_sqlite_provider_and_searches() {
             "devin/v17/sessions.db",
             "devincliassistantoracle",
             4,
-            50,
+            49,
         ),
     ] {
         let temp = tempdir();

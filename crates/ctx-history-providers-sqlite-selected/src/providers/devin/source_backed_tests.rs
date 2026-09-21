@@ -102,6 +102,132 @@ fn malformed_off_chain_json_does_not_abort_valid_sessions() {
 }
 
 #[test]
+fn malformed_scalar_rows_are_rejected_locally_during_a_mixed_validity_full_scan() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update sessions set main_chain_id = 'not-a-node' where id = 'abounding-crest'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "update message_nodes set parent_node_id = 'not-a-node' \
+         where session_id = 'discovered-sandal' and node_id = 24",
+        [],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "insert into subagent_heads (session_id, agent_id, chain_node_id, updated_at) \
+             values ('discovered-sandal', 'bad-chain', 'not-a-node', 1789910400);
+         insert into subagent_heads (session_id, agent_id, chain_node_id, updated_at) \
+             values ('discovered-sandal', 'bad-time', 35, 'not-a-time');",
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.counts.rejected_sessions, 1);
+    assert_eq!(scanned.counts.rejected_records, 1);
+    assert_eq!(scanned.counts.rejected_lineages, 2);
+    assert!(scanned
+        .records
+        .iter()
+        .all(|record| { record.provider_session_id.as_deref() != Some("abounding-crest") }));
+    for healthy_session in ["discovered-sandal", "exclusive-bamboo"] {
+        assert!(scanned
+            .records
+            .iter()
+            .any(|record| record.provider_session_id.as_deref() == Some(healthy_session)));
+    }
+    for detail in [
+        "main_chain_id has a non-integer SQLite scalar",
+        "node 24 was rejected: parent_node_id has a non-integer SQLite scalar",
+        "bad-chain was rejected: chain_node_id has a non-integer SQLite scalar",
+        "bad-time was rejected: updated_at has a non-integer SQLite scalar",
+    ] {
+        assert!(
+            scanned
+                .rejections
+                .iter()
+                .any(|rejection| rejection.detail.contains(detail)),
+            "missing rejection for {detail}: {:#?}",
+            scanned.rejections
+        );
+    }
+    assert_eq!(
+        scanned.scanned_counts.complete_records,
+        scanned.scanned_counts.retained_records
+            + scanned.scanned_counts.rejected_records
+            + scanned.scanned_counts.ignored_records
+    );
+}
+
+#[test]
+fn a_traversed_malformed_parent_rejects_that_session_with_its_row_diagnostic() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update message_nodes set parent_node_id = 'not-a-node' \
+         where session_id = 'abounding-crest' and node_id = 30",
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.counts.rejected_sessions, 1);
+    assert_eq!(scanned.counts.rejected_records, 1);
+    assert!(scanned
+        .records
+        .iter()
+        .any(|record| { record.provider_session_id.as_deref() == Some("discovered-sandal") }));
+    assert!(scanned.rejections.iter().any(|rejection| {
+        rejection.detail.contains(
+            "chain traversed node 30, whose parent_node_id has a non-integer SQLite scalar",
+        )
+    }));
+}
+
+#[test]
+fn duplicate_json_keys_cannot_establish_subagent_or_compaction_relationships() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update message_nodes set chat_message = \
+         '{\"message_id\":\"ambiguous-subagent\",\"role\":\"assistant\",\"content\":\"ambiguous\",\"metadata\":{\"extensions\":{\"subagent/chain_node_id\":35,\"subagent/chain_node_id\":35,\"subagent/agent_id\":\"ambiguous\"}}}' \
+         where session_id = 'discovered-sandal' and node_id = 37",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "update message_nodes set metadata = '{\"summarized_from\":42,\"summarized_from\":42}' \
+         where session_id = 'discovered-sandal' and node_id = 48",
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert!(scanned
+        .records
+        .iter()
+        .any(|record| { record.provider_session_id.as_deref() == Some("abounding-crest") }));
+    assert!(scanned.records.iter().all(|record| {
+        !record
+            .provider_session_id
+            .as_deref()
+            .is_some_and(|id| id.contains("/subagents/ambiguous"))
+    }));
+    assert!(scanned.records.iter().all(|record| {
+        !record
+            .content
+            .normalized_body
+            .as_deref()
+            .is_some_and(|body| body.contains("Full conversation history saved"))
+    }));
+    assert!(scanned.counts.rejected_records >= 2);
+    assert!(scanned.rejections.iter().any(|rejection| {
+        rejection
+            .detail
+            .contains("node 48 has ambiguous duplicate metadata JSON keys")
+    }));
+}
+
+#[test]
 fn empty_tool_text_is_enriched_through_the_full_scan() {
     let (_temp, conn) = mutable_fixture();
     conn.execute(

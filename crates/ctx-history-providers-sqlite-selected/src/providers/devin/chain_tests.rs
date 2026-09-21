@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::chain::{
-    plan_session, DevinLineageKey, DevinNodeFacts, DevinSessionPlan, DevinSessionRejection,
-    DevinSpliceKind, DevinSubagentHead,
+    plan_session, plan_session_with_limits, DevinLineageKey, DevinNodeFacts, DevinSessionPlan,
+    DevinSessionRejection, DevinSpliceKind, DevinSubagentHead,
 };
 
 /// Builds a forest from `(node_id, parent)` pairs.
@@ -199,6 +199,58 @@ fn a_parent_that_does_not_precede_its_child_rejects_the_session() {
         plan_without_heads(&self_loop, Some(1)).rejection,
         Some(DevinSessionRejection::NonMonotonicParent)
     );
+}
+
+#[test]
+fn malformed_abandoned_branches_do_not_discard_the_primary_transcript() {
+    let facts = forest(&[
+        (0, None),
+        (1, Some(0)),
+        (2, Some(1)),
+        // This abandoned cycle is not reachable from the primary transcript.
+        (10, Some(11)),
+        (11, Some(10)),
+    ]);
+
+    let plan = plan_without_heads(&facts, Some(2));
+    assert!(plan.rejection.is_none());
+    assert_eq!(primary_nodes(&plan), [0, 1, 2]);
+    assert_eq!(plan.counts.ignored_nodes, 2);
+}
+
+#[test]
+fn a_malformed_traversed_subagent_rejects_only_that_lineage() {
+    let mut facts = forest(&[
+        (0, None),
+        (1, Some(0)),
+        (2, Some(1)),
+        (10, Some(11)),
+        (11, Some(10)),
+    ]);
+    facts.get_mut(&2).unwrap().subagent_chain_node_id = Some(10);
+    facts.get_mut(&2).unwrap().subagent_agent_id = Some("agent-a".to_owned());
+
+    let plan = plan_without_heads(&facts, Some(2));
+    assert!(plan.rejection.is_none());
+    assert_eq!(primary_nodes(&plan), [0, 1, 2]);
+    assert_eq!(plan.counts.rejected_lineages, 1);
+    assert_eq!(plan.counts.ignored_nodes, 2);
+}
+
+#[test]
+fn a_subagent_hole_rejects_only_that_lineage() {
+    let facts = forest(&[(0, None), (1, Some(0)), (2, Some(1)), (10, Some(99))]);
+    let heads = [DevinSubagentHead {
+        agent_id: "agent-a".to_owned(),
+        chain_node_id: 10,
+        updated_at: 0,
+    }];
+
+    let plan = plan_session(&facts, Some(2), &heads);
+    assert!(plan.rejection.is_none());
+    assert_eq!(primary_nodes(&plan), [0, 1, 2]);
+    assert_eq!(plan.counts.rejected_lineages, 1);
+    assert_eq!(plan.counts.ignored_nodes, 1);
 }
 
 #[test]
@@ -438,6 +490,28 @@ fn durable_duplicates_are_noops_and_bad_heads_reject_locally() {
             DevinLineageKey::Subagent("agent-b".to_owned()),
         ]
     );
+}
+
+#[test]
+fn overlapping_durable_heads_share_one_walk_budget() {
+    let mut facts = BTreeMap::new();
+    chain_of(&mut facts, &[0]);
+    chain_of(&mut facts, &[10, 11, 12, 13, 14, 15, 16, 17, 18]);
+    let heads = (0..32)
+        .map(|index| DevinSubagentHead {
+            agent_id: format!("agent-{index:02}"),
+            chain_node_id: 18,
+            updated_at: index,
+        })
+        .collect::<Vec<_>>();
+
+    // One step for the primary and nine for the first accepted head. Every
+    // later head must reject from the shared blocked set without another walk.
+    let plan = plan_session_with_limits(&facts, Some(0), &heads, facts.len(), facts.len());
+    assert!(plan.rejection.is_none());
+    assert_eq!(plan.lineages.len(), 2);
+    assert_eq!(plan.counts.rejected_lineages, 31);
+    assert_eq!(plan.counts.ignored_nodes, 0);
 }
 
 #[test]
