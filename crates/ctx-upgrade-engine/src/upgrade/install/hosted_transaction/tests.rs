@@ -4,12 +4,12 @@ use ctx_managed_pair_engine::{
     MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH, MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
     MANAGED_PAIR_STATE_RELATIVE_PATH,
 };
-use std::{fs, os::unix::fs::PermissionsExt as _, process::Command, time::Duration};
+use std::{fs, os::unix::fs::PermissionsExt as _, process::Command};
 
 use crate::upgrade::{
     download::DownloadedArtifact,
     install::{InstallFingerprint, InstallationLock},
-    managed_pair::{apply_prepared_install, ManagedPairMode, PreparedCoreArtifact},
+    managed_pair::apply_prepared_install,
     metadata::ReleaseMetadata,
     state::{begin_manual_attempt_locked, UpgradeLock},
     UpgradePlan, TEST_RELEASE_PROCESS, TEST_SEMANTIC_LAYOUT,
@@ -873,7 +873,7 @@ fn ordinary_self_upgrade_child_probe() -> Result<()> {
     let plan = ordinary_upgrade_plan(&install, next_core);
     let lock = UpgradeLock::acquire(&data_root)?;
     let attempt = begin_manual_attempt_locked(&data_root, &lock, "manual_apply")?;
-    let mut core = PreparedCoreArtifact::Legacy(DownloadedArtifact::from_bytes(
+    let mut core = Some(DownloadedArtifact::from_bytes(
         &data_root,
         next_core,
         MAX_BINARY_BYTES,
@@ -885,13 +885,11 @@ fn ordinary_self_upgrade_child_probe() -> Result<()> {
         &TEST_SEMANTIC_LAYOUT,
         &lock,
         &plan,
-        &ManagedPairMode::CoreOnly,
         &mut core,
         None,
         &mut [],
         &data_root,
         &attempt,
-        Duration::from_secs(3600),
         None,
         &mut || {
             before_publish_called = true;
@@ -927,23 +925,22 @@ fn hosted_uninstall_cleans_candidate_orphaned_before_pending_publication() {
 }
 
 #[test]
-fn core_only_hosted_install_refuses_managed_pair_material() {
+fn single_hosted_install_accepts_terminal_pair_but_rejects_pending_replacement() {
     let fixture = pair_fixture();
-    let error = reject_managed_pair_material_for_core_only_install(&fixture.install).unwrap_err();
-    assert!(format!("{error:#}").contains("cannot replace a managed Core+Pro pair"));
-
-    fs::remove_file(&fixture.state).unwrap();
-    fs::remove_file(&fixture.envelope).unwrap();
-    fs::remove_file(&fixture.companion).unwrap();
-    let error = reject_managed_pair_material_for_core_only_install(&fixture.install).unwrap_err();
-    assert!(format!("{error:#}").contains("cannot replace a managed Core+Pro pair"));
-
-    fs::write(
-        install_marker_path(&fixture.install),
-        marker(&fixture.install, &sha256_hex(b"paired ctx")),
-    )
-    .unwrap();
-    reject_managed_pair_material_for_core_only_install(&fixture.install).unwrap();
+    ensure_legacy_pair_transaction_inactive(&fixture.install).unwrap();
+    // No deletion occurs at admission: old verification can still use its image.
+    assert!(fixture.state.exists());
+    assert!(fixture.envelope.exists());
+    assert!(fixture.companion.exists());
+    let pending = fixture
+        .root
+        .join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH);
+    fs::write(&pending, b"pending legacy replacement").unwrap();
+    assert!(ensure_legacy_pair_transaction_inactive(&fixture.install)
+        .unwrap_err()
+        .to_string()
+        .contains("finish the pending managed-pair upgrade"));
+    assert!(fixture.companion.exists());
 }
 
 #[test]

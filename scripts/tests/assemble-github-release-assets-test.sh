@@ -14,6 +14,38 @@ runtime="${tmp}/runtime"
 receipts="${tmp}/macos-release-pair-qualification"
 mkdir -p "${core}" "${runtime}" "${receipts}"
 
+# Exercise assembly using authored upstream-verifier stubs in a disposable repo.
+# These tests do not claim platform signature/native execution evidence.
+fixture_repo="${tmp}/repo"
+mkdir -p "${fixture_repo}/scripts/release" "${tmp}/bin" "${tmp}/authority"
+cp "${assembler}" "${fixture_repo}/scripts/"
+cp "${source_root}/scripts/release/release_bundle.py" "${fixture_repo}/scripts/release/"
+cp "${source_root}/scripts/release/verify-runtime-signatures.py" "${fixture_repo}/scripts/release/"
+# Keep the real authority/policy/extraction owner; stub external signature tools.
+cat > "${fixture_repo}/scripts/macos-release-signing-evidence.py" <<'PY_STUB'
+import os
+raise SystemExit(int(os.environ.get("CTX_ASSEMBLY_REJECT_SIGNATURE", "0")))
+PY_STUB
+cat > "${fixture_repo}/scripts/verify-macos-release-attestation.sh" <<'SH_STUB'
+#!/usr/bin/env bash
+exit "${CTX_ASSEMBLY_REJECT_SIGNATURE:-0}"
+SH_STUB
+chmod +x "${fixture_repo}/scripts/verify-macos-release-attestation.sh"
+assembler="${fixture_repo}/scripts/assemble-github-release-assets.sh"
+export CTX_RELEASE_AUTHORITY_DIR="${tmp}/authority"
+export CTX_RELEASE_HANDOFF_SHA256="$(printf '%064d' 1)"
+export CTX_ASSEMBLY_REAL_PYTHON="$(command -v python3)"
+cat > "${tmp}/bin/python3" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *release-sbom.py*) exit "${CTX_ASSEMBLY_REJECT_HANDOFF:-0}" ;;
+esac
+exec "$CTX_ASSEMBLY_REAL_PYTHON" "$@"
+SH
+chmod +x "${tmp}/bin/python3"
+export PATH="${tmp}/bin:$PATH"
+printf '{"source_commit":"1111111111111111111111111111111111111111","validation_policy":"native-receipts-required-v1"}\n' > "${CTX_RELEASE_AUTHORITY_DIR}/release-validation.json"
+
 core_assets=(
   ctx-linux-x64
   ctx-linux-x64.cdx.json
@@ -49,6 +81,16 @@ for asset in "${runtime_assets[@]}"; do
   sha256sum "${runtime}/${asset}" | awk '{print $1}' > "${runtime}/${asset}.sha256"
 done
 for platform in macos-arm64 macos-x64; do
+  "${CTX_ASSEMBLY_REAL_PYTHON}" - "${runtime}/ctx-onnxruntime-${platform}.tar.gz" <<'ARCHIVE'
+import io, sys, tarfile
+payload = b"authored non-native dylib fixture\n"
+with tarfile.open(sys.argv[1], "w:gz") as archive:
+    member = tarfile.TarInfo("lib/libonnxruntime.dylib")
+    member.size = len(payload)
+    archive.addfile(member, io.BytesIO(payload))
+ARCHIVE
+  sha256sum "${runtime}/ctx-onnxruntime-${platform}.tar.gz" | awk '{print $1}' \
+    > "${runtime}/ctx-onnxruntime-${platform}.tar.gz.sha256"
   cli="ctx-${platform}"
   runtime_archive="ctx-onnxruntime-${platform}.tar.gz"
   {
@@ -56,6 +98,15 @@ for platform in macos-arm64 macos-x64; do
     sha256sum "${runtime}/${runtime_archive}"
   } | sed "s#  ${core}/#  #; s#  ${runtime}/#  #" \
     > "${receipts}/${cli}.release-pair.sha256"
+done
+
+cp "${core}/SHA256SUMS" "${CTX_RELEASE_AUTHORITY_DIR}/SHA256SUMS"
+for gate in HANDOFF SIGNATURE; do
+  if env "CTX_ASSEMBLY_REJECT_${gate}=1" bash "${assembler}" "${core}" "${runtime}" "${tmp}/rejected-${gate}" "${receipts}"; then
+    printf 'assembler ignored required %s verification\n' "$gate" >&2
+    exit 1
+  fi
+  test ! -e "${tmp}/rejected-${gate}"
 done
 
 missing_receipts="${tmp}/missing-receipts"
@@ -171,5 +222,27 @@ fi
 grep -Fq 'runtime release asset must be a regular non-symlink file' \
   "${tmp}/symlink.err"
 test ! -e "${tmp}/symlink-output"
+
+# A policy switch cannot detach assembly from its admitted staged authority.
+if CTX_RELEASE_VALIDATION_POLICY=factory-only-human-override-v1 \
+  bash "${assembler}" "${core}" "${runtime}" "${tmp}/wrong-policy" "${tmp}/absent" \
+  >"${tmp}/wrong-policy.out" 2>"${tmp}/wrong-policy.err"; then
+  printf 'assembly accepted a different staged validation policy\n' >&2
+  exit 1
+fi
+grep -Fq 'assembly and staged validation selections differ' "${tmp}/wrong-policy.err"
+test ! -e "${tmp}/wrong-policy"
+printf '{"source_commit":"1111111111111111111111111111111111111111","validation_policy":"factory-only-human-override-v1"}\n' \
+  > "${CTX_RELEASE_AUTHORITY_DIR}/release-validation.json"
+# The authorized route omits execution receipts but retains both verifier calls.
+CTX_RELEASE_VALIDATION_POLICY=factory-only-human-override-v1 \
+  bash "${assembler}" "${core}" "${runtime}" "${tmp}/no-native" "${tmp}/absent"
+test -s "${tmp}/no-native.assembly.json"
+"${CTX_ASSEMBLY_REAL_PYTHON}" - "${tmp}/no-native.assembly.json" <<'PY_CHECK'
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["macos_cli_runtime_native_execution"] == "not_run"
+assert len(value["artifacts"]) == 21
+PY_CHECK
 
 printf 'GitHub release final assembly tests passed\n'

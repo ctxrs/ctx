@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{Read as _, Write as _},
     os::windows::{io::AsRawHandle as _, process::CommandExt as _},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Child, ChildStdout, Command, Stdio},
     time::{Duration, Instant},
 };
@@ -132,17 +132,6 @@ pub(super) fn spawn(
     Ok(helper_pid)
 }
 
-pub(in crate::upgrade) fn prepare_managed_pair(
-    source: &Path,
-    install_path: &Path,
-    attempt_id: &str,
-) -> Result<PathBuf> {
-    cleanup_stale_copies(install_path)?;
-    let helper_path = super::helper_path(install_path, attempt_id)?;
-    copy_helper(source, &helper_path)?;
-    Ok(helper_path)
-}
-
 pub(in crate::upgrade) fn spawn_managed_pair(
     process: &dyn ReleaseProcessPort,
     helper_path: &Path,
@@ -168,6 +157,13 @@ pub(in crate::upgrade) fn spawn_managed_pair(
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW);
     process.sanitize_release_authority_env(&mut command);
+    // A rebuilt qualification candidate may continue its fixture-signed
+    // transaction after the normal child sanitizer removed release authority.
+    // This branch does not exist in production binaries.
+    #[cfg(ctx_release_qualification)]
+    if let Some(authority) = std::env::var_os("CTX_RELEASE_MANAGED_PAIR_AUTHORITY_JSON") {
+        command.env("CTX_RELEASE_MANAGED_PAIR_AUTHORITY_JSON", authority);
+    }
     let mut child = command
         .spawn()
         .context("spawn Windows managed-pair replacement helper")?;

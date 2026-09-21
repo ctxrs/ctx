@@ -428,15 +428,6 @@ pub(in crate::upgrade) fn helper_path(install_path: &Path, attempt_id: &str) -> 
 }
 
 #[cfg(windows)]
-pub(in crate::upgrade) fn prepare_managed_pair_helper(
-    source: &Path,
-    install_path: &Path,
-    attempt_id: &str,
-) -> Result<PathBuf> {
-    helper::prepare_managed_pair(source, install_path, attempt_id)
-}
-
-#[cfg(windows)]
 pub(in crate::upgrade) fn spawn_managed_pair_helper(
     process: &dyn ReleaseProcessPort,
     helper_path: &Path,

@@ -1,0 +1,74 @@
+---
+title: "Privacy Policy"
+description: "How ctx handles information for the public docs site, installers, and local search CLI."
+---
+
+Last updated: September 21, 2026
+
+# Privacy Policy
+
+ctx engineering inc is a Delaware corporation that develops open-source projects, including ctx. This policy covers the ctx website, support, installers, and local CLI. The official website is [ctx.rs](https://ctx.rs), and the source repository is [github.com/ctxrs/ctx](https://github.com/ctxrs/ctx).
+
+## Local CLI data
+
+ctx is a local CLI for indexing existing coding-agent session history into a self-contained Tantivy Core and searching it from your machine. Setup, source discovery, and import read local provider inputs. Search, show, locate, and transcript output read local ctx Core storage for transcript content.
+
+The CLI may store sensitive developer history locally, including prompts, responses, code snippets, command text, command output previews, file paths, working directories, session metadata, and normalized searchable text. Treat the ctx data root, Core index, local database sidecars, logs, and written JSON or transcript output as private developer data.
+
+By default, the ctx data root is `~/.ctx`. You can choose a different root with `CTX_DATA_ROOT` or `--data-root`.
+
+## CLI analytics
+
+The ctx CLI uses default-on product analytics for coarse command invocation metadata, including install-triggered setup runs. This helps us understand which commands are used, whether they succeed, and where the CLI needs improvement. CLI analytics are sent to `https://cli.ctx.rs/functions/v1/analytics`.
+
+The CLI analytics field allowlist includes random data-root and client-profile identifiers (stored as server-side hashes), ctx version, OS, architecture, typed surface and operation names, success state, duration bucket, option booleans, bucketed counts, selected provider filters, and coarse network geography derived by hosting infrastructure. The server also records the non-secret identity-key version used for hashing. Secret HMAC keys and salts are never telemetry. When analytics are enabled, normal setup, import, search-refresh, and daemon work can also report that ctx passively detected or refreshed a provider from a closed provider-family list, even if you did not select a provider or provider filter. Provider telemetry is limited to closed categories for refresh context, lifecycle, outcome, failure code, and retryability plus bucketed corpus and work measurements. Closed provider families remain eligible for collection even when they are rare or low usage; collection does not use a popularity threshold. For less than seven days after an official hosted installation, eligible product-analytics events may also include the installer attempt identifier so we can measure initial activation; the server stores it only as a hash. ctx omits this bridge at the seven-day boundary and whenever the install timestamp is missing, malformed, or in the future. Managed upgrades preserve the original timestamp rather than reopening the window.
+
+Analytics identifiers are random local identifiers, not hardware fingerprints.
+Blame metadata is limited to closed target kinds, first or continuation calls,
+outcomes, bucketed evaluated-result counts and durations, and freshness states. It never
+includes target strings, Git object IDs, cursors, repository paths, or evidence
+content. Foreground commands record locally; only daemon maintenance uploads
+queued CLI analytics when consent allows it.
+
+If an analytics request cannot be delivered, ctx places the exact already-serialized content-free request in a bounded owner-private file in the operating system's user-state directory, outside the ctx data root. The outbox contains the random analytics identifiers already present in the request, a one-way endpoint fingerprint, and queue bookkeeping. It does not contain transcript content, source code, paths, response bodies, or raw errors. It is limited to 128 requests, 2 MiB total, 512 KiB per request, and 30 days. ctx reports queue depth, retry attempts, drops, age, and delivery failures only through closed buckets and failure classes. If the private outbox is malformed or oversized, ctx replaces it with an empty valid outbox and later reports one closed `local_io` drop; unsafe paths or permissions still fail closed. An explicit analytics opt-out removes the outbox the next time ctx opens analytics state and makes no telemetry request.
+
+CLI analytics do not include history or transcript content, prompts, responses, source code or source bodies, indexed search content, search query text, MCP request parameters or tool-result content, result snippets, source or repository paths, locators or native coordinates, repository or branch names, raw local or provider source/session/event/record/resource IDs or hashes of them, exact corpus counts, byte sizes, text lengths, timestamps, durations, CPU, memory, or I/O measurements, raw error messages, command text, command output, credentials, authorization headers, access tokens, secrets, or SQLite database contents. Counts, sizes, lengths, durations, and resource measurements are omitted or bucketed before transmission. Setup, import, search, show, locate, and transcript output do not send indexed transcript content to a model API as part of normal CLI operation. CLI and MCP operations may send only bounded typed operation metadata under this allowlist, such as input or output kinds, outcomes, duration or count buckets, truncation booleans, and lifecycle state.
+
+To disable CLI analytics persistently, set `[analytics] enabled = false` in `config.toml`. To disable analytics for one process or installer run, set `CTX_ANALYTICS_ENABLED=false`. A config opt-out wins over `CTX_ANALYTICS_ENABLED=true` and an endpoint override.
+
+## Installer diagnostics
+
+The official shell and PowerShell installers separately send default-on diagnostic stage reports to `https://cli.ctx.rs/functions/v1/install-attempt`. The exact `install_stage@1` payload allowlist is `event_name`, `event_version`, `install_attempt_id`, `stage`, `status`, `platform`, `arch`, and `script_family`. The anonymous per-response attempt identifier is stored only as a server-side hash.
+
+Installer diagnostics do not include history or transcript content, prompts, query text, source code or source bodies, source or repository paths, credentials, authorization headers, access tokens, secrets, command output, or downloaded file contents.
+
+Set `CTX_ANALYTICS_ENABLED=false` before running the installer to disable both installer diagnostics and CLI analytics during setup.
+
+We process CLI analytics and installer diagnostics only through their respective field allowlists. Server-side hashes and random analytics identifiers are pseudonymous safeguards, not a claim that raw records are anonymous. Automatic deletion of accepted raw product-telemetry records is currently disabled so we can diagnose behavior across released versions, investigate incidents, validate the collection pipeline, and create statistical history. Raw access is restricted, and raw records remain subject to applicable deletion requests and to deletion when they are no longer reasonably needed for those purposes or when law, security, or abuse response requires it.
+
+We also create daily statistical counts over closed fields such as product version, platform, operation, outcome, failure code, retryability, and delivery-health buckets. Those daily rows omit event IDs, identity hashes, identity-key versions, exact timestamps, payloads, and raw errors. We intend to retain these identity-free aggregate counts as long-term product history, including after corresponding raw records are removed.
+
+## Upgrade checks
+
+Official installer-managed binaries can contact ctx release metadata endpoints
+for explicit `ctx upgrade` operations. Only daemon maintenance performs
+background auto-upgrade checks; ordinary foreground commands do not trigger
+automatic upgrades. Upgrade checks are intended to send only ordinary HTTP
+request metadata plus release channel/platform context; they are not intended
+to upload transcript text, search queries, snippets, source paths, repository
+names, command output, or SQLite contents. Disable managed background
+auto-upgrade with `ctx upgrade disable` or `CTX_UPGRADE_AUTO=off`.
+
+## Public site and support
+
+When you use the public docs site or email us, we may receive information such as your email address, support messages, issue reports, diagnostics you choose to provide, IP address, browser and device metadata, referring pages, pages viewed, and basic site usage data.
+
+Do not send unnecessary secrets, credentials, customer data, proprietary code, private transcripts, SQLite databases, logs, or written ctx output in support messages.
+
+## Third-party providers
+
+ctx indexes history created by third-party coding agents and developer tools. Those providers control their own products, storage locations, network behavior, terms, and privacy practices. You are responsible for understanding the providers you use and for deciding what local history ctx should index, write to files, or share.
+
+## Contact
+
+For privacy requests, email [privacy@ctx.rs](mailto:privacy@ctx.rs). We can respond for data that ctx controls, such as support records and first-party analytics. Local CLI data remains on your machine unless you choose to send it somewhere.

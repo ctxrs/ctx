@@ -2,21 +2,19 @@
 
 use std::env;
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Mutex,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+    Arc, Mutex,
 };
 use std::{io::Write, path::Path, thread, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ctx_client_observability::analytics::PublicEventV1;
-use ctx_companion_bridge::CancellationToken;
 use ctx_daemon_cli::{DaemonConfig, DaemonMode, DaemonRuntimeConfig};
 
 pub(crate) use ctx_daemon_cli::{
     begin_daemon_upgrade_handoff, complete_replacement_daemon_handoff,
     coordinate_import_source_backed_refresh_with_progress,
-    coordinate_setup_source_backed_refresh_with_progress,
-    coordinate_source_backed_refresh_with_progress, daemon_autostart_suppression_reason,
+    coordinate_setup_source_backed_refresh_with_progress, daemon_autostart_suppression_reason,
     finish_replacement_daemon_handoff, mark_replacement_helper_handoff,
     published_explicit_source_relocation_authority, semantic_managed_model_snapshot_dir,
     semantic_native_accelerator_target, semantic_provisioning_coreml_asset_matches,
@@ -142,26 +140,27 @@ fn wait_for_import_daemon_semantic_completion(
 struct CtxDaemonCliHost;
 
 static HOST: CtxDaemonCliHost = CtxDaemonCliHost;
-const COMPANION_MAINTENANCE_WAKE_RUNNING: u8 = 1;
-const COMPANION_MAINTENANCE_WAKE_PENDING: u8 = 2;
-static COMPANION_MAINTENANCE_WAKE_STATE: AtomicU8 = AtomicU8::new(0);
-static COMPANION_MAINTENANCE_WORKER: Mutex<Option<CompanionMaintenanceWorker>> = Mutex::new(None);
+const ATTRIBUTION_MAINTENANCE_WAKE_RUNNING: u8 = 1;
+const ATTRIBUTION_MAINTENANCE_WAKE_PENDING: u8 = 2;
+static ATTRIBUTION_MAINTENANCE_WAKE_STATE: AtomicU8 = AtomicU8::new(0);
+static ATTRIBUTION_MAINTENANCE_WORKER: Mutex<Option<AttributionMaintenanceWorker>> =
+    Mutex::new(None);
 
-struct CompanionMaintenanceWorker {
-    cancellation: CancellationToken,
+struct AttributionMaintenanceWorker {
+    cancellation: Arc<AtomicBool>,
     handle: std::thread::JoinHandle<()>,
 }
 
-fn request_companion_maintenance_worker(state: &AtomicU8) -> bool {
-    let mut observed = state.fetch_or(COMPANION_MAINTENANCE_WAKE_PENDING, Ordering::AcqRel)
-        | COMPANION_MAINTENANCE_WAKE_PENDING;
+fn request_attribution_maintenance_worker(state: &AtomicU8) -> bool {
+    let mut observed = state.fetch_or(ATTRIBUTION_MAINTENANCE_WAKE_PENDING, Ordering::AcqRel)
+        | ATTRIBUTION_MAINTENANCE_WAKE_PENDING;
     loop {
-        if observed & COMPANION_MAINTENANCE_WAKE_RUNNING != 0 {
+        if observed & ATTRIBUTION_MAINTENANCE_WAKE_RUNNING != 0 {
             return false;
         }
         match state.compare_exchange_weak(
             observed,
-            observed | COMPANION_MAINTENANCE_WAKE_RUNNING,
+            observed | ATTRIBUTION_MAINTENANCE_WAKE_RUNNING,
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
@@ -171,19 +170,19 @@ fn request_companion_maintenance_worker(state: &AtomicU8) -> bool {
     }
 }
 
-fn take_companion_maintenance_request(state: &AtomicU8) {
-    state.fetch_and(!COMPANION_MAINTENANCE_WAKE_PENDING, Ordering::AcqRel);
+fn take_attribution_maintenance_request(state: &AtomicU8) {
+    state.fetch_and(!ATTRIBUTION_MAINTENANCE_WAKE_PENDING, Ordering::AcqRel);
 }
 
-fn companion_maintenance_should_continue(state: &AtomicU8) -> bool {
+fn attribution_maintenance_should_continue(state: &AtomicU8) -> bool {
     loop {
         let observed = state.load(Ordering::Acquire);
-        if observed & COMPANION_MAINTENANCE_WAKE_PENDING != 0 {
+        if observed & ATTRIBUTION_MAINTENANCE_WAKE_PENDING != 0 {
             return true;
         }
         if state
             .compare_exchange_weak(
-                COMPANION_MAINTENANCE_WAKE_RUNNING,
+                ATTRIBUTION_MAINTENANCE_WAKE_RUNNING,
                 0,
                 Ordering::AcqRel,
                 Ordering::Acquire,
@@ -195,26 +194,74 @@ fn companion_maintenance_should_continue(state: &AtomicU8) -> bool {
     }
 }
 
-fn stop_companion_maintenance_worker_in(
+fn stop_attribution_maintenance_worker_in(
     state: &AtomicU8,
-    worker: &Mutex<Option<CompanionMaintenanceWorker>>,
+    worker: &Mutex<Option<AttributionMaintenanceWorker>>,
 ) {
     let worker = worker
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take();
     if let Some(worker) = worker {
-        worker.cancellation.cancel();
+        worker.cancellation.store(true, Ordering::Release);
         let _ = worker.handle.join();
     }
     state.store(0, Ordering::Release);
 }
 
-fn stop_companion_maintenance_worker() {
-    stop_companion_maintenance_worker_in(
-        &COMPANION_MAINTENANCE_WAKE_STATE,
-        &COMPANION_MAINTENANCE_WORKER,
+fn stop_attribution_maintenance_worker() {
+    stop_attribution_maintenance_worker_in(
+        &ATTRIBUTION_MAINTENANCE_WAKE_STATE,
+        &ATTRIBUTION_MAINTENANCE_WORKER,
     );
+}
+
+fn reconcile_current_attribution(
+    data_root: &Path,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<()> {
+    let Some(generation) = ctx_history_snapshot_reader::load_active_generation_id(data_root)?
+    else {
+        return Ok(());
+    };
+    let snapshot = ctx_history_snapshot_reader::CoreSnapshot::open(
+        data_root,
+        &generation,
+        &ctx_history_snapshot_reader::SnapshotContract::current()?,
+    )?;
+    ctx_attribution::catch_up(data_root, &snapshot, cancelled)?;
+    Ok(())
+}
+
+pub(crate) fn complete_attribution(
+    data_root: &Path,
+    pin: &PinnedSourceBackedGeneration,
+) -> Result<()> {
+    ctx_daemon_cli::foreground_checkpoint()?;
+    // The command keeps its verified Core pin alive through the entire synchronous catch-up.
+    let result: Result<()> = (|| {
+        let snapshot = ctx_history_snapshot_reader::CoreSnapshot::open(
+            data_root,
+            pin.generation_id(),
+            &ctx_history_snapshot_reader::SnapshotContract::current()?,
+        )?;
+        ctx_attribution::catch_up(data_root, &snapshot, &|| {
+            ctx_daemon_cli::foreground_checkpoint().is_err()
+        })?;
+        Ok(())
+    })();
+    ctx_daemon_cli::foreground_checkpoint()?;
+    if matches!(
+        result
+            .as_ref()
+            .err()
+            .and_then(|error| error
+                .downcast_ref::<ctx_attribution::materializer::SegmentMaterializerError>()),
+        Some(ctx_attribution::materializer::SegmentMaterializerError::Cancelled)
+    ) {
+        return Err(ctx_daemon_cli::FiniteWorkerInterrupted.into());
+    }
+    result.context("Core history remains available; attribution completion failed. Run `ctx import --all` to retry.")
 }
 
 pub(crate) fn initialize() -> Result<()> {
@@ -389,7 +436,13 @@ pub(crate) fn source_epoch_status_report(
     data_root: &Path,
     config: &ctx_app_config::AppConfig,
 ) -> Result<ctx_daemon_cli::SourceEpochStatus> {
-    ctx_daemon_cli::source_epoch_status_report(data_root, &daemon_cli_config(config))
+    let mut source =
+        ctx_daemon_cli::source_epoch_status_report(data_root, &daemon_cli_config(config))?;
+    source.report["attribution"] = match ctx_attribution::readiness(data_root) {
+        Ok(status) => serde_json::to_value(status)?,
+        Err(error) => serde_json::json!({"error": error}),
+    };
+    Ok(source)
 }
 
 pub(crate) fn autostart_daemon_and_wait(
@@ -558,8 +611,8 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
             request, data_root, config, &upgrade,
         );
         // The daemon owns the maintenance worker. Cancel and join it before
-        // returning so Pro and any contained descendants cannot outlive Core.
-        stop_companion_maintenance_worker();
+        // returning so attribution work cannot outlive the owning daemon.
+        stop_attribution_maintenance_worker();
         result
     }
 
@@ -594,45 +647,44 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
     fn core_generation_published(
         &self,
         data_root: &Path,
-        _publication: &ctx_daemon_cli::CoreGenerationPublished,
+        _publication: Option<&ctx_daemon_cli::CoreGenerationPublished>,
     ) -> Result<()> {
-        if !request_companion_maintenance_worker(&COMPANION_MAINTENANCE_WAKE_STATE) {
+        if !request_attribution_maintenance_worker(&ATTRIBUTION_MAINTENANCE_WAKE_STATE) {
             return Ok(());
         }
         let data_root = data_root.to_path_buf();
-        let cancellation = CancellationToken::new();
+        let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
         let worker = std::thread::Builder::new()
-            .name("ctx-pro-maintenance-wake".to_owned())
+            .name("ctx-attribution-maintenance".to_owned())
             .spawn(move || loop {
-                take_companion_maintenance_request(&COMPANION_MAINTENANCE_WAKE_STATE);
-                let _ = crate::companion::wake_verified_private_maintenance(
-                    &data_root,
-                    &worker_cancellation,
-                );
-                if worker_cancellation.is_cancelled() {
-                    COMPANION_MAINTENANCE_WAKE_STATE.store(0, Ordering::Release);
+                take_attribution_maintenance_request(&ATTRIBUTION_MAINTENANCE_WAKE_STATE);
+                let _ = reconcile_current_attribution(&data_root, &|| {
+                    worker_cancellation.load(Ordering::Acquire)
+                });
+                if worker_cancellation.load(Ordering::Acquire) {
+                    ATTRIBUTION_MAINTENANCE_WAKE_STATE.store(0, Ordering::Release);
                     break;
                 }
-                if !companion_maintenance_should_continue(&COMPANION_MAINTENANCE_WAKE_STATE) {
+                if !attribution_maintenance_should_continue(&ATTRIBUTION_MAINTENANCE_WAKE_STATE) {
                     break;
                 }
             });
         match worker {
             Ok(handle) => {
-                let previous = COMPANION_MAINTENANCE_WORKER
+                let previous = ATTRIBUTION_MAINTENANCE_WORKER
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .replace(CompanionMaintenanceWorker {
+                    .replace(AttributionMaintenanceWorker {
                         cancellation,
                         handle,
                     });
                 if let Some(previous) = previous {
-                    previous.cancellation.cancel();
+                    previous.cancellation.store(true, Ordering::Release);
                     let _ = previous.handle.join();
                 }
             }
-            Err(_) => COMPANION_MAINTENANCE_WAKE_STATE.store(0, Ordering::Release),
+            Err(_) => ATTRIBUTION_MAINTENANCE_WAKE_STATE.store(0, Ordering::Release),
         }
         Ok(())
     }

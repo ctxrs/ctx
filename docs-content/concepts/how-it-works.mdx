@@ -1,0 +1,181 @@
+---
+title: "How ctx works"
+sidebarTitle: "How it works"
+description: "How ctx discovers local agent history, builds a self-contained Tantivy Core generation, and keeps optional derived products current."
+---
+
+ctx makes local coding-agent history searchable by normalizing provider data
+into a self-contained local Core. A later agent can search for a phrase like
+`failed migration`, open the matching event, and inspect the session where it
+happened.
+
+## Discovery
+
+```bash
+ctx sources
+ctx sources --json
+```
+
+Discovery checks known local history locations for supported agent harnesses.
+It reports what ctx can see on the current machine without launching those
+agents.
+
+In JSON output:
+
+- `native_import` says whether ctx supports the provider format;
+- `importable` says whether a supported source is currently available.
+
+A provider can be supported even when there is nothing to import on one
+machine. Its local history may be missing, empty, moved, or written in an
+unsupported schema version.
+
+## Refresh
+
+```bash
+ctx setup
+ctx import --all
+ctx import --provider codex
+ctx import --provider opencode --path ~/.local/share/opencode/opencode.db
+```
+
+`ctx setup` is the normal first-run path. It discovers available inputs and
+publishes a fresh self-contained Core generation.
+
+`ctx import` explicitly refreshes provider inputs. Use it to target a provider,
+supply an exact path, or force foreground catch-up.
+
+Refresh reads provider history. It does not write provider files or source
+repositories, call model APIs, or require provider API keys. Accepted events
+become complete normalized Core records.
+
+## Self-contained Core records
+
+Provider histories use different schemas: JSONL transcript trees, SQLite
+databases, and structured session files. ctx normalizes the supported parts into
+one record contract:
+
+- sessions and events with ctx-owned IDs;
+- provider identity, original provider session ID, timestamps, roles, and event
+  types;
+- complete product-visible content and full meaningful text for search;
+- captured repository, file, and version-control evidence; and
+- stable Core citations for those records.
+
+The immutable Core generation stores each complete normalized record and indexes
+its meaningful text. Provider session IDs remain available for native workflows
+such as `codex resume <uuid>`. Typed ctx lookup uses ctx-owned IDs positionally
+and retains explicit provider-aware identity paths.
+
+A session can be associated with no repository, one repository, or several.
+Blame derives repository identity from captured evidence in retained Core
+records. Access to a current local checkout is separate, is revalidated before
+use, and may disappear without erasing the captured history.
+
+## Local storage
+
+The default data root contains Core and its optional local products:
+
+```text
+~/.ctx/
+  search/
+    lexical/
+    semantic/
+    attribution/
+  config.toml
+  usage.sqlite
+```
+
+- `search/lexical/` contains immutable Tantivy Core generations with full
+  meaningful text indexed and complete normalized records stored.
+- `search/semantic/` contains optional generation-bound flat-F32 vectors,
+  hashes, and offsets. It contains no plaintext transcript chunks.
+
+- `search/attribution/` contains a bounded, plain derived index for Blame,
+  including repository facts and stable Core citations. It does not duplicate
+  complete Core transcript bodies.
+
+Semantic and attribution indexes may trail Core and catch up independently.
+The daemon schedules attribution catch-up on startup and publication. Run
+`ctx import --all` or `ctx setup --wait` for explicit completion, including in
+manual mode and with unchanged Core. `ctx setup --no-daemon` suppresses that
+refresh. Status, doctor, and index wait/watch only observe it.
+
+Core/Tantivy is the local authority for normalized lexical records and history
+queries. Typed provider-aware search, show, and locate cover direct lookup;
+ctx has no generic SQL or database-query surface.
+
+Blame distinguishes index currentness from repository evidence and local Git
+access. A current index with no supported repository evidence is a valid empty
+or abstained result. Missing local access limits operations that need that
+checkout. See [Blame](/blame).
+
+You can choose another root with `CTX_DATA_ROOT` or `--data-root`.
+
+Version 0.26 starts a fresh self-contained Core epoch. Before the first Core
+generation is verified and atomically active, ctx does not open or migrate an
+old Store database family. After verified activation, ctx deletes that exact old
+Store database family. There is no supported rollback, manual recovery, or v0.25
+binary or daemon path; recovery fixes forward by rebuilding from provider
+inputs. Current-format atomic install and publication crash recovery remain
+supported.
+
+## Search and retrieval
+
+```bash
+ctx search "retry handling"
+ctx search --term retry --term backoff --term timeout
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id>
+ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+```
+
+Lexical search, snippets, event and session display, and MCP read one pinned Core
+generation. Hybrid and semantic search may also use the optional semantic
+generation when it matches that Core generation.
+
+Search snippets and bounded displays are derived from complete stored Core
+content. If an operation applies a response limit, it reports the result as
+paged or truncated rather than claiming that a prefix is complete. Provider
+files do not need to remain available for ordinary reads.
+
+These commands retrieve existing material. They do not summarize with a model.
+
+## Refresh behavior
+
+```bash
+ctx search "token budget" --refresh background
+ctx search "token budget" --refresh off
+ctx search "token budget" --refresh wait
+```
+
+Search defaults to `--refresh background`. It serves the active Core generation
+and lets daemon maintenance publish a later one. A first search may perform a
+bounded foreground bootstrap when no generation exists.
+
+`--refresh off` is read-only with respect to provider discovery and derived
+projections. It queries only the active lexical and compatible semantic state.
+
+`--refresh wait` runs foreground source refresh and fails if refresh cannot
+complete. Run `ctx import` when you want explicit provider or path control.
+
+JSON search output includes `freshness` and `retrieval` objects so scripts can
+inspect the refresh mode, active generation, retrieval backend, and semantic
+fallback state.
+
+## Failure boundaries
+
+A refresh candidate becomes visible only after it is complete and verified.
+Temporary source loss, an unreadable source, or an unsupported parser revision
+keeps the last good Core records available and reports stale refresh health. A
+confirmed source deletion removes its records in a later committed generation.
+Semantic or attribution failure does not roll back a valid Core generation.
+
+Use these commands to narrow the problem:
+
+```bash
+ctx sources --json
+ctx import --provider <provider> --progress plain
+ctx search "the missing phrase" --refresh wait
+ctx status --format json
+ctx doctor
+```

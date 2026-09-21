@@ -33,9 +33,9 @@ fn ready_nonempty_http_uses_the_configured_authenticated_executor_without_mutati
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].method, "GET");
     assert_eq!(requests[0].path, "/semantic-base/v2/contract");
-    assert!(requests.iter().all(|request| {
-        request.header("authorization") == Some("Bearer passive-semantic-test-token")
-    }));
+    assert!(requests
+        .iter()
+        .all(|request| { request.header("authorization") == Some("Bearer synthetic-test") }));
     assert_eq!(requests[1].body["input_kind"], "query");
     assert_eq!(requests[1].body["space_id"], "test-space");
     assert_eq!(requests[1].body["dimensions"], 7);

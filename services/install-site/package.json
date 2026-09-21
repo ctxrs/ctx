@@ -1,0 +1,21 @@
+{
+  "name": "ctx-install-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "node deploy.mjs apply",
+    "deploy:prepare": "node deploy.mjs prepare",
+    "deploy:check": "node deploy.mjs check",
+    "deploy:staging": "wrangler deploy --env staging",
+    "test": "node src/run-node-test-suite.mjs src/*.test.mjs src/test/*.test.mjs"
+  },
+  "overrides": {
+    "sharp": "0.35.4",
+    "undici": "7.29.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.114.0"
+  },
+  "license": "Apache-2.0"
+}

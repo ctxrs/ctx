@@ -28,6 +28,7 @@ pub use diagnostics::{
 #[cfg(unix)]
 pub use install::reconcile_managed_pair_integration_under_installation_lock;
 pub use install::{
+    cleanup_legacy_managed_pair_under_installation_lock,
     current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
     disable_current_man_pages, ensure_hosted_transaction_inactive_under_installation_lock,
     installation_hosted_uninstall_is_active,

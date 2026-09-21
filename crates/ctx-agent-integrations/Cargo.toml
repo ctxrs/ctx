@@ -10,6 +10,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ctx-attribution-model = { path = "../ctx-attribution-model" }
+ctx-client-observability = { path = "../ctx-client-observability", default-features = false }
 anyhow.workspace = true
 chrono.workspace = true
 ctx-history-core = { path = "../ctx-history-core" }

@@ -79,7 +79,7 @@ rust_library(
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(),
-    deps = all_crate_deps(normal = True) + CTX_UPGRADE_ENGINE_DEPS,
+    deps = all_crate_deps(normal = True) + [dep for dep in CTX_UPGRADE_ENGINE_DEPS if dep != "//crates/ctx-companion-bridge:lib"] + ["//crates/ctx-companion-bridge:qualification_lib"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = ["test-harness.env"],
@@ -87,6 +87,21 @@ rust_library(
         "--cfg=ctx_release_qualification",
         "--cfg=ctx_upgrade_engine_test_support",
     ],
+)
+
+ctx_rust_test(
+    name = "qualification_tests",
+    srcs = RUST_SRCS,
+    crate_name = "ctx_upgrade_engine",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal = True, normal_dev = True) + [dep for dep in CTX_UPGRADE_ENGINE_DEPS if dep != "//crates/ctx-companion-bridge:lib"] + ["//crates/ctx-companion-bridge:qualification_lib"],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_env_files = ["test-harness.env"],
+    rustc_flags = CTX_UPGRADE_ENGINE_RUSTC_FLAGS + ["--cfg=ctx_release_qualification"],
+    tags = ["exclusive", "manual"],
 )
 
 ctx_rust_test(

@@ -111,6 +111,15 @@ const MAN_PAGE_COMPATIBILITY_ALIASES: &[(&str, &str)] = &[
 
 const TOPICS: &[DocTopic] = &[
     DocTopic {
+        id: "blame",
+        title: "Agent Blame",
+        audience: "human-agent",
+        summary: "Cited agent provenance for file lines, commits, and pull requests.",
+        tags: &["blame", "git", "provenance", "citations"],
+        source_path: "docs/blame.md",
+        body: include_str!("../../../docs/blame.md"),
+    },
+    DocTopic {
         id: "getting-started",
         title: "Getting Started",
         audience: "human-agent",

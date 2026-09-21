@@ -61,39 +61,39 @@ fn import_semantic_owner_is_independent_of_daemon_autostart_suppression() {
 }
 
 #[test]
-fn companion_maintenance_wake_coalesces_without_losing_a_publication() {
+fn attribution_maintenance_wake_coalesces_without_losing_a_publication() {
     let state = AtomicU8::new(0);
 
-    assert!(request_companion_maintenance_worker(&state));
-    assert!(!request_companion_maintenance_worker(&state));
-    take_companion_maintenance_request(&state);
+    assert!(request_attribution_maintenance_worker(&state));
+    assert!(!request_attribution_maintenance_worker(&state));
+    take_attribution_maintenance_request(&state);
 
-    assert!(!request_companion_maintenance_worker(&state));
-    assert!(companion_maintenance_should_continue(&state));
-    take_companion_maintenance_request(&state);
-    assert!(!companion_maintenance_should_continue(&state));
+    assert!(!request_attribution_maintenance_worker(&state));
+    assert!(attribution_maintenance_should_continue(&state));
+    take_attribution_maintenance_request(&state);
+    assert!(!attribution_maintenance_should_continue(&state));
     assert_eq!(state.load(Ordering::Acquire), 0);
 }
 
 #[test]
-fn daemon_shutdown_cancels_and_joins_companion_maintenance_worker() {
-    let state = AtomicU8::new(COMPANION_MAINTENANCE_WAKE_RUNNING);
-    let cancellation = CancellationToken::new();
+fn daemon_shutdown_cancels_and_joins_attribution_maintenance_worker() {
+    let state = AtomicU8::new(ATTRIBUTION_MAINTENANCE_WAKE_RUNNING);
+    let cancellation = Arc::new(AtomicBool::new(false));
     let worker_cancellation = cancellation.clone();
     let stopped = Arc::new(AtomicBool::new(false));
     let worker_stopped = Arc::clone(&stopped);
     let handle = std::thread::spawn(move || {
-        while !worker_cancellation.is_cancelled() {
+        while !worker_cancellation.load(AtomicOrdering::Acquire) {
             std::thread::yield_now();
         }
         worker_stopped.store(true, AtomicOrdering::Release);
     });
-    let worker = Mutex::new(Some(CompanionMaintenanceWorker {
+    let worker = Mutex::new(Some(AttributionMaintenanceWorker {
         cancellation,
         handle,
     }));
 
-    stop_companion_maintenance_worker_in(&state, &worker);
+    stop_attribution_maintenance_worker_in(&state, &worker);
 
     assert!(stopped.load(AtomicOrdering::Acquire));
     assert_eq!(state.load(Ordering::Acquire), 0);

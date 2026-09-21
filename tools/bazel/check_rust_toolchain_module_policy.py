@@ -77,8 +77,8 @@ def validate_pins(files: dict[str, str]) -> None:
     if pin.get("profile") != "minimal" or set(pin.get("components", ())) != {"rustfmt", "clippy"}:
         raise PolicyError("repository toolchain requires minimal, rustfmt, and clippy")
     manifest = tomllib.loads(files["Cargo.toml"])
-    if manifest["workspace"]["package"]["rust-version"] != "1.88":
-        raise PolicyError("the maintained compiler pin must not change the Rust 1.88 MSRV")
+    if manifest["workspace"]["package"]["rust-version"] != "1.95":
+        raise PolicyError("the retained repository parser requires the Rust 1.95 MSRV")
     primary_count = 0
     for node in ast.walk(ast.parse(files["MODULE.bazel"])):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -113,7 +113,7 @@ def check_pin_mutations(files: dict[str, str]) -> None:
         ("rust-toolchain.toml", version, "stable"),
         ("rust-toolchain.toml", 'profile = "minimal"', 'profile = "default"'),
         ("rust-toolchain.toml", '"clippy"', '"rust-src"'),
-        ("Cargo.toml", 'rust-version = "1.88"', 'rust-version = "1.98"'),
+        ("Cargo.toml", 'rust-version = "1.95"', 'rust-version = "1.98"'),
         ("MODULE.bazel", f'versions = ["{version}"]', 'versions = ["0.0.0"]'),
         ("MODULE.bazel", f'rustfmt_version = "{version}"', 'rustfmt_version = "0.0.0"'),
         ("MODULE.bazel", f'cargo-{version}-', 'cargo-0.0.0-'),

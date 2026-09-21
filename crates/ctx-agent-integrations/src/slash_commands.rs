@@ -30,9 +30,9 @@ session for this request.
 
 User request: $ARGUMENTS
 
-Choose local history search or ctx pro blame based on the request. Inspect cited
-events or sessions before making claims, preserve the distinction between Core
-and paid pro capabilities, and return a concise answer grounded in ctx citations.
+Choose local history search or ctx blame based on the request. Inspect cited
+events or sessions before making claims, and return a concise answer grounded
+in ctx citations.
 Prefer default text output for agent reading; use `--format json` only for
 scripts or exact machine-readable fields.
 "#;

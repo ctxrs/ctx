@@ -1,0 +1,54 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library", "js_test")
+load("@release_api_npm//:defs.bzl", "npm_link_all_packages")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "pnpm-lock.yaml",
+    "wrangler.toml",
+    "release-trust/core-staging-metadata-signing-public.pem",
+    "release-trust/core-staging-metadata-signing-public.spki-sha256",
+])
+
+npm_link_all_packages(name = "node_modules")
+
+js_library(
+    name = "release_config_inputs",
+    srcs = [
+        "release-trust/core-staging-metadata-signing-public.pem",
+        "release-trust/core-staging-metadata-signing-public.spki-sha256",
+        "wrangler.toml",
+    ],
+)
+
+js_library(
+    name = "test_inputs",
+    srcs = glob(["src/**/*.ts", "test/**/*.ts", "test/**/*.mjs"], exclude = ["test/**/*.d.ts"]) + ["vitest.config.ts"],
+    data = [":release_config_inputs", "package.json", "tsconfig.json"] + glob(["test/**/*.d.ts"]),
+)
+
+js_test(
+    name = "worker_test",
+    entry_point = "test/run-bazel-tests.mjs",
+    args = ["worker"],
+    data = [":test_inputs", ":node_modules/vitest"],
+    size = "small",
+)
+
+js_test(
+    name = "typecheck_test",
+    entry_point = "test/run-bazel-tests.mjs",
+    args = ["typecheck"],
+    data = [
+        ":test_inputs",
+        ":node_modules/@cloudflare/workers-types",
+        ":node_modules/typescript",
+        ":node_modules/vitest",
+    ],
+    size = "small",
+)
+
+test_suite(
+    name = "release_api_worker_tests",
+    tests = [":worker_test", ":typecheck_test"],
+)

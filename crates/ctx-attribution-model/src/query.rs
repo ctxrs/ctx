@@ -1,0 +1,957 @@
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
+
+use serde::{Deserialize, Deserializer, Serialize};
+
+use super::{
+    CommitLineage, CoreMaterializationReceiptIdentity, ErrorClass, EvidenceCitation,
+    MAX_BLAME_ATTRIBUTIONS_PER_MATCH, MAX_BLAME_CURSOR_BYTES, MAX_BLAME_EVIDENCE,
+    MAX_BLAME_RESULTS, MAX_BLAME_TARGET_BYTES, MAX_CITATIONS_PER_FACT, ProtocolError, ResourceKind,
+    ResourceRef,
+};
+
+#[path = "query_pull_request_selector.rs"]
+pub(crate) mod pull_request_selector;
+use pull_request_selector::{PullRequestSelectorKind, pull_request_selector_kind};
+
+/// Exact completed authority that a cited blame request requires the derived graph to match.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuerySnapshotExpectation {
+    Core {
+        receipt: CoreMaterializationReceiptIdentity,
+    },
+}
+
+impl QuerySnapshotExpectation {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        match self {
+            Self::Core { receipt } => receipt.validate(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl LineRange {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.start == 0 || self.end < self.start {
+            return Err(ProtocolError::new(
+                ErrorClass::InvalidRequest,
+                "line range must be positive and inclusive",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BlameTarget {
+    File {
+        path: String,
+        repository: Option<String>,
+        lines: Option<LineRange>,
+    },
+    Commit {
+        oid: String,
+        repository: Option<String>,
+    },
+    PullRequest {
+        selector: String,
+        repository: Option<String>,
+    },
+}
+
+impl BlameTarget {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let (value, repository) = match self {
+            Self::File {
+                path,
+                repository,
+                lines,
+            } => {
+                if let Some(lines) = lines {
+                    lines.validate()?;
+                }
+                (path, repository)
+            }
+            Self::Commit { oid, repository } => {
+                validate_commit_selector(oid)?;
+                (oid, repository)
+            }
+            Self::PullRequest {
+                selector,
+                repository,
+            } => {
+                match pull_request_selector_kind(selector) {
+                    Some(PullRequestSelectorKind::Number) if repository.is_none() => {
+                        return Err(ProtocolError::new(
+                            ErrorClass::InvalidRequest,
+                            "pull request number requires a repository selector",
+                        ));
+                    }
+                    Some(
+                        PullRequestSelectorKind::Number | PullRequestSelectorKind::CanonicalUrl,
+                    ) => {}
+                    None => {
+                        return Err(ProtocolError::new(
+                            ErrorClass::InvalidRequest,
+                            "pull request selector must be a positive decimal number or canonical supported PR URL",
+                        ));
+                    }
+                }
+                (selector, repository)
+            }
+        };
+        validate_bounded_text(value, "blame target")?;
+        if let Some(repository) = repository {
+            validate_repository_selector(repository)?;
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn requires_git_read(&self) -> bool {
+        matches!(self, Self::File { .. })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlameRequest {
+    pub target: BlameTarget,
+    pub limit: u32,
+    pub cursor: Option<String>,
+    pub expected_snapshot: QuerySnapshotExpectation,
+}
+
+impl BlameRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.expected_snapshot.validate()?;
+        if self.limit == 0 || self.limit > MAX_BLAME_RESULTS {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                format!("blame limit must be between 1 and {MAX_BLAME_RESULTS}"),
+            ));
+        }
+        validate_cursor(self.cursor.as_deref())?;
+        self.target.validate()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationReason {
+    MoreMatches,
+    MoreCommittedLines,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlameContinuation {
+    pub cursor: String,
+    pub reason: ContinuationReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResolvedBlameTarget {
+    File {
+        path: String,
+        repository: ResourceRef,
+        requested_lines: Option<LineRange>,
+    },
+    Commit {
+        commit: ResourceRef,
+        repository: ResourceRef,
+    },
+    PullRequest {
+        selector: String,
+        pull_request: ResourceRef,
+        repository: ResourceRef,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeStatus {
+    Clean,
+    Differs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitSnapshot {
+    pub head_oid: String,
+    pub worktree_status: WorktreeStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactConfidence {
+    Explicit,
+    High,
+    Medium,
+    Low,
+    Ambiguous,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactState {
+    Asserted,
+    Ambiguous,
+    Contradicted,
+    Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionRelationship {
+    ProducedBy,
+    PossiblyProducedBy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAttribution {
+    pub id: String,
+    pub relationship: ProductionRelationship,
+    pub producing_session: ResourceRef,
+    pub parent_session: Option<ResourceRef>,
+    pub direct_actor: Option<ResourceRef>,
+    pub owning_root: Option<ResourceRef>,
+    pub fact_occurred_at_ms: Option<i64>,
+    pub confidence: FactConfidence,
+    pub state: FactState,
+    pub evidence_numbers: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileBlameMatch {
+    pub id: String,
+    pub lines: LineRange,
+    pub commit: ResourceRef,
+    pub line_evidence_numbers: Vec<u32>,
+    pub production: Vec<AgentAttribution>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommitFactType {
+    #[serde(rename = "git.commit.produced")]
+    Produced,
+    #[serde(rename = "git.commit.amended")]
+    Amended,
+    #[serde(rename = "git.commit.cherry_picked")]
+    CherryPicked,
+    #[serde(rename = "git.commit.reverted")]
+    Reverted,
+    #[serde(rename = "git.commit.pushed")]
+    Pushed,
+    #[serde(rename = "git.commit.inspected")]
+    Inspected,
+    #[serde(rename = "git.commit.referenced")]
+    Referenced,
+    #[serde(rename = "git.commit.ambiguous")]
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitPredicate {
+    ProducedBy,
+    PossiblyProducedBy,
+    AmendedBy,
+    CherryPickedFrom,
+    Reverts,
+    PushedBy,
+    InspectedBy,
+    ReferencedBy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitBlameMatch {
+    pub fact_id: String,
+    pub fact_type: CommitFactType,
+    pub predicate: CommitPredicate,
+    pub subject: ResourceRef,
+    pub object: Option<ResourceRef>,
+    pub parent_session: Option<ResourceRef>,
+    pub fact_occurred_at_ms: Option<i64>,
+    pub confidence: FactConfidence,
+    pub state: FactState,
+    pub direct_actor: Option<ResourceRef>,
+    pub owning_root: Option<ResourceRef>,
+    pub evidence_numbers: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestAction {
+    Referenced,
+    Created,
+    Reviewed,
+    Commented,
+    Merged,
+    Edited,
+    Closed,
+    Reopened,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PullRequestActivity {
+    pub fact_id: String,
+    pub action: PullRequestAction,
+    pub session: ResourceRef,
+    pub direct_actor: Option<ResourceRef>,
+    pub owning_root: Option<ResourceRef>,
+    pub fact_occurred_at_ms: Option<i64>,
+    pub confidence: FactConfidence,
+    pub state: FactState,
+    pub evidence_numbers: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestCommitRelationship {
+    ContainsCommit,
+    MergedAs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PullRequestCommit {
+    pub fact_id: String,
+    pub relationship: PullRequestCommitRelationship,
+    pub commit: ResourceRef,
+    pub fact_occurred_at_ms: Option<i64>,
+    pub production: Vec<AgentAttribution>,
+    pub evidence_numbers: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum PullRequestBlameRelationship {
+    Activity(PullRequestActivity),
+    Commit(PullRequestCommit),
+}
+
+/// One complete top-level PR activity or commit-membership relationship.
+///
+/// Keeping each relationship as its own match makes the request limit exact while
+/// preserving the PR -> commit -> producing-session proof boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PullRequestBlameMatch {
+    pub pull_request: ResourceRef,
+    pub relationship: PullRequestBlameRelationship,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum BlameMatch {
+    File(FileBlameMatch),
+    Commit(CommitBlameMatch),
+    PullRequest(PullRequestBlameMatch),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NumberedEvidence {
+    pub number: u32,
+    pub citation: EvidenceCitation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlameAttribution {
+    Proven,
+    Possible,
+    Conflicting,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlameCoverageUnit {
+    CommittedLine,
+    CommitFact,
+    PullRequestRelationship,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlameCoverage {
+    pub unit: BlameCoverageUnit,
+    pub evaluated: u32,
+    pub proven: u32,
+    pub possible: u32,
+    pub conflicting: u32,
+    pub none: u32,
+}
+
+impl BlameCoverage {
+    const fn empty(unit: BlameCoverageUnit) -> Self {
+        Self {
+            unit,
+            evaluated: 0,
+            proven: 0,
+            possible: 0,
+            conflicting: 0,
+            none: 0,
+        }
+    }
+
+    fn add(&mut self, attribution: BlameAttribution, evaluated: u32) -> Result<(), ProtocolError> {
+        self.evaluated = self
+            .evaluated
+            .checked_add(evaluated)
+            .ok_or_else(|| ProtocolError::new(ErrorClass::Bounds, "blame page count overflowed"))?;
+        let count = match attribution {
+            BlameAttribution::Proven => &mut self.proven,
+            BlameAttribution::Possible => &mut self.possible,
+            BlameAttribution::Conflicting => &mut self.conflicting,
+            BlameAttribution::None => &mut self.none,
+        };
+        *count = count.checked_add(evaluated).ok_or_else(|| {
+            ProtocolError::new(ErrorClass::Bounds, "blame page coverage overflowed")
+        })?;
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        let counted = self
+            .proven
+            .checked_add(self.possible)
+            .and_then(|count| count.checked_add(self.conflicting))
+            .and_then(|count| count.checked_add(self.none))
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorClass::Bounds, "blame coverage count overflowed")
+            })?;
+        if counted != self.evaluated {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame coverage counts must sum to the evaluated page count",
+            ));
+        }
+        Ok(())
+    }
+
+    const fn aggregate_attribution(&self) -> BlameAttribution {
+        if self.conflicting > 0 {
+            BlameAttribution::Conflicting
+        } else if self.evaluated > 0 && self.proven == self.evaluated {
+            BlameAttribution::Proven
+        } else if self.proven > 0 || self.possible > 0 {
+            BlameAttribution::Possible
+        } else {
+            BlameAttribution::None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlameOutcome {
+    pub attribution: BlameAttribution,
+    pub coverage: BlameCoverage,
+}
+
+impl BlameOutcome {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        self.coverage.validate()?;
+        if self.attribution != self.coverage.aggregate_attribution() {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame attribution must be the conservative aggregate of page coverage",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlameResult {
+    pub snapshot: QuerySnapshotExpectation,
+    pub target: ResolvedBlameTarget,
+    pub git_snapshot: Option<GitSnapshot>,
+    pub outcome: BlameOutcome,
+    pub matches: Vec<BlameMatch>,
+    pub evidence: Vec<NumberedEvidence>,
+    pub next: Option<BlameContinuation>,
+    pub lineage: Option<CommitLineage>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlameResultWire {
+    snapshot: QuerySnapshotExpectation,
+    target: ResolvedBlameTarget,
+    git_snapshot: Option<GitSnapshot>,
+    outcome: BlameOutcome,
+    matches: Vec<BlameMatch>,
+    evidence: Vec<NumberedEvidence>,
+    next: Option<BlameContinuation>,
+    #[serde(default)]
+    lineage: Option<CommitLineage>,
+}
+
+impl<'de> Deserialize<'de> for BlameResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = BlameResultWire::deserialize(deserializer)?;
+        let result = Self {
+            snapshot: wire.snapshot,
+            target: wire.target,
+            git_snapshot: wire.git_snapshot,
+            outcome: wire.outcome,
+            matches: wire.matches,
+            evidence: wire.evidence,
+            next: wire.next,
+            lineage: wire.lineage,
+        };
+        result
+            .validate()
+            .map_err(|error| serde::de::Error::custom(error.message))?;
+        Ok(result)
+    }
+}
+
+mod result;
+fn production_attribution(attributions: &[AgentAttribution]) -> BlameAttribution {
+    let asserted_producers = attributions
+        .iter()
+        .filter(|attribution| {
+            attribution.relationship == ProductionRelationship::ProducedBy
+                && attribution.state == FactState::Asserted
+        })
+        .map(|attribution| attribution.producing_session.id.as_str())
+        .collect::<BTreeSet<_>>();
+    match asserted_producers.len() {
+        2.. => BlameAttribution::Conflicting,
+        1 => BlameAttribution::Proven,
+        _ if attributions.iter().any(|attribution| {
+            attribution.relationship == ProductionRelationship::PossiblyProducedBy
+                && attribution.state == FactState::Ambiguous
+        }) =>
+        {
+            BlameAttribution::Possible
+        }
+        _ => BlameAttribution::None,
+    }
+}
+
+const fn fact_attribution(state: FactState) -> BlameAttribution {
+    match state {
+        FactState::Asserted => BlameAttribution::Proven,
+        FactState::Ambiguous => BlameAttribution::Possible,
+        FactState::Contradicted | FactState::Superseded => BlameAttribution::None,
+    }
+}
+
+const fn commit_fact_attribution(
+    fact: &CommitBlameMatch,
+    conflicting_producers: bool,
+) -> BlameAttribution {
+    match (fact.predicate, fact.state) {
+        (CommitPredicate::ProducedBy, FactState::Asserted) if conflicting_producers => {
+            BlameAttribution::Conflicting
+        }
+        (CommitPredicate::ProducedBy, FactState::Asserted) => BlameAttribution::Proven,
+        (CommitPredicate::PossiblyProducedBy, FactState::Ambiguous) => BlameAttribution::Possible,
+        _ => BlameAttribution::None,
+    }
+}
+
+impl ResolvedBlameTarget {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        match self {
+            Self::File {
+                path,
+                repository,
+                requested_lines,
+            } => {
+                validate_bounded_text(path, "resolved file path")?;
+                validate_resource_kind(repository, ResourceKind::Repository)?;
+                if let Some(lines) = requested_lines {
+                    lines.validate()?;
+                }
+            }
+            Self::Commit { commit, repository } => {
+                validate_resource_kind(commit, ResourceKind::Commit)?;
+                validate_resource_kind(repository, ResourceKind::Repository)?;
+            }
+            Self::PullRequest {
+                selector,
+                pull_request,
+                repository,
+            } => {
+                if pull_request_selector_kind(selector).is_none() {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Corrupt,
+                        "resolved pull request selector is not canonical",
+                    ));
+                }
+                validate_resource_kind(pull_request, ResourceKind::PullRequest)?;
+                validate_resource_kind(repository, ResourceKind::Repository)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BlameMatch {
+    fn validate(
+        &self,
+        target: &ResolvedBlameTarget,
+        available: &BTreeSet<u32>,
+        referenced: &mut BTreeSet<u32>,
+    ) -> Result<(), ProtocolError> {
+        match (self, target) {
+            (Self::File(value), ResolvedBlameTarget::File { .. }) => {
+                validate_bounded_text(&value.id, "file blame match ID")?;
+                value.lines.validate()?;
+                validate_resource_kind(&value.commit, ResourceKind::Commit)?;
+                validate_evidence_numbers(&value.line_evidence_numbers, available, referenced)?;
+                if value.production.len() > MAX_BLAME_ATTRIBUTIONS_PER_MATCH {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Bounds,
+                        "file blame match exceeds its attribution bound",
+                    ));
+                }
+                for attribution in &value.production {
+                    attribution.validate(available, referenced)?;
+                }
+            }
+            (Self::Commit(value), ResolvedBlameTarget::Commit { .. }) => {
+                value.validate(available, referenced)?;
+            }
+            (Self::PullRequest(value), ResolvedBlameTarget::PullRequest { .. }) => {
+                value.validate(available, referenced)?;
+            }
+            _ => {
+                return Err(ProtocolError::new(
+                    ErrorClass::Corrupt,
+                    "blame match kind does not match its resolved target",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl AgentAttribution {
+    fn validate(
+        &self,
+        available: &BTreeSet<u32>,
+        referenced: &mut BTreeSet<u32>,
+    ) -> Result<(), ProtocolError> {
+        validate_bounded_text(&self.id, "agent attribution ID")?;
+        validate_resource_kind(&self.producing_session, ResourceKind::Session)?;
+        if let Some(resource) = &self.parent_session {
+            validate_resource_kind(resource, ResourceKind::Session)?;
+        }
+        if let Some(resource) = &self.direct_actor {
+            resource.validate()?;
+        }
+        if let Some(resource) = &self.owning_root {
+            resource.validate()?;
+        }
+        validate_production_semantics(self.relationship, self.state, self.confidence)?;
+        validate_evidence_numbers(&self.evidence_numbers, available, referenced)
+    }
+}
+
+fn validate_production_semantics(
+    relationship: ProductionRelationship,
+    state: FactState,
+    confidence: FactConfidence,
+) -> Result<(), ProtocolError> {
+    match (relationship, state, confidence) {
+        (
+            ProductionRelationship::ProducedBy,
+            FactState::Asserted,
+            FactConfidence::Explicit
+            | FactConfidence::High
+            | FactConfidence::Medium
+            | FactConfidence::Low
+            | FactConfidence::Unknown,
+        )
+        | (
+            ProductionRelationship::PossiblyProducedBy,
+            FactState::Ambiguous,
+            FactConfidence::Ambiguous,
+        ) => Ok(()),
+        (ProductionRelationship::ProducedBy, _, _) => Err(ProtocolError::new(
+            ErrorClass::Corrupt,
+            "asserted production has inconsistent state or confidence",
+        )),
+        (ProductionRelationship::PossiblyProducedBy, _, _) => Err(ProtocolError::new(
+            ErrorClass::Corrupt,
+            "possible production must preserve ambiguous state and confidence",
+        )),
+    }
+}
+
+impl CommitBlameMatch {
+    fn validate(
+        &self,
+        available: &BTreeSet<u32>,
+        referenced: &mut BTreeSet<u32>,
+    ) -> Result<(), ProtocolError> {
+        validate_bounded_text(&self.fact_id, "commit fact ID")?;
+        validate_resource_kind(&self.subject, ResourceKind::Commit)?;
+        if let Some(object) = &self.object {
+            object.validate()?;
+        }
+        if let Some(resource) = &self.parent_session {
+            validate_resource_kind(resource, ResourceKind::Session)?;
+        }
+        if let Some(resource) = &self.direct_actor {
+            resource.validate()?;
+        }
+        if let Some(resource) = &self.owning_root {
+            resource.validate()?;
+        }
+        let expected = match self.fact_type {
+            CommitFactType::Produced => CommitPredicate::ProducedBy,
+            CommitFactType::Ambiguous => CommitPredicate::PossiblyProducedBy,
+            CommitFactType::Amended => CommitPredicate::AmendedBy,
+            CommitFactType::CherryPicked => CommitPredicate::CherryPickedFrom,
+            CommitFactType::Reverted => CommitPredicate::Reverts,
+            CommitFactType::Pushed => CommitPredicate::PushedBy,
+            CommitFactType::Inspected => CommitPredicate::InspectedBy,
+            CommitFactType::Referenced => CommitPredicate::ReferencedBy,
+        };
+        if self.predicate != expected {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "commit fact type and predicate disagree",
+            ));
+        }
+        if self.object.is_none()
+            && !(matches!(
+                self.fact_type,
+                CommitFactType::CherryPicked | CommitFactType::Reverted
+            ) && self.state == FactState::Ambiguous)
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "commit fact is missing a required object",
+            ));
+        }
+        let production_relationship = match self.predicate {
+            CommitPredicate::ProducedBy => Some(ProductionRelationship::ProducedBy),
+            CommitPredicate::PossiblyProducedBy => Some(ProductionRelationship::PossiblyProducedBy),
+            CommitPredicate::AmendedBy
+            | CommitPredicate::CherryPickedFrom
+            | CommitPredicate::Reverts
+            | CommitPredicate::PushedBy
+            | CommitPredicate::InspectedBy
+            | CommitPredicate::ReferencedBy => None,
+        };
+        if let (Some(relationship), Some(producing_session)) =
+            (production_relationship, self.object.as_ref())
+        {
+            validate_resource_kind(producing_session, ResourceKind::Session)?;
+            validate_production_semantics(relationship, self.state, self.confidence)?;
+        }
+        validate_evidence_numbers(&self.evidence_numbers, available, referenced)
+    }
+}
+
+impl PullRequestBlameMatch {
+    fn validate(
+        &self,
+        available: &BTreeSet<u32>,
+        referenced: &mut BTreeSet<u32>,
+    ) -> Result<(), ProtocolError> {
+        validate_resource_kind(&self.pull_request, ResourceKind::PullRequest)?;
+        match &self.relationship {
+            PullRequestBlameRelationship::Activity(activity) => {
+                validate_bounded_text(&activity.fact_id, "pull request activity fact ID")?;
+                validate_resource_kind(&activity.session, ResourceKind::Session)?;
+                if let Some(resource) = &activity.direct_actor {
+                    resource.validate()?;
+                }
+                if let Some(resource) = &activity.owning_root {
+                    resource.validate()?;
+                }
+                validate_evidence_numbers(&activity.evidence_numbers, available, referenced)
+            }
+            PullRequestBlameRelationship::Commit(commit) => {
+                validate_bounded_text(&commit.fact_id, "pull request commit fact ID")?;
+                validate_resource_kind(&commit.commit, ResourceKind::Commit)?;
+                if commit.production.len() > MAX_BLAME_ATTRIBUTIONS_PER_MATCH {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Bounds,
+                        "pull request commit match exceeds its attribution bound",
+                    ));
+                }
+                validate_evidence_numbers(&commit.evidence_numbers, available, referenced)?;
+                for attribution in &commit.production {
+                    attribution.validate(available, referenced)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_evidence_numbers(
+    numbers: &[u32],
+    available: &BTreeSet<u32>,
+    referenced: &mut BTreeSet<u32>,
+) -> Result<(), ProtocolError> {
+    if numbers.is_empty() || numbers.len() > MAX_CITATIONS_PER_FACT {
+        return Err(ProtocolError::new(
+            ErrorClass::Bounds,
+            "evidence-number list must be nonempty and within its bound",
+        ));
+    }
+    let mut prior = 0;
+    for number in numbers {
+        if *number <= prior || !available.contains(number) {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "evidence numbers must be unique, sorted, and present in the page",
+            ));
+        }
+        referenced.insert(*number);
+        prior = *number;
+    }
+    Ok(())
+}
+
+fn validate_cursor(cursor: Option<&str>) -> Result<(), ProtocolError> {
+    if cursor.is_some_and(|cursor| {
+        cursor.is_empty() || cursor.len() > MAX_BLAME_CURSOR_BYTES || !cursor.is_ascii()
+    }) {
+        return Err(ProtocolError::new(
+            ErrorClass::Bounds,
+            format!("blame cursor must contain 1 to {MAX_BLAME_CURSOR_BYTES} ASCII bytes"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_commit_selector(value: &str) -> Result<(), ProtocolError> {
+    if !(4..=64).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ProtocolError::new(
+            ErrorClass::InvalidRequest,
+            "commit selector must contain 4 to 64 ASCII hexadecimal characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bounded_text(value: &str, name: &str) -> Result<(), ProtocolError> {
+    if value.trim().is_empty()
+        || value.len() > MAX_BLAME_TARGET_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(ProtocolError::new(
+            ErrorClass::Bounds,
+            format!("{name} is empty, unsafe, or exceeds its byte bound"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_repository_selector(value: &str) -> Result<(), ProtocolError> {
+    if value.trim().is_empty() {
+        return Err(ProtocolError::new(
+            ErrorClass::InvalidRequest,
+            "repository selector cannot be empty or whitespace",
+        ));
+    }
+    validate_bounded_text(value, "repository selector")
+}
+
+fn validate_resource_kind(
+    resource: &ResourceRef,
+    expected: ResourceKind,
+) -> Result<(), ProtocolError> {
+    resource.validate()?;
+    if resource.kind != expected {
+        return Err(ProtocolError::new(
+            ErrorClass::Corrupt,
+            "resource reference has an unexpected kind",
+        ));
+    }
+    Ok(())
+}
+
+fn line_range_contains(outer: &LineRange, inner: &LineRange) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
+}
+
+pub(crate) fn same_resource_identity(left: &ResourceRef, right: &ResourceRef) -> bool {
+    left.kind == right.kind && left.id == right.id
+}
+
+fn commit_selector_matches(requested: &str, resolved: &str) -> bool {
+    requested.len() <= resolved.len()
+        && requested.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && resolved.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && resolved
+            .get(..requested.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(requested))
+}
+
+fn repository_selector_matches(requested: Option<&str>, resolved: &ResourceRef) -> bool {
+    requested.is_none_or(|requested| {
+        canonical_logical_repository_id(requested)
+            == canonical_logical_repository_id(&resolved.display)
+    })
+}
+
+/// Canonicalizes only the ASCII case of the forge host in a logical
+/// repository identity. Every other byte remains identity-bearing.
+#[must_use]
+pub fn canonical_logical_repository_id(value: &str) -> Cow<'_, str> {
+    let Some((host, opaque_tail)) = value
+        .strip_prefix("forge:")
+        .and_then(|identity| identity.split_once('/'))
+    else {
+        return Cow::Borrowed(value);
+    };
+    let canonical_host = host.to_ascii_lowercase();
+    if canonical_host == host {
+        Cow::Borrowed(value)
+    } else {
+        Cow::Owned(format!("forge:{canonical_host}/{opaque_tail}"))
+    }
+}
+
+#[cfg(test)]
+#[path = "query_request_generation_tests.rs"]
+mod request_generation_tests;
+
+#[cfg(test)]
+#[path = "query/tests.rs"]
+mod tests;

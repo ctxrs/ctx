@@ -208,6 +208,7 @@ pub fn render_status_human(
     document.push_blank();
     document.append(section("History", fields(context, &history_fields)));
 
+    super::append_attribution(context, &mut document, report);
     let daemon = &report["daemon"];
     let daemon_status = if daemon.get("running").and_then(Value::as_bool) == Some(true) {
         if daemon.get("heartbeat_stale").and_then(Value::as_bool) == Some(true) {

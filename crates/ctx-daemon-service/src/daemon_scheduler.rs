@@ -541,7 +541,7 @@ where
     // Core is already durable at this point. Notification is a publication
     // seam, not a second commit phase, so delivery errors are intentionally
     // quarantined and never become daemon retry state.
-    let _ = port.notify(data_root, &publication);
+    let _ = port.notify(data_root, Some(&publication));
 }
 
 fn persist_core_scheduler_status(

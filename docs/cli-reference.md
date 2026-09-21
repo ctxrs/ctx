@@ -28,7 +28,6 @@ as `search`, `show`, `sources`, and `docs` are not suppressed.
 
 ```bash
 ctx setup
-ctx setup --pro
 ctx setup --no-daemon
 ctx setup --format json
 ctx setup --progress json --format json
@@ -91,10 +90,10 @@ ctx daemon run
   and one-copy semantic/context byte channels separate; transport bytes never
   drive context-token or savings estimates. Byte-derived token values include
   coverage and remain unavailable for unmeasured legacy rows rather than
-  becoming false zeros. Completed companion-backed Blame appears with calls,
-  technical success/failure, and duration; Core does not classify private
-  results, and CLI Blame output is shown as unavailable. `stats --detail` adds
-  CLI/MCP operation and latency breakdowns. Reporting is uncounted and does not
+  becoming false zeros. Completed Blame appears with calls,
+  technical success/failure, and duration. Local Blame result counts remain
+  N/A with zero stored results, and CLI output bytes remain unavailable.
+  `stats --detail` adds CLI/MCP operation and latency breakdowns. Reporting is uncounted and does not
   create `usage.sqlite` on a pristine root.
 - `status --usage disable` and `enable` write the canonical `[local_usage]
   enabled` override; `status --usage reset` atomically clears the usage
@@ -617,12 +616,22 @@ worker failure: the admitted request stays retained and may finish later.
 Inspect `ctx daemon status` and `ctx index` before retrying. Work that continues
 to report progress can run longer than five minutes.
 
-## Paid Companion Routes
+## Blame
 
-Official managed distributions may install a separately signed private
-companion alongside Core. Core-only channels retain the OSS commands. Paid
-routes return a typed companion-unavailable failure when the companion is
-absent. See [ctx Pro](managed-companion.md).
+```bash
+ctx blame src/checkout.ts --lines 118:146
+ctx blame file src/checkout.ts --lines 118:146
+ctx blame commit <commit-id>
+ctx blame pr https://github.com/your-org/your-repo/pull/42
+ctx blame --type file src/checkout.ts --format json
+```
+
+Blame is included in all ctx builds. It connects committed code to recorded
+agent sessions with citations, confidence, and explicit evidence limits.
+`--repository` selects a repository, `--limit` bounds complete matches, and
+`--cursor` continues the same query. See [Blame](blame.md) for indexing,
+continuation, and the distinction between PR activity and code production.
+
 ## Show
 
 ```bash
@@ -988,8 +997,8 @@ ctx docs man --out ~/.local/share/man/man1
 `docs` exposes a curated copy of the public ctx docs inside the binary. It is
 intended for humans and agents that need local command help without opening the
 website. `docs list`, `docs search`, and `docs show` read embedded text and do
-not touch provider history, Core/Tantivy generations, semantic data, or the Pro
-graph.
+not touch provider history, Core/Tantivy generations, semantic data, or the
+attribution index.
 `docs show --out PATH` writes one embedded topic to that explicit path.
 `docs man --print PAGE` prints one generated man page to stdout.
 `docs man --out DIR` writes generated section-1 man pages for `ctx` and its

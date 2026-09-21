@@ -1,0 +1,25 @@
+No producer proven
+  1 pull request relationship evaluated on this page · 0 proven · 0 possible ·
+  0 conflicting · 1 none
+
+Pull request  ctxrs/ctx#42
+Repository    ctxrs/ctx
+Selector      42
+
+Code produced
+  Contains commit
+    commit deadbeef
+      evidence      [1]
+      Agent production  not proven
+
+PR activity
+  No cited activity on this page.
+
+More results
+  1 matches shown; more matches are available.
+  Continue
+    ctx blame pr 42 --repository ctxrs/ctx --cursor activity-page
+
+Evidence
+  [1]
+    ctx show event 8cd765ac-68a3-8a2c-ae04-669a08be6370 · Core aaaaaaaaaaaa · source 0f989cc2-fb1b-8eaf-8403-078d7622424b · sequence 1

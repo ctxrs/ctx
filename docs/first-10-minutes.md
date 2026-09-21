@@ -37,7 +37,7 @@ and publishes an immutable Core/Tantivy search generation. Optional semantic
 indexing advances separately. It does not execute history-source plugin
 commands. The default root is `~/.ctx`.
 
-Use a temporary root for trials:
+Use a temporary root for experiments:
 
 ```bash
 ctx --data-root /tmp/ctx-first-10 setup

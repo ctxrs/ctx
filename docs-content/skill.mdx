@@ -1,0 +1,77 @@
+---
+title: "Install the ctx skill"
+sidebarTitle: "ctx skill"
+description: "Install or refresh the bundled ctx agent-history search skill."
+---
+
+Install the CLI first:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+```
+
+The hosted installer runs the bundled skill install by default. To install or
+refresh the ctx skill manually:
+
+```bash
+ctx integrations install skill
+```
+
+The command installs or refreshes `ctx` in the selected
+agent skill location.
+
+## Useful options
+
+```bash
+ctx integrations install skill --agent codex
+ctx integrations install skill --agent claude-code --agent cursor
+ctx integrations install skill --all-agents
+ctx integrations install skill --project
+```
+
+Use `--agent` to target specific harnesses. Use `--all-agents` to write every
+supported agent location. Use `--project` for a project-scoped install when
+the selected agent supports one.
+
+Check installed state with:
+
+```bash
+ctx integrations status skill
+ctx integrations status skill --agent codex --json
+```
+
+## Manual fallback
+
+If the native installer cannot write to your agent's skill directory, copy
+`skills/ctx` from
+[ctxrs/ctx](https://github.com/ctxrs/ctx) into the skill directory supported by
+your agent, or give the agent this instruction:
+
+```text
+Use ctx to search prior local coding-agent sessions before you answer or edit.
+
+Run:
+ctx search "<focused query>"
+
+Search multiple terms:
+ctx search --term "<term one>" --term "<term two>"
+
+Inspect the best result:
+ctx show event <ctx-event-id> --window 3
+or:
+ctx show session <ctx-session-id>
+
+If retrieved history affects your answer, cite the ctx_event_id or
+ctx_session_id and include the ctx command you ran.
+```
+
+## Verify
+
+Ask the agent for a short cited finding before it edits:
+
+```text
+Search ctx for prior work on this area. Inspect the best event or session, tell
+me which ctx ID you used, and explain whether that history changes your plan.
+```
+
+If ctx does not return a useful result, the agent should say that and continue from the current repository state.

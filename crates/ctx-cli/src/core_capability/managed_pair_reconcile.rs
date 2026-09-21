@@ -3,18 +3,16 @@ use std::ffi::OsStr;
 use anyhow::{anyhow, bail, Context as _, Result};
 use ctx_upgrade_engine::{
     ensure_hosted_transaction_inactive_under_installation_lock,
-    inspect_managed_pair_under_installation_lock, managed_install_marker_for_current_exe,
+    managed_install_marker_for_current_exe,
     reconcile_managed_pair_integration_under_installation_lock,
     try_acquire_managed_installation_mutation_at_root, ManagedInstallMarker,
-    ManagedPairInstallationStatus,
 };
 
 use super::{
     managed_pair_apply::{
-        managed_core_destination, marker_channel, normalized_absolute_path, require_directory,
-        require_regular_file,
+        managed_core_destination, normalized_absolute_path, require_directory, require_regular_file,
     },
-    write_response_frame, CoreManagedPairVerifier,
+    write_response_frame,
 };
 
 const ARGUMENT_COUNT: usize = 5;
@@ -56,16 +54,14 @@ pub(super) fn run(arguments: &[std::ffi::OsString], writer: impl std::io::Write)
         ManagedInstallMarker::Absent => bail!("managed Core install marker is absent"),
         ManagedInstallMarker::Invalid { reason } => bail!(reason),
     };
-    let verifier = CoreManagedPairVerifier::for_channel(marker_channel(&active_marker)?);
     ensure_hosted_transaction_inactive_under_installation_lock(&managed_core_destination(
         &install_root,
     ))?;
-    if !matches!(
-        inspect_managed_pair_under_installation_lock(&install_root, &verifier)?,
-        ManagedPairInstallationStatus::Healthy { .. }
-    ) {
-        bail!("managed-pair reconciliation requires an installed signed pair");
-    }
+    // The installed executable and hosted marker own integration receipts.
+    // Pair slots may already be retired by a prior successful reconciliation.
     reconcile_managed_pair_integration_under_installation_lock(&install_root, &integration)?;
+    ctx_upgrade_engine::cleanup_legacy_managed_pair_under_installation_lock(
+        &active_marker.install_path,
+    )?;
     write_response_frame(writer, success_receipt())
 }

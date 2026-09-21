@@ -1,3 +1,4 @@
+pub(crate) mod blame;
 pub(crate) mod doctor;
 mod history_health;
 pub(crate) mod import;

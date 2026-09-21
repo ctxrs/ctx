@@ -1,0 +1,57 @@
+---
+title: "Grep and log search"
+description: "Why raw log search is a tempting baseline, and what ctx adds as agent history grows."
+---
+
+Raw text search is a good first move when you know the phrase and the file. If one Codex transcript contains `retry handling`, `rg "retry handling" ~/.codex/sessions` may find it.
+
+A byte match often leaves the current agent with the hard work still ahead: finding the session that contained the match, the event before it, the provider that wrote it, the command output nearby, or a stable ID it can cite in a handoff.
+
+Provider histories do not share one layout. One agent may write JSONL transcript trees, another may use SQLite, another may keep nested project directories, and another may store session state. A text match can find a string inside any of those formats. It cannot turn the match into a portable `ctx_event_id`.
+
+## Where raw search breaks
+
+Raw search works best when all of these are true:
+
+- the phrase is exact;
+- the provider is known;
+- the storage path is known;
+- the file format is easy to read;
+- a single match is enough.
+
+Coding-agent history often misses at least one of those conditions.
+
+Common failure modes:
+
+- The same phrase appears in prompts, assistant replies, tool calls, tool output, and copied logs, with no stable event identity.
+- A provider stores one session per file, while another stores many events in a database or nested directory.
+- The useful hit is near the match, but the surrounding session context is split across records.
+- The result path points to a provider file, but there is no durable command to show the matching event later.
+- A renamed checkout or moved provider directory changes the search surface.
+- A search returns dozens of snippets, but no ranked session/event result a later agent can cite.
+
+With one provider and a few sessions, you can inspect the surrounding file by hand. With several agents and months of history, the current agent spends time reconstructing sessions instead of using them.
+
+## What ctx adds
+
+ctx imports real local provider history into a local Tantivy Core index. It normalizes the retrieval surface around sessions, events, provider metadata, timestamps, snippets, and citations while keeping source-level provenance back to the provider-owned history.
+
+Search results use ctx-owned IDs:
+
+```bash
+ctx search "retry handling"
+ctx show event <ctx-event-id>
+ctx show session <ctx-session-id>
+ctx locate event <ctx-event-id>
+```
+
+A ctx result gives the next command somewhere precise to go. The agent can inspect the event, open the session, locate the source, or write a transcript file without reverse-engineering the provider log file.
+
+## What ctx does not replace
+
+Raw search is still useful. If you know the exact file and phrase, `rg` is fast and direct. It also works outside ctx's supported provider formats.
+
+Use raw search when you know the exact file and phrase. Use ctx when the answer needs session context, event identity, provider metadata, citations, or a command another agent can rerun.
+
+ctx does this locally. Search and show do not call a model, require API keys,
+write into your repository, or depend on a hosted service.

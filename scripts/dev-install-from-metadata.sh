@@ -708,11 +708,15 @@ schema_version="$(metadata_value "${metadata_file}" CTX_RELEASE_SCHEMA_VERSION)"
 version="$(metadata_value "${metadata_file}" CTX_RELEASE_VERSION)" || fail "metadata missing CTX_RELEASE_VERSION"
 base_url="$(metadata_value "${metadata_file}" CTX_RELEASE_BASE_URL)" || fail "metadata missing CTX_RELEASE_BASE_URL"
 platform_key="${platform//-/_}"
+pair_envelope_artifact= pair_core_object_key= pair_core_checksum= pair_companion_object_key= pair_companion_checksum=
+[[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || fail "invalid release version: $version"
+if (( 10#${BASH_REMATCH[1]} < 1 || (10#${BASH_REMATCH[1]} == 1 && 10#${BASH_REMATCH[2]} < 5) )); then
 pair_envelope_artifact="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_MANAGED_PAIR_ENVELOPE_${platform_key}")"
 pair_core_object_key="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_MANAGED_PAIR_CORE_OBJECT_${platform_key}")"
 pair_core_checksum="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_MANAGED_PAIR_CORE_SHA256_${platform_key}")"
 pair_companion_object_key="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_MANAGED_PAIR_COMPANION_OBJECT_${platform_key}")"
 pair_companion_checksum="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_MANAGED_PAIR_COMPANION_SHA256_${platform_key}")"
+fi
 metadata_trust="explicit-unsigned"
 artifact="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_ARTIFACT_${platform_key}")"
 checksum="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_SHA256_${platform_key}")"

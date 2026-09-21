@@ -140,6 +140,18 @@ pub fn verify_signed_managed_pair_envelope(
     expectations: &ManagedPairExpectations,
     envelope_bytes: &[u8],
 ) -> Result<SignedManagedPairIdentity, BridgeError> {
+    #[cfg(ctx_release_qualification)]
+    match std::env::var("CTX_RELEASE_MANAGED_PAIR_AUTHORITY_JSON") {
+        Ok(authority) => {
+            if authority.is_empty() || authority.len() > 16 * 1024 {
+                return Err(verification("qualification authority exceeds its bound"));
+            }
+            return verify_envelope(expectations, authority.as_bytes(), envelope_bytes)
+                .map(|value| value.identity);
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(_) => return Err(verification("qualification authority is not UTF-8")),
+    }
     verify_envelope(expectations, EMBEDDED_AUTHORITY, envelope_bytes).map(|value| value.identity)
 }
 
@@ -518,3 +530,6 @@ mod component_tests {
         })
     }
 }
+
+#[cfg(test)]
+mod unified_tests;

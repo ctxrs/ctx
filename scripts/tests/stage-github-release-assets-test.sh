@@ -17,6 +17,7 @@ repo_root="${tmp_dir}/repo"
 mkdir -p "${repo_root}/contracts" "${repo_root}/scripts/release"
 cp "${source_root}/scripts/stage-github-release-assets.sh" \
   "${repo_root}/scripts/stage-github-release-assets.sh"
+cp "${source_root}/scripts/release/release-validation.py" "${repo_root}/scripts/release/"
 cp "${source_root}/scripts/release/release_bundle.py" \
   "${repo_root}/scripts/release/release_bundle.py"
 cp "${source_root}/scripts/release/seal-linux-factory-candidate.py" \
@@ -45,6 +46,8 @@ git -C "${repo_root}" \
   -c user.email='ctx-release-test@example.invalid' \
   commit -qm 'create release staging fixture'
 source_commit="$(git -C "${repo_root}" rev-parse --verify HEAD^{commit})"
+export CTX_RELEASE_CI_RECEIPT="${tmp_dir}/normal-ci.json"
+printf '{"kind":"ctx-normal-ci-result","schema_version":1,"mode":"ci","source_commit":"%s","status":"passed"}\n' "$source_commit" > "$CTX_RELEASE_CI_RECEIPT"
 stage="${repo_root}/scripts/stage-github-release-assets.sh"
 
 fake_bin="${tmp_dir}/bin"
@@ -61,6 +64,19 @@ if [ "${1:-}" = - ] && [ -d "${2:-}" ] && [ "${#3}" -eq 40 ]; then
   exec "${CTX_REAL_PYTHON3:?}" "$@"
 fi
 case "$*" in
+  *release-validation.py*)
+    exec "${CTX_REAL_PYTHON3:?}" "$@"
+    ;;
+  *verify-windows-release.py*)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --output ]; then
+        printf '{"kind":"authored-signature-stub"}\n' > "$2"
+        exit 0
+      fi
+      shift
+    done
+    exit 1
+    ;;
   *release_bundle.py*)
     exec "${CTX_REAL_PYTHON3:?}" "$@"
     ;;
@@ -407,6 +423,40 @@ CTX_FAKE_SBOM_LOG="${default_sbom_log}" \
   PATH="${fake_bin}:${PATH}" \
   /bin/bash "${stage}" "${matrix}" "${default_output}"
 assert_exact_assets "${default_output}" 15 "${default_assets[@]}"
+# The authorized construction route consumes signed factory evidence while
+# recording native execution as not run, without manufacturing native receipts.
+factory_output="${tmp_dir}/factory-only"
+CTX_FAKE_SBOM_LOG="${tmp_dir}/factory-sbom.log" \
+  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/factory-build-info.log" \
+  CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${source_commit}" \
+  CTX_REAL_PYTHON3="${real_python3}" \
+  CTX_RELEASE_VALIDATION_POLICY=factory-only-human-override-v1 \
+  CTX_PUBLIC_NATIVE_PROOF_DIR="${tmp_dir}/absent-native-proofs" \
+  PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${matrix}" "${factory_output}"
+"${real_python3}" - "${factory_output}.authority/release-validation.json" <<'COVERAGE'
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["normal_ci"]["status"] == "passed"
+assert all(item == {"status": "not_run"} for item in value["native_execution"].values())
+assert value["nightly"] == value["release_tier"] == "not_run"
+COVERAGE
+for platform in macos-arm64 macos-x64; do
+  grep -Fq '"origin":"factory-pending"' "${factory_output}/ctx-${platform}.signing.json"
+done
+if CTX_FAKE_SBOM_LOG="${tmp_dir}/missing-ci-sbom.log" \
+  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/missing-ci-build-info.log" \
+  CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${source_commit}" \
+  CTX_REAL_PYTHON3="${real_python3}" \
+  CTX_RELEASE_VALIDATION_POLICY=factory-only-human-override-v1 \
+  CTX_RELEASE_CI_RECEIPT="${tmp_dir}/absent-normal-ci.json" \
+  PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${matrix}" "${tmp_dir}/missing-ci" \
+  >"${tmp_dir}/missing-ci.out" 2>"${tmp_dir}/missing-ci.err"; then
+  printf 'factory-only stage accepted missing normal CI\n' >&2
+  exit 1
+fi
+test ! -e "${tmp_dir}/missing-ci"
 for platform in macos-arm64 macos-x64; do
   grep -Fq '"origin":"native-passed"' \
     "${default_output}/ctx-${platform}.signing.json"
@@ -414,7 +464,7 @@ for platform in macos-arm64 macos-x64; do
     "${matrix}/ctx-${platform}.signing.json"
 done
 default_authority="${default_output}.authority"
-test "$(find "${default_authority}" -maxdepth 1 -type f | wc -l)" -eq 20
+test "$(find "${default_authority}" -maxdepth 1 -type f | wc -l)" -eq 23
 for candidate in \
   ctx.candidate.json \
   ctx-linux-aarch64.candidate.json \
@@ -435,6 +485,9 @@ for handoff_input in \
   ctx.exe.size.json \
   ctx.exe.third-party-notices.txt \
   ctx-core.release-complete.json \
+  normal-ci.json \
+  release-validation.json \
+  windows-authenticode.json \
   ctx-core-github-handoff.json \
   ctx-core-github-handoff.json.sha256 \
   ctx-release-factory.json \

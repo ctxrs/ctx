@@ -5,7 +5,7 @@ The ctx plugin, default skill, and supported native command are all named
 agent skill directories.
 
 Use the default skill when an agent should search past local agent
-sessions or use ctx pro to trace a line, file, commit, or PR back to the session
+sessions or use ctx blame to trace a line, file, commit, or PR back to the session
 that produced it.
 
 ## Native ctx CLI
@@ -125,7 +125,7 @@ native Codex, Claude Code, and Cursor manifests and catalogs alongside the
 portable manifest.
 
 The plugin requires an installed and initialized ctx CLI. Installing the plugin
-does not install the CLI or enable the paid ctx pro add-on.
+uses the installed ctx CLI; Blame is included in that CLI.
 
 Manage the released plugin through ctx with:
 

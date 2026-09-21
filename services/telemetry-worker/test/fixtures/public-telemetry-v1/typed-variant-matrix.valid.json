@@ -1,0 +1,671 @@
+{
+  "schema_version": 1,
+  "outcomes": ["success", "failure"],
+  "operating_systems": ["linux", "macos", "windows", "freebsd"],
+  "operations": {
+    "cli": [
+      {
+        "operation": "setup",
+        "properties": {
+          "output": "human",
+          "no_daemon": false,
+          "wait": false,
+          "progress_mode": "none"
+        }
+      },
+      {
+        "operation": "semantic_enable",
+        "properties": {
+          "output": "human"
+        }
+      },
+      {
+        "operation": "semantic_status",
+        "properties": {
+          "output": "human"
+        }
+      },
+      {
+        "operation": "semantic_disable",
+        "properties": {
+          "output": "human"
+        }
+      },
+      {
+        "operation": "status",
+        "properties": {
+          "output": "json"
+        }
+      },
+      {
+        "operation": "index",
+        "properties": {
+          "output": "human",
+          "index_operation": "status"
+        }
+      },
+      {
+        "operation": "index",
+        "properties": {
+          "output": "human",
+          "index_operation": "mode"
+        }
+      },
+      {
+        "operation": "index",
+        "properties": {
+          "output": "human",
+          "index_operation": "watch"
+        }
+      },
+      {
+        "operation": "index",
+        "properties": {
+          "output": "human",
+          "index_operation": "wait"
+        }
+      },
+      {
+        "operation": "sources",
+        "properties": {
+          "output": "human",
+          "all_sources": true
+        }
+      },
+      {
+        "operation": "import",
+        "properties": {
+          "output": "human",
+          "resume": false,
+          "all_sources": true,
+          "no_daemon": false,
+          "source_mode": "all_discovered",
+          "reset_cursor": false,
+          "progress_mode": "plain"
+        }
+      },
+      {
+        "operation": "show",
+        "properties": {
+          "output": "json",
+          "target_kind": "event",
+          "output_format": "json",
+          "writes_out_file": false,
+          "provider_lookup": false
+        }
+      },
+      {
+        "operation": "show",
+        "outcome": "success",
+        "properties": {
+          "output": "json",
+          "target_kind": "events",
+          "output_format": "jsonl",
+          "writes_out_file": false,
+          "provider_lookup": false,
+          "events_returned_bucket": "2-5"
+        }
+      },
+      {
+        "operation": "show",
+        "outcome": "failure",
+        "properties": {
+          "output": "json",
+          "target_kind": "events",
+          "output_format": "jsonl",
+          "writes_out_file": false,
+          "provider_lookup": false
+        }
+      },
+      {
+        "operation": "show",
+        "outcome": "success",
+        "properties": {
+          "output": "json",
+          "target_kind": "events",
+          "output_format": "jsonl",
+          "writes_out_file": false,
+          "provider_lookup": false
+        }
+      },
+      {
+        "operation": "locate",
+        "properties": {
+          "output": "json",
+          "target_kind": "session",
+          "output_format": "json",
+          "provider_lookup": true
+        }
+      },
+      {
+        "operation": "search",
+        "properties": {
+          "output": "human",
+          "has_query": true,
+          "has_provider_filter": false,
+          "has_workspace_filter": false,
+          "has_since_filter": false,
+          "has_event_type_filter": false,
+          "has_file_filter": false,
+          "has_session_filter": false,
+          "event_results": false,
+          "primary_only": true,
+          "include_subagents": false,
+          "include_current_session": false,
+          "limit_bucket": "21-100"
+        }
+      },
+      {
+        "operation": "docs",
+        "properties": {
+          "output": "human",
+          "implicit_list": false,
+          "writes_output": false
+        }
+      },
+      {
+        "operation": "docs",
+        "properties": {
+          "output": "human",
+          "docs_operation": "show",
+          "implicit_list": false,
+          "topic": "event-queries",
+          "writes_output": true
+        }
+      },
+      {
+        "operation": "integration",
+        "properties": {
+          "output": "human"
+        }
+      },
+      {
+        "operation": "upgrade",
+        "outcome": "success",
+        "properties": {
+          "output": "human",
+          "upgrade_mode": "manual",
+          "upgrade_operation": "check",
+          "dry_run": false,
+          "upgrade_status": "available",
+          "upgrade_applied": false,
+          "upgrade_scheduled": false,
+          "update_available": true,
+          "update_was_available": true,
+          "upgrade_attempt_id": "ua_01890f3e-2c80-7000-8000-000000000001",
+          "managed_install": true,
+          "self_upgrade_allowed": true,
+          "auto_upgrade_allowed": true,
+          "upgrade_warning_count_bucket": "0",
+          "upgrade_channel": "stable"
+        }
+      },
+      {
+        "operation": "upgrade",
+        "outcome": "success",
+        "properties": {
+          "upgrade_mode": "auto",
+          "upgrade_operation": "apply",
+          "dry_run": false,
+          "upgrade_status": "applied",
+          "upgrade_applied": true,
+          "upgrade_scheduled": false,
+          "update_available": false,
+          "update_was_available": true,
+          "upgrade_attempt_id": "ua_01890f3e-2c80-7000-8000-000000000002",
+          "managed_install": true,
+          "self_upgrade_allowed": true,
+          "auto_upgrade_allowed": true,
+          "upgrade_warning_count_bucket": "0",
+          "upgrade_channel": "stable"
+        }
+      },
+      {
+        "operation": "doctor",
+        "properties": {
+          "output": "human"
+        }
+      }
+    ],
+    "daemon": [
+      {
+        "operation": "enable",
+        "properties": {}
+      },
+      {
+        "operation": "disable",
+        "properties": {}
+      },
+      {
+        "operation": "status",
+        "properties": {}
+      },
+      {
+        "operation": "run_once",
+        "properties": {
+          "start_mode": "auto",
+          "supervisor": "cli_autostart",
+          "trigger_command": "search"
+        }
+      }
+    ],
+    "mcp": [
+      {
+        "operation": "status",
+        "properties": {
+          "method": "tools_call",
+          "tool": "status"
+        }
+      },
+      {
+        "operation": "sources",
+        "properties": {
+          "method": "tools_call",
+          "tool": "sources"
+        }
+      },
+      {
+        "operation": "search",
+        "properties": {
+          "method": "tools_call",
+          "tool": "search"
+        }
+      },
+      {
+        "operation": "show_session",
+        "properties": {
+          "method": "tools_call",
+          "tool": "show_session"
+        }
+      },
+      {
+        "operation": "show_event",
+        "properties": {
+          "method": "tools_call",
+          "tool": "show_event"
+        }
+      },
+      {
+        "operation": "query_events",
+        "outcome": "success",
+        "properties": {
+          "method": "tools_call",
+          "tool": "query_events",
+          "result_count_bucket": "2-5",
+          "zero_result": false,
+          "result_truncated": false,
+          "response_bound": "within_limit"
+        }
+      },
+      {
+        "operation": "query_events",
+        "outcome": "failure",
+        "properties": {
+          "method": "tools_call",
+          "tool": "query_events",
+          "error_layer": "tool",
+          "error_class": "tool_failure",
+          "response_bound": "within_limit"
+        }
+      },
+      {
+        "operation": "blame",
+        "properties": {
+          "method": "tools_call",
+          "tool": "blame"
+        }
+      },
+      {
+        "operation": "pro_status",
+        "properties": {
+          "method": "tools_call",
+          "tool": "pro_status"
+        }
+      },
+      {
+        "operation": "unknown",
+        "properties": {
+          "method": "unknown",
+          "tool": "unknown"
+        }
+      },
+      {
+        "operation": "missing",
+        "properties": {
+          "method": "missing",
+          "tool": "missing"
+        }
+      }
+    ]
+  },
+  "runtime": {
+    "daemon": [
+      {
+        "operation": "ready",
+        "properties": {
+          "start_mode": "auto",
+          "supervisor": "cli_autostart",
+          "trigger_command": "search"
+        }
+      },
+      {
+        "operation": "stopped",
+        "properties": {
+          "start_mode": "manual",
+          "supervisor": "user",
+          "history_freshness": "current",
+          "semantic_backlog_bucket": "0",
+          "semantic_coverage": "complete",
+          "retry_backoff": "none"
+        }
+      },
+      {
+        "operation": "recovered",
+        "properties": {
+          "start_mode": "auto",
+          "supervisor": "cli_autostart",
+          "trigger_command": "import",
+          "history_freshness": "pending",
+          "semantic_backlog_bucket": "1",
+          "semantic_coverage": "incomplete",
+          "retry_backoff": "semantic"
+        }
+      },
+      {
+        "operation": "failed",
+        "properties": {
+          "start_mode": "auto",
+          "supervisor": "cli_autostart",
+          "trigger_command": "setup",
+          "history_freshness": "failed",
+          "semantic_backlog_bucket": "unknown",
+          "semantic_coverage": "unknown",
+          "retry_backoff": "both"
+        }
+      },
+      {
+        "operation": "cycle",
+        "properties": {
+          "start_mode": "auto",
+          "supervisor": "cli_autostart",
+          "trigger_command": "search",
+          "history_freshness": "backoff",
+          "semantic_backlog_bucket": "21-100",
+          "semantic_coverage": "dirty",
+          "retry_backoff": "history",
+          "cycle_result": "no_work",
+          "coalesced_cycles_bucket": "6-20"
+        }
+      },
+      {
+        "operation": "liveness",
+        "properties": {
+          "start_mode": "manual",
+          "supervisor": "user",
+          "history_freshness": "unknown",
+          "semantic_backlog_bucket": "unknown",
+          "semantic_coverage": "empty",
+          "retry_backoff": "none"
+        }
+      }
+    ],
+    "mcp": [
+      {
+        "operation": "initialized",
+        "properties": {
+          "initialized": true,
+          "request_count_bucket": "0",
+          "tool_request_count_bucket": "0",
+          "tool_failure_count_bucket": "0",
+          "malformed_request_count_bucket": "0",
+          "ping_count_bucket": "0",
+          "tools_list_count_bucket": "1",
+          "initialized_notification_count_bucket": "1",
+          "unknown_notification_count_bucket": "0",
+          "telemetry_dropped_count_bucket": "0"
+        }
+      },
+      {
+        "operation": "stopped",
+        "properties": {
+          "initialized": true,
+          "stop_reason": "eof",
+          "request_count_bucket": "6-20",
+          "tool_request_count_bucket": "2-5",
+          "tool_failure_count_bucket": "1",
+          "malformed_request_count_bucket": "0",
+          "ping_count_bucket": "1",
+          "tools_list_count_bucket": "1",
+          "initialized_notification_count_bucket": "1",
+          "unknown_notification_count_bucket": "0",
+          "telemetry_dropped_count_bucket": "0"
+        }
+      }
+    ]
+  },
+  "mcp_dimensions": {
+    "error_layers": ["input", "json_rpc", "tool", "response"],
+    "error_classes": [
+      "invalid_utf8",
+      "line_too_large",
+      "invalid_json",
+      "invalid_request",
+      "invalid_params",
+      "server_not_initialized",
+      "method_not_found",
+      "missing_tool",
+      "unknown_tool",
+      "tool_failure",
+      "response_serialize",
+      "response_write",
+      "response_flush"
+    ],
+    "response_bounds": ["within_limit", "replaced"],
+    "stop_reasons": [
+      "eof",
+      "stdin_read_error",
+      "response_serialize_error",
+      "stdout_write_error",
+      "stdout_flush_error"
+    ]
+  },
+  "daemon_dimensions": {
+    "cycle_results": ["work", "no_work", "failure"]
+  },
+  "pro_host": {
+    "operations": ["lifecycle", "materialize", "status", "blame"],
+    "lifecycle_operations": ["setup", "manage", "status", "uninstall"],
+    "access_states": ["trial", "active", "canceling_paid", "offline_grace", "locked"],
+    "helper_connection_outcomes": [
+      "not_attempted",
+      "connected",
+      "not_installed",
+      "authorization_failed",
+      "protocol_mismatch",
+      "timed_out",
+      "crashed",
+      "unavailable"
+    ],
+    "reconcile_outcomes": [
+      "not_attempted",
+      "missing",
+      "current",
+      "installed",
+      "updated",
+      "failed"
+    ],
+    "uninstall_data_dispositions": ["delete", "preserve"],
+    "materialization_modes": ["no_op", "full", "incremental", "resume", "rebuild"],
+    "materialization_commits": ["not_committed", "no_op", "committed", "replayed", "mixed"],
+    "freshness": ["current", "unknown"],
+    "materialization_results": ["completed", "failed"],
+    "surfaces": ["cli", "mcp"],
+    "failure_buckets": [
+      "commercial",
+      "installation",
+      "authorization",
+      "key_store",
+      "protocol",
+      "source",
+      "repository",
+      "stale",
+      "ambiguous",
+      "invalid_request",
+      "invalid_response",
+      "cancelled",
+      "helper_crashed",
+      "helper_timeout",
+      "output",
+      "other"
+    ],
+    "blame_target_kinds": ["file", "commit", "pull_request"]
+  },
+  "provider_refresh": {
+    "providers": [
+      "codex",
+      "claude",
+      "pi",
+      "opencode",
+      "kilo",
+      "kiro_cli",
+      "antigravity",
+      "gemini",
+      "tabnine",
+      "cursor",
+      "windsurf",
+      "zed",
+      "copilot_cli",
+      "factory_ai_droid",
+      "qwen_code",
+      "kimi_code_cli",
+      "auggie",
+      "junie",
+      "firebender",
+      "forgecode",
+      "deepagents",
+      "mistral_vibe",
+      "mux",
+      "rovodev",
+      "openclaw",
+      "hermes",
+      "nanoclaw",
+      "astrbot",
+      "shelley",
+      "continue",
+      "openhands",
+      "cline",
+      "roo_code",
+      "crush",
+      "goose",
+      "lingma",
+      "qoder",
+      "warp",
+      "codebuddy",
+      "trae",
+      "shell",
+      "git",
+      "jj",
+      "gh",
+      "custom",
+      "unknown",
+      "mimocode"
+    ],
+    "surfaces": ["cli", "daemon"],
+    "triggers": ["setup", "import", "search", "daemon"],
+    "source_modes": ["discovered", "explicit_path", "explicit_format", "history_source_plugin"],
+    "changes": ["changed", "no_op"],
+    "content_evidence": ["none", "accepted", "mixed", "unknown"],
+    "work_kinds": [null, "no_op", "fresh", "append", "rewrite", "truncate", "replace", "retire", "mixed"],
+    "refresh_results": ["complete", "partial", "failure"],
+    "core_results": ["no_op", "complete", "partial", "failure", "unknown"],
+    "pro_results": [
+      "not_requested",
+      "unavailable",
+      "no_op",
+      "complete",
+      "partial",
+      "behind",
+      "failure",
+      "unknown"
+    ],
+    "failure_scopes": ["none", "record", "source", "system", "mixed", "unknown"],
+    "failure_types": [
+      "none",
+      "record_rejection",
+      "unsupported_schema",
+      "not_found",
+      "permission",
+      "source_database",
+      "malformed_source",
+      "store",
+      "worker_panic",
+      "system_io",
+      "system",
+      "other",
+      "mixed",
+      "unknown"
+    ],
+    "count_buckets": [
+      "0",
+      "1",
+      "2-5",
+      "6-20",
+      "21-100",
+      "101-1k",
+      "1k-10k",
+      "10k-100k",
+      "100k-1m",
+      "1m+"
+    ],
+    "byte_buckets": [
+      "0",
+      "lt_100kb",
+      "100kb-1mb",
+      "1mb-10mb",
+      "10mb-100mb",
+      "100mb-1gb",
+      "1gb-2gb",
+      "2gb-5gb",
+      "5gb-10gb",
+      "10gb-25gb",
+      "25gb-50gb",
+      "50gb-100gb",
+      "100gb+"
+    ],
+    "duration_buckets": [
+      "unknown",
+      "lt_100ms",
+      "lt_1s",
+      "lt_5s",
+      "lt_30s",
+      "lt_2m",
+      "lt_10m",
+      "lt_1h",
+      "gte_1h"
+    ]
+  },
+  "install_stage": {
+    "platforms": ["linux", "macos", "windows"],
+    "architectures": ["x64", "arm64"],
+    "script_families": ["posix", "powershell"],
+    "stage_status_pairs": [
+      ["installer", "started"],
+      ["installer", "completed"],
+      ["installer", "failed"],
+      ["artifact_download", "started"],
+      ["artifact_download", "completed"],
+      ["binary_install", "completed"],
+      ["skill_install", "started"],
+      ["skill_install", "completed"],
+      ["skill_install", "failed"],
+      ["skill_install", "skipped"],
+      ["setup", "started"],
+      ["setup", "completed"],
+      ["setup", "failed"],
+      ["setup", "skipped"],
+      ["uninstall", "started"],
+      ["uninstall", "completed"],
+      ["uninstall", "failed"]
+    ]
+  }
+}

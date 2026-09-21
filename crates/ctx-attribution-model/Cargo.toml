@@ -1,0 +1,16 @@
+[package]
+name = "ctx-attribution-model"
+version.workspace = true
+description = "Canonical Blame requests, results, evidence and presentation data"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ctx-history-core = { path = "../ctx-history-core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

@@ -39,7 +39,7 @@ The canonical persisted indexing control is `[indexing] mode = "auto"` or
 mode and `ctx index mode auto` or `ctx index mode manual` to persist a change.
 
 ctx stores immutable Core/Tantivy search generations, optional semantic data,
-and content-free local usage aggregates locally. Treat the ctx data root like
+a derived attribution index, and content-free local usage aggregates locally. Treat the ctx data root like
 private source history.
 
 ## Local Layout
@@ -51,6 +51,7 @@ Default root:
   search/
     lexical/
     semantic/
+    attribution/
   usage.sqlite
   config.toml
   runtime/
@@ -118,13 +119,12 @@ not reported as empty. Failures always use N/A with zero results. CLI status
 report/control operations are excluded from both recording and the persisted
 operation vocabulary.
 
-Current usage definition 3 keeps the full prior Core operation vocabulary and
-adds CLI/MCP `blame` when an installed companion supplies that route. Core
-records only the completed wrapper facts: calls, technical outcome, duration,
-and exact flushed MCP response bytes. Core does not inspect Blame output or
-private result semantics, so Blame always has `not_applicable` result class and
-zero `result_count`. CLI Blame output bytes are unavailable and render as N/A;
-Core-only distributions simply have no Blame rows.
+Usage definition 3 includes CLI/MCP `blame` calls, technical outcomes,
+durations, and exact flushed MCP response bytes. It records no transcript
+content, repository targets, or citation identities. Its Blame rows use
+`not_applicable` result class and zero `result_count`; unavailable CLI Blame
+output-byte measurements render as N/A. Historical rows keep the definition
+under which they were recorded.
 
 Only one completed foreground CLI command or recognized MCP `tools/call` is
 counted. MCP records after the complete response has serialized, written, and
@@ -181,6 +181,33 @@ installer and development installer place those native runtime files under
 `${CTX_RUNTIME_DIR:-$HOME/.ctx/runtime}/onnxruntime/<runtime-version>/<platform>`.
 They are product runtime assets, not provider-history storage, and may be shared
 by multiple ctx data roots on the same machine.
+
+## Blame attribution
+
+Blame reads retained Core history and a plain derived index under
+`search/attribution/`. The index binds to its committed Core generation and is
+published atomically. Attribution failure does not roll back valid Core history.
+The index is rebuildable from retained records; operations that need a checkout
+also depend on available local Git objects. Lost earlier repository observations
+are not recovered by decrypting an old graph.
+
+Daemon startup and Core publication schedule catch-up. Explicit `ctx import --all`
+and `ctx setup --wait` complete attribution in the calling command, including
+in manual mode and when Core has not changed. A finite Core worker still owns
+only source refresh; the caller completes attribution after that worker.
+`ctx setup --no-daemon` suppresses refresh even with `--wait`. Status, doctor,
+and index wait/watch only observe existing state and do not create or rebuild
+an attribution index.
+
+A current empty or abstained index is terminal. It does not need another
+completion pass just because it has no evidence for a target. Missing history,
+ambiguous repository identity, and unavailable local Git objects can still
+limit Blame. See [Blame](blame.md) for result and cursor semantics.
+
+Legacy `pro/` directories, graph files, and keys are inert and untouched in 1.5.
+Blame does not open them or access a vault. Hosted uninstall preserves Core,
+attribution, and legacy data; its retired `--delete-data` option fails before
+mutation. Source and package installations use their original removal method.
 
 ## Provider sources, Core, and derived storage
 
@@ -239,6 +266,9 @@ without changing generation-wide totals or the daemon's global watch catalog.
 - `search/semantic` contains generation-bound flat-F32 vectors, hashes, and
   offsets derived from eligible Core content; it does not persist separate
   plaintext transcript chunks.
+- `search/attribution` contains the plain, bounded derived index used by Blame,
+  with repository facts and stable Core citations rather than a second full
+  transcript store.
 - `usage.sqlite` contains only the bounded content-free aggregates documented
   above. It is product state, not history or search authority.
 
@@ -402,20 +432,20 @@ Neither maintenance path changes the command result.
 | `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, and optional persistent daemon lock/status/job files in automatic mode; old Store artifacts are neither opened nor deleted |
 | `ctx semantic status` | semantic policy, selected executor metadata, generation and local asset metadata, indexing mode, and daemon state; does not require or expose an executor credential or make a network request | none |
 | `ctx semantic enable` / `ctx semantic disable` | semantic policy, selected executor metadata, generation and local asset metadata, indexing mode, and daemon state | atomically updates `config.toml`; automatic-mode enable may start the daemon and use the selected executor, while disable lets daemon maintenance quiesce semantic work and retains downloaded assets |
-| `ctx status` | data root metadata, source epoch, lexical/semantic generation metadata, daemon state, and compact local usage health | none; does not mutate provider history, Core generations, or usage aggregates |
+| `ctx status` | data root metadata, source epoch, lexical/semantic/attribution generation metadata, daemon state, and compact local usage health | none; does not mutate provider history, Core generations, or usage aggregates |
 | `ctx index` / `ctx index watch` / `ctx index wait` | indexing mode, lexical/semantic generation metadata, and daemon state | none |
 | `ctx index mode` | `config.toml` when present | none when reading; `auto` or `manual` writes `config.toml` and establishes or removes persistent supervision |
 | `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, local history-source plugin manifests, and configured named history roots | none |
 | `ctx sources add [--replace]` / `ctx sources remove` | `config.toml` and named provider history root path metadata used for validation | atomically updates `config.toml`; provider history is never modified |
-| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; when semantic search is enabled, the exact published generation may also create or update its semantic projection through the selected executor (including built-in model/runtime acquisition or an explicitly selected HTTP executor); finite workers remain Core-only |
+| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; when semantic search is enabled, the exact published generation may also create or update its semantic projection through the selected executor (including built-in model/runtime acquisition or an explicitly selected HTTP executor); finite workers remain limited to Core refresh, with explicit `ctx import --all` completing attribution in the caller |
 | `ctx show session` / `ctx show event` | complete policy-selected records in the active verified Core/Tantivy generation | selected `--out` path for `show session` when provided |
 | `ctx list events` | complete policy-selected records and existing index terms in one pinned verified Core/Tantivy generation | none; event enumeration is read-only |
 | `ctx search` | active verified Core/Tantivy generation and existing semantic generation; direct CLI passive semantic/hybrid queries may also read selected-executor metadata and verified cached model/runtime assets, or call an explicitly selected HTTP executor after preflight; when refresh has authority, bounded provider discovery/path metadata | a refresh-authorized search may publish a candidate Core generation and daemon state, and an exact semantic `--refresh wait` may create or update the semantic projection through the selected executor (including built-in model/runtime acquisition); manual background and `--refresh off` do not start or wake a ctx daemon or worker and do not mutate Core or semantic projection state |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
-| `ctx doctor` | source epoch, lexical/semantic generation metadata, and ctx-owned daemon lock/status/job metadata | none |
-| `ctx daemon run` | provider transcripts, active lexical and semantic generations, model-cache metadata, and daemon state | candidate lexical generation publication, semantic catch-up, and daemon state |
+| `ctx doctor` | source epoch, lexical/semantic/attribution generation metadata, and ctx-owned daemon lock/status/job metadata | none |
+| `ctx daemon run` | provider transcripts, active lexical, semantic, and attribution generations, model-cache metadata, and daemon state | candidate lexical generation publication, attribution catch-up, semantic catch-up, and daemon state |
 
 Setup, import, and default lexical search do not require source repository
 writes, embedding APIs, executor credentials, or remote accounts. Without
@@ -657,8 +687,9 @@ registry, atomic generation publication, status reporting, disable behavior,
 and persistent process lifecycle remain active. History refresh, semantic
 indexing and serving, canonical maintenance, and daemon-driven automatic
 upgrades do not run. Ordinary foreground commands do not substitute for the
-disabled maintenance paths. Manual finite workers always enforce the Core-only
-exclusions independently of this persistent-daemon setting.
+disabled maintenance paths. Manual finite workers remain limited to Core
+refresh independently of this persistent-daemon setting; explicit completion
+commands reconcile attribution in the caller after the Core worker finishes.
 
 Semantic search remains disabled by default. Its config opt-in is:
 

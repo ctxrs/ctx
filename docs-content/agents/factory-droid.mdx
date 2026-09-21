@@ -1,0 +1,46 @@
+---
+title: "Use ctx with Factory AI Droid"
+sidebarTitle: "Factory Droid"
+description: "Import Factory AI Droid local sessions and search them with ctx."
+---
+
+Install ctx on the machine where Factory AI Droid has local sessions:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+```
+
+See [Install](/getting-started/install) for setup and data-root details.
+
+ctx can import Factory AI Droid local session history when supported records are present. That makes Droid work searchable from the same local index used for Claude Code, Codex, Cursor, Pi, and other supported agents.
+
+## Import Factory AI Droid history
+
+```bash
+ctx setup
+ctx import --provider factory-ai-droid
+ctx sources --json
+```
+
+Use the JSON output to confirm whether the source is `importable` on this machine.
+
+## Search Factory AI Droid history
+
+```bash
+ctx search "refactor attempt" --provider factory-ai-droid
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id>
+```
+
+If a later agent needs the source path or a transcript file:
+
+```bash
+ctx locate event <ctx-event-id>
+ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+```
+
+## Prompt an agent
+
+```text
+Use ctx to search prior Factory AI Droid sessions for this area before editing. Inspect the best hit, cite the ctx ID you used, and continue only from history that still matches the current code.
+```

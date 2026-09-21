@@ -22,7 +22,17 @@ where
 {
     let arguments = arguments.into_iter().map(Into::into).collect::<Vec<_>>();
     match Cli::try_parse_from(arguments.iter().cloned()) {
-        Ok(cli) => Ok(cli),
+        Ok(cli) => {
+            if let crate::cli::CommandRoot::Blame(args) = &cli.command {
+                if let Err(detail) = args.target() {
+                    let mut error = clap::Error::raw(ErrorKind::ValueValidation, detail);
+                    attach_value_validation_usage(&mut error, &arguments);
+                    render_clap_output(&error, &arguments)?;
+                    return Err(RenderedClapError(2).into());
+                }
+            }
+            Ok(cli)
+        }
         Err(mut error) => {
             attach_value_validation_usage(&mut error, &arguments);
             let exit_code = u8::try_from(error.exit_code()).unwrap_or(2);
@@ -50,6 +60,29 @@ fn write_adapted_clap_output(
     machine_output: bool,
     ui: &mut Ui,
 ) -> Result<()> {
+    if machine_output
+        && error.use_stderr()
+        && leaf_bin_name(arguments)
+            .is_some_and(|name| name == "ctx blame" || name.starts_with("ctx blame "))
+    {
+        // Preserve the released machine-readable argument error using the
+        // canonical pure model. Clap still owns parsing, help and exit codes.
+        let diagnostic = ctx_attribution_model::BlameDiagnostic {
+            error: "invalid_request",
+            error_code: "invalid_request",
+            reason: ctx_attribution_model::BlameDiagnosticReason::RequestInvalid,
+            message: "The blame request is invalid.",
+            retryable: false,
+            freshness: None,
+            next_action: None,
+            candidates: Vec::new(),
+            candidates_truncated: false,
+        };
+        let mut bytes = serde_json::to_vec(&diagnostic)?;
+        bytes.push(b'\n');
+        ui.write_stderr_bytes(&bytes)?;
+        return Ok(());
+    }
     if !machine_output {
         let context = if error.use_stderr() {
             ui.stderr_context()

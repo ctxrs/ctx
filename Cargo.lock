@@ -249,6 +249,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "bytecount"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -409,6 +415,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "compact_str"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "static_assertions",
+ "zmij",
+]
+
+[[package]]
 name = "console"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -476,6 +495,12 @@ dependencies = [
  "objc2-core-ml",
  "objc2-foundation",
 ]
+
+[[package]]
+name = "cow-utils"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "417bef24afe1460300965a25ff4a24b8b45ad011948302ec221e8a0a81eb2c79"
 
 [[package]]
 name = "cpufeatures"
@@ -567,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "ctx"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -580,6 +605,8 @@ dependencies = [
  "ctx-agent-application",
  "ctx-agent-integrations",
  "ctx-app-config",
+ "ctx-attribution",
+ "ctx-attribution-model",
  "ctx-cli-presentation",
  "ctx-client-observability",
  "ctx-companion-bridge",
@@ -592,6 +619,7 @@ dependencies = [
  "ctx-history-platform",
  "ctx-history-read-application",
  "ctx-history-refresh",
+ "ctx-history-snapshot-reader",
  "ctx-terminal",
  "ctx-upgrade-engine",
  "flate2",
@@ -617,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-agent-application"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -637,10 +665,12 @@ dependencies = [
 
 [[package]]
 name = "ctx-agent-integrations"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "ctx-attribution-model",
+ "ctx-client-observability",
  "ctx-history-core",
  "fs2",
  "jsonc-parser",
@@ -657,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-app-config"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ctx-history-capture-model",
@@ -676,15 +706,97 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctx-attribution"
+version = "1.5.0"
+dependencies = [
+ "anstream",
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "ctx-attribution-derivation",
+ "ctx-attribution-index",
+ "ctx-attribution-model",
+ "ctx-history-core",
+ "ctx-history-index",
+ "ctx-history-index-format",
+ "ctx-history-index-query",
+ "ctx-history-platform",
+ "ctx-history-snapshot-reader",
+ "ctx-repository-evidence",
+ "ctx-terminal",
+ "fs2",
+ "hex",
+ "rustix",
+ "same-file",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "unicode-segmentation",
+ "unicode-width",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ctx-attribution-derivation"
+version = "1.5.0"
+dependencies = [
+ "ctx-attribution-index",
+ "ctx-attribution-model",
+ "ctx-history-core",
+ "ctx-repository-evidence",
+ "hex",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "ctx-attribution-index"
+version = "1.5.0"
+dependencies = [
+ "ctx-attribution-model",
+ "ctx-history-core",
+ "ctx-history-platform",
+ "fs2",
+ "fst",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ctx-attribution-model"
+version = "1.5.0"
+dependencies = [
+ "ctx-history-core",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ctx-cli-contract-tests"
 version = "1.0.0"
 dependencies = [
  "assert_cmd",
  "base64 0.22.1",
  "chrono",
+ "ctx-attribution",
  "ctx-history-core",
  "ctx-history-index",
+ "ctx-history-platform",
  "ctx-history-refresh-execution",
+ "ctx-history-snapshot-reader",
  "flate2",
  "fs2",
  "libc",
@@ -724,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-cli-qualification"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anstream",
  "assert_cmd",
@@ -747,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-client-observability"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -766,22 +878,19 @@ dependencies = [
 
 [[package]]
 name = "ctx-companion-bridge"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "base64 0.22.1",
- "libc",
  "ring",
  "serde",
  "serde_json",
  "sha2",
- "tempfile",
  "thiserror 1.0.69",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "ctx-daemon-application"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ctx-client-observability",
@@ -797,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-daemon-cli"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ctx-app-config",
@@ -825,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-daemon-runtime"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -846,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-daemon-service"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -872,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-deepseek-harness-qualification"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "assert_cmd",
  "ctx-history-index-query",
@@ -884,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-capture"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "ctx-history-capture-composition",
  "ctx-history-capture-model",
@@ -898,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-capture-composition"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -933,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-capture-composition-qualification"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "base64 0.22.1",
  "ctx-history-capture-composition",
@@ -960,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-capture-model"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "chrono",
  "ctx-history-core",
@@ -983,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-cli"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anstream",
  "anyhow",
@@ -1011,7 +1120,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-core"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1023,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-index"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "crc32fast",
  "ctx-history-core",
@@ -1042,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-index-format"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "base64 0.22.1",
  "ctx-history-capture-model",
@@ -1061,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-index-generation"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "crc32fast",
  "ctx-history-platform",
@@ -1079,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-index-qualification"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "ctx-history-core",
  "ctx-history-index",
@@ -1090,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-index-query"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "ctx-history-core",
  "ctx-history-index",
@@ -1107,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-ingest-application"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ctx-history-capture-model",
@@ -1123,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-jsonl"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1141,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-native-jsonl-parsers"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -1152,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-openclaw-schema"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "rusqlite",
  "thiserror 1.0.69",
@@ -1160,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-platform"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "dirs",
  "libc",
@@ -1231,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-provider-fx"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1262,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-provider-hermes"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -1318,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-provider-openclaw-sqlite"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -1375,7 +1484,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-providers-sqlite-inventory"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -1456,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-read-application"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1475,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-refresh"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ctx-history-capture",
@@ -1492,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-refresh-execution"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ctx-history-capture",
@@ -1511,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-snapshot-reader"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "ctx-history-core",
  "ctx-history-index",
@@ -1527,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-source-discovery"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
@@ -1554,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-source-discovery-qualification"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "ctx-history-capture-model",
  "ctx-history-core",
@@ -1567,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-source-io"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -1597,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-managed-pair-engine"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ctx-history-platform",
@@ -1614,15 +1723,38 @@ dependencies = [
 
 [[package]]
 name = "ctx-protocol"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "ctx-repository-evidence"
+version = "1.5.0"
+dependencies = [
+ "chrono",
+ "ctx-attribution-model",
+ "ctx-history-capture-model",
+ "ctx-history-core",
+ "libc",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "url",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ctx-sdk"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "ctx-protocol",
  "serde",
@@ -1634,7 +1766,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-semantic-index"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ctx-history-core",
@@ -1656,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-semantic-model"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "coreml-native",
@@ -1683,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-terminal"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1701,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-upgrade-engine"
-version = "1.4.12"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1944,6 +2076,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 
 [[package]]
+name = "dragonbox_ecma"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd8e701084c37e7ef62d3f9e453b618130cbc0ef3573847785952a3ac3f746bf"
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2108,6 +2246,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fst"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a"
+
+[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2243,6 +2387,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+]
 
 [[package]]
 name = "hashlink"
@@ -2258,6 +2405,12 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hf-hub"
@@ -2561,6 +2714,15 @@ name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
 dependencies = [
  "either",
 ]
@@ -2972,6 +3134,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nonmax"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "610a5acd306ec67f907abe5567859a3c693fb9886eb1f012ab8f2a47bef3db51"
+
+[[package]]
 name = "normalize-line-endings"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3004,6 +3172,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42b8cfee0e339a0337359f3c88165702ac6e600dc01c0cc9579a92d62b08477a"
 dependencies = [
  "bitflags 2.13.0",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
+dependencies = [
+ "num-integer",
+ "num-traits",
 ]
 
 [[package]]
@@ -3251,6 +3429,231 @@ dependencies = [
 ]
 
 [[package]]
+name = "owo-colors"
+version = "4.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8"
+
+[[package]]
+name = "oxc_allocator"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "064fce871c5cb07e557049ed27c8ca2aa530db797f73424c67e4bb8cfe61175e"
+dependencies = [
+ "allocator-api2",
+ "hashbrown 0.17.1",
+ "oxc_data_structures",
+ "rustc-hash",
+]
+
+[[package]]
+name = "oxc_ast"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a999fd4494b604fc0328fc43443bc1298722500587d87d7e993118bd82c65d7b"
+dependencies = [
+ "bitflags 2.13.0",
+ "oxc_allocator",
+ "oxc_ast_macros",
+ "oxc_data_structures",
+ "oxc_diagnostics",
+ "oxc_estree",
+ "oxc_regular_expression",
+ "oxc_span",
+ "oxc_str",
+ "oxc_syntax",
+]
+
+[[package]]
+name = "oxc_ast_macros"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d715e3c300c95b1d797b05526567161fd86fcac2ac68235101c61b736f216cde"
+dependencies = [
+ "phf",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.2",
+]
+
+[[package]]
+name = "oxc_ast_visit"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81b9d77b5c27575ef7d624de1f226caeca3c0d3fcc2347bdaa788d5c4a85512d"
+dependencies = [
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_span",
+ "oxc_syntax",
+]
+
+[[package]]
+name = "oxc_data_structures"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d15a23b57a931fda6bc9a4fdc3fbabcac6a2edfd0b7216cb7c81432f0e9f54d9"
+
+[[package]]
+name = "oxc_diagnostics"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2d0ce1ec51b07b6501eecedd5ab50835b7ebe5c8463cada3b2e6d984d0943af"
+dependencies = [
+ "bytecount",
+ "cow-utils",
+ "itoa",
+ "memchr",
+ "owo-colors",
+ "oxc_span",
+ "percent-encoding",
+ "smallvec",
+ "textwrap",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "oxc_ecmascript"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b5d3d07165b7aadcd021f62cd95fb7d62cb6977b8bbfb42fa12adbfb7e75257"
+dependencies = [
+ "dragonbox_ecma",
+ "itoa",
+ "num-bigint",
+ "num-traits",
+ "oxc_ast",
+ "oxc_data_structures",
+ "oxc_span",
+ "oxc_syntax",
+]
+
+[[package]]
+name = "oxc_estree"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc7af86a59b7aeb2845ffea2cc21ae259053865b175e9ac936a7d72f2744abe5"
+
+[[package]]
+name = "oxc_index"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "191884bee6c3744909a51acc7d78d4ae370d817b25875b10642f632327b6296e"
+dependencies = [
+ "nonmax",
+ "serde",
+]
+
+[[package]]
+name = "oxc_parser"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "311c29dfdf55ea8bf065cf300b3d0dca5fe1c0fb8059c9ba70a6c98cce75306e"
+dependencies = [
+ "bitflags 2.13.0",
+ "cow-utils",
+ "memchr",
+ "num-bigint",
+ "num-traits",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_data_structures",
+ "oxc_diagnostics",
+ "oxc_ecmascript",
+ "oxc_span",
+ "oxc_str",
+ "oxc_syntax",
+ "rustc-hash",
+ "seq-macro",
+]
+
+[[package]]
+name = "oxc_regular_expression"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31839a373ad02a37fad54244a3eb710f9a94b5e2e16ca0e1d28a37b4c75b8ebc"
+dependencies = [
+ "bitflags 2.13.0",
+ "oxc_allocator",
+ "oxc_ast_macros",
+ "oxc_diagnostics",
+ "oxc_span",
+ "oxc_str",
+ "phf",
+ "rustc-hash",
+ "unicode-id-start",
+]
+
+[[package]]
+name = "oxc_semantic"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366191309f606847936aade62707b06683ed5e0b0c8cb66c27710a61f64a50f1"
+dependencies = [
+ "itertools 0.15.0",
+ "memchr",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_data_structures",
+ "oxc_diagnostics",
+ "oxc_ecmascript",
+ "oxc_index",
+ "oxc_span",
+ "oxc_str",
+ "oxc_syntax",
+ "rustc-hash",
+ "self_cell",
+ "smallvec",
+]
+
+[[package]]
+name = "oxc_span"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c355ae1fa3e865c28cb8a85735ecafd1bb6340a5b880c638d127c1f2d61a98a5"
+dependencies = [
+ "compact_str 0.10.0",
+ "oxc_allocator",
+ "oxc_ast_macros",
+ "oxc_estree",
+ "oxc_str",
+]
+
+[[package]]
+name = "oxc_str"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ba45ef9efa8296e647aa37b2b21936cb520953031edc1ef6352281bbea22faa"
+dependencies = [
+ "compact_str 0.10.0",
+ "hashbrown 0.17.1",
+ "oxc_allocator",
+ "oxc_estree",
+]
+
+[[package]]
+name = "oxc_syntax"
+version = "0.146.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0970d9be099a082711b574d58add258549580a70fe6546b99a067bbd7ad4a264"
+dependencies = [
+ "bitflags 2.13.0",
+ "cow-utils",
+ "dragonbox_ecma",
+ "nonmax",
+ "oxc_allocator",
+ "oxc_ast_macros",
+ "oxc_estree",
+ "oxc_index",
+ "oxc_span",
+ "oxc_str",
+ "phf",
+ "unicode-id-start",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3308,6 +3711,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9744bc48116fee06334924bb5f2bad41eed5e89bd26e29b0b799f9a3f82c210"
 dependencies = [
  "pest",
+]
+
+[[package]]
+name = "phf"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "010378780309880b08997fae13be7834dba947d36393bd372f2b1556deb2a2f6"
+dependencies = [
+ "phf_macros",
+ "phf_shared",
+ "serde",
+]
+
+[[package]]
+name = "phf_generator"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeb62e0959d5a1bebc965f4d15d9e2b7cea002b6b0f5ba8cde6cc26738467100"
+dependencies = [
+ "fastrand",
+ "phf_shared",
+]
+
+[[package]]
+name = "phf_macros"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fa8d0ca26d424d27630da600c6624696e7dec8bf7b3b492b383c5dc49e5e085"
+dependencies = [
+ "phf_generator",
+ "phf_shared",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6fd9027e2d9319be6349febd1db4e8d02aa544921200c9b777720ac34a3aa89"
+dependencies = [
+ "siphasher",
 ]
 
 [[package]]
@@ -3608,7 +4054,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2964d0cf57a3e7a06e8183d14a8b527195c706b7983549cd5462d5aa3747438f"
 dependencies = [
  "either",
- "itertools",
+ "itertools 0.14.0",
  "rayon",
 ]
 
@@ -3840,7 +4286,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3939,10 +4385,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "self_cell"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813"
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+
+[[package]]
+name = "seq-macro"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
 name = "serde"
@@ -4045,6 +4503,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "siphasher"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+
+[[package]]
 name = "sketches-ddsketch"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4064,6 +4528,15 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "smawk"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
 
 [[package]]
 name = "socket2"
@@ -4191,7 +4664,7 @@ dependencies = [
  "fnv",
  "fs4",
  "htmlescape",
- "itertools",
+ "itertools 0.14.0",
  "levenshtein_automata",
  "log",
  "lru",
@@ -4240,7 +4713,7 @@ checksum = "c57166f5bcfd478f370ab8445afb4678dce44801fa5ce5c451aaf8595583c5dc"
 dependencies = [
  "downcast-rs",
  "fastdivide",
- "itertools",
+ "itertools 0.14.0",
  "serde",
  "tantivy-bitpacker",
  "tantivy-common",
@@ -4292,7 +4765,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a2cfc3ac5164cbadc28965ffb145a8f47582a60ae5897859ad8d4316596c606"
 dependencies = [
  "futures-util",
- "itertools",
+ "itertools 0.14.0",
  "tantivy-bitpacker",
  "tantivy-common",
  "tantivy-fst",
@@ -4357,6 +4830,17 @@ name = "termtree"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
+
+[[package]]
+name = "textwrap"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c13547615a44dc9c452a8a534638acdf07120d4b6847c8178705da06306a3057"
+dependencies = [
+ "smawk",
+ "unicode-linebreak",
+ "unicode-width",
+]
 
 [[package]]
 name = "thiserror"
@@ -4461,13 +4945,13 @@ checksum = "b238e22d44a15349529690fb07bd645cf58149a1b1e44d6cb5bd1641ff1a6223"
 dependencies = [
  "ahash",
  "aho-corasick",
- "compact_str",
+ "compact_str 0.9.1",
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
  "getrandom 0.3.4",
  "indicatif",
- "itertools",
+ "itertools 0.14.0",
  "log",
  "macro_rules_attribute",
  "monostate",
@@ -4672,10 +5156,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
+name = "unicode-id-start"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81b79ad29b5e19de4260020f8919b443b2ef0277d242ce532ec7b7a2cc8b6007"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-linebreak"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
 
 [[package]]
 name = "unicode-normalization-alignments"

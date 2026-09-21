@@ -1,0 +1,724 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "ctxrs/ctx",
+    "commit": "5a4ccb39d0cb4016bef2d22c25f714dc4543c6f9",
+    "files": {
+      "crates/ctx-cli/src/analytics/operation.rs": "79a50bf1201d57f5106faf282031e2e232fed112244dc85feeb761e3b94ca6a6",
+      "crates/ctx-cli/src/analytics/product.rs": "90c84843faf1550d417da4e7e77134c6a2fc9d6425018b6b0c458be74e358387",
+      "crates/ctx-cli/src/analytics/sender.rs": "c1847d5f051ff8ffe1aed5dd9166dee3e27bb9d2d302ddfadf10e63e5d318785",
+      "crates/ctx-cli/src/upgrade/command.rs": "e1db9eaf842d524d57d3938c1fa7bebb844723ad07e09b002b249c3df934feed",
+      "crates/ctx-cli/src/upgrade/command/daemon.rs": "548cc098fb7d95f80c839728e56bec7555665a1e9e5d13da082678fa3e7fe31e",
+      "crates/ctx-cli/src/upgrade/state.rs": "46121dd6d616c03d953e9d218b20502f0ee5996f9549ac44d1b83686cf9a22b1"
+    }
+  },
+  "variants": [
+    {
+      "name": "manual_check_available",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "check",
+        "dry_run": false,
+        "upgrade_status": "available",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": true,
+        "update_was_available": true,
+        "upgrade_attempt_id": "ua_manual_check_available",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "manual_check_up_to_date",
+      "outcome": "success",
+      "properties": {
+        "output": "json",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "check",
+        "dry_run": false,
+        "upgrade_status": "up_to_date",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_manual_check_current",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "1",
+        "upgrade_channel": "beta"
+      }
+    },
+    {
+      "name": "manual_check_failure_before_outcome",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "check",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "upgrade_failure_kind": "metadata_fetch"
+      }
+    },
+    {
+      "name": "manual_check_output_failure_after_outcome",
+      "outcome": "failure",
+      "properties": {
+        "output": "json",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "check",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": true,
+        "update_was_available": true,
+        "upgrade_attempt_id": "ua_manual_check_output",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "canary",
+        "upgrade_failure_kind": "apply_failed"
+      }
+    },
+    {
+      "name": "manual_apply_up_to_date",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "up_to_date",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_manual_apply_current",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "manual_apply_up_to_date_with_dry_run_flag",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": true,
+        "upgrade_status": "up_to_date",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_manual_apply_current_dry",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "manual_apply_dry_run_update",
+      "outcome": "success",
+      "properties": {
+        "output": "json",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": true,
+        "upgrade_status": "dry_run",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": true,
+        "update_was_available": true,
+        "upgrade_attempt_id": "ua_manual_dry_update",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "2-5",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "manual_apply_dry_run_semantic_repair",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": true,
+        "upgrade_status": "dry_run",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_manual_dry_repair",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "dev"
+      }
+    },
+    {
+      "name": "manual_apply_scheduled_update",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "scheduled",
+        "upgrade_applied": false,
+        "upgrade_scheduled": true,
+        "update_available": true,
+        "update_was_available": true,
+        "upgrade_attempt_id": "ua_manual_scheduled_update",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "manual_apply_scheduled_semantic_repair",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "scheduled",
+        "upgrade_applied": false,
+        "upgrade_scheduled": true,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_manual_scheduled_repair",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "manual_apply_scheduled_recovery",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "scheduled",
+        "upgrade_applied": false,
+        "upgrade_scheduled": true,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_manual_scheduled_recovery",
+        "managed_install": false,
+        "self_upgrade_allowed": false,
+        "auto_upgrade_allowed": false,
+        "upgrade_warning_count_bucket": "0"
+      }
+    },
+    {
+      "name": "manual_apply_applied_update",
+      "outcome": "success",
+      "properties": {
+        "output": "json",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "applied",
+        "upgrade_applied": true,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": true,
+        "upgrade_attempt_id": "ua_manual_applied_update",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "1",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "manual_apply_applied_semantic_repair",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "applied",
+        "upgrade_applied": true,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_manual_applied_repair",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "manual_apply_applied_recovery",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "applied",
+        "upgrade_applied": true,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_manual_applied_recovery",
+        "managed_install": false,
+        "self_upgrade_allowed": false,
+        "auto_upgrade_allowed": false,
+        "upgrade_warning_count_bucket": "1"
+      }
+    },
+    {
+      "name": "manual_status_checked",
+      "outcome": "success",
+      "properties": {
+        "output": "json",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "status",
+        "dry_run": false,
+        "upgrade_status": "status_checked",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false
+      }
+    },
+    {
+      "name": "manual_auto_enabled",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "enable",
+        "dry_run": false,
+        "upgrade_status": "auto_enabled",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false
+      }
+    },
+    {
+      "name": "manual_auto_disabled",
+      "outcome": "success",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "disable",
+        "dry_run": false,
+        "upgrade_status": "auto_disabled",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false
+      }
+    },
+    {
+      "name": "manual_status_failure",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "status",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "upgrade_failure_kind": "apply_failed"
+      }
+    },
+    {
+      "name": "manual_enable_failure",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "enable",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "upgrade_failure_kind": "apply_failed"
+      }
+    },
+    {
+      "name": "manual_disable_failure",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "disable",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "upgrade_failure_kind": "apply_failed"
+      }
+    },
+    {
+      "name": "manual_apply_lock_failed",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "upgrade_failure_kind": "lock_failed"
+      }
+    },
+    {
+      "name": "manual_apply_unmanaged_install",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "upgrade_failure_kind": "unmanaged_install"
+      }
+    },
+    {
+      "name": "manual_apply_metadata_fetch",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "upgrade_failure_kind": "metadata_fetch"
+      }
+    },
+    {
+      "name": "manual_apply_signature_verify",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "upgrade_failure_kind": "signature_verify"
+      }
+    },
+    {
+      "name": "manual_apply_metadata_invalid",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "upgrade_failure_kind": "metadata_invalid"
+      }
+    },
+    {
+      "name": "manual_apply_artifact_verify",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "upgrade_failure_kind": "artifact_verify"
+      }
+    },
+    {
+      "name": "manual_apply_artifact_download",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "upgrade_failure_kind": "artifact_download"
+      }
+    },
+    {
+      "name": "manual_apply_policy_disallowed",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "upgrade_failure_kind": "policy_disallowed"
+      }
+    },
+    {
+      "name": "manual_apply_apply_failed",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "upgrade_failure_kind": "apply_failed"
+      }
+    },
+    {
+      "name": "manual_apply_output_failure_after_plan_outcome",
+      "outcome": "failure",
+      "properties": {
+        "output": "json",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": true,
+        "upgrade_attempt_id": "ua_manual_apply_output",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable",
+        "upgrade_failure_kind": "apply_failed"
+      }
+    },
+    {
+      "name": "manual_apply_output_failure_after_recovery_outcome",
+      "outcome": "failure",
+      "properties": {
+        "output": "human",
+        "upgrade_mode": "manual",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_manual_recovery_output",
+        "managed_install": false,
+        "self_upgrade_allowed": false,
+        "auto_upgrade_allowed": false,
+        "upgrade_warning_count_bucket": "1",
+        "upgrade_failure_kind": "apply_failed"
+      }
+    },
+    {
+      "name": "automatic_up_to_date",
+      "outcome": "success",
+      "properties": {
+        "upgrade_mode": "auto",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "up_to_date",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_auto_current",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "automatic_skipped_update",
+      "outcome": "success",
+      "properties": {
+        "upgrade_mode": "auto",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "skipped",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": true,
+        "upgrade_attempt_id": "ua_auto_skipped_update",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "automatic_skipped_semantic_repair",
+      "outcome": "success",
+      "properties": {
+        "upgrade_mode": "auto",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "skipped",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_auto_skipped_repair",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "automatic_applied_update",
+      "outcome": "success",
+      "properties": {
+        "upgrade_mode": "auto",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "applied",
+        "upgrade_applied": true,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": true,
+        "upgrade_attempt_id": "ua_auto_applied_update",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "1",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "automatic_applied_semantic_repair",
+      "outcome": "success",
+      "properties": {
+        "upgrade_mode": "auto",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "applied",
+        "upgrade_applied": true,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": false,
+        "upgrade_attempt_id": "ua_auto_applied_repair",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    },
+    {
+      "name": "automatic_applied_recovery",
+      "outcome": "success",
+      "properties": {
+        "upgrade_mode": "auto",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "applied",
+        "upgrade_applied": true,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "upgrade_attempt_id": "ua_auto_applied_recovery"
+      }
+    },
+    {
+      "name": "automatic_failure_before_plan",
+      "outcome": "failure",
+      "properties": {
+        "upgrade_mode": "auto",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "upgrade_attempt_id": "ua_auto_failed_before_plan",
+        "upgrade_failure_kind": "metadata_fetch"
+      }
+    },
+    {
+      "name": "automatic_failure_with_plan",
+      "outcome": "failure",
+      "properties": {
+        "upgrade_mode": "auto",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "update_was_available": true,
+        "upgrade_attempt_id": "ua_auto_failed_with_plan",
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable",
+        "upgrade_failure_kind": "artifact_download"
+      }
+    },
+    {
+      "name": "automatic_failure_recovery",
+      "outcome": "failure",
+      "properties": {
+        "upgrade_mode": "auto",
+        "upgrade_operation": "apply",
+        "dry_run": false,
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_scheduled": false,
+        "update_available": false,
+        "upgrade_attempt_id": "ua_auto_failed_recovery",
+        "upgrade_failure_kind": "apply_failed"
+      }
+    }
+  ]
+}

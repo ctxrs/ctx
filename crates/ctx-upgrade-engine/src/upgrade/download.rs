@@ -29,6 +29,7 @@ pub(super) struct DownloadedArtifact {
 }
 
 impl DownloadedArtifact {
+    #[cfg(test)]
     pub(super) fn from_bytes(
         managed_root: &Path,
         bytes: &[u8],
@@ -143,6 +144,7 @@ impl DownloadedArtifact {
         self.byte_len
     }
 
+    #[cfg(test)]
     pub(super) fn sha256(&self) -> &str {
         &self.sha256
     }
@@ -206,6 +208,7 @@ impl DownloadedArtifact {
         .map(|_| ())
     }
 
+    #[cfg(test)]
     pub(super) fn retained_path(&mut self) -> Result<&Path> {
         self.verify_unchanged()?;
         Ok(&self.path)

@@ -28,7 +28,7 @@ fn observed_operation(kind: McpToolKind) -> Option<ObservedMcpProductOperation> 
         McpToolKind::ShowSession => Some(ObservedMcpProductOperation::ShowSession),
         McpToolKind::ShowEvent => Some(ObservedMcpProductOperation::ShowEvent),
         McpToolKind::QueryEvents => Some(ObservedMcpProductOperation::QueryEvents),
-        McpToolKind::Blame | McpToolKind::ProStatus => None,
+        McpToolKind::Blame => Some(ObservedMcpProductOperation::Blame),
         McpToolKind::Unknown | McpToolKind::Missing => None,
     }
 }
@@ -41,9 +41,7 @@ fn request_observation(descriptor: RequestDescriptor) -> McpRequestObservation {
         RequestDescriptor::ToolCall { operation } => {
             McpRequestObservation::ToolCall(match observed_operation(operation) {
                 Some(operation) => McpObservedTool::Product(operation),
-                None if operation == McpToolKind::Unknown || operation.is_companion_owned() => {
-                    McpObservedTool::Unknown
-                }
+                None if operation == McpToolKind::Unknown => McpObservedTool::Unknown,
                 None => McpObservedTool::Missing,
             })
         }
@@ -240,12 +238,14 @@ fn result_metadata(
     if operation == McpToolKind::Search {
         apply_search_execution(&mut metadata, usage);
     }
+    metadata.blame = usage.and_then(|usage| usage.blame);
     metadata
 }
 
 fn search_result_metadata(usage: Option<&ToolUsageFacts>) -> McpResultMetadataV1 {
     let mut metadata = McpResultMetadataV1::default();
     apply_search_execution(&mut metadata, usage);
+    metadata.blame = usage.and_then(|usage| usage.blame);
     metadata
 }
 

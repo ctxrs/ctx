@@ -1,0 +1,96 @@
+---
+title: "Troubleshooting"
+description: "Common local ctx search setup, import, and retrieval problems."
+---
+
+# Troubleshooting
+
+## ctx is missing or the wrong version runs after installation
+
+Open a new terminal so shell startup or user PATH changes take effect. For the
+default location, a POSIX shell, Bash, or Zsh can use:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+command -v ctx
+ctx --version
+```
+
+In PowerShell:
+
+```powershell
+$env:Path = "$HOME\.local\bin;$env:Path"
+Get-Command ctx -All
+ctx --version
+```
+
+Substitute your custom binary directory if you set `CTX_BIN_DIR` or `-BinDir`.
+In Bash or Zsh, `type -a ctx` lists all matches; POSIX `command -v ctx` shows
+only the selected command. Put the intended install directory first. If you
+opted out of PATH changes, add that directory yourself.
+
+## Installation or setup failed
+
+Keep the error text and selected release version. Check network access for a
+download failure, or disk space and install-directory permissions for a write
+failure, then rerun the same installer. Preserve the existing binary, managed
+marker, and data root while retrying.
+
+If the CLI was installed but setup did not finish, retry `ctx setup`, then
+check `ctx status`. A successful version check alone does not prove setup or
+indexing completed. Man-page and skill warnings have their own repair commands.
+If Blame indexing is pending, run `ctx import --all` or `ctx setup --wait`
+and retry.
+
+The hosted installer does not silently adopt an unmanaged executable or repair
+an edited marker. Follow the
+[managed installation recovery instructions](https://github.com/ctxrs/ctx/blob/main/docs/upgrade.md#fix-upgrade-diagnostics)
+before moving either file. To remove a managed installation, use the
+[hosted uninstaller](/getting-started/install#uninstall-the-managed-cli).
+Use the keep-data option shown there to preserve your local data root.
+
+## No sources found
+
+Run:
+
+```bash
+ctx sources --json
+```
+
+Confirm the provider keeps history on this machine and pass an explicit path if needed:
+
+```bash
+ctx import --path ~/.codex/sessions
+```
+
+In JSON output, `native_import: true` means ctx supports that provider format. `importable: true` means the current path has supported data available to import. A source can be native but still report `missing`, `empty`, or `unknown` on a specific machine.
+
+## Search misses recent work
+
+Search defaults to `--refresh background`. In automatic mode, it serves the
+published generation and asks daemon maintenance to refresh. In manual mode,
+ordinary search uses the published generation without starting or waking a
+process. Run an explicit refresh to catch up:
+
+```bash
+ctx import --all
+ctx search "the missing phrase"
+# Or refresh before searching:
+ctx search "the missing phrase" --refresh wait
+```
+
+Use `--refresh off` to query only the existing index. `--refresh wait` fails if
+the refresh cannot complete. Run `ctx sources --format json` to inspect source
+availability and `ctx import --provider codex --progress plain` for a targeted
+repair pass. For pending Blame attribution, use `ctx import --all` or
+`ctx setup --wait`; index wait/watch and status are observers.
+
+## Store problems
+
+Find the active root:
+
+```bash
+ctx status
+```
+
+The default is `~/.ctx`. Check permissions and available disk space. Treat databases and logs as private local history when collecting diagnostics.

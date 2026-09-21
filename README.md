@@ -1,8 +1,8 @@
-<img src="docs/assets/ctx-readme-banner.png" alt="You have months of coding agent history on your machine. Search it with ctx. Blame it with ctx pro." width="100%">
+<img src="docs/assets/ctx-readme-banner.png" alt="You have months of coding agent history on your machine. Search it with ctx." width="100%">
 
 **ctx** is an open-source CLI for fast local search across your past coding agent sessions. You can search messages and tool calls across agents and sessions, then jump straight to the exact event or full transcript for any result.
 
-**ctx pro** is a paid add-on for “git blame, but for agent sessions.” Take any line, file, commit, or PR and surface the original transcript of the agent session that produced it. Your agents can use that transcript to recover why the code was written that way, including the decisions, assumptions, and tool calls from the original session.
+**`ctx blame`** connects a line, file, commit, or PR to the agent sessions that produced it, with citations to the original transcript and tool calls. It is included in the open-source CLI.
 
 Coding agents have git history, but their own session transcripts and tool call records remain sequestered away in verbose log files. Those log files are a treasure trove of useful data, but they aren't accessible in a legible format for agents.
 
@@ -60,7 +60,7 @@ By structuring agent history into sessions, events, metadata, and indexed fields
 
 <img src="docs/assets/ctx-token-efficiency-chart.png" alt="Token output per agent history search: ctx search 917 tokens, raw transcript search 45,734 tokens." width="100%">
 
-## ctx pro: git blame, but for agent sessions
+## Git blame for agent sessions
 
 `git blame` tells you which commit last changed a line. `ctx blame` tells you which agent session produced that commit, with exact citations back to the original transcript and recorded tool calls.
 
@@ -109,17 +109,7 @@ ctx blame pr https://github.com/your-org/your-repo/pull/42
 
 Like ctx indexing and search capabilities, blame runs locally, so your code and history never leave your machine.
 
-ctx pro is $20 USD per month, but you can try it for free for two weeks with no account or credit card required.
-
-New to ctx? [Install ctx](https://ctx.rs/getting-started/install). Eligible fresh interactive installs start the free ctx pro trial automatically.
-
-Already use ctx? Set up pro:
-
-```bash
-ctx pro
-```
-
-[Learn more about ctx pro](docs/managed-companion.md), including supported inputs, local privacy, pricing, and the free trial.
+[Learn how to use Blame](docs/blame.md), including supported inputs, evidence limits, and local indexing.
 
 ## How it works
 
@@ -129,7 +119,7 @@ Your past coding agent sessions already live on your machine, usually in JSONL f
 
 ctx does not require hooks or any code running inside the agent process. Automatic indexing is on by default and keeps the index current as those history sources change. Each update is completed before it becomes visible, so commands never read a partially built index.
 
-Every session and event receives a stable ctx ID and retains its complete transcript content and source information. `ctx search` finds the relevant history, `ctx show` retrieves the exact event or full transcript, and `ctx locate` identifies where it came from. Semantic search and ctx pro use those same records.
+Every session and event receives a stable ctx ID and retains its complete transcript content and source information. `ctx search` finds the relevant history, `ctx show` retrieves the exact event or full transcript, and `ctx locate` identifies where it came from. Semantic search and Blame use those same records.
 
 ```bash
 # Index all of your existing local agent sessions
@@ -189,7 +179,7 @@ In our benchmark, this was 16x faster than ctx's previous optimized SQLite imple
 | Codebase intelligence ([Graphify](https://github.com/Graphify-Labs/graphify), [Sourcegraph](https://sourcegraph.com/)) | The current repository's code, symbols, documents, and relationships | “What is in this codebase, and how does it fit together?” |
 | Coding-agent history and provenance ([ctx](https://ctx.rs)) | Original sessions, messages, tool calls, and local Git history | “What actually happened, and which session produced this code?” |
 
-ctx gives coding agents exact recall of prior work. They can search the original history, retrieve the cited transcript or tool call, and use ctx pro to map a line, file, commit, or PR back to the session that produced it.
+ctx gives coding agents exact recall of prior work. They can search the original history, retrieve the cited transcript or tool call, and use `ctx blame` to map a line, file, commit, or PR back to the session that produced it.
 
 An agent might use all three in one investigation: memory for a durable rule, codebase intelligence to find the relevant subsystem, and ctx to recover the historical work that explains the change.
 
@@ -240,32 +230,13 @@ Read more about [agent memory](https://ctx.rs/comparisons/agent-memory), [codeba
 | Warp | Supported |
 | Zed | Supported |
 
-## Refer a dev to ctx pro and we'll buy you $120 in LLM tokens
-
-Coding agents aren't cheap. For each developer you refer who becomes a ctx pro subscriber, you earn $10 cash per month for each of their first 12 paid months.
-
-Two active referrals earn you $20 per month; ten earn you $100 per month.
-
-The dev you refer gets a 30-day pro trial instead of the standard 14 days.
-
-```bash
-# Claim your referral codename
-ctx referral create <codename>
-
-# Share this command with another developer
-ctx pro --referral <codename>
-```
-
-[See referral details](https://ctx.rs/pro/referrals) for eligibility, payouts, and terms.
-
 ## Explore the docs
 
 | Page | What it covers |
 | --- | --- |
 | [Install](https://ctx.rs/getting-started/install) | Install ctx, initialize local storage, and index discovered local history. |
 | [Quickstart](https://ctx.rs/first-search) | Search local history, inspect an event, open the session, and use JSON output. |
-| [ctx pro](docs/managed-companion.md) | Use git blame for agent sessions, start the free trial, and review pricing and local privacy. |
-| [Referral details](https://ctx.rs/pro/referrals) | Review referral eligibility, commissions, payouts, and terms. |
+| [Blame](docs/blame.md) | Trace committed code to agent sessions and inspect cited evidence. |
 | [Install the ctx skill](https://ctx.rs/skill) | Install the agent-history search skill with the open skills installer. |
 | [Package managers and unmanaged installs](docs/unmanaged-installs.md) | Install from GitHub Releases, mise, Homebrew, or source builds. |
 | [Agent plugin installs](docs/agent-skill-install.md) | Install the ctx skill through Codex, Claude Code, Cursor, or a raw skill folder. |

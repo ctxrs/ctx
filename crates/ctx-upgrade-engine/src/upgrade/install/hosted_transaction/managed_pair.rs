@@ -6,8 +6,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_managed_pair_engine::{
     cleanup_orphaned_managed_pair_candidate_under_installation_lock,
-    inspect_managed_pair_under_installation_lock,
-    managed_pair_evidence_present_under_installation_lock, ManagedPairInstallationStatus,
+    inspect_managed_pair_under_installation_lock, ManagedPairInstallationStatus,
     ManagedPairVerifier, MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH,
     MANAGED_PAIR_ENVELOPE_RELATIVE_PATH, MANAGED_PAIR_STATE_RELATIVE_PATH,
 };
@@ -37,18 +36,14 @@ pub fn ensure_hosted_transaction_inactive_under_installation_lock(
     bail!("finish the pending hosted installation transaction before changing the installation")
 }
 
-pub(super) fn reject_managed_pair_material_for_core_only_install(
-    install_path: &Path,
-) -> Result<()> {
+pub(super) fn ensure_legacy_pair_transaction_inactive(install_path: &Path) -> Result<()> {
     let Some((root, _, _, _)) = managed_pair_paths(install_path) else {
         return Ok(());
     };
-    if path_entry_exists(&root.join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH))?
-        || managed_pair_evidence_present_under_installation_lock(&root)?
-    {
-        bail!("Core-only hosted installation cannot replace a managed Core+Pro pair");
+    if path_entry_exists(&root.join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH))? {
+        bail!("finish the pending managed-pair upgrade before reinstalling");
     }
-    Ok(())
+    crate::upgrade::state::ensure_legacy_pair_scheduler_terminal(install_path)
 }
 
 pub(super) fn snapshot_managed_pair_files(

@@ -121,12 +121,8 @@ pub(crate) struct IndexDashboardFixtureArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CommandRoot {
-    #[command(about = "Run companion-owned ctx Pro commands")]
-    Pro,
-    #[command(about = "Run companion-owned agent provenance")]
-    Blame,
-    #[command(about = "Run companion-owned referral commands")]
-    Referral,
+    #[command(about = "Show cited agent provenance for committed code or a pull request")]
+    Blame(commands::blame::BlameArgs),
     #[command(about = "Create local ctx storage and index discovered history")]
     Setup(SetupArgs),
     #[command(about = "Manage local semantic search")]

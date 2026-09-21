@@ -1,0 +1,85 @@
+---
+title: "Blame: git blame for agent sessions"
+sidebarTitle: "Blame"
+description: "Map a line, file, commit, or PR back to the coding-agent session that produced it, with citations to the original transcript and tool calls."
+---
+
+# Blame: git blame for agent sessions
+
+`git blame` tells you which commit last changed a line. `ctx blame` tells you which agent session produced that commit, with exact citations back to the original transcript and recorded tool calls.
+
+Agents use `ctx blame` to recover context that no longer exists anywhere near the current session. Starting from a file, line range, commit, or PR, they can find the relevant historical agent sessions and recover the decisions, constraints, failed approaches, and assumptions recorded there.
+
+This helps agents:
+
+- recover constraints and decisions no longer visible in the code
+- uncover assumptions embedded in earlier changes
+- avoid retrying approaches that already failed
+- resume work without relying on lossy compaction summaries
+- audit past agent work to improve instructions, tools, and workflows
+
+Every attribution includes citations back to the original transcript and tool calls. If the session is not on your machine (for example, because a teammate's agent produced the code), ctx says it cannot prove the attribution.
+
+```bash
+# Your agent is investigating why customized cart items
+# are disappearing from your e-commerce app.
+$ ctx blame file src/checkout.ts --lines 118:146
+
+# ctx blame finds the agent session that produced those lines:
+# Lines 118–146
+#   commit    8f3c2a1
+#   Produced by
+#     session   c0297b8a-2ad7-4f73-a826-8ee9387cd1f4
+#     evidence  [1] [2]
+
+# Your agent opens the transcript of the session that produced the offending commit
+$ ctx show session c0297b8a-2ad7-4f73-a826-8ee9387cd1f4
+
+# Previous agent — transcript excerpt
+"Some responses contain multiple cart lines with the same product_id.
+I'm treating those as duplicates and merging them before calculating the total."
+
+# Your agent finds the mistake
+"FOUND IT: The previous agent treated matching product_ids as duplicate cart lines.
+Customized items can share a product ID, so that merge drops valid items."
+```
+
+`ctx blame` can also start from a commit or PR:
+
+```bash
+ctx blame commit <sha>
+ctx blame pr https://github.com/your-org/your-repo/pull/42
+```
+
+Like ctx indexing and search capabilities, blame runs locally, so your code and history never leave your machine.
+
+See [Install ctx](/getting-started/install) or build it from
+[source](https://github.com/ctxrs/ctx).
+
+## Commands and indexing
+
+Both `ctx blame TARGET --type file|commit|pr` and `ctx blame file|commit|pr TARGET`
+are supported. Use `--lines START[:END]` for an inclusive file range,
+`--repository REPOSITORY` to select a logical repository identity such as
+`forge:github.com/org/repo`, `--limit` and `--cursor` for pages,
+and `--format json` for structured output. `--` ends option parsing.
+
+A file query targets committed HEAD content. Uncommitted edits are reported
+separately; they do not silently change the committed target. Commit IDs support
+SHA-1 and SHA-256 repositories. PR URLs and local selectors use captured local
+evidence; ctx does not fetch from the hosting service to fill gaps.
+
+Blame distinguishes production evidence from review activity, and proven links
+from possible, conflicting, or missing evidence. A current empty index is a
+valid result. Missing local Git objects or ambiguous repository identity can
+limit attribution even when history search works.
+
+The daemon catches up the derived `search/attribution/` index after startup and
+Core publication. If Blame reports indexing is pending, run `ctx import --all`
+or `ctx setup --wait`. In manual indexing mode, these commands complete
+attribution in the caller, including when Core history has not changed.
+`ctx setup --no-daemon` suppresses this refresh. Status, doctor, and index
+wait/watch only observe it.
+
+For the full CLI and MCP contract, see the
+[Blame guide](https://github.com/ctxrs/ctx/blob/main/docs/blame.md).

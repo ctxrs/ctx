@@ -1,0 +1,36 @@
+{
+  "name": "ctx-telemetry-worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local --port 8793",
+    "readiness:check": "node scripts/cloudflare-neon-readiness.mjs --profile telemetry --wrangler-config wrangler.toml",
+    "readiness:check:local": "node scripts/cloudflare-neon-readiness.mjs --profile telemetry --wrangler-config wrangler.toml --no-infisical --skip-cloudflare --skip-neon-api",
+    "typecheck": "tsc --noEmit",
+    "test:maintenance": "vitest run test/producer-readiness.test.ts test/scheduled-retention.test.ts test/worker-http.test.ts && tsc --noEmit",
+    "test": "vitest run && node --test test/*.node.mjs && tsc --noEmit",
+    "health-monitor:check": "node scripts/health-monitor.mjs",
+    "health-monitor:apply": "node scripts/health-monitor.mjs --apply",
+    "candidate:staging": "node scripts/candidate-staging-gate.mjs",
+    "queue:gate": "node scripts/cloudflare-queue-gate.mjs",
+    "queue:dlq:decode": "node scripts/telemetry-queue-dlq.mjs",
+    "queue:dlq:redrive": "node scripts/telemetry-queue-redrive.mjs",
+    "deploy": "wrangler deploy --env staging",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:prod": "wrangler deploy --env prod",
+    "test:maintenance:postgres": "node --test --test-name-pattern='telemetry maintenance catch-up' test/maintenance-postgres.integration.mjs",
+    "test:blame:postgres": "vitest run --config vitest.postgres.config.ts"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260921.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.0",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.136.0"
+  },
+  "license": "Apache-2.0"
+}

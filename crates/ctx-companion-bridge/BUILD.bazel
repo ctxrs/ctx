@@ -30,9 +30,25 @@ rust_library(
     compile_data = COMPILE_DATA,
     edition = crate_edition(),
     aliases = aliases(),
-    deps = all_crate_deps(normal = True) + ["//crates/ctx-history-platform:lib"],
+    deps = all_crate_deps(normal = True),
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = ["--check-cfg=cfg(test)", "--check-cfg=cfg(ctx_release_qualification)"],
+)
+
+rust_library(
+    name = "qualification_lib",
+    testonly = True,
+    srcs = PROD_SRCS,
+    crate_name = "ctx_companion_bridge",
+    crate_root = "src/lib.rs",
+    compile_data = COMPILE_DATA,
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = ["--check-cfg=cfg(test)", "--check-cfg=cfg(ctx_release_qualification)", "--cfg=ctx_release_qualification"],
 )
 
 ctx_rust_test(
@@ -40,11 +56,27 @@ ctx_rust_test(
     srcs = RUST_SRCS,
     crate_name = "ctx_companion_bridge",
     crate_root = "src/lib.rs",
-    compile_data = COMPILE_DATA,
+    compile_data = COMPILE_DATA + ["//:legacy_unified_envelope_fixtures"],
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/ctx-history-platform:lib"],
+    deps = all_crate_deps(normal = True, normal_dev = True),
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = ["--check-cfg=cfg(test)", "--check-cfg=cfg(ctx_release_qualification)"],
+    tags = ["exclusive", "security"],
+)
+
+ctx_rust_test(
+    name = "qualification_tests",
+    srcs = RUST_SRCS,
+    crate_name = "ctx_companion_bridge",
+    crate_root = "src/lib.rs",
+    compile_data = COMPILE_DATA + ["//:legacy_unified_envelope_fixtures"],
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal = True, normal_dev = True),
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = ["--check-cfg=cfg(test)", "--check-cfg=cfg(ctx_release_qualification)", "--cfg=ctx_release_qualification"],
     tags = ["exclusive", "security"],
 )

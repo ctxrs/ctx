@@ -1,0 +1,105 @@
+---
+title: "Search"
+sidebarTitle: "Search workflow"
+description: "Search indexed agent sessions and retrieve cited context without model summarization."
+---
+
+# Search
+
+`ctx search` finds matching indexed history. Default results are shaped around useful sessions: ctx shows the strongest matching span from each session, then lets you drill into dense event-level matches when one session looks relevant.
+
+Search defaults to `--refresh background`. In automatic indexing mode it
+serves the latest published generation and requests daemon maintenance. In
+manual mode it uses the published generation without starting or waking a
+process. Use `--refresh wait` or an explicit import when you need fresh history
+before querying.
+Custom history files require explicit registration; search never executes a
+plugin exporter.
+
+## Examples
+
+```bash
+ctx search "build failure"
+ctx search "sqlite storage" --provider codex
+ctx search "retry handling" --workspace checkout --since 60d
+ctx search "tool output" --event-type tool_output
+ctx search --file crates/foo/src/lib.rs
+ctx search "token budget" --refresh off
+ctx search --term "installer" --term checksum --term release
+ctx search "token budget" --session <ctx-session-id>
+ctx search "token budget" --exclude-session <ctx-session-id>
+ctx search "token budget" --events
+ctx search "token budget" --limit 5 --verbose
+ctx search "release notes" --history-source example-agent/default
+```
+
+Use repeatable `--term` when you want to search multiple explicit words or phrases, similar to `rg -e foo -e bar`. You can use `--term` on its own or together with a positional query.
+
+Results can include `ctx_event_id`, `ctx_session_id`, provider metadata, title or event label, snippet, rank, match reasons, timestamp, working directory, source path or cursor when available, citations, `session_importance`, `more_matches_in_session`, and `suggested_next_commands` for typed commands such as `ctx show event`, `ctx show session`, and `ctx locate event`.
+
+Search result IDs are ctx-owned. Provider-owned session and event IDs remain
+first-class metadata for native workflows and explicit provider-aware lookup;
+positional lookup commands use `ctx_event_id` and `ctx_session_id`.
+
+## Filters
+
+- `--provider codex|grok-build|deepseek-harness|pi|claude|opencode|kilo|kiro-cli|crush|goose|lingma|qoder|warp|codebuddy|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|tabnine|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|auggie|junie|firebender|forgecode|deepagents|mistral-vibe|mux|rovodev|cline|roo|mimocode`;
+- `--history-source <provider_key/source_id>` for imported custom history;
+- `--provider-key <key>`, `--source-id <id>`, and `--source-format <format>` for exact custom history source filters;
+- `--workspace <name-or-path>`;
+- `--since <rfc3339-or-days>d`;
+- `--event-type <event-type>`;
+- `--file <path>`;
+- `--session <ctx-session-id>`;
+- `--exclude-session <ctx-session-id>`, repeatable exact session exclusions;
+- `--term <query-or-keyword>`, repeatable explicit search terms;
+- `--events`;
+- `--primary-only`;
+- `--limit <n>`;
+- `--refresh background|off|wait`;
+- `--include-current-session`;
+- `--verbose`.
+
+`--since` accepts RFC 3339 timestamps such as `2026-06-01T00:00:00Z` or a day window such as `30d`.
+
+The default searches all indexed sessions, including primary and subagent
+sessions. Use `--primary-only` when you want only sessions with an exact
+provider-native primary claim.
+
+`--limit` defaults to `20` and is capped at `200`.
+
+Default search returns diverse session-level results. Use `--session <ctx-session-id>` after a default search has identified a session to inspect; scoped session search returns dense event hits. Use `--events` without `--session` when you want dense event-level results across sessions.
+
+When a supported direct CLI provides an unambiguous current-session identity,
+search excludes that active session tree by default. The supported direct CLIs
+are Codex, DeepSeek Harness, Grok Build, Pi, Claude Code, Goose, Hermes,
+Shelley, Qwen Code, and Mux. Ambiguous or missing identity fails open, so ctx
+does not guess. Use `--include-current-session` to disable only this automatic
+tree exclusion; it does not override repeatable `--exclude-session` values.
+
+Use `--exclude-session <ctx-session-id-or-prefix>` to exclude one exact
+resolved ctx session; repeat the flag for multiple sessions. It accepts a full
+ctx session ID or unambiguous prefix, not provider session IDs, and it conflicts
+with `--session <ctx-session-id>`. With
+`--session`, automatic tree exclusion is not applied, so
+`--include-current-session` has no effect. MCP search does not automatically
+exclude the caller's current session.
+
+`--refresh` defaults to `background`. In automatic indexing mode, it may start
+or wake the persistent daemon while serving the latest published generation;
+in manual mode, it serves that generation without contacting a process. Use
+`--refresh wait` to request authoritative Core publication before querying.
+Use `--refresh off` to query published generations without starting or waking a
+process. NanoClaw history is project-local and is discovered automatically from
+the current workspace; use an explicit path only to target another project.
+
+## Machine output
+
+Use default text output for agent reading. Use `ctx search --json` for scripts, `jq`, or exact field extraction. JSON results include the same result metadata and citations as the human output, plus a top-level `freshness` object describing the pre-search refresh mode and outcome. A citation with `source_exists: false` means ctx can return indexed text, but the raw provider file was not available at the stored path when the result was built.
+
+## Cited retrieval
+
+Use `ctx search`, `ctx show event`, `ctx show session`, `ctx locate event`, and `ctx locate session` for deterministic cited retrieval. These commands return source material and do not call a model or generate a summary. Use `ctx show session --format markdown --out <path>` when you need a transcript artifact on disk.
+
+These typed commands are the local history query surface. ctx does not expose a
+generic SQL or database-query interface.

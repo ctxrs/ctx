@@ -35,6 +35,16 @@ source_paths=(
   crates/ctx-agent-integrations/src
   crates/ctx-app-config/Cargo.toml
   crates/ctx-app-config/src
+  crates/ctx-attribution-model/Cargo.toml
+  crates/ctx-attribution-model/src
+  crates/ctx-repository-evidence/Cargo.toml
+  crates/ctx-repository-evidence/src
+  crates/ctx-attribution-index/Cargo.toml
+  crates/ctx-attribution-index/src
+  crates/ctx-attribution/Cargo.toml
+  crates/ctx-attribution/src
+  crates/ctx-attribution-derivation/Cargo.toml
+  crates/ctx-attribution-derivation/src
   crates/ctx-cli/Cargo.toml
   crates/ctx-cli/src
   crates/ctx-cli-presentation/Cargo.toml
@@ -78,9 +88,9 @@ source_paths=(
   crates/ctx-history-search/src
 )
 
-removed_surface_pattern='ctx (dashboard|shim|publish|evidence|link-pr|context|uninstall|watch)([^[:alnum:]_-]|$)'
+removed_surface_pattern='ctx (dashboard|shim|publish|evidence|link-pr|context|watch)([^[:alnum:]_-]|$)'
 removed_surface_pattern+='|ctx update([[:space:]]+--|[^[:alnum:]_ -]|[[:space:]]*$)'
-removed_surface_pattern+='|ctx pr([^[:alnum:]_-]|$)|publish pr-comment|dashboard export|gh CLI|GhCli|upsert_github|wrapper scripts'
+removed_surface_pattern+='|ctx pr([^[:alnum:]_-]|$)|publish pr-comment|dashboard export|(^|[^[:alnum:]_])gh CLI([^[:alnum:]_]|$)|GhCli|upsert_github|wrapper scripts'
 removed_surface_pattern+='|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope'
 removed_surface_pattern+='|(^|[^[:alnum:]_])ShimCommandOptions([^[:alnum:]_]|$)'
 removed_surface_pattern+='|CommandRoot::Context([^[:alnum:]_]|$)|CommandRoot::Update([^[:alnum:]_]|$)|CommandRoot::Uninstall([^[:alnum:]_]|$)|CommandRoot::Watch([^[:alnum:]_]|$)'
@@ -126,6 +136,24 @@ check_file() {
 
   if LC_ALL=C grep -n -E "${removed_surface_pattern}" "${path}" >/dev/null 2>&1; then
     printf 'release source contains a removed top-level/cloud surface: %s\n' "${path}" >&2
+    failures=$((failures + 1))
+  fi
+
+  # Keep the actual unsupported invocation ban, while allowing only the
+  # exact hosted/native distinction also accepted by check-docs and the
+  # embedded-doc binary audit. Do not ignore the rest of the matching line.
+  if LC_ALL=C grep -i -E 'ctx uninstall' "${path}" >/dev/null 2>&1 \
+    && python3 - "${path}" <<'PY_UNINSTALL'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"There is no\s+native\s+`ctx uninstall`\s+command\.", "", text)
+raise SystemExit(0 if re.search(r"\bctx uninstall\b", text, re.IGNORECASE) else 1)
+PY_UNINSTALL
+  then
+    printf 'release source recommends a removed native uninstall command: %s\n' "${path}" >&2
     failures=$((failures + 1))
   fi
 

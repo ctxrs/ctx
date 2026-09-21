@@ -27,8 +27,10 @@ use super::{
 
 mod managed_pair;
 mod replacement;
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(super) use managed_pair::validate_helper_file as validate_managed_pair_helper_file;
+#[cfg(test)]
+pub(super) use managed_pair::write_attempt_locked as write_managed_pair_attempt_locked;
 #[cfg(windows)]
 pub(super) use managed_pair::{
     acquire_helper_recovery_lock as acquire_managed_pair_helper_recovery_lock,
@@ -38,8 +40,7 @@ pub(super) use managed_pair::{
 pub(super) use managed_pair::{
     acquire_recovery_lock as acquire_managed_pair_recovery_lock,
     recovery_hint as managed_pair_recovery_hint, recovery_locked as managed_pair_recovery_locked,
-    try_acquire_recovery_lock as try_acquire_managed_pair_recovery_lock,
-    write_attempt_locked as write_managed_pair_attempt_locked, ManagedPairRecovery,
+    try_acquire_recovery_lock as try_acquire_managed_pair_recovery_lock, ManagedPairRecovery,
 };
 use replacement::applied_state_write_failure_injected;
 #[cfg(any(windows, test))]
@@ -661,6 +662,30 @@ fn read_state_object(install_path: &Path) -> UpgradeState {
         .and_then(|bytes| serde_json::from_slice::<UpgradeState>(&bytes).ok())
         .map(UpgradeState::valid_or_default)
         .unwrap_or_default()
+}
+
+/// Cleanup cannot discard the image while a released updater still expects it.
+pub(in crate::upgrade) fn ensure_legacy_pair_scheduler_terminal(install_path: &Path) -> Result<()> {
+    let Some(bytes) = super::install::read_stable_file(
+        &state_path(install_path),
+        "ctx upgrade scheduler state",
+        DUE_HINT_STATE_MAX_BYTES,
+        super::install::StableFileKind::Data,
+    )?
+    else {
+        return Ok(());
+    };
+    let state: UpgradeState = serde_json::from_slice(&bytes)?;
+    if state.schema_version != STATE_SCHEMA_VERSION || is_active_upgrade_status(&state.status) {
+        return Err(anyhow!(
+            "finish the pending upgrade before retiring legacy installation files"
+        ));
+    }
+    // Terminal publication has finished every pair-slot read. Daemon restart
+    // owns only the installed executable and its lifecycle record; it neither
+    // consumes these retired files nor grants installation ownership. Do not
+    // turn a stale/abandoned lifecycle record into a second installation fence.
+    Ok(())
 }
 
 fn read_state_object_bounded(install_path: &Path) -> Option<UpgradeState> {

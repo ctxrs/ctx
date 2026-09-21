@@ -1,0 +1,66 @@
+load("@docs_site_npm//:defs.bzl", "npm_link_all_packages")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["pnpm-lock.yaml"])
+
+npm_link_all_packages(name = "node_modules")
+
+filegroup(
+    name = "test_inputs",
+    srcs = glob(
+        ["scripts/**/*.ts", "src/**/*.ts", "src/**/*.tsx", "src/**/*.css", "public/**"],
+        exclude = [
+            "src/generated/**",
+            "public/**/*.md",
+            "public/.well-known/**",
+            "public/llms.txt",
+            "public/robots.txt",
+            "public/search-index.json",
+            "public/sitemap.xml",
+            "public/videos/**",
+        ],
+    ) + [
+        "index.html",
+        "package.json",
+        "tsconfig.json",
+        "tsconfig.app.json",
+        "tsconfig.node.json",
+        "vite.config.ts",
+        "vitest.config.ts",
+    ],
+)
+
+sh_test(
+    name = "docs_site_test",
+    size = "small",
+    srcs = ["//:scripts/bazel/package-action.sh"],
+    args = [
+        "$(rootpath @pnpm//:pnpm)",
+        "services/docs-site",
+        "test",
+    ],
+    data = [
+        "@pnpm//:pnpm",
+        "//docs-content:site_content",
+        ":test_inputs",
+        ":node_modules/@mdx-js/mdx",
+        ":node_modules/@vitejs/plugin-react",
+        ":node_modules/github-slugger",
+        ":node_modules/gray-matter",
+        ":node_modules/mdast-util-to-string",
+        ":node_modules/react",
+        ":node_modules/react-dom",
+        ":node_modules/rehype-slug",
+        ":node_modules/remark-gfm",
+        ":node_modules/remark-mdx",
+        ":node_modules/remark-parse",
+        ":node_modules/shiki",
+        ":node_modules/tsx",
+        ":node_modules/unified",
+        ":node_modules/unist-util-visit",
+        ":node_modules/vite",
+        ":node_modules/vitest",
+    ],
+)

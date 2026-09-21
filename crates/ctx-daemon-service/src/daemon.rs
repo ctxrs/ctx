@@ -417,6 +417,11 @@ where
                 config_port: ports.config,
             },
         ) == DaemonConfigReloadOutcome::StopDisabled;
+        if !finite_worker && !stop_disabled {
+            // Reconcile retained Core even when startup produces no new publication.
+            // A failed derived consumer never revokes searchable Core readiness.
+            let _ = ports.generation_published.notify(data_root, None);
+        }
         if !finite_worker {
             install_source_watch_ingress(
                 &wakeup,
@@ -974,23 +979,15 @@ where
     Ok(())
 }
 
-fn recover_source_refresh_before_ipc(
-    data_root: &Path,
-    source_refresh: &CoreRefreshEngine,
-) -> Result<()> {
-    source_refresh
-        .recover_interrupted_publication(data_root)
-        .map(|_| ())
-        .context("recover interrupted Core refresh before daemon readiness")
-}
-
 fn recover_source_refresh_coordinator_before_ipc(
     runtime: &mut DaemonRuntime,
     data_root: &Path,
     config: &'static dyn DaemonConfigPort,
 ) -> Result<Arc<CoreRefreshEngine>> {
     let source_refresh = Arc::new(super::source_backed_refresh_adapter::refresh_engine(config));
-    recover_source_refresh_before_ipc(data_root, source_refresh.as_ref())?;
+    source_refresh
+        .recover_interrupted_publication(data_root)
+        .context("recover interrupted Core refresh before daemon readiness")?;
     runtime.source_refresh_coordinator = Some(Arc::clone(&source_refresh));
     Ok(source_refresh)
 }

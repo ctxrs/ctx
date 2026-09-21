@@ -10,6 +10,8 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+import functools
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,44 +20,6 @@ AUTHORITY = ROOT / "contracts" / "ctx-managed-pair-release-authority-v1.json"
 MANIFEST_SCHEMA = ROOT / "contracts" / "ctx-managed-pair-manifest-v1.schema.json"
 RELEASE_SET_SCHEMA = ROOT / "contracts" / "ctx-managed-pair-release-set-v1.schema.json"
 STATE_SCHEMA = ROOT / "contracts" / "ctx-managed-pair-state-v1.schema.json"
-
-TEST_PRIVATE_KEY_PEM = """-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC4czAqM5XMipjl
-QxTatkq8VmeS13e2aEpqT1v/XGL17o43i624H80xEbvB5tV/YzpO5N8sb4wEUj9h
-yNzB5/U4S6SM/QadcA9fk/V7KeBOcz15PvZaU0UNp/dKVvzEFtxv/rjQCfA80C2N
-30lTwti8pts4IulxVeB7BkIvqs3XADV5zBVwRACHWt5MKcMrXfBcmKRy8TLdNeml
-lPgU3V2pj4c54KQ0aoy3/970+ry3P+eT8BlatU4k8R+pS0Oy4s3Ezczj9UrPCREd
-1m2tAqaw8B0wRoei+nHEPWqbbzgx8fepv38U9LXmzYpCjSWSZ+zcZ4YBsXlyab3a
-2PjyZ42HAgMBAAECggEAHQvis1qhRe8zibMJJzIazdLrh5fP3dVJlrk9mxag7Oqu
-0bd42WyEoywQPcZMq71kEsV/EZ/VVF7hZVQ803pkRwO+e4djEcryWNJTj5w2GxSR
-wzSzleDUGITxb+8H6hdRin95+iT+hI0iB1v4z6x49ihukEYLLhJgge8n4BrNRISa
-P+SInTo/UzO5NIzh8HdQBJqkammS4c/Eij0jVw9onMpOFWKAxcs0hmk1SSy6KouD
-yDBqp6m6ILlAuggZutkn+7X4QUzvgBQePYy6BNX57dmFpBWt/8DVc5m4Ciwd+s1L
-CLRL86X6YLtc5wTQvdX/xHbW9m/FUXk5EvK2eQ+IyQKBgQD7B4aFQFwHiRjO323d
-I7FUcSgsBEz/pYiucEF5c+GQUpSq/ORgFg7sYLAv3312nbu/TdIw2O0KxhhfUX6j
-iRGe5NzSogUpRHk3Rq/tbQKULezDi9Lc7ROUuMYRpsHSjiVLB+zYdRDZULBqAdSo
-3A0c0/xfCKB0efIJt4SfTVtcvwKBgQC8Git0ry8csFgmwmuxHL1nBmxXBLyZ04Ko
-PQ+WyLPgL8cVP3Bf19zXDtmeoPSD8bZODys4UKit3zpZDEKN9S8JeN2E1h5MTgKN
-wmOxdimAo0xKHJ/EnvxzfR5UzbrGiuajCFvIDPjItl3gSJ2av1cwQ8ljZBtOoqdX
-KiTNCw7ZOQKBgQCTEuSom32P2K4VPmiC4M+blrSfnWFzgoujEBf8TX2BbjC2QXaY
-KTRTH476bWl3npCKU9DrV50B6/AJoJievcb6HkKWkeCOPhT64speQ7j4EjQemYRQ
-dgI750n8u4PhlfCZlioY4/WcLR8+7JWo3Uw9cKHzF/3SYEQDl2b3Yn49xwKBgFda
-g+HNVUCqeFWPpnl60k6dAgUrUvbQ7fV5Xdr1W+t55KdubZ5k3c8Vu2RadRMtVi9M
-BhNCCgOtDii6c9H/EhgBBEajNTDUbYUtyCRqrn1p2Iz2XA/wkWaErWhOnjWD3fXK
-dO0jcQms/02gC2kJANGOOWEp5TCQgswM60g5oWypAoGADlZTP+97w9NcOJoQdZVi
-+I5NLRKHUjAvax4BALtH5uuVIwj6cSwheRkBzd7rU1aQ65yuUYwIznDsC2rir26x
-ehIUvhTehZf04otZbIo7UUvFhohRmX5k4/Idf/njMa/dA5afBMM1xE7IkoeHQyLc
-3I9zapKTmyq90XvKHvA9eyA=
------END PRIVATE KEY-----"""
-
-TEST_PUBLIC_KEY_PEM = """-----BEGIN RSA PUBLIC KEY-----
-MIIBCgKCAQEAuHMwKjOVzIqY5UMU2rZKvFZnktd3tmhKak9b/1xi9e6ON4utuB/N
-MRG7webVf2M6TuTfLG+MBFI/Ycjcwef1OEukjP0GnXAPX5P1eyngTnM9eT72WlNF
-Daf3Slb8xBbcb/640AnwPNAtjd9JU8LYvKbbOCLpcVXgewZCL6rN1wA1ecwVcEQA
-h1reTCnDK13wXJikcvEy3TXppZT4FN1dqY+HOeCkNGqMt//e9Pq8tz/nk/AZWrVO
-JPEfqUtDsuLNxM3M4/VKzwkRHdZtrQKmsPAdMEaHovpxxD1qm284MfH3qb9/FPS1
-5s2KQo0lkmfs3GeGAbF5cmm92tj48meNhwIDAQAB
------END RSA PUBLIC KEY-----"""
 
 SPEC = importlib.util.spec_from_file_location("managed_pair_contracts", SCRIPT)
 if SPEC is None or SPEC.loader is None:
@@ -68,11 +32,17 @@ def digest(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
+@functools.lru_cache(maxsize=1)
+def ephemeral_test_keys() -> dict[str, str]:
+    private = subprocess.run(["openssl", "genpkey", "-algorithm", "RSA",
+        "-pkeyopt", "rsa_keygen_bits:2048"], check=True, capture_output=True).stdout
+    public = subprocess.run(["openssl", "rsa", "-RSAPublicKey_out"],
+        input=private, check=True, capture_output=True).stdout
+    return {"TEST_PRIVATE_KEY_PEM": private.decode(), "TEST_PUBLIC_KEY_PEM": public.decode()}
+
+
 def test_key_pem(name: str) -> str:
-    return {
-        "TEST_PRIVATE_KEY_PEM": TEST_PRIVATE_KEY_PEM,
-        "TEST_PUBLIC_KEY_PEM": TEST_PUBLIC_KEY_PEM,
-    }[name]
+    return ephemeral_test_keys()[name]
 
 
 def test_authorities() -> dict[str, dict[str, str]]:

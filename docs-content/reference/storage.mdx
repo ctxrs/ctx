@@ -1,0 +1,113 @@
+---
+title: "Storage and privacy"
+sidebarTitle: "Storage"
+description: "ctx stores self-contained normalized history in Core and keeps derived local projections separate."
+---
+
+# Storage and privacy
+
+Default root:
+
+```text
+~/.ctx/
+  search/
+    lexical/
+    semantic/
+    attribution/
+  usage.sqlite
+  config.toml
+  logs/
+```
+
+`CTX_DATA_ROOT` or `--data-root` can point ctx somewhere else. The configured
+root is used directly.
+
+## Self-contained Core
+
+Provider transcript files and databases are read-only acquisition inputs. After
+a successful refresh, the committed Core generation is the authority for
+normalized history. It stores complete product-visible records, stable
+identities, content-policy state, captured repository evidence, citations, and the full
+meaningful text used for lexical search.
+
+Search, show, locate, MCP, semantic indexing, and Blame read Core rather than
+reopening provider records. A temporary input failure preserves the last good
+Core data and is reported as refresh health; an incomplete refresh candidate is
+never published.
+
+## Core and derived products
+
+The data root keeps Core alongside independent derived products:
+
+- `search/lexical/` contains immutable Tantivy Core generations. Each accepted
+  event's complete normalized record is stored and its full meaningful text is
+  indexed.
+- `search/semantic/` contains optional generation-bound flat-F32 vectors,
+  hashes, offsets, and policy metadata. It contains no plaintext transcript
+  chunks, bodies, or previews.
+
+- `search/attribution/` contains the plain, bounded, derived index used by
+  Blame. It stores repository and attribution facts with stable Core citations,
+  not another complete transcript store.
+
+The semantic and attribution indexes bind to committed Core generations and
+may trail Core independently. Attribution is rebuilt from retained Core records;
+operations that need a current checkout also require available local Git objects.
+The original provider files are not needed to read retained Core history.
+
+Core/Tantivy is the sole public local architecture for normalized lexical
+records and history queries. Typed provider-aware search, show, and locate
+provide direct lookup. There is no `ctx sql`, MCP SQL tool, ctx-owned relational
+history database, or replacement generic query engine.
+
+## Fresh v0.26 epoch
+
+Version 0.26 does not adopt the pre-v0.26 history database. Before the first
+self-contained Core generation is verified and atomically active, setup,
+refresh, import, search, show, locate, MCP, and daemon maintenance do not open,
+query, repair, migrate, or use an old Store database family as fallback. After
+verified activation, ctx deletes that exact old Store database family.
+
+There is no supported rollback, manual recovery, or v0.25 binary or daemon
+path. Recovery fixes forward from currently available provider sources.
+Current-format atomic install and publication crash recovery remain supported.
+A fresh v0.26 data root does not create `work.sqlite`.
+
+## Other local state
+
+`usage.sqlite` stores bounded daily local product-usage aggregates. It is
+separate from provider history and contains no query, path, prompt, transcript,
+session or event ID, or exact timestamp.
+
+Official installer-managed binaries also have an ownership sidecar next to the
+binary, such as `~/.local/bin/ctx.install.json`. The sidecar is outside the ctx
+data root because it describes the installed executable.
+
+## Repository identity and local access
+
+The attribution index derives logical repository bindings from captured
+structured activity in Core. It records explicit abstentions when identity is
+missing, ambiguous, unsafe, or unsupported. Repository-scoped observations do
+not grant access outside their binding.
+
+Logical identity is separate from current local access. A moved or deleted
+worktree may retain its identity while losing an available local root. Blame
+reports limits in repository, commit, and PR evidence without inventing a
+connection. Current empty or abstained coverage is a valid result.
+
+## Keeping attribution current
+
+Daemon startup and Core publication schedule attribution catch-up. Explicit
+`ctx import --all` and `ctx setup --wait` complete it in the caller, including
+in manual indexing mode and when Core is unchanged. `ctx setup --no-daemon`
+suppresses this refresh. Status, doctor, and index observation never rebuild it.
+
+## Network behavior
+
+Discovery and refresh read provider inputs locally. Search, show, locate, and
+MCP read Core and its local derived products. None of these operations repeats
+the network activity that originally produced a provider transcript.
+
+Semantic model or runtime acquisition is an explicit, separately controlled
+network surface. Command-metadata privacy controls are covered in the
+[Privacy Policy](/legal/privacy-policy).

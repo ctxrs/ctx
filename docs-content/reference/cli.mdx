@@ -1,0 +1,219 @@
+---
+title: "CLI reference"
+sidebarTitle: "CLI"
+description: "The public ctx search CLI command surface."
+---
+
+# CLI reference
+
+## Blame
+
+```bash
+ctx blame src/auth.ts --lines 42
+ctx blame file src/auth.ts --lines 42:55
+ctx blame commit abc1234
+ctx blame pr https://github.com/org/repo/pull/123
+ctx blame src/auth.ts --lines 42 --format json
+```
+
+Blame traces files, lines, commits, and PRs
+to agent sessions using local evidence and stable Core citations. See
+[Blame](/blame) for both command forms, target resolution, confidence, pagination,
+and indexing behavior.
+
+If attribution indexing is pending, run `ctx import --all` or
+`ctx setup --wait`. Status, doctor, and index observation do not rebuild it.
+
+## Setup and health
+
+```bash
+ctx setup
+ctx setup --json
+ctx setup --progress json --json
+ctx status
+ctx status --json
+ctx doctor
+ctx doctor --json
+```
+
+Setup creates local storage, discovers supported provider history, inventories
+local history sources, imports discovered native provider sources, and optimizes
+the local Tantivy Core index. Status retains schema 3 and includes an `attribution` observation of generation
+currentness, coverage, and operation availability. A current empty or abstained
+index is terminal. See the [JSON contract](https://github.com/ctxrs/ctx/blob/main/docs/contracts/json.md#blame-attribution-readiness)
+for exact fields. Health checks read local state. These commands do
+not change shell startup files, install repository integrations, write into
+source repositories, call model APIs, or require API keys. Installer-managed
+binaries can run signed background auto-upgrade checks through daemon
+maintenance; ordinary foreground commands do not trigger them.
+
+## Agent skill
+
+```bash
+ctx integrations install skill
+ctx integrations install skill --agent codex --agent claude-code
+ctx integrations install skill --all-agents
+ctx integrations install skill --project
+ctx integrations install skill --force
+ctx integrations status skill
+ctx integrations status skill --agent codex --json
+```
+
+`integrations install skill` installs or refreshes ctx's bundled
+`ctx` skill. With no target flags in an interactive
+terminal, it opens a small agent picker with the universal `~/.agents/skills`
+location selected plus detected agent-specific folders for tools that need
+them. In non-interactive runs, it installs to the universal folder and also
+writes detected agent-specific folders, such as Claude Code, only when ctx sees
+evidence that the agent is installed. `--agent` targets specific skill folders,
+`--all-agents` writes all supported target folders, and `--project` switches
+from global paths to current-project skill folders.
+
+`integrations status skill` reports whether the bundled skill is `current`,
+`stale`, `modified`, or `missing`. `integrations install skill` refreshes
+stale bundled copies automatically, but it refuses to overwrite locally
+modified skill files unless you pass `--force`.
+
+## Integrations
+
+```bash
+ctx integrations install mcp
+ctx integrations install mcp --agent codex
+ctx integrations install mcp --provider cursor --project
+ctx integrations install mcp --all-agents --json
+ctx integrations install mcp --agent cursor --force
+ctx integrations status mcp
+ctx integrations status mcp --agent codex --json
+ctx integrations install slash-commands
+ctx integrations install slash-commands --agent opencode
+ctx integrations install slash-commands --agent gemini-cli --project
+ctx integrations install slash-commands --agent qwen-code
+ctx integrations install slash-commands --all-agents
+ctx integrations install slash-commands --force
+ctx integrations install slash-commands --json
+```
+
+`integrations install mcp` adds a local MCP server named `ctx` to supported
+coding-agent client configs. `integrations install slash-commands` installs a
+`/ctx` entry point only for providers where ctx has a documented,
+file-based command surface it can manage safely: OpenCode, MiMo Code, Gemini
+CLI, and Qwen Code. For Codex, Claude Code, Cursor, GitHub Copilot CLI, Pi,
+and other skill-first agents, use `ctx integrations install skill`.
+
+## Sources
+
+```bash
+ctx sources
+ctx sources --json
+```
+
+`sources` lists provider history locations that ctx knows how to check on this machine. JSON rows include provider, path, status, native import support, importability, source format, raw retention, and any unsupported reason. `native_import: true` means ctx has parser support for that provider format. `importable: true` means the current path has supported data available to import.
+
+## Import
+
+```bash
+ctx import
+ctx import --all
+ctx import --provider codex
+ctx import --provider pi
+ctx import --provider claude
+ctx import --provider opencode
+ctx import --provider kilo
+ctx import --provider kiro-cli
+ctx import --provider antigravity
+ctx import --provider gemini
+ctx import --provider cursor
+ctx import --provider copilot-cli
+ctx import --provider factory-ai-droid
+ctx import --provider qwen-code
+ctx import --provider roo
+ctx import --path ~/.codex/sessions
+ctx import --provider opencode --path ~/.local/share/opencode/opencode.db
+ctx import --input-format ctx-history-jsonl-v2 --path ./history.jsonl
+ctx import --history-source example-agent/default
+ctx import --history-source-manifest ./ctx-history-plugin.json
+ctx import --resume
+ctx import --json
+ctx import --progress json --json
+```
+
+`import` explicitly indexes provider history into the local Tantivy Core. The normal first-run path is `ctx setup`, which already imports discovered sources. Use `import` to repair, re-run, resume, or target a specific provider or path. Current `--resume` output marks an idempotent rescan; provider-native cursor resume is not yet a universal contract.
+
+Custom history plugins use a local manifest to identify a durable provider-owned
+`ctx-history-jsonl-v2` file. Explicit import registers that file with normal Core
+refresh; ctx does not execute a plugin command or manage an exporter cursor. See
+[Custom history plugins](/providers/custom-history-plugins).
+
+## Show, locate, search, and MCP
+
+```bash
+ctx show session <ctx-session-id>
+ctx show session <ctx-session-id> --format json
+ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+ctx show event <ctx-event-id> --window 3
+ctx show event <ctx-event-id> --before 5 --after 10
+ctx show event <ctx-event-id> --format json
+ctx locate session <ctx-session-id>
+ctx locate session --provider codex --provider-session <provider-session-id> --format json
+ctx locate event <ctx-event-id>
+ctx search "build failure"
+ctx search "sqlite storage" --provider opencode
+ctx search --term "installer" --term checksum --term release
+ctx search "build failure" --session <ctx-session-id>
+ctx search "build failure" --exclude-session <ctx-session-id-or-prefix>
+ctx search "build failure" --events
+ctx search "token budget" --refresh off
+ctx search "token budget" --refresh wait
+ctx search "release notes" --history-source example-agent/default
+ctx search "build failure" --json
+ctx mcp serve
+```
+
+Default text output is intended for humans and agents reading command output. JSON output is intended for scripts, `jq`, and exact field extraction. Treat it as private local data unless it has been reviewed and redacted.
+
+`show session` defaults to `--mode lite`. Valid modes are `lite`, `full`, and `log`.
+
+`search` defaults to session-diverse results and `--refresh background`, which serves the latest published generation and may wake the persistent daemon in automatic indexing mode. In manual mode, background search does not start or wake a process. Results include primary and subagent sessions unless `--primary-only` is supplied. Use repeatable `--term` for explicit multi-term search. Use `--session <ctx-session-id>` to drill into one session, `--exclude-session <ctx-session-id-or-prefix>` to remove an exact resolved session (repeatable), `--events` for dense event-level results, and `--verbose` for expanded text diagnostics. `--session` conflicts with `--exclude-session`; exclusions require a full ctx session ID or unambiguous prefix, not a provider session ID. Use `--refresh off` to query published generations without starting or waking a process, or `--refresh wait` to request authoritative Core publication before querying. `--limit` is capped at `200`. Search JSON includes a top-level `freshness` object describing the refresh mode and outcome.
+
+When invoked through one of the supported direct CLIs—Codex, DeepSeek
+Harness, Grok Build, Pi, Claude Code, Goose, Hermes, Shelley, Qwen Code, or
+Mux—ctx automatically excludes the active session tree when it can resolve one
+unambiguous identity. Missing, malformed, conflicting, or ambiguous identity
+fails open. `--include-current-session` disables only that automatic tree
+exclusion; it does not override manual exclusions, and it has no effect with
+`--session`. MCP search does not automatically exclude its caller's current
+session.
+
+`show session --out` writes the selected transcript artifact to a file and prints nothing on success. `mcp serve` starts the read-only ctx MCP server over stdio for agent harnesses that prefer MCP tool calls over shell commands.
+
+Search, show, and locate are the typed local history query surfaces. They retain
+provider IDs for native workflows and explicit provider-aware lookup without
+exposing SQL, raw database access, or another generic query language. Show and
+locate read the active verified Tantivy Core generation; they do not reopen
+provider history at query time.
+
+## Docs and upgrades
+
+```bash
+ctx docs list
+ctx docs search "upgrade"
+ctx docs show cli-reference
+ctx docs man --print ctx
+ctx upgrade status
+ctx upgrade check
+ctx upgrade --dry-run
+ctx upgrade disable
+```
+
+`ctx docs` reads embedded documentation from the binary and can generate section-1 man pages. Agents should prefer `ctx docs search` and `ctx docs show`; man pages are primarily for human shell use.
+
+`ctx upgrade` checks and applies signed CLI releases only for official installer-managed binaries with a matching sidecar marker. Source builds, `cargo install`, package-manager installs, and copied binaries are unmanaged and will not self-upgrade. Use `ctx upgrade disable` or `CTX_UPGRADE_AUTO=off` to disable managed background auto-upgrade.
+
+## Progress output
+
+```bash
+ctx setup --progress json --json
+ctx import --progress json --json
+```
+
+`setup` and `import` accept `--progress auto|plain|json|none`. Progress writes to stderr and does not change structured stdout, so `--json` command results remain a single JSON object.

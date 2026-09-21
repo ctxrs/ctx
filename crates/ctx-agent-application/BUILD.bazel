@@ -50,7 +50,7 @@ rust_library(
     edition = crate_edition(),
     aliases = aliases(),
     deps = all_crate_deps(normal = True) + [
-        "//crates/ctx-agent-integrations:lib",
+        "//crates/ctx-agent-integrations:test_support_lib",
         "//crates/ctx-client-observability:test_support_lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),

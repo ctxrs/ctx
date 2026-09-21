@@ -1,0 +1,128 @@
+---
+title: "Use ctx with Codex"
+sidebarTitle: "Codex"
+description: "Install the ctx skill for Codex, search local agent history, inspect cited results, and continue from prior work."
+---
+
+Install ctx first if it is not already available:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+```
+
+See [Install](/getting-started/install) for setup and data-root details.
+
+Codex can use ctx directly from the shell. The `ctx` skill makes the workflow reusable across tasks.
+
+## Install the skill
+
+Install the shared ctx skill locally:
+
+```bash
+ctx integrations install skill --agent codex
+```
+
+Omit `--agent codex` to install the universal `.agents` copy plus detected
+agent-specific folders. Add `--project` if you want a repository-local skill
+folder.
+
+## Prompt Codex to use ctx
+
+If the skill is not installed in Codex yet, paste a prompt like this at the start of a task:
+
+```text
+Before editing, use ctx to search prior local agent sessions for related work.
+
+Run:
+ctx search "<focused query>"
+
+If the wording is uncertain, search explicit terms:
+ctx search --term "<term one>" --term "<term two>"
+
+Inspect the best result before relying on it:
+ctx show event <ctx-event-id> --window 3
+or:
+ctx show session <ctx-session-id>
+
+If the result affects your implementation, cite the `ctx_event_id` or `ctx_session_id` in your summary.
+```
+
+For a bug fix:
+
+```text
+Use ctx to find prior sessions about the flaky migration failure. Inspect the best matching event with `ctx show event ... --window 3`, then explain whether the prior attempt changes your plan.
+```
+
+For a follow-up task:
+
+```text
+Use ctx to find the previous session for the search ranking change. Inspect the session, then continue from the cited decision if it still matches the code.
+```
+
+## Commands Codex should run
+
+Start broad enough to find the session:
+
+```bash
+ctx search "flaky migration failure"
+```
+
+Inspect the event when the result points to a specific moment:
+
+```bash
+ctx show event <ctx-event-id> --window 3
+```
+
+Inspect the session when the result points to the task as a whole:
+
+```bash
+ctx show session <ctx-session-id>
+```
+
+Find the original source or write a transcript file when a handoff needs provenance:
+
+```bash
+ctx locate event <ctx-event-id>
+ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+```
+
+## Choose the refresh mode
+
+Search defaults to `--refresh background`. In automatic indexing mode it
+serves the latest published generation and requests daemon maintenance. In
+manual mode it uses the published generation without starting or waking a
+process. Use `--refresh wait` or an explicit import when you need fresh history
+before querying.
+
+Use the existing index only:
+
+```bash
+ctx search "release checklist" --refresh off
+```
+
+Require freshness before searching:
+
+```bash
+ctx search "release checklist" --refresh wait
+```
+
+If the missing work came from another supported provider, ask Codex to import explicitly first:
+
+```bash
+ctx import --provider claude
+ctx search "release checklist"
+```
+
+## Cited output
+
+Ask Codex to separate retrieved context from its own next step:
+
+```text
+Retrieved context: `ctx show event <ctx-event-id> --window 3` shows that the
+last attempt failed because the assertion expected the old cursor name.
+
+Plan: I will check the current migration code and update the assertion only if
+the cursor name changed in the same way.
+```
+
+The cited ctx ID lets a reviewer rerun the same command.

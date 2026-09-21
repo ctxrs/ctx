@@ -367,6 +367,13 @@ fn setup_wait_indexes_in_foreground_without_changing_manual_mode() {
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(setup["schema_version"], 3);
+    assert_eq!(setup["attribution"]["currentness"], "current", "{setup:#}");
+    assert_eq!(
+        setup["attribution"]["receipt"]["core_generation_id"],
+        setup["refresh_request"]["published_generation"]
+    );
+    assert!(setup["attribution"].get("diagnostic").is_none());
     assert_eq!(setup["daemon_autostart"]["requested"], false, "{setup:#}");
     assert_eq!(
         setup["daemon_autostart"]["reason"], "daemon_disabled",
@@ -393,48 +400,47 @@ fn setup_wait_indexes_in_foreground_without_changing_manual_mode() {
 }
 
 #[test]
-fn managed_core_setup_wait_indexes_in_foreground_without_changing_manual_mode() {
-    let temp = tempdir();
+fn native_import_completes_attribution_without_changing_manual_mode() {
+    let temp = daemon_test_root();
     write_codex_setup_session(&temp);
     let config_path = data_root(&temp).join("config.toml");
     fs::create_dir_all(data_root(&temp)).unwrap();
     let original = "[indexing]\nmode = \"manual\"\n";
     fs::write(&config_path, original).unwrap();
-    let request = json!({
-        "data_root": data_root(&temp),
-        "operation": "CoreSetup",
-        "options": {
-            "defer_fresh_empty_wait": false,
-            "no_daemon": false,
-            "notice_lines": [],
-            "progress": "none",
-            "semantic": false,
-            "wait": true,
-        },
-        "protocol_version": 3,
-        "schema_version": 1,
-    });
-    let output = ctx(&temp)
-        .arg("--ctx-core-capability-v1")
-        .write_stdin(format!("{}\n", serde_json::to_string(&request).unwrap()))
-        .timeout(Duration::from_secs(20))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stdout={}\nstderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(response["ok"], true, "{response:#}");
-    assert!(
-        response["facts"]["generation_id"].as_str().is_some(),
+    ctx(&temp)
+        .args(["import", "--all", "--progress", "none"])
+        .assert()
+        .success();
+    let response = json_output(ctx(&temp).args(["status", "--format=json"]));
+    assert_eq!(response["schema_version"], 3);
+    assert_eq!(
+        response["attribution"]["currentness"], "current",
         "{response:#}"
     );
     assert_eq!(
-        response["facts"]["refresh_request"]["status"], "published",
-        "{response:#}"
+        response["attribution"]["receipt"]["core_generation_id"],
+        response["attribution"]["requested_core_generation_id"]
+    );
+    assert!(response["attribution"].get("diagnostic").is_none());
+
+    // Reproduce an existing Core snapshot with no derived attribution (for
+    // example immediately after upgrade). A no-op import still completes it.
+    fs::remove_dir_all(data_root(&temp).join("search/attribution")).unwrap();
+    let pending = json_output(ctx(&temp).args(["status", "--format=json"]));
+    assert_eq!(pending["attribution"]["currentness"], "not_materialized");
+    assert!(!data_root(&temp).join("search/attribution").exists());
+    ctx(&temp)
+        .args(["import", "--all", "--progress", "none"])
+        .assert()
+        .success();
+    let completed = json_output(ctx(&temp).args(["status", "--format=json"]));
+    assert_eq!(
+        completed["attribution"]["currentness"], "current",
+        "{completed:#}"
+    );
+    assert_eq!(
+        completed["attribution"]["receipt"]["core_generation_id"],
+        response["attribution"]["receipt"]["core_generation_id"]
     );
 
     let search = json_output(ctx(&temp).args([
@@ -448,7 +454,7 @@ fn managed_core_setup_wait_indexes_in_foreground_without_changing_manual_mode() 
         "{search:#}"
     );
     assert_eq!(fs::read_to_string(config_path).unwrap(), original);
-    let stopped = wait_for_daemon_status(&temp, "disabled", false, "setup");
+    let stopped = wait_for_daemon_status(&temp, "disabled", false, "import");
     assert_eq!(stopped["daemon"]["running"], false, "{stopped:#}");
     assert!(!data_root(&temp).join("daemon/supervisor.json").exists());
 }
@@ -1358,3 +1364,95 @@ fn empty_catalog_setup_mode_oracle_rejects_premature_readiness() {
 
 #[path = "lifecycle/additional.rs"]
 mod additional;
+
+#[test]
+fn setup_no_daemon_wait_preserves_suppression_and_pending_attribution() {
+    let temp = daemon_test_root();
+    write_codex_setup_session(&temp);
+    let setup = json_output(ctx(&temp).args([
+        "setup",
+        "--no-daemon",
+        "--wait",
+        "--format=json",
+        "--progress=none",
+    ]));
+    assert_eq!(setup["schema_version"], 3);
+    assert_eq!(setup["daemon_autostart"]["requested"], false);
+    assert_eq!(setup["refresh_request"]["reason"], "explicit_opt_out");
+    assert_eq!(setup["attribution"]["currentness"], "not_materialized");
+    assert!(!data_root(&temp).join("search/attribution").exists());
+    assert_no_daemon_autostart_mutation(&temp);
+}
+
+#[test]
+fn current_empty_attribution_is_terminal_after_manual_setup() {
+    let temp = daemon_test_root();
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n",
+    )
+    .unwrap();
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress=none"]));
+    let attribution = &setup["attribution"];
+    assert_eq!(attribution["currentness"], "current", "{setup:#}");
+    assert_eq!(attribution["materialized_coverage"], "empty", "{setup:#}");
+    assert!(attribution.get("diagnostic").is_none());
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
+    assert_eq!(&status["attribution"], attribution);
+}
+
+#[test]
+fn attribution_completion_failure_preserves_core_search_and_native_retry() {
+    let temp = daemon_test_root();
+    write_codex_setup_session(&temp);
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n",
+    )
+    .unwrap();
+    ctx(&temp)
+        .args(["setup", "--wait", "--format=json", "--progress=none"])
+        .assert()
+        .success();
+    let attribution_root = data_root(&temp).join("search/attribution");
+    fs::remove_dir_all(&attribution_root).unwrap();
+    fs::write(
+        &attribution_root,
+        b"authored non-directory failure fixture\n",
+    )
+    .unwrap();
+    let failure = ctx(&temp)
+        .args(["import", "--all", "--progress=none"])
+        .output()
+        .unwrap();
+    assert!(!failure.status.success());
+    let stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(
+        stderr.contains("Core history remains available"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ctx import --all"), "{stderr}");
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert!(status["attribution"]["error"].is_object(), "{status:#}");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "setup should import",
+        "--refresh=off",
+        "--format=json",
+    ]));
+    assert!(!search["results"].as_array().unwrap().is_empty());
+    fs::remove_file(attribution_root).unwrap();
+    ctx(&temp)
+        .args(["import", "--all", "--progress=none"])
+        .assert()
+        .success();
+    let recovered = json_output(ctx(&temp).args(["status", "--format=json"]));
+    assert_eq!(
+        recovered["attribution"]["currentness"], "current",
+        "{recovered:#}"
+    );
+}

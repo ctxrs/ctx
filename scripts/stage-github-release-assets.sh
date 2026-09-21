@@ -18,6 +18,12 @@ only valid in private builder staging before a completion marker is created.
 USAGE
 }
 
+validation_policy="${CTX_RELEASE_VALIDATION_POLICY:-native-receipts-required-v1}"
+case "${validation_policy}" in
+  native-receipts-required-v1|factory-only-human-override-v1) ;;
+  *) printf 'unknown release validation policy\n' >&2; exit 2 ;;
+esac
+ci_receipt="${CTX_RELEASE_CI_RECEIPT:-target/ctx-artifacts/check/normal-ci.json}"
 mode="stage"
 case "${1:-}" in
   --transcode-runtime)
@@ -239,8 +245,9 @@ requested_native_proof_dir="${native_proof_dir}"
 if [[ "${requested_native_proof_dir}" != /* ]]; then
   requested_native_proof_dir="${repo_root}/${requested_native_proof_dir}"
 fi
-python3 -I "${bundle_tool}" require-directory \
-  --directory "${requested_native_proof_dir}"
+if [[ "${validation_policy}" == native-receipts-required-v1 ]]; then
+  python3 -I "${bundle_tool}" require-directory --directory "${requested_native_proof_dir}"
+fi
 
 stage_asset() {
   local source_name="$1"
@@ -252,6 +259,14 @@ stage_asset() {
   local expected_sha actual_sha staged_sha
 
   require_regular_input "${source_path}" "public release artifact"
+  if [[ "${mode}" == 0755 ]]; then
+    python3 - "${source_path}" <<'BOUND'
+from pathlib import Path
+import sys
+if not 0 < Path(sys.argv[1]).stat().st_size <= 128 * 1024 * 1024:
+    raise SystemExit("unified executable exceeds the stock 128 MiB download bound")
+BOUND
+  fi
   require_regular_input "${source_sha_path}" "public artifact checksum"
   if [[ ! -s "${source_sha_path}" ]]; then
     printf 'missing public artifact checksum: %s\n' "${source_sha_path}" >&2
@@ -311,7 +326,10 @@ stage_macos_cli_verifier_inputs() {
   local dest_name="$2"
   local platform="$3"
   local source_path="${artifact_dir%/}/${source_name}"
-  local native_signing_evidence="${native_proof_dir%/}/${platform}/${source_name}.signing.json"
+  local native_signing_evidence="${source_path}.signing.json"
+  if [[ "${validation_policy}" == native-receipts-required-v1 ]]; then
+    native_signing_evidence="${native_proof_dir%/}/${platform}/${source_name}.signing.json"
+  fi
   local suffix source destination source_digest destination_digest
 
   for suffix in \
@@ -454,12 +472,16 @@ if (
 print(commit)
 PY
 )"
+  local -a execution_selection=()
+  if [[ "${validation_policy}" == factory-only-human-override-v1 ]]; then
+    execution_selection+=(--allow-pending-cli-execution)
+  fi
   python3 scripts/macos-release-signing-evidence.py verify-artifact \
     --evidence "${cli_evidence}" \
     --platform "${platform}" \
     --kind cli \
     --artifact "${binary}" \
-    --checksum "${binary_checksum}"
+    --checksum "${binary_checksum}" "${execution_selection[@]}"
   CTX_MACOS_RELEASE_SOURCE_COMMIT="${source_commit}" \
     scripts/verify-macos-release-attestation.sh \
     "${platform}" cli "${binary}" "${cli_attestation}" "${cli_attestation_cms}"
@@ -545,6 +567,7 @@ validate_staged_cli_evidence \
   ctx.exe ctx-windows-x64.exe windows-x64 \
   "${authority_dir%/}/ctx.exe.candidate.json" \
   ctx.exe "${authority_dir}"
+if [[ "${validation_policy}" == native-receipts-required-v1 ]]; then
 for native_platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64; do
   native_artifact="ctx-${native_platform}"
   [[ "${native_platform}" == "windows-x64" ]] && native_artifact="ctx-windows-x64.exe"
@@ -553,14 +576,23 @@ for native_platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64
     --artifact "${out_dir%/}/${native_artifact}" \
     --proof "${native_proof_dir%/}/${native_platform}/ctx-${native_platform}.native-execution.json"
 done
+fi
 validate_macos_cli_signing_evidence macos-arm64
 validate_macos_cli_signing_evidence macos-x64
+python3 -I scripts/release/verify-windows-release.py \
+  --artifact "${out_dir}/ctx-windows-x64.exe" \
+  --output "${authority_dir}/windows-authenticode.json"
 
 for authority_candidate in "${authority_candidates[@]}"; do
   printf '%s\n' \
     "$(sha256_file "${authority_dir%/}/${authority_candidate}")" \
     >"${authority_dir%/}/${authority_candidate}.sha256"
 done
+stage_authority_leaf "${ci_receipt}" normal-ci.json
+python3 scripts/release/release-validation.py \
+  --source-commit "${source_commit}" --policy "${validation_policy}" \
+  --ci-receipt "${authority_dir}/normal-ci.json" \
+  --native-proof-dir "${native_proof_dir}" --output "${authority_dir}/release-validation.json"
 python3 - "${authority_dir}" "${source_commit}" <<'PY'
 import hashlib
 import json
@@ -624,6 +656,8 @@ document = {
     "release_sums": sums_record,
     "schema_version": 1,
     "source_commit": source_commit,
+    "validation": record("release-validation.json"),
+    "windows_signature": record("windows-authenticode.json"),
 }
 encoded = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
 output = root / "ctx-core-github-handoff.json"
@@ -650,6 +684,9 @@ authority_expected="$({
   done
   printf '%s\n' \
     SHA256SUMS \
+    normal-ci.json \
+    release-validation.json \
+    windows-authenticode.json \
     ctx-core-github-handoff.json \
     ctx-core-github-handoff.json.sha256 \
     ctx-core.release-complete.json \

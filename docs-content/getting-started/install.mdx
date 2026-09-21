@@ -1,0 +1,203 @@
+---
+title: "Install and index local history"
+sidebarTitle: "Install"
+description: "Install ctx, create local storage, discover sources, import history, and run a first search."
+---
+
+# Install and index local history
+
+## Install the CLI
+
+The canonical installer for the standalone search CLI is
+`https://ctx.rs/install`. It installs the signed ctx CLI, installs
+the bundled agent-history skill, and runs `ctx setup` by default so local history
+is inventoried and indexing begins. Daemon maintenance is enabled by default,
+so eligible setup runs request the ctx-owned background daemon after setup
+output.
+
+macOS and Linux:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://ctx.rs/install.ps1 | iex
+```
+
+On Unix, you need `curl`, OpenSSL, standard shell utilities, network access,
+and a writable install directory. Windows x64 supports Windows PowerShell 5.1
+and PowerShell 7 and uses built-in .NET signature verification without OpenSSL.
+
+The default binary directory is `$HOME/.local/bin` on Unix and
+`$HOME\.local\bin` on Windows. Set `CTX_BIN_DIR` on Unix or use `-BinDir` in
+PowerShell for a custom absolute path ending in `bin`. Quote paths containing spaces. The installer
+updates shell startup files on Unix or the user PATH on Windows unless you pass
+`--no-modify-path` or `-NoModifyPath`. Open a new terminal and run
+`ctx --version`. Existing Unix shells need the PATH command printed by the
+installer; a child installer cannot change its parent shell's environment.
+See [Troubleshooting](/troubleshooting) if another installation is selected.
+
+Use `--no-setup` on Unix or `-NoSetup` on Windows for install-only CI,
+packaging, or review flows. Install-only mode skips both the skill step and
+history indexing unless you pass a skill target explicitly:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh -s -- --no-setup
+```
+
+To keep setup but opt out of daemon autostart for that run, use
+`--no-daemon`, `-NoDaemon`, or `CTX_INSTALL_NO_DAEMON=1`:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh -s -- --no-daemon
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://ctx.rs/install.ps1))) -NoDaemon
+```
+
+Machine-readable setup output is not a daemon opt-out. `--json` changes the
+output contract only; automation that must suppress background maintenance
+must also pass `--no-daemon` or set `CTX_INSTALL_NO_DAEMON=1`.
+
+The installer downloads release metadata and the CLI artifact, then verifies
+release metadata and SHA-256 checksums before installing artifacts. It also
+writes a managed install marker so `ctx upgrade` can apply signed CLI updates,
+installs generated Unix man pages unless `--no-man` or `CTX_INSTALL_NO_MAN=1` is
+used, and installs `ctx` unless `--no-skill` or
+`CTX_INSTALL_NO_SKILL=1` is used. Target a specific skill folder with
+`--skill-agent codex`, repeat `--skill-agent`, or use `--all-skill-agents`;
+Windows exposes the same controls as `-NoSkill`, `-SkillAgent`, and
+`-AllSkillAgents`. Hosted binaries are published for Linux x64, Linux ARM64,
+macOS, and Windows. Setup and search do not send transcript text,
+prompts, or indexed search content to a model API. See the [Privacy Policy](/legal/privacy-policy)
+before installing when you need strict command-metadata controls.
+
+Use [`ctx blame`](/blame) to trace files, commits, and PRs to agent sessions
+using local history and Git objects.
+
+## Uninstall the managed CLI
+
+Use the hosted uninstaller for an installer-managed ctx binary. On macOS or Linux:
+
+```bash
+curl -fsSL https://ctx.rs/uninstall | sh -s -- --keep-data
+```
+
+On Windows:
+
+```powershell
+$uninstall = [scriptblock]::Create((irm https://ctx.rs/uninstall.ps1))
+& $uninstall -KeepData -NonInteractive
+```
+
+These commands preserve your local data root.
+
+The uninstaller removes verified installer-owned files and preserves modified
+or unowned files. Windows skill copies require separate removal. There is no
+native `ctx uninstall` command. For a source or package-manager install, stop
+any configured ctx daemon and use the original installation method for removal.
+The hosted uninstaller refuses to remove an unmanaged executable.
+
+## Unmanaged installations
+
+Without the official marker they remain unmanaged; use their original
+installation method for upgrades and removal. The hosted installer refuses to overwrite an unmanaged executable
+or a mismatched marker; follow the
+[conversion procedure](https://github.com/ctxrs/ctx/blob/main/docs/unmanaged-installs.md#convert-an-unmanaged-install-to-a-managed-install)
+before replacing an existing installation.
+
+For a fresh source installation on a supported host:
+
+```bash
+scripts/bazelw build //crates/ctx-cli:ctx --config=release
+install -d "$HOME/.local/bin"
+install -m 0755 bazel-bin/crates/ctx-cli/ctx "$HOME/.local/bin/ctx"
+```
+
+## Create local storage
+
+```bash
+ctx setup
+ctx status
+```
+
+Setup creates the configured ctx data root, initializes self-contained Tantivy
+Core storage, discovers known provider history paths, catalogs local history
+sources, imports discovered native provider sources, optimizes the local search
+index, and prints next steps. Implicit installer setup does not write
+`config.toml` merely to persist default settings. The default data root is
+`~/.ctx`.
+JSON changes setup output, not daemon policy. The setup JSON reports deferred
+autostart intent under `daemon_autostart`; use
+`ctx daemon status --json` for the resulting process state.
+`ctx setup --no-daemon` is a one-run opt-out, while `ctx daemon disable` is
+durable.
+
+Use a different root for tests:
+
+```bash
+ctx --data-root /tmp/ctx-demo setup
+CTX_DATA_ROOT=/tmp/ctx-demo ctx status
+```
+
+Setup is local with respect to provider history and storage. It does not write
+to source repositories, call model APIs, or require API keys. For official
+installer-managed binaries, only daemon maintenance performs signed background
+auto-upgrade checks; ordinary foreground commands do not trigger automatic
+upgrades. The updater does not collect provider history.
+
+## Set up your agent
+
+The installer runs the bundled agent-history skill installer by default. To
+refresh the skill manually:
+
+```bash
+ctx integrations install skill
+```
+
+See [Install the ctx skill](/skill) for agent targeting, project installs, and
+manual fallback instructions.
+
+## Import and search
+
+```bash
+ctx sources
+ctx import --all
+ctx search "failed migration"
+ctx show session <ctx-session-id>
+ctx show event <ctx-event-id> --window 3
+```
+
+Use JSON output for scripts and exact field extraction:
+
+```bash
+ctx sources --json
+ctx import --resume --json
+ctx search "sqlite migration failed" --workspace ctx --json
+ctx show session <ctx-session-id> --format json
+ctx show event <ctx-event-id> --format json
+```
+
+Use repeatable `--term` when you need to search several explicit words or phrases:
+
+```bash
+ctx search --term "sqlite migration" --term rollback --term cursor
+```
+
+## Built-in docs and upgrades
+
+```bash
+ctx docs search "upgrade"
+ctx docs show cli-reference
+ctx docs man --print ctx
+ctx upgrade status
+ctx upgrade check
+```
+
+`ctx docs` is embedded in the binary. `ctx upgrade` works only for official
+installer-managed binaries with a matching sidecar marker; source builds and
+package-manager installs stay unmanaged.

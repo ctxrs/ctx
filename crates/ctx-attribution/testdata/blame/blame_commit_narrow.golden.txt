@@ -1,0 +1,16 @@
+Producer proven
+
+Commit      abcdef
+Repository  ctxrs/ctx
+
+Produced by
+  session session-producer
+    id
+      session:018f0f65-8b1f-7f30-9dc4-a81c7e36a1b2
+    confidence    explicit
+    state         asserted
+    evidence      [1]
+
+Evidence
+  [1]
+    ctx show event 8cd765ac-68a3-8a2c-ae04-669a08be6370 · Core aaaaaaaaaaaa · source 0f989cc2-fb1b-8eaf-8403-078d7622424b · sequence 1

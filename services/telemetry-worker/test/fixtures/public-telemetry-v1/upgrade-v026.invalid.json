@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "manual_missing_output",
+      "base": "manual_check_available",
+      "delete": ["output"],
+      "expected": "missing_output"
+    },
+    {
+      "name": "automatic_has_cli_output",
+      "base": "automatic_applied_update",
+      "set": { "output": "human" },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "automatic_uses_check_operation",
+      "base": "automatic_applied_update",
+      "set": { "upgrade_operation": "check" },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "automatic_is_dry_run",
+      "base": "automatic_applied_update",
+      "set": { "dry_run": true },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "automatic_missing_attempt_id",
+      "base": "automatic_applied_update",
+      "delete": ["upgrade_attempt_id"],
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "automatic_has_foreground_deprecated_control",
+      "base": "automatic_applied_update",
+      "set": { "deprecated_upgrade_control": true },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "invalid_attempt_id_path",
+      "base": "manual_check_available",
+      "set": { "upgrade_attempt_id": "../private/path" },
+      "expected": "invalid_upgrade_attempt_id"
+    },
+    {
+      "name": "invalid_attempt_id_prose",
+      "base": "manual_check_available",
+      "set": { "upgrade_attempt_id": "customer machine one" },
+      "expected": "invalid_upgrade_attempt_id"
+    },
+    {
+      "name": "simple_operation_has_attempt_id",
+      "base": "manual_status_checked",
+      "set": { "upgrade_attempt_id": "ua_cross_operation" },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "simple_operation_has_plan_field",
+      "base": "manual_auto_enabled",
+      "set": { "update_was_available": false },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "check_claims_applied",
+      "base": "manual_check_available",
+      "set": { "upgrade_applied": true },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "check_availability_disagrees",
+      "base": "manual_check_available",
+      "set": { "update_was_available": false },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "apply_dry_run_without_flag",
+      "base": "manual_apply_dry_run_update",
+      "set": { "dry_run": false },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "apply_success_uses_unreachable_locked_status",
+      "base": "manual_apply_applied_update",
+      "set": { "upgrade_status": "locked" },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "failure_omits_failure_kind",
+      "base": "manual_apply_apply_failed",
+      "delete": ["upgrade_failure_kind"],
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "enriched_output_failure_uses_non_output_failure_kind",
+      "base": "manual_check_output_failure_after_outcome",
+      "set": { "upgrade_failure_kind": "metadata_fetch" },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "success_includes_failure_kind",
+      "base": "manual_apply_applied_update",
+      "set": { "upgrade_failure_kind": "apply_failed" },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "success_uses_failed_status",
+      "base": "manual_apply_applied_update",
+      "set": {
+        "upgrade_status": "failed",
+        "upgrade_applied": false,
+        "upgrade_failure_kind": "apply_failed"
+      },
+      "expected": "invalid_upgrade_shape"
+    },
+    {
+      "name": "upgrade_includes_message_prose",
+      "base": "manual_check_available",
+      "set": { "message": "ctx 9.9.9 is available" },
+      "expected": "unknown_operation_property"
+    },
+    {
+      "name": "upgrade_includes_warning_prose",
+      "base": "manual_apply_applied_update",
+      "set": { "warnings": "daemon restart pending" },
+      "expected": "unknown_operation_property"
+    },
+    {
+      "name": "upgrade_includes_raw_error",
+      "base": "manual_apply_apply_failed",
+      "set": { "raw_error": "/private/path?token=secret" },
+      "expected": "unknown_operation_property"
+    },
+    {
+      "name": "upgrade_includes_search_field",
+      "base": "manual_check_available",
+      "set": { "query_length_bucket": "1-20" },
+      "expected": "unknown_operation_property"
+    },
+    {
+      "name": "upgrade_properties_crossed_to_search",
+      "base": "manual_check_available",
+      "operation": "search",
+      "expected": "unknown_operation_property"
+    }
+  ]
+}

@@ -1,0 +1,189 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@telemetry_npm//:defs.bzl", "npm_link_all_packages")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["pnpm-lock.yaml"])
+
+npm_link_all_packages(name = "node_modules")
+
+filegroup(
+    name = "contracts",
+    srcs = glob(["contracts/*.json"]),
+)
+
+filegroup(
+    name = "worker_sources",
+    srcs = glob(["src/**/*.ts"]),
+)
+
+js_library(
+    name = "blame_product_contract_source",
+    srcs = ["src/blame-product-contract.ts"],
+)
+
+js_library(
+    name = "product_health_environment_contract",
+    srcs = ["scripts/candidate-staging-gate.mjs"],
+    data = ["wrangler.toml"],
+)
+
+filegroup(
+    name = "test_sources",
+    srcs = glob([
+        "test/**/*.json",
+        "test/**/*.mjs",
+        "test/**/*.ts",
+        "test/**/*.md",
+    ]),
+)
+
+filegroup(
+    name = "operator_scripts",
+    srcs = glob(["scripts/**/*.mjs"]),
+)
+
+filegroup(
+    name = "postgres_schema",
+    srcs = glob(["schema/*.sql"]),
+)
+
+filegroup(
+    name = "deploy_config",
+    srcs = [
+        "BUILD.bazel",
+        "config/health-monitor.json",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "tsconfig.json",
+        "vitest.config.ts",
+        "vitest.postgres.config.ts",
+        "wrangler.toml",
+    ],
+)
+
+sh_test(
+    name = "package_test",
+    srcs = ["//:scripts/bazel/package-action.sh"],
+    args = [
+        "$(rootpath @pnpm//:pnpm)",
+        "services/telemetry-worker",
+        "test",
+    ],
+    data = [
+        "@pnpm//:pnpm",
+        ":node_modules/@cloudflare/workers-types",
+        ":node_modules/@neondatabase/serverless",
+        ":node_modules/typescript",
+        ":node_modules/vitest",
+        "//:telemetry_contract_fixtures",
+        ":contracts",
+        ":deploy_config",
+        ":operator_scripts",
+        ":test_sources",
+        ":worker_sources",
+    ],
+    tags = [
+        "requires-pnpm",
+        "telemetry-worker",
+    ],
+)
+
+sh_binary(
+    name = "candidate_staging_gate",
+    srcs = ["//:scripts/bazel/package-action.sh"],
+    args = [
+        "$(rootpath @pnpm//:pnpm)",
+        "services/telemetry-worker",
+        "candidate:staging",
+    ],
+    data = [
+        "@pnpm//:pnpm",
+        ":deploy_config",
+        ":operator_scripts",
+    ],
+    tags = [
+        "manual",
+        "no-cache",
+        "release-gate",
+        "requires-network",
+        "requires-pnpm",
+    ],
+)
+
+sh_test(
+    name = "maintenance_test",
+    srcs = ["//:scripts/bazel/package-action.sh"],
+    args = [
+        "$(rootpath @pnpm//:pnpm)",
+        "services/telemetry-worker",
+        "test:maintenance",
+    ],
+    data = [
+        "@pnpm//:pnpm",
+        ":node_modules/@cloudflare/workers-types",
+        ":node_modules/@neondatabase/serverless",
+        ":node_modules/typescript",
+        ":node_modules/vitest",
+        ":contracts",
+        ":deploy_config",
+        ":test_sources",
+        ":worker_sources",
+    ],
+    tags = ["requires-pnpm", "telemetry-worker"],
+)
+
+# Missing PostgreSQL fails the behavioral check. Until the shared migration
+# toolchain models this host dependency, successful results are not reused.
+sh_test(
+    name = "maintenance_postgres_test",
+    srcs = ["//:scripts/bazel/package-action.sh"],
+    args = [
+        "$(rootpath @pnpm//:pnpm)",
+        "services/telemetry-worker",
+        "test:maintenance:postgres",
+    ],
+    data = [
+        "@pnpm//:pnpm",
+        ":node_modules/@cloudflare/workers-types",
+        ":node_modules/@neondatabase/serverless",
+        ":node_modules/typescript",
+        ":node_modules/vitest",
+        ":postgres_schema",
+        ":deploy_config",
+        ":test_sources",
+        ":worker_sources",
+    ],
+    env = {"CTX_TEST_POSTGRES_BIN": "/usr/lib/postgresql/16/bin"},
+    tags = ["external", "postgresql", "requires-pnpm", "telemetry-worker"],
+)
+
+# Local HTTP -> Queue -> actual PostgreSQL INSERT and typed constraint proof.
+# The runner provisions PostgreSQL 16+; no private schema or live data is read.
+sh_test(
+    name = "blame_postgres_test",
+    srcs = ["//:scripts/bazel/package-action.sh"],
+    args = [
+        "$(rootpath @pnpm//:pnpm)",
+        "services/telemetry-worker",
+        "test:blame:postgres",
+    ],
+    data = [
+        "@pnpm//:pnpm",
+        ":node_modules/@cloudflare/workers-types",
+        ":node_modules/@neondatabase/serverless",
+        ":node_modules/typescript",
+        ":node_modules/vitest",
+        "//:telemetry_contract_fixtures",
+        ":contracts",
+        ":deploy_config",
+        ":postgres_schema",
+        ":test_sources",
+        ":worker_sources",
+    ],
+    env = {"CTX_TEST_POSTGRES_BIN": "/usr/lib/postgresql/16/bin"},
+    tags = ["external", "postgresql", "requires-pnpm", "telemetry-worker"],
+)

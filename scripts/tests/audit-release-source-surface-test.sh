@@ -25,7 +25,18 @@ if ! bash "${checker}" "${fixture_root}/retained-workspace-product-crate-version
   fail 'workspace-inherited product crate version was rejected'
 fi
 
+if ! bash "${checker}" "${fixture_root}/retained-blame-docs" >/dev/null; then
+  fail 'ordinary Blame docs or the explicit native uninstall disclaimer was rejected'
+fi
+
 for retired_case in \
+  retired-uninstall-advice \
+  retired-attribution-manifest \
+  retired-ctx-attribution-model-surface \
+  retired-ctx-repository-evidence-surface \
+  retired-ctx-attribution-index-surface \
+  retired-ctx-attribution-surface \
+  retired-ctx-attribution-derivation-surface \
   mutated-hardcoded-product-crate-version \
   retired-top-level-uninstall \
   retired-command-surfaces \
@@ -33,6 +44,10 @@ for retired_case in \
   retired-task-documents-command-surface \
   retired-update-invocation \
   retired-update-route; do
+  if [[ ! -d "${fixture_root}/${retired_case}" ]]; then
+    fail "missing fixture directory: ${retired_case}"
+    continue
+  fi
   if bash "${checker}" "${fixture_root}/${retired_case}" >/dev/null 2>&1; then
     fail "removed surface passed: ${retired_case}"
   fi

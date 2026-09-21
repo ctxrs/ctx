@@ -1,0 +1,341 @@
+{
+  "schema_version": 1,
+  "model_contract": {
+    "model_id": "intfloat/multilingual-e5-small",
+    "revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+    "dimensions": 384,
+    "pooling": "attention_mask_mean",
+    "normalization": "l2",
+    "query_prefix": "query: ",
+    "passage_prefix": "passage: "
+  },
+  "runtime_install_manifest_contract": {
+    "schema_version": 1,
+    "manager": "ctx-hosted-installer",
+    "metadata_trust": "signed-release-metadata",
+    "required_fields": [
+      "schema_version",
+      "manager",
+      "metadata_trust",
+      "runtime",
+      "platform",
+      "version",
+      "sha256",
+      "artifact_url",
+      "installed_at",
+      "files"
+    ],
+    "publication": "write_last_after_extraction_and_file_verification",
+    "loader": "rehash_every_required_file_before_load"
+  },
+  "publication_pins": {
+    "schema_version": 1,
+    "model": {
+      "asset_id": "onnx_model",
+      "signed_metadata_paths": [
+        "LICENSE",
+        "manifest.json"
+      ],
+      "runtime_files": {
+        "onnx/model.onnx": {
+          "size": 470268510,
+          "sha256": "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"
+        },
+        "tokenizer.json": {
+          "size": 17082730,
+          "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
+        },
+        "config.json": {
+          "size": 655,
+          "sha256": "69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959"
+        },
+        "special_tokens_map.json": {
+          "size": 167,
+          "sha256": "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7"
+        },
+        "tokenizer_config.json": {
+          "size": 443,
+          "sha256": "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b"
+        }
+      }
+    },
+    "accelerator_model": {
+      "asset_id": "onnx_model_o4_fp16",
+      "signed_metadata_paths": [
+        "LICENSE",
+        "manifest.json"
+      ],
+      "runtime_files": {
+        "onnx/model.onnx": {
+          "size": 235052531,
+          "sha256": "4654c156f3e4171abc9c716cdb771bf9116455d15ac1aab364aeeede0e3205b0"
+        },
+        "tokenizer.json": {
+          "size": 17082730,
+          "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
+        },
+        "config.json": {
+          "size": 655,
+          "sha256": "69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959"
+        },
+        "special_tokens_map.json": {
+          "size": 167,
+          "sha256": "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7"
+        },
+        "tokenizer_config.json": {
+          "size": 443,
+          "sha256": "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b"
+        }
+      }
+    },
+    "coreml": {
+      "asset_id": "apple_coreml",
+      "archive_sha256": "25fbf333d1e72f5c075973ef968dfa1446459f61f3ac63ef3690d9865435af17",
+      "manifest_path": "manifest.json",
+      "manifest_sha256": "20a94162aca7c2f9f65be27839cd6867ec1c54e142fdf0c652de20139dffbc19"
+    },
+    "windows_ml": {
+      "asset_id": "windows_ml",
+      "source_package": "Microsoft.Windows.AI.MachineLearning",
+      "source_package_sha256": "691165fa3c07a04b752cbf4a07e93ed13a418e9dea1ee89eb163d2225e2ba3af",
+      "ort_version": "1.24.6",
+      "ort_commit": "800ac32bc82d562c611d641b1112a8aa9f90c4f9"
+    }
+  },
+  "assets": {
+    "onnx_model": {
+      "role": "model",
+      "backend": "onnx",
+      "version": "1.0.0",
+      "platform": "any",
+      "artifact": "ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz",
+      "format": "tar.xz",
+      "path_prefix": "ctx-multilingual-e5-small-onnx-fp32-1.0.0",
+      "max_expanded_bytes": 603979776,
+      "max_files": 16,
+      "exact_paths": [
+        "LICENSE",
+        "config.json",
+        "manifest.json",
+        "onnx/model.onnx",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json"
+      ],
+      "tree_prefixes": []
+    },
+    "onnx_model_o4_fp16": {
+      "role": "model",
+      "backend": "onnx",
+      "version": "1.0.0",
+      "platform": "any",
+      "artifact": "ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz",
+      "format": "tar.xz",
+      "path_prefix": "ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0",
+      "max_expanded_bytes": 335544320,
+      "max_files": 16,
+      "exact_paths": [
+        "LICENSE",
+        "config.json",
+        "manifest.json",
+        "onnx/model.onnx",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json"
+      ],
+      "tree_prefixes": []
+    },
+    "apple_coreml": {
+      "role": "accelerator",
+      "backend": "coreml",
+      "version": "1.0.0",
+      "platform": "macos-arm64",
+      "artifact": "ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz",
+      "format": "tar.xz",
+      "path_prefix": "ctx-multilingual-e5-small-coreml-fp16-1.0.0",
+      "max_expanded_bytes": 2147483648,
+      "max_files": 4096,
+      "exact_paths": [
+        "PROVENANCE.json",
+        "THIRD_PARTY_NOTICES.md",
+        "manifest.json",
+        "tokenizer.json"
+      ],
+      "tree_prefixes": [
+        "LICENSES/",
+        "document.mlpackage/",
+        "query.mlpackage/"
+      ]
+    },
+    "linux_x64_cpu": {
+      "role": "cpu-runtime",
+      "backend": "ort-cpu",
+      "version": "1.27.0",
+      "platform": "linux-x64",
+      "artifact": "ctx-onnxruntime-linux-x64.tar.zst",
+      "format": "tar.zst",
+      "path_prefix": "",
+      "max_expanded_bytes": 67108864,
+      "max_files": 8,
+      "exact_paths": [
+        "GIT_COMMIT_ID",
+        "LICENSE",
+        "ThirdPartyNotices.txt",
+        "VERSION_NUMBER",
+        "lib/libonnxruntime.so"
+      ],
+      "tree_prefixes": []
+    },
+    "linux_aarch64_cpu": {
+      "role": "cpu-runtime",
+      "backend": "ort-cpu",
+      "version": "1.27.0",
+      "platform": "linux-aarch64",
+      "artifact": "ctx-onnxruntime-linux-aarch64.tar.zst",
+      "format": "tar.zst",
+      "path_prefix": "",
+      "max_expanded_bytes": 67108864,
+      "max_files": 8,
+      "exact_paths": [
+        "GIT_COMMIT_ID",
+        "LICENSE",
+        "ThirdPartyNotices.txt",
+        "VERSION_NUMBER",
+        "lib/libonnxruntime.so"
+      ],
+      "tree_prefixes": []
+    },
+    "macos_arm64_cpu": {
+      "role": "cpu-runtime",
+      "backend": "ort-cpu",
+      "version": "1.27.0",
+      "platform": "macos-arm64",
+      "artifact": "ctx-onnxruntime-macos-arm64.tar.zst",
+      "format": "tar.zst",
+      "path_prefix": "",
+      "max_expanded_bytes": 100663296,
+      "max_files": 8,
+      "exact_paths": [
+        "GIT_COMMIT_ID",
+        "LICENSE",
+        "ThirdPartyNotices.txt",
+        "VERSION_NUMBER",
+        "lib/libonnxruntime.dylib"
+      ],
+      "tree_prefixes": []
+    },
+    "macos_x64_cpu": {
+      "role": "cpu-runtime",
+      "backend": "ort-cpu",
+      "version": "1.27.0",
+      "platform": "macos-x64",
+      "artifact": "ctx-onnxruntime-macos-x64.tar.zst",
+      "format": "tar.zst",
+      "path_prefix": "",
+      "max_expanded_bytes": 100663296,
+      "max_files": 8,
+      "exact_paths": [
+        "GIT_COMMIT_ID",
+        "LICENSE",
+        "ThirdPartyNotices.txt",
+        "VERSION_NUMBER",
+        "lib/libonnxruntime.dylib"
+      ],
+      "tree_prefixes": []
+    },
+    "windows_ml": {
+      "role": "cpu-runtime",
+      "backend": "windows-ml",
+      "version": "2.1.74",
+      "platform": "windows-x64",
+      "artifact": "ctx-windowsml-windows-x64.zip",
+      "format": "zip",
+      "path_prefix": "",
+      "max_expanded_bytes": 50331648,
+      "max_files": 5,
+      "exact_paths": [
+        "LICENSE",
+        "ThirdPartyNotices.txt",
+        "lib/DirectML.dll",
+        "lib/Microsoft.Windows.AI.MachineLearning.dll",
+        "lib/onnxruntime.dll"
+      ],
+      "tree_prefixes": []
+    },
+    "linux_cuda12": {
+      "role": "accelerator",
+      "backend": "ort-cuda",
+      "version": "1.27.0",
+      "platform": "linux-x64-cuda12",
+      "artifact": "ctx-onnxruntime-linux-x64-cuda12.tar.zst",
+      "format": "tar.zst",
+      "path_prefix": "",
+      "max_expanded_bytes": 2147483648,
+      "max_files": 18,
+      "exact_paths": [
+        "GIT_COMMIT_ID",
+        "LICENSE",
+        "NVIDIA-CUDA-LICENSE.txt",
+        "NVIDIA-CUDNN-LICENSE.txt",
+        "ThirdPartyNotices.txt",
+        "VERSION_NUMBER",
+        "lib/libcublas.so.12",
+        "lib/libcublasLt.so.12",
+        "lib/libcudart.so.12",
+        "lib/libcudnn.so.9",
+        "lib/libcudnn_graph.so.9",
+        "lib/libcudnn_ops.so.9",
+        "lib/libcufft.so.11",
+        "lib/libcurand.so.10",
+        "lib/libnvrtc.so.12",
+        "lib/libonnxruntime.so",
+        "lib/libonnxruntime_providers_cuda.so",
+        "lib/libonnxruntime_providers_shared.so"
+      ],
+      "tree_prefixes": []
+    }
+  },
+  "targets": [
+    {
+      "target": "apple-silicon",
+      "backend": "coreml",
+      "key": "apple_silicon_coreml",
+      "asset_ids": [
+        "onnx_model",
+        "macos_arm64_cpu",
+        "apple_coreml"
+      ]
+    },
+    {
+      "target": "windows",
+      "backend": "windows-ml",
+      "key": "windows_windows_ml",
+      "asset_ids": [
+        "onnx_model_o4_fp16",
+        "windows_ml"
+      ]
+    },
+    {
+      "target": "linux-nvidia",
+      "backend": "ort-cuda",
+      "key": "linux_nvidia_ort_cuda",
+      "asset_ids": [
+        "onnx_model_o4_fp16",
+        "linux_cuda12"
+      ]
+    },
+    {
+      "target": "universal",
+      "backend": "ort-cpu",
+      "key": "universal_ort_cpu",
+      "asset_ids": [
+        "onnx_model",
+        "linux_x64_cpu",
+        "linux_aarch64_cpu",
+        "macos_arm64_cpu",
+        "macos_x64_cpu",
+        "windows_ml"
+      ]
+    }
+  ]
+}

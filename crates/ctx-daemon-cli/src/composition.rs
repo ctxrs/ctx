@@ -208,12 +208,12 @@ pub trait DaemonCliHost: Send + Sync {
         timeout: Duration,
         writer: &mut dyn Write,
     ) -> Result<u64>;
-    /// Neutral post-publication seam for companion composition. The default is
-    /// intentionally a no-op until a companion bridge is installed.
+    /// Reconciles derived attribution after startup (None) or Core publication.
+    /// Hosts without attribution composition may omit this optional consumer.
     fn core_generation_published(
         &self,
         _data_root: &Path,
-        _publication: &CoreGenerationPublished,
+        _publication: Option<&CoreGenerationPublished>,
     ) -> Result<()> {
         Ok(())
     }
