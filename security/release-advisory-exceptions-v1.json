@@ -7,9 +7,9 @@
       "package": "paste",
       "version": "1.0.15",
       "lockfile": "Cargo.lock",
-      "rationale": "Re-evaluated 2026-09-13: RUSTSEC-2024-0436 is an unmaintained-only advisory for paste 1.0.15, a build-time proc macro used by tokenizers 0.22.2 through fastembed 5.17.2. The checksum-verified crate has no normal dependencies or unsafe blocks and is not linked into or callable by the release binary. macro_rules_attribute 0.2.3 uses pastey, leaving tokenizers as the only paste edge. Published tokenizers 0.23.2 still requires paste ^1.0.14; fastembed 6.1.0 requires tokenizers ^0.23.2, so upgrading does not remove it. Accept only this exact locked finding through 2026-09-20. Re-evaluate upstream migration before expiry; remove the exception when a compatible maintained path is available.",
+      "rationale": "Re-evaluated 2026-09-21 at public source 73138509b13e26ed1ae565a045eadd52d84fe381: paste 1.0.15 remains unmaintained. Its only locked release parent is tokenizers 0.22.2, used through fastembed 5.17.2 and directly on macOS. Checksum-verified paste is a build-time procedural macro; the two tokenizers invocations construct fixed serde helper identifiers. No runtime paste entry point or new affected 1.5 path was found; build-time code exposure and maintenance risk remain. Published tokenizers 0.23.2 still requires paste; fastembed 7.0.1 still reaches that dependency and is not a paste remedy. Upstream tokenizers PR1834 switched to pastey but was reverted about ten minutes later because maintainers preferred stable, dependency-free paste without unsafe code from a trusted maintainer, not because of stated technical incompatibility with pastey. A pastey 0.2.3 backport would be an independent ctx change whose macro/serde compatibility is untested. The proposed checked-in parent source violates unchanged physical file/ownership rules, while a permissible maintained source route or broader migration has not been established by the bounded review. Accept only this exact locked finding through 2026-09-28. Re-evaluate before expiry; remove the exception with actual dependency removal and the unchanged gate. This is bounded risk acceptance, not a claim of zero risk or impossible remediation.",
       "owner": "ctx-release-security",
-      "expires": "2026-09-20"
+      "expires": "2026-09-28"
     },
     {
       "advisory_id": "RUSTSEC-2026-0253",
@@ -17,9 +17,9 @@
       "package": "lru",
       "version": "0.16.4",
       "lockfile": "Cargo.lock",
-      "rationale": "Re-evaluated 2026-09-13: RUSTSEC-2026-0253 requires LruCache::pop to unwind while dropping a key with a panicking Drop implementation. The only locked release use is Tantivy 0.26.1's document-store cache, LruCache<usize, OwnedBytes>, which calls get/put/len but not pop. The cache field is not exposed to callers, and usize keys cannot run a panicking Drop. The checksum-verified lru 0.16.4 source has the reported unsafe ordering, but this call/key combination does not reach it. Published Tantivy 0.26.2 still requires lru ^0.16.3; patched lru >=0.18.2 is outside that requirement. Accept only this exact locked finding through 2026-09-20; remove the exception when a compatible Tantivy release adopts patched lru.",
+      "rationale": "Re-evaluated 2026-09-21 at public source 73138509b13e26ed1ae565a045eadd52d84fe381: lru 0.16.4 retains the reported panic-unsafe LruCache::pop ordering and potential use-after-free/double-free. Its only locked release parent is Tantivy 0.26.1. The private LruCache<usize, OwnedBytes> document-store cache calls get/put/len, not pop, exposes no cache to callers, and uses usize keys without a panicking destructor; inspected called methods do not indirectly call pop. No route to the reported method/precondition was found, including the 1.5 Core-read consumer; this is not a proof about every lru operation. Published Tantivy 0.26.2 still requires lru ^0.16.3, excluding fixed versions >=0.18.2. The known upstream fix uses Tantivy 0.27.0 and entails a real source/dependency migration; a narrow 0.26.1 backport to fixed lru remains a candidate, but its proposed checked-in source violates unchanged physical file/ownership rules and no permissible compatible route has been validated. Accept only this exact locked finding through 2026-09-28. Re-evaluate before expiry; remove the exception when the selected dependency is actually fixed or replaced and the unchanged gate confirms it. The locked unsafe code and residual uncertainty remain; remediation is not claimed impossible.",
       "owner": "ctx-release-security",
-      "expires": "2026-09-20"
+      "expires": "2026-09-28"
     }
   ]
 }

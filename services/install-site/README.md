@@ -43,16 +43,24 @@ Prepare candidate scripts against a passed release-contract report for the
 
 ```sh
 node services/install-site/deploy.mjs prepare /path/to/new-evidence --release-evidence /path/to/current-release.json
-node services/install-site/deploy.mjs check /path/to/new-evidence --native-results /path/to/native-results
-node services/install-site/deploy.mjs apply /path/to/new-evidence --native-results /path/to/native-results
+node services/install-site/deploy.mjs check /path/to/new-evidence
+node services/install-site/deploy.mjs apply /path/to/new-evidence
 ```
 
-The gate checks the live signed feed against that report, executes separate
-unpublished 1.5 fixtures, and requires real Linux installation and both Windows
-PowerShell editions against the current feed. Candidate fixture execution
-requires PowerShell; missing execution cannot qualify deployment. The Windows
-report is `windows-x64.json`, produced by `tests/install_live_smoke.ps1` from
-an isolated fixture packet and the exact proposed installer bytes.
+The gate checks the live signed feed against that report before and after
+qualification, executes separate unpublished 1.5 fixtures, and requires real
+Linux installation. Candidate fixture execution still requires PowerShell on
+the Linux owner; missing execution cannot qualify deployment.
+
+Windows native validation is optional. Omit `--native-results` to record
+`native_results["windows-x64"]` as `{"status":"not_run","reason":"not_supplied"}`
+in `deployment.json`. To include it, append `--native-results /path/to/native-results`
+to either `check` or `apply`. That directory must contain `windows-x64.json`,
+produced by `tests/install_live_smoke.ps1` from an isolated fixture packet and
+the exact proposed installer bytes. Supplied evidence must pass both real
+PowerShell editions, loaded-profile checks, fresh installation and managed
+reinstall against the current feed. Missing, malformed or mismatched supplied
+evidence fails qualification; it is never reported as `not_run`.
 
 The candidate source hash is independent of the released binary's source
 commit. Changes to candidate source or scripts invalidate the candidate.

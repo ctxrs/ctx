@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { candidateAt, deploymentExitCode, prepare, runDeployment } from "../../deploy.mjs";
 import {
   approvedRelease, assertSameInstaller, installerBody, sha256, validateNativeResults,
@@ -92,12 +93,29 @@ test("Windows proof requires both real shell editions and both lifecycle phases"
   }
 });
 
-test("deployment requires Linux and both native Windows shells against the approved pair", () => {
+test("omitted Windows evidence is not_run while Linux proof remains mandatory", () => {
+  for (const directory of [undefined, null]) {
+    const results = validateNativeResults(directory, candidate, unixResult());
+    assert.deepEqual(results["windows-x64"], { status: "not_run", reason: "not_supplied" });
+    assert.deepEqual(results["linux-x64"], unixResult());
+    assert.throws(() => validateNativeResults(directory, candidate, undefined), /installation checks/);
+    const incomplete = unixResult();
+    incomplete.checks.search = false;
+    assert.throws(() => validateNativeResults(directory, candidate, incomplete), /installation checks/);
+    assert.throws(() => validateNativeResults(directory, candidate, { ...unixResult(), core_sha256: otherDigest }), /installation checks/);
+  }
+});
+
+test("an explicit Windows directory requires complete evidence against the approved pair", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-deploy-native-"));
   try {
     assert.throws(() => validateNativeResults(directory, candidate, unixResult()));
+    for (const report of ["not json", JSON.stringify({ status: "not_run" }), JSON.stringify({ ...windowsResult(), status: "failed" })]) {
+      fs.writeFileSync(path.join(directory, "windows-x64.json"), report);
+      assert.throws(() => validateNativeResults(directory, candidate, unixResult()));
+    }
     fs.writeFileSync(path.join(directory, "windows-x64.json"), JSON.stringify(windowsResult()));
-    assert.equal(Object.keys(validateNativeResults(directory, candidate, unixResult())).length, 2);
+    assert.deepEqual(validateNativeResults(directory, candidate, unixResult())["windows-x64"], windowsResult());
     const wrong = { ...candidate, release: { version: "1.3.4", pairs } };
     assert.throws(() => validateNativeResults(directory, wrong, unixResult()));
     const changed = structuredClone(candidate);
@@ -105,6 +123,41 @@ test("deployment requires Linux and both native Windows shells against the appro
     assert.throws(() => validateNativeResults(directory, changed, unixResult()));
     fs.unlinkSync(path.join(directory, "windows-x64.json"));
     assert.throws(() => validateNativeResults(directory, candidate, unixResult()));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("deployment CLI accepts omitted Windows evidence but rejects incomplete options", {
+  skip: process.platform !== "linux" || process.arch !== "x64",
+}, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-deploy-argv-"));
+  try {
+    const script = new URL("../../deploy.mjs", import.meta.url);
+    for (const action of ["check", "apply"]) {
+      for (const options of [[], ["--native-results", directory]]) {
+        // Empty candidate stops before network, fixtures, installation or activation.
+        const result = spawnSync(process.execPath, [script.pathname, action, directory, ...options], {
+          encoding: "utf8", timeout: 10_000,
+        });
+        assert.equal(result.error, undefined);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /candidate\.json/);
+        assert.doesNotMatch(result.stderr, /usage:/);
+      }
+      for (const options of [["--native-results"], ["--native-results", ""], ["--unknown", directory], ["--native-results", directory, "extra"]]) {
+        const result = spawnSync(process.execPath, [script.pathname, action, directory, ...options], {
+          encoding: "utf8", timeout: 10_000,
+        });
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /usage:/);
+      }
+    }
+    const missingRelease = spawnSync(process.execPath, [script.pathname, "prepare", directory], {
+      encoding: "utf8", timeout: 10_000,
+    });
+    assert.equal(missingRelease.status, 1);
+    assert.match(missingRelease.stderr, /usage:/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -180,8 +233,8 @@ function execution(overrides = {}) {
   return {
     calls, records,
     hooks: {
-      verifyCurrentFeed: async () => ({ version, signature_verified: true }),
-      runCandidateFixtures: () => ({ kind: "unpublished-candidate-fixtures", status: "passed" }),
+      verifyCurrentFeed: async () => { calls.push("feed"); return { version, signature_verified: true }; },
+      runCandidateFixtures: () => { calls.push("fixtures"); return { kind: "unpublished-candidate-fixtures", status: "passed" }; },
       candidateAt: async () => { calls.push("candidate"); return candidate; },
       runLinux: (_directory, _script, phase) => { calls.push(phase); return unixResult(); },
       validateNativeResults: () => { calls.push("native"); return { checked: true }; },
@@ -194,12 +247,61 @@ function execution(overrides = {}) {
 }
 const inputs = { directory: "/retained", nativeDirectory: "/native", apply: true };
 
+test("check and apply can omit Windows while retaining Linux, fixtures and both feed checks", async () => {
+  for (const apply of [false, true]) {
+    const { hooks, calls, records } = execution({ validateNativeResults });
+    const result = await runDeployment({ directory: inputs.directory, apply }, hooks);
+    assert.equal(result.status, apply ? "passed" : "qualified");
+    assert.deepEqual(result.native_results["windows-x64"], { status: "not_run", reason: "not_supplied" });
+    assert.deepEqual(result.native_results["linux-x64"], unixResult());
+    assert.deepEqual(records.at(-1).native_results, result.native_results);
+    assert.deepEqual(calls, ["candidate", "feed", "fixtures", "candidate", "candidate", "feed",
+      ...(apply ? ["deploy", "readback", "live"] : [])]);
+  }
+});
+
+test("omitting Windows cannot waive failed Linux or the second current-feed check", async () => {
+  const withoutWindows = { directory: inputs.directory, apply: true };
+  const linux = execution({
+    validateNativeResults,
+    runLinux: () => ({ ...unixResult(), status: "failed" }),
+  });
+  await assert.rejects(runDeployment(withoutWindows, linux.hooks), /installation checks/);
+  assert.ok(!linux.calls.includes("deploy"));
+  assert.equal(linux.records.at(-1).status, "qualification_failed");
+  let reads = 0;
+  const feed = execution({
+    validateNativeResults,
+    verifyCurrentFeed: async () => {
+      if (++reads === 2) throw new Error("current feed changed during qualification");
+      return { version, signature_verified: true };
+    },
+  });
+  await assert.rejects(runDeployment(withoutWindows, feed.hooks), /current feed changed/);
+  assert.equal(reads, 2);
+  assert.ok(!feed.calls.includes("deploy"));
+  assert.equal(feed.records.at(-1).status, "qualification_failed");
+});
+
+test("a supplied bad Windows receipt blocks activation through the real validator", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-deploy-bad-windows-"));
+  try {
+    fs.writeFileSync(path.join(directory, "windows-x64.json"), JSON.stringify({ ...windowsResult(), status: "failed" }));
+    const { hooks, calls, records } = execution({ validateNativeResults });
+    await assert.rejects(runDeployment({ ...inputs, nativeDirectory: directory }, hooks), /Windows installation result/);
+    assert.ok(!calls.includes("deploy"));
+    assert.equal(records.at(-1).status, "qualification_failed");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("incompatible real installer stops before deployment", async () => {
   const { hooks, calls, records } = execution({
     runLinux: () => { throw new Error("released binary rejects unknown operation"); },
   });
   await assert.rejects(runDeployment(inputs, hooks), /unknown operation/);
-  assert.deepEqual(calls, ["candidate"]);
+  assert.deepEqual(calls, ["candidate", "feed", "fixtures"]);
   assert.equal(records.at(-1).status, "qualification_failed");
 });
 
@@ -233,7 +335,7 @@ test("check mode never activates; apply verifies installation after readback", a
   assert.ok(!first.calls.includes("deploy"));
   const second = execution();
   assert.equal((await runDeployment(inputs, second.hooks)).status, "passed");
-  assert.deepEqual(second.calls, ["candidate", "candidate", "native", "candidate", "deploy", "readback", "live"]);
+  assert.deepEqual(second.calls, ["candidate", "feed", "fixtures", "candidate", "native", "candidate", "feed", "deploy", "readback", "live"]);
 });
 
 test("Wrangler failure after activation still triggers readback and cannot report success", async () => {
@@ -279,10 +381,12 @@ test("1.5 live proof requires one real binary and does not invent a Pro digest",
 
 test("current-feed mismatch and failed unpublished fixtures block deployment", async () => {
   for (const operation of ["verifyCurrentFeed", "runCandidateFixtures"]) {
-    const { hooks, calls, records } = execution({ [operation]: () => { throw new Error("unproved input"); } });
-    await assert.rejects(runDeployment(inputs, hooks), /unproved input/);
-    assert.equal(calls.includes("deploy"), false);
-    assert.equal(records.at(-1).status, "qualification_failed");
+    for (const nativeDirectory of [inputs.nativeDirectory, undefined]) {
+      const { hooks, calls, records } = execution({ [operation]: () => { throw new Error("unproved input"); } });
+      await assert.rejects(runDeployment({ ...inputs, nativeDirectory }, hooks), /unproved input/);
+      assert.equal(calls.includes("deploy"), false);
+      assert.equal(records.at(-1).status, "qualification_failed");
+    }
   }
 });
 

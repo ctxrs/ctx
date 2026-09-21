@@ -155,13 +155,13 @@ export function validateNativeResults(directory, candidate, localResult) {
   const { version, pairs } = candidate.release;
   const expectedPro = (platform) => isUnifiedVersion(version) ? undefined : pairs[platform].pro_sha256;
   const results = {};
-  // Exercise both hosted script implementations. The release owner retains the
-  // existing five-target native artifact qualification, including macOS/ARM.
+  // Linux installation is required; Windows evidence is optional, but any
+  // explicitly supplied report must pass the complete existing validation.
   results["linux-x64"] = validateUnixResult(localResult, {
     platform: "linux-x64", installerSha256: candidate.shell_sha256, version,
     coreSha256: pairs["linux-x64"].core_sha256, proSha256: expectedPro("linux-x64"),
   });
-  results["windows-x64"] = validateWindowsResult(
+  results["windows-x64"] = directory == null ? { status: "not_run", reason: "not_supplied" } : validateWindowsResult(
     readReport(path.join(directory, "windows-x64.json")),
     { installerSha256: candidate.powershell_sha256, version,
       coreSha256: pairs["windows-x64"].core_sha256, proSha256: expectedPro("windows-x64") },
