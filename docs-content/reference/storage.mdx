@@ -83,10 +83,6 @@ Official installer-managed binaries also have an ownership sidecar next to the
 binary, such as `~/.local/bin/ctx.install.json`. The sidecar is outside the ctx
 data root because it describes the installed executable.
 
-Blame does not use a credential store or encrypted product graph. On upgrade,
-old `pro/` files and keys are left inert and untouched. They are not a fallback
-or an input to the attribution index.
-
 ## Repository identity and local access
 
 The attribution index derives logical repository bindings from captured
@@ -113,5 +109,5 @@ MCP read Core and its local derived products. None of these operations repeats
 the network activity that originally produced a provider transcript.
 
 Semantic model or runtime acquisition is an explicit, separately controlled
-network surface. Blame does not contact an account or trial service. Command-metadata privacy
-controls are covered in the [Privacy Policy](/legal/privacy-policy).
+network surface. Command-metadata privacy controls are covered in the
+[Privacy Policy](/legal/privacy-policy).

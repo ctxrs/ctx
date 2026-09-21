@@ -26,10 +26,10 @@ regenerate them with the owning command instead of editing them.
 ## Routes
 
 `/blame` is the canonical Blame guide. Former `/pro` and `/pro/index` routes
-redirect there; their Markdown exports remain Markdown. Former referral URLs
-lead to legacy support and legal information. `/cloud` still aliases `/teams`,
-`/slack` keeps its configured destination, and shared fonts retain cross-origin
-access. Product aliases apply only to content roots containing the Blame guide.
+redirect there; their Markdown exports remain Markdown. Former `/pro/referrals`,
+`/teams`, and `/cloud` URLs lead home. `/slack` keeps its configured destination,
+and shared fonts retain cross-origin access. Product aliases apply only to
+content roots containing the Blame guide.
 
 ## Optional ADE archive
 

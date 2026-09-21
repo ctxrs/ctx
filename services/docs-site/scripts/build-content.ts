@@ -530,8 +530,6 @@ async function main(): Promise<void> {
   const docsConfig = await readDocsConfig();
   const tabs = docsConfig.navigation?.tabs ?? [];
   const { pageSpecs: basePageSpecs, redirects, pageTabs } = collectRoutes(tabs);
-  redirects['/cloud'] = '/teams';
-  redirects['/cloud/'] = '/teams';
   if (docsConfig.footer?.socials?.slack) {
     redirects['/slack'] = docsConfig.footer.socials.slack;
   }
@@ -543,15 +541,19 @@ async function main(): Promise<void> {
   // Product aliases apply only when this content root contains the current guide.
   // An explicitly supplied archive root keeps its own routes.
   if (pages['/blame']) {
+    for (const pathname of ['/teams', '/teams/', '/cloud', '/cloud/']) {
+      redirects[pathname] = '/';
+    }
+    redirects['/teams.md'] = '/index.md';
     for (const pathname of ['/pro', '/pro/', '/pro/index', '/pro/index/']) {
       redirects[pathname] = '/blame';
     }
     redirects['/pro/index.md'] = '/blame.md';
     redirects['/pro.md'] = '/blame.md';
     for (const pathname of ['/pro/referrals', '/pro/referrals/']) {
-      redirects[pathname] = '/legal/legacy-services';
+      redirects[pathname] = '/';
     }
-    redirects['/pro/referrals.md'] = '/legal/legacy-services.md';
+    redirects['/pro/referrals.md'] = '/index.md';
   }
   const searchIndex = buildSearchIndex(searchPages);
   const siteName = docsConfig.name ?? 'ctx Docs';

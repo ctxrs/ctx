@@ -70,12 +70,6 @@
       {
         "tab": "Support",
         "href": "mailto:support@ctx.rs"
-      },
-      {
-        "tab": "For Teams",
-        "pages": [
-          "teams"
-        ]
       }
     ]
   },
@@ -104,10 +98,6 @@
           {
             "label": "Changelog",
             "href": "/changelog"
-          },
-          {
-            "label": "For Teams",
-            "href": "/teams"
           }
         ]
       },

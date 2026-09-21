@@ -40,11 +40,11 @@ describe('prerender helpers', () => {
     expect(buildRedirectsFile({
       '/pro': '/blame',
       '/pro/index.md': '/blame.md',
-      '/pro/referrals.md': '/legal/legacy-services.md',
+      '/pro/referrals.md': '/index.md',
     })).toBe([
       '/pro /blame/ 308',
       '/pro/index.md /blame.md 308',
-      '/pro/referrals.md /legal/legacy-services.md 308',
+      '/pro/referrals.md /index.md 308',
       '',
     ].join('\n'));
   });
