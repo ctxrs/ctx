@@ -1,5 +1,5 @@
 import React, { StrictMode } from 'react';
-import { hydrateRoot } from 'react-dom/client';
+import { createRoot, hydrateRoot } from 'react-dom/client';
 import { App } from './App';
 import { loadBrandFonts, revealBrandFontGate } from './lib/brand-fonts';
 import './index.css';
@@ -12,11 +12,16 @@ if (!appElement) {
   throw new Error('Missing #app root element');
 }
 
-hydrateRoot(
-  appElement,
+const app = (
   <StrictMode>
     <App pathname={window.location.pathname} />
-  </StrictMode>,
+  </StrictMode>
 );
+
+if (appElement.childElementCount === 0) {
+  createRoot(appElement).render(app);
+} else {
+  hydrateRoot(appElement, app);
+}
 
 void loadBrandFonts({ includeItalic: true }).finally(revealBrandFontGate);

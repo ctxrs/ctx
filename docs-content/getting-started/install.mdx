@@ -76,15 +76,15 @@ macOS, and Windows. Setup and search do not send transcript text,
 prompts, or indexed search content to a model API. See the [Privacy Policy](/legal/privacy-policy)
 before installing when you need strict command-metadata controls.
 
-[Blame](/blame) is included in ctx. It uses local retained history and Git
-objects to trace code to agent sessions. No account or activation is needed.
+Use [`ctx blame`](/blame) to trace files, commits, and PRs to agent sessions
+using local history and Git objects.
 
 ## Uninstall the managed CLI
 
 Use the hosted uninstaller for an installer-managed ctx binary. On macOS or Linux:
 
 ```bash
-curl -fsSL https://ctx.rs/uninstall | sh
+curl -fsSL https://ctx.rs/uninstall | sh -s -- --keep-data
 ```
 
 On Windows:
@@ -94,11 +94,7 @@ $uninstall = [scriptblock]::Create((irm https://ctx.rs/uninstall.ps1))
 & $uninstall -KeepData -NonInteractive
 ```
 
-For ctx 1.5 and later, the default and `--keep-data` (`-KeepData`) preserve
-Core history, the `search/attribution/` index, and any legacy data and keys.
-The retired `--delete-data` (`-DeleteData`) option fails before changing the
-installation; rerun without that option. It does not delete your history.
-Older installed releases retain their original, scoped uninstall behavior.
+These commands preserve your local data root.
 
 The uninstaller removes verified installer-owned files and preserves modified
 or unowned files. Windows skill copies require separate removal. There is no
@@ -108,7 +104,6 @@ The hosted uninstaller refuses to remove an unmanaged executable.
 
 ## Unmanaged installations
 
-Source builds, direct binaries, and package-manager installs include Blame.
 Without the official marker they remain unmanaged; use their original
 installation method for upgrades and removal. The hosted installer refuses to overwrite an unmanaged executable
 or a mismatched marker; follow the

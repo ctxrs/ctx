@@ -53,8 +53,8 @@ ctx blame pr https://github.com/your-org/your-repo/pull/42
 
 Like ctx indexing and search capabilities, blame runs locally, so your code and history never leave your machine.
 
-Blame is included in the open-source ctx CLI. [Install ctx](/getting-started/install)
-or build it from [public source](https://github.com/ctxrs/ctx).
+See [Install ctx](/getting-started/install) or build it from
+[source](https://github.com/ctxrs/ctx).
 
 ## Commands and indexing
 
@@ -80,10 +80,6 @@ or `ctx setup --wait`. In manual indexing mode, these commands complete
 attribution in the caller, including when Core history has not changed.
 `ctx setup --no-daemon` suppresses this refresh. Status, doctor, and index
 wait/watch only observe it.
-
-Blame reads retained Core history and a plain, rebuildable attribution index;
-it needs no account, activation, or separate encrypted store. Existing legacy
-data and keys are left untouched and are not used by ctx 1.5.
 
 For the full CLI and MCP contract, see the
 [Blame guide](https://github.com/ctxrs/ctx/blob/main/docs/blame.md).

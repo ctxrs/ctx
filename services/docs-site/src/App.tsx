@@ -62,13 +62,6 @@ interface SearchNavigationTarget {
   search: string;
 }
 
-const DEFAULT_CLOUD_WAITLIST_ENDPOINT = 'https://api.ctx.rs/functions/v1/cloud-waitlist';
-const CLOUD_WAITLIST_ENDPOINT = (
-  import.meta.env?.VITE_CTX_WAITLIST_ENDPOINT ??
-  (typeof process === 'undefined' ? undefined : process.env.VITE_CTX_WAITLIST_ENDPOINT) ??
-  DEFAULT_CLOUD_WAITLIST_ENDPOINT
-).trim();
-
 function getSearchNavigationTarget(currentHref: string, href: string): SearchNavigationTarget | null {
   const currentUrl = new URL(currentHref);
   const targetUrl = new URL(href, currentUrl);
@@ -93,91 +86,6 @@ function copyPageUrl(pathname: string): void {
   }
 
   void copyText(buildCanonicalUrl(pathname));
-}
-
-function formDataString(formData: FormData, key: string): string | null {
-  const value = formData.get(key);
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const normalized = value.trim();
-  return normalized.length > 0 ? normalized : null;
-}
-
-function setCloudWaitlistStatus(
-  form: HTMLFormElement,
-  tone: 'error' | 'success' | 'working',
-  message: string,
-): void {
-  const status = form.querySelector<HTMLElement>('[data-cloud-waitlist-status]');
-  if (!status) {
-    return;
-  }
-  status.dataset.tone = tone;
-  status.textContent = message;
-}
-
-function buildCloudWaitlistPayload(form: HTMLFormElement): Record<string, string | null> {
-  const formData = new FormData(form);
-  const url = new URL(window.location.href);
-  return {
-    company: formDataString(formData, 'company'),
-    email: formDataString(formData, 'email') ?? '',
-    message: formDataString(formData, 'message'),
-    page_url: window.location.href,
-    referrer: document.referrer || null,
-    source_path: window.location.pathname,
-    utm_campaign: url.searchParams.get('utm_campaign'),
-    utm_content: url.searchParams.get('utm_content'),
-    utm_medium: url.searchParams.get('utm_medium'),
-    utm_source: url.searchParams.get('utm_source'),
-    utm_term: url.searchParams.get('utm_term'),
-  };
-}
-
-export async function submitCloudWaitlistForm(
-  form: HTMLFormElement,
-  fetchImpl: typeof fetch = fetch,
-): Promise<void> {
-  const submitButton = form.querySelector<HTMLButtonElement>('button[type="submit"]');
-  const endpoint = form.action || CLOUD_WAITLIST_ENDPOINT;
-  submitButton?.setAttribute('disabled', 'true');
-  setCloudWaitlistStatus(form, 'working', 'Submitting...');
-  try {
-    const response = await fetchImpl(endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(buildCloudWaitlistPayload(form)),
-    });
-    if (!response.ok) {
-      setCloudWaitlistStatus(
-        form,
-        'error',
-        response.status === 429
-          ? 'Too many attempts. Please try again later.'
-          : 'Something went wrong. Please email support@ctx.rs.',
-      );
-      return;
-    }
-    form.reset();
-    setCloudWaitlistStatus(form, 'success', "Thanks - we'll be in touch.");
-  } catch {
-    setCloudWaitlistStatus(form, 'error', 'Something went wrong. Please email support@ctx.rs.');
-  } finally {
-    submitButton?.removeAttribute('disabled');
-  }
-}
-
-export function handleCloudWaitlistSubmit(
-  event: SubmitEvent,
-  fetchImpl: typeof fetch = fetch,
-): Promise<void> | null {
-  const target = event.target;
-  if (!(target instanceof HTMLFormElement) || !target.matches('[data-cloud-waitlist-form]')) {
-    return null;
-  }
-  event.preventDefault();
-  return submitCloudWaitlistForm(target, fetchImpl);
 }
 
 function sameTabNeighbors(
@@ -307,7 +215,6 @@ export function App({ pathname }: AppProps) {
   const page = getPageForPathname(resolvedPathname);
   const activeTab = getActiveTab(resolvedPathname);
   const sidebarGroups = getPageGroupsForTab(activeTab.key);
-  const isStandalonePage = page?.pathname === '/teams';
   const neighbors: PageWithNeighbors | null = page
     ? sameTabNeighbors(page, getAdjacentPages(page.pathname))
     : null;
@@ -427,19 +334,6 @@ export function App({ pathname }: AppProps) {
       window.removeEventListener('popstate', handlePopState);
       document.removeEventListener('click', handleDocumentClick);
     };
-  }, []);
-
-  useEffect(() => {
-    if (typeof document === 'undefined') {
-      return;
-    }
-
-    const handleSubmit = (event: SubmitEvent) => {
-      void handleCloudWaitlistSubmit(event);
-    };
-
-    document.addEventListener('submit', handleSubmit);
-    return () => document.removeEventListener('submit', handleSubmit);
   }, []);
 
   useEffect(() => {
@@ -658,7 +552,6 @@ export function App({ pathname }: AppProps) {
     <div
       className="site-shell"
       data-pathname={resolvedPathname}
-      data-standalone={isStandalonePage ? 'true' : undefined}
       ref={shellRef}
     >
       <Header
@@ -671,24 +564,21 @@ export function App({ pathname }: AppProps) {
         tabs={site.tabs}
       />
       <div className="site-layout">
-        {!isStandalonePage ? (
-          <Sidebar
-            activePathname={page?.pathname ?? resolvedPathname}
-            groups={sidebarGroups}
-            isOpen={mobileNavOpen}
-            onClose={() => setMobileNavOpen(false)}
-          />
-        ) : null}
+        <Sidebar
+          activePathname={page?.pathname ?? resolvedPathname}
+          groups={sidebarGroups}
+          isOpen={mobileNavOpen}
+          onClose={() => setMobileNavOpen(false)}
+        />
         <main className="content-shell">
           <div className="content-frame">
             {page ? (
               <article
                 className="article-shell"
                 data-pathname={page.pathname}
-                data-standalone={isStandalonePage ? 'true' : undefined}
                 data-tab={page.tabKey}
               >
-                {!isHomePage && !isStandalonePage ? (
+                {!isHomePage ? (
                   <header className="article-header">
                     <div className="article-section-label">{pageGroupLabel}</div>
                     <div className="article-title-row">
@@ -711,7 +601,7 @@ export function App({ pathname }: AppProps) {
                   </header>
                 ) : null}
                 <PageContent html={page.html} pathname={page.pathname} />
-                {!isStandalonePage ? <PageFooterNav neighbors={neighbors} /> : null}
+                <PageFooterNav neighbors={neighbors} />
               </article>
             ) : (
               <article className="article-shell">
@@ -726,7 +616,7 @@ export function App({ pathname }: AppProps) {
             )}
           </div>
         </main>
-        {!isStandalonePage ? <TableOfContents headings={page?.headings ?? []} /> : null}
+        <TableOfContents headings={page?.headings ?? []} />
         <SiteFooter footer={site.footer} />
       </div>
       {SearchDialogComponent ? (
