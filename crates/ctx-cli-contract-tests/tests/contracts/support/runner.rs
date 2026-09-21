@@ -162,7 +162,6 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
         ] {
             fs::create_dir_all(path).unwrap();
         }
-        command.env("CTX_PRO_DATA_ROOT", temp.path().join("pro"));
         command.env("USERPROFILE", temp.path());
         command.env("XDG_CONFIG_HOME", &xdg_config);
         command.env("XDG_DATA_HOME", &xdg_data);
@@ -172,7 +171,6 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
         command.env("TMPDIR", &process_temp);
         command.env("TEMP", &process_temp);
         command.env("TMP", &process_temp);
-        command.env("CTX_MACHINE_ID", "ctx-hermetic-test-machine");
         for name in [
             "CLINE_DATA_DIR",
             "CLINE_DB_DATA_DIR",

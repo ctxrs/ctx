@@ -31,6 +31,8 @@ is durably handed to the bounded local outbox. A failed local handoff leaves the
 claim unacknowledged.
 
 `operation_completed@1` records one terminal event for an eligible operation.
+Blame's ordinary CLI/MCP terminal and its closed, optional measurements are
+specified in [blame.md](blame.md).
 `provider_refresh_completed@1` records one completed aggregate for every
 observed provider and trigger. Provider names are the complete
 `CaptureProvider` vocabulary; producers do not suppress low-usage providers.

@@ -136,5 +136,5 @@ The route fails closed on:
 - daemon-publication failure.
 
 Manifest discovery is read-only. Import writes the ctx-owned route catalog and
-Core/Tantivy generation and may schedule optional semantic or Pro-derived work;
+Core/Tantivy generation and may schedule optional semantic or attribution work;
 it never rewrites or copies the provider file itself.

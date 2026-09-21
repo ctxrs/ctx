@@ -28,7 +28,13 @@ core_dir="$1"
 runtime_dir="$2"
 out_dir="$3"
 receipt_dir="$4"
-for variable in core_dir runtime_dir out_dir receipt_dir; do
+validation_policy="${CTX_RELEASE_VALIDATION_POLICY:-native-receipts-required-v1}"
+authority_dir="${CTX_RELEASE_AUTHORITY_DIR:-${core_dir}.authority}"
+case "${validation_policy}" in
+  native-receipts-required-v1|factory-only-human-override-v1) ;;
+  *) die "unknown release validation policy" ;;
+esac
+for variable in core_dir runtime_dir out_dir receipt_dir authority_dir; do
   value="${!variable}"
   [[ "${value}" != -* ]] || die "release directory cannot start with '-': ${value}"
   if [[ "${value}" != /* ]]; then
@@ -38,7 +44,13 @@ done
 
 python3 -I "${bundle_tool}" require-directory --directory "${core_dir}"
 python3 -I "${bundle_tool}" require-directory --directory "${runtime_dir}"
-python3 -I "${bundle_tool}" require-directory --directory "${receipt_dir}"
+if [[ "${validation_policy}" == native-receipts-required-v1 ]]; then
+  python3 -I "${bundle_tool}" require-directory --directory "${receipt_dir}"
+fi
+python3 -I "${bundle_tool}" require-directory --directory "${authority_dir}"
+python3 -I "${repo_root}/scripts/release-sbom.py" verify-release \
+  --handoff-dir "${authority_dir}" \
+  --expected-handoff-sha256 "${CTX_RELEASE_HANDOFF_SHA256:?independent Core handoff digest is required}" >/dev/null
 python3 -I "${bundle_tool}" preflight-publication \
   --input-dir "${core_dir}" --output-dir "${out_dir}"
 python3 -I "${bundle_tool}" preflight-publication \
@@ -129,6 +141,8 @@ for asset in "${core_assets[@]}"; do
     || die "Core checksum mismatch for ${asset}"
 done
 
+cmp "${core_dir}/SHA256SUMS" "${authority_dir}/SHA256SUMS"
+
 declare -A runtime_digests=()
 for asset in "${runtime_assets[@]}"; do
   source_path="${runtime_dir%/}/${asset}"
@@ -176,8 +190,14 @@ verify_macos_pair_receipt() {
     die "macOS release-pair receipt digest mismatch for ${runtime_asset}"
 }
 
-verify_macos_pair_receipt macos-arm64
-verify_macos_pair_receipt macos-x64
+if [[ "${validation_policy}" == native-receipts-required-v1 ]]; then
+  verify_macos_pair_receipt macos-arm64
+  verify_macos_pair_receipt macos-x64
+fi
+# Native execution may be omitted; authenticated runtime bytes may not.
+python3 -I "${repo_root}/scripts/release/verify-runtime-signatures.py" \
+  --runtime-dir "${runtime_dir}" --authority-dir "${authority_dir}" \
+  --policy "${validation_policy}"
 
 staged="$(mktemp -d "$(dirname "${out_dir}")/.github-release-final.XXXXXX")"
 cleanup() {
@@ -214,4 +234,22 @@ done
 python3 -I "${bundle_tool}" commit-directory \
   --stage-dir "${staged}" --output-dir "${out_dir}"
 trap - EXIT
+python3 - "${authority_dir}" "${out_dir}" "${validation_policy}" <<'ASSEMBLY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+authority, output = map(Path, sys.argv[1:3])
+validation = json.loads((authority / "release-validation.json").read_bytes())
+body = {"kind": "ctx-release-assembly", "schema_version": 1,
+        "source_commit": validation["source_commit"],
+        "validation_policy": sys.argv[3], "validation": validation,
+        "release_sums_sha256": hashlib.sha256((output / "SHA256SUMS").read_bytes()).hexdigest(),
+        "macos_cli_runtime_native_execution": "passed" if sys.argv[3] == "native-receipts-required-v1" else "not_run",
+        "artifacts": [{"name": p.name, "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+                       "size_bytes": p.stat().st_size} for p in sorted(output.iterdir())]}
+with Path(str(output) + ".assembly.json").open("x") as receipt:
+    json.dump(body, receipt, sort_keys=True, separators=(",", ":"))
+    receipt.write("\n")
+ASSEMBLY
 printf 'assembled GitHub release assets in %s\n' "${out_dir}"

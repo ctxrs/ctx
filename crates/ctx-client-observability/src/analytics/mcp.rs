@@ -2,7 +2,10 @@ use serde_json::{json, Map, Value};
 
 use crate::operation_descriptor::McpOperation;
 
-use super::{count_bucket, duration_bucket, CountBucket, DurationBucket, SearchTerminalFacts};
+use super::{
+    count_bucket, duration_bucket, BlameTerminalFacts, CountBucket, DurationBucket,
+    SearchTerminalFacts,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpMethodV1 {
@@ -100,6 +103,7 @@ pub struct McpResultMetadataV1 {
     pub events_truncated: Option<bool>,
     pub response_bound: Option<McpResponseBoundV1>,
     pub search: Option<SearchTerminalFacts>,
+    pub blame: Option<BlameTerminalFacts>,
 }
 
 impl McpResultMetadataV1 {
@@ -130,6 +134,9 @@ impl McpOperation {
         );
         let result = self.result();
         let search = result.search;
+        if let Some(blame) = result.blame {
+            blame.insert_properties(properties);
+        }
         insert_optional_bucket(properties, "result_count_bucket", result.result_count);
         insert_optional_bool(properties, "zero_result", result.zero_result);
         insert_optional_bool(properties, "result_truncated", result.result_truncated);

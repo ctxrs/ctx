@@ -348,18 +348,6 @@ pub(super) fn write_install_marker_to(
     atomic_write_json(marker_path, &body)
 }
 
-pub(in crate::upgrade) fn install_marker_bytes(
-    existing_marker_path: &Path,
-    plan: &UpgradePlan,
-    install_attribution: Option<&ActiveInstallAttribution>,
-) -> Result<Vec<u8>> {
-    let mut body = install_marker_value(existing_marker_path, plan, install_attribution)?;
-    body.as_object_mut()
-        .expect("install marker is an object")
-        .insert("managed_pair".to_owned(), Value::Bool(true));
-    serde_json::to_vec_pretty(&body).context("serialize managed Core install marker")
-}
-
 fn install_marker_value(
     existing_marker_path: &Path,
     plan: &UpgradePlan,
@@ -460,7 +448,7 @@ fn string_field(value: &Value, key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("ctx install marker missing {key}"))
 }
 
-fn read_install_marker_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(super) fn read_install_marker_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     read_stable_file(
         path,
         "ctx install marker",

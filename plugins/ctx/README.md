@@ -4,7 +4,7 @@ Fast local search and 'git blame' for agent sessions.
 
 This plugin bundles the `ctx` Agent Skill and a `/ctx` command for clients that
 support plugin commands. The skill teaches agents to search local agent
-history with ctx and, when available, use the paid ctx pro add-on to trace
+history with ctx and use ctx blame to trace
 a line, file, commit, or PR back to the original agent session that produced
 it.
 
@@ -16,7 +16,7 @@ Install and set up the ctx CLI:
 curl -fsSL https://ctx.rs/install | sh
 ```
 
-The plugin does not install the CLI or enable ctx pro by itself.
+The plugin uses your installed ctx CLI for search and Blame.
 
 When upgrading from the former `ctx-agent-history-search` plugin, uninstall that
 package in the client before installing `ctx`. Plugin managers treat the new

@@ -61,7 +61,7 @@ if len(keyed) != len(steps):
 required = {
     "public-smoke",
     "public-nightly",
-    "public-release",
+    "public-release-ci",
     "sdk-swift-required",
     "public-cli-linux-factory",
     "public-cli-linux-x64-native-smoke",
@@ -110,9 +110,15 @@ semantic_condition = (
     'build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && '
     'build.branch == "main" && build.pull_request.id == null'
 )
-github_release_condition = (
+github_native_condition = (
     'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && '
     'build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && '
+    'build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && '
+    'build.branch == "main" && build.pull_request.id == null'
+)
+
+github_release_condition = (
+    'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && '
     'build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && '
     'build.branch == "main" && build.pull_request.id == null'
 )
@@ -120,7 +126,7 @@ github_release_condition = (
 for key, mode, condition in (
     ("public-smoke", "ci", ordinary_condition),
     ("public-nightly", "nightly", nightly_condition),
-    ("public-release", "release", core_release_condition),
+    ("public-release-ci", "ci", core_release_condition),
 ):
     step = keyed[key]
     if step.get("command", "").strip() != (
@@ -180,9 +186,9 @@ linux_x64_keys = {
 }
 for key, step in keyed.items():
     agents = step.get("agents", {})
-    if key == "public-release":
+    if key == "public-release-ci":
         if agents != public_release_selector:
-            fail("public-release must require task-bind and exact CLONE_FS authority")
+            fail("public-release-ci must require task-bind and exact CLONE_FS authority")
     elif key in linux_x64_keys:
         if agents != linux_x64_selector:
             fail(f"{key} must require the exact Linux x86_64 release selector")
@@ -215,8 +221,10 @@ if (
     fail("factory must invoke one five-target Core-only Linux construction route")
 if "build-onnxruntime-sidecar.sh" in factory_command or "semantic" in factory_command.lower():
     fail("factory must not construct semantic assets")
-if factory.get("depends_on") is not None or factory.get("secrets"):
-    fail("factory must be independent and acquire signing values only at signing")
+if factory.get("depends_on") != "public-release-ci" or factory.get("secrets"):
+    fail("factory must require normal CI and acquire signing values only at signing")
+if '--work-dir "$${CTX_RELEASE_WORK_ROOT:?absolute disk-backed factory work directory}"' not in factory_command:
+    fail("factory must place compilation and tool caches on the configured build disk")
 if factory.get("artifact_paths") != ["target/public-cli-artifacts/*"]:
     fail("factory must upload its complete Core candidate directory")
 
@@ -311,7 +319,7 @@ for key, (platform, queue, os_name, arch) in native.items():
 
 candidate = keyed["github-release-candidate"]
 expected_candidate_dependencies = [
-    "public-release",
+    "public-release-ci",
     "public-cli-linux-factory",
     "public-cli-linux-x64-native-smoke",
     "public-cli-linux-aarch64-native-smoke",
@@ -321,7 +329,7 @@ expected_candidate_dependencies = [
 ]
 if candidate.get("depends_on") != expected_candidate_dependencies:
     fail("Core candidate staging has the wrong strict dependency set")
-if candidate.get("if") != core_native_condition:
+if candidate.get("if") != core_release_condition:
     fail("Core candidate staging has the wrong release condition")
 if candidate.get("allow_dependency_failure") or candidate.get("soft_fail"):
     fail("Core candidate staging must fail closed")
@@ -346,6 +354,16 @@ for proof in native.values():
     platform = proof[0]
     if f"ctx-{platform}.native-execution.json" not in candidate_command:
         fail(f"Core candidate staging must consume native {platform} proof")
+selection = 'if [[ "$${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then'
+if (candidate_command.count(selection) != 1
+        or candidate_command.count("export CTX_RELEASE_VALIDATION_POLICY=factory-only-human-override-v1") != 1
+        or candidate_command.count("export CTX_RELEASE_VALIDATION_POLICY=native-receipts-required-v1") != 1
+        or candidate_command.count('"target/ctx-artifacts/check/normal-ci.json" . --step public-release-ci') != 1):
+    fail("candidate staging must bind normal CI and explicitly select truthful native coverage")
+branch = candidate_command.split(selection, 1)[1].split("\nfi", 1)[0]
+for platform, *_ in native.values():
+    if f"ctx-{platform}.native-execution.json" not in branch:
+        fail("native execution proof must remain inside its explicit opt-in branch")
 logical_candidate_command = "\n".join(
     " ".join(line.split())
     for line in re.sub(r"\\\n[ \t]*", " ", candidate_command).splitlines()
@@ -453,7 +471,7 @@ def validate_release_pair(
 ) -> None:
     if pair.get("depends_on") != ["github-release-candidate", runtime_producer]:
         fail(f"{key} must join only the sealed Core candidate and its runtime producer")
-    if pair.get("if") != github_release_condition:
+    if pair.get("if") != github_native_condition:
         fail(f"{key} has the wrong final-release condition")
     if any(field in pair for field in ("allow_dependency_failure", "soft_fail", "skip")):
         fail(f"{key} must fail closed")
@@ -618,6 +636,7 @@ def assembly_download(pattern: str, step: str) -> str:
 
 expected_assembly_commands = [
     "mkdir -p target/public-cli-artifacts target/macos-release-pair-qualification",
+    assembly_download("target/github-release-authority/*", "github-release-candidate"),
     assembly_download("target/github-core-release-assets/*", "github-release-candidate"),
     assembly_download(
         "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz*",
@@ -628,16 +647,21 @@ expected_assembly_commands = [
         "semantic-runtime-portable",
     ),
     assembly_download(
-        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz*",
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64*",
         "semantic-runtime-portable",
     ),
     assembly_download(
-        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz*",
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64*",
         "public-cli-macos-x64-runtime-producer",
     ),
     assembly_download(
         "*ctx-onnxruntime-windows-x64.zip*", "semantic-runtime-windows-ml"
     ),
+    "export CTX_RELEASE_VALIDATION_POLICY=factory-only-human-override-v1",
+    "export CTX_RELEASE_AUTHORITY_DIR=target/github-release-authority",
+    'export CTX_RELEASE_HANDOFF_SHA256="$$(sha256sum target/github-release-authority/ctx-core-github-handoff.json | cut -d\' \' -f1)"',
+    'if [[ "$${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then',
+    "export CTX_RELEASE_VALIDATION_POLICY=native-receipts-required-v1",
     assembly_download(
         "target/macos-release-pair-qualification/ctx-macos-arm64.release-pair.sha256",
         "public-cli-macos-arm64-release-pair-qualification",
@@ -646,6 +670,7 @@ expected_assembly_commands = [
         "target/macos-release-pair-qualification/ctx-macos-x64.release-pair.sha256",
         "public-cli-macos-x64-release-pair-qualification",
     ),
+    "fi",
     (
         "scripts/assemble-github-release-assets.sh "
         "target/github-core-release-assets target/public-cli-artifacts "
@@ -674,9 +699,13 @@ validate_assembly_command(github_release_command)
 for forbidden in ("multilingual-e5", "cuda12", "windowsml"):
     if forbidden in github_release_command.lower():
         fail(f"final GitHub assembly unexpectedly consumes {forbidden}")
-if github_release.get("artifact_paths") != ["target/github-release-assets/*"]:
-    fail("final GitHub assembly must upload only the complete public asset set")
+if github_release.get("artifact_paths") != ["target/github-release-assets/*", "target/github-release-assets.assembly.json"]:
+    fail("final GitHub assembly must upload the complete asset set and truthful digest-bound receipt")
 for old, new in (
+    ("factory-only-human-override-v1", "claimed-native-success"),
+    ("CTX_RELEASE_HANDOFF_SHA256", "UNBOUND_HANDOFF_SHA256"),
+    ("target/github-release-authority/*", "target/foreign-authority/*"),
+    ('== "1" ]]; then', '== "0" ]]; then'),
     (
         "target/macos-release-pair-qualification/ctx-macos-arm64.release-pair.sha256",
         "target/macos-release-pair-qualification/missing.release-pair.sha256",
@@ -716,7 +745,7 @@ handoff_command = handoff.get("command", "")
 if handoff_command.count("--step semantic-runtime-portable") != 3:
     fail("Semantic handoff must gather its three portable CPU runtime families")
 for forbidden in (
-    "public-release",
+    "public-release-ci",
     "public-cli-linux-factory",
     "public-cli-macos-arm64-release-pair-qualification",
     "public-cli-macos-x64-release-pair-qualification",
@@ -726,7 +755,7 @@ for forbidden in (
         fail(f"Semantic handoff must not consume Core/SDK input ({forbidden})")
 
 core_keys = {
-    "public-release",
+    "public-release-ci",
     "public-cli-linux-factory",
     *native.keys(),
     "github-release-candidate",
@@ -754,7 +783,7 @@ for step in steps:
 
 print(
     "Buildkite release pipeline: independent Core/SDK/Semantic graphs, "
-    "five exact-byte Core validators, two authoritative macOS release-pair gates"
+    "normal CI, explicit native coverage, signatures and complete final asset binding"
 )
 PY
 

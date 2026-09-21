@@ -26,9 +26,10 @@ jobs validate these exact bytes; they do not rebuild them.
 Options:
   --source-commit SHA      Required clean source commit (default: HEAD)
   --output-dir DIR         Candidate directory (default: target/public-cli-artifacts)
-  --toolchain-dir DIR      Verified tool cache (default: target/release-toolchain)
+  --work-dir DIR           Compilation and scratch root (default: CTX_RELEASE_WORK_ROOT or target)
+  --toolchain-dir DIR      Verified tool cache (default: WORK_DIR/release-toolchain)
   --targets ID[,ID...]     Build selected target IDs; repeat for more (default: all)
-  --macos-sdk PATH         Private regular macOS SDK archive
+  --macos-sdk PATH         Licensed regular macOS SDK archive matching the public pin
   --jobs N                 Cargo jobs per target (default: 2)
   --build-parallelism N    Concurrent target builds (default: 2)
   --diagnostic-unsigned    Build and inspect, but do not sign or emit releasable manifests
@@ -83,7 +84,8 @@ download_verified() {
 
 source_commit=""
 output_dir="target/public-cli-artifacts"
-toolchain_dir="target/release-toolchain"
+toolchain_dir=""
+work_dir="${CTX_RELEASE_WORK_ROOT:-target}"
 macos_sdk_input="${CTX_MACOS_SDK_ROOT:-}"
 cargo_jobs="${CTX_RELEASE_CARGO_JOBS:-2}"
 build_parallelism="${CTX_RELEASE_BUILD_PARALLELISM:-2}"
@@ -94,6 +96,7 @@ while [[ $# -gt 0 ]]; do
     --source-commit) shift; source_commit="${1:-}" ;;
     --output-dir) shift; output_dir="${1:-}" ;;
     --toolchain-dir) shift; toolchain_dir="${1:-}" ;;
+    --work-dir) shift; work_dir="${1:-}" ;;
     --targets)
       shift
       [[ $# -gt 0 ]] || die "--targets requires at least one target ID"
@@ -113,6 +116,13 @@ done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
+[[ -n "${work_dir}" && "${work_dir}" != -* ]] || die "--work-dir is required"
+[[ "${work_dir}" == /* ]] || work_dir="${repo_root}/${work_dir}"
+toolchain_dir="${toolchain_dir:-${work_dir}/release-toolchain}"
+[[ "${toolchain_dir}" == /* ]] || toolchain_dir="${repo_root}/${toolchain_dir}"
+export CTX_RELEASE_WORK_ROOT="${work_dir}"
+mkdir -p "${work_dir}/tmp"
+export TMPDIR="${work_dir}/tmp"
 [[ "$(uname -s)" == "Linux" ]] || die "release factory requires Linux"
 case "$(uname -m)" in x86_64|amd64) ;; *) die "release factory requires x86_64" ;; esac
 require_command python3
@@ -236,7 +246,7 @@ if [[ ! -f "${tomli_dir}/tomli/__init__.py" ]]; then
     die "tomli wheel has an unexpected layout"
   mv "${tomli_temporary}" "${tomli_dir}"
 fi
-python_with_tomli=(env "PYTHONPATH=${repo_root}/${tomli_dir}" python3 -S)
+python_with_tomli=(env "PYTHONPATH=${tomli_dir}" python3 -S)
 [[ "$("${python_with_tomli[@]}" -c 'import tomli; print(tomli.__version__)')" == "${TOMLI_VERSION}" ]] || \
   die "tomli version mismatch"
 
@@ -248,7 +258,7 @@ if [[ ! -x "${zig_dir}/zig" ]]; then
     "${ZIG_SHA256}" "${zig_archive}"
   tar -C "${toolchain_dir}" -xf "${zig_archive}"
 fi
-export PATH="${repo_root}/${zig_dir}:${PATH}"
+export PATH="${zig_dir}:${PATH}"
 [[ "$(zig version)" == "${ZIG_VERSION}" ]] || die "Zig version mismatch"
 
 if ! cargo install --list | grep -Fqx "cargo-zigbuild v${CARGO_ZIGBUILD_VERSION}:"; then
@@ -277,7 +287,7 @@ if [[ "${official}" == "1" && "${needs_macos}" == "1" ]]; then
     [[ -x "${nested_rcodesign}" ]] || die "rcodesign archive has an unexpected layout"
     mv "${nested_rcodesign}" "${rcodesign_dir}/rcodesign"
   fi
-  export PATH="${repo_root}/${rcodesign_dir}:${PATH}"
+  export PATH="${rcodesign_dir}:${PATH}"
   rcodesign --version | grep -F "${RCODESIGN_VERSION}" >/dev/null || \
     die "rcodesign version mismatch"
 fi
@@ -387,7 +397,7 @@ build_target() {
   binary="${CTX_PUBLIC_TARGET_BINARY}"
   raw="ctx"
   [[ "${target_id}" != "windows-x64" ]] || raw="ctx.exe"
-  target_dir="${repo_root}/target/linux-release-factory/${target_id}"
+  target_dir="${work_dir}/linux-release-factory/${target_id}"
   encoded_flags=""
   if [[ "${target_id}" == macos-* ]]; then
     # Leave deterministic load-command space for the Developer ID signature.

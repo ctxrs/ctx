@@ -10,7 +10,11 @@ import tomllib
 
 
 PACKAGE = "ctx-agent-integrations"
-EXPECTED_LOCAL_DEPS = {"ctx-history-core"}
+EXPECTED_LOCAL_DEPS = {
+    "ctx-attribution-model",
+    "ctx-client-observability",
+    "ctx-history-core",
+}
 ALLOWED_REVERSE_DEPENDENTS = {"ctx", "ctx-agent-application", "ctx-cli-presentation"}
 
 
@@ -123,10 +127,10 @@ def main() -> None:
         "AppConfig",
         "IntegrationTelemetry",
         "PublicEventV1",
-        "ctx_client_observability",
-        "ctx-client-observability",
         "local_usage",
-        "analytics::",
+        "ctx_attribution::",
+        "ctx_attribution_index::",
+        "ctx_repository_evidence::",
     ]
     for path in sources:
         body = path.read_text(encoding="utf-8")

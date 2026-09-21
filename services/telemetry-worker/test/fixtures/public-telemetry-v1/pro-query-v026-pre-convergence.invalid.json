@@ -1,0 +1,287 @@
+{
+  "cases": [
+    {
+      "name": "missing query kind",
+      "operation": "query",
+      "remove": "query_kind",
+      "error": "invalid_query_kind"
+    },
+    {
+      "name": "missing query surface",
+      "operation": "query",
+      "remove": "query_surface",
+      "error": "invalid_query_surface"
+    },
+    {
+      "name": "missing helper outcome",
+      "operation": "query",
+      "remove": "helper_connection_outcome",
+      "error": "invalid_helper_connection_outcome"
+    },
+    {
+      "name": "missing auto materialization",
+      "operation": "query",
+      "remove": "query_auto_materialization",
+      "error": "invalid_query_auto_materialization"
+    },
+    {
+      "name": "unknown query kind",
+      "operation": "query",
+      "field": "query_kind",
+      "value": "explain",
+      "error": "invalid_query_kind"
+    },
+    {
+      "name": "unknown query surface",
+      "operation": "query",
+      "field": "query_surface",
+      "value": "web",
+      "error": "invalid_query_surface"
+    },
+    {
+      "name": "unknown access state",
+      "operation": "query",
+      "field": "access_state",
+      "value": "free",
+      "error": "invalid_access_state"
+    },
+    {
+      "name": "unknown helper outcome",
+      "operation": "query",
+      "field": "helper_connection_outcome",
+      "value": "socket_error",
+      "error": "invalid_helper_connection_outcome"
+    },
+    {
+      "name": "post-convergence query count bucket",
+      "operation": "query",
+      "field": "query_result_count_bucket",
+      "value": "1k-10k",
+      "error": "invalid_query_result_count_bucket"
+    },
+    {
+      "name": "raw query result count",
+      "operation": "query",
+      "field": "query_result_count_bucket",
+      "value": 3,
+      "error": "invalid_query_result_count_bucket"
+    },
+    {
+      "name": "string query empty flag",
+      "operation": "query",
+      "field": "query_empty",
+      "value": "false",
+      "error": "invalid_query_empty"
+    },
+    {
+      "name": "numeric query truncated flag",
+      "operation": "query",
+      "field": "query_truncated",
+      "value": 1,
+      "error": "invalid_query_truncated"
+    },
+    {
+      "name": "unknown query freshness",
+      "operation": "query",
+      "field": "query_freshness",
+      "value": "pending",
+      "error": "invalid_query_freshness"
+    },
+    {
+      "name": "unknown auto materialization",
+      "operation": "query",
+      "field": "query_auto_materialization",
+      "value": "skipped",
+      "error": "invalid_query_auto_materialization"
+    },
+    {
+      "name": "raw query failure",
+      "operation": "query",
+      "field": "query_failure_bucket",
+      "value": "permission denied at secret path",
+      "error": "invalid_query_failure_bucket"
+    },
+    {
+      "name": "unknown materialization mode",
+      "operation": "query",
+      "field": "materialization_mode",
+      "value": "delta",
+      "error": "invalid_materialization_mode"
+    },
+    {
+      "name": "unknown materialization commit",
+      "operation": "query",
+      "field": "materialization_commit",
+      "value": "written",
+      "error": "invalid_materialization_commit"
+    },
+    {
+      "name": "unknown historical materialization freshness",
+      "operation": "query",
+      "field": "materialization_freshness",
+      "value": "pending",
+      "error": "invalid_materialization_freshness"
+    },
+    {
+      "name": "unknown materialization result",
+      "operation": "query",
+      "field": "materialization_result",
+      "value": "partial",
+      "error": "invalid_materialization_result"
+    },
+    {
+      "name": "post-convergence materialization batch bucket",
+      "operation": "query",
+      "field": "materialization_batch_count_bucket",
+      "value": "1k-10k",
+      "error": "invalid_materialization_batch_count_bucket"
+    },
+    {
+      "name": "post-convergence materialization input bucket",
+      "operation": "query",
+      "field": "materialization_input_count_bucket",
+      "value": "1k-10k",
+      "error": "invalid_materialization_input_count_bucket"
+    },
+    {
+      "name": "post-convergence materialization output bucket",
+      "operation": "query",
+      "field": "materialization_output_count_bucket",
+      "value": "1k-10k",
+      "error": "invalid_materialization_output_count_bucket"
+    },
+    {
+      "name": "post-convergence materialization lag bucket",
+      "operation": "query",
+      "field": "materialization_lag_bucket",
+      "value": "1k-10k",
+      "error": "invalid_materialization_lag_bucket"
+    },
+    {
+      "name": "raw materialization failure",
+      "operation": "query",
+      "field": "materialization_failure_bucket",
+      "value": "database error with raw details",
+      "error": "invalid_materialization_failure_bucket"
+    },
+    {
+      "name": "unknown future query property",
+      "operation": "query",
+      "field": "query_mode",
+      "value": "future",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "query prose",
+      "operation": "query",
+      "field": "query",
+      "value": "find the private launch plan",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "query content",
+      "operation": "query",
+      "field": "content",
+      "value": "private source content",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "query path",
+      "operation": "query",
+      "field": "path",
+      "value": "/private/repository/file.rs",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "query repository identifier",
+      "operation": "query",
+      "field": "repository_id",
+      "value": "github.com/private/repository",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "query session identifier",
+      "operation": "query",
+      "field": "session_id",
+      "value": "private-session-id",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "query raw identifier",
+      "operation": "query",
+      "field": "query_id",
+      "value": "private-query-id",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "query raw error",
+      "operation": "query",
+      "field": "error",
+      "value": "permission denied at /private/path",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "query raw error message",
+      "operation": "query",
+      "field": "error_message",
+      "value": "database returned private row data",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "status field on historical query",
+      "operation": "query",
+      "field": "status_surface",
+      "value": "mcp",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "blame field on historical query",
+      "operation": "query",
+      "field": "blame_surface",
+      "value": "mcp",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "lifecycle field on historical query",
+      "operation": "query",
+      "field": "lifecycle_operation",
+      "value": "status",
+      "error": "unknown_pro_query_property"
+    },
+    {
+      "name": "historical query field on final status",
+      "operation": "status",
+      "field": "query_kind",
+      "value": "status",
+      "error": "unknown_pro_status_property"
+    },
+    {
+      "name": "historical query field on final blame",
+      "operation": "blame",
+      "field": "query_surface",
+      "value": "mcp",
+      "error": "unknown_pro_blame_property"
+    },
+    {
+      "name": "historical query field on lifecycle",
+      "operation": "lifecycle",
+      "field": "query_kind",
+      "value": "facts",
+      "error": "unknown_pro_lifecycle_property"
+    },
+    {
+      "name": "historical query field on materialize",
+      "operation": "materialize",
+      "field": "query_kind",
+      "value": "facts",
+      "error": "unknown_pro_materialization_property"
+    },
+    {
+      "name": "historical stale freshness on final materialize",
+      "operation": "materialize",
+      "field": "materialization_freshness",
+      "value": "stale",
+      "error": "invalid_materialization_freshness"
+    }
+  ]
+}

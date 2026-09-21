@@ -24,9 +24,9 @@ successful no-op. A conflicting entry is left untouched unless `--force` is
 supplied; invalid configuration is always left untouched.
 
 The server advertises its current tool set through MCP discovery rather than a
-fixed documented count. Core tools include:
+fixed documented count. Tools include:
 
-- `status`, the same structured source, upgrade, Pro, and compact local-usage
+- `status`, the same structured source, upgrade, attribution, and compact local-usage
   status as `ctx status --format json`;
 - `sources`, discovered local agent history sources;
 - `search`, search the active Core/Tantivy generation and optional compatible
@@ -35,7 +35,9 @@ fixed documented count. Core tools include:
 - `show_event`, read a stored Core event and optional surrounding window
   by ctx event ID;
 - `query_events`, read one bounded deterministic page selected from normalized
-  Core events.
+  Core events;
+- `blame`, trace committed file lines, commits, or pull requests to cited agent
+  evidence, with text and structured results. See [Blame](blame.md).
 
 The `search` tool accepts `content_scope` with the exact values `all`,
 `transcript`, `calls`, or `outputs`. Omission resolves to `all`, and successful
@@ -201,15 +203,16 @@ MCP output as private local history: it may include absolute paths, source
 metadata, snippets, transcript text, MCP arguments, and response payloads, and
 the MCP host may log or forward tool output.
 
-When an installed companion supplies `blame`, Core records one local usage
-completion only after the exact proxied response is written and flushed. It
+For `blame`, ctx records one local usage completion only after the complete
+response is written and flushed. It
 uses the standard JSON-RPC `error`/`result.isError` envelope only for technical
 success or failure, records the response byte count and duration, and does not
-inspect or infer private result semantics. Local recording is fail-open and
-cannot change the response.
+store evidence content or classify local Blame result counts. Local recording
+is fail-open and cannot change the response.
 
-
-Like CLI JSON status, MCP `status` can include local source, semantic, daemon,
+Like CLI JSON status, MCP `status` includes the schema-3 `attribution`
+observation documented in [JSON contracts](contracts/json.md#blame-attribution-readiness).
+It can include local source, semantic, daemon,
 and upgrade diagnostic path fields in `structuredContent`. They are local
 troubleshooting hints for this machine, not portable contract IDs. Compact
 `local_usage` contains only enablement, state, definition/retention versions,

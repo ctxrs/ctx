@@ -159,9 +159,10 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
     collect_paths(&command, &[], &mut paths);
     // Integrations exposes install, status, and remove for four canonical
     // targets; hidden compatibility aliases do not add grammar nodes.
+    // Native Blame adds three subcommands; Pro and Referral leaves are removed.
     assert_eq!(
         paths.len(),
-        62,
+        63,
         "unexpected public CLI grammar depth: {paths:?}"
     );
 

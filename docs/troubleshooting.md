@@ -42,8 +42,8 @@ retry.
 
 If installation succeeded but setup failed, run `ctx setup`, then `ctx status`.
 An optional man-page or skill warning is separate from installation failure;
-follow the warning's repair command. Skipping or failing Pro activation does
-not remove the installed companion or prevent use of Core search.
+follow the warning's repair command. If Blame indexing is pending, run
+`ctx import --all` or `ctx setup --wait` and retry.
 
 For an unmanaged executable or mismatched marker, follow the
 [upgrade recovery instructions](upgrade.md#fix-upgrade-diagnostics) before
@@ -51,26 +51,30 @@ moving any files.
 
 ## Uninstall The Managed CLI
 
-On macOS or Linux, choose one:
+Use the hosted uninstaller for an installer-managed ctx binary. On macOS or Linux:
 
 ```bash
-curl -fsSL https://ctx.rs/uninstall | sh -s -- --keep-data
-curl -fsSL https://ctx.rs/uninstall | sh -s -- --delete-data
+curl -fsSL https://ctx.rs/uninstall | sh
 ```
 
-On Windows, keep local Pro data with:
+On Windows:
 
 ```powershell
 $uninstall = [scriptblock]::Create((irm https://ctx.rs/uninstall.ps1))
 & $uninstall -KeepData -NonInteractive
 ```
 
-Use `-DeleteData` instead of `-KeepData` to delete local Pro data. Both choices
-preserve Core history in the selected `CTX_DATA_ROOT` (default `~/.ctx`). The
-uninstaller removes verified installer-owned files and preserves modified or
-unowned files. Windows skill copies require separate removal. For an unmanaged
-install, use its package manager or the
-[manual lifecycle handoff](unmanaged-installs.md#binary-lifecycle-handoff).
+For ctx 1.5 and later, the default and `--keep-data` (`-KeepData`) preserve
+Core history, the `search/attribution/` index, and any legacy data and keys.
+The retired `--delete-data` (`-DeleteData`) option fails before changing the
+installation; rerun without that option. It does not delete your history.
+Older installed releases retain their original, scoped uninstall behavior.
+
+The uninstaller removes verified installer-owned files and preserves modified
+or unowned files. Windows skill copies require separate removal. There is no
+native `ctx uninstall` command. For a source or package-manager install, stop
+any configured ctx daemon and use the original installation method for removal.
+The hosted uninstaller refuses to remove an unmanaged executable.
 
 ## No Sources Found
 

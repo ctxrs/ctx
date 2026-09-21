@@ -21,6 +21,10 @@ name = "cli_public_help_docs"
 path = "tests/contracts/cli_public_help_docs.rs"
 
 [[test]]
+name = "native_blame"
+path = "tests/contracts/native_blame.rs"
+
+[[test]]
 name = "hosted_uninstall_fence"
 path = "tests/contracts/hosted_uninstall_fence.rs"
 
@@ -49,6 +53,9 @@ name = "setup_sources_import"
 path = "tests/contracts/setup_sources_import.rs"
 
 [dev-dependencies]
+ctx-attribution = { path = "../ctx-attribution", features = ["test-support"] }
+ctx-history-snapshot-reader = { path = "../ctx-history-snapshot-reader" }
+ctx-history-platform = { path = "../ctx-history-platform" }
 assert_cmd.workspace = true
 base64.workspace = true
 chrono.workspace = true

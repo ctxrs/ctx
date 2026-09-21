@@ -1,0 +1,53 @@
+# Live compatibility worker for release artifact API routes. Keep deployable
+# until updater/release clients no longer depend on api.ctx.rs compatibility.
+name = "ctx-release-api"
+main = "src/worker.ts"
+compatibility_date = "2026-05-28"
+
+[vars]
+RELEASE_ARTIFACT_REDIRECT_BASE_URL = "https://api.ctx.rs/storage/v1/object/public/releases"
+
+[[r2_buckets]]
+binding = "RELEASES_BUCKET"
+bucket_name = "ctx-releases-prod"
+preview_bucket_name = "ctx-releases-prod"
+
+[env.staging]
+name = "ctx-release-api-staging"
+
+[env.staging.vars]
+RELEASE_ARTIFACT_REDIRECT_BASE_URL = "https://ctx-release-api-staging.fancy-sea-92df.workers.dev/storage/v1/object/public/releases"
+
+[[env.staging.r2_buckets]]
+binding = "RELEASES_BUCKET"
+bucket_name = "ctx-releases-staging"
+preview_bucket_name = "ctx-releases-staging"
+
+[env.prod]
+name = "ctx-release-api"
+routes = [
+  { pattern = "api.ade.ctx.rs", custom_domain = true },
+  { pattern = "api.ade.ctx.rs/download/*", zone_name = "ctx.rs" },
+  { pattern = "api.ade.ctx.rs/functions/v1/download/*", zone_name = "ctx.rs" },
+  { pattern = "api.ade.ctx.rs/functions/v1/provider-matrix/*", zone_name = "ctx.rs" },
+  { pattern = "api.ade.ctx.rs/functions/v1/releases/*", zone_name = "ctx.rs" },
+  { pattern = "api.ade.ctx.rs/storage/v1/object/public/releases/*", zone_name = "ctx.rs" },
+  { pattern = "api.ctx.rs/download/*", zone_name = "ctx.rs" },
+  { pattern = "api.ctx.rs/functions/v1/download/*", zone_name = "ctx.rs" },
+  { pattern = "api.ctx.rs/functions/v1/provider-matrix/*", zone_name = "ctx.rs" },
+  { pattern = "api.ctx.rs/functions/v1/releases/*", zone_name = "ctx.rs" },
+  { pattern = "api.ctx.rs/functions/v2/releases/*", zone_name = "ctx.rs" },
+  { pattern = "api.ctx.rs/storage/v1/object/public/releases/*", zone_name = "ctx.rs" },
+  { pattern = "cli.ctx.rs/functions/v1/download/*", zone_name = "ctx.rs" },
+  { pattern = "cli.ctx.rs/functions/v1/provider-matrix/*", zone_name = "ctx.rs" },
+  { pattern = "cli.ctx.rs/functions/v1/releases/*", zone_name = "ctx.rs" },
+  { pattern = "cli.ctx.rs/functions/v2/releases/*", zone_name = "ctx.rs" },
+  { pattern = "cli.ctx.rs/storage/v1/object/public/releases/*", zone_name = "ctx.rs" },
+]
+
+[env.prod.vars]
+RELEASE_ARTIFACT_REDIRECT_BASE_URL = "https://api.ctx.rs/storage/v1/object/public/releases"
+
+[[env.prod.r2_buckets]]
+binding = "RELEASES_BUCKET"
+bucket_name = "ctx-releases-prod"

@@ -1,8 +1,8 @@
 use crate::analytics::{
-    DaemonOperationV1, DocsTelemetry, DoctorTelemetry, ImportTelemetry, IndexTelemetry,
-    IntegrationTelemetry, LocateTelemetry, McpErrorClassV1, McpErrorLayerV1, McpMethodV1,
-    McpResultMetadataV1, SearchTelemetry, SetupTelemetry, ShowTelemetry, SourcesTelemetry,
-    StatusTelemetry, UpgradeTelemetry,
+    BlameTerminalFacts, DaemonOperationV1, DocsTelemetry, DoctorTelemetry, ImportTelemetry,
+    IndexTelemetry, IntegrationTelemetry, LocateTelemetry, McpErrorClassV1, McpErrorLayerV1,
+    McpMethodV1, McpResultMetadataV1, SearchTelemetry, SetupTelemetry, ShowTelemetry,
+    SourcesTelemetry, StatusTelemetry, UpgradeTelemetry,
 };
 
 /// Closed, transport-neutral identity and telemetry facts for one product operation.
@@ -32,6 +32,7 @@ pub enum CliOperation {
     ShowEvent(ShowTelemetry),
     Locate(LocateTelemetry),
     Search(SearchTelemetry),
+    Blame(BlameTerminalFacts),
     Docs(DocsTelemetry),
     Integrations(IntegrationTelemetry),
     McpServe,
@@ -61,6 +62,7 @@ impl CliOperation {
             Self::ShowSession(_) | Self::ShowEvent(_) => "show",
             Self::Locate(_) => "locate",
             Self::Search(_) => "search",
+            Self::Blame(_) => "blame",
             Self::Docs(_) => "docs",
             Self::Integrations(_) => "integration",
             Self::McpServe => "serve",
@@ -88,6 +90,7 @@ impl CliOperation {
                 | Self::ShowEvent(_)
                 | Self::Locate(_)
                 | Self::Search(_)
+                | Self::Blame(_)
                 | Self::Docs(_)
                 | Self::Integrations(_)
                 | Self::Upgrade { .. }
@@ -107,6 +110,7 @@ impl CliOperation {
             Self::ShowEvent(_) => Some(LocalUsageOperation::ShowEvent),
             Self::Locate(_) => Some(LocalUsageOperation::Locate),
             Self::Search(_) => Some(LocalUsageOperation::Search),
+            Self::Blame(_) => Some(LocalUsageOperation::Blame),
             Self::Docs(_) => Some(LocalUsageOperation::Docs),
             Self::Integrations(_) => Some(LocalUsageOperation::Integrations),
             Self::McpServe | Self::DaemonRun => None,
@@ -136,6 +140,7 @@ pub enum ObservedMcpProductOperation {
     ShowSession,
     ShowEvent,
     QueryEvents,
+    Blame,
 }
 
 impl ObservedMcpProductOperation {
@@ -147,6 +152,7 @@ impl ObservedMcpProductOperation {
             Self::ShowSession => "show_session",
             Self::ShowEvent => "show_event",
             Self::QueryEvents => "query_events",
+            Self::Blame => "blame",
         }
     }
 
@@ -155,6 +161,7 @@ impl ObservedMcpProductOperation {
             Self::Status => LocalUsageOperation::Status,
             Self::Sources => LocalUsageOperation::Sources,
             Self::Search => LocalUsageOperation::Search,
+            Self::Blame => LocalUsageOperation::Blame,
             Self::ShowSession => LocalUsageOperation::ShowSession,
             Self::ShowEvent | Self::QueryEvents => LocalUsageOperation::ShowEvent,
         }
@@ -201,6 +208,7 @@ impl McpOperation {
                 events_truncated: None,
                 response_bound: None,
                 search: None,
+                blame: None,
             },
         }
     }

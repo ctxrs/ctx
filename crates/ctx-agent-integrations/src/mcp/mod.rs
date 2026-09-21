@@ -9,7 +9,7 @@ use crate::tool_backend::{
 };
 
 mod arguments;
-mod companion;
+mod blame;
 mod input;
 mod query_events;
 mod response;
@@ -23,7 +23,6 @@ use arguments::{
     optional_usize, validate_argument_keys, validate_search_filter_arguments,
     SourceIdentityFilterArgs,
 };
-pub use companion::validated_companion_tool_request;
 pub use input::{read_mcp_input_line, McpInputLine};
 use query_events::query_events_operation;
 pub use response::error_response;
@@ -96,7 +95,6 @@ pub enum McpToolKind {
     ShowEvent,
     QueryEvents,
     Blame,
-    ProStatus,
     Unknown,
     Missing,
 }
@@ -161,7 +159,6 @@ impl McpToolKind {
             Some("show_event") => Self::ShowEvent,
             Some("query_events") => Self::QueryEvents,
             Some("blame") => Self::Blame,
-            Some("pro_status") => Self::ProStatus,
             Some(_) => Self::Unknown,
             None => Self::Missing,
         }
@@ -176,14 +173,9 @@ impl McpToolKind {
             Self::ShowEvent => "show_event",
             Self::QueryEvents => "query_events",
             Self::Blame => "blame",
-            Self::ProStatus => "pro_status",
             Self::Unknown => "unknown",
             Self::Missing => "missing",
         }
-    }
-
-    pub const fn is_companion_owned(self) -> bool {
-        matches!(self, Self::Blame | Self::ProStatus)
     }
 
     fn allowed_arguments(self) -> Option<&'static [&'static str]> {
@@ -193,6 +185,7 @@ impl McpToolKind {
             Self::ShowSession => Some(SHOW_SESSION_ARGUMENTS),
             Self::ShowEvent => Some(SHOW_EVENT_ARGUMENTS),
             Self::QueryEvents => Some(QUERY_EVENTS_ARGUMENTS),
+            Self::Blame => Some(&["target", "limit", "cursor"]),
             _ => None,
         }
     }
@@ -406,7 +399,7 @@ fn initialize_result(params: &Value, server_identity: McpServerIdentity<'_>) -> 
             "name": server_identity.name,
             "version": server_identity.version
         },
-        "instructions": "Local access to ctx Core tools and declarative companion-owned routes. Tool output may include absolute paths, source metadata, snippets, and transcript text; MCP hosts may log or forward it. Companion-owned requests are forwarded opaquely by the executable."
+        "instructions": "Local access to ctx search, cited Blame, and history tools. Tool output may include absolute paths, source metadata, snippets, and transcript text; MCP hosts may log or forward it."
     })
 }
 
@@ -431,17 +424,6 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
     backend: &B,
     render_text: &impl Fn(&Value) -> String,
 ) -> Result<McpHandled<Value>, McpHandled<Value>> {
-    if operation.is_companion_owned() {
-        return Err(McpHandled::plain(json_rpc_error(
-            -32603,
-            "Companion unavailable",
-            Some(json!({
-                "error": "companion_unavailable",
-                "error_code": "companion_unavailable",
-                "retryable": true,
-            })),
-        )));
-    }
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return Err(McpHandled::plain(json_rpc_error(
             -32602,
@@ -490,10 +472,11 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
         Ok(ToolOutcome {
             structured,
             compact,
+            text,
             usage: backend_usage,
         }) => {
             usage.facts.merge(backend_usage);
-            let text = render_text(compact.as_ref().unwrap_or(&structured));
+            let text = text.unwrap_or_else(|| render_text(compact.as_ref().unwrap_or(&structured)));
             Ok(McpHandled {
                 value: tool_result_with_text(structured, text),
                 usage: Some(usage),
@@ -526,9 +509,6 @@ fn parse_operation<B: ToolBackend>(
     arguments: &Value,
     backend: &B,
 ) -> Result<ToolOperation, McpOperationParseError> {
-    if operation.is_companion_owned() {
-        return Err(invalid_tool_request(format!("unknown tool {}", operation.tool_name())).into());
-    }
     let operation = match operation {
         McpToolKind::Status => Ok(ToolOperation::Status),
         McpToolKind::Sources => Ok(ToolOperation::Sources),
@@ -536,6 +516,7 @@ fn parse_operation<B: ToolBackend>(
         McpToolKind::ShowSession => show_session_operation(arguments),
         McpToolKind::ShowEvent => show_event_operation(arguments),
         McpToolKind::QueryEvents => query_events_operation(arguments),
+        McpToolKind::Blame => blame::parse(arguments),
         _ => Err(invalid_tool_request(format!(
             "unknown tool {}",
             operation.tool_name()
@@ -633,6 +614,7 @@ fn search_request<B: ToolBackend>(
 
 fn tool_definitions(provider_names: Vec<&'static str>) -> Vec<Value> {
     vec![
+        blame::tool_definition(),
         json!({
             "name": McpToolKind::Status.tool_name(),
             "title": "Status",
@@ -794,22 +776,17 @@ mod request_id_tests {
 
     use super::{
         encoded_json_string_bytes, handle_protocol_message, request_id_is_accepted, search_request,
-        tool_definitions, McpServerIdentity, McpToolKind, RequestDescriptor,
-        MCP_MAX_ENCODED_REQUEST_ID_BYTES, PROVIDER_ROOT_SELECTOR_PATTERN,
+        tool_definitions, McpServerIdentity, RequestDescriptor, MCP_MAX_ENCODED_REQUEST_ID_BYTES,
+        PROVIDER_ROOT_SELECTOR_PATTERN,
     };
     use crate::tool_backend::{
-        OpaqueMcpProxyError, ToolBackend, ToolExecutionError, ToolOperation, ToolOutcome,
-        ToolSearchBackend,
+        ToolBackend, ToolExecutionError, ToolOperation, ToolOutcome, ToolSearchBackend,
     };
 
     struct UnusedBackend;
 
     impl ToolBackend for UnusedBackend {
         fn execute(&self, _operation: ToolOperation) -> Result<ToolOutcome, ToolExecutionError> {
-            panic!("request-ID validation must run before the backend")
-        }
-
-        fn proxy_companion_mcp(&self, _request: &[u8]) -> Result<Vec<u8>, OpaqueMcpProxyError> {
             panic!("request-ID validation must run before the backend")
         }
 
@@ -886,12 +863,21 @@ mod request_id_tests {
     }
 
     #[test]
-    fn core_tool_manifest_contains_no_companion_owned_definition() {
+    fn manifest_registers_native_blame_and_no_commercial_tools() {
         let definitions = tool_definitions(Vec::new());
-        assert!(definitions.iter().all(|tool| {
-            !McpToolKind::from_tool_name(tool.get("name").and_then(Value::as_str))
-                .is_companion_owned()
-        }));
+        let names = definitions
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"blame"));
+        assert!(!names.contains(&"pro_status"));
+        assert!(!names.contains(&"referral"));
+        let blame = definitions
+            .iter()
+            .find(|tool| tool["name"] == "blame")
+            .unwrap();
+        assert_eq!(blame["annotations"]["readOnlyHint"], true);
+        assert_eq!(blame["inputSchema"]["properties"]["limit"]["maximum"], 8);
     }
 
     #[test]

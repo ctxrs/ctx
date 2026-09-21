@@ -1,0 +1,23 @@
+name = "ctx-install-site"
+main = "src/index.js"
+compatibility_date = "2026-02-23"
+routes = [
+  { pattern = "cli.ctx.rs", custom_domain = true },
+  { pattern = "ctx.rs/install*", custom_domain = false },
+  { pattern = "ctx.rs/uninstall*", custom_domain = false },
+  { pattern = "ade.ctx.rs/install*", custom_domain = false },
+]
+
+[env.staging]
+name = "ctx-install-site-staging"
+workers_dev = true
+routes = []
+
+[env.staging.vars]
+STAGING_INSTALLER_OBJECT_KEY = "installers/dogfood-managed-5f5a63228-fa68ad4a8-p32/1.0.0/install.sh"
+STAGING_BUNDLE_OBJECT_PREFIX = "bundles/dogfood-managed-5f5a63228-fa68ad4a8-p32/1.0.0/"
+
+[[env.staging.r2_buckets]]
+binding = "STAGING_RELEASES_BUCKET"
+bucket_name = "ctx-releases-staging"
+preview_bucket_name = "ctx-releases-staging"

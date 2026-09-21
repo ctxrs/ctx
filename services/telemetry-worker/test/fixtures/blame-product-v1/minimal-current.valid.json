@@ -1,0 +1,33 @@
+{
+  "client_profile_id": "11111111-1111-4111-8111-111111111111",
+  "data_root_id": "22222222-2222-4222-8222-222222222222",
+  "app_version": "1.2.3",
+  "os": "linux",
+  "arch": "x86_64",
+  "events": [
+    {
+      "event_id": "33333333-3333-4333-8333-333333333333",
+      "event_name": "operation_completed",
+      "event_version": 1,
+      "occurred_at": "2026-08-25T15:42:00Z",
+      "surface": "pro_host",
+      "operation": "blame",
+      "outcome": "success",
+      "duration_bucket": "lt_1s",
+      "properties": {
+        "blame_schema_version": 1,
+        "blame_semantics_version": 1,
+        "blame_surface": "cli",
+        "blame_target_kind": "file",
+        "blame_request_kind": "first_request",
+        "blame_access_state": "active",
+        "blame_result_state": "none",
+        "blame_freshness": "current",
+        "blame_has_more": false,
+        "blame_output_served": true,
+        "blame_pro_version": "1.1.0",
+        "blame_pro_protocol_version": 3
+      }
+    }
+  ]
+}

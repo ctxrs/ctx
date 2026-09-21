@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 mod filesystem;
 mod fix_forward;
+mod retirement;
+pub use retirement::retire_managed_pair_files_under_installation_lock;
 #[cfg(unix)]
 mod reconciliation;
 

@@ -53,7 +53,9 @@ fn protocol_classification_maps_to_content_free_product_facts() {
         ),
         (
             json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{"name":"blame"}}),
-            McpRequestObservation::ToolCall(McpObservedTool::Unknown),
+            McpRequestObservation::ToolCall(McpObservedTool::Product(
+                ObservedMcpProductOperation::Blame,
+            )),
         ),
     ] {
         assert_eq!(

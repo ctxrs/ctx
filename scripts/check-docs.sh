@@ -24,6 +24,7 @@ required_paths=(
   docs/provider-support.md
   docs/provider-support-matrix.json
   docs/search.md
+  docs/blame.md
   docs/slash-command-integrations.md
   docs/limitations.md
   docs/security-checks.md
@@ -91,7 +92,7 @@ scan_docs() {
   fi
 }
 
-unsupported_surface_pattern='dashboard|shim|shims|pull request|pull-request|pr evidence|pr-evidence|ctx pr([^[:alnum:]_]|$)|ctx publish|ctx evidence|ctx skill (install|status)([^[:alnum:]_]|$)|ctx update|ctx uninstall|\bADE\b|automatic summar|\bMVP\b|recover prior decisions|ctx remembers everything|privacy-first|ctx context|ctx export|ctx validate|normalized-only|normalized only|normalized_import_only|normalized provider JSONL|CTX_PROVIDER_NORMALIZED_IMPORT_DEV|[W]ork Recorder|[w]ork recorder|\bwork-[r]ecord\b'
+unsupported_surface_pattern='dashboard|shim|shims|ctx pr([^[:alnum:]_]|$)|ctx publish|ctx evidence|ctx skill (install|status)([^[:alnum:]_]|$)|ctx update|\bADE\b|automatic summar|\bMVP\b|recover prior decisions|ctx remembers everything|privacy-first|ctx context|ctx export|ctx validate|normalized-only|normalized only|normalized_import_only|normalized provider JSONL|CTX_PROVIDER_NORMALIZED_IMPORT_DEV|[W]ork Recorder|[w]ork recorder|\bwork-[r]ecord\b'
 private_path_pattern='/home/[^[:space:]/]+/(code|Documents|Desktop)|/Users/[^[:space:]/]+/(code|Documents|Desktop)'
 private_path_pattern+='|multi[-_]repo[-_]workspace'
 private_path_pattern+='|(conformance|internal)[^[:space:]/]*/[^[:space:]/]*(proof|evidence)[-_](packet|packets|bundle)'
@@ -115,13 +116,20 @@ if scan_docs "${private_path_pattern}" "${public_docs[@]}"; then
 fi
 
 python3 - "${public_docs[@]}" <<'PY'
+import re
 import sys
 from pathlib import Path
 
 from scripts.check_mcp_tool_call_attribution_capabilities_lib import public_boundary_violation
 
 for name in sys.argv[1:]:
-    violation = public_boundary_violation(Path(name).read_text(encoding="utf-8"))
+    text = Path(name).read_text(encoding="utf-8")
+    # The hosted uninstaller is supported; there is no native uninstall command.
+    # Permit that explicit distinction while rejecting runnable recommendations.
+    command_text = re.sub(r"There is no\s+native\s+`ctx uninstall`\s+command\.", "", text)
+    if re.search(r"\bctx uninstall\b", command_text, re.IGNORECASE):
+        raise SystemExit(f"{name} recommends the unsupported native ctx uninstall command")
+    violation = public_boundary_violation(text)
     if violation is not None:
         raise SystemExit(f"{name} crosses the public documentation boundary: {violation}")
 PY

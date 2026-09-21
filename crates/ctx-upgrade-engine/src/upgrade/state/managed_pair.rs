@@ -5,14 +5,20 @@ use std::{
 };
 
 use anyhow::{anyhow, Context as _, Result};
-use serde_json::{json, Map, Value};
+#[cfg(any(test, windows))]
+use serde_json::json;
+use serde_json::{Map, Value};
 
+#[cfg(test)]
+use super::write_state_checked_locked;
 use super::{
     is_active_upgrade_status, is_automatic_attempt_source, is_valid_upgrade_attempt_id,
-    read_state_object, read_state_object_bounded, write_state_checked_locked,
-    write_state_object_locked, UpgradeAttempt, UpgradeLock, UpgradeState,
+    read_state_object, read_state_object_bounded, UpgradeLock, UpgradeState,
 };
+#[cfg(any(test, windows))]
+use super::{write_state_object_locked, UpgradeAttempt};
 use crate::upgrade::install::InstallationLock;
+#[cfg(test)]
 use crate::upgrade::UpgradePlan;
 
 const ATTEMPT_KEY: &str = "managed_pair_apply";
@@ -255,7 +261,7 @@ fn recovery_from_state(
     })
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(in crate::upgrade) fn validate_helper_file(path: &Path, expected_sha256: &str) -> Result<()> {
     let bytes = crate::upgrade::install::read_stable_file(
         path,
@@ -272,6 +278,7 @@ pub(in crate::upgrade) fn validate_helper_file(path: &Path, expected_sha256: &st
     Ok(())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::upgrade) fn write_attempt_locked(
     data_root: &Path,
@@ -425,6 +432,7 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[cfg(test)]
 fn set_optional_string(plan: &mut Map<String, Value>, key: &str, value: Option<&str>) {
     match value {
         Some(value) => {

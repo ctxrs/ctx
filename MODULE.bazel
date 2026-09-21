@@ -1,6 +1,6 @@
 module(
     name = "ctx_search",
-    version = "0.22.0",
+    version = "1.5.0",
 )
 
 bazel_dep(name = "rules_rust", version = "0.71.3")
@@ -11,6 +11,39 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "rules_java", version = "9.1.0")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "aspect_bazel_lib", version = "2.19.2")
+bazel_dep(name = "aspect_rules_js", version = "2.9.2")
+bazel_dep(name = "rules_nodejs", version = "6.7.5")
+
+# Service tests use declared, locked tools and dependencies.
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version = "22.12.0")
+
+pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
+pnpm.pnpm(name = "pnpm", pnpm_version = "9.15.1")
+use_repo(pnpm, "pnpm")
+
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+npm.npm_translate_lock(
+    name = "release_api_npm",
+    pnpm_lock = "//services/release-api-worker:pnpm-lock.yaml",
+    run_lifecycle_hooks = False,
+    update_pnpm_lock = False,
+)
+npm.npm_translate_lock(
+    name = "telemetry_npm",
+    bins = {"typescript": ["tsc=./bin/tsc"], "vitest": ["vitest=./vitest.mjs"]},
+    pnpm_lock = "//services/telemetry-worker:pnpm-lock.yaml",
+    run_lifecycle_hooks = False,
+    update_pnpm_lock = False,
+)
+npm.npm_translate_lock(
+    name = "docs_site_npm",
+    pnpm_lock = "//services/docs-site:pnpm-lock.yaml",
+    run_lifecycle_hooks = False,
+    update_pnpm_lock = False,
+)
+use_repo(npm, "docs_site_npm", "release_api_npm", "telemetry_npm")
 
 # rules_rust 0.71.3 publishes the x86_64-unknown-freebsd toolchain, but its
 # host detector omits FreeBSD, and Windows needs two narrow upstream fixes:

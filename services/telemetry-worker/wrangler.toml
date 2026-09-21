@@ -1,0 +1,108 @@
+name = "ctx-telemetry-staging"
+main = "src/worker.ts"
+compatibility_date = "2026-05-30"
+
+[vars]
+TELEMETRY_ANALYTICS_ENVIRONMENT = "staging"
+TELEMETRY_CLOUDFLARE_ACCOUNT_ID = "f40307a99aa7ad04d63aefd1a08e6fb1"
+TELEMETRY_IDENTITY_KEY_VERSION = "1"
+
+[[ratelimits]]
+name = "TELEMETRY_RATE_LIMITER"
+namespace_id = "2201"
+simple = { limit = 600, period = 60 }
+
+[[queues.producers]]
+binding = "TELEMETRY_INGEST_QUEUE"
+queue = "ctx-telemetry-ingest-staging"
+
+[[queues.consumers]]
+queue = "ctx-telemetry-ingest-staging"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 10
+max_concurrency = 4
+dead_letter_queue = "ctx-telemetry-ingest-staging-dlq"
+
+[triggers]
+crons = ["17 3 * * *"]
+
+[env.staging]
+name = "ctx-telemetry-staging"
+workers_dev = false
+preview_urls = false
+routes = [
+  { pattern = "telemetry-staging.ctx.rs", custom_domain = true },
+]
+
+[env.staging.observability]
+enabled = true
+head_sampling_rate = 1
+
+[env.staging.observability.logs]
+invocation_logs = false
+
+[env.staging.vars]
+TELEMETRY_ANALYTICS_ENVIRONMENT = "staging"
+TELEMETRY_CLOUDFLARE_ACCOUNT_ID = "f40307a99aa7ad04d63aefd1a08e6fb1"
+TELEMETRY_IDENTITY_KEY_VERSION = "1"
+
+[[env.staging.ratelimits]]
+name = "TELEMETRY_RATE_LIMITER"
+namespace_id = "2201"
+simple = { limit = 600, period = 60 }
+
+[[env.staging.queues.producers]]
+binding = "TELEMETRY_INGEST_QUEUE"
+queue = "ctx-telemetry-ingest-staging"
+
+[[env.staging.queues.consumers]]
+queue = "ctx-telemetry-ingest-staging"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 10
+max_concurrency = 4
+dead_letter_queue = "ctx-telemetry-ingest-staging-dlq"
+
+[env.staging.triggers]
+crons = ["17 3 * * *"]
+
+[env.prod]
+name = "ctx-telemetry"
+routes = [
+  { pattern = "cli.ctx.rs/functions/v1/analytics*", zone_name = "ctx.rs" },
+  { pattern = "cli.ctx.rs/functions/v1/install-attempt*", zone_name = "ctx.rs" },
+  { pattern = "api.ctx.rs/functions/v1/telemetry*", zone_name = "ctx.rs" }
+]
+
+[env.prod.observability]
+enabled = true
+head_sampling_rate = 1
+
+[env.prod.observability.logs]
+invocation_logs = false
+
+[env.prod.vars]
+TELEMETRY_ANALYTICS_ENVIRONMENT = "production"
+TELEMETRY_CLOUDFLARE_ACCOUNT_ID = "f40307a99aa7ad04d63aefd1a08e6fb1"
+TELEMETRY_IDENTITY_KEY_VERSION = "1"
+
+[[env.prod.ratelimits]]
+name = "TELEMETRY_RATE_LIMITER"
+namespace_id = "2202"
+simple = { limit = 600, period = 60 }
+
+[[env.prod.queues.producers]]
+binding = "TELEMETRY_INGEST_QUEUE"
+queue = "ctx-telemetry-ingest-prod"
+
+[[env.prod.queues.consumers]]
+queue = "ctx-telemetry-ingest-prod"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 10
+max_concurrency = 4
+dead_letter_queue = "ctx-telemetry-ingest-prod-dlq"
+
+[env.prod.triggers]
+crons = ["17 3 * * *"]

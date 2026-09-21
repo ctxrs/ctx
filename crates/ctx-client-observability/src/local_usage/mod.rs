@@ -209,9 +209,10 @@ impl CompletedOperation {
         }
     }
 
-    /// Builds the aggregate-only completion observed by Core's existing
-    /// companion wrapper. Core does not inspect private result semantics, so
-    /// Blame result classification and count remain not applicable.
+    /// Builds the ordinary aggregate-only Blame completion. Usage definition 3
+    /// records technical outcome and duration, with N/A result class and zero
+    /// result count. CLI output bytes remain unavailable; MCP supplies only
+    /// its existing delivered response-byte measurement.
     pub fn blame(
         surface: Surface,
         success: bool,

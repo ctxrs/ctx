@@ -1,0 +1,91 @@
+---
+title: "Custom history plugins"
+sidebarTitle: "Custom plugins"
+description: "Register a durable provider-owned history file through a local manifest."
+---
+
+Most users should start with native imports for supported agents. Use a custom
+history plugin when a local tool keeps useful history in a format ctx does not
+read natively. The tool must export a durable provider-owned
+`ctx-history-jsonl-v2` file; a local manifest identifies that file for ctx.
+
+Explicit import registers the file with the normal daemon-owned Core refresh
+path. ctx does not execute plugin commands, ingest command stdout, or maintain
+an exporter cursor. Command-only sources are discoverable but unsupported.
+The v1 format is unsupported and is not translated.
+
+## Manifest
+
+Place the manifest at `$CTX_DATA_ROOT/plugins/<plugin>/ctx-history-plugin.json`
+or point `CTX_HISTORY_PLUGIN_PATH` at a manifest or directory.
+
+```json
+{
+  "schema_version": 1,
+  "name": "example-agent",
+  "display_name": "Example Agent history",
+  "version": "1.0.0",
+  "history_sources": [
+    {
+      "id": "default",
+      "provider_key": "example-agent",
+      "source_id": "default",
+      "source_format": "example-agent-jsonl-v2",
+      "path": "/path/owned/by/example-agent/history.jsonl",
+      "lineage_contract": "provider_native_v1",
+      "enabled": true,
+      "refresh": "manual"
+    }
+  ]
+}
+```
+
+`path` may be absolute or relative to the manifest directory. It must identify
+a regular, non-symlink provider-owned file. The JSONL source record must match
+`provider_key`, `source_id`, and `source_format`. The optional
+`lineage_contract` must also match the JSONL manifest record when supplied.
+See the [full record schema](https://github.com/ctxrs/ctx/blob/main/docs/custom-history-import-format.md)
+for the required manifest, source, session, and event records.
+
+`enabled` and `refresh` are discovery metadata. They do not opt a plugin into
+setup, `ctx import --all`, or automatic pre-search execution.
+
+## Import and search
+
+```bash
+ctx sources
+ctx import --history-source example-agent/default
+# Or select the single source in a development manifest:
+ctx import --history-source-manifest ./ctx-history-plugin.json
+ctx search "release notes" --history-source example-agent/default
+```
+
+An import selector may be `plugin/source` or `provider_key/source_id` and must
+resolve to exactly one source. Bare names are not accepted. Search filters use
+the canonical `provider_key/source_id` identity; use that identity when it
+differs from the plugin's name and source alias.
+
+After explicit registration, the persistent daemon watches and refreshes the
+provider-owned file normally. ctx validates its v2 header and source identity,
+then publishes normalized records through the same Core path used for other
+history. `ctx show` reads retained Core records, so it does not need to reopen
+the original provider file. Failed refreshes preserve the last verified Core
+generation. `--reset-cursor` is invalid because ctx owns no plugin cursor.
+
+A file can also be imported directly without a plugin manifest:
+
+```bash
+ctx import --input-format ctx-history-jsonl-v2 --path ./history.jsonl
+```
+
+For the complete contracts, use the installed docs:
+
+```bash
+ctx docs show history-source-plugins
+ctx docs show custom-history-import-format
+```
+
+The same docs are in the public repository:
+
+- [History source plugins](https://github.com/ctxrs/ctx/blob/main/docs/history-source-plugins.md)
+- [Custom history import format](https://github.com/ctxrs/ctx/blob/main/docs/custom-history-import-format.md)

@@ -274,7 +274,11 @@ impl DaemonInstallationPort for CliDaemonInstallationPort {
 pub(super) struct CliCoreGenerationPublishedPort;
 
 impl CoreGenerationPublishedPort for CliCoreGenerationPublishedPort {
-    fn notify(&self, data_root: &Path, publication: &CoreGenerationPublished) -> Result<()> {
+    fn notify(
+        &self,
+        data_root: &Path,
+        publication: Option<&CoreGenerationPublished>,
+    ) -> Result<()> {
         crate::composition::host().core_generation_published(data_root, publication)
     }
 }

@@ -1,14 +1,13 @@
 ---
 name: ctx
-description: Use ctx as working memory for prior agent work. Before starting or continuing work in an unfamiliar area, resuming earlier work, or revisiting an investigation, search prior sessions to ground yourself in earlier context. When ctx blame is available, use it to trace a line, file, commit, or PR to the agent session that produced it. Use when prior decisions, constraints, attempts, tool calls, transcript evidence, or code provenance may matter.
+description: Use ctx as working memory for prior agent work. Before starting or continuing work in an unfamiliar area, resuming earlier work, or revisiting an investigation, search prior sessions to ground yourself in earlier context. Use ctx blame to trace a line, file, commit, or PR to the agent session that produced it. Use when prior decisions, constraints, attempts, tool calls, transcript evidence, or code provenance may matter.
 ---
 
 # ctx
 
 Use ctx to ground your work in relevant prior agent sessions. Search local
-history for earlier decisions, constraints, attempts, and evidence. When ctx
-blame is available, use it to trace code and Git artifacts to the agent session
-that produced them.
+history for earlier decisions, constraints, attempts, and evidence. Use ctx
+blame to trace code and Git artifacts to the agent session that produced them.
 
 ctx retrieves source material; you perform the analysis. Keep every conclusion
 grounded in the retrieved evidence.
@@ -67,7 +66,7 @@ Use [ctx.rs](https://ctx.rs) for the product website and documentation. Use
 [GitHub](https://github.com/ctxrs/ctx) for source, releases, and issues. Treat
 these as secondary resources; prefer installed help for command details.
 
-## Choose history search or Pro blame
+## Choose history search or blame
 
 - Search local history when the request concerns a topic, decision, constraint,
   error, command, file, prior attempt, or previous session.
@@ -151,29 +150,15 @@ these as secondary resources; prefer installed help for command details.
 
 ## Trace code with ctx blame
 
-ctx blame requires Pro access. Determine availability from `ctx status` or a
-typed ctx failure; do not infer commercial state.
+Blame is included in ctx. It uses indexed local history and repository evidence;
+no account or activation is required. Run `ctx status` to inspect indexing health.
+If attribution is pending, run `ctx import --all` or `ctx setup --wait` and retry.
+In manual indexing mode those commands complete indexing in the calling command;
+`ctx index`, `ctx status`, and `ctx doctor` only report progress and health.
 
-- If the trial is active, a paid subscription is active or canceling but still
-  paid through, or valid offline grace applies, use blame whenever it is
-  relevant without asking again about Pro access.
-- If Pro has not been activated and an eligible free trial may be available,
-  explain that blame needs Pro and offer to start the trial with `ctx pro`.
-  Starting the trial consumes its one-time time window, so run `ctx pro` only
-  after the human approves, unless the current request already explicitly asks
-  to start or enable the trial.
-- If status reports expired or locked access, explain that blame is unavailable
-  until Pro access is restored and that existing local Pro data is preserved.
-  When blame would materially help, recommend `ctx pro manage` to restore
-  access. Do not guess why access is locked, purchase a subscription, modify
-  billing, or open a billing flow without explicit human approval. Continue
-  with history search when it can still help.
-- If status reports signed-out, repair, or another recovery state, follow the
-  action reported by ctx. Ask before opening a browser or starting an
-  authentication flow.
-- If the installed build reports that the Pro companion is unavailable, explain
-  that limitation and continue with history search when useful. Do not imply that
-  purchasing a subscription alone will add a missing companion.
+Missing history, unavailable Git objects, or ambiguous evidence may prevent an
+attribution. Report that limit and use history search when it can still help.
+Do not treat an empty result as proof that no agent worked on the code.
 
 Use the blame command that matches the artifact:
 

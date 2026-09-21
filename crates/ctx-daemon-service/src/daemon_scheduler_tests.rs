@@ -494,10 +494,10 @@ impl CoreGenerationPublishedPort for FailingGenerationPublished {
     fn notify(
         &self,
         _data_root: &Path,
-        publication: &CoreGenerationPublished,
+        publication: Option<&CoreGenerationPublished>,
     ) -> anyhow::Result<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        *self.observed.lock().unwrap() = Some(publication.clone());
+        *self.observed.lock().unwrap() = publication.cloned();
         anyhow::bail!("injected publication notification failure")
     }
 }

@@ -1,0 +1,95 @@
+{
+  "version": 2,
+  "accountId": "f40307a99aa7ad04d63aefd1a08e6fb1",
+  "zoneId": "e3ab55fb89448b5d619c4461e4b999ad",
+  "healthCheck": {
+    "address": "cli.ctx.rs",
+    "type": "HTTPS",
+    "suspended": false,
+    "retries": 2,
+    "timeout": 5,
+    "interval": 60,
+    "check_regions": [
+      "WNAM",
+      "ENAM",
+      "WEU"
+    ],
+    "consecutive_successes": 2,
+    "consecutive_fails": 2,
+    "http_config": {
+      "method": "GET",
+      "port": 443,
+      "expected_body": "\"alert\":false",
+      "expected_codes": [
+        "200"
+      ],
+      "follow_redirects": false,
+      "allow_insecure": false,
+      "header": {
+        "Host": [
+          "cli.ctx.rs"
+        ]
+      }
+    }
+  },
+  "notificationPolicy": {
+    "enabled": true,
+    "alert_type": "health_check_status_notification",
+    "filters": {
+      "status": [
+        "Unhealthy"
+      ]
+    },
+    "mechanisms": {
+      "email": [
+        {
+          "id": "telemetry-alerts@example.invalid"
+        }
+      ]
+    }
+  },
+  "signals": [
+    {
+      "signal": "producer_configuration",
+      "healthCheckId": "4b41c9e3a36000186d35f24ba68c7a9d",
+      "notificationPolicyId": "f7eb184b30d94763a597836cd8bf8f88",
+      "action": "Check telemetry Worker reachability, required configuration, rate limiter and Queue binding."
+    },
+    {
+      "signal": "database_availability",
+      "healthCheckId": "21fd128ebac2dc3116f25ff6ba9e74fa",
+      "notificationPolicyId": "d6ce26a2c20345eb93772fc25bf60067",
+      "action": "Check Neon availability, ingest credentials and the health snapshot query."
+    },
+    {
+      "signal": "compatibility_rejections",
+      "healthCheckId": "4dca90288a3424b350085b03143264f6",
+      "notificationPolicyId": "e21e24c82df84d9f9c0440e933fb1e04",
+      "action": "Inspect bounded rejection codes and released-version shapes; compatibility rejection threshold reached."
+    },
+    {
+      "signal": "event_collisions",
+      "healthCheckId": "de93ea3074fcbe0ad12a9283bda5958d",
+      "notificationPolicyId": "00e1549e405e4abea513e867f4c2ff1b",
+      "action": "Investigate telemetry event-ID reuse with a different fingerprint; do not overwrite retained rows."
+    },
+    {
+      "signal": "other_rejections",
+      "healthCheckId": "5c32df7bb2b131adece52240da7e71c7",
+      "notificationPolicyId": "e2c2fa3f7f3245f48bd0be38cc208d80",
+      "action": "Inspect bounded non-compatibility rejection codes; the other-rejection threshold was reached."
+    },
+    {
+      "signal": "queue_health",
+      "healthCheckId": "dc732aa4e2fdac6c6c2ec83e4916a959",
+      "notificationPolicyId": "1888b53513ea4f88963eb35f7d413838",
+      "action": "Run the canonical ongoing Queue gate; inspect backlog, age, retries, failures and DLQ before retention expiry."
+    },
+    {
+      "signal": "queue_metrics",
+      "healthCheckId": "1f284f5ac41e559094362783182d2712",
+      "notificationPolicyId": "d6587cbd78d341138d7dfc68f2e4ed09",
+      "action": "Restore Queue metric visibility: inspect the read-only token and bounded Cloudflare API failure category."
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+---
+title: "Agent memory"
+description: "How ctx differs from saved facts, summaries, vector memory, graph memory, and transcript search."
+---
+
+Suppose an agent asks, “Did we already reject the fallback in `auth/callback.ts`?” A saved memory might contain “avoid the fallback.” A summary might say the fallback was removed. That may be enough for orientation, but it is weak evidence before a new edit. The current agent still needs to know where the decision came from, what command or error led to it, and whether the old reasoning still matches the code.
+
+ctx is built for that audit step. It imports real local coding-agent sessions into a self-contained Tantivy Core and searches the sessions and events themselves. A result can carry a `ctx_event_id`, a `ctx_session_id`, provider metadata, a snippet, and source citation. The agent can run `ctx show event <ctx-event-id> --window 3` before treating the old decision as evidence.
+
+## When memory helps
+
+Saved memory works well for stable facts:
+
+- "Use pnpm in this repo."
+- "The public CLI must not call hosted services during search."
+- "Prefer `cargo nextest` for this package."
+
+Summaries work well when the next agent needs a short briefing and does not need to audit every step.
+
+Vector or graph memory can help when related material may use different words from the query, or when the useful answer is a relationship between concepts.
+
+Those tools can sit beside ctx. They carry compact knowledge forward. ctx gives the agent a way back to the source session when the compact form is too thin.
+
+## When provenance is the answer
+
+ctx is for questions where the original session matters:
+
+- "Where did we decide to reject this fallback?"
+- "Which command produced the error we are seeing again?"
+- "Was this migration already attempted?"
+- "Which provider transcript mentioned this file?"
+- "Can I cite the exact event before editing code?"
+
+For those questions, a saved fact may hide the disagreement, failed attempt, or tool output that explains the current state. ctx keeps retrieval tied to sessions and events, so a user or later agent can inspect the source before acting.
+
+## What ctx stores
+
+ctx indexes local provider history into a local Tantivy Core. Search can return cited session and event results, including ctx-owned IDs that work with commands such as `ctx show event`, `ctx show session`, `ctx locate event`, and `ctx locate session`. When a file artifact is useful, `ctx show session --format markdown --out <path>` writes the selected transcript to disk.
+
+ctx does not call a model to make memories. It does not need API keys, write into a repository, or use a hosted search service. It reads local history, builds a searchable index, and returns cited results.
+
+The decision rule is simple: use memory for durable facts you trust outside the original discussion; use ctx when the agent needs to inspect the discussion, command, output, or rejected attempt itself.

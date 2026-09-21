@@ -26,7 +26,7 @@ pub(super) fn tool_error_result(error: ToolBackendError) -> Value {
             "error": detail,
             "error_code": "invalid_request",
         }),
-        ToolBackendError::EventQuery(error) => error.structured,
+        ToolBackendError::Blame(error) | ToolBackendError::EventQuery(error) => error.structured,
         ToolBackendError::SourceUnavailable => json!({
             "error": "source_unavailable",
             "error_code": "source_unavailable",

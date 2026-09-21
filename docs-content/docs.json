@@ -1,0 +1,149 @@
+{
+  "name": "ctx",
+  "colors": {
+    "primary": "#15803D",
+    "light": "#33FF33",
+    "dark": "#15803D"
+  },
+  "favicon": "/favicon.ico",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Docs",
+        "groups": [
+          {
+            "group": "Start",
+            "pages": [
+              "index",
+              "getting-started/install",
+              "first-search",
+              "skill"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/how-it-works",
+              "concepts/supported-agents",
+              "reference/storage"
+            ]
+          },
+          {
+            "group": "Comparisons",
+            "pages": [
+              "comparisons/agent-memory",
+              "comparisons/codebase-graphs",
+              "comparisons/grep-log-search"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "blame",
+              "search",
+              "reference/cli",
+              "providers/native-imports",
+              "providers/custom-history-plugins",
+              "troubleshooting",
+              "changelog"
+            ]
+          },
+          {
+            "group": "Use with agents",
+            "pages": [
+              "agents/claude-code",
+              "agents/codex",
+              "agents/cursor",
+              "agents/pi",
+              "agents/opencode",
+              "agents/antigravity-gemini",
+              "agents/copilot-cli",
+              "agents/factory-droid"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "GitHub",
+        "href": "https://github.com/ctxrs/ctx"
+      },
+      {
+        "tab": "Support",
+        "href": "mailto:support@ctx.rs"
+      },
+      {
+        "tab": "For Teams",
+        "pages": [
+          "teams"
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/ctxrs/ctx",
+      "slack": "https://join.slack.com/t/ctxcommunity/shared_invite/zt-3ukm4kcyp-JOk23wqKOHjwvs~zR5SfyQ",
+      "x": "https://x.com/ctx_rs"
+    },
+    "links": [
+      {
+        "header": "Product",
+        "items": [
+          {
+            "label": "Docs",
+            "href": "/"
+          },
+          {
+            "label": "Install",
+            "href": "/getting-started/install"
+          },
+          {
+            "label": "CLI Reference",
+            "href": "/reference/cli"
+          },
+          {
+            "label": "Changelog",
+            "href": "/changelog"
+          },
+          {
+            "label": "For Teams",
+            "href": "/teams"
+          }
+        ]
+      },
+      {
+        "header": "Project",
+        "items": [
+          {
+            "label": "GitHub",
+            "href": "https://github.com/ctxrs/ctx"
+          },
+          {
+            "label": "Issues",
+            "href": "https://github.com/ctxrs/ctx/issues/new"
+          }
+        ]
+      },
+      {
+        "header": "Legal",
+        "items": [
+          {
+            "label": "Privacy Policy",
+            "href": "/legal/privacy-policy"
+          },
+          {
+            "label": "Terms of Use",
+            "href": "/legal/terms"
+          },
+          {
+            "label": "Security",
+            "href": "/legal/security"
+          }
+        ]
+      }
+    ]
+  },
+  "appearance": {
+    "default": "dark"
+  }
+}

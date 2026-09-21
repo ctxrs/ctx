@@ -258,7 +258,16 @@ fn request_source_refresh(
     } else {
         SourceBackedRefreshMode::Background
     };
+    let mut deferred_terminal_success = None;
     let mut report_progress = |status: &crate::semantic::RefreshStatus| {
+        if status
+            .kind()?
+            .terminal_outcome()
+            .is_some_and(|outcome| !outcome.code().is_failure())
+        {
+            deferred_terminal_success = Some(status.clone());
+            return Ok(());
+        }
         progress.source_refresh(status).map_err(anyhow::Error::new)
     };
     let mut effective_wait = wait;
@@ -276,6 +285,22 @@ fn request_source_refresh(
     }
     match result {
         Ok(observation) => {
+            if effective_wait {
+                let receipt = observation.receipt.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Core refresh completed without an authoritative publication receipt"
+                    )
+                })?;
+                if receipt.published_generation != observation.pin.generation_id() {
+                    bail!("Core refresh receipt and retained generation disagree");
+                }
+                crate::semantic::complete_attribution(data_root, &observation.pin)?;
+            }
+            if let Some(status) = deferred_terminal_success {
+                progress
+                    .source_refresh(&status)
+                    .map_err(anyhow::Error::new)?;
+            }
             let receipt = observation
                 .receipt
                 .as_ref()
@@ -292,6 +317,9 @@ fn request_source_refresh(
             }))
         }
         Err(error) => {
+            if ctx_daemon_cli::finite_worker_interrupted(&error) {
+                return Err(error);
+            }
             if error
                 .chain()
                 .any(|cause| cause.downcast_ref::<ProgressWriterError>().is_some())

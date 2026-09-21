@@ -27,6 +27,8 @@ PROD_SRCS = glob(
 )
 
 CTX_AGENT_INTEGRATIONS_DEPS = [
+    "//crates/ctx-attribution-model:lib",
+    "//crates/ctx-client-observability:lib",
     "//crates/ctx-history-core:lib",
 ]
 
@@ -39,6 +41,24 @@ rust_library(
     aliases = aliases(),
     compile_data = ["//:ctx_bundled_skills"],
     deps = all_crate_deps(normal = True) + CTX_AGENT_INTEGRATIONS_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
+rust_library(
+    name = "test_support_lib",
+    testonly = True,
+    srcs = PROD_SRCS,
+    crate_name = "ctx_agent_integrations",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    compile_data = ["//:ctx_bundled_skills"],
+    deps = all_crate_deps(normal = True) + [
+        "//crates/ctx-attribution-model:lib",
+        "//crates/ctx-client-observability:test_support_lib",
+        "//crates/ctx-history-core:lib",
+    ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
 )

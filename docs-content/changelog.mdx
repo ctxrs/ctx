@@ -1,0 +1,1674 @@
+---
+title: "Changelog"
+sidebarTitle: "Changelog"
+description: "Public ctx CLI release history."
+---
+
+Entries below describe the behavior of their dated historical releases. A
+feature recorded here may no longer be part of the current product surface.
+See [Blame](/blame) and [Install](/getting-started/install) for current use.
+
+## 1.4.12
+
+Released: 2026-09-20
+
+### Fixed
+
+- Blame reports missing or locked credentials and the corresponding recovery action instead of an invalid-response error. This applies to CLI and MCP requests.
+
+### Commits and PRs
+
+- Source commit: [c774cccb](https://github.com/ctxrs/ctx/commit/c774cccb39913b5e0457deba874af20fd4390436).
+- Full diff: [v1.4.11...c774cccb](https://github.com/ctxrs/ctx/compare/v1.4.11...c774cccb39913b5e0457deba874af20fd4390436).
+- [#1016](https://github.com/ctxrs/ctx/pull/1016) — prepare the 1.4.12 patch release.
+
+## 1.4.11
+
+Released: 2026-09-20
+
+### Fixed
+
+- OpenClaw imports schema v19 databases while retaining schema and agent-ownership checks.
+- On Linux under a non-root user, OpenCode, Kilo, and MiMo Code imports copy conversation tables without copying unrelated SQLite event logs. Other platforms and Linux root retain full-database snapshots.
+- fx imports current conversation logs and their retained tool output. Resume-cache files no longer prevent discovery, and older recovery checkpoints and permission state remain readable.
+- Codex rollouts retain explicit fork and delegation parents after a revert changes their history base.
+- Managed upgrades remove obsolete CLI and companion downloads. After installing this release, run `ctx upgrade` again to clear downloads left by older updaters.
+
+### Commits and PRs
+
+- Source commit: [c3fbd8b4](https://github.com/ctxrs/ctx/commit/c3fbd8b4f06ad1e84c5fff7836602cc9f3b04249).
+- Full diff: [v1.4.10...c3fbd8b4](https://github.com/ctxrs/ctx/compare/v1.4.10...c3fbd8b4f06ad1e84c5fff7836602cc9f3b04249).
+- [#1010](https://github.com/ctxrs/ctx/pull/1010) — remove obsolete upgrade downloads.
+- [#1011](https://github.com/ctxrs/ctx/pull/1011) — preserve explicit Codex parent links.
+- [#1015](https://github.com/ctxrs/ctx/pull/1015) — restore provider imports and prepare 1.4.11.
+
+## 1.4.10
+
+Released: 2026-09-16
+
+### Fixed
+
+- Upgrades recognize stopped daemons even when another process has reused
+  their process ID.
+- Daemon status no longer requests a restart solely because another shell has
+  different locale, temporary-directory, or session settings.
+- Windows manual upgrades and semantic-runtime repairs record completion
+  before restarting background indexing. Resume preserves the installed
+  environment and data-root path.
+- Windows scheduled tasks wait for fresh daemon ownership when process IDs
+  are reused.
+- Hosted installers accept supported existing semantic and named-source settings.
+
+### Commits and PRs
+
+- Source commit: [31109e1d](https://github.com/ctxrs/ctx/commit/31109e1d4fcb8dc522a70a24061c389ab44e42ef).
+- Full diff: [v1.4.9...31109e1d](https://github.com/ctxrs/ctx/compare/v1.4.9...31109e1d4fcb8dc522a70a24061c389ab44e42ef).
+- [#1006](https://github.com/ctxrs/ctx/pull/1006) — restore daemon availability after upgrades and shell changes.
+- [#1007](https://github.com/ctxrs/ctx/pull/1007) — preserve Windows task ownership across upgrades.
+- [#1008](https://github.com/ctxrs/ctx/pull/1008) — prepare the 1.4.10 patch release.
+
+## 1.4.9
+
+Released: 2026-09-16
+
+### Fixed
+
+- Hosted setup waits for the first searchable history index before completing,
+  including when indexing is configured as manual or progress output is
+  disabled. Manual mode stays manual after the foreground refresh.
+- Setup no longer reports background indexing as queued when background work is
+  disabled. Installer paths that do not start ctx pro print the `ctx pro` CTA.
+
+### Commits and PRs
+
+- Source commit: [9c2e92d9](https://github.com/ctxrs/ctx/commit/9c2e92d93d0cfd6c9d1f3271130935181b4447df).
+- Full diff: [v1.4.8...9c2e92d9](https://github.com/ctxrs/ctx/compare/v1.4.8...9c2e92d93d0cfd6c9d1f3271130935181b4447df).
+- [#1004](https://github.com/ctxrs/ctx/pull/1004) — publish initial history before setup returns.
+- [#1005](https://github.com/ctxrs/ctx/pull/1005) — prepare the 1.4.9 patch release.
+
+## 1.4.8
+
+Released: 2026-09-16
+
+### Fixed
+
+- Upgrade warnings preserve line breaks in human-readable output while
+  escaping terminal control characters. JSON warning values are unchanged.
+- On Linux, when systemd reports that the ctx user service has hit its start
+  limit, ctx clears that service's failure state and retries the start once.
+  Other failures do not trigger a reset, and daemon ownership checks still
+  apply after the retry.
+
+### Commits and PRs
+
+- Source commit: [d4813857](https://github.com/ctxrs/ctx/commit/d4813857b17030e6408490b79d074e3164dcb038).
+- Full diff: [v1.4.7...d4813857](https://github.com/ctxrs/ctx/compare/v1.4.7...d4813857b17030e6408490b79d074e3164dcb038).
+- [#1003](https://github.com/ctxrs/ctx/pull/1003) — format upgrade warnings and recover systemd start-limit failures.
+
+## 1.4.7
+
+Released: 2026-09-15
+
+### Fixed
+
+- On Linux, daemon status reports a responsive daemon as running when ctx
+  cannot inspect its executable, with executable identity marked unavailable.
+  If the daemon does not respond, its owner remains unverified instead of
+  being reported as a stale lock.
+- Imports and waits can keep using an authenticated connection to a matching
+  daemon when executable inspection is denied. Denied inspection does not
+  trigger a service handoff or allow forced termination.
+
+### Commits and PRs
+
+- Source commit: [9beaeae5](https://github.com/ctxrs/ctx/commit/9beaeae5ee74e56db50d4a63195536e20ba27bac).
+- Full diff: [v1.4.6...9beaeae5](https://github.com/ctxrs/ctx/compare/v1.4.6...9beaeae5ee74e56db50d4a63195536e20ba27bac).
+- [#1000](https://github.com/ctxrs/ctx/pull/1000) — preserve live Linux daemon ownership when executable inspection is denied.
+
+## 1.4.6
+
+Released: 2026-09-15
+
+### Changed
+
+- Background refresh diagnostics distinguish supported filesystem and resource
+  failures using typed causes, without collecting paths or error text.
+- Telemetry upload recovery reports distinguish supported connection, timeout,
+  response-read and local queue failures. Older clients can continue sharing
+  the same queue. Unknown causes remain unspecified; retry behavior is unchanged.
+
+### Fixed
+
+- In 1.4.6, managed installation, upgrade and uninstall accept user-owned `755` and
+  `775` executable directories and preserve their permissions and unrelated
+  tools. The shell installer no longer changes an existing `bin` to `700`.
+- Installer failures stop progress output before showing the error and tell
+  users to resolve the reported problem before retrying.
+  Already-installed older CLIs still apply their old permission checks during
+  upgrade; their errors are now shown without changing shared directory permissions.
+- On Linux, ctx pro credentials use the existing `/run/user/<uid>` session
+  directory when `XDG_RUNTIME_DIR` is unset.
+
+### Commits and PRs
+
+- Source commit: [a6ee08e9](https://github.com/ctxrs/ctx/commit/a6ee08e928b12d25fcb3ece538b3f145ac839003).
+- Full diff: [v1.4.4...a6ee08e9](https://github.com/ctxrs/ctx/compare/v1.4.4...a6ee08e928b12d25fcb3ece538b3f145ac839003).
+- Telemetry recovery compatibility: [#998](https://github.com/ctxrs/ctx/pull/998).
+- Installer permissions: [#993](https://github.com/ctxrs/ctx/pull/993).
+- Diagnostic recovery: [#992](https://github.com/ctxrs/ctx/pull/992).
+
+## 1.4.4
+
+Released: 2026-09-15
+
+### Fixed
+
+- File filters recognize literal filenames from Codex tool arguments encoded
+  as JSON strings and from direct or nested patch headers. Original content
+  is preserved, and available source logs are reparsed for existing indexes.
+- Background refresh diagnostics preserve typed coverage-block reasons
+  through recovery and retain complete partial-source classifications,
+  without changing refresh or retry behavior.
+- Updated rustls to 0.23.45 to enforce TLS 1.3 handshake encryption boundaries
+  (RUSTSEC-2026-0285).
+
+### Changed
+
+- Repository-local Rust toolchain settings consistently select Rust 1.97.1.
+  The declared minimum supported Rust version remains unchanged.
+- Windows source-build instructions explain the MSVC C++ tools, Windows SDK
+  and Bash prerequisites, which are not needed for prebuilt installations.
+
+### Commits and PRs
+
+- Source commit: [1012e523](https://github.com/ctxrs/ctx/commit/1012e523e02c0c84ee3272bdc09ee29b88258571).
+- Full diff: [v1.4.3...1012e523](https://github.com/ctxrs/ctx/compare/v1.4.3...1012e523e02c0c84ee3272bdc09ee29b88258571).
+- File-filter fix: [#990](https://github.com/ctxrs/ctx/pull/990).
+- TLS security fix: [#991](https://github.com/ctxrs/ctx/pull/991).
+
+## 1.4.3
+
+Released: 2026-09-14
+
+### Fixed
+
+- History on tmpfs and supported eCryptfs encrypted-home filesystems can be
+  indexed. eCryptfs requires an inspectable backing filesystem that meets the
+  existing local-filesystem requirements.
+- Rejected source roots retain their filesystem or permission error instead
+  of being reported as symlink problems. `ctx doctor` JSON now reports
+  incomplete source discovery, matching the human-readable output.
+- `ctx doctor` no longer recommends retrying a completed import solely because
+  some records were rejected.
+- MCP clients can list event metadata when an event is too large to inline.
+
+### Changed
+
+- Failed background refreshes retain coarse failure-stage and error-family
+  diagnostics. These do not include error text or paths, change retry behavior,
+  or retroactively diagnose earlier failures.
+
+### Commits and PRs
+
+- Source commit: [a9980606](https://github.com/ctxrs/ctx/commit/a9980606570f659f9ae4ef1a9a44fead3f61fd1c).
+- Full diff: [v1.4.2...a9980606](https://github.com/ctxrs/ctx/compare/v1.4.2...a9980606570f659f9ae4ef1a9a44fead3f61fd1c).
+- Merged PRs: [#982](https://github.com/ctxrs/ctx/pull/982),
+  [#983](https://github.com/ctxrs/ctx/pull/983), [#984](https://github.com/ctxrs/ctx/pull/984),
+  [#985](https://github.com/ctxrs/ctx/pull/985).
+
+## 1.4.2
+
+Released: 2026-09-12
+
+### Fixed
+
+- Fixed a macOS folder-watcher shutdown race that could leave background
+  refresh stuck while the list of watched folders was being updated.
+- Background refresh on macOS now detects appended history even when a folder
+  notification is missed.
+- Readers and recovery processes prepare their file limits before opening an
+  index. Stalled refresh requests return an actionable error instead of waiting
+  indefinitely, and `ctx doctor` explains disk-space and file-limit failures.
+- Semantic search keeps large source catalogs within the manifest size limit
+  and reports runtime startup failures instead of showing continued preparation.
+- Fixed SQLite lock handling during Semantic indexing and local usage recording.
+- Codex imports preserve oversized prompts and history after a revert. Goose
+  imports accept database versions 9, 15 and 16, and Cursor imports retain
+  native turn timestamps.
+- Fixed Cargo subprocess-test compilation.
+
+### Commits and PRs
+
+- Source commit: [e4602f78](https://github.com/ctxrs/ctx/commit/e4602f787c55ba9e4ef76e000d47fea9ff4a7344).
+- Full diff: [v1.4.1...e4602f78](https://github.com/ctxrs/ctx/compare/v1.4.1...e4602f787c55ba9e4ef76e000d47fea9ff4a7344).
+- Merged PRs: [#964](https://github.com/ctxrs/ctx/pull/964), [#965](https://github.com/ctxrs/ctx/pull/965),
+  [#967](https://github.com/ctxrs/ctx/pull/967), [#952](https://github.com/ctxrs/ctx/pull/952),
+  [#968](https://github.com/ctxrs/ctx/pull/968), [#969](https://github.com/ctxrs/ctx/pull/969),
+  [#954](https://github.com/ctxrs/ctx/pull/954), [#972](https://github.com/ctxrs/ctx/pull/972),
+  [#956](https://github.com/ctxrs/ctx/pull/956), [#979](https://github.com/ctxrs/ctx/pull/979).
+
+## 1.4.1
+
+Released: 2026-09-10
+
+### Fixed
+
+- Restores the telemetry recovery fix from 1.3.2 that was missing in 1.4.0.
+  After reporting a partial backlog, the client now reports recovery when the
+  remaining events finish sending, including after a restart.
+- Restores installation and recovery guidance, including PATH checks, retry
+  commands, custom install locations, and the distinction between installing
+  the companion and activating Pro.
+
+The original update feed remains frozen at the 1.3.2 bridge. Current managed
+installations receive 1.4.1 through the newer feed.
+
+### Commits and PRs
+
+- Source commit: [5b3fb3ac](https://github.com/ctxrs/ctx/commit/5b3fb3ac63a0ecb66ba943a5d0e9380134320726).
+- Full diff: [v1.4.0...5b3fb3ac](https://github.com/ctxrs/ctx/compare/v1.4.0...5b3fb3ac63a0ecb66ba943a5d0e9380134320726).
+- Merged PR: [#962](https://github.com/ctxrs/ctx/pull/962).
+
+## 1.4.0
+
+Released: 2026-09-09
+
+### Changed
+
+- The seven in-repo SDKs now use `agent-history-v2`, with schema version 1.
+  The generic `localOnly` status property is removed. CLI status and setup JSON
+  use schema version 3; generic usage/error, index and daemon envelopes use
+  schema version 2. Update consumers that require the old field or check these
+  versions; the [migration guide](https://github.com/ctxrs/ctx/blob/1dc6d684c62ccfdb86ee1733e69144a824a745f4/contracts/agent-history-v2/README.md#migrating-from-v1)
+  covers the affected APIs. Operation-specific Semantic diagnostics retain
+  their execution-location information.
+
+### Fixed
+
+- Semantic search shows and cites the passage that earned the result's score.
+- Semantic document chunks no longer lose their final tokens to tokenizer
+  truncation.
+- Codex imports preserve distinct item and tool-call identities when both are
+  present in a transcript.
+- Failed index rebuilds clean up their abandoned candidate files. Disk-pressure
+  reports use the observed free space.
+
+GitHub downloads contain unmanaged Core-only binaries. The
+[hosted installer](https://ctx.rs/install) installs the managed Core and Pro pair.
+Existing managed installations move through the 1.3.2 bridge before 1.4.0.
+Windows 0.25.0 users must stop any opted-in legacy ctx daemon and rerun the
+[PowerShell installer](https://ctx.rs/install.ps1).
+
+### Commits and PRs
+
+- Source commit: [1dc6d684](https://github.com/ctxrs/ctx/commit/1dc6d684c62ccfdb86ee1733e69144a824a745f4).
+- Full diff: [v1.3.2...1dc6d684](https://github.com/ctxrs/ctx/compare/v1.3.2...1dc6d684c62ccfdb86ee1733e69144a824a745f4).
+- Merged PRs: [#959](https://github.com/ctxrs/ctx/pull/959),
+  [#960](https://github.com/ctxrs/ctx/pull/960).
+- Direct commits: [a16a8023](https://github.com/ctxrs/ctx/commit/a16a8023dd172ecd88003241bb49c5789a247067),
+  [2ba1b48f](https://github.com/ctxrs/ctx/commit/2ba1b48fb4b17bfe34d8b174038df80606ff34b6),
+  [d5fd46e4](https://github.com/ctxrs/ctx/commit/d5fd46e41e896f4221af793975053dc8c115b1f3),
+  [1595b89e](https://github.com/ctxrs/ctx/commit/1595b89e3de8aed0e76d8901e54a3ddfaee36f4a), and
+  [1e199c7e](https://github.com/ctxrs/ctx/commit/1e199c7e95960f48af4d5dbb02f2d259a5aea26c).
+
+## 1.3.2
+
+Released: 2026-09-09
+
+ctx 1.3.2 improves managed upgrades, refresh recovery, Windows installation,
+and Semantic packaging while retaining the existing JSON and SDK interfaces.
+
+### Changed
+
+- Stable managed releases now require the complete source-bound semantic model
+  and runtime asset set before stable metadata can advance.
+- Existing managed installations upgrade through 1.3.2 before moving to later
+  stable releases. Ordinary `ctx upgrade` handles the transition, except on
+  Windows 0.25.0: rerun the [PowerShell installer](https://ctx.rs/install.ps1)
+  because that old executable's self-upgrader cannot complete the update.
+  Stop any opted-in legacy ctx daemon before reinstalling.
+- The legacy `local_only` JSON and `localOnly` SDK fields remain available but
+  are deprecated. Use operation-specific Semantic diagnostics to understand
+  execution location; the legacy marker is not a network or privacy guarantee.
+
+### Fixed
+
+- Managed Core and Pro upgrades preserve a truthful applied result and recover
+  safely when post-commit finalization or restart work is interrupted.
+- Windows managed-pair replacement now handles access-control changes,
+  candidate cleanup, and path identity correctly.
+- Windows installers preserve command exit codes and diagnostic output in
+  PowerShell 5.1 and 7, including successful commands that write to stderr.
+- The PowerShell installer recovers managed Windows 0.25.0 installations using
+  the authenticated release, without relying on the old broken self-upgrader.
+- Windows background processing handles private-directory permissions and
+  concurrent readers correctly.
+- Refresh restart recovery preserves source-authoritative predecessor rebuilds
+  and retained readers without reviving obsolete protocol paths.
+- Refresh jobs report completion only after the terminal journal write is
+  confirmed; an unconfirmed write remains pending for retry.
+- Telemetry reports recovery once queued events finish sending, including
+  when delivery resumes after a restart.
+- Installer downloads and decompression have bounded work and preserve useful
+  failures instead of hanging indefinitely.
+- Managed-pair protocol output and automatic-upgrade warnings again follow
+  terminal output ownership, including raw and machine-readable modes.
+
+GitHub Release downloads are unmanaged ctx Core-only binaries; the hosted
+installer at [ctx.rs/install](https://ctx.rs/install) provides the managed Core
+and Pro installation path.
+
+### Commits and PRs
+
+- Source commit: [22ae223e](https://github.com/ctxrs/ctx/commit/22ae223ebb4a0c909861e3a7e1e98d4bd5b2d523).
+- Full changelog: [v1.3.1...22ae223e](https://github.com/ctxrs/ctx/compare/v1.3.1...22ae223ebb4a0c909861e3a7e1e98d4bd5b2d523).
+- Refresh source follow-up: [#933](https://github.com/ctxrs/ctx/pull/933).
+- Merged PRs: [#871](https://github.com/ctxrs/ctx/pull/871),
+  [#876](https://github.com/ctxrs/ctx/pull/876),
+  [#886](https://github.com/ctxrs/ctx/pull/886),
+  [#887](https://github.com/ctxrs/ctx/pull/887),
+  [#889](https://github.com/ctxrs/ctx/pull/889),
+  [#890](https://github.com/ctxrs/ctx/pull/890),
+  [#891](https://github.com/ctxrs/ctx/pull/891),
+  [#892](https://github.com/ctxrs/ctx/pull/892),
+  [#893](https://github.com/ctxrs/ctx/pull/893),
+  [#894](https://github.com/ctxrs/ctx/pull/894),
+  [#895](https://github.com/ctxrs/ctx/pull/895),
+  [#896](https://github.com/ctxrs/ctx/pull/896),
+  [#897](https://github.com/ctxrs/ctx/pull/897),
+  [#899](https://github.com/ctxrs/ctx/pull/899),
+  [#900](https://github.com/ctxrs/ctx/pull/900),
+  [#901](https://github.com/ctxrs/ctx/pull/901),
+  [#902](https://github.com/ctxrs/ctx/pull/902),
+  [#903](https://github.com/ctxrs/ctx/pull/903),
+  [#904](https://github.com/ctxrs/ctx/pull/904) ([4338adbb](https://github.com/ctxrs/ctx/commit/4338adbb7c1420221ac4a2c75f277bc4300561e3)),
+  [#906](https://github.com/ctxrs/ctx/pull/906) ([aa062102](https://github.com/ctxrs/ctx/commit/aa062102e2a2b686788986a39674a616b18b60e5)),
+  [#907](https://github.com/ctxrs/ctx/pull/907) ([76eddce2](https://github.com/ctxrs/ctx/commit/76eddce2220ba7758f55b7eb68cb1f626ad4e1d4)),
+  [#908](https://github.com/ctxrs/ctx/pull/908) ([d2792cd5](https://github.com/ctxrs/ctx/commit/d2792cd52e224122f26db8e7cad78eeb7d1e19df)),
+  [#909](https://github.com/ctxrs/ctx/pull/909) ([9391ba90](https://github.com/ctxrs/ctx/commit/9391ba9050958ad69625e5834bf197b259b3ef4a)),
+  [#911](https://github.com/ctxrs/ctx/pull/911) ([b0cb6cef](https://github.com/ctxrs/ctx/commit/b0cb6cef0ad2672674fd83cab16fae65e753082f)),
+  [#912](https://github.com/ctxrs/ctx/pull/912) ([15de5dba](https://github.com/ctxrs/ctx/commit/15de5dbac00247964c37df547bee9b26d3158f89)), and
+  [#913](https://github.com/ctxrs/ctx/pull/913) ([dd04a2cc](https://github.com/ctxrs/ctx/commit/dd04a2cc98a2a13aee0c0c73d85782c1d35547a6)).
+- Direct commits: [7ee6bb51](https://github.com/ctxrs/ctx/commit/7ee6bb517807af32433ec4001b27652e31792238),
+  [0b016e0f](https://github.com/ctxrs/ctx/commit/0b016e0fa534537d1a8943e98edea42e4172f77f),
+  [d1b3608f](https://github.com/ctxrs/ctx/commit/d1b3608f21ccc8286a075925d1886fb6341c6be7),
+  [541890a9](https://github.com/ctxrs/ctx/commit/541890a9c7dfc59d0530dd8962b73f848987bf05), and
+  [8df5f9ca](https://github.com/ctxrs/ctx/commit/8df5f9ca745af25a69ea6b303e91f411cbc1bb2e).
+
+## 1.3.1
+
+Released: 2026-09-02
+
+ctx 1.3.1 improves background work, managed upgrades, and snapshot reads while
+making partial history results easier to understand.
+
+### Changed
+
+- Semantic maintenance now gets bounded opportunities to make progress during
+  continuous Core refresh activity.
+- Partial history labels now distinguish files that were not indexed from
+  individual records that were skipped.
+- The persistent daemon now delivers queued telemetry in the background, so
+  foreground CLI and MCP commands do not perform telemetry network delivery.
+
+### Fixed
+
+- Certified unchanged SQLite histories are reused without snapshot copies or
+  logical rescans.
+- Managed upgrades safely refresh existing ctx-owned skills and
+  installer-owned man pages while leaving uncertain or modified installs
+  untouched.
+- Artifact redirects remain bound to the signed artifact origin while retaining
+  existing transport and integrity checks.
+- Snapshot reads can reopen a certified retained predecessor after legitimate
+  publication metadata changes without accepting unrelated stale state.
+
+The binaries attached to the GitHub Release provide ctx Core only. The hosted
+installer remains the recommended path for a managed Core and Pro installation.
+
+### Commits and PRs
+
+- Source commit: [e44fb562](https://github.com/ctxrs/ctx/commit/e44fb5623db966254f195c182d7642f9df013cb2).
+- Full changelog: [v1.3.0...e44fb562](https://github.com/ctxrs/ctx/compare/v1.3.0...e44fb5623db966254f195c182d7642f9df013cb2).
+- Merged PRs: [#866](https://github.com/ctxrs/ctx/pull/866),
+  [#867](https://github.com/ctxrs/ctx/pull/867),
+  [#868](https://github.com/ctxrs/ctx/pull/868),
+  [#869](https://github.com/ctxrs/ctx/pull/869),
+  [#873](https://github.com/ctxrs/ctx/pull/873),
+  [#880](https://github.com/ctxrs/ctx/pull/880),
+  [#882](https://github.com/ctxrs/ctx/pull/882),
+  [#883](https://github.com/ctxrs/ctx/pull/883), and
+  [#884](https://github.com/ctxrs/ctx/pull/884).
+
+## 1.3.0
+
+Released: 2026-09-01
+
+ctx 1.3.0 adds configurable external semantic embedding executors and makes
+foreground imports finish only after enabled semantic indexing reaches the
+imported generation. It also tightens cross-platform daemon ownership, source
+access, and release checks.
+
+### Added
+
+- Semantic search can use a configured external HTTP embedding executor and
+  custom embedding spaces.
+
+### Changed
+
+- `ctx import` now waits for both lexical and enabled semantic indexing, so a
+  successful return means the imported generation is ready to query.
+- Daemon-free semantic commands can query a ready semantic index without
+  launching a daemon.
+- Built-in semantic throttling is enabled by default and can be disabled in
+  config for bounded maximum throughput; status reports both configured and
+  effective state.
+
+### Fixed
+
+- Failed semantic activation no longer takes Core search offline, and
+  foreground Core ML execution without a daemon uses the stable CPU path.
+- Foreground import cancellation stops only the finite worker started by that
+  command.
+- Refresh returns after verified publication instead of waiting on stale
+  request bookkeeping.
+- Windows source traversal and index pointer replacement retain tighter
+  ownership and data-integrity checks.
+- Native ONNX loader errors retain useful path diagnostics.
+- Windows release checks allow the exact `crypt32.dll` import used by native
+  certificate verification while continuing to reject unexpected PE imports.
+- Managed Windows installs resolve their lifecycle root from the user profile
+  without requiring unrelated roaming or local app-data folders.
+
+The binaries attached to the GitHub Release provide ctx Core only. The hosted
+installer remains the recommended path for a managed Core and Pro installation.
+
+### Commits and PRs
+
+- Source commit: [3dcecc4f](https://github.com/ctxrs/ctx/commit/3dcecc4fb2e59b7ad676075ecbdbbad07d17e48d).
+- Full changelog: [v1.2.4...3dcecc4f](https://github.com/ctxrs/ctx/compare/v1.2.4...3dcecc4fb2e59b7ad676075ecbdbbad07d17e48d).
+- Merged PRs: [#831](https://github.com/ctxrs/ctx/pull/831),
+  [#834](https://github.com/ctxrs/ctx/pull/834),
+  [#835](https://github.com/ctxrs/ctx/pull/835),
+  [#836](https://github.com/ctxrs/ctx/pull/836),
+  [#843](https://github.com/ctxrs/ctx/pull/843),
+  [#846](https://github.com/ctxrs/ctx/pull/846),
+  [#822](https://github.com/ctxrs/ctx/pull/822),
+  [#833](https://github.com/ctxrs/ctx/pull/833),
+  [#832](https://github.com/ctxrs/ctx/pull/832),
+  [#847](https://github.com/ctxrs/ctx/pull/847),
+  [#781](https://github.com/ctxrs/ctx/pull/781),
+  [#848](https://github.com/ctxrs/ctx/pull/848),
+  [#849](https://github.com/ctxrs/ctx/pull/849),
+  [#850](https://github.com/ctxrs/ctx/pull/850),
+  [#851](https://github.com/ctxrs/ctx/pull/851),
+  [#852](https://github.com/ctxrs/ctx/pull/852),
+  [#854](https://github.com/ctxrs/ctx/pull/854),
+  [#855](https://github.com/ctxrs/ctx/pull/855),
+  [#858](https://github.com/ctxrs/ctx/pull/858),
+  [#862](https://github.com/ctxrs/ctx/pull/862),
+  [#857](https://github.com/ctxrs/ctx/pull/857),
+  [#863](https://github.com/ctxrs/ctx/pull/863), and
+  [#864](https://github.com/ctxrs/ctx/pull/864).
+
+## 1.2.4
+
+Released: 2026-08-29
+
+ctx 1.2.4 keeps search results current immediately after refresh and improves
+background telemetry delivery and failed-source retry behavior.
+
+### Fixed
+
+- Search now waits for semantic indexing to catch up with a refresh before
+  returning results, avoiding a brief window where search could use the
+  previous generation.
+- Background telemetry now has more time to send and drain queued events,
+  while interactive commands keep their short delivery timeout.
+- When no provider can handle a source, ctx retries once and then pauses that
+  route instead of retrying indefinitely. Source changes, upgrades, and manual
+  imports allow another attempt.
+
+The binaries attached to the GitHub Release provide ctx Core only. The hosted
+installer remains the recommended path for a managed Core and Pro installation.
+
+### Commits and PRs
+
+- Source commit: [64f673f1](https://github.com/ctxrs/ctx/commit/64f673f144dc53e71bc903b3d81c528897257923).
+- Full changelog: [v1.2.3...64f673f1](https://github.com/ctxrs/ctx/compare/v1.2.3...64f673f144dc53e71bc903b3d81c528897257923).
+- Merged PRs: [#826](https://github.com/ctxrs/ctx/pull/826)
+  ([794efcc8](https://github.com/ctxrs/ctx/commit/794efcc8fcb7b3c911cc37155d25a555ba198b8a)),
+  [#827](https://github.com/ctxrs/ctx/pull/827)
+  ([ebaab787](https://github.com/ctxrs/ctx/commit/ebaab787dbba5d4cb840fff6dc433c57ab1894f7)), and
+  [#828](https://github.com/ctxrs/ctx/pull/828)
+  ([64f673f1](https://github.com/ctxrs/ctx/commit/64f673f144dc53e71bc903b3d81c528897257923)).
+
+## 1.2.3
+
+Released: 2026-08-29
+
+ctx 1.2.3 fixes OpenCode history imports and restores managed upgrades to
+signed Core-only releases.
+
+### Fixed
+
+- OpenCode file and attachment parts without indexable text no longer
+  interrupt history import or expose attachment metadata as indexed content.
+  Malformed and unsupported SQLite rows now produce bounded diagnostics.
+- Existing managed installations can upgrade to newer signed Core-only
+  releases that do not include optional Semantic Search assets.
+
+The binaries attached to the GitHub Release provide ctx Core only. The hosted
+installer remains the recommended path for a managed Core and Pro installation.
+
+### Commits and PRs
+
+- Source commit: [53c4784c](https://github.com/ctxrs/ctx/commit/53c4784cf9b6f99b558c251a12212d27e2fb7ee3).
+- Full changelog: [v1.2.2...53c4784c](https://github.com/ctxrs/ctx/compare/v1.2.2...53c4784cf9b6f99b558c251a12212d27e2fb7ee3).
+- Merged PRs: [#816](https://github.com/ctxrs/ctx/pull/816)
+  ([59985328](https://github.com/ctxrs/ctx/commit/5998532811fa2b9689ce966f6ff0a7253986f5d7)),
+  [#817](https://github.com/ctxrs/ctx/pull/817)
+  ([f857c0d6](https://github.com/ctxrs/ctx/commit/f857c0d64bea1caa8d9180c7739e335e01a85e22)), and
+  [#818](https://github.com/ctxrs/ctx/pull/818)
+  ([53c4784c](https://github.com/ctxrs/ctx/commit/53c4784cf9b6f99b558c251a12212d27e2fb7ee3)).
+
+## 1.2.2
+
+Released: 2026-08-28
+
+ctx 1.2.2 makes background indexing recover more safely, avoids repeated
+full-index verification during watcher recovery, and improves setup and import
+diagnostics.
+
+### Changed
+
+- Setup follows daemon-owned startup indexing and reports its progress instead
+  of returning before the initial handoff is complete.
+- Import summaries report net additions and removals so incremental changes are
+  easier to understand.
+- Upgrades no longer need the temporary RFC 2544 fake-IP setting. Existing
+  copies of that retired setting are removed from `config.toml` automatically.
+
+### Fixed
+
+- Repeated background failures pause only the affected source after
+  confirmation, while healthy sources and the last verified index remain
+  available. Source changes, upgrades, and manual imports re-arm the route.
+- Watcher recovery no longer repeats an exhaustive logical audit of an already
+  published index, reducing avoidable CPU and memory use reported in
+  [#804](https://github.com/ctxrs/ctx/issues/804) and
+  [#805](https://github.com/ctxrs/ctx/issues/805).
+- Daemon shutdown stays bounded when active indexing work is stuck and
+  preserves the last published generation.
+- Semantic catch-up uses the verified generation identity so recovery cannot
+  attach vectors to the wrong index generation.
+- Oversized JSONL history records are read in full rather than treated as
+  truncated input, and native watchers ignore access-only filesystem events
+  that do not change history.
+- SQLite-backed providers and terminal refresh reporting now publish a single
+  coherent completion or failure result.
+
+The binaries attached to the GitHub Release provide ctx Core only. The hosted
+installer remains the recommended path for a managed Core and Pro installation.
+
+### Commits and PRs
+
+- Source commit: [45731bac](https://github.com/ctxrs/ctx/commit/45731bac5275b54a76a4e8bfe704b660bfb77a09).
+- Full changelog: [v1.2.1...45731bac](https://github.com/ctxrs/ctx/compare/v1.2.1...45731bac5275b54a76a4e8bfe704b660bfb77a09).
+- Merged PRs: [#795](https://github.com/ctxrs/ctx/pull/795)
+  ([85023aaa](https://github.com/ctxrs/ctx/commit/85023aaa2c62761bc15c41aef3736c353ccc64e5)),
+  [#794](https://github.com/ctxrs/ctx/pull/794)
+  ([89de86fe](https://github.com/ctxrs/ctx/commit/89de86fe96d07b24b627da85520242c969895b45)),
+  [#800](https://github.com/ctxrs/ctx/pull/800)
+  ([b6649784](https://github.com/ctxrs/ctx/commit/b66497840df0f2106d21ff18309c00b99e697ce5)),
+  [#796](https://github.com/ctxrs/ctx/pull/796)
+  ([ecbd66ca](https://github.com/ctxrs/ctx/commit/ecbd66ca119173a667768a79f4ce4df587fbee12)),
+  [#801](https://github.com/ctxrs/ctx/pull/801)
+  ([da53d147](https://github.com/ctxrs/ctx/commit/da53d1475b6fb9d74c22d74742dd52d88f8734ff)),
+  [#803](https://github.com/ctxrs/ctx/pull/803)
+  ([f7ceb487](https://github.com/ctxrs/ctx/commit/f7ceb48719ef6a48bbd6a466c804fb02767963f1)),
+  [#806](https://github.com/ctxrs/ctx/pull/806)
+  ([11d90357](https://github.com/ctxrs/ctx/commit/11d90357c5afd77b999ca3d441811b7a1749c724)),
+  [#808](https://github.com/ctxrs/ctx/pull/808)
+  ([79809b11](https://github.com/ctxrs/ctx/commit/79809b1178d85a9118fff691488a55e840882192)),
+  [#809](https://github.com/ctxrs/ctx/pull/809)
+  ([81af78d7](https://github.com/ctxrs/ctx/commit/81af78d7fe92e51b0efbfca3c9da267aeefa4ab9)),
+  [#807](https://github.com/ctxrs/ctx/pull/807)
+  ([523e23b4](https://github.com/ctxrs/ctx/commit/523e23b4611b4056e777376115442ef2f238213f)),
+  [#810](https://github.com/ctxrs/ctx/pull/810)
+  ([73940a57](https://github.com/ctxrs/ctx/commit/73940a57b9bc3cf037aa9fd671392da8fb7b056c)),
+  [#811](https://github.com/ctxrs/ctx/pull/811)
+  ([dd5b7a15](https://github.com/ctxrs/ctx/commit/dd5b7a15f3b1af723d4297a21aa15de5533d0959)), and
+  [#812](https://github.com/ctxrs/ctx/pull/812)
+  ([45731bac](https://github.com/ctxrs/ctx/commit/45731bac5275b54a76a4e8bfe704b660bfb77a09)).
+
+## 1.2.1
+
+Released: 2026-08-28
+
+ctx 1.2.1 fixes Core CLI upgrades on VPN and TUN networks that resolve the
+official release service into the RFC 2544 benchmarking range.
+
+### Fixed
+
+- `ctx upgrade` can use official signed release artifacts when `cli.ctx.rs`
+  resolves into `198.18.0.0/15` after the user explicitly enables:
+
+  ```toml
+  [upgrade]
+  allow_rfc2544_fake_ip = true
+  ```
+
+  The option is off by default and applies only to signed release artifacts
+  fetched over HTTPS from the official ctx release service.
+
+The binaries attached to the GitHub Release provide ctx Core only. The hosted
+installer remains the recommended path for a managed Core and Pro installation.
+
+### Commits and PRs
+
+- Source commit: [edf7119e](https://github.com/ctxrs/ctx/commit/edf7119e3e3e268d5647f330d8c75b39896d877c).
+- Full changelog: [v1.2.0...edf7119e](https://github.com/ctxrs/ctx/compare/v1.2.0...edf7119e3e3e268d5647f330d8c75b39896d877c).
+- Merged PR: [#788](https://github.com/ctxrs/ctx/pull/788) ([5d127701](https://github.com/ctxrs/ctx/commit/5d12770149af0a0f3af9a2c96370714521058e99)).
+
+## 1.2.0
+
+Released: 2026-08-27
+
+ctx 1.2.0 expands semantic-search controls and makes local history ingestion
+more resilient across providers and large corpora.
+
+### Added
+
+- Manage semantic indexing directly with `ctx semantic enable`,
+  `ctx semantic status`, and `ctx semantic disable`; repair missing runtime
+  components and wait for manual semantic refreshes to finish.
+- Native `fx` history support and aggregate local Blame usage in `ctx stats`.
+
+### Changed
+
+- Semantic backfills run in batches, with clearer CUDA and backend reporting on
+  WSL2.
+- History health, search-result identity, missing import paths, and local
+  timestamps are clearer.
+- Upgrades and installs better support read-only third-party locations,
+  daemon-owned automatic scheduling, and Windows verbatim and managed paths.
+
+### Fixed
+
+- Claude, Codex, and Cursor imports better handle duplicate identities, large
+  archives, top-level roles, divergent transcript copies, paginated plan
+  completions, and rejected-record diagnostics.
+- Incremental indexing and refresh better handle large segment topologies,
+  bounded lossless watcher recovery, source-tree failures, duplicate-identity
+  quarantine, scoped retries, and SQLite file-descriptor headroom.
+
+### Commits and PRs
+
+- Source commit: [a24fe521](https://github.com/ctxrs/ctx/commit/a24fe5212994bb816daadce3f71b347f2ce3deda).
+- Full changelog: [v1.1.1...a24fe521](https://github.com/ctxrs/ctx/compare/v1.1.1...a24fe5212994bb816daadce3f71b347f2ce3deda).
+- Version PR: [#785](https://github.com/ctxrs/ctx/pull/785).
+
+## 1.1.3
+
+Released: 2026-08-26
+
+ctx 1.1.3 improves multi-root support, makes large Codex archives import
+reliably, and makes new Pro setup flows tell the truth about when access is
+ready.
+
+### Changed
+
+- Setup and status now give a concise summary of configured history folders
+  and import health; concise human `ctx sources` output keeps configured roots
+  visible while hiding irrelevant automatic empty locations, while JSON and
+  `--all` preserve the full inventory.
+- More valid large Codex records are retained, with concise diagnostics for
+  skipped records and source failures.
+- New Pro browser handoffs keep browser and terminal completion in sync:
+  interactive `ctx pro` waits for durable local acceptance, retries dropped
+  responses safely, and returns a bounded, actionable error when Linux keyring
+  access is locked.
+
+### Fixed
+
+- Large Codex archives no longer stop at 10,000 entries during discovery.
+- Claude Code histories keep the latest compatible observation when resumed
+  sessions reuse an event UUID.
+- Interrupted Pro catch-up recovers safely when its pre-lease Core generation
+  has already been collected.
+- Large valid indexes with more than 64 internal segments continue refreshing
+  instead of being mislabeled as corrupt.
+
+### Commits and PRs
+
+- Source commit: [ff596d98](https://github.com/ctxrs/ctx/commit/ff596d985c6def52fa19ba0cf6a5ba48eaa27032).
+- Full changelog: [v1.1.1...ff596d98](https://github.com/ctxrs/ctx/compare/v1.1.1...ff596d985c6def52fa19ba0cf6a5ba48eaa27032).
+- Merged PRs: [#663](https://github.com/ctxrs/ctx/pull/663), [#699](https://github.com/ctxrs/ctx/pull/699), [#700](https://github.com/ctxrs/ctx/pull/700), [#701](https://github.com/ctxrs/ctx/pull/701), [#702](https://github.com/ctxrs/ctx/pull/702), [#703](https://github.com/ctxrs/ctx/pull/703), [#705](https://github.com/ctxrs/ctx/pull/705), [#706](https://github.com/ctxrs/ctx/pull/706), [#709](https://github.com/ctxrs/ctx/pull/709), [#711](https://github.com/ctxrs/ctx/pull/711), [#712](https://github.com/ctxrs/ctx/pull/712), [#713](https://github.com/ctxrs/ctx/pull/713), [#714](https://github.com/ctxrs/ctx/pull/714), [#715](https://github.com/ctxrs/ctx/pull/715), [#716](https://github.com/ctxrs/ctx/pull/716), [#719](https://github.com/ctxrs/ctx/pull/719), [#720](https://github.com/ctxrs/ctx/pull/720), [#723](https://github.com/ctxrs/ctx/pull/723), and [#724](https://github.com/ctxrs/ctx/pull/724).
+- Direct commit: [7d9e715a](https://github.com/ctxrs/ctx/commit/7d9e715a0d7612e147f2a430fed4ea06c0296d1d).
+
+## 1.1.1
+
+Released: 2026-08-25
+
+ctx 1.1.1 makes first-run setup more reliable when indexing, daemon
+maintenance, and Pro activation overlap. It also improves result diversity for
+broad searches across large histories.
+
+### Changed
+
+- Broad searches spread bounded results across more sessions and sources before
+  returning additional matches from the same history.
+
+### Fixed
+
+- Ordinary commands reuse a healthy same-version daemon instead of reconciling
+  its native service from each invoking shell's environment.
+- Pro setup treats an index generation rollover as transient, retries the open,
+  and no longer reports the race as corrupted history.
+- If Pro activation completes but the remaining setup does not, the installer
+  preserves that activation and prints the correct `ctx setup` retry command.
+
+### Commits and PRs
+
+- Source commit: [297c136f](https://github.com/ctxrs/ctx/commit/297c136f562c1ecbd7224968cc49477922457de8).
+- Full changelog: [v1.1.0...297c136f](https://github.com/ctxrs/ctx/compare/v1.1.0...297c136f562c1ecbd7224968cc49477922457de8).
+- Merged PRs: [#693](https://github.com/ctxrs/ctx/pull/693), [#694](https://github.com/ctxrs/ctx/pull/694), [#695](https://github.com/ctxrs/ctx/pull/695), [#696](https://github.com/ctxrs/ctx/pull/696), and [#697](https://github.com/ctxrs/ctx/pull/697).
+
+## 1.1.0
+
+Released: 2026-08-25
+
+ctx 1.1 adds multi-root support, so histories from separate Codex, Claude,
+Cursor, and other workspaces can live in one index and be searched
+independently. It also adds JSONL v2 custom-history support and a broad set of
+fixes for imports, index recovery, upgrades, and Windows.
+
+### Added
+
+- Added multi-root support. Multiple roots from the same provider can remain in
+  one index and be selected with `--source-root` or `--source-group`, including
+  through JSON and MCP requests.
+- Custom history now uses the strict JSONL v2 envelope and carries provider,
+  source, and session identities through CLI, JSONL, locate, show, and MCP
+  output.
+
+### Changed
+
+- Privacy settings now apply consistently across Core, Pro CLI, and MCP.
+
+### Fixed
+
+- Large SQLite histories are admitted according to available disk space instead
+  of a fixed 2 GiB snapshot ceiling.
+- Malformed records and broken transcript sources are isolated so healthy
+  histories continue importing.
+- Duplicate native JSONL records are rejected individually instead of aborting
+  the complete import.
+- Resumed Gemini recordings retain distinct identities when Gemini reuses a
+  session ID.
+- Replaced roots retire old members correctly, and timestamp-only JSONL changes
+  no longer create duplicate content.
+- New index generations are integrity-checked before activation.
+- Cursor transcript discovery is limited to known layouts, avoiding unrelated
+  filesystem traversal.
+- Cold Codex imports capture the complete available history while a session is
+  still active, then import new content during the next refresh.
+- Repaired Windows upgrade and uninstall compatibility across retained
+  runtimes, legacy private state, install paths, and process identities.
+- Same-version upgrades repair missing or corrupt signed semantic runtimes.
+- Daemon refresh failures no longer leave stale requests in progress.
+- Automatic upgrades remain active when daemon indexing is disabled.
+- Index recovery preserves recoverable generations and retries transient
+  cleanup races.
+- Corrected result accounting that could report valid partial semantic results
+  as contradictory failures.
+
+### Commits and PRs
+
+- Source commit: [98ee0a91](https://github.com/ctxrs/ctx/commit/98ee0a9101d59ecf96e9529505fc34b3674671ad)
+- Full changelog: [v1.0.2...98ee0a91](https://github.com/ctxrs/ctx/compare/v1.0.2...98ee0a9101d59ecf96e9529505fc34b3674671ad)
+- Merged PRs: [#649](https://github.com/ctxrs/ctx/pull/649), [#650](https://github.com/ctxrs/ctx/pull/650), [#651](https://github.com/ctxrs/ctx/pull/651), [#652](https://github.com/ctxrs/ctx/pull/652), [#653](https://github.com/ctxrs/ctx/pull/653), [#654](https://github.com/ctxrs/ctx/pull/654), [#657](https://github.com/ctxrs/ctx/pull/657), [#667](https://github.com/ctxrs/ctx/pull/667), [#668](https://github.com/ctxrs/ctx/pull/668), [#669](https://github.com/ctxrs/ctx/pull/669), [#671](https://github.com/ctxrs/ctx/pull/671), [#672](https://github.com/ctxrs/ctx/pull/672), [#673](https://github.com/ctxrs/ctx/pull/673), [#675](https://github.com/ctxrs/ctx/pull/675), [#676](https://github.com/ctxrs/ctx/pull/676), [#677](https://github.com/ctxrs/ctx/pull/677), [#680](https://github.com/ctxrs/ctx/pull/680), [#682](https://github.com/ctxrs/ctx/pull/682), [#683](https://github.com/ctxrs/ctx/pull/683), [#685](https://github.com/ctxrs/ctx/pull/685), [#686](https://github.com/ctxrs/ctx/pull/686), [#687](https://github.com/ctxrs/ctx/pull/687), [#688](https://github.com/ctxrs/ctx/pull/688), [#691](https://github.com/ctxrs/ctx/pull/691), and [#692](https://github.com/ctxrs/ctx/pull/692).
+- Release-candidate fix-forward PR: [#681](https://github.com/ctxrs/ctx/pull/681).
+- Direct commits: [ae2ea235](https://github.com/ctxrs/ctx/commit/ae2ea235482d888d73269f49fc0cc143c451228f) and [b33107ed](https://github.com/ctxrs/ctx/commit/b33107ed3c15fff59ddcb144bffa255d117d8ebc).
+
+## 1.0.2
+
+2026-08-21
+
+### Changed
+
+- Setup now advances the sessions, messages, tool-call, and data-scanned
+  counters throughout large Codex history scans, reducing long apparent pauses
+  while retaining the ingestion pipeline's bounded batching and throughput.
+- Cold indexing now merges wider groups of lexical segments, reducing merge
+  overhead on large histories.
+- Expired ctx pro browser handoffs now lead users back to a safe recovery path
+  instead of leaving them in a stale sign-in flow.
+
+### Fixed
+
+- Simplified error propagation for quarantined Codex rollouts and parallel
+  ingestion failures, preserving the original actionable error.
+
+### Commits and PRs
+
+- Source commit: [e02b4796](https://github.com/ctxrs/ctx/commit/e02b47965d1c251062978cfdbf7b9fefab850e69)
+- Full changelog: [v1.0.1...v1.0.2](https://github.com/ctxrs/ctx/compare/v1.0.1...v1.0.2)
+
+## 1.0.0
+
+2026-08-20
+
+ctx 1.0 is our first major stable release and brings serious performance and
+correctness improvements. Cold ingestion of a 4 GB history corpus fell from 44
+minutes to 2m22s, about 18x faster, and incremental refresh fell from 4.0s to
+0.35s, about 12x faster. The release also adds automatic indexing across more
+than 40 local agent-history sources, tracks parent, subagent, fork, and
+copied-session lineage, and introduces `ctx blame`, a ctx pro command that connects
+files, commits, and pull requests to the agent sessions that produced them.
+
+### Indexing and storage
+
+- Replaced the legacy SQLite/FTS history store with immutable, self-contained
+  Tantivy Core generations.
+- Complete normalized records now live in Core, so searches and transcript
+  reads do not reopen provider databases or files.
+- Publications are verified and activated as complete generations. Interrupted
+  refreshes retain the last verified generation and safely retry.
+- Semantic search now uses optional memory-mapped flat-F32 generations instead
+  of `sqlite-vec`.
+- Core, semantic, and pro state are bound to committed generations, preventing
+  mixed or partially updated results.
+- Added route-local incremental refresh, unchanged-source admission, bounded
+  generation verification, and writerless no-op refreshes.
+- Malformed or conflicting Codex rollouts can be quarantined individually while
+  valid sibling histories continue importing.
+
+### Search and structured access
+
+- Added content-aware ranking and explicit `all`, `transcript`, `calls`, and
+  `outputs` scopes.
+- Added deterministic event queries through `ctx list events`, with chronology,
+  provider, source, session, lineage, agent, workspace, and file filters.
+- Added generation-bound JSON and streaming JSONL output for structured queries
+  and exports.
+- Added exact MCP server/tool attribution and policy-selected invocation search.
+- Added provider-neutral parent, child, fork, and copied-session relationships.
+  Proven copies are suppressed from default search without becoming
+  inaccessible.
+- Added `ctx show event` and expanded session rendering with text, Markdown,
+  JSON, and JSONL output.
+- Added transcript export through `ctx show session --out`.
+
+Examples:
+
+```bash
+ctx list events --provider codex --event-type message \
+  --content full --format jsonl > codex-messages.jsonl
+
+ctx list events --since 2026-08-01T00:00:00Z \
+  --until 2026-08-02T00:00:00Z --format jsonl
+
+ctx show session <session-id> --mode full \
+  --format markdown --out transcript.md
+```
+
+### ctx pro
+
+- Added file, commit, and pull-request blame for connecting code changes to the
+  agent sessions that produced them.
+- Added `ctx blame <target>` shorthand with explicit `--type file|commit|pr`
+  overrides.
+- Added bounded verified evidence context to blame results.
+- Added exact Git operation lineage for amend, rebase, and cherry-pick
+  attribution.
+- Added explicit attribution outcomes when evidence is absent, ambiguous,
+  stale, or unverifiable.
+- pro consumes committed Core generations directly and does not rescan provider
+  histories.
+- First setup can automatically start a 14-day trial without requiring an
+  account or card.
+- Added a browser handoff for connecting an account, retaining access after the
+  trial, or subscribing.
+- Core remains fully usable when ctx pro is unavailable.
+
+### Setup, indexing, and terminal UX
+
+- First setup now coordinates Core indexing and optional pro trial setup while
+  preserving Core-first, fail-soft behavior.
+- Added automatic and manual indexing modes through
+  `ctx index mode auto|manual`.
+- Added whole-run progress and estimated completion time.
+- Added continuously updating session, message, tool-call, and data-scanned
+  counters.
+- Added live terminal resize handling and persistent structured callouts.
+- Hardened daemon recovery, concurrent publication, reinstall supervision,
+  service ownership, and idempotent reinstall behavior.
+- Added the universal `ctx` agent plugin and migrated the managed skill and
+  command to it.
+
+### Provider support and import reliability
+
+- Added or completed support for Hermes, Grok Build, DeepSeek Harness, current
+  and legacy OpenClaw history, OpenHands CLI, Cline SDK stores, Mux archives,
+  Shelley, and compressed Codex rollouts.
+- Fixed streamed Kimi assistant content and corrected wire semantics.
+- Restored Factory Droid discovery and stabilized retry identities.
+- Hardened Cursor, Copilot CLI, OpenCode, Codex, Claude, Pi, and other importers
+  against sockets, symlinks, active writes, malformed optional metadata,
+  duplicate identities, and partial records.
+- Supported readable provider histories are now discovered and imported
+  automatically.
+
+### Performance
+
+| Workload | Before | ctx 1.0 | Result |
+|---|---:|---:|---:|
+| 4 GB cold ingestion ([#306](https://github.com/ctxrs/ctx/issues/306)) | 44m 33s | 2m 22s | About 18x faster |
+| 648 MB incremental refresh | 4.015s | 0.345s | About 12x faster |
+| 35 GB ordinary append | Full-route work | 469ms p50, 535ms p95 | Under 0.5s median |
+| 5.44 GB lexical cold build | 30.60s | 7.65s | 75% faster |
+| Lexical filesystem output | 3.87 GB | 240.8 MB | 16x smaller |
+| Broad-term lexical query | 115.23ms | 1.178ms | 98x faster |
+| 20.8 GB Core ingestion | 21m 49.8s | 15m 04.5s | 30.9% faster |
+| 20.8 GB Core to pro completion | 28m 33.2s | 21m 47.4s | 23.7% faster |
+| Four-CPU, 192-source refresh | 21.23s / 189.9 MB | 13.06s / 131.2 MB | 38.5% faster, 30.9% less memory |
+| 33 GB unchanged refresh | 13.26s | 7.29s | 45% faster |
+| 16,384-document publication | 3.141s | 84.5ms | 37x faster |
+
+The final live-counter implementation measured an approximately 0.6% wall-time
+difference, within run variance, and an identical 1.31s incremental-refresh
+median.
+
+### Platforms and distribution
+
+Official artifacts are available for:
+
+- Linux x86-64 and ARM64, targeting a GLIBC 2.28 ceiling.
+- macOS x86-64 and Apple Silicon.
+- Windows x86-64.
+
+Official installs verify signed metadata and artifact hashes. Windows artifacts
+are Authenticode-signed, and macOS artifacts are signed and notarized. Source
+and package-manager installations remain fully supported as Core-only
+installations.
+
+### Breaking changes and upgrade notes
+
+- On first run, ctx 1.0 automatically builds a new immutable Core generation
+  from your existing provider histories. It does not convert the legacy index
+  in place. The new generation is verified before activation, interrupted
+  builds can safely retry, and your original agent history is never modified.
+  No manual migration is required.
+- `ctx sql` and its persistent relational projection have been removed. Common
+  structured-access workflows remain available through indexed
+  `ctx list events` filters, JSON/JSONL, `jq`, MCP, and the SDKs. Arbitrary SQL
+  is gone, but provider, source, session, lineage, chronology, role, event-type,
+  workspace, and file selection have typed indexed equivalents.
+- The legacy `--json` shortcut has been removed; use `--format json`.
+- Windsurf support was removed because its available source was hook-generated
+  output rather than automatically discoverable native history.
+- Trae support was removed because its history contract could not be supported
+  reliably.
+
+### Contributors
+
+External code contributors:
+
+- [@j2h4u](https://github.com/j2h4u): bounded provider imports, OpenClaw refresh
+  efficiency, and OpenCode empty-value handling
+- [@rNoz](https://github.com/rNoz): macOS path safety, Cursor and Copilot CLI
+  source handling, Factory Droid discovery, and daemon upgrade recovery
+- [@rcny](https://github.com/rcny): Kimi streamed assistant content and
+  corrected transcript semantics
+- [@createsomethingtoday](https://github.com/createsomethingtoday): macOS stat
+  metadata normalization
+- [@atharva-patill](https://github.com/atharva-patill): source-backed indexing
+  documentation
+
+The Factory Droid discovery fix was integrated through a maintainer change and
+retains rNoz as its commit author.
+
+Issue reports and product feedback also came from:
+
+- [@j2h4u](https://github.com/j2h4u), with 28 reports covering setup
+  performance, large-corpus correctness, daemon recovery, incremental refresh,
+  provider support, and progress, including [#195](https://github.com/ctxrs/ctx/issues/195),
+  [#306](https://github.com/ctxrs/ctx/issues/306), [#327](https://github.com/ctxrs/ctx/issues/327),
+  [#506](https://github.com/ctxrs/ctx/issues/506), [#610](https://github.com/ctxrs/ctx/issues/610),
+  [#614](https://github.com/ctxrs/ctx/issues/614), and [#619](https://github.com/ctxrs/ctx/issues/619).
+- [@hampsterx](https://github.com/hampsterx): [#171](https://github.com/ctxrs/ctx/issues/171),
+  [#176](https://github.com/ctxrs/ctx/issues/176), [#177](https://github.com/ctxrs/ctx/issues/177),
+  [#181](https://github.com/ctxrs/ctx/issues/181), [#247](https://github.com/ctxrs/ctx/issues/247),
+  [#492](https://github.com/ctxrs/ctx/issues/492)
+- [@rNoz](https://github.com/rNoz): [#230](https://github.com/ctxrs/ctx/issues/230),
+  [#248](https://github.com/ctxrs/ctx/issues/248), [#260](https://github.com/ctxrs/ctx/issues/260),
+  [#261](https://github.com/ctxrs/ctx/issues/261), [#275](https://github.com/ctxrs/ctx/issues/275),
+  [#277](https://github.com/ctxrs/ctx/issues/277), [#362](https://github.com/ctxrs/ctx/issues/362)
+- [@mrm007](https://github.com/mrm007): [#597](https://github.com/ctxrs/ctx/issues/597),
+  [#621](https://github.com/ctxrs/ctx/issues/621), [#624](https://github.com/ctxrs/ctx/issues/624)
+- [@soichisumi](https://github.com/soichisumi): [#158](https://github.com/ctxrs/ctx/issues/158),
+  [#159](https://github.com/ctxrs/ctx/issues/159)
+- [@atharva-patill](https://github.com/atharva-patill):
+  [#161](https://github.com/ctxrs/ctx/issues/161), [#164](https://github.com/ctxrs/ctx/issues/164)
+- [@xodn348](https://github.com/xodn348): [#60](https://github.com/ctxrs/ctx/issues/60)
+- [@mgitterle](https://github.com/mgitterle): [#205](https://github.com/ctxrs/ctx/issues/205)
+- [@rafidka](https://github.com/rafidka): [#405](https://github.com/ctxrs/ctx/issues/405)
+
+Thank you to everyone who tested ctx against real histories, reported failures,
+supplied benchmarks, and contributed fixes.
+
+### Full changelog
+
+ctx 1.0 includes 391 merged PRs since v0.25.0.
+
+[View the full v0.25.0 to v1.0.0 changelog](https://github.com/ctxrs/ctx/compare/v0.25.0...v1.0.0).
+
+## 0.25.0
+
+2026-07-13
+
+### Added
+
+- Added an opt-in background daemon that keeps local history fresh, owns
+  semantic indexing, and serves search queries without reopening the index for
+  each command.
+- Added opt-in hybrid semantic search using the pinned
+  `intfloat/multilingual-e5-small` model across the supported release matrix.
+  Apple Silicon can use Core ML acceleration; managed ONNX Runtime sidecars
+  provide the CPU path on Linux, macOS, Windows, and FreeBSD.
+- Added MiMo Code integration installers and coarse local hardware capability
+  telemetry for release planning.
+
+### Changed
+
+- Lexical search now uses OR semantics by default and ranks conversational user
+  and assistant messages ahead of lower-value event records.
+- Native refresh skips unchanged histories, avoids rescanning full-text rows,
+  and bounds bulk import and WAL recovery work more carefully on large indexes.
+- macOS release binaries are now Developer ID signed and notarized.
+
+### Fixed
+
+- Updated Factory Droid, AstrBot, CodeBuddy, Junie, NanoClaw, and related native
+  importers for current on-disk formats.
+- Fixed canonical handling for workspace and file filters, made upgrade errors
+  visible in text status, and cleaned completed scheduled-upgrade state.
+- Cleaned temporary semantic model download state after verified installation
+  and tightened cross-platform runtime validation.
+
+Daemon maintenance and semantic search remain disabled by default in 0.25.0.
+After opting in through `~/.ctx/config.toml`, run `ctx setup`; `ctx status`
+reports daemon state and semantic indexing coverage. Windows binaries are
+protected by signed release metadata and SHA-256 verification but are not yet
+Authenticode-signed.
+
+### Commits and PRs
+
+- Release: [v0.25.0](https://github.com/ctxrs/ctx/releases/tag/v0.25.0)
+- Source commit: [228e05fa](https://github.com/ctxrs/ctx/commit/228e05fa0fd058822be7a362acd65cacdad24356)
+- Full diff: [v0.24.0...228e05fa](https://github.com/ctxrs/ctx/compare/v0.24.0...228e05fa0fd058822be7a362acd65cacdad24356)
+- Merged PRs: [#103](https://github.com/ctxrs/ctx/pull/103), [#107](https://github.com/ctxrs/ctx/pull/107), [#108](https://github.com/ctxrs/ctx/pull/108), [#109](https://github.com/ctxrs/ctx/pull/109), [#114](https://github.com/ctxrs/ctx/pull/114), [#115](https://github.com/ctxrs/ctx/pull/115), [#116](https://github.com/ctxrs/ctx/pull/116), [#117](https://github.com/ctxrs/ctx/pull/117), [#120](https://github.com/ctxrs/ctx/pull/120), [#121](https://github.com/ctxrs/ctx/pull/121), [#122](https://github.com/ctxrs/ctx/pull/122), [#123](https://github.com/ctxrs/ctx/pull/123), [#124](https://github.com/ctxrs/ctx/pull/124), [#129](https://github.com/ctxrs/ctx/pull/129), [#130](https://github.com/ctxrs/ctx/pull/130), [#131](https://github.com/ctxrs/ctx/pull/131), [#132](https://github.com/ctxrs/ctx/pull/132), [#133](https://github.com/ctxrs/ctx/pull/133), [#134](https://github.com/ctxrs/ctx/pull/134), [#135](https://github.com/ctxrs/ctx/pull/135), [#136](https://github.com/ctxrs/ctx/pull/136), [#137](https://github.com/ctxrs/ctx/pull/137), [#138](https://github.com/ctxrs/ctx/pull/138), [#140](https://github.com/ctxrs/ctx/pull/140), [#141](https://github.com/ctxrs/ctx/pull/141), [#142](https://github.com/ctxrs/ctx/pull/142), [#143](https://github.com/ctxrs/ctx/pull/143), [#144](https://github.com/ctxrs/ctx/pull/144), [#145](https://github.com/ctxrs/ctx/pull/145), [#146](https://github.com/ctxrs/ctx/pull/146), [#147](https://github.com/ctxrs/ctx/pull/147), [#148](https://github.com/ctxrs/ctx/pull/148), [#149](https://github.com/ctxrs/ctx/pull/149), [#150](https://github.com/ctxrs/ctx/pull/150), [#151](https://github.com/ctxrs/ctx/pull/151), and [#152](https://github.com/ctxrs/ctx/pull/152).
+
+## 0.23.0
+
+2026-07-08
+
+### Added
+
+- Added multilingual scriptgram search so unspaced and mixed-script CJK, Kana,
+  Hangul, Thai, Myanmar, and Indic queries can recall matching session and
+  event text that SQLite FTS tokenizes poorly.
+- Added a v45 local schema migration that rebuilds the scriptgram search
+  sidecars during normal CLI migration.
+
+### Changed
+
+- `ctx setup` now keeps valid local sessions searchable when nearby provider
+  files are empty or malformed.
+- Native import manifest handling now records malformed per-file failures
+  without treating every file in the source as failed.
+
+### Fixed
+
+- Fixed bundled skill installs created before `.ctx-skill.json` metadata so
+  known legacy `ctx-agent-history-search` copies upgrade as ctx-managed stale
+  installs.
+- Fixed default skill installation so a custom same-name detected agent skill is
+  preserved without failing the whole public installer flow.
+- Fixed Codex setup imports so an empty or malformed session file does not skip
+  the entire Codex sessions source.
+- Fixed Antigravity setup imports so malformed transcript JSONL files are
+  skipped while other valid Antigravity transcripts are indexed.
+- Fixed completed progress rendering so final plain and JSON progress reports
+  show 100% completion instead of `0% ... done`.
+
+### Commits and PRs
+
+- Source commit: [1bd78811](https://github.com/ctxrs/ctx/commit/1bd78811191940ab11b88a667cb8fde039b97dd8)
+- Full diff: [v0.22.0...1bd78811](https://github.com/ctxrs/ctx/compare/v0.22.0...1bd78811191940ab11b88a667cb8fde039b97dd8)
+- Merged PRs: [#101](https://github.com/ctxrs/ctx/pull/101) ([05f1f8cb](https://github.com/ctxrs/ctx/commit/05f1f8cb6e5ede4ab184792594ea00a5e67979d0)).
+- Direct commits: [1bd78811](https://github.com/ctxrs/ctx/commit/1bd78811191940ab11b88a667cb8fde039b97dd8).
+
+## 0.22.0
+
+2026-07-08
+
+### Added
+
+- Added `ctx integrations install/status mcp` for supported coding-agent MCP
+  configs, including structured config updates and conflict handling.
+- Added `ctx integrations install slash-commands` for supported command-file
+  agents, with project and global scopes.
+- Added real harness smoke coverage for MCP, bundled skill, and slash-command
+  integration flows.
+
+### Changed
+
+- Moved bundled agent skill install and status under
+  `ctx integrations install/status skills`.
+- Native provider imports now use the updated public import policy defaults,
+  retaining conversation text and safe metadata while skipping successful raw
+  outputs and diffs.
+- The explicit-metadata development installer is now named
+  `scripts/dev-install-from-metadata.sh`.
+- Public CI and release artifact checks now run through the hosted Buildkite
+  pipeline configuration.
+
+### Fixed
+
+- Fixed oversized SQLite and JSONL handling so invalid or oversized records are
+  skipped and reported without aborting nearby importable content.
+- Fixed OpenCode and Kilo message-part imports.
+- Fixed Python SDK handling of invalid UTF-8 from the local CLI.
+- Tightened README and install documentation around the current hosted and
+  unmanaged install paths.
+
+### Commits and PRs
+
+- Source commit: [a13b8a10](https://github.com/ctxrs/ctx/commit/a13b8a10c40656c2505ba2137ce9fe3f1ac3cdf0)
+- Full diff: [v0.21.0...a13b8a10](https://github.com/ctxrs/ctx/compare/v0.21.0...a13b8a10c40656c2505ba2137ce9fe3f1ac3cdf0)
+- Merged PRs: [#86](https://github.com/ctxrs/ctx/pull/86), [#87](https://github.com/ctxrs/ctx/pull/87), [#88](https://github.com/ctxrs/ctx/pull/88), [#91](https://github.com/ctxrs/ctx/pull/91), [#92](https://github.com/ctxrs/ctx/pull/92), [#93](https://github.com/ctxrs/ctx/pull/93), [#94](https://github.com/ctxrs/ctx/pull/94), [#95](https://github.com/ctxrs/ctx/pull/95), [#97](https://github.com/ctxrs/ctx/pull/97).
+- Direct commits: [37d438af](https://github.com/ctxrs/ctx/commit/37d438afca20899422192a67bff54695ac61aa1a), [095ae841](https://github.com/ctxrs/ctx/commit/095ae8414c17404e66f4213314b8ac13f8d47422), [64b82f6d](https://github.com/ctxrs/ctx/commit/64b82f6dfbfd246ccadae5bafc73ef89bd6484ac), [cdf8045f](https://github.com/ctxrs/ctx/commit/cdf8045fb19e8fd2fe17c3d2692526b367f45276), [f651ebe3](https://github.com/ctxrs/ctx/commit/f651ebe3b5839c0cea46a6816e6ae9f35a8e2e3e), [3ee32820](https://github.com/ctxrs/ctx/commit/3ee328201a87e8d44c8beee6a2ef23544e1b24e3), [cb761401](https://github.com/ctxrs/ctx/commit/cb76140159d430fd633bb0bfe78e6406b3afc53f), [f0ccbfa0](https://github.com/ctxrs/ctx/commit/f0ccbfa09fa8949995abfca4b43c86c2cc216593), [deb06975](https://github.com/ctxrs/ctx/commit/deb069750b93b4fa96a027b9f9ec4210175bdb55), [1603613f](https://github.com/ctxrs/ctx/commit/1603613f6fb78413c636b2aebb0f43ec62069e1a), [a13b8a10](https://github.com/ctxrs/ctx/commit/a13b8a10c40656c2505ba2137ce9fe3f1ac3cdf0).
+
+## 0.21.0
+
+2026-07-07
+
+### Added
+
+- Added Linux ARM64 release asset support with the `ctx-linux-aarch64`
+  artifact name in the hosted release matrix.
+- Added public CI coverage and Bazel-modeled Rust crate checks for the public
+  CLI repository.
+
+### Changed
+
+- `ctx setup`, `ctx status`, and `ctx sources` now share a clearer local-source
+  inventory and scale better as supported provider coverage grows.
+- Added `--quiet` output handling for setup/status workflows so scripted
+  installs can suppress non-essential success output.
+- Native imports are source-atomic by default, and provider identities are
+  scoped by source so multiple local history roots stay distinct.
+- Provider listings now focus on importers that are supported by the public
+  CLI.
+- Local redaction and share-safety state was removed from CLI storage, JSON
+  output, and SDK contracts; local payloads and previews are stored directly.
+- Install documentation now covers unmanaged GitHub release assets, checksums,
+  `mise`, Homebrew, and source-build behavior for the current release line.
+
+### Fixed
+
+- `ctx status` is now strictly read-only and will not initialize or repair local
+  state.
+- Metadata-only provider imports are rejected before they create searchable
+  history.
+- Setup, upgrade, and install diagnostics now report clearer lifecycle state.
+- Public CI setup, clippy coverage, and release-build environment handling were
+  hardened for the current provider matrix.
+
+### Commits and PRs
+
+- Source commit: [13caeb68](https://github.com/ctxrs/ctx/commit/13caeb68ff295a4a3e0986d1fc9f9df7e249ab6c)
+- Full diff: [v0.20.0...13caeb68](https://github.com/ctxrs/ctx/compare/v0.20.0...13caeb68ff295a4a3e0986d1fc9f9df7e249ab6c)
+- Merged PRs: [#67](https://github.com/ctxrs/ctx/pull/67), [#68](https://github.com/ctxrs/ctx/pull/68), [#70](https://github.com/ctxrs/ctx/pull/70), [#73](https://github.com/ctxrs/ctx/pull/73), [#74](https://github.com/ctxrs/ctx/pull/74), [#75](https://github.com/ctxrs/ctx/pull/75), [#76](https://github.com/ctxrs/ctx/pull/76), [#77](https://github.com/ctxrs/ctx/pull/77), [#78](https://github.com/ctxrs/ctx/pull/78), [#79](https://github.com/ctxrs/ctx/pull/79), [#80](https://github.com/ctxrs/ctx/pull/80), [#81](https://github.com/ctxrs/ctx/pull/81), [#82](https://github.com/ctxrs/ctx/pull/82), [#83](https://github.com/ctxrs/ctx/pull/83), [#84](https://github.com/ctxrs/ctx/pull/84), [#85](https://github.com/ctxrs/ctx/pull/85).
+- Direct commits: [13caeb68](https://github.com/ctxrs/ctx/commit/13caeb68ff295a4a3e0986d1fc9f9df7e249ab6c).
+
+## 0.20.0
+
+2026-07-06
+
+### Added
+
+- Added native `ctx skill install` and `ctx skill status` support for the
+  bundled `ctx-agent-history-search` skill.
+- Added installer setup integration for the bundled skill, including the
+  universal `.agents` location and detected agent-specific skill folders.
+- Expanded supported local agent-history imports to 40 supported entries,
+  including Warp, Windsurf, AstrBot, OpenClaw, Hermes Agent, NanoClaw, Shelley,
+  Continue, OpenHands, Tabnine, Zed, Cline, Roo Code, and more.
+
+### Changed
+
+- Improved installer output and first-run setup guidance with clearer setup
+  status and get-started commands.
+- Made source listing UX scale better as supported agent coverage grows by
+  summarizing missing long-tail sources.
+- Updated docs and README references for native skill install and supported
+  local agent history imports.
+
+### Fixed
+
+- Fixed `--since` overflow handling.
+- Fixed Windows home-directory discovery for provider locations.
+- Fixed read-only commands so they avoid unnecessary store initialization.
+- Fixed explicit import path and history-source manifest validation.
+- Fixed native JSONL import behavior for files without importable session
+  headers.
+- Fixed whitespace-only search filters.
+- Fixed OpenCode import to index actual session messages.
+- Fixed MCP tool results to return readable text in `content[0].text`.
+- Fixed empty provider session validation.
+- Added parser, path, SQLite, timestamp, manifest, and resource-bound hardening
+  across CLI/provider import paths.
+
+### Commits and PRs
+
+- Source commit: [a0648850](https://github.com/ctxrs/ctx/commit/a0648850b200c4f4901ea95fe8f55f51f9365be4)
+- Full diff: [v0.19.0...a0648850](https://github.com/ctxrs/ctx/compare/v0.19.0...a0648850b200c4f4901ea95fe8f55f51f9365be4)
+- Merged PRs: [#38](https://github.com/ctxrs/ctx/pull/38), [#43](https://github.com/ctxrs/ctx/pull/43), [#45](https://github.com/ctxrs/ctx/pull/45), [#46](https://github.com/ctxrs/ctx/pull/46), [#47](https://github.com/ctxrs/ctx/pull/47), [#48](https://github.com/ctxrs/ctx/pull/48), [#49](https://github.com/ctxrs/ctx/pull/49), [#50](https://github.com/ctxrs/ctx/pull/50), [#54](https://github.com/ctxrs/ctx/pull/54), [#55](https://github.com/ctxrs/ctx/pull/55), [#57](https://github.com/ctxrs/ctx/pull/57), [#58](https://github.com/ctxrs/ctx/pull/58), [#61](https://github.com/ctxrs/ctx/pull/61), [#63](https://github.com/ctxrs/ctx/pull/63), [#64](https://github.com/ctxrs/ctx/pull/64), [#65](https://github.com/ctxrs/ctx/pull/65).
+- Direct commits: [4c71625c](https://github.com/ctxrs/ctx/commit/4c71625cc4d573c6bb97f241fd9a9d6c4ad913dd), [bb9be0f9](https://github.com/ctxrs/ctx/commit/bb9be0f9c6f4e9daabb5110128b423c8ba1c201e), [ba282238](https://github.com/ctxrs/ctx/commit/ba28223850b9375c024126c0813d5279734030c1), [a0648850](https://github.com/ctxrs/ctx/commit/a0648850b200c4f4901ea95fe8f55f51f9365be4).
+
+## 0.18.0
+
+2026-07-03
+
+### Added
+
+- Added hosted installer handoff marker support so managed installs can connect
+  an install attempt to later CLI lifecycle events without copying marker
+  contents into event properties.
+- Added a setup-start lifecycle event before setup completion.
+
+### Changed
+
+- Managed upgrades now preserve hosted installer handoff markers when rewriting
+  install sidecars.
+
+### Commits and PRs
+
+- Source commit: [c2e0ab6d](https://github.com/ctxrs/ctx/commit/c2e0ab6d61f0e7732a7f94fb40bfd66c46bb4779)
+- Full diff: [cc059d63...c2e0ab6d](https://github.com/ctxrs/ctx/compare/cc059d63019dacec80c4b4dbcf8dcbf623c1b1a8...c2e0ab6d61f0e7732a7f94fb40bfd66c46bb4779)
+- Merged PRs: [#39](https://github.com/ctxrs/ctx/pull/39) ([c2e0ab6d](https://github.com/ctxrs/ctx/commit/c2e0ab6d61f0e7732a7f94fb40bfd66c46bb4779)).
+
+## 0.17.0
+
+2026-07-03
+
+### Added
+
+- Added exact file-only search behavior for path-scoped queries.
+- Added SDK validation and error coverage for required search intent across the
+  generated clients.
+
+### Changed
+
+- `ctx search` now requires explicit search intent; empty queries no longer fall
+  back to broad results.
+- Native path imports now require an explicit provider.
+- Provider provenance is scoped by source so multi-source imports preserve
+  distinct event and file-touch identities.
+- Local preview redaction docs now clarify that search output is local private
+  transcript text, not share-safe redacted text.
+
+### Fixed
+
+- Hardened malformed config handling so invalid config fails loudly.
+- Hardened read-only search, doctor, upgrade diagnostics, and upgrade locking
+  paths.
+- Skipped unreadable child directories while probing provider roots.
+- Initialized empty stores in refresh-off CLI tests.
+
+### Commits and PRs
+
+- Source commit: [cc059d63](https://github.com/ctxrs/ctx/commit/cc059d63019dacec80c4b4dbcf8dcbf623c1b1a8)
+- Full diff: [f78a0973...cc059d63](https://github.com/ctxrs/ctx/compare/f78a0973f0b7fd971af0f2d690ac2e31dca25af0...cc059d63019dacec80c4b4dbcf8dcbf623c1b1a8)
+- Merged PRs: [#36](https://github.com/ctxrs/ctx/pull/36) ([2630d13e](https://github.com/ctxrs/ctx/commit/2630d13e5199ebc912c66564fae5c2611cafc37e)); [#37](https://github.com/ctxrs/ctx/pull/37) ([cc059d63](https://github.com/ctxrs/ctx/commit/cc059d63019dacec80c4b4dbcf8dcbf623c1b1a8)).
+- Direct commits: [b1084572](https://github.com/ctxrs/ctx/commit/b1084572cd4a8784edf1837437f74de5e2f04563), [9e2ed1fd](https://github.com/ctxrs/ctx/commit/9e2ed1fdfa61931028616741acfc5b754c29b04c), [66497887](https://github.com/ctxrs/ctx/commit/66497887fc5f8a09c2f1b037a57c3ed55d42aefd), [1ab83050](https://github.com/ctxrs/ctx/commit/1ab83050b0261f965e7db26060ab04d546605d3b), [613b1abc](https://github.com/ctxrs/ctx/commit/613b1abc53912bb5597971207e73b04f9f2e9348), [80106f7f](https://github.com/ctxrs/ctx/commit/80106f7ff89331e0073478ceb4fb329e31fce5cc), [1ae35f9b](https://github.com/ctxrs/ctx/commit/1ae35f9b55fba10643a199e76d61764b881ab1ff), [fd22ab07](https://github.com/ctxrs/ctx/commit/fd22ab073c6e70f3e76b11c949929e51bcf3d0fe), [a6a3f947](https://github.com/ctxrs/ctx/commit/a6a3f947abb3cb377abc2e2e24a4a97f0fcf1e38), [38241f0c](https://github.com/ctxrs/ctx/commit/38241f0c1d167b2f98b358d8d8fa1c37807f66ac).
+
+## 0.16.0
+
+2026-07-02
+
+### Added
+
+- Added `ctx-history-jsonl-v1` imports for explicit JSONL interchange files.
+- Added local history-source plugins: a manifest plus script or binary command
+  that streams `ctx-history-jsonl-v1` records to stdout.
+- Added custom history-source filters and cursor handoff to CLI and MCP
+  source/search flows.
+
+### Changed
+
+- `ctx sources`, `ctx import`, `ctx search`, and MCP source/search flows now
+  understand custom history sources.
+- Search-time refresh can run enabled custom history plugins before querying.
+- Plugin docs are linked from the README, embedded docs, and ctx.rs site.
+- README and import-source UX were tightened.
+
+### Fixed
+
+- Fixed plugin timeout handling when helper descendants keep stdout or stderr
+  open past the configured source timeout.
+- Improved the error for nonexistent import paths.
+
+### Commits and PRs
+
+- Source commit: [f78a0973](https://github.com/ctxrs/ctx/commit/f78a0973f0b7fd971af0f2d690ac2e31dca25af0)
+- Full diff: [b4280575...f78a0973](https://github.com/ctxrs/ctx/compare/b42805757e85b31f1b951fbbd839b02e33424525...f78a0973f0b7fd971af0f2d690ac2e31dca25af0)
+- Merged PRs: [#23](https://github.com/ctxrs/ctx/pull/23) ([eb48bc15](https://github.com/ctxrs/ctx/commit/eb48bc153e57587caf93c5e6739e1e950bfdb574), [92d10122](https://github.com/ctxrs/ctx/commit/92d10122292fc6a664b7ca056a3493ce39920b4d), merge [9b5e5b2f](https://github.com/ctxrs/ctx/commit/9b5e5b2fa9b9cbdbee70276e80c620dfe395d905)); [#24](https://github.com/ctxrs/ctx/pull/24) ([374a46c5](https://github.com/ctxrs/ctx/commit/374a46c5a03a47f720f4ff1c14eca094cb86b08e), merge [60315348](https://github.com/ctxrs/ctx/commit/60315348f98cf7b6347e1628a1e1420c139f80c5)); [#25](https://github.com/ctxrs/ctx/pull/25) ([4ac09671](https://github.com/ctxrs/ctx/commit/4ac0967193fa65b72097857cdd323f682b114c98), merge [ba5eb393](https://github.com/ctxrs/ctx/commit/ba5eb393d10173630e76961488ffced87f4dd31c)).
+- Direct commits: [f7e2f8cb](https://github.com/ctxrs/ctx/commit/f7e2f8cb5e78ead27dc5419e819dcff478b2e5a6), [a1af9c7c](https://github.com/ctxrs/ctx/commit/a1af9c7c865fbe82bcaeac91f17e7ffea56ba4c9), [ced549f4](https://github.com/ctxrs/ctx/commit/ced549f46dbd2b40351c78cec265901a6e43e66f), [78cd4b46](https://github.com/ctxrs/ctx/commit/78cd4b46a9995447b0973df29cdcd9444a75d1d9), [4dde2d96](https://github.com/ctxrs/ctx/commit/4dde2d962dc8eea435218f102d64d5fc1e490595), [10cfd711](https://github.com/ctxrs/ctx/commit/10cfd7113483a3c177d237bc878298efcb948390), [f78a0973](https://github.com/ctxrs/ctx/commit/f78a0973f0b7fd971af0f2d690ac2e31dca25af0).
+
+## 0.15.0
+
+2026-07-01
+
+### Added
+
+- Added first-class local history import and search support for OpenClaw,
+  Hermes, NanoClaw, and AstrBot.
+
+### Changed
+
+- Updated provider docs and fixture coverage for the new native sources.
+
+### Commits and PRs
+
+- Source commit: [b4280575](https://github.com/ctxrs/ctx/commit/b42805757e85b31f1b951fbbd839b02e33424525)
+- Full diff: [b0d938aa...b4280575](https://github.com/ctxrs/ctx/compare/b0d938aa45cd3375548f28029ca98247d5a26a4e...b42805757e85b31f1b951fbbd839b02e33424525)
+- Merged PRs: [#21](https://github.com/ctxrs/ctx/pull/21) ([84bd1d24](https://github.com/ctxrs/ctx/commit/84bd1d249bde35ad48611b1b45662c7d549d08f6), merge [7d71efd7](https://github.com/ctxrs/ctx/commit/7d71efd756c6d0b63f31b54d7aabe3c58fc4ca22)); [#22](https://github.com/ctxrs/ctx/pull/22) ([6df3f7ae](https://github.com/ctxrs/ctx/commit/6df3f7ae623ba2752e563ade68844be75043b9df), merge [b4280575](https://github.com/ctxrs/ctx/commit/b42805757e85b31f1b951fbbd839b02e33424525)).
+
+## 0.14.0
+
+2026-07-01
+
+### Added
+
+- Added experimental in-repo agent-history SDKs while keeping them
+  non-publishing.
+- Added privacy-safe telemetry device identity support.
+
+### Changed
+
+- Cross-built macOS CLI artifacts from Linux with pinned Zig and
+  `cargo-zigbuild` tooling.
+- Hardened release and archive coverage.
+- Renamed SDK contracts and docs around the agent-history naming.
+
+### Fixed
+
+- Fixed Swift SDK full-toolchain tests.
+- Cleaned up a clippy fixture issue in store archive-validation tests.
+
+### Commits and PRs
+
+- Source commit: [b0d938aa](https://github.com/ctxrs/ctx/commit/b0d938aa45cd3375548f28029ca98247d5a26a4e)
+- Full diff: [bad3cace...b0d938aa](https://github.com/ctxrs/ctx/compare/bad3cace3ed578199d90bf014cfcf3ea12208260...b0d938aa45cd3375548f28029ca98247d5a26a4e)
+- Merged PRs: [#20](https://github.com/ctxrs/ctx/pull/20) ([42ab67f5](https://github.com/ctxrs/ctx/commit/42ab67f571fbf85817dce57f8e39eb9eca017c36), merge [c3bffbdc](https://github.com/ctxrs/ctx/commit/c3bffbdc2a9cba40ce93a15a7725027e08678bc4)).
+- Direct commits: [6ba82519](https://github.com/ctxrs/ctx/commit/6ba82519f9ac8aba914970d6dcd981a366dabab5), [be42c1a6](https://github.com/ctxrs/ctx/commit/be42c1a6301c909d7422fa1dbcfcb5e7b1ed17cf), [71c3b3c9](https://github.com/ctxrs/ctx/commit/71c3b3c9c3ac271e69e1946fd3148db06a59503a), [782b8e32](https://github.com/ctxrs/ctx/commit/782b8e32d6b2fa32c719b98662eaa9ed117674b5), [d02c30fa](https://github.com/ctxrs/ctx/commit/d02c30fa81c5042dcff8e398a1ff5a8afc4cb587), [647d7889](https://github.com/ctxrs/ctx/commit/647d7889d0a404ca7ebf3ca02a66e174cc2b3165), [0540c26e](https://github.com/ctxrs/ctx/commit/0540c26e9fd56d01d715bfe66ddb9df7645fa7ec), [93a0c10b](https://github.com/ctxrs/ctx/commit/93a0c10b9af0687c30cdf713eea136b5320d6955), [b0d938aa](https://github.com/ctxrs/ctx/commit/b0d938aa45cd3375548f28029ca98247d5a26a4e).
+
+## 0.13.0
+
+2026-07-01
+
+### Added
+
+- Added embedded docs for SQL, MCP, and upgrade topics.
+- Added `ctx doctor` progress output.
+- Added richer agent skill guidance for advanced ctx workflows.
+
+### Changed
+
+- `ctx search` excludes subagent sessions by default, with
+  `--include-subagents` for explicit subagent coverage.
+- Search filter state and legacy JSON output were cleaned up.
+- Provider display names and provider filter docs were clarified.
+- Darwin CLI artifact generation can run from Linux through `cargo-zigbuild`.
+
+### Fixed
+
+- Fixed catalog import checkpoint state.
+- Kept checkpoint helper tests clippy-clean.
+- Suppressed weak embedded-doc search matches and added recovery suggestions.
+
+### Commits and PRs
+
+- Source commit: [bad3cace](https://github.com/ctxrs/ctx/commit/bad3cace3ed578199d90bf014cfcf3ea12208260)
+- Full diff: [74bb09cf...bad3cace](https://github.com/ctxrs/ctx/compare/74bb09cfb8ca4f1dcc23b2f6c5e810b83566ecd9...bad3cace3ed578199d90bf014cfcf3ea12208260)
+- Merged PRs: [#17](https://github.com/ctxrs/ctx/pull/17) ([81ba338a](https://github.com/ctxrs/ctx/commit/81ba338a13a6a86ede095dead00c4f261d7651f1), merge [22c2fde6](https://github.com/ctxrs/ctx/commit/22c2fde6ab8759118c71aea3accc4a41c87af767)).
+- Direct commits: [d737d2dd](https://github.com/ctxrs/ctx/commit/d737d2ddebdd0b63df09bdd50a687749f4552be7), [010666b8](https://github.com/ctxrs/ctx/commit/010666b8ab873f60f478467322756725430c540f), [3effe403](https://github.com/ctxrs/ctx/commit/3effe4037503631d7e5afb571d30048a25402350), [bf0c0319](https://github.com/ctxrs/ctx/commit/bf0c0319b5bb709f16dcbe4f4e6b47cc6e37b04b), [9b7a68b5](https://github.com/ctxrs/ctx/commit/9b7a68b5d43a53e4a0957f4303f7402b93b8fb3e), [48038596](https://github.com/ctxrs/ctx/commit/480385960c6312bc0e6552f26daf3cdca450d801), [0d1838db](https://github.com/ctxrs/ctx/commit/0d1838dbc257636824f18a842e478d42276871d1), [b7c77800](https://github.com/ctxrs/ctx/commit/b7c778003c65ba0e03de934a3f025ee6342275f8), [ebafca46](https://github.com/ctxrs/ctx/commit/ebafca4633eaa2b79bf84bb8d6e728230e02f3cf), [87c543c6](https://github.com/ctxrs/ctx/commit/87c543c68511f82acfe83352c59ea952a4b31822), [e6886030](https://github.com/ctxrs/ctx/commit/e6886030e8a2a5bd72c59257957304e12eac9b7a), [3d1282d6](https://github.com/ctxrs/ctx/commit/3d1282d6411b949493a0d00d55fd3c43a4b065c7), [f71d114c](https://github.com/ctxrs/ctx/commit/f71d114c180c4262d0d77592103ddd4ee05ac1a6), [34d641d0](https://github.com/ctxrs/ctx/commit/34d641d0b4b72a442b8f9f8393a7f75d9ac2fbdd), [f7775be9](https://github.com/ctxrs/ctx/commit/f7775be9793058cf8a852490569e5e54f0df8fd0), [572ba143](https://github.com/ctxrs/ctx/commit/572ba1438d3200c008231c67248d9b478b0a3525), [bad3cace](https://github.com/ctxrs/ctx/commit/bad3cace3ed578199d90bf014cfcf3ea12208260).
+
+## 0.12.0
+
+2026-06-30
+
+### Added
+
+- Added `ctx sql` for one bounded, read-only SQL statement over the local
+  store.
+- Added the MCP `sql` tool for advanced agent queries.
+- Added stable read-only views: `ctx_sessions`, `ctx_events`,
+  `ctx_files_touched`, and `ctx_sources`.
+- Added SQL input from an argument, stdin, or `--file`.
+
+### Changed
+
+- SQL execution is bounded by rows, columns, SQL size, value size, SQLite
+  allocation, and timeout limits.
+
+### Commits and PRs
+
+- Source commit: [74bb09cf](https://github.com/ctxrs/ctx/commit/74bb09cfb8ca4f1dcc23b2f6c5e810b83566ecd9)
+- Full diff: [9a38a12a...74bb09cf](https://github.com/ctxrs/ctx/compare/9a38a12a5c5b5c9fcdb3b05318e2b29bd8811641...74bb09cfb8ca4f1dcc23b2f6c5e810b83566ecd9)
+- Direct commits: [74bb09cf](https://github.com/ctxrs/ctx/commit/74bb09cfb8ca4f1dcc23b2f6c5e810b83566ecd9).
+
+## 0.11.0
+
+2026-06-30
+
+### Added
+
+- Added signed managed upgrade checks and apply flow through `ctx upgrade`.
+- Added background auto-upgrade checks for hosted-installer-managed installs.
+- Added built-in documentation through `ctx docs`.
+- Added generated man pages through `ctx docs man`.
+
+### Changed
+
+- Hosted Unix and PowerShell installers verify signed CLI metadata, write
+  managed install markers, and install generated Unix man pages.
+- Release metadata carries explicit self-upgrade and auto-upgrade policy flags.
+
+### Commits and PRs
+
+- Source commit: [9a38a12a](https://github.com/ctxrs/ctx/commit/9a38a12a5c5b5c9fcdb3b05318e2b29bd8811641)
+- Full diff: [1bdd9943...9a38a12a](https://github.com/ctxrs/ctx/compare/1bdd9943fe76be648514f66cf93587ac176cfa15...9a38a12a5c5b5c9fcdb3b05318e2b29bd8811641)
+- Direct commits: [9a38a12a](https://github.com/ctxrs/ctx/commit/9a38a12a5c5b5c9fcdb3b05318e2b29bd8811641).
+
+## 0.10.0
+
+2026-06-30
+
+### Added
+
+- Added touched-file metadata ingestion where provider transcripts expose file
+  paths through tool calls, patches, commands, or native fields.
+- Added `ctx search --file <path>` examples and JSON contract notes for
+  touched-file matches and citations.
+- Added the README token-efficiency chart.
+
+### Changed
+
+- Search output is described as local/private transcript text, not share-safe
+  redacted text.
+- Older data roots can refresh derived search projections and re-read original
+  provider transcripts when they still exist.
+- Agent skill docs were refreshed.
+
+### Commits and PRs
+
+- Source commit: [1bdd9943](https://github.com/ctxrs/ctx/commit/1bdd9943fe76be648514f66cf93587ac176cfa15)
+- Full diff: [7331158b...1bdd9943](https://github.com/ctxrs/ctx/compare/7331158b180493c0fcf19026cda51172e9d5306f...1bdd9943fe76be648514f66cf93587ac176cfa15)
+- Direct commits: [337d055b](https://github.com/ctxrs/ctx/commit/337d055b2c1623b1198d16a76f0fa54fe8e3d0e7), [e97ffc8b](https://github.com/ctxrs/ctx/commit/e97ffc8b8de18fd20d5c9ed232570bdf325b91f7), [94053dc5](https://github.com/ctxrs/ctx/commit/94053dc5166bca2557d9fdaeca35cf2c1bb7599a), [6d5c674f](https://github.com/ctxrs/ctx/commit/6d5c674f53419649f2a7dca1ad0dcb9868c542fa), [140f8821](https://github.com/ctxrs/ctx/commit/140f8821cffa81e56d2039b8a7046102b60e86e6), [3dffbf8b](https://github.com/ctxrs/ctx/commit/3dffbf8b0dee22f8319ccf522f5f557798241994), [d304c2f2](https://github.com/ctxrs/ctx/commit/d304c2f2d23118ef4eae6c69a2f399c49cfcb036), [8fcbf589](https://github.com/ctxrs/ctx/commit/8fcbf5896597a36526464b88cb167c078ce66aaf), [1bdd9943](https://github.com/ctxrs/ctx/commit/1bdd9943fe76be648514f66cf93587ac176cfa15).
+
+## 0.8.0
+
+2026-06-29
+
+### Changed
+
+- Removed redundant top-level `ctx list`, `ctx export`, and `ctx validate`
+  commands.
+- Kept `ctx doctor` as the storage health command.
+- Moved transcript file writing to `ctx show session --out`.
+- Updated docs, JSON contracts, security notes, and installed agent
+  instructions for the smaller command surface.
+
+### Commits and PRs
+
+- Source commit: [7331158b](https://github.com/ctxrs/ctx/commit/7331158b180493c0fcf19026cda51172e9d5306f)
+- Full diff: [70df37e4...7331158b](https://github.com/ctxrs/ctx/compare/70df37e4055bc27d8c0b47b2849ca61f9115d8a6...7331158b180493c0fcf19026cda51172e9d5306f)
+- Direct commits: [7331158b](https://github.com/ctxrs/ctx/commit/7331158b180493c0fcf19026cda51172e9d5306f).
+
+## 0.7.0
+
+2026-06-29
+
+### Changed
+
+- Removed the public top-level `ctx research` command and MCP `research` tool.
+- Kept history research as an agent workflow composed from `ctx search`, scoped
+  `ctx search --session`, and `ctx show`.
+- Updated docs and agent skill instructions to use the composable commands.
+
+### Commits and PRs
+
+- Source commit: [70df37e4](https://github.com/ctxrs/ctx/commit/70df37e4055bc27d8c0b47b2849ca61f9115d8a6)
+- Full diff: [9a005c87...70df37e4](https://github.com/ctxrs/ctx/compare/9a005c87c10d3a843dd53474f3000f504447b41f...70df37e4055bc27d8c0b47b2849ca61f9115d8a6)
+- Direct commits: [70df37e4](https://github.com/ctxrs/ctx/commit/70df37e4055bc27d8c0b47b2849ca61f9115d8a6).
+
+## 0.6.0
+
+2026-06-29
+
+### Added
+
+- Added the read-only MCP stdio server.
+- Added deterministic research packets and performance gates.
+- Added real-corpus search quality benchmarks.
+
+### Changed
+
+- Default search output became more compact and action-oriented, including
+  inspect commands for follow-up retrieval.
+- Session transcript rendering defaults toward lite output.
+- `ctx status` source counting is faster.
+- Installed agent skill/plugin instructions were synced with the refined CLI
+  flow.
+
+### Fixed
+
+- Satisfied strict clippy for the CLI UX changes.
+- Kept session metrics scoped to session-search results.
+
+### Commits and PRs
+
+- Source commit: [9a005c87](https://github.com/ctxrs/ctx/commit/9a005c87c10d3a843dd53474f3000f504447b41f)
+- Full diff: [c7d95fcf...9a005c87](https://github.com/ctxrs/ctx/compare/c7d95fcfa6aecd1aef05f512ba94e60457896408...9a005c87c10d3a843dd53474f3000f504447b41f)
+- Direct commits: [4e826ca6](https://github.com/ctxrs/ctx/commit/4e826ca6394b598e1963a0d892febe7b8b9c56fc), [80a79424](https://github.com/ctxrs/ctx/commit/80a7942444a1613614a05d67f8078c29611de658), [adb4db50](https://github.com/ctxrs/ctx/commit/adb4db50713d12b25d53c8ebe2f935fd2b9f44ff), [f12e22af](https://github.com/ctxrs/ctx/commit/f12e22af094afdcc0da80a12d6888067e7881d01), [d53fe7cc](https://github.com/ctxrs/ctx/commit/d53fe7cc9dde2aa0591f3acb71930552ede67f4c), [ab62d57f](https://github.com/ctxrs/ctx/commit/ab62d57f0e05ef615893204466d502b345e60df7), [81cda0d1](https://github.com/ctxrs/ctx/commit/81cda0d12b600cd271480db2a8361d81d6888f07), [363a7c97](https://github.com/ctxrs/ctx/commit/363a7c9743330de11e78f9093acab59cfb23447e), [0ff9f14d](https://github.com/ctxrs/ctx/commit/0ff9f14d98df9c6568aa3239d398fd06dd1234b0), [c653149a](https://github.com/ctxrs/ctx/commit/c653149a844cfb80908db25a5f01418a8d9a6c3a), [a7f4386f](https://github.com/ctxrs/ctx/commit/a7f4386f7dcbf0658fa5c5ba6e9ffb97cd23a887), [9a005c87](https://github.com/ctxrs/ctx/commit/9a005c87c10d3a843dd53474f3000f504447b41f).
+
+## 0.5.0
+
+2026-06-27
+
+### Changed
+
+- Moved indexed history item counting into the store so setup/search checks no
+  longer had to enumerate every session and event.
+- Avoided doing that count unless search had no results and needed a useful
+  next step.
+- Updated package versions and public artifact checks for the release.
+
+### Commits and PRs
+
+- Source commit: [c7d95fcf](https://github.com/ctxrs/ctx/commit/c7d95fcfa6aecd1aef05f512ba94e60457896408)
+- Branch diff: [8c55c2ca...c7d95fcf](https://github.com/ctxrs/ctx/compare/8c55c2cad5f40aaf504cdbfd6904443f47bd86f7...c7d95fcfa6aecd1aef05f512ba94e60457896408)
+- Direct commits: [8c55c2ca](https://github.com/ctxrs/ctx/commit/8c55c2cad5f40aaf504cdbfd6904443f47bd86f7), [eb6a460a](https://github.com/ctxrs/ctx/commit/eb6a460a84510e5d0cc2cf41e2bf0a6bb7e16a1c), [c7d95fcf](https://github.com/ctxrs/ctx/commit/c7d95fcfa6aecd1aef05f512ba94e60457896408).
+
+## 0.4.0
+
+2026-06-26
+
+### Changed
+
+- Made search refresh incrementally import discovered native provider sources.
+- Preserved Codex tail state through recataloging.
+- Avoided global FTS rebuilds during normal refresh.
+
+### Fixed
+
+- Added regression and performance coverage for no-op and tail-refresh paths.
+
+### Commits and PRs
+
+- Source commit: [abc08a15](https://github.com/ctxrs/ctx/commit/abc08a1558769c6cade174537e1e55ee10cd5e37)
+- Full diff: [5cf4f497...abc08a15](https://github.com/ctxrs/ctx/compare/5cf4f49704626024198b32cd345564f3cc370d71...abc08a1558769c6cade174537e1e55ee10cd5e37)
+- Direct commits: [abc08a15](https://github.com/ctxrs/ctx/commit/abc08a1558769c6cade174537e1e55ee10cd5e37).
+
+## 0.3.0
+
+2026-06-26
+
+### Added
+
+- Added clearer provider source discovery and importability reporting for
+  `ctx sources`.
+- Added Codex incremental import performance coverage.
+
+### Changed
+
+- Improved search refresh controls and freshness reporting.
+- Tightened hosted installer setup and search behavior.
+
+### Fixed
+
+- Fixed an incremental performance clippy lint.
+
+### Commits and PRs
+
+- Source commit: [5cf4f497](https://github.com/ctxrs/ctx/commit/5cf4f49704626024198b32cd345564f3cc370d71)
+- Full diff: [22b94fe3...5cf4f497](https://github.com/ctxrs/ctx/compare/22b94fe3c76eece7836c5b528e9f9e463b421943...5cf4f49704626024198b32cd345564f3cc370d71)
+- Direct commits: [d738d919](https://github.com/ctxrs/ctx/commit/d738d9196e9db40309ae54eee18e65ce4b9bc113), [0920d005](https://github.com/ctxrs/ctx/commit/0920d005c3c25296f24e394aa49d8448ea1ef46d), [5cf4f497](https://github.com/ctxrs/ctx/commit/5cf4f49704626024198b32cd345564f3cc370d71).
+
+## 0.2.0
+
+2026-06-25
+
+### Added
+
+- Shipped the local SQLite index for agent-history sessions and events.
+- Supported setup, source discovery, import, search, show, locate, doctor, and
+  JSON output for agent workflows.
+- Included native local-history imports for the first supported coding-agent
+  formats.
+- Published hosted installers and cross-platform CLI artifacts.
+
+### Fixed
+
+- Fixed OpenCode import sequencing before the stable metadata refresh.
+
+### Commits and PRs
+
+- Source commit: [22b94fe3](https://github.com/ctxrs/ctx/commit/22b94fe3c76eece7836c5b528e9f9e463b421943)
+- Notable commits: [dc90632a](https://github.com/ctxrs/ctx/commit/dc90632ab2ca56d6ce6f22bd1d5e5b5d65a65473), [22b94fe3](https://github.com/ctxrs/ctx/commit/22b94fe3c76eece7836c5b528e9f9e463b421943).

@@ -52,8 +52,7 @@ pub(in crate::upgrade) fn run_windows_replacement_helper<D: DaemonUpgradePort + 
 
 #[cfg(windows)]
 pub(in crate::upgrade) use windows::{
-    open_managed_pair_parent, prepare_managed_pair_helper, spawn_managed_pair_helper,
-    write_managed_pair_helper_ready,
+    open_managed_pair_parent, spawn_managed_pair_helper, write_managed_pair_helper_ready,
 };
 
 #[cfg(unix)]

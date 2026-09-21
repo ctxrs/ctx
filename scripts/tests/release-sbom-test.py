@@ -497,12 +497,28 @@ repository = "https://example.invalid/{name}"
         (self.handoff / FACTORY_MANIFEST).write_bytes(factory_payload)
         (self.handoff / FACTORY_COMPLETION).write_bytes(completion_payload)
 
+        ci = self.canonical_json({"kind": "ctx-normal-ci-result", "schema_version": 1,
+            "mode": "ci", "source_commit": COMMIT, "status": "passed"})
+        validation = self.canonical_json({"kind": "ctx-release-validation", "schema_version": 1,
+            "source_commit": COMMIT, "validation_policy": "factory-only-human-override-v1",
+            "normal_ci": {"status": "passed", "receipt": self.file_record("normal-ci.json", ci)},
+            "nightly": "not_run", "release_tier": "not_run", "native_execution": {
+                p: {"status": "not_run"} for p in ("linux-x64", "linux-aarch64", "macos-arm64", "macos-x64", "windows-x64")}})
+        signature = self.canonical_json({"kind": "ctx-windows-authenticode-signing", "schema_version": 1,
+            "artifact_sha256": hashlib.sha256(source_payloads["ctx.exe"]).hexdigest(),
+            "artifact_size": len(source_payloads["ctx.exe"])})
+        for name, payload in (("normal-ci.json", ci), ("release-validation.json", validation),
+                              ("windows-authenticode.json", signature)):
+            (self.handoff / name).write_bytes(payload)
+
         handoff = {
             "candidate_manifests": [self.file_record(name, source_payloads[name])
                                     for name in CORE_CANDIDATE_MANIFESTS],
             "factory_completion": self.file_record(FACTORY_COMPLETION,
                                                    completion_payload),
             "factory_manifest": self.file_record(FACTORY_MANIFEST, factory_payload),
+            "validation": self.file_record("release-validation.json", validation),
+            "windows_signature": self.file_record("windows-authenticode.json", signature),
             "kind": "ctx-public-core-github-handoff",
             "release_sums": self.file_record("SHA256SUMS", sums_payload),
             "schema_version": 1,
@@ -524,6 +540,8 @@ repository = "https://example.invalid/{name}"
             ("factory_completion", FACTORY_COMPLETION),
             ("factory_manifest", FACTORY_MANIFEST),
             ("release_sums", "SHA256SUMS"),
+            ("validation", "release-validation.json"),
+            ("windows_signature", "windows-authenticode.json"),
         ):
             value[field] = self.file_record(name, (self.handoff / name).read_bytes())
         payload = self.canonical_json(value)
@@ -911,9 +929,9 @@ repository = "https://example.invalid/{name}"
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("does not bind third_party_notices", rejected.stderr)
 
-    def test_core_handoff_verifies_the_exact_20_file_authority(self) -> None:
+    def test_core_handoff_verifies_the_exact_23_file_authority(self) -> None:
         self.prepare_core_handoff()
-        self.assertEqual(len(list(self.handoff.iterdir())), 20)
+        self.assertEqual(len(list(self.handoff.iterdir())), 23)
         self.assertEqual(len((self.handoff / "SHA256SUMS").read_text().splitlines()), 15)
         self.assertFalse(any("runtime" in path.name for path in self.handoff.iterdir()))
         self.assertEqual(self.run_command("verify-release").stdout.strip(),
@@ -938,6 +956,9 @@ repository = "https://example.invalid/{name}"
             ("completion-digest", FACTORY_COMPLETION,
              "factory and completion bindings disagree"),
             ("inventory-name", "ctx.exe", "exact production inventory"),
+            ("coverage", "release-validation.json", "release validation does not describe"),
+            ("ci", "normal-ci.json", "requires passed normal CI"),
+            ("signature", "windows-authenticode.json", "differs from the final executable"),
         ]
         cases.extend(
             ("candidate-digest", name, "candidate digest sidecar")
@@ -1001,6 +1022,16 @@ repository = "https://example.invalid/{name}"
                         if item["name"] == "ctx.candidate.json"
                     )
                     record["sha256"] = "f" * 64
+                    path.write_bytes(self.canonical_json(value))
+                    self.reauthorize_handoff()
+                elif mutation in ("coverage", "ci", "signature"):
+                    value = json.loads(path.read_bytes())
+                    if mutation == "coverage":
+                        value["nightly"] = "passed"
+                    elif mutation == "ci":
+                        value["source_commit"] = "f" * 40
+                    else:
+                        value["artifact_sha256"] = "f" * 64
                     path.write_bytes(self.canonical_json(value))
                     self.reauthorize_handoff()
                 elif mutation == "inventory-name":

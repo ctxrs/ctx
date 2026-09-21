@@ -32,8 +32,7 @@ to manage `PATH` yourself.
 
 For a custom location, set `CTX_BIN_DIR` on Unix or pass `-BinDir` to the
 PowerShell installer. Use an absolute path ending in `bin`, such as
-`$HOME/ctx tools/bin`, so the companion can be installed beside it under
-`libexec`. Quote paths containing spaces. Open a new terminal after installation
+`$HOME/ctx tools/bin`. Quote paths containing spaces. Open a new terminal after installation
 and check `ctx --version`; see [PATH troubleshooting](troubleshooting.md#ctx-command-not-found-after-install)
 if it selects a different installation.
 
@@ -312,16 +311,21 @@ supported machine-readable retrieval API for scripts and exact field
 extraction. It contains cited snippets and source metadata, but it is retrieved
 source material rather than generated analysis.
 
-## 7. Optional Pro Activation
+## 7. Trace Code To Its Agent Session
 
-Official managed ctx installations include a separately signed private
-companion. Installing it does not by itself activate Pro access. An eligible
-fresh interactive install can start a trial during setup; use `--no-pro-trial`
-on Unix, `-NoProTrial` on Windows, or `CTX_INSTALL_NO_PRO_TRIAL=1` to skip trial
-activation while still installing the pair. Core-only installation channels
-retain all OSS setup, import, search, and show commands. Paid routes return a
-typed companion-unavailable failure when
-the companion is absent. See [ctx Pro](managed-companion.md).
+Blame is included in ctx. Start from a file, commit, or pull request:
+
+```bash
+ctx blame file src/checkout.ts --lines 118:146
+ctx blame commit <commit-id>
+ctx blame pr https://github.com/your-org/your-repo/pull/42
+```
+
+Inspect the cited event or session to understand the evidence. If attribution
+is pending, run `ctx import --all` or `ctx setup --wait`, then retry. In manual
+indexing mode those commands complete attribution in the calling command.
+See [Blame](blame.md) for supported inputs and evidence limits.
+
 ## 8. Built-In Docs And Upgrades
 
 ```bash

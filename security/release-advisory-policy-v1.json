@@ -21,6 +21,34 @@
       "disposition": "exclude",
       "role": "private experimental TypeScript SDK development",
       "rationale": "The package is marked private and neither ships in nor constructs or operates a public CLI release."
+    },
+    {
+      "path": "services/install-site/package-lock.json",
+      "ecosystem": "npm",
+      "disposition": "scan",
+      "closure": "lockfile",
+      "role": "hosted installer package that delivers the unified public CLI"
+    },
+    {
+      "path": "services/release-api-worker/pnpm-lock.yaml",
+      "ecosystem": "npm",
+      "disposition": "scan",
+      "closure": "lockfile",
+      "role": "public release metadata service deployment"
+    },
+    {
+      "path": "services/docs-site/pnpm-lock.yaml",
+      "ecosystem": "npm",
+      "disposition": "exclude",
+      "role": "public documentation renderer",
+      "rationale": "Documentation rendering does not construct, sign, store, or serve release artifacts; its source and locked build remain in the public workspace."
+    },
+    {
+      "path": "services/telemetry-worker/pnpm-lock.yaml",
+      "ecosystem": "npm",
+      "disposition": "exclude",
+      "role": "public product telemetry receiver",
+      "rationale": "The event receiver does not construct, sign, store, or deliver release artifacts; ordinary package and database contract tests remain required."
     }
   ]
 }

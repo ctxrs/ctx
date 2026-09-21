@@ -116,6 +116,7 @@ def validate_linux_route(source: str) -> None:
             "print_tool_versions",
             LINUX_SDK_INVOCATION,
             'bash scripts/check.sh "${check_args[@]}"',
+            "emit_normal_ci_receipt",
         ],
         "Linux CI must retain its exact fail-closed execution sequence",
     )
@@ -175,6 +176,18 @@ def main() -> None:
     ]
     validate(public_ci, sdk_runner)
 
+    sequence = 'bash scripts/check.sh "${check_args[@]}"\nemit_normal_ci_receipt'
+    expect_rejection(
+        "normal CI receipt emitted before checks",
+        replace_once(public_ci, sequence,
+                     'emit_normal_ci_receipt\nbash scripts/check.sh "${check_args[@]}"'),
+        sdk_runner,
+    )
+    expect_rejection(
+        "normal CI receipt omitted",
+        replace_once(public_ci, "\nemit_normal_ci_receipt\n", "\n"),
+        sdk_runner,
+    )
     expect_rejection(
         "worker provisioning restored",
         replace_once(

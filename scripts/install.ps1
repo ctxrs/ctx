@@ -493,11 +493,15 @@ try {
     $schemaVersion = Get-MetadataValue $metadataValues "CTX_RELEASE_SCHEMA_VERSION"
     $version = Get-MetadataValue $metadataValues "CTX_RELEASE_VERSION"
     $baseUrl = Get-MetadataValue $metadataValues "CTX_RELEASE_BASE_URL"
+    $pairEnvelopeArtifact = $pairCoreObjectKey = $pairCoreChecksum = $pairCompanionObjectKey = $pairCompanionChecksum = ""
+    if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { Fail "invalid release version: $version" }
+    if ([version]$version -lt [version]"1.5.0") {
     $pairEnvelopeArtifact = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_MANAGED_PAIR_ENVELOPE_windows_x64" ""
     $pairCoreObjectKey = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_MANAGED_PAIR_CORE_OBJECT_windows_x64" ""
     $pairCoreChecksum = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_MANAGED_PAIR_CORE_SHA256_windows_x64" ""
     $pairCompanionObjectKey = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_MANAGED_PAIR_COMPANION_OBJECT_windows_x64" ""
     $pairCompanionChecksum = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_MANAGED_PAIR_COMPANION_SHA256_windows_x64" ""
+    }
     $artifact = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_ARTIFACT_windows_x64" ""
     $checksum = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_SHA256_windows_x64" ""
     $runtimeArtifact = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_ONNXRUNTIME_ARTIFACT_windows_x64" ""

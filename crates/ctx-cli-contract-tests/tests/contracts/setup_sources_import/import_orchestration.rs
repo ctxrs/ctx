@@ -1239,3 +1239,48 @@ fn explicit_import_failure_does_not_refresh_an_unrelated_cold_route() {
 
 #[path = "import_orchestration/additional.rs"]
 mod additional;
+
+#[test]
+fn persistent_daemon_startup_reconciles_absent_attribution_without_core_publication() {
+    let temp = daemon_test_root();
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n[sources]\nautomatic = false\n",
+    )
+    .unwrap();
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress=none"]));
+    let generation = setup["attribution"]["receipt"]["core_generation_id"]
+        .as_str()
+        .expect("retained empty Core generation")
+        .to_owned();
+    assert_eq!(setup["attribution"]["materialized_coverage"], "empty");
+    // Successful setup leaves its finite worker to retire after the quiet grace.
+    // Observe ownership release before starting a different daemon in this root.
+    wait_for_daemon_status(&temp, "disabled", false, "setup");
+    fs::remove_dir_all(data_root(&temp).join("search/attribution")).unwrap();
+    let _daemon = start_source_refresh_daemon_with_config(&temp, "source-refresh-only", "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n[sources]\nautomatic = false\n[search]\nsemantic = false\n");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = json_output(ctx(&temp).args(["status", "--format=json"]));
+        if status["attribution"]["currentness"] == "current" {
+            assert_eq!(
+                status["attribution"]["receipt"]["core_generation_id"],
+                generation
+            );
+            assert_eq!(
+                status["attribution"]["requested_core_generation_id"],
+                generation
+            );
+            assert_eq!(status["attribution"]["materialized_coverage"], "empty");
+            assert!(status["attribution"].get("diagnostic").is_none());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "startup failed to reconcile retained Core: {status:#}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

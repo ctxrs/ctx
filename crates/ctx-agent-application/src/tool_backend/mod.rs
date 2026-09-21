@@ -1,8 +1,9 @@
 //! Coarse host ports for agent-facing workspace, session, and context tools.
 
 use ctx_agent_integrations::tool_backend::{
-    QueryEventsRequest, ShowEventRequest, ShowSessionRequest, ToolBackendError, ToolExecutionError,
-    ToolSearchRequest, ToolSearchTerminalFacts, ToolSearchUsageFacts,
+    BlameTarget, QueryEventsRequest, ShowEventRequest, ShowSessionRequest, ToolBackendError,
+    ToolExecutionError, ToolOutcome, ToolSearchRequest, ToolSearchTerminalFacts,
+    ToolSearchUsageFacts,
 };
 use serde_json::Value;
 
@@ -34,6 +35,12 @@ pub struct SourceCatalog {
 /// One call per history operation or page. Implementations own concrete index,
 /// query, cursor, generation-pinning, and status read-model access.
 pub trait HistoryReadPort: Send + Sync {
+    fn blame(
+        &self,
+        target: BlameTarget,
+        limit: u32,
+        cursor: Option<String>,
+    ) -> Result<ToolOutcome, ToolExecutionError>;
     fn status(&self) -> Result<Value, ToolBackendError>;
 
     fn show_session(

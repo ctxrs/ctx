@@ -30,9 +30,7 @@ pub(crate) fn refresh_existing_managed_skills_on_startup(command: &CommandRoot) 
 
 fn command_is_refresh_eligible(command: &CommandRoot) -> bool {
     match command {
-        CommandRoot::Pro | CommandRoot::Blame | CommandRoot::Setup(_) | CommandRoot::Import(_) => {
-            true
-        }
+        CommandRoot::Blame(_) | CommandRoot::Setup(_) | CommandRoot::Import(_) => true,
         CommandRoot::Semantic(args) => !matches!(&args.command, SemanticCommand::Status(_)),
         CommandRoot::Sources(args) => matches!(
             &args.command,
@@ -43,8 +41,7 @@ fn command_is_refresh_eligible(command: &CommandRoot) -> bool {
             &args.command,
             DaemonCommand::Run(_) | DaemonCommand::Enable(_)
         ),
-        CommandRoot::Referral
-        | CommandRoot::Status(_)
+        CommandRoot::Status(_)
         | CommandRoot::Stats(_)
         | CommandRoot::Index(_)
         | CommandRoot::Show(_)
@@ -74,8 +71,7 @@ mod tests {
     fn ordinary_mutation_startups_are_refresh_eligible() {
         for arguments in [
             &["ctx", "setup"][..],
-            &["ctx", "pro"][..],
-            &["ctx", "blame"][..],
+            &["ctx", "blame", "src/lib.rs"][..],
             &["ctx", "import", "--all"][..],
             &["ctx", "search", "needle"][..],
             &["ctx", "search", "needle", "--refresh", "wait"][..],

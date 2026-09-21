@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "types": []
+  },
+  "files": [
+    "src/cli-install-managed-pair-contract.js",
+    "src/cli-install-shell-managed-pair.js",
+    "src/cli-install-powershell-managed-pair.js",
+    "src/test/cli-install-managed-pair.typecheck.js"
+  ]
+}

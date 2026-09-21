@@ -274,11 +274,18 @@ pub(crate) fn run_cli() -> Result<()> {
     };
 
     let search_operation = matches!(&cli.command, CommandRoot::Search(_));
+    let blame_operation = matches!(&cli.command, CommandRoot::Blame(_));
     let foreground_finite_wait = command_uses_foreground_finite_wait(&cli.command);
     let execute_command = || match cli.command {
-        CommandRoot::Pro | CommandRoot::Blame | CommandRoot::Referral => Err(anyhow::anyhow!(
-            "companion-owned command bypassed native argv routing"
-        )),
+        CommandRoot::Blame(args) => crate::commands::blame::run(
+            args,
+            &data_root,
+            analytics_draft
+                .as_mut()
+                .expect("Blame has a terminal draft")
+                .blame_mut(),
+            &mut ui,
+        ),
         CommandRoot::Setup(args) => run_setup(
             args,
             data_root.clone(),
@@ -455,12 +462,12 @@ pub(crate) fn run_cli() -> Result<()> {
         &mut ui,
     ) {
         Ok(rendered_error) => (rendered_error, None),
-        Err(error) if search_operation => (None, Some(error)),
+        Err(error) if search_operation || blame_operation => (None, Some(error)),
         Err(error) => return Err(error),
     };
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
-    let delivery_result = if search_operation {
+    let delivery_result = if search_operation || blame_operation {
         ui.flush()
             .context("flush structured terminal output")
             .and_then(|()| flush_cli_output(&mut stdout, &mut stderr).map_err(Into::into))
@@ -477,18 +484,25 @@ pub(crate) fn run_cli() -> Result<()> {
     };
     let output_duration = output_started.elapsed();
     let duration = started.elapsed();
-    let output_result = delivery_result.and_then(|()| match search_error_render_failure {
-        Some(error) => Err(error),
-        None => Ok(()),
-    });
+    let output_result =
+        delivery_result.and_then(|()| search_error_render_failure.map_or(Ok(()), Err));
     if output_result.is_ok() {
         local_usage::record_best_effort(&local_usage_authority, &usage_control, || {
-            complete_local_usage(
-                local_usage_draft,
-                result.is_ok(),
-                duration,
-                output_measurement.total_bytes(),
-            )
+            if blame_operation {
+                Some(local_usage::CompletedOperation::blame(
+                    local_usage::Surface::Cli,
+                    result.is_ok(),
+                    0,
+                    duration,
+                ))
+            } else {
+                complete_local_usage(
+                    local_usage_draft,
+                    result.is_ok(),
+                    duration,
+                    output_measurement.total_bytes(),
+                )
+            }
         });
     }
     drop(output_measurement);
@@ -502,11 +516,28 @@ pub(crate) fn run_cli() -> Result<()> {
             output_duration,
         )
     });
+    let blame_output_served = blame_operation.then(|| {
+        let facts = analytics_draft
+            .as_mut()
+            .expect("Blame has a terminal draft")
+            .blame_mut();
+        let served = output_result.is_ok() && facts.output_served != Some(false);
+        facts.output_served = Some(served);
+        if output_result.is_err() {
+            facts.failure = Some(crate::analytics::BlameFailure {
+                class: crate::analytics::BlameFailureClass::Output,
+                phase: crate::analytics::BlameFailurePhase::Output,
+            });
+        }
+        served
+    });
     let mut events = provider_refreshes.finish();
     if let Some(draft) = analytics_draft {
         if draft.should_emit() {
             events.push(draft.finish(
-                result.is_ok() && search_output_served.unwrap_or(true),
+                result.is_ok()
+                    && search_output_served.unwrap_or(true)
+                    && blame_output_served.unwrap_or(true),
                 duration,
             ));
         }
@@ -677,7 +708,7 @@ fn write_clap_output_with_line_ends(
 
 fn command_json_output(command: &CommandRoot) -> bool {
     match command {
-        CommandRoot::Pro | CommandRoot::Blame | CommandRoot::Referral => false,
+        CommandRoot::Blame(args) => args.json_output(),
         CommandRoot::Setup(args) => args.format.is_json(),
         CommandRoot::Semantic(args) => args.json_output(),
         CommandRoot::Status(args) => args.format.is_json(),
@@ -766,9 +797,9 @@ fn command_can_report_malformed_config(command: &CommandRoot) -> bool {
 
 pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDescriptor {
     let operation = match command {
-        CommandRoot::Pro | CommandRoot::Blame | CommandRoot::Referral => {
-            unreachable!("companion-owned commands are routed before Clap")
-        }
+        CommandRoot::Blame(args) => CliOperation::Blame(crate::analytics::BlameTerminalFacts::new(
+            crate::commands::blame::target_kind(&args.target().expect("validated Blame target")),
+        )),
         CommandRoot::Setup(args) => CliOperation::Setup(SetupTelemetry {
             no_daemon: args.no_daemon,
             wait: args.wait,

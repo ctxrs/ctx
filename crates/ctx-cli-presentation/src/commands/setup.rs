@@ -20,7 +20,7 @@ pub struct SetupArgs {
     pub no_daemon: bool,
     #[arg(
         long,
-        help = "Wait for the lexical refresh to publish before returning"
+        help = "Wait for history refresh and attribution indexing to complete"
     )]
     pub wait: bool,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
@@ -117,6 +117,7 @@ pub fn render_setup_human(
         ));
     }
 
+    super::append_attribution(context, &mut document, source);
     let next_command = if partial_cause.is_some() {
         "ctx doctor"
     } else if mode == "ready" {

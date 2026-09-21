@@ -59,12 +59,15 @@ for managed_pair_caller in \
   grep -F -- '--ctx-core-managed-pair-apply-v1' \
     "${repo_root}/${managed_pair_caller}" >/dev/null
 done
-if git -C "${repo_root}" grep -n -E \
-  'install-managed-pair\.py|managed_pair_installer' -- \
-  BUILD.bazel scripts ':!scripts/tests/**' ':!scripts/install-path-smoke.sh'; then
+scan_status=0
+grep -RnE --exclude-dir=tests --exclude=install-path-smoke.sh \
+  'install-managed-pair\.py|managed_pair_installer' \
+  "${repo_root}/BUILD.bazel" "${repo_root}/scripts" || scan_status=$?
+if [[ "${scan_status}" == 0 ]]; then
   printf 'superseded Python managed-pair installer is still referenced\n' >&2
   exit 1
 fi
+[[ "${scan_status}" == 1 ]] || exit "${scan_status}"
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-install-path-smoke.XXXXXX")"
 server_pid=""
@@ -173,7 +176,7 @@ CURL_CA_BUNDLE="${tmp_dir}/cert.pem" curl -fsS "https://127.0.0.1:${port}/ctx-li
 metadata="${tmp_dir}/metadata.env"
 {
   printf 'CTX_RELEASE_SCHEMA_VERSION=1\n'
-  printf 'CTX_RELEASE_VERSION=0.0.0-smoke\n'
+  printf 'CTX_RELEASE_VERSION=1.5.0\n'
   printf 'CTX_RELEASE_BASE_URL=https://127.0.0.1:%s\n' "${port}"
   printf 'CTX_RELEASE_ARTIFACT_linux_x64=ctx-linux-x64\n'
   printf 'CTX_RELEASE_SHA256_linux_x64=%s\n' "${checksum}"
@@ -195,7 +198,7 @@ mkdir -p \
 cp "${artifact}" "${tmp_dir}/${pair_core_object}"
 cp "${pair_companion}" "${tmp_dir}/${pair_companion_object}"
 pair_metadata="${tmp_dir}/metadata-pair.env"
-cp "${metadata}" "${pair_metadata}"
+sed 's/^CTX_RELEASE_VERSION=1.5.0$/CTX_RELEASE_VERSION=1.4.12/' "${metadata}" > "${pair_metadata}"
 {
   printf 'CTX_RELEASE_CHANNEL=staging\n'
   printf 'CTX_RELEASE_MANAGED_PAIR_ENVELOPE_linux_x64=%s\n' "$(basename "${pair_envelope}")"
@@ -416,16 +419,16 @@ test "$(cat "${no_daemon_env_log}")" = $'setup\n--progress\nnone\n--no-daemon'
 home_dry_run="${tmp_dir}/home-dry-run"
 mkdir -p "${home_dry_run}"
 env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_dry_run}" SHELL="/bin/bash" "${installer[@]}" --dry-run --no-setup > "${tmp_dir}/dry-run.out"
-grep -F 'Dry run: would install ctx 0.0.0-smoke (linux-x64)' "${tmp_dir}/dry-run.out" >/dev/null
-! grep -F 'Installing ctx 0.0.0-smoke (linux-x64)' "${tmp_dir}/dry-run.out" >/dev/null
+grep -F 'Dry run: would install ctx 1.5.0 (linux-x64)' "${tmp_dir}/dry-run.out" >/dev/null
+! grep -F 'Installing ctx 1.5.0 (linux-x64)' "${tmp_dir}/dry-run.out" >/dev/null
 ! grep -F 'Installed ctx binary.' "${tmp_dir}/dry-run.out" >/dev/null
 
 installer_aarch64=(bash "${repo_root}/scripts/dev-install-from-metadata.sh" --metadata "${metadata}" --platform linux-aarch64)
 home_dry_run_aarch64="${tmp_dir}/home-dry-run-aarch64"
 mkdir -p "${home_dry_run_aarch64}"
 env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_dry_run_aarch64}" SHELL="/bin/bash" "${installer_aarch64[@]}" --dry-run --no-setup > "${tmp_dir}/dry-run-aarch64.out"
-grep -F 'Dry run: would install ctx 0.0.0-smoke (linux-aarch64)' "${tmp_dir}/dry-run-aarch64.out" >/dev/null
-! grep -F 'Installing ctx 0.0.0-smoke (linux-aarch64)' "${tmp_dir}/dry-run-aarch64.out" >/dev/null
+grep -F 'Dry run: would install ctx 1.5.0 (linux-aarch64)' "${tmp_dir}/dry-run-aarch64.out" >/dev/null
+! grep -F 'Installing ctx 1.5.0 (linux-aarch64)' "${tmp_dir}/dry-run-aarch64.out" >/dev/null
 ! grep -F 'Installed ctx binary.' "${tmp_dir}/dry-run-aarch64.out" >/dev/null
 
 home_idem="${tmp_dir}/home-idem"

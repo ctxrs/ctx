@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "ctxrs/ctx",
+    "commit": "64f673f144dc53e71bc903b3d81c528897257923",
+    "files": {
+      "crates/ctx-cli/src/upgrade/command.rs": "d17d04edc92b3847e06fa5de1fe2290e55f69ad12c89bf2ee5c67256058aef51"
+    }
+  },
+  "event": {
+    "event_id": "d220e8ef-eb0b-43d9-89c8-c64806e87d93",
+    "event_name": "operation_completed",
+    "event_version": 1,
+    "occurred_at": "2026-08-30T12:34:00Z",
+    "surface": "cli",
+    "operation": "upgrade",
+    "outcome": "failure",
+    "duration_bucket": "lt_100ms",
+    "properties": {
+      "output": "human",
+      "upgrade_mode": "manual",
+      "upgrade_operation": "enable",
+      "dry_run": false,
+      "upgrade_status": "failed",
+      "upgrade_applied": false,
+      "upgrade_scheduled": false,
+      "upgrade_failure_kind": "unmanaged_install"
+    }
+  }
+}
