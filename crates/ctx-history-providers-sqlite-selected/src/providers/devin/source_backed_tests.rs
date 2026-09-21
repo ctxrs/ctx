@@ -1,32 +1,41 @@
 use ctx_history_core::{
-    AgentScope, CoreRecord, ProviderNativeSessionRelationship, SourceAnchorScope,
+    AgentScope, CoreRecord, ProviderNativeSessionRelationship, ScannedSourceCounts,
+    SourceAnchorScope,
 };
 
 use super::{
     schema::DevinNativeSchema,
-    schema_tests::{fixture_connection, mutable_fixture},
+    schema_tests::{fixture_connection, fixture_path, mutable_fixture},
     source_backed::{devin_source_key_scoped, scan_devin_snapshot, DevinScanCounts},
 };
 
 struct Scanned {
     records: Vec<CoreRecord>,
     counts: DevinScanCounts,
+    scanned_counts: ScannedSourceCounts,
     fingerprint: [u8; 32],
+    rejections: Vec<ctx_history_capture_runtime::SourceBackedRecordRejectionDraft>,
+    omitted_rejections: usize,
 }
 
 fn scan(conn: &rusqlite::Connection) -> Scanned {
     let schema = DevinNativeSchema::probe(conn).unwrap();
     let source = devin_source_key_scoped(SourceAnchorScope::Unqualified).unwrap();
     let mut records = Vec::new();
-    let scan = scan_devin_snapshot(conn, &schema, &source, &mut |record| {
+    let selector = fixture_path().to_string_lossy().into_owned();
+    let scan = scan_devin_snapshot(conn, &schema, &source, &selector, &mut |record| {
         records.push(record);
         Ok(())
     })
     .unwrap();
+    let (rejections, omitted_rejections) = scan.record_rejections.clone().into_parts();
     Scanned {
         records,
         counts: scan.counts,
+        scanned_counts: scan.scanned_counts().unwrap(),
         fingerprint: scan.logical_fingerprint,
+        rejections,
+        omitted_rejections,
     }
 }
 
@@ -51,6 +60,77 @@ fn the_fixture_projects_every_session_with_no_rejected_records() {
     );
     assert_eq!(scanned.counts.rejected_lineages, 0);
     assert_eq!(scanned.counts.rejected_splices, 0);
+    assert!(scanned.rejections.is_empty());
+    assert_eq!(scanned.omitted_rejections, 0);
+}
+
+#[test]
+fn compaction_copies_of_the_same_native_message_are_emitted_once() {
+    let scanned = fixture_scan();
+    let copies = scanned
+        .records
+        .iter()
+        .filter(|record| {
+            record.provider_session_id.as_deref() == Some("discovered-sandal")
+                && record
+                    .content
+                    .normalized_body
+                    .as_deref()
+                    .is_some_and(|body| body.contains("devinclioracleskill"))
+        })
+        .count();
+    assert_eq!(copies, 1, "the rewritten system-prefix message is one turn");
+}
+
+#[test]
+fn malformed_off_chain_json_does_not_abort_valid_sessions() {
+    let baseline = fixture_scan();
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update message_nodes set chat_message = '{', metadata = '{' \
+         where session_id = 'abounding-crest' and node_id = 26",
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.records, baseline.records);
+    assert_eq!(
+        scanned.counts.complete_records,
+        baseline.counts.complete_records
+    );
+}
+
+#[test]
+fn empty_tool_text_is_enriched_through_the_full_scan() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        concat!(
+            "update message_nodes set chat_message = json_set(chat_message, '$.content', '', ",
+            "'$.metadata.extensions.\"chisel/terminal_output\".text', '') ",
+            "where session_id = 'abounding-crest' and node_id = 28"
+        ),
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    let expected_call_id = ctx_history_core::TypedKey::utf8("exec_0").unwrap();
+    let result = scanned
+        .records
+        .iter()
+        .find(|record| {
+            record.content.activity.as_ref().is_some_and(|activity| {
+                activity.provider_call_id.as_ref() == Some(&expected_call_id)
+                    && activity.result.is_some()
+            })
+        })
+        .expect("empty native result must survive until ACP enrichment");
+    assert!(result
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("devinclitooloracle")));
 }
 
 #[test]
@@ -110,6 +190,59 @@ fn the_primary_transcript_claims_no_lineage_and_the_subagent_claims_an_exact_one
         );
         assert_ne!(record.session_id, primary_session_id);
     }
+}
+
+#[test]
+fn a_durable_background_head_projects_a_child_and_rotates_with_its_evidence() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        concat!(
+            "insert into subagent_heads (session_id, agent_id, chain_node_id, updated_at) ",
+            "values ('discovered-sandal', 'background-sidekick', 30, 1789910400)"
+        ),
+        [],
+    )
+    .unwrap();
+
+    let with_head = scan(&conn);
+    let primary_session_id = with_head
+        .records
+        .iter()
+        .find(|record| record.provider_session_id.as_deref() == Some("discovered-sandal"))
+        .map(|record| record.session_id)
+        .expect("primary session present");
+    let child = with_head
+        .records
+        .iter()
+        .filter(|record| {
+            record.provider_session_id.as_deref()
+                == Some("discovered-sandal/subagents/background-sidekick")
+        })
+        .collect::<Vec<_>>();
+    assert!(!child.is_empty(), "durable background child present");
+    for record in child {
+        assert_eq!(record.agent_scope, Some(AgentScope::Subagent));
+        assert_eq!(record.parent_session_id, Some(primary_session_id));
+        assert_eq!(record.root_session_id, Some(primary_session_id));
+        assert_eq!(
+            record.session_relationship,
+            Some(ProviderNativeSessionRelationship::Delegated)
+        );
+    }
+
+    conn.execute(
+        concat!(
+            "update subagent_heads set updated_at = updated_at + 1 ",
+            "where session_id = 'discovered-sandal' and agent_id = 'background-sidekick'"
+        ),
+        [],
+    )
+    .unwrap();
+    assert_ne!(
+        scan(&conn).fingerprint,
+        with_head.fingerprint,
+        "updated_at is part of durable-head evidence"
+    );
 }
 
 #[test]
@@ -250,7 +383,7 @@ fn the_fingerprint_notices_content_metadata_and_disposition_changes() {
     .unwrap();
     assert_ne!(scan(&conn).fingerprint, baseline, "hidden flag change");
 
-    // A session becoming un-importable.
+    // A session becoming metadata-only stays valid but rotates its evidence.
     let (_temp, conn) = mutable_fixture();
     conn.execute(
         "update sessions set main_chain_id = null where id = 'abounding-crest'",
@@ -259,7 +392,16 @@ fn the_fingerprint_notices_content_metadata_and_disposition_changes() {
     .unwrap();
     let dropped = scan(&conn);
     assert_ne!(dropped.fingerprint, baseline, "disposition change");
-    assert_eq!(dropped.counts.rejected_sessions, 1);
+    assert_eq!(dropped.counts.rejected_sessions, 0);
+
+    // A dangling non-null anchor is structurally invalid.
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update sessions set main_chain_id = 999999 where id = 'abounding-crest'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(scan(&conn).counts.rejected_sessions, 1);
 
     // A vanished tool_call_state row.
     let (_temp, conn) = mutable_fixture();
@@ -269,6 +411,76 @@ fn the_fingerprint_notices_content_metadata_and_disposition_changes() {
     )
     .unwrap();
     assert_ne!(scan(&conn).fingerprint, baseline, "tool state removal");
+}
+
+#[test]
+fn malformed_sessions_and_lineages_are_visible_in_scanned_rejections() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update sessions set main_chain_id = 999999 where id = 'abounding-crest'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        concat!(
+            "insert into subagent_heads (session_id, agent_id, chain_node_id, updated_at) ",
+            "values ('discovered-sandal', 'missing-sidekick', 999999, 1789910400)"
+        ),
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.counts.rejected_sessions, 1);
+    assert_eq!(scanned.counts.rejected_lineages, 1);
+    assert_eq!(scanned.counts.rejected_splices, 0);
+    assert_eq!(
+        scanned.scanned_counts.rejected_records,
+        scanned.counts.rejected_records + 2
+    );
+    assert_eq!(
+        scanned.scanned_counts.complete_records,
+        scanned.scanned_counts.retained_records
+            + scanned.scanned_counts.rejected_records
+            + scanned.scanned_counts.ignored_records
+    );
+    assert_eq!(scanned.rejections.len(), 2);
+    assert_eq!(scanned.omitted_rejections, 0);
+    assert!(scanned
+        .rejections
+        .iter()
+        .any(|rejection| rejection.detail.contains("abounding-crest")
+            && rejection.detail.contains("main_chain_id")));
+    assert!(scanned
+        .rejections
+        .iter()
+        .any(|rejection| rejection.detail.contains("discovered-sandal")
+            && rejection.detail.contains("subagent lineage")));
+}
+
+#[test]
+fn rejected_nodes_and_all_invalid_sources_retain_bounded_diagnostics() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update message_nodes set chat_message = '{' \
+         where session_id = 'abounding-crest' and node_id = 30",
+        [],
+    )
+    .unwrap();
+    let scanned = scan(&conn);
+    assert_eq!(scanned.counts.rejected_records, 1);
+    assert_eq!(scanned.rejections.len(), 1);
+    assert_eq!(scanned.rejections[0].line_number, 30);
+    assert!(scanned.rejections[0].detail.contains("abounding-crest"));
+
+    let (_temp, conn) = mutable_fixture();
+    conn.execute("update sessions set main_chain_id = 999999", [])
+        .unwrap();
+    let scanned = scan(&conn);
+    assert!(scanned.records.is_empty());
+    assert_eq!(scanned.scanned_counts.rejected_records, 3);
+    assert_eq!(scanned.rejections.len(), 3);
+    assert_eq!(scanned.omitted_rejections, 0);
 }
 
 #[test]
@@ -321,7 +533,8 @@ fn scan_through_a_pinned_snapshot(
     let result = (|| {
         let connection = database.connection()?;
         let schema = DevinNativeSchema::probe(connection)?;
-        let scan = scan_devin_snapshot(connection, &schema, &source, &mut |_| {
+        let selector = database_path.to_string_lossy();
+        let scan = scan_devin_snapshot(connection, &schema, &source, &selector, &mut |_| {
             emitted += 1;
             Ok(())
         })?;

@@ -44,17 +44,27 @@ const DEVIN_REQUIRED_SESSION_COLUMNS: &[&str] = &[
     "created_at",
     "last_activity_at",
     "main_chain_id",
+    "title",
+    "model",
+    "agent_mode",
     "hidden",
 ];
 const DEVIN_REQUIRED_NODE_COLUMNS: &[&str] = &[
-    "row_id",
     "session_id",
     "node_id",
     "parent_node_id",
     "chat_message",
     "created_at",
+    "metadata",
 ];
-const DEVIN_REQUIRED_TOOL_STATE_COLUMNS: &[&str] = &["session_id", "tool_call_id"];
+const DEVIN_REQUIRED_TOOL_STATE_COLUMNS: &[&str] = &[
+    "session_id",
+    "tool_call_id",
+    "tool_call_json",
+    "tool_call_update_json",
+];
+const DEVIN_REQUIRED_SUBAGENT_HEAD_COLUMNS: &[&str] =
+    &["session_id", "agent_id", "chain_node_id", "updated_at"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DevinNativeSchema {
@@ -63,6 +73,7 @@ pub(super) struct DevinNativeSchema {
     session_columns: BTreeSet<String>,
     node_columns: BTreeSet<String>,
     tool_state_columns: BTreeSet<String>,
+    subagent_head_columns: BTreeSet<String>,
 }
 
 impl DevinNativeSchema {
@@ -72,6 +83,7 @@ impl DevinNativeSchema {
         let session_columns = devin_table_columns(conn, "sessions")?;
         let node_columns = devin_table_columns(conn, "message_nodes")?;
         let tool_state_columns = devin_table_columns(conn, "tool_call_state")?;
+        let subagent_head_columns = devin_table_columns(conn, "subagent_heads")?;
         ensure_sqlite_table_columns(
             &session_columns,
             "Devin sessions table",
@@ -87,30 +99,49 @@ impl DevinNativeSchema {
             "Devin tool_call_state table",
             DEVIN_REQUIRED_TOOL_STATE_COLUMNS,
         )?;
+        ensure_sqlite_table_columns(
+            &subagent_head_columns,
+            "Devin subagent_heads table",
+            DEVIN_REQUIRED_SUBAGENT_HEAD_COLUMNS,
+        )?;
 
-        // The forest walk probes one node at a time by (session_id, node_id),
-        // so that pair must be a real unique index rather than a convention.
-        if sqlite_unique_index_for_columns(
-            conn,
-            "message_nodes",
-            &["session_id", "node_id"],
-            &DEVIN_INDEX_PROBE,
-        )?
-        .is_none()
-        {
-            return Err(CaptureError::InvalidPayload(
-                "Devin message_nodes requires a non-partial ascending UNIQUE BINARY index on (session_id, node_id) for bounded chain traversal"
-                    .to_owned(),
-            ));
+        // Every ordered scan and point lookup must ride a native unique key.
+        // Without these keys keyset paging can skip duplicate sessions, head
+        // ordering can spill to ambient temporary storage, and tool-state
+        // enrichment can choose an arbitrary duplicate row.
+        for (table, columns, purpose) in [
+            ("sessions", &["id"][..], "session keyset paging"),
+            (
+                "message_nodes",
+                &["session_id", "node_id"][..],
+                "bounded chain traversal",
+            ),
+            (
+                "tool_call_state",
+                &["session_id", "tool_call_id"][..],
+                "deterministic tool-state lookup",
+            ),
+            (
+                "subagent_heads",
+                &["session_id", "agent_id"][..],
+                "bounded durable-head ordering",
+            ),
+        ] {
+            if sqlite_unique_index_for_columns(conn, table, columns, &DEVIN_INDEX_PROBE)?.is_none()
+            {
+                return Err(CaptureError::InvalidPayload(format!(
+                    "Devin {table} requires a non-partial ascending UNIQUE BINARY index on ({}) for {purpose}",
+                    columns.join(", ")
+                )));
+            }
         }
-        devin_require_integer_row_id(conn)?;
-
         let schema_objects = devin_native_schema_objects(conn)?;
         let capability_digest = devin_capability_digest(
             schema_version,
             &session_columns,
             &node_columns,
             &tool_state_columns,
+            &subagent_head_columns,
             &schema_objects,
         );
         Ok(Self {
@@ -119,6 +150,7 @@ impl DevinNativeSchema {
             session_columns,
             node_columns,
             tool_state_columns,
+            subagent_head_columns,
         })
     }
 
@@ -139,6 +171,11 @@ impl DevinNativeSchema {
     #[cfg(test)]
     pub(super) fn has_tool_state_column(&self, column: &str) -> bool {
         self.tool_state_columns.contains(column)
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_subagent_head_column(&self, column: &str) -> bool {
+        self.subagent_head_columns.contains(column)
     }
 }
 
@@ -179,35 +216,12 @@ fn devin_table_columns(conn: &Connection, table: &str) -> Result<BTreeSet<String
     sqlite_table_columns(conn, table).map_err(CaptureError::from)
 }
 
-/// `message_nodes.row_id` is the rowid alias the scratch ordering and payload
-/// hydration address rows by, so it has to be a declared INTEGER primary key
-/// rather than an ordinary column that happens to be named that way.
-fn devin_require_integer_row_id(conn: &Connection) -> Result<()> {
-    let mut statement = conn.prepare(
-        "select name, type, pk from pragma_table_info('message_nodes') where pk > 0 order by pk",
-    )?;
-    let keys = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    match keys.as_slice() {
-        [(name, kind, _)] if name == "row_id" && kind.eq_ignore_ascii_case("INTEGER") => Ok(()),
-        _ => Err(CaptureError::InvalidPayload(
-            "Devin message_nodes must declare row_id as its INTEGER primary key".to_owned(),
-        )),
-    }
-}
-
 fn devin_capability_digest(
     schema_version: i64,
     session_columns: &BTreeSet<String>,
     node_columns: &BTreeSet<String>,
     tool_state_columns: &BTreeSet<String>,
+    subagent_head_columns: &BTreeSet<String>,
     schema_objects: &[(String, String, String)],
 ) -> String {
     let mut hasher = Sha256::new();
@@ -217,6 +231,7 @@ fn devin_capability_digest(
         ("sessions", session_columns),
         ("message_nodes", node_columns),
         ("tool_call_state", tool_state_columns),
+        ("subagent_heads", subagent_head_columns),
     ] {
         hasher.update((table.len() as u64).to_le_bytes());
         hasher.update(table.as_bytes());
@@ -241,7 +256,7 @@ fn devin_native_schema_objects(conn: &Connection) -> Result<Vec<(String, String,
          from sqlite_schema
          where type in ('table', 'index')
            and tbl_name in ('sessions', 'message_nodes', 'tool_call_state',
-                            'refinery_schema_history')
+                            'subagent_heads', 'refinery_schema_history')
          order by type, name",
     )?;
     let objects = statement

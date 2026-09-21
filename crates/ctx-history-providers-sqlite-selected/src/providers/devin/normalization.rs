@@ -107,8 +107,7 @@ pub(super) fn normalize_node(
     let content = message
         .get("content")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty());
+        .map(str::trim);
 
     // The Core role comes from the shared mapper, which agrees with Devin's
     // four roles exactly. The match below decides only which events a role's
@@ -117,7 +116,7 @@ pub(super) fn normalize_node(
     let mut events = Vec::new();
     match role_text {
         Some("user") => {
-            if let Some(content) = content {
+            if let Some(content) = content.filter(|text| !text.is_empty()) {
                 events.push(DevinNativeEvent::new(
                     EventType::Message,
                     role,
@@ -130,7 +129,7 @@ pub(super) fn normalize_node(
             if let Some(thinking) = thinking_text(&message) {
                 events.push(DevinNativeEvent::new(EventType::Summary, role, thinking));
             }
-            if let Some(content) = content {
+            if let Some(content) = content.filter(|text| !text.is_empty()) {
                 let mut event = DevinNativeEvent::new(EventType::Message, role, content.to_owned());
                 event.structured_content = Some(structured_assistant_content(&message));
                 events.push(event);
@@ -151,7 +150,7 @@ pub(super) fn normalize_node(
             } else {
                 (EventType::Notice, ())
             };
-            if let Some(content) = content {
+            if let Some(content) = content.filter(|text| !text.is_empty()) {
                 events.push(DevinNativeEvent::new(event_type, role, content.to_owned()));
             }
         }
@@ -268,17 +267,20 @@ fn tool_output_event(
         .and_then(Value::as_object);
     let terminal = extensions.and_then(|ext| ext.get("chisel/terminal_output"));
 
-    // The node's own content is the tool's rendered result. When it is absent,
-    // the recorded terminal output is the same text the harness showed.
-    let text = content.map(str::to_owned).or_else(|| {
-        terminal
-            .and_then(Value::as_object)
-            .and_then(|output| output.get("text"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_owned)
-    })?;
+    // The node's non-empty content is the tool's rendered result. Otherwise
+    // prefer its terminal output, while preserving an explicitly empty text
+    // channel so the result still exists for later ACP enrichment. Only two
+    // absent channels mean there is no result event.
+    let terminal_text = terminal
+        .and_then(Value::as_object)
+        .and_then(|output| output.get("text"))
+        .and_then(Value::as_str)
+        .map(str::trim);
+    let text = content
+        .filter(|text| !text.is_empty())
+        .or(terminal_text)
+        .or(content)?
+        .to_owned();
 
     let mut event = DevinNativeEvent::new(EventType::ToolOutput, role, text);
     event.provider_call_id = message

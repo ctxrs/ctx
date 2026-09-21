@@ -2338,7 +2338,8 @@
             "Reads Devin SQLite history from cli/sessions.db using a read-only connection.",
             "Devin 3000.10.21 created ~/.local/share/devin/cli/sessions.db with sessions(id, working_directory, main_chain_id, ...), message_nodes(row_id, session_id, node_id, parent_node_id, chat_message, created_at, metadata), tool_call_state(session_id, tool_call_id, tool_call_json, tool_call_update_json) and subagent_heads(session_id, agent_id, chain_node_id, updated_at).",
             "message_nodes per session is a forest; the imported transcript is the walk from sessions.main_chain_id up parent_node_id, reversed, with pre-compaction history spliced in through metadata.summarized_from.",
-            "Admission is structural rather than version-pinned: required tables, columns, and the (session_id, node_id) unique index are probed, and max(refinery_schema_history.version) feeds the capability digest so a migration rotates the published content digest."
+            "Admission is structural rather than version-pinned: required tables, columns, and the native session, node, tool-state, and subagent-head unique keys are probed, and max(refinery_schema_history.version) feeds the capability digest so a migration rotates the published content digest.",
+            "Foreground subagent back-links and durable subagent_heads entries are imported as delegated child sessions."
           ]
         }
       ],
@@ -2368,9 +2369,9 @@
         "parent_child_session_edges": true
       },
       "limitations": [
-        "Only the main chain and the pre-compaction history reachable from it are imported. Summarizer threads, abandoned regenerated turns, and subagent threads Devin did not back-link are counted but not imported.",
-        "Subagent lineage is imported only for foreground `run_subagent` calls, which are the only ones that record `subagent/chain_node_id`. Background subagent trees carry `subagent/agent_id` alone and claim no lineage.",
-        "Per-session model and agent mode are retained in structured content only; no model, cost, or token fact is projected. Exact MCP server/tool attribution is not supported."
+        "Only the main chain and the pre-compaction history reachable from it are imported. Summarizer threads, abandoned regenerated turns, and subagent threads without a foreground back-link or durable head are counted but not imported.",
+        "Foreground back-linked and durable background subagent trees are imported; a subagent forest without an exact chain tip remains unclaimed.",
+        "Native assistant payloads retain generation metadata when Devin writes it, but session-level model, agent mode, cost, and token data are not projected as Core facts. Exact MCP server/tool attribution is not supported."
       ],
       "public_docs": "docs/provider-support.md"
     }

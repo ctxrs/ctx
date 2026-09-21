@@ -195,12 +195,13 @@ System prompts sit on that chain and are imported as notices; the node a
 compaction wrote is imported as a summary. Nodes off the chain are counted but
 not imported: summarizer threads, abandoned regenerated turns, and the
 pre-compaction copies Devin rewrote. Subagent threads become separate delegated
-sessions only for foreground `run_subagent` calls, which are the only ones for
-which Devin records a `subagent/chain_node_id` back-link to the subagent chain
-tip; background subagent trees carry an agent id alone, prove no lineage, and
-are not imported. Per-session model and agent mode are retained in structured
-content only, with no model, cost, or token fact projected, and exact MCP
-server/tool attribution is not supported.
+sessions when Devin records either a foreground `subagent/chain_node_id`
+back-link or a durable `subagent_heads` chain tip, so foreground and durable
+background subagents are imported. A subagent tree without either exact tip
+link remains unclaimed. Native assistant payloads retain generation metadata
+when Devin writes it, but session-level model, agent mode, cost, and token data
+are not projected as Core facts. Exact MCP server/tool attribution is not
+supported.
 
 `ctx sources --format json` reports each known provider source with `import_support`
 and `importable` fields. A source is importable only when provider-specific

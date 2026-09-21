@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::chain::{
-    plan_session, DevinLineageKey, DevinNodeFacts, DevinSessionRejection, DevinSpliceKind,
+    plan_session, DevinLineageKey, DevinNodeFacts, DevinSessionPlan, DevinSessionRejection,
+    DevinSpliceKind, DevinSubagentHead,
 };
 
 /// Builds a forest from `(node_id, parent)` pairs.
@@ -41,10 +42,17 @@ fn primary_nodes(plan: &super::chain::DevinSessionPlan) -> Vec<i64> {
         .collect()
 }
 
+fn plan_without_heads(
+    facts: &BTreeMap<i64, DevinNodeFacts>,
+    main_chain_id: Option<i64>,
+) -> DevinSessionPlan {
+    plan_session(facts, main_chain_id, &[])
+}
+
 #[test]
 fn a_linear_chain_is_imported_in_ancestor_first_order() {
     let facts = forest(&[(0, None), (1, Some(0)), (2, Some(1)), (3, Some(2))]);
-    let plan = plan_session(&facts, Some(3));
+    let plan = plan_without_heads(&facts, Some(3));
     assert!(plan.rejection.is_none());
     assert_eq!(primary_nodes(&plan), [0, 1, 2, 3]);
     assert_eq!(plan.counts.ignored_nodes, 0);
@@ -74,7 +82,7 @@ fn nodes_off_the_chain_are_counted_and_not_imported() {
         (5, Some(2)),
         (6, None),
     ]);
-    let plan = plan_session(&facts, Some(3));
+    let plan = plan_without_heads(&facts, Some(3));
     assert_eq!(primary_nodes(&plan), [0, 1, 2, 3]);
     assert_eq!(plan.counts.ignored_nodes, 3);
     assert_eq!(plan.imported_nodes(), 4);
@@ -92,7 +100,7 @@ fn a_summarized_from_node_splices_its_prior_history_transitively() {
     facts.get_mut(&6).unwrap().summarized_from = Some(3);
     facts.get_mut(&9).unwrap().summarized_from = Some(6);
 
-    let plan = plan_session(&facts, Some(9));
+    let plan = plan_without_heads(&facts, Some(9));
     assert!(plan.rejection.is_none());
     assert_eq!(primary_nodes(&plan), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     assert_eq!(plan.counts.rejected_splices, 0);
@@ -103,7 +111,7 @@ fn a_summarized_from_node_splices_its_prior_history_transitively() {
     let mut single = facts.clone();
     single.get_mut(&6).unwrap().summarized_from = None;
     assert_eq!(
-        primary_nodes(&plan_session(&single, Some(9))),
+        primary_nodes(&plan_without_heads(&single, Some(9))),
         [4, 5, 6, 7, 8, 9]
     );
 
@@ -111,7 +119,10 @@ fn a_summarized_from_node_splices_its_prior_history_transitively() {
     let mut bare = facts.clone();
     bare.get_mut(&9).unwrap().summarized_from = None;
     bare.get_mut(&6).unwrap().summarized_from = None;
-    assert_eq!(primary_nodes(&plan_session(&bare, Some(9))), [7, 8, 9]);
+    assert_eq!(
+        primary_nodes(&plan_without_heads(&bare, Some(9))),
+        [7, 8, 9]
+    );
 }
 
 #[test]
@@ -120,7 +131,7 @@ fn splice_nodes_are_marked_and_chain_nodes_are_not() {
     chain_of(&mut facts, &[0, 1, 2]);
     chain_of(&mut facts, &[0, 3, 4]);
     facts.get_mut(&4).unwrap().summarized_from = Some(2);
-    let plan = plan_session(&facts, Some(4));
+    let plan = plan_without_heads(&facts, Some(4));
     let marks = plan.lineages[0]
         .nodes
         .iter()
@@ -143,7 +154,7 @@ fn a_splice_naming_an_absent_node_keeps_the_chain_and_is_counted() {
     let mut facts = BTreeMap::new();
     chain_of(&mut facts, &[0, 1, 2]);
     facts.get_mut(&2).unwrap().summarized_from = Some(99);
-    let plan = plan_session(&facts, Some(2));
+    let plan = plan_without_heads(&facts, Some(2));
     assert!(plan.rejection.is_none());
     assert_eq!(primary_nodes(&plan), [0, 1, 2]);
     assert_eq!(plan.counts.rejected_splices, 1);
@@ -152,8 +163,8 @@ fn a_splice_naming_an_absent_node_keeps_the_chain_and_is_counted() {
 #[test]
 fn a_session_without_a_main_chain_yields_metadata_only() {
     let facts = forest(&[(0, None), (1, Some(0))]);
-    let plan = plan_session(&facts, None);
-    assert_eq!(plan.rejection, Some(DevinSessionRejection::NoMainChain));
+    let plan = plan_without_heads(&facts, None);
+    assert_eq!(plan.rejection, None);
     assert!(plan.lineages.is_empty());
     assert_eq!(plan.counts.ignored_nodes, 2);
 }
@@ -162,14 +173,14 @@ fn a_session_without_a_main_chain_yields_metadata_only() {
 fn a_missing_anchor_or_a_hole_mid_chain_rejects_the_session() {
     let facts = forest(&[(0, None), (1, Some(0))]);
     assert_eq!(
-        plan_session(&facts, Some(7)).rejection,
+        plan_without_heads(&facts, Some(7)).rejection,
         Some(DevinSessionRejection::MissingChainAnchor)
     );
 
     // Node 2's parent is absent from the session, so the transcript has a hole.
     let holed = forest(&[(2, Some(1)), (3, Some(2))]);
     assert_eq!(
-        plan_session(&holed, Some(3)).rejection,
+        plan_without_heads(&holed, Some(3)).rejection,
         Some(DevinSessionRejection::BrokenChainParent)
     );
 }
@@ -179,13 +190,13 @@ fn a_parent_that_does_not_precede_its_child_rejects_the_session() {
     // A cycle necessarily violates this, so it is caught before any walk.
     let cyclic = forest(&[(0, Some(1)), (1, Some(0))]);
     assert_eq!(
-        plan_session(&cyclic, Some(1)).rejection,
+        plan_without_heads(&cyclic, Some(1)).rejection,
         Some(DevinSessionRejection::NonMonotonicParent)
     );
 
     let self_loop = forest(&[(0, None), (1, Some(1))]);
     assert_eq!(
-        plan_session(&self_loop, Some(1)).rejection,
+        plan_without_heads(&self_loop, Some(1)).rejection,
         Some(DevinSessionRejection::NonMonotonicParent)
     );
 }
@@ -198,7 +209,7 @@ fn a_linked_subagent_becomes_its_own_lineage() {
     facts.get_mut(&2).unwrap().subagent_chain_node_id = Some(12);
     facts.get_mut(&2).unwrap().subagent_agent_id = Some("agent-a".to_owned());
 
-    let plan = plan_session(&facts, Some(2));
+    let plan = plan_without_heads(&facts, Some(2));
     assert_eq!(plan.lineages.len(), 2);
     assert_eq!(plan.lineages[0].key, DevinLineageKey::Primary);
     assert_eq!(plan.lineages[0].lineage_ord, 0);
@@ -226,7 +237,7 @@ fn subagent_links_that_do_not_hold_up_drop_only_that_lineage() {
     chain_of(&mut absent, &[0, 1, 2]);
     absent.get_mut(&2).unwrap().subagent_chain_node_id = Some(99);
     absent.get_mut(&2).unwrap().subagent_agent_id = Some("agent-a".to_owned());
-    let plan = plan_session(&absent, Some(2));
+    let plan = plan_without_heads(&absent, Some(2));
     assert_eq!(plan.lineages.len(), 1);
     assert_eq!(plan.counts.rejected_lineages, 1);
     assert_eq!(primary_nodes(&plan), [0, 1, 2]);
@@ -237,7 +248,7 @@ fn subagent_links_that_do_not_hold_up_drop_only_that_lineage() {
     chain_of(&mut blank, &[10, 11]);
     blank.get_mut(&2).unwrap().subagent_chain_node_id = Some(11);
     blank.get_mut(&2).unwrap().subagent_agent_id = Some("   ".to_owned());
-    let plan = plan_session(&blank, Some(2));
+    let plan = plan_without_heads(&blank, Some(2));
     assert_eq!(plan.lineages.len(), 1);
     assert_eq!(plan.counts.rejected_lineages, 1);
 
@@ -246,7 +257,7 @@ fn subagent_links_that_do_not_hold_up_drop_only_that_lineage() {
     chain_of(&mut overlapping, &[0, 1, 2]);
     overlapping.get_mut(&2).unwrap().subagent_chain_node_id = Some(1);
     overlapping.get_mut(&2).unwrap().subagent_agent_id = Some("agent-a".to_owned());
-    let plan = plan_session(&overlapping, Some(2));
+    let plan = plan_without_heads(&overlapping, Some(2));
     assert_eq!(plan.lineages.len(), 1);
     assert_eq!(plan.counts.rejected_lineages, 1);
 }
@@ -261,7 +272,7 @@ fn a_repeated_agent_id_keeps_the_first_thread_only() {
         facts.get_mut(&linker).unwrap().subagent_chain_node_id = Some(tip);
         facts.get_mut(&linker).unwrap().subagent_agent_id = Some("agent-a".to_owned());
     }
-    let plan = plan_session(&facts, Some(3));
+    let plan = plan_without_heads(&facts, Some(3));
     assert_eq!(plan.lineages.len(), 2);
     assert_eq!(
         plan.lineages[1]
@@ -277,6 +288,193 @@ fn a_repeated_agent_id_keeps_the_first_thread_only() {
 }
 
 #[test]
+fn background_heads_follow_foreground_links_in_reader_order() {
+    let mut facts = BTreeMap::new();
+    chain_of(&mut facts, &[0, 1, 2]);
+    for nodes in [[10, 11], [20, 21], [30, 31], [40, 41]] {
+        chain_of(&mut facts, &nodes);
+    }
+    facts.get_mut(&1).unwrap().subagent_chain_node_id = Some(11);
+    facts.get_mut(&1).unwrap().subagent_agent_id = Some("agent-z".to_owned());
+    facts.get_mut(&2).unwrap().subagent_chain_node_id = Some(21);
+    facts.get_mut(&2).unwrap().subagent_agent_id = Some("agent-a".to_owned());
+    let heads = [
+        DevinSubagentHead {
+            agent_id: "agent-b".to_owned(),
+            chain_node_id: 31,
+            updated_at: 200,
+        },
+        DevinSubagentHead {
+            agent_id: "agent-c".to_owned(),
+            chain_node_id: 41,
+            updated_at: 100,
+        },
+    ];
+
+    let plan = plan_session(&facts, Some(2), &heads);
+    assert_eq!(
+        plan.lineages
+            .iter()
+            .map(|lineage| lineage.key.clone())
+            .collect::<Vec<_>>(),
+        [
+            DevinLineageKey::Primary,
+            DevinLineageKey::Subagent("agent-z".to_owned()),
+            DevinLineageKey::Subagent("agent-a".to_owned()),
+            DevinLineageKey::Subagent("agent-b".to_owned()),
+            DevinLineageKey::Subagent("agent-c".to_owned()),
+        ]
+    );
+    assert_eq!(plan.counts.ignored_nodes, 0);
+    assert_eq!(plan.counts.rejected_lineages, 0);
+}
+
+#[test]
+fn a_durable_head_extends_the_same_foreground_subagent_chain() {
+    let mut facts = BTreeMap::new();
+    chain_of(&mut facts, &[0, 1, 2]);
+    chain_of(&mut facts, &[10, 11, 12]);
+    facts.get_mut(&2).unwrap().subagent_chain_node_id = Some(11);
+    facts.get_mut(&2).unwrap().subagent_agent_id = Some("agent-a".to_owned());
+    let heads = [DevinSubagentHead {
+        agent_id: "agent-a".to_owned(),
+        chain_node_id: 12,
+        updated_at: 200,
+    }];
+
+    let plan = plan_session(&facts, Some(2), &heads);
+    assert_eq!(plan.lineages.len(), 2);
+    assert_eq!(plan.counts.rejected_lineages, 0);
+    assert_eq!(plan.counts.ignored_nodes, 0);
+    assert_eq!(
+        plan.lineages[1]
+            .nodes
+            .iter()
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        [10, 11, 12]
+    );
+}
+
+#[test]
+fn an_invalid_first_tip_does_not_hide_a_valid_head_for_the_same_agent() {
+    let mut facts = BTreeMap::new();
+    chain_of(&mut facts, &[0, 1, 2]);
+    chain_of(&mut facts, &[10, 11, 12]);
+    facts.get_mut(&2).unwrap().subagent_chain_node_id = Some(99);
+    facts.get_mut(&2).unwrap().subagent_agent_id = Some("agent-a".to_owned());
+    let heads = [DevinSubagentHead {
+        agent_id: "agent-a".to_owned(),
+        chain_node_id: 12,
+        updated_at: 200,
+    }];
+
+    let plan = plan_session(&facts, Some(2), &heads);
+    assert_eq!(plan.counts.rejected_lineages, 1);
+    assert_eq!(plan.lineages.len(), 2);
+    assert_eq!(
+        plan.lineages[1]
+            .nodes
+            .iter()
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        [10, 11, 12]
+    );
+}
+
+#[test]
+fn durable_duplicates_are_noops_and_bad_heads_reject_locally() {
+    let mut facts = BTreeMap::new();
+    chain_of(&mut facts, &[0, 1, 2]);
+    for nodes in [[10, 11], [20, 21], [30, 31]] {
+        chain_of(&mut facts, &nodes);
+    }
+    facts.get_mut(&1).unwrap().subagent_chain_node_id = Some(11);
+    facts.get_mut(&1).unwrap().subagent_agent_id = Some("agent-a".to_owned());
+    facts.get_mut(&2).unwrap().subagent_chain_node_id = Some(21);
+    facts.get_mut(&2).unwrap().subagent_agent_id = Some("agent-b".to_owned());
+    let heads = [
+        // Exact foreground duplicate: neither another lineage nor a rejection.
+        DevinSubagentHead {
+            agent_id: "agent-a".to_owned(),
+            chain_node_id: 11,
+            updated_at: 1,
+        },
+        // Same exact agent, different tip.
+        DevinSubagentHead {
+            agent_id: "agent-b".to_owned(),
+            chain_node_id: 31,
+            updated_at: 2,
+        },
+        DevinSubagentHead {
+            agent_id: "  ".to_owned(),
+            chain_node_id: 31,
+            updated_at: 3,
+        },
+        DevinSubagentHead {
+            agent_id: "agent-missing".to_owned(),
+            chain_node_id: 99,
+            updated_at: 4,
+        },
+        DevinSubagentHead {
+            agent_id: "agent-overlap".to_owned(),
+            chain_node_id: 1,
+            updated_at: 5,
+        },
+    ];
+
+    let plan = plan_session(&facts, Some(2), &heads);
+    assert_eq!(plan.lineages.len(), 3);
+    assert_eq!(plan.counts.rejected_lineages, 4);
+    assert_eq!(plan.counts.ignored_nodes, 2);
+    assert_eq!(
+        plan.lineages
+            .iter()
+            .map(|lineage| lineage.key.clone())
+            .collect::<Vec<_>>(),
+        [
+            DevinLineageKey::Primary,
+            DevinLineageKey::Subagent("agent-a".to_owned()),
+            DevinLineageKey::Subagent("agent-b".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn durable_head_reader_preserves_values_and_orders_by_agent_id() {
+    let (_temp, conn) = super::schema_tests::mutable_fixture();
+    for (session_id, agent_id, chain_node_id, updated_at) in [
+        ("discovered-sandal", "agent-z", 41, 900),
+        ("discovered-sandal", "agent-a ", 31, 700),
+        ("abounding-crest", "other-session", 11, 800),
+    ] {
+        conn.execute(
+            "insert into subagent_heads(session_id, agent_id, chain_node_id, updated_at) \
+             values (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, agent_id, chain_node_id, updated_at],
+        )
+        .unwrap();
+    }
+
+    let heads = super::stream::read_subagent_heads(&conn, "discovered-sandal").unwrap();
+    assert_eq!(
+        heads,
+        [
+            DevinSubagentHead {
+                agent_id: "agent-a ".to_owned(),
+                chain_node_id: 31,
+                updated_at: 700,
+            },
+            DevinSubagentHead {
+                agent_id: "agent-z".to_owned(),
+                chain_node_id: 41,
+                updated_at: 900,
+            },
+        ]
+    );
+}
+
+#[test]
 fn planning_matches_the_recorded_fixture_sessions() {
     let conn = super::schema_tests::fixture_connection();
     let expected: &[(&str, usize, usize, u64)] = &[
@@ -287,7 +485,7 @@ fn planning_matches_the_recorded_fixture_sessions() {
     ];
     for &(session_id, lineages, primary_len, ignored) in expected {
         let (facts, main_chain_id) = super::stream::read_session_facts(&conn, session_id).unwrap();
-        let plan = plan_session(&facts, main_chain_id);
+        let plan = plan_without_heads(&facts, main_chain_id);
         assert!(plan.rejection.is_none(), "{session_id}");
         assert_eq!(plan.lineages.len(), lineages, "{session_id} lineages");
         assert_eq!(
@@ -304,7 +502,7 @@ fn planning_matches_the_recorded_fixture_sessions() {
     // The compaction session is the one that proves the splice matters.
     let (facts, main_chain_id) =
         super::stream::read_session_facts(&conn, "discovered-sandal").unwrap();
-    let plan = plan_session(&facts, main_chain_id);
+    let plan = plan_without_heads(&facts, main_chain_id);
     assert_eq!(
         primary_nodes(&plan),
         [16, 17, 18, 19, 20, 21, 22, 36, 37, 39, 40, 42, 47, 48]

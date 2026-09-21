@@ -15,11 +15,16 @@ use std::collections::BTreeMap;
 use rusqlite::{params_from_iter, types::Value, Connection, Row};
 
 use crate::{
-    provider::sqlite::{optional_timestamp_millis_expr, MAX_PROVIDER_SQLITE_VALUE_BYTES},
+    provider::sqlite::{
+        optional_timestamp_millis_expr, sqlite_table_exists, MAX_PROVIDER_SQLITE_VALUE_BYTES,
+    },
     CaptureError, Result,
 };
 
-use super::{chain::DevinNodeFacts, schema::DevinNativeSchema};
+use super::{
+    chain::{DevinNodeFacts, DevinSubagentHead, DEVIN_MAX_SESSION_NODES},
+    schema::DevinNativeSchema,
+};
 
 /// Sessions read per keyset page.
 pub(super) const DEVIN_SESSION_PAGE_ROWS: usize = 64;
@@ -27,6 +32,8 @@ pub(super) const DEVIN_SESSION_PAGE_ROWS: usize = 64;
 pub(super) const DEVIN_HYDRATION_BATCH_ROWS: usize = 64;
 /// Payload bytes a hydration batch targets before rolling over.
 pub(super) const DEVIN_HYDRATION_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+/// Total variable-width scalar text retained by one metadata/planning read.
+const DEVIN_RETAINED_SCALAR_TEXT_BYTES: usize = 8 * 1024 * 1024;
 /// A single node may exceed the batch target, but never the record contract.
 /// The margin covers the fixed-width columns the bound is measured alongside.
 pub(super) const DEVIN_HYDRATION_SINGLETON_MAX_BYTES: u64 =
@@ -49,13 +56,15 @@ pub(super) struct DevinSessionRow {
 /// One planned node's payload.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct DevinNodeRow {
-    pub(super) row_id: i64,
     pub(super) node_id: i64,
     pub(super) parent_node_id: Option<i64>,
     pub(super) chat_message: String,
     pub(super) created_at: i64,
     pub(super) metadata: Option<String>,
 }
+
+pub(super) const SUBAGENT_HEADS_SQL: &str = "select agent_id, chain_node_id, updated_at \
+     from subagent_heads where session_id = ?1 order by agent_id limit ?2";
 
 const SESSION_COLUMNS: &str =
     "id, working_directory, main_chain_id, title, model, agent_mode, hidden";
@@ -91,8 +100,23 @@ pub(super) fn read_session_page(
         decode_session_row,
     )?;
     let mut page = Vec::with_capacity(DEVIN_SESSION_PAGE_ROWS);
+    let mut retained_text_bytes = 0_usize;
     for row in rows {
-        page.push(row?);
+        let row = row?;
+        let row_bytes = row.id.len()
+            + row.working_directory.len()
+            + row.title.as_ref().map_or(0, String::len)
+            + row.model.as_ref().map_or(0, String::len)
+            + row.agent_mode.as_ref().map_or(0, String::len);
+        retained_text_bytes = retained_text_bytes.checked_add(row_bytes).ok_or_else(|| {
+            CaptureError::InvalidPayload("Devin session-page text size overflowed".to_owned())
+        })?;
+        if retained_text_bytes > DEVIN_RETAINED_SCALAR_TEXT_BYTES {
+            return Err(CaptureError::InvalidPayload(
+                "Devin session page exceeds the retained text byte bound".to_owned(),
+            ));
+        }
+        page.push(row);
     }
     Ok(page)
 }
@@ -114,10 +138,16 @@ fn decode_session_row(row: &Row<'_>) -> rusqlite::Result<DevinSessionRow> {
 }
 
 pub(super) const SESSION_FACTS_SQL: &str = "select node_id, parent_node_id, \
-     json_extract(metadata, '$.summarized_from'), \
-     json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"'), \
-     json_extract(chat_message, '$.metadata.extensions.\"subagent/agent_id\"') \
-     from message_nodes where session_id = ?1 order by node_id";
+     case when json_valid(metadata) then \
+       case when json_type(metadata, '$.summarized_from') = 'integer' \
+         then json_extract(metadata, '$.summarized_from') end end, \
+     case when json_valid(chat_message) then \
+       case when json_type(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"') = 'integer' \
+         then json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"') end end, \
+     case when json_valid(chat_message) then \
+       case when json_type(chat_message, '$.metadata.extensions.\"subagent/agent_id\"') = 'text' \
+         then json_extract(chat_message, '$.metadata.extensions.\"subagent/agent_id\"') end end \
+     from message_nodes where session_id = ?1 order by node_id limit ?2";
 
 /// Reads every node's planning facts for one session, plus its main chain.
 ///
@@ -136,8 +166,10 @@ pub(super) fn read_session_facts(
         )
         .map_err(CaptureError::from)?;
     let mut statement = conn.prepare(SESSION_FACTS_SQL)?;
-    let mut rows = statement.query([session_id])?;
+    let row_limit = DEVIN_MAX_SESSION_NODES.saturating_add(1) as i64;
+    let mut rows = statement.query(rusqlite::params![session_id, row_limit])?;
     let mut facts = BTreeMap::new();
+    let mut planning_text_bytes = 0_usize;
     while let Some(row) = rows.next()? {
         let node_id: i64 = row.get(0)?;
         let entry = DevinNodeFacts {
@@ -153,8 +185,71 @@ pub(super) fn read_session_facts(
                 "Devin session {session_id} contains duplicate node {node_id}"
             )));
         }
+        if facts.len() > DEVIN_MAX_SESSION_NODES {
+            // The planner needs only the sentinel entry to classify this
+            // session as over-bound. Do not retain the rest of the forest.
+            break;
+        }
+        planning_text_bytes = planning_text_bytes
+            .checked_add(
+                facts[&node_id]
+                    .subagent_agent_id
+                    .as_ref()
+                    .map_or(0, String::len),
+            )
+            .ok_or_else(|| {
+                CaptureError::InvalidPayload(format!(
+                    "Devin session {session_id} planning text size overflowed"
+                ))
+            })?;
+        if planning_text_bytes > DEVIN_RETAINED_SCALAR_TEXT_BYTES {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Devin session {session_id} exceeds the planning text byte bound"
+            )));
+        }
     }
     Ok((facts, main_chain_id))
+}
+
+/// Reads one session's durable subagent pointers in native primary-key order.
+pub(super) fn read_subagent_heads(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<DevinSubagentHead>> {
+    if !sqlite_table_exists(conn, "subagent_heads")? {
+        return Ok(Vec::new());
+    }
+    let row_limit = DEVIN_MAX_SESSION_NODES.saturating_add(1) as i64;
+    let mut statement = conn.prepare(SUBAGENT_HEADS_SQL)?;
+    let mut rows = statement.query(rusqlite::params![session_id, row_limit])?;
+    let mut heads = Vec::new();
+    let mut planning_text_bytes = 0_usize;
+    while let Some(row) = rows.next()? {
+        let agent_id: String = row.get(0)?;
+        planning_text_bytes = planning_text_bytes
+            .checked_add(agent_id.len())
+            .ok_or_else(|| {
+                CaptureError::InvalidPayload(format!(
+                    "Devin session {session_id} durable-head text size overflowed"
+                ))
+            })?;
+        if planning_text_bytes > DEVIN_RETAINED_SCALAR_TEXT_BYTES {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Devin session {session_id} exceeds the durable-head text byte bound"
+            )));
+        }
+        heads.push(DevinSubagentHead {
+            agent_id,
+            chain_node_id: row.get(1)?,
+            updated_at: row.get(2)?,
+        });
+    }
+    if heads.len() > DEVIN_MAX_SESSION_NODES {
+        return Err(CaptureError::InvalidPayload(format!(
+            "Devin session {session_id} exceeds the durable subagent head bound"
+        )));
+    }
+    Ok(heads)
 }
 
 fn hydration_sql(rows: usize) -> String {
@@ -163,7 +258,7 @@ fn hydration_sql(rows: usize) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "select row_id, node_id, parent_node_id, chat_message, created_at, metadata \
+        "select node_id, parent_node_id, chat_message, created_at, metadata \
          from message_nodes where session_id = ?1 and node_id in ({parameters}) order by node_id"
     )
 }
@@ -190,10 +285,17 @@ where
         parameters.push(Value::Text(session_id.to_owned()));
         parameters.extend(batch.iter().map(|&node_id| node_id.into()));
         let mut rows = statement.query(params_from_iter(parameters))?;
-        let mut decoded = BTreeMap::new();
+        let mut decoded = Vec::new();
         let mut batch_bytes = 0_u64;
+        let mut expected = 0_usize;
         while let Some(row) = rows.next()? {
             let node = decode_node_row(row)?;
+            if batch.get(expected) != Some(&node.node_id) {
+                return Err(E::from(CaptureError::SystemInvariant(
+                    "Devin payload hydration returned a missing, duplicate, or unrequested node",
+                )));
+            }
+            expected += 1;
             let bytes = node.chat_message.len() as u64
                 + node.metadata.as_ref().map_or(0, |value| value.len()) as u64;
             if bytes > DEVIN_HYDRATION_SINGLETON_MAX_BYTES {
@@ -202,39 +304,42 @@ where
                     node.node_id
                 ))));
             }
-            batch_bytes = batch_bytes.saturating_add(bytes);
-            if decoded.insert(node.node_id, node).is_some() {
-                return Err(E::from(CaptureError::SystemInvariant(
-                    "Devin payload hydration returned one node twice",
-                )));
+            if !decoded.is_empty()
+                && batch_bytes.saturating_add(bytes) > DEVIN_HYDRATION_BATCH_BYTES
+            {
+                flush_hydrated(&mut decoded, visit)?;
+                batch_bytes = 0;
             }
+            batch_bytes = batch_bytes.saturating_add(bytes);
+            decoded.push(node);
         }
         drop(rows);
-        debug_assert!(batch_bytes <= DEVIN_HYDRATION_BATCH_BYTES.saturating_mul(4));
-        for node_id in batch {
-            let node = decoded
-                .remove(node_id)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Devin node disappeared from its pinned snapshot",
-                ))?;
-            visit(node)?;
-        }
-        if !decoded.is_empty() {
+        if expected != batch.len() {
             return Err(E::from(CaptureError::SystemInvariant(
-                "Devin payload hydration returned an unrequested node",
+                "Devin node disappeared from its pinned snapshot",
             )));
         }
+        flush_hydrated(&mut decoded, visit)?;
+    }
+    Ok(())
+}
+
+fn flush_hydrated<E>(
+    decoded: &mut Vec<DevinNodeRow>,
+    visit: &mut dyn FnMut(DevinNodeRow) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    for node in decoded.drain(..) {
+        visit(node)?;
     }
     Ok(())
 }
 
 fn decode_node_row(row: &Row<'_>) -> rusqlite::Result<DevinNodeRow> {
     Ok(DevinNodeRow {
-        row_id: row.get(0)?,
-        node_id: row.get(1)?,
-        parent_node_id: row.get(2)?,
-        chat_message: row.get(3)?,
-        created_at: row.get(4)?,
-        metadata: row.get(5)?,
+        node_id: row.get(0)?,
+        parent_node_id: row.get(1)?,
+        chat_message: row.get(2)?,
+        created_at: row.get(3)?,
+        metadata: row.get(4)?,
     })
 }

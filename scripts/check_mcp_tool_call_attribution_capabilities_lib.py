@@ -901,7 +901,7 @@ def validate_contract(
             fail(f"duplicate support provider: {provider_id}")
         support_by_id[provider_id] = row
     if len(support_by_id) != 43:
-        fail(f"support matrix must contain 42 providers, found {len(support_by_id)}")
+        fail(f"support matrix must contain 43 providers, found {len(support_by_id)}")
 
     rows, lane_statuses, provider_statuses = validate_routes(capability, support_by_id)
     exact_suites, exact_tests, exact_links = validate_exact_checks(

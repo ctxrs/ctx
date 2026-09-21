@@ -3,15 +3,15 @@
 Sanitized SQLite fixture for the Devin native history importer.
 
 - Producer: Devin (Cognition), installed from the public `devin-cli`
-  Homebrew cask. See Provenance below for the exact versions recorded.
+  Homebrew cask. See Provenance below for the exact versions.
 - Store: `~/.local/share/devin/cli/sessions.db`. Devin documents no environment
   variable for this location; `devin --help` exposes only `--config`. The
   fixture therefore proves the XDG-and-home default, not an override.
 - Schema admission: structural, not version-pinned. The importer probes the
-  tables, columns, and indexes it reads and refuses a source that loses any of
-  them, while `max(refinery_schema_history.version)` feeds the capability
-  digest so a migration rotates the published content digest. This fixture
-  records version 17.
+  tables, columns, and native unique keys it reads and refuses a source that
+  loses any of them, while `max(refinery_schema_history.version)` feeds the
+  capability digest so a migration rotates the published content digest. This
+  fixture records version 17.
 
 ## Ground truth
 
@@ -26,6 +26,8 @@ message_nodes(row_id, session_id, node_id, parent_node_id, chat_message,
               created_at, metadata)          -- UNIQUE(session_id, node_id)
 tool_call_state(session_id, tool_call_id, tool_call_json,
                 tool_call_update_json)       -- PK(session_id, tool_call_id)
+subagent_heads(session_id, agent_id, chain_node_id, updated_at)
+                                             -- PK(session_id, agent_id)
 prompt_history, rendered_commits, app_state  -- present, left empty here
 ```
 
@@ -113,75 +115,28 @@ Oracle strings, used by the CLI conformance tests:
 - `exclusive-bamboo`: user asks for a file edit; the tool node reports writing
   `devinclifileoracle` to `note.txt`; the assistant replies `devincliedited`.
 
-## Sanitization
+## Sanitization and evidence boundary
 
-Following the convention set by the `warp`, `cursor`, and `antigravity`
-fixtures, this fixture preserves native field names, keys, and graph shape while
-carrying no vendor system-prompt prose, no operator-private prompt text, and no
-copied workspace code. Every node, `node_id`, `parent_node_id`, `message_id`,
-role, metadata key, and extension key is reproduced as observed. The following
-text bodies are replaced with synthetic placeholders:
-
-- The six Devin system-prefix segments (`agent-instructions`,
-  `subagent-profiles`, `model-identity`, `parallel-tool-calls`,
-  `subagent-instructions`, `summarizer-instructions`), wherever they appear —
-  in `message_nodes.chat_message.content`, in
-  `sessions.cogs_json[].append_system_messages[].content`, and in
-  `sessions.cogs_json[].set_system_prefix[].content`.
-- The summarizer thread's two prompt nodes: the request itself, and the input
-  node, which is a verbatim re-dump of the whole conversation and therefore
-  embeds the system prompts a second time.
-- The operator's always-on rule text and its path, replaced by a synthetic
-  `devinclirule` rule at `/home/dev/.devin/rules/devinclirule.md`.
-- The `<available_skills>` listing, replaced by a synthetic
-  `devinclioracleskill` entry.
-- The `agent-ext/rules-loaded` and `agent-ext/skills-loaded` inventories, whose
-  entries enumerate whatever the operator happens to have installed, including
-  local paths and third-party skill descriptions. Both are replaced wholesale
-  with one synthetic entry so the extension shape survives and the inventory
-  does not.
-- `/home/ubuntu` throughout, rewritten to `/home/dev`, and one employer-internal
-  hostname, rewritten to `example.invalid`.
-
-The generated compaction summary and the tool output are kept as recorded: they
-describe the fixture's own `/tmp` disk-usage task and contain nothing private,
-and the on-chain summary node's text is what the importer projects as a summary
-event.
-
-Replacements are applied to parsed JSON values and re-serialized, so they cannot
-corrupt structure. The result was re-scanned to confirm none of the original
-strings survive.
+The fixture preserves the native SQLite schema, forest shape, ordering,
+metadata keys, and controlled oracle content while replacing prompts, local
+inventories, paths, hostnames, and identifiers with fixture values. A final
+deterministic publication pass also removed opaque reasoning signatures and
+replaced host-private temporary-directory and summary-file names. Those
+signatures are not imported by ctx. The fixture contains no credentials or
+copied workspace code.
 
 ## Provenance
 
-`abounding-crest` and `exclusive-bamboo` were recorded against Devin
-`3000.4.25`; `discovered-sandal` was recorded against `3000.6.14` with a prompt
-chosen to force a foreground `run_subagent` followed by `/compact`, so that the
-subagent-linkage and compaction shapes come from a real run rather than from
-hand-written SQL. Both producer versions write schema version 16.
+Two sessions were recorded by Devin CLI 3000.4.25 and one by 3000.6.14. Devin
+CLI 3000.10.21 then migrated the database from schema version 16 to version 17,
+which added `subagent_heads`. The public fixture's SHA-256 is
+`a2f85bd32456d21d0fd7dc06619430cfb5f9bcda455972aed47e7eabb6092c69`.
 
-Devin `3000.10.21` then migrated the store to version 17, adding one table:
-
-```sql
-CREATE TABLE subagent_heads (
-    session_id    TEXT    NOT NULL,
-    agent_id      TEXT    NOT NULL,
-    chain_node_id INTEGER NOT NULL,
-    updated_at    INTEGER NOT NULL,
-    PRIMARY KEY (session_id, agent_id),
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
-);
-```
-
-Nothing else changed: the four tables the importer reads are byte-identical
-across 16 and 17. This fixture was migrated in place with that exact DDL and
-the real `refinery_schema_history` row, rather than re-recorded, so the
-sanitized session content above is unchanged and still traceable to the runs
-that produced it.
-
-`subagent_heads` is empty here, which is what an in-place migration produces:
-Devin writes a row when a session spawns a subagent after the migration, and
-all three sessions predate it. The importer does not read the table. It is an
-authoritative `(session_id, agent_id)` to `chain_node_id` map, so it is the
-missing evidence for the background subagent threads this importer currently
-declines to claim lineage for.
+The sessions are authentic Devin CLI output subsequently migrated to schema
+version 17. The resulting `subagent_heads` table is empty because the recorded
+sessions predate that migration. Focused tests add a temporary row to a private
+copy of the fixture to exercise the current background-head contract without
+misrepresenting synthetic data as a native capture. This fixture therefore
+qualifies the historical native forest, compaction, foreground-subagent, and
+tool-state shapes; current-writer background-subagent evidence remains a
+separate qualification requirement.

@@ -126,14 +126,16 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for DevinDocumentT
             let connection = database.connection().map_err(devin_route_error)?;
             let schema = DevinNativeSchema::probe(connection)
                 .map_err(|error| devin_route_error(error.into()))?;
-            let scan = scan_devin_snapshot(connection, &schema, leaf, &mut |record| {
-                sink.emit_core_record(record)
-                    .map_err(DevinSourceBackedError::Route)
-            })
-            .map_err(|error| {
-                database.diagnose_provider_query_error(error, SqliteFailurePhase::Projection)
-            })
-            .map_err(devin_route_error)?;
+            let source_selector = self.path.to_string_lossy();
+            let scan =
+                scan_devin_snapshot(connection, &schema, leaf, &source_selector, &mut |record| {
+                    sink.emit_core_record(record)
+                        .map_err(DevinSourceBackedError::Route)
+                })
+                .map_err(|error| {
+                    database.diagnose_provider_query_error(error, SqliteFailurePhase::Projection)
+                })
+                .map_err(devin_route_error)?;
             // The snapshot must still be the one this scan opened, or the
             // records just emitted describe a source that no longer exists.
             if database.evidence() != &authority.opening_evidence {
@@ -153,6 +155,7 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for DevinDocumentT
             return Err(database.abort(error));
         }
         let certificate = scan.certify(leaf.clone()).map_err(devin_route_error)?;
+        sink.record_rejections(scan.record_rejections);
         Ok(document_terminal(&certificate))
     }
 
@@ -246,10 +249,14 @@ fn observe_devin_inventory(data_root: &Path, path: &Path) -> DevinResult<DevinPh
             let observed = (|| {
                 let connection = database.connection()?;
                 let schema = DevinNativeSchema::probe(connection)?;
-                let scan =
-                    scan_devin_snapshot(connection, &schema, &placeholder_source()?, &mut |_| {
-                        Ok(())
-                    })?;
+                let source_selector = path.to_string_lossy();
+                let scan = scan_devin_snapshot(
+                    connection,
+                    &schema,
+                    &placeholder_source()?,
+                    &source_selector,
+                    &mut |_| Ok(()),
+                )?;
                 Ok::<[u8; 32], DevinSourceBackedError>(scan.logical_fingerprint)
             })();
             let logical_fingerprint = match observed {

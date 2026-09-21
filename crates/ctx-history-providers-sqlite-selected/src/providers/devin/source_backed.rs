@@ -6,15 +6,20 @@
 //!
 //! Lineage follows the Codex and Claude precedent. A session's primary
 //! transcript claims nothing about its parentage. A subagent thread Devin
-//! back-linked becomes its own delegated session, keyed by the agent id, with
-//! the primary session as both its parent and its root. Nothing claims an
-//! event copy: Devin records no proof that would support one.
+//! foreground-linked or recorded with a durable head becomes its own delegated
+//! session, keyed by the agent id, with the primary session as both its parent
+//! and its root. Nothing claims an event copy: Devin records no proof that
+//! would support one.
 
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use thiserror::Error;
 
 use ctx_history_capture_model::normalization::provider_timestamp_seconds;
+use ctx_history_capture_runtime::{
+    SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDraft,
+    SourceBackedRecordRejectionDrafts, MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS,
+};
 use ctx_history_core::{
     admit_optional_provider_call_id, derive_event_id, derive_native_session_id, ActivityInvocation,
     ActivityJsonCapture, ActivityResult, ActivityTextCapture, AgentScope, CaptureProvider,
@@ -35,10 +40,16 @@ use crate::{
 };
 
 use super::{
-    chain::{plan_session, DevinLineageKey, DevinSessionPlan, DevinSpliceKind},
+    chain::{
+        plan_session, DevinLineageKey, DevinSessionPlan, DevinSessionRejection, DevinSpliceKind,
+        DevinSubagentHead,
+    },
     normalization::{enrich_tool_output, normalize_node, DevinNativeEvent, DevinNodeDisposition},
     schema::DevinNativeSchema,
-    stream::{hydrate_nodes, read_session_facts, read_session_page, DevinNodeRow, DevinSessionRow},
+    stream::{
+        hydrate_nodes, read_session_facts, read_session_page, read_subagent_heads, DevinNodeRow,
+        DevinSessionRow,
+    },
     tool_state::read_tool_state,
 };
 
@@ -192,11 +203,11 @@ fn primary_projection(
     })
 }
 
-/// A back-linked subagent thread, projected as a delegated child session.
+/// An exactly linked subagent thread, projected as a delegated child session.
 ///
-/// Devin records the link on the primary transcript's own tool node, so the
-/// parent and the root are the same session and the claim is exact rather than
-/// inferred.
+/// Devin records either a foreground link on the primary transcript's tool
+/// node or a durable head scoped to the primary session, so the parent and root
+/// are the same session and the claim is exact rather than inferred.
 fn subagent_projection(
     source: &SourceKey,
     session: &DevinSessionRow,
@@ -247,6 +258,7 @@ pub(super) struct DevinScanCounts {
 pub(super) struct DevinSourceBackedScan {
     pub(super) counts: DevinScanCounts,
     pub(super) logical_fingerprint: [u8; 32],
+    pub(super) record_rejections: SourceBackedRecordRejectionDrafts,
     schema_evidence: String,
 }
 
@@ -256,21 +268,26 @@ impl DevinSourceBackedScan {
     /// `complete_records` is the total the scan classified, which Core
     /// requires to equal retained plus rejected plus ignored; the records
     /// actually published are `retained_records`.
-    pub(super) fn scanned_counts(&self) -> ScannedSourceCounts {
+    pub(super) fn scanned_counts(&self) -> DevinResult<ScannedSourceCounts> {
         let retained = self.counts.complete_records;
-        let classified = retained
-            .saturating_add(self.counts.rejected_records)
-            .saturating_add(self.counts.ignored_nodes);
-        ScannedSourceCounts {
+        let rejected = checked_add(
+            checked_add(
+                checked_add(self.counts.rejected_records, self.counts.rejected_sessions)?,
+                self.counts.rejected_lineages,
+            )?,
+            self.counts.rejected_splices,
+        )?;
+        let classified = checked_add(checked_add(retained, rejected)?, self.counts.ignored_nodes)?;
+        Ok(ScannedSourceCounts {
             complete_records: classified,
             retained_records: retained,
-            rejected_records: self.counts.rejected_records,
+            rejected_records: rejected,
             ignored_records: self.counts.ignored_nodes,
             // One indexed document per retained record, matching the Core
             // records the adapter forwards.
             indexed_documents: retained,
             certified_bytes: self.counts.certified_bytes,
-        }
+        })
     }
 
     /// Binds this scan's logical evidence to one Core certification identity.
@@ -279,7 +296,7 @@ impl DevinSourceBackedScan {
             DEVIN_SOURCE_BACKED_PARSER_REVISION,
             self.schema_evidence.as_bytes(),
             self.logical_fingerprint,
-            self.scanned_counts(),
+            self.scanned_counts()?,
         )
         .certify(source)?)
     }
@@ -291,6 +308,7 @@ pub(super) fn scan_devin_snapshot(
     conn: &Connection,
     schema: &DevinNativeSchema,
     source: &SourceKey,
+    source_selector: &str,
     emit: &mut dyn FnMut(CoreRecord) -> DevinResult<()>,
 ) -> DevinResult<DevinSourceBackedScan> {
     let mut fingerprint =
@@ -298,6 +316,7 @@ pub(super) fn scan_devin_snapshot(
     let mut counts = DevinScanCounts::default();
     let mut cursor = String::new();
     let mut event_sequence = 0_u64;
+    let mut record_rejections = SourceBackedRecordRejectionDrafts::default();
 
     loop {
         let page = read_session_page(conn, schema, &cursor)?;
@@ -307,19 +326,56 @@ pub(super) fn scan_devin_snapshot(
         for session in &page {
             counts.sessions = checked_add(counts.sessions, 1)?;
             let (facts, main_chain_id) = read_session_facts(conn, &session.id)?;
-            let plan = plan_session(&facts, main_chain_id);
+            let heads = read_subagent_heads(conn, &session.id)?;
+            let plan = plan_session(&facts, main_chain_id, &heads);
             fingerprint.record::<DevinSourceBackedError>(
                 DEVIN_LOGICAL_SESSION_RELATION,
-                session_evidence(session, &plan),
+                session_evidence(session, &plan, &heads),
             )?;
-            if plan.rejection.is_some() {
+            if let Some(reason) = plan.rejection.as_ref() {
                 counts.rejected_sessions = checked_add(counts.rejected_sessions, 1)?;
+                record_devin_rejection(
+                    &mut record_rejections,
+                    source,
+                    source_selector,
+                    session.main_chain_id,
+                    SourceBackedRecordRejectionClass::MalformedRecord,
+                    format!(
+                        "Devin session {} was rejected: {}",
+                        diagnostic_id(&session.id),
+                        session_rejection_detail(reason)
+                    ),
+                );
             }
             counts.ignored_nodes = checked_add(counts.ignored_nodes, plan.counts.ignored_nodes)?;
             counts.rejected_lineages =
                 checked_add(counts.rejected_lineages, plan.counts.rejected_lineages)?;
             counts.rejected_splices =
                 checked_add(counts.rejected_splices, plan.counts.rejected_splices)?;
+            record_repeated_devin_rejection(
+                &mut record_rejections,
+                source,
+                source_selector,
+                session.main_chain_id,
+                plan.counts.rejected_lineages,
+                SourceBackedRecordRejectionClass::UnsupportedRecord,
+                format!(
+                    "Devin session {} contains an invalid, ambiguous, or overlapping subagent lineage",
+                    diagnostic_id(&session.id)
+                ),
+            );
+            record_repeated_devin_rejection(
+                &mut record_rejections,
+                source,
+                source_selector,
+                session.main_chain_id,
+                plan.counts.rejected_splices,
+                SourceBackedRecordRejectionClass::MalformedRecord,
+                format!(
+                    "Devin session {} contains a compaction splice whose referenced node is absent",
+                    diagnostic_id(&session.id)
+                ),
+            );
 
             project_session(
                 conn,
@@ -328,6 +384,8 @@ pub(super) fn scan_devin_snapshot(
                 &plan,
                 &mut fingerprint,
                 &mut counts,
+                source_selector,
+                &mut record_rejections,
                 &mut event_sequence,
                 emit,
             )?;
@@ -341,6 +399,7 @@ pub(super) fn scan_devin_snapshot(
     Ok(DevinSourceBackedScan {
         counts,
         logical_fingerprint: fingerprint.finish(),
+        record_rejections,
         schema_evidence: schema.capability_digest.clone(),
     })
 }
@@ -353,6 +412,8 @@ fn project_session(
     plan: &DevinSessionPlan,
     fingerprint: &mut RelationFingerprint,
     counts: &mut DevinScanCounts,
+    source_selector: &str,
+    record_rejections: &mut SourceBackedRecordRejectionDrafts,
     event_sequence: &mut u64,
     emit: &mut dyn FnMut(CoreRecord) -> DevinResult<()>,
 ) -> DevinResult<()> {
@@ -381,7 +442,7 @@ fn project_session(
             .collect::<std::collections::BTreeMap<_, _>>();
         // Within one lineage a repeated message_id whose payload is
         // byte-identical is a copy Devin rewrote, not a second turn.
-        let mut seen_messages = std::collections::BTreeMap::<String, [u8; 32]>::new();
+        let mut seen_messages = std::collections::BTreeSet::<(String, [u8; 32])>::new();
         let mut emit_error = None;
 
         hydrate_nodes::<DevinSourceBackedError>(conn, &session.id, &node_ids, &mut |node| {
@@ -405,6 +466,18 @@ fn project_session(
             match normalized.disposition {
                 Some(DevinNodeDisposition::Unsupported) => {
                     counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+                    record_devin_rejection(
+                        record_rejections,
+                        source,
+                        source_selector,
+                        Some(node.node_id),
+                        SourceBackedRecordRejectionClass::UnsupportedRecord,
+                        format!(
+                            "Devin session {} node {} has an unsupported or malformed message payload",
+                            diagnostic_id(&session.id),
+                            node.node_id
+                        ),
+                    );
                     return Ok(());
                 }
                 Some(DevinNodeDisposition::Empty) => {
@@ -414,14 +487,11 @@ fn project_session(
                 None => {}
             }
             if let Some(message_id) = normalized.message_id.as_deref() {
-                if seen_messages
-                    .get(message_id)
-                    .is_some_and(|previous| *previous == digest)
-                {
+                let message_digest = message_payload_digest(&node.chat_message);
+                if !seen_messages.insert((message_id.to_owned(), message_digest)) {
                     counts.ignored_nodes = checked_add(counts.ignored_nodes, 1)?;
                     return Ok(());
                 }
-                seen_messages.insert(message_id.to_owned(), digest);
             }
 
             for (subrecord_index, mut event) in normalized.events.into_iter().enumerate() {
@@ -451,8 +521,20 @@ fn project_session(
                     *event_sequence,
                 ) {
                     Ok(record) => record,
-                    Err(_) => {
+                    Err(error) => {
                         counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+                        record_devin_rejection(
+                            record_rejections,
+                            source,
+                            source_selector,
+                            Some(node.node_id),
+                            SourceBackedRecordRejectionClass::UnsupportedRecord,
+                            format!(
+                                "Devin session {} node {} could not satisfy the Core projection contract: {error}",
+                                diagnostic_id(&session.id),
+                                node.node_id
+                            ),
+                        );
                         continue;
                     }
                 };
@@ -475,6 +557,67 @@ fn project_session(
     Ok(())
 }
 
+fn diagnostic_id(value: &str) -> String {
+    value.chars().take(128).collect()
+}
+
+fn session_rejection_detail(reason: &DevinSessionRejection) -> &'static str {
+    match reason {
+        DevinSessionRejection::MissingChainAnchor => "main_chain_id names an absent node",
+        DevinSessionRejection::BrokenChainParent => "a retained chain parent is absent",
+        DevinSessionRejection::NonMonotonicParent => {
+            "a retained chain parent does not precede its child"
+        }
+        DevinSessionRejection::TooManyNodes => "the message forest exceeds the planning bound",
+    }
+}
+
+fn record_devin_rejection(
+    rejections: &mut SourceBackedRecordRejectionDrafts,
+    source: &SourceKey,
+    source_selector: &str,
+    node_id: Option<i64>,
+    class: SourceBackedRecordRejectionClass,
+    detail: String,
+) {
+    rejections.record(SourceBackedRecordRejectionDraft {
+        source: source.clone(),
+        provider: CaptureProvider::Devin,
+        source_selector: source_selector.to_owned(),
+        line_number: node_id
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(0),
+        payload_type: Some("sqlite_row".to_owned()),
+        class,
+        detail,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_repeated_devin_rejection(
+    rejections: &mut SourceBackedRecordRejectionDrafts,
+    source: &SourceKey,
+    source_selector: &str,
+    node_id: Option<i64>,
+    count: u64,
+    class: SourceBackedRecordRejectionClass,
+    detail: String,
+) {
+    let retained = count.min(MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS as u64);
+    for _ in 0..retained {
+        record_devin_rejection(
+            rejections,
+            source,
+            source_selector,
+            node_id,
+            class,
+            detail.clone(),
+        );
+    }
+    let omitted = count.saturating_sub(retained);
+    rejections.record_omitted(usize::try_from(omitted).unwrap_or(usize::MAX));
+}
+
 /// The logical row digest for one node, over the columns that carry content.
 ///
 /// `row_id` is deliberately excluded: it is an insertion artifact, and a
@@ -489,7 +632,18 @@ fn node_row_digest(node: &DevinNodeRow) -> [u8; 32] {
     ])
 }
 
-fn session_evidence(session: &DevinSessionRow, plan: &DevinSessionPlan) -> [u8; 32] {
+/// Content identity used only to collapse Devin's rewritten compaction copy.
+/// Row timestamps and metadata remain in the logical fingerprint, but they do
+/// not make the same exact native message a second searchable turn.
+fn message_payload_digest(chat_message: &str) -> [u8; 32] {
+    sqlite_logical_record_digest_bytes(&[NativeSqliteValue::Text(chat_message.to_owned())])
+}
+
+fn session_evidence(
+    session: &DevinSessionRow,
+    plan: &DevinSessionPlan,
+    heads: &[DevinSubagentHead],
+) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
     hash_text(&mut digest, &session.id);
@@ -508,6 +662,12 @@ fn session_evidence(session: &DevinSessionRow, plan: &DevinSessionPlan) -> [u8; 
     digest.update(plan.counts.ignored_nodes.to_be_bytes());
     digest.update(plan.counts.rejected_lineages.to_be_bytes());
     digest.update(plan.counts.rejected_splices.to_be_bytes());
+    digest.update(u64::try_from(heads.len()).unwrap_or(u64::MAX).to_be_bytes());
+    for head in heads {
+        hash_text(&mut digest, &head.agent_id);
+        digest.update(head.chain_node_id.to_be_bytes());
+        digest.update(head.updated_at.to_be_bytes());
+    }
     digest.finalize().into()
 }
 

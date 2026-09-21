@@ -64,11 +64,17 @@ pub(super) struct DevinNodeFacts {
     pub(super) subagent_agent_id: Option<String>,
 }
 
+/// Devin's durable pointer to one subagent transcript.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DevinSubagentHead {
+    pub(super) agent_id: String,
+    pub(super) chain_node_id: i64,
+    pub(super) updated_at: i64,
+}
+
 /// Why a session yielded no transcript at all.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum DevinSessionRejection {
-    /// The session records no main chain, so it has metadata only.
-    NoMainChain,
     /// `main_chain_id` names a node the session does not contain.
     MissingChainAnchor,
     /// A chain node's `parent_node_id` names a node the session does not
@@ -147,11 +153,24 @@ pub(super) const DEVIN_MAX_SESSION_NODES: usize = 1_000_000;
 pub(super) fn plan_session(
     facts: &BTreeMap<i64, DevinNodeFacts>,
     main_chain_id: Option<i64>,
+    subagent_heads: &[DevinSubagentHead],
 ) -> DevinSessionPlan {
     let total = facts.len() as u64;
     if facts.len() > DEVIN_MAX_SESSION_NODES {
         return DevinSessionPlan::rejected(DevinSessionRejection::TooManyNodes, total);
     }
+    // A null anchor is Devin's metadata-only state. Nothing in the forest is a
+    // transcript in that state, including otherwise malformed or linked nodes.
+    let Some(main_chain_id) = main_chain_id else {
+        return DevinSessionPlan {
+            lineages: Vec::new(),
+            counts: DevinPlanCounts {
+                ignored_nodes: total,
+                ..DevinPlanCounts::default()
+            },
+            rejection: None,
+        };
+    };
     // Ancestor-first ordering rests on this, so it is verified once up front
     // rather than trusted per walk.
     if let Some((&node_id, _)) = facts.iter().find(|(node_id, node)| {
@@ -161,9 +180,6 @@ pub(super) fn plan_session(
         let _ = node_id;
         return DevinSessionPlan::rejected(DevinSessionRejection::NonMonotonicParent, total);
     }
-    let Some(main_chain_id) = main_chain_id else {
-        return DevinSessionPlan::rejected(DevinSessionRejection::NoMainChain, total);
-    };
     if !facts.contains_key(&main_chain_id) {
         return DevinSessionPlan::rejected(DevinSessionRejection::MissingChainAnchor, total);
     }
@@ -183,9 +199,12 @@ pub(super) fn plan_session(
         nodes: ordered_nodes(facts, &primary, main_chain_id),
     }];
 
-    // Subagent threads are imported only where the primary transcript itself
-    // links to them, and only once per agent id.
-    let mut seen_agents = BTreeSet::<String>::new();
+    // Foreground links retain their primary-transcript order. Durable-only
+    // heads follow in the deterministic order supplied by the reader. A
+    // subagent can move between foreground and background while keeping its
+    // agent id, so a later head on the same chain replaces an earlier tip.
+    let mut candidate_indexes = BTreeMap::<String, usize>::new();
+    let mut candidates = Vec::<DevinSubagentCandidate>::new();
     for node_id in &primary {
         let node = &facts[node_id];
         let (Some(tip), Some(agent_id)) = (
@@ -194,33 +213,29 @@ pub(super) fn plan_session(
         ) else {
             continue;
         };
-        if agent_id.trim().is_empty() || !seen_agents.insert(agent_id.to_owned()) {
-            counts.rejected_lineages += 1;
-            continue;
-        }
-        if !facts.contains_key(&tip) {
-            counts.rejected_lineages += 1;
-            continue;
-        }
-        let mut lineage_counts = DevinPlanCounts::default();
-        let Ok(nodes) = collect_lineage(facts, tip, &mut lineage_counts, &claimed) else {
-            counts.rejected_lineages += 1;
-            continue;
-        };
-        // A subagent thread that reaches into an already-imported lineage is
-        // not an independent transcript, so no lineage claim is made for it.
-        if nodes.iter().any(|node_id| claimed.contains(node_id)) {
-            counts.rejected_lineages += 1;
-            continue;
-        }
-        counts.rejected_splices += lineage_counts.rejected_splices;
-        claimed.extend(nodes.iter().copied());
-        let lineage_ord = lineages.len() as u32;
-        lineages.push(DevinLineagePlan {
-            key: DevinLineageKey::Subagent(agent_id.to_owned()),
-            lineage_ord,
-            nodes: ordered_nodes(facts, &nodes, tip),
-        });
+        admit_subagent_candidate(
+            facts,
+            &claimed,
+            agent_id,
+            tip,
+            &mut candidate_indexes,
+            &mut candidates,
+            &mut counts,
+        );
+    }
+    for head in subagent_heads {
+        admit_subagent_candidate(
+            facts,
+            &claimed,
+            &head.agent_id,
+            head.chain_node_id,
+            &mut candidate_indexes,
+            &mut candidates,
+            &mut counts,
+        );
+    }
+    for candidate in candidates {
+        add_subagent_lineage(facts, candidate, &mut claimed, &mut lineages, &mut counts);
     }
 
     counts.ignored_nodes = total - claimed.len() as u64;
@@ -229,6 +244,88 @@ pub(super) fn plan_session(
         counts,
         rejection: None,
     }
+}
+
+struct DevinSubagentCandidate {
+    agent_id: String,
+    tip: i64,
+    nodes: BTreeSet<i64>,
+    rejected_splices: u64,
+}
+
+fn admit_subagent_candidate(
+    facts: &BTreeMap<i64, DevinNodeFacts>,
+    primary: &BTreeSet<i64>,
+    agent_id: &str,
+    tip: i64,
+    indexes: &mut BTreeMap<String, usize>,
+    candidates: &mut Vec<DevinSubagentCandidate>,
+    counts: &mut DevinPlanCounts,
+) {
+    if agent_id.trim().is_empty() {
+        counts.rejected_lineages += 1;
+        return;
+    }
+    if !facts.contains_key(&tip) {
+        counts.rejected_lineages += 1;
+        return;
+    }
+    let mut lineage_counts = DevinPlanCounts::default();
+    let Ok(nodes) = collect_lineage(facts, tip, &mut lineage_counts, primary) else {
+        counts.rejected_lineages += 1;
+        return;
+    };
+    if nodes.iter().any(|node_id| primary.contains(node_id)) {
+        counts.rejected_lineages += 1;
+        return;
+    }
+
+    let candidate = DevinSubagentCandidate {
+        agent_id: agent_id.to_owned(),
+        tip,
+        nodes,
+        rejected_splices: lineage_counts.rejected_splices,
+    };
+    let Some(&index) = indexes.get(agent_id) else {
+        indexes.insert(agent_id.to_owned(), candidates.len());
+        candidates.push(candidate);
+        return;
+    };
+    let previous = &candidates[index];
+    if previous.tip == tip {
+        return;
+    }
+    if candidate.nodes.contains(&previous.tip) {
+        candidates[index] = candidate;
+    } else if !previous.nodes.contains(&tip) {
+        // Disjoint tips under one exact agent id are ambiguous. Keep the
+        // first native link and reject only the conflicting candidate.
+        counts.rejected_lineages += 1;
+    }
+}
+
+fn add_subagent_lineage(
+    facts: &BTreeMap<i64, DevinNodeFacts>,
+    candidate: DevinSubagentCandidate,
+    claimed: &mut BTreeSet<i64>,
+    lineages: &mut Vec<DevinLineagePlan>,
+    counts: &mut DevinPlanCounts,
+) {
+    if candidate
+        .nodes
+        .iter()
+        .any(|node_id| claimed.contains(node_id))
+    {
+        counts.rejected_lineages += 1;
+        return;
+    }
+    counts.rejected_splices += candidate.rejected_splices;
+    claimed.extend(candidate.nodes.iter().copied());
+    lineages.push(DevinLineagePlan {
+        key: DevinLineageKey::Subagent(candidate.agent_id),
+        lineage_ord: lineages.len() as u32,
+        nodes: ordered_nodes(facts, &candidate.nodes, candidate.tip),
+    });
 }
 
 /// Walks one lineage from `tip`, following parents and splicing transitively.

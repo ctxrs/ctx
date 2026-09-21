@@ -131,6 +131,42 @@ fn a_tool_node_falls_back_to_recorded_terminal_output_and_reads_its_timing() {
 }
 
 #[test]
+fn an_empty_tool_result_is_preserved_but_absent_result_text_is_not() {
+    let events = normalize(json!({
+        "role": "tool",
+        "content": "",
+        "tool_call_id": "exec_empty",
+        "metadata": {"extensions": {
+            "chisel/terminal_output": {"text": "", "cwd": "/tmp/devin-fixture"},
+            "chisel/tool_call_timing": {
+                "finished_at": "2026-08-19T19:20:07.467967400Z",
+                "duration_ms": 2,
+            },
+        }},
+    }));
+    assert_eq!(kinds(&events), [(EventType::ToolOutput, EventRole::Tool)]);
+    assert_eq!(events[0].text, "");
+    assert_eq!(events[0].provider_call_id.as_deref(), Some("exec_empty"));
+    assert_eq!(events[0].workdir.as_deref(), Some("/tmp/devin-fixture"));
+    assert_eq!(events[0].duration_ms, Some(2));
+
+    let absent = normalize_node(
+        &json!({
+            "role": "tool",
+            "tool_call_id": "exec_absent",
+            "metadata": {"extensions": {
+                "chisel/terminal_output": {"cwd": "/tmp/devin-fixture"},
+            }},
+        })
+        .to_string(),
+        None,
+    )
+    .unwrap();
+    assert!(absent.events.is_empty());
+    assert_eq!(absent.disposition, Some(DevinNodeDisposition::Empty));
+}
+
+#[test]
 fn a_node_the_reader_cannot_audit_is_refused_and_an_empty_one_is_ignored() {
     for payload in [
         json!({"role": "future_role", "content": "text"}),
@@ -199,30 +235,42 @@ fn acp_enrichment_is_additive_and_never_overwrites_the_node() {
 }
 
 #[test]
-fn acp_enrichment_supplies_text_only_when_the_node_had_none() {
+fn acp_enrichment_supplies_text_to_an_empty_normalized_result() {
     let mut event = normalize(json!({
         "role": "tool",
         "content": "",
         "tool_call_id": "exec_0",
-        "metadata": {"extensions": {"chisel/terminal_output": {"text": " "}}},
+        "metadata": {"extensions": {"chisel/terminal_output": {
+            "text": "",
+            "cwd": "/tmp/devin-fixture",
+        }}},
     }))
-    .pop()
-    .unwrap_or_else(|| {
-        // A tool node with no readable text at all yields no event, so build
-        // the enrichment target from a node that does.
-        normalize(json!({"role": "tool", "content": "x", "tool_call_id": "exec_0"})).remove(0)
+    .remove(0);
+    assert_eq!(event.text, "");
+    assert_eq!(event.provider_call_id.as_deref(), Some("exec_0"));
+
+    let call = json!({
+        "toolCallId": "exec_0",
+        "rawInput": {"command": "false"},
+        "_meta": {"cognition.ai/inferenceToolName": "exec"},
     });
-    event.text = String::new();
-    enrich_tool_output(
-        &mut event,
-        None,
-        Some(&json!({
-            "status": "failed",
-            "content": [{"type": "content", "content": {"type": "text", "text": "acp only"}}],
-        })),
-    );
+    let update = json!({
+        "toolCallId": "exec_0",
+        "status": "failed",
+        "content": [{"type": "content", "content": {"type": "text", "text": "acp only"}}],
+    });
+    let expected_acp = json!({
+        "acp": {
+            "tool_call": call.clone(),
+            "tool_call_update": update.clone(),
+        },
+    });
+    enrich_tool_output(&mut event, Some(&call), Some(&update));
+
     assert_eq!(event.text, "acp only");
     assert_eq!(event.status.as_deref(), Some("failed"));
+    assert_eq!(event.tool_name.as_deref(), Some("exec"));
+    assert_eq!(event.structured_content.as_ref(), Some(&expected_acp));
 }
 
 #[test]
