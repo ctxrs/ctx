@@ -39,12 +39,12 @@
     "remark-mdx": "^3.1.1",
     "remark-parse": "^11.0.0",
     "shiki": "^4.0.2",
-    "tsx": "^4.20.6",
+    "tsx": "^4.23.15",
     "typescript": "~5.9.3",
     "unified": "^11.0.5",
     "unist-util-visit": "^5.0.0",
-    "vite": "^8.0.1",
-    "vitest": "^4.0.7",
-    "wrangler": "^4.79.0"
+    "vite": "^8.3.0",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.136.0"
   }
 }
