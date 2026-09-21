@@ -27,13 +27,16 @@ export function readReport(file) {
 
 export function approvedRelease(file) {
   const evidence = readReport(file);
+  const mainChecked = evidence?.public_source?.remote_main_checked === true;
+  const tagChecked = evidence?.public_source?.release_tag_checked === true
+    && evidence.public_source.release_tag === `v${evidence.release?.version}`;
   if (evidence?.schema_version !== 1 || evidence.kind !== "public-cli-release-contract"
       || evidence.status !== "passed" || evidence.release?.channel !== "stable"
       || !VERSION.test(evidence.release.version ?? "")
       || !/^[0-9a-f]{40}$/u.test(evidence.release.source_commit ?? "")
       || evidence.public_source?.commit !== evidence.release.source_commit
       || evidence.public_source?.worktree_clean_checked !== true
-      || evidence.public_source?.remote_main_checked !== true
+      || (!mainChecked && !tagChecked)
       || evidence.metadata?.stable?.signature_verified !== true
       || evidence.metadata?.versioned?.signature_verified !== true
       || !SHA256.test(evidence.metadata.stable.sha256 ?? "")
