@@ -182,6 +182,16 @@ test("approved release input requires signed pair identities for every platform"
   try {
     fs.writeFileSync(file, JSON.stringify(evidence));
     assert.equal(approvedRelease(file).version, version);
+    evidence.public_source.remote_main_checked = false;
+    evidence.public_source.release_tag_checked = true;
+    evidence.public_source.release_tag = `v${version}`;
+    fs.writeFileSync(file, JSON.stringify(evidence));
+    assert.equal(approvedRelease(file).version, version);
+    evidence.public_source.release_tag = "v1.4.12";
+    fs.writeFileSync(file, JSON.stringify(evidence));
+    assert.throws(() => approvedRelease(file), /passed approved/);
+    evidence.public_source.remote_main_checked = true;
+    evidence.public_source.release_tag_checked = false;
     evidence.metadata.managed_pair = { "linux-x64": pairs["linux-x64"] };
     fs.writeFileSync(file, JSON.stringify(evidence));
     assert.throws(() => approvedRelease(file), /missing the signed pair/);

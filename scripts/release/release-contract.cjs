@@ -251,6 +251,19 @@ function assertPublicSource(repo, expectedCommit) {
   return actualCommit;
 }
 
+function assertPublicReleaseTag(repo, version, expectedCommit) {
+  const configuredTag = env("CTX_PUBLIC_RELEASE_TAG"), expectedTag = `v${version}`;
+  if (!configuredTag) return { checked: false, tag: null };
+  if (configuredTag !== expectedTag) fail(`CTX_PUBLIC_RELEASE_TAG is ${configuredTag}, expected ${expectedTag}`);
+  const refs = run("git", ["ls-remote", "origin", `refs/tags/${configuredTag}`,
+    `refs/tags/${configuredTag}^{}`], { cwd: repo }).split(/\r?\n/u).filter(Boolean);
+  const peeled = refs.find((line) => line.endsWith(`refs/tags/${configuredTag}^{}`));
+  if (!peeled) fail(`release tag ${configuredTag} must be annotated`);
+  const commit = peeled.split(/\s+/u)[0];
+  if (commit !== expectedCommit) fail(`release tag ${configuredTag} does not resolve to ${expectedCommit}`);
+  return { checked: true, tag: configuredTag };
+}
+
 function loadHostedInstallerPublicKeyPem() {
   const installer = fs.readFileSync(path.join(ROOT, "services/install-site/src/cli-install-script.js"), "utf8");
   const match = installer.match(/DEFAULT_METADATA_PUBLIC_KEY_PEM\s*=\s*`([\s\S]*?)`;/);
@@ -880,6 +893,7 @@ async function main() {
   );
 
   assertPublicSource(repo, sourceCommit);
+  const releaseTag = assertPublicReleaseTag(repo, version, sourceCommit);
   const [stable, versioned] = await Promise.all([
     loadSignedMetadata(stableUrl, "stable", publicKeyPem),
     loadSignedMetadata(versionedUrl, "versioned", publicKeyPem),
@@ -930,6 +944,8 @@ async function main() {
       commit: sourceCommit,
       worktree_clean_checked: env("CTX_PUBLIC_RELEASE_SKIP_WORKTREE_CHECK") !== "1",
       remote_main_checked: env("CTX_PUBLIC_RELEASE_SKIP_REMOTE_CHECK") !== "1",
+      release_tag: releaseTag.tag,
+      release_tag_checked: releaseTag.checked,
     },
     metadata: {
       frozen_bridge: frozenBridge,
