@@ -8,6 +8,47 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 1.5.0
+
+Released: 2026-09-21
+
+### Changed
+
+- Blame is built into the open-source ctx CLI, including source and
+  package-manager builds. File, commit, and pull-request attribution retains
+  the short and explicit CLI forms and the MCP `blame` tool, with citations and
+  text and structured results. Blame no longer requires a Pro companion, trial,
+  activation, machine fingerprint, or subscription.
+- Blame, its build tools, the installer, and the documentation site now live
+  in the public ctx repository.
+- Automatic indexing maintains attribution alongside local history. Run
+  `ctx setup --wait` or `ctx import --all` to complete it explicitly, including
+  in manual mode or when history is already current. Setup's `--no-daemon`
+  option continues to suppress refresh.
+- `ctx status` and `ctx doctor` report attribution readiness and coverage.
+  Blame queries read the existing index without starting a rebuild. A current
+  index remains ready when no attribution evidence is available. History
+  remains searchable while attribution catches up.
+- Existing retained history and citations are preserved. Blame uses the
+  unencrypted local `search/attribution/` index; old encrypted Pro data and keys
+  are left untouched and unused. Upgrading does not cancel an existing
+  subscription.
+- For hosted installs from 1.5 onward, uninstalling with no option or
+  `--keep-data` preserves history, attribution, and legacy data and keys.
+  `--delete-data` is rejected before changes are made; rerun without that
+  option. Package-manager and source installs use their original removal
+  method. There is no native `ctx uninstall` command.
+- Restored the original “search it with ctx” banner and updated documentation
+  and bundled agent skills for included Blame, without trial or purchase
+  instructions.
+
+### Commits and PRs
+
+- Source commit: [137f60fe](https://github.com/ctxrs/ctx/commit/137f60fe7e45238d96afeb41103432095aabf8a7).
+- Full diff: [v1.4.12...137f60fe](https://github.com/ctxrs/ctx/compare/v1.4.12...137f60fe7e45238d96afeb41103432095aabf8a7).
+- [#1018](https://github.com/ctxrs/ctx/pull/1018) — include native Blame in the public ctx 1.5 product.
+- [#1020](https://github.com/ctxrs/ctx/pull/1020) — renew bounded paste/lru exceptions and allow omitted Windows install evidence.
+
 ## 1.4.12
 
 Released: 2026-09-20
