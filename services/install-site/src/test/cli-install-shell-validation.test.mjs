@@ -828,8 +828,13 @@ json_document_is_well_formed "$1"
       valid: false,
     },
     {
+      name: "bounded multiline document",
+      document: `${" \n".repeat(1113)}0\n`,
+      valid: true,
+    },
+    {
       name: "excessive record count",
-      document: `${" \n".repeat(1025)}0\n`,
+      document: `${" \n".repeat(4097)}0\n`,
       valid: false,
     },
     { name: "oversized document", document: Buffer.alloc(1048577, 0x20), valid: false },
