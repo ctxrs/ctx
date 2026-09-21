@@ -4,12 +4,13 @@ use rusqlite::Connection;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::{CaptureError, Result};
+use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
 use super::model::OpenCodeNativeSchemaFamily;
 use crate::provider::providers::opencode::OpenCodeSqliteDialect;
 
 const MAX_NATIVE_IDENTITY_BYTES: i64 = 4 * 1024;
+const JSON_HINT_BYTES: usize = 256;
 const CONVERSATION_ROLES: &str =
     "'user','assistant','system','developer','tool','toolresult','bashexecution'";
 const CONVERSATION_TYPES: &str =
@@ -251,7 +252,10 @@ fn current_table_rows(
 ) -> Result<CurrentTableRows> {
     let column_type_marker = if has_type_column {
         format!(
-            "typeof(type) = 'text' and {} in ({CONVERSATION_TYPES})",
+            "case when typeof(type) = 'text'
+                        and octet_length(type) <= {JSON_HINT_BYTES}
+                  then {} in ({CONVERSATION_TYPES})
+                  else 0 end",
             normalized_token_sql("type")
         )
     } else {
@@ -266,9 +270,14 @@ fn current_table_rows(
                  select 1 from {table}
                  where ({column_type_marker})
                     or case
-                           when typeof(data) = 'text' and json_valid(data) then
-                               ({role} in ({CONVERSATION_ROLES})
-                                or {data_type} in ({CONVERSATION_TYPES}))
+                           when typeof(data) = 'text'
+                                and octet_length(data) <= {MAX_PROVIDER_SQLITE_VALUE_BYTES}
+                           then case
+                                    when json_valid(data) then
+                                        ({role} in ({CONVERSATION_ROLES})
+                                         or {data_type} in ({CONVERSATION_TYPES}))
+                                    else 0
+                                end
                            else 0
                        end
                  limit 1

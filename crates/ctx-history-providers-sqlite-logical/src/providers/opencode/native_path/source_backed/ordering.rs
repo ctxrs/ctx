@@ -20,6 +20,7 @@ use crate::{
         },
         OpenCodeSqliteDialect,
     },
+    provider::sqlite::SqliteLengthPreflightGuard,
     provider_sources::SqliteSourceAccessError,
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -403,6 +404,10 @@ fn hydrate_requested_events(
     requests: &[HydrationRequest],
     consume_event: &mut dyn FnMut(SourceEventRow) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<()> {
+    // The query masks every oversized payload and bounds every variable-width
+    // key before it crosses into Rust. Temporarily lift SQLite's row limit so
+    // two independently accepted 16 MiB values can share one result row.
+    let _length_guard = SqliteLengthPreflightGuard::new(source);
     let sql = source_backed_fallback_events_by_rowids_sql(schema, requests.len());
     let mut point = source.prepare(&sql)?;
     let mut source_rows = point.query(params_from_iter(
