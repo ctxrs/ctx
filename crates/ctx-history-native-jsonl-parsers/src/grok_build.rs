@@ -1,6 +1,10 @@
 use std::borrow::Cow;
 
 use chrono::{DateTime, Utc};
+use ctx_history_capture_model::acp::{
+    acp_terminal_status as terminal_status, acp_update as update, acp_update_kind as update_kind,
+    acp_visible_text as visible_text,
+};
 use ctx_history_core::{EventRole, EventType};
 use serde_json::{json, Value};
 
@@ -12,21 +16,10 @@ pub struct GrokBuildResultSubrecord<'a> {
     pub tool_name: Option<&'a str>,
 }
 
-fn update(value: &Value) -> &Value {
-    value
-        .pointer("/params/update")
-        .or_else(|| value.get("update"))
-        .unwrap_or(value)
-}
-
 fn envelope_meta(value: &Value) -> Option<&Value> {
     value
         .pointer("/params/_meta")
         .or_else(|| value.get("_meta"))
-}
-
-fn update_kind(value: &Value) -> Option<&str> {
-    update(value).get("sessionUpdate").and_then(Value::as_str)
 }
 
 pub fn header_session_id(value: &Value) -> Option<String> {
@@ -149,13 +142,6 @@ pub fn contentless_result_evidence(value: &Value) -> Value {
     })
 }
 
-fn terminal_status(value: &Value) -> Option<&str> {
-    update(value)
-        .get("status")
-        .and_then(Value::as_str)
-        .filter(|status| matches!(*status, "completed" | "failed"))
-}
-
 fn grok_build_tool_kind(value: &Value) -> Option<&str> {
     update(value)
         .pointer("/_meta/x.ai~1tool/kind")
@@ -211,28 +197,6 @@ fn raw_output_visible_text(raw_output: &Value) -> Option<String> {
         _ => None,
     };
     selected.filter(|content| !content.trim().is_empty())
-}
-
-fn visible_text(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(items) => {
-            let parts = items.iter().map(visible_text).collect::<Option<Vec<_>>>()?;
-            (!parts.is_empty()).then(|| parts.join("\n"))
-        }
-        Value::Object(object) => match object.get("type").and_then(Value::as_str) {
-            Some("text") => object
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            Some("content") => object.get("content").and_then(visible_text),
-            Some("diff") => serde_json::to_string(value).ok(),
-            // ACP content unions are closed here. Image/resource blocks and
-            // future variants stay contentless until their schema is audited.
-            Some(_) | None => None,
-        },
-        Value::Null | Value::Bool(_) | Value::Number(_) => None,
-    }
 }
 
 #[cfg(test)]

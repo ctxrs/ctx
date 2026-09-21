@@ -97,7 +97,21 @@ pub(crate) fn install_provider_default_fixture(
             &temp.path().join(".vscode-mock/global-storage"),
         ),
         "fx" => install_fx(temp, user_text, assistant_text),
+        "devin" => install_fixture_file(
+            "devin/v17/sessions.db",
+            &devin_data_root(temp).join("devin/cli/sessions.db"),
+        ),
         other => panic!("missing default fixture installer for matrix provider {other}"),
+    }
+}
+
+/// Devin reads its store from the platform data root, which is the XDG
+/// data home on Unix and the roaming application data directory on Windows.
+fn devin_data_root(temp: &TempDir) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        temp.path().join("AppData/Roaming")
+    } else {
+        temp.path().join(".local/share")
     }
 }
 

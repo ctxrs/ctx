@@ -1,20 +1,22 @@
 //! Selected/direct SQLite provider implementations for ctx history capture.
 //!
-//! Firebender, Goose, Kiro, and Warp own their native parsing, immutable
+//! Devin, Firebender, Goose, Kiro, and Warp own their native parsing, immutable
 //! snapshot interpretation, source identities, and replacement-tree adapters
 //! here. Concrete generation publication remains in the capture façade.
 
 mod error;
+mod fingerprint;
 mod native_source;
 mod providers;
 mod record_evidence;
+mod sqlite_common;
 
 pub use error::{CaptureError, Result};
 pub use providers::{
-    firebender_source_backed_driver, firebender_source_backed_driver_scoped,
-    goose_source_backed_driver, goose_source_backed_driver_scoped, kiro_source_backed_driver,
-    kiro_source_backed_driver_scoped, warp_source_backed_driver, warp_source_backed_driver_scoped,
-    GooseSourceRoute,
+    devin_source_backed_driver, devin_source_backed_driver_scoped, firebender_source_backed_driver,
+    firebender_source_backed_driver_scoped, goose_source_backed_driver,
+    goose_source_backed_driver_scoped, kiro_source_backed_driver, kiro_source_backed_driver_scoped,
+    warp_source_backed_driver, warp_source_backed_driver_scoped, GooseSourceRoute,
 };
 
 pub use ctx_history_capture_runtime::{
@@ -22,6 +24,7 @@ pub use ctx_history_capture_runtime::{
 };
 pub use ctx_history_source_sqlite::MAX_PROVIDER_SQLITE_VALUE_BYTES;
 
+pub const DEVIN_CLI_SESSIONS_SQLITE_SOURCE_FORMAT: &str = "devin_cli_sessions_sqlite";
 pub const FIREBENDER_SQLITE_SOURCE_FORMAT: &str = "firebender_chat_history_sqlite";
 pub const GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT: &str = "goose_sessions_sqlite";
 pub const KIRO_SQLITE_SOURCE_FORMAT: &str = "kiro_cli_sqlite";

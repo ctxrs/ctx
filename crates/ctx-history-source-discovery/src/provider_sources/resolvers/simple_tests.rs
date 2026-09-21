@@ -745,6 +745,60 @@ fn goose_official_root_uses_override_or_one_current_platform_strategy() {
 }
 
 #[test]
+fn devin_official_root_uses_one_current_platform_strategy() {
+    let temp = tempdir();
+    let base = context(&temp, DiscoveryPlatform::Linux);
+
+    let default_linux = resolve_provider(&base, CaptureProvider::Devin);
+    assert_eq!(
+        paths(&default_linux),
+        [base.home().join(".local/share/devin/cli/sessions.db")]
+    );
+
+    let xdg = temp.path().join("xdg");
+    let linux = resolve_provider(
+        &base.clone().with_env("XDG_DATA_HOME", xdg.as_os_str()),
+        CaptureProvider::Devin,
+    );
+    assert_eq!(paths(&linux), [xdg.join("devin/cli/sessions.db")]);
+
+    // A relative XDG_DATA_HOME is not authority; the home default still wins.
+    let relative = resolve_provider(
+        &base.clone().with_env("XDG_DATA_HOME", "relative-xdg"),
+        CaptureProvider::Devin,
+    );
+    assert_eq!(
+        paths(&relative),
+        [base.home().join(".local/share/devin/cli/sessions.db")]
+    );
+
+    let windows_context = DiscoveryContext::new(
+        temp.path().join("win-home"),
+        temp.path().join("win-cwd"),
+        DiscoveryPlatform::Windows,
+        DiscoveryPlatformDirs {
+            data: Some(temp.path().join("roaming")),
+            ..DiscoveryPlatformDirs::default()
+        },
+    );
+    let windows = resolve_provider(&windows_context, CaptureProvider::Devin);
+    assert_eq!(
+        paths(&windows),
+        [temp.path().join("roaming/devin/cli/sessions.db")]
+    );
+
+    let other_unix = resolve_provider(
+        &context(&temp, DiscoveryPlatform::OtherUnix),
+        CaptureProvider::Devin,
+    );
+    assert!(other_unix.sources.is_empty());
+    assert_eq!(
+        other_unix.issues[0].kind,
+        DiscoveryIssueKind::SelectorUnreconstructible
+    );
+}
+
+#[test]
 fn continue_official_root_resolves_relative_replacement_and_suppresses_default() {
     let temp = tempdir();
     let base = context(&temp, DiscoveryPlatform::Linux);
@@ -928,7 +982,7 @@ fn forgecode_official_root_preserves_raw_cwd_semantics_and_exists_winner() {
 }
 
 #[test]
-fn simple_lane_has_seventeen_reviewed_winner_only_policies() {
+fn simple_lane_has_eighteen_reviewed_winner_only_policies() {
     let temp = tempdir();
     let context = context(&temp, DiscoveryPlatform::Linux);
     let providers = [
@@ -949,8 +1003,9 @@ fn simple_lane_has_seventeen_reviewed_winner_only_policies() {
         CaptureProvider::FactoryAiDroid,
         CaptureProvider::ForgeCode,
         CaptureProvider::Fx,
+        CaptureProvider::Devin,
     ];
-    assert_eq!(providers.len(), 17);
+    assert_eq!(providers.len(), 18);
     for provider in providers {
         let report = resolve_provider(&context, provider);
         let expected = if provider == CaptureProvider::Codex {

@@ -158,6 +158,7 @@ fn provider_source_for_path_with_optional_data_root(
         CaptureProvider::MiMoCode => "mimocode_sqlite",
         CaptureProvider::Crush => "crush_sqlite",
         CaptureProvider::Goose => "goose_sessions_sqlite",
+        CaptureProvider::Devin => "devin_cli_sessions_sqlite",
         CaptureProvider::Antigravity => "antigravity_cli_transcript_jsonl_tree",
         CaptureProvider::Gemini => "gemini_cli_chat_recording_jsonl",
         CaptureProvider::Tabnine => "tabnine_cli_chat_recording_jsonl",

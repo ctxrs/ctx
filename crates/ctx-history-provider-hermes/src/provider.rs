@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
+use ctx_history_source_sqlite::sqlite_logical_record_digest_bytes;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::normalization::{provider_nonnegative_i64_to_u64, provider_required_timestamp_seconds};
 use crate::{record_evidence::RecordDigest, Result, HERMES_SQLITE_SOURCE_FORMAT};
@@ -97,31 +97,11 @@ pub(in crate::provider) fn hermes_native_event(
     })
 }
 
+/// Hermes rows are digested with the shared provider logical-row function, so
+/// the persisted evidence stays byte-comparable with every other SQLite
+/// provider rather than depending on a private re-encode.
 fn hermes_layout_record_digest(values: &[HermesSqliteValue]) -> RecordDigest {
-    const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
-    let mut digest = Sha256::new();
-    digest.update(DOMAIN);
-    digest.update((values.len() as u64).to_be_bytes());
-    for value in values {
-        match value {
-            HermesSqliteValue::Null => digest.update([0]),
-            HermesSqliteValue::Integer(value) => {
-                digest.update([1]);
-                digest.update(value.to_be_bytes());
-            }
-            HermesSqliteValue::RealBits(value) => {
-                digest.update([2]);
-                digest.update(value.to_be_bytes());
-            }
-            HermesSqliteValue::Text(value) => {
-                digest.update([3]);
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value.as_bytes());
-            }
-        }
-    }
-    RecordDigest::parse(format!("{:x}", digest.finalize()))
-        .expect("SHA-256 formatter must return a valid digest")
+    RecordDigest::from_sha256(sqlite_logical_record_digest_bytes(values))
 }
 
 pub(crate) fn hermes_decode_content(raw: Option<&str>) -> Value {

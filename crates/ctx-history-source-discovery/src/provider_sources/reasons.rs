@@ -29,6 +29,9 @@ pub(super) fn empty_source_reason(provider: CaptureProvider) -> Option<&'static 
         CaptureProvider::Goose => {
             Some("path exists but no Goose sessions SQLite database was found")
         }
+        CaptureProvider::Devin => {
+            Some("path exists but no Devin sessions SQLite database was found")
+        }
         CaptureProvider::Antigravity => {
             Some("path exists but no Antigravity transcript JSONL files were found")
         }
@@ -218,6 +221,9 @@ pub(super) fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'stati
         CaptureProvider::Goose => {
             Some("path exists but the Goose sessions database could not be read; check permissions")
         }
+        CaptureProvider::Devin => Some(
+            "path exists but the Devin sessions database could not be read; check permissions",
+        ),
         CaptureProvider::Antigravity => {
             Some("path exists but Antigravity transcripts could not be read; check permissions")
         }

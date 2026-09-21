@@ -43,6 +43,7 @@
     { "id": "warp", "status": "current" },
     { "id": "codebuddy", "status": "current" },
     { "id": "fx", "status": "current" },
+    { "id": "devin", "status": "current" },
     { "id": "shell", "status": "current" },
     { "id": "git", "status": "current" },
     { "id": "jj", "status": "current" },

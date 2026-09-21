@@ -29,7 +29,7 @@ duplicate, or ambiguous identity evidence must not become a qualifying
 
 The machine-readable authority is
 [`mcp-tool-call-attribution-capabilities.json`](mcp-tool-call-attribution-capabilities.json).
-Its 51 capability lanes contain three `exact`, 47 `not-qualified`, and one
+Its 52 capability lanes contain three `exact`, 48 `not-qualified`, and one
 `excluded` row. Each exact row names its current implementation plus the owning
 Cargo/Bazel suite and live Rust tests. The checker resolves those references
 against the repository; the owning targets execute the behavioral tests through

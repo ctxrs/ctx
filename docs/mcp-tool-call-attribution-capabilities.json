@@ -52,17 +52,17 @@
     "exact_requires_source_commits": false
   },
   "expected_counts": {
-    "providers": 42,
-    "base_routes": 47,
-    "capability_lanes": 51,
+    "providers": 43,
+    "base_routes": 48,
+    "capability_lanes": 52,
     "lane_statuses": {
       "exact": 3,
-      "not-qualified": 47,
+      "not-qualified": 48,
       "excluded": 1
     },
     "provider_statuses": {
       "exact": 3,
-      "not-qualified": 39,
+      "not-qualified": 40,
       "excluded": 0
     }
   },
@@ -439,6 +439,13 @@
       "status": "not-qualified", "reason": "no_server_field",
       "detail": "Current fx v0.0.6 schema-v3 durable call records contain no authoritative MCP server alias; ctx does not infer one from tool names or configuration.",
       "evidence": ["https://github.com/vercel-labs/fx/blob/79666393e5f613c85f2f0b4b65475f1addd55379/src/core/session/session_codec.zig"]
+    },
+    {
+      "provider_id": "devin", "route": "native_import", "source_format": "devin_cli_sessions_sqlite", "source_schema": "devin-cli-sessions-sqlite-v1",
+      "producer_bound": {"kind": "versions", "versions": ["3000.6.14"], "ranges": [], "source_commits": [], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "writer_version_unproven",
+      "detail": "Devin mcp_call_tool arguments do durably retain server_name, tool_name, and a call id linking to exactly one terminal tool node on the imported chain, but Cognition publishes no first-party writer source or schema proving those fields or their lifecycle, so the observed shape is not an admissible producer boundary.",
+      "evidence": ["https://docs.devin.ai/cli"]
     }
   ],
   "exact_checks": [

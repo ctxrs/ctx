@@ -47,6 +47,7 @@ text_enum! {
         Warp => "warp",
         CodeBuddy => "codebuddy",
         Fx => "fx",
+        Devin => "devin",
         Shell => "shell",
         Git => "git",
         Jj => "jj",
@@ -283,6 +284,11 @@ const NATIVE_PROVIDER_CLI_SPECS: &[ProviderCliSpec] = &[
         cli_name: "fx",
         aliases: &[],
     },
+    ProviderCliSpec {
+        provider: CaptureProvider::Devin,
+        cli_name: "devin",
+        aliases: &[],
+    },
 ];
 
 const CUSTOM_PROVIDER_CLI_SPEC: ProviderCliSpec = ProviderCliSpec {
@@ -366,6 +372,7 @@ impl CaptureProvider {
             Self::Warp => "Warp",
             Self::CodeBuddy => "CodeBuddy",
             Self::Fx => "fx",
+            Self::Devin => "Devin",
             Self::Shell => "Shell",
             Self::Git => "Git",
             Self::Jj => "Jujutsu",
@@ -439,6 +446,7 @@ mod tests {
             (CaptureProvider::Warp, "warp", "Warp"),
             (CaptureProvider::CodeBuddy, "codebuddy", "CodeBuddy"),
             (CaptureProvider::Fx, "fx", "fx"),
+            (CaptureProvider::Devin, "devin", "Devin"),
             (CaptureProvider::Shell, "shell", "Shell"),
             (CaptureProvider::Git, "git", "Git"),
             (CaptureProvider::Jj, "jj", "Jujutsu"),

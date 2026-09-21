@@ -77,6 +77,7 @@ pub(super) fn default_location_import_probe(
         CaptureProvider::KiroCli => path_is_file_probe(path),
         CaptureProvider::Crush => path_is_file_probe(path),
         CaptureProvider::Goose => path_is_file_probe(path),
+        CaptureProvider::Devin => path_is_file_probe(path),
         CaptureProvider::Claude => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenClaw
             if location.source_format

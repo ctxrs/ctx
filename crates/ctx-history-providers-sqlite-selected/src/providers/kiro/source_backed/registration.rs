@@ -8,7 +8,7 @@ use std::{
 use super::{
     kiro_source_key_scoped, observe_kiro_logical_snapshot, require_legacy_sqlite_format,
     scan_kiro_snapshot, KiroSourceBackedErrorV0, KiroSourceBackedScan,
-    KIRO_SOURCE_BACKED_PARSER_REVISION, SOURCE_BACKED_PAGE_ROWS,
+    KIRO_SOURCE_BACKED_PARSER_REVISION, KIRO_SOURCE_PATH_REASONS, SOURCE_BACKED_PAGE_ROWS,
 };
 use crate::{
     common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
@@ -396,32 +396,21 @@ impl KiroMissingLeafFence {
 }
 
 fn database_parent(path: &Path) -> super::KiroSourceBackedResultV0<&Path> {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| {
-            CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: "Kiro SQLite source must have a parent directory",
-            }
-            .into()
-        })
+    Ok(crate::sqlite_common::database_parent(
+        path,
+        &KIRO_SOURCE_PATH_REASONS,
+    )?)
 }
 
 fn database_leaf(path: &Path) -> super::KiroSourceBackedResultV0<&OsStr> {
-    path.file_name().ok_or_else(|| {
-        CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "Kiro SQLite source must have a database leaf name",
-        }
-        .into()
-    })
+    Ok(crate::sqlite_common::database_leaf(
+        path,
+        &KIRO_SOURCE_PATH_REASONS,
+    )?)
 }
 
 fn invalid_database_leaf(path: &Path) -> CaptureError {
-    CaptureError::InvalidProviderTranscriptPath {
-        path: path.to_path_buf(),
-        reason: "Kiro SQLite source must be a regular non-symlink file",
-    }
+    crate::sqlite_common::invalid_database_leaf(path, &KIRO_SOURCE_PATH_REASONS)
 }
 
 pub(crate) fn kiro_scan_error(error: KiroSourceBackedErrorV0) -> SourceBackedRouteError {
@@ -502,10 +491,4 @@ pub(super) fn route_kiro_sqlite_source_call<T>(
     route_kiro_sqlite_call(result.map_err(KiroSourceBackedErrorV0::from))
 }
 
-fn source_changed(detail: impl Into<String>) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(SourceBackedRouteErrorKind::SourceChanged, detail)
-}
-
-fn internal_error(detail: impl Into<String>) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
-}
+use crate::sqlite_common::{internal_error, source_changed};

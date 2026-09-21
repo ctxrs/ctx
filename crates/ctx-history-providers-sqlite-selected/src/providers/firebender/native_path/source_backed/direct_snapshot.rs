@@ -166,31 +166,27 @@ fn open_snapshot_from_authority(
     })
 }
 
+const FIREBENDER_SOURCE_PATH_REASONS: crate::sqlite_common::SqliteSourcePathReasons =
+    crate::sqlite_common::SqliteSourcePathReasons {
+        missing_parent: "Firebender SQLite source must have a parent directory",
+        missing_leaf: "Firebender SQLite source must have a database leaf name",
+        not_regular_file: "Firebender SQLite source must be a regular non-symlink file",
+    };
+
 fn database_parent(path: &Path) -> FirebenderSourceBackedResult<&Path> {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| {
-            CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: "Firebender SQLite source must have a parent directory",
-            }
-            .into()
-        })
+    Ok(crate::sqlite_common::database_parent(
+        path,
+        &FIREBENDER_SOURCE_PATH_REASONS,
+    )?)
 }
 
 fn database_leaf(path: &Path) -> FirebenderSourceBackedResult<&OsStr> {
-    path.file_name().ok_or_else(|| {
-        CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "Firebender SQLite source must have a database leaf name",
-        }
-        .into()
-    })
+    Ok(crate::sqlite_common::database_leaf(
+        path,
+        &FIREBENDER_SOURCE_PATH_REASONS,
+    )?)
 }
 
 fn invalid_database_leaf(path: &Path) -> CaptureError {
-    CaptureError::InvalidProviderTranscriptPath {
-        path: path.to_path_buf(),
-        reason: "Firebender SQLite source must be a regular non-symlink file",
-    }
+    crate::sqlite_common::invalid_database_leaf(path, &FIREBENDER_SOURCE_PATH_REASONS)
 }

@@ -1,7 +1,7 @@
 use std::fmt;
 
 /// Lossless provider-native SQLite value used for persisted logical evidence.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum NativeSqliteValue {
     Null,
     Integer(i64),

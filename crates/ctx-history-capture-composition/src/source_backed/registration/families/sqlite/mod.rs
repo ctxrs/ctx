@@ -24,6 +24,13 @@ pub(super) fn register_route(
             data_root,
             source_root_lineage,
         ),
+        CaptureProvider::Devin => other::register_devin_source_backed_route(
+            registry,
+            source,
+            selection,
+            data_root,
+            source_root_lineage,
+        ),
         CaptureProvider::Firebender => other::register_firebender_source_backed_route(
             registry,
             source,

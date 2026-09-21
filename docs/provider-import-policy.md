@@ -181,6 +181,7 @@ Secondary traits are noted only to guide tests and hardening work.
 | Kiro | `kiro_cli_sqlite` | SQLite message store | SQLite conversation key/value rows containing message JSON. |
 | Crush | `crush_sqlite` | SQLite message store | SQLite sessions with message parts and tool metadata. |
 | Goose | `goose_sessions_sqlite` | SQLite message store | SQLite sessions/messages with structured content JSON. |
+| Devin | `devin_cli_sessions_sqlite` | SQLite message store | SQLite sessions plus a per-session message forest walked from the recorded main chain. |
 | Lingma | `lingma_sqlite` | SQLite message store | SQLite chat rows with prompt/assistant fields. |
 | Qoder | `qoder_transcript_jsonl_tree` | JSONL transcript stream/tree | Transcript and direct project session JSONL leaves under the selected bounded project root. |
 | Warp | `warp_sqlite` | SQLite encoded/blob store | SQLite rows include JSON plus decoded task protobuf blobs. |

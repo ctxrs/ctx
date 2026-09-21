@@ -17,7 +17,6 @@ use ctx_history_core::{
     StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use rusqlite::Connection;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
@@ -913,31 +912,26 @@ fn event_type(event: &GooseNativeEvent) -> EventType {
     }
 }
 
+impl crate::fingerprint::CountOverflowError for GooseSourceBackedErrorV0 {
+    fn count_overflow() -> Self {
+        Self::CountOverflow
+    }
+}
+
+/// Pins the shared counter to this provider's error taxonomy so call sites do
+/// not each have to name it.
 fn checked_add(left: u64, right: u64) -> GooseSourceBackedResultV0<u64> {
-    left.checked_add(right)
-        .ok_or(GooseSourceBackedErrorV0::CountOverflow)
+    crate::fingerprint::checked_add(left, right)
 }
 
 fn missing_tree_fingerprint(source: &SourceKey) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(GOOSE_MISSING_TREE_DOMAIN);
-    digest.update(source.exact_descriptor_digest());
-    digest.finalize().into()
+    crate::fingerprint::missing_tree_fingerprint(GOOSE_MISSING_TREE_DOMAIN, source)
 }
 
-fn source_changed(detail: impl Into<String>) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(SourceBackedRouteErrorKind::SourceChanged, detail)
-}
-
-fn internal_route_error(detail: impl Into<String>) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
-}
+use crate::sqlite_common::{internal_error as internal_route_error, source_changed};
 
 fn sqlite_access_error(error: crate::provider_sources::SqliteSourceAccessError) -> CaptureError {
-    CaptureError::SystemIo {
-        operation: "accessing a retained Goose SQLite source",
-        source: io::Error::other(error),
-    }
+    crate::sqlite_common::sqlite_access_error("accessing a retained Goose SQLite source", error)
 }
 
 #[cfg(test)]

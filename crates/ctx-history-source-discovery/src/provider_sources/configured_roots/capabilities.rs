@@ -30,7 +30,7 @@ const INTENTIONAL_AUTOMATIC_EXACT: ConfiguredRootCapabilityState =
     ConfiguredRootCapabilityState::IntentionalAutomaticExact;
 
 // Keep this table in the exact landed provider-spec order. It is the one
-// exhaustive configured-root capability declaration for all 42 providers.
+// exhaustive configured-root capability declaration for all 43 providers.
 pub(super) const CONFIGURED_ROOT_CAPABILITIES: &[ConfiguredRootCapability] = &[
     ConfiguredRootCapability {
         provider: CaptureProvider::Codex,
@@ -334,6 +334,14 @@ pub(super) const CONFIGURED_ROOT_CAPABILITIES: &[ConfiguredRootCapability] = &[
             ConfiguredRootPathKind::Directory,
             "fx_sessions_tree",
             "fx-sessions",
+        ),
+    },
+    ConfiguredRootCapability {
+        provider: CaptureProvider::Devin,
+        state: exact_source(
+            ConfiguredRootPathKind::File,
+            "devin_cli_sessions_sqlite",
+            "devin-cli-sessions-database",
         ),
     },
 ];

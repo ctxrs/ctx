@@ -82,6 +82,7 @@ PROVIDER_FAMILY_COVERAGE = (
     ("warp", SQLITE_WAL_FAMILY, None),
     ("codebuddy", DOCUMENT_TREE_FAMILY, None),
     ("mimocode", SQLITE_WAL_FAMILY, None),
+    ("devin", SQLITE_WAL_FAMILY, None),
 )
 
 

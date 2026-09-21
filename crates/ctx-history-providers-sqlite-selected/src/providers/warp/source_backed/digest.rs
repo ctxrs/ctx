@@ -1,40 +1,28 @@
 use super::*;
 
-pub(super) fn missing_tree_fingerprint(source: &SourceKey) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(WARP_MISSING_TREE_DOMAIN);
-    digest.update(source.exact_descriptor_digest());
-    digest.finalize().into()
-}
+pub(super) use crate::fingerprint::{hash_optional_text, hash_text};
 
-pub(super) fn checked_add(left: u64, right: u64) -> WarpSourceBackedResultV0<u64> {
-    left.checked_add(right)
-        .ok_or(WarpSourceBackedErrorV0::CountOverflow)
-}
-
-pub(super) fn hash_bytes(digest: &mut Sha256, value: &[u8]) -> WarpSourceBackedResultV0<()> {
-    digest.update(
-        u64::try_from(value.len())
-            .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?
-            .to_be_bytes(),
-    );
-    digest.update(value);
-    Ok(())
-}
-
-pub(super) fn hash_text(digest: &mut Sha256, value: &str) {
-    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
-    digest.update(value.as_bytes());
-}
-
-pub(super) fn hash_optional_text(digest: &mut Sha256, value: Option<&str>) {
-    match value {
-        Some(value) => {
-            digest.update([1]);
-            hash_text(digest, value);
-        }
-        None => digest.update([0]),
+impl crate::fingerprint::CountOverflowError for WarpSourceBackedErrorV0 {
+    fn count_overflow() -> Self {
+        Self::CountOverflow
     }
+}
+
+pub(super) fn missing_tree_fingerprint(source: &SourceKey) -> [u8; 32] {
+    crate::fingerprint::missing_tree_fingerprint(WARP_MISSING_TREE_DOMAIN, source)
+}
+
+/// Pins the shared counter to this provider's error taxonomy so call sites do
+/// not each have to name it.
+pub(super) fn checked_add(left: u64, right: u64) -> WarpSourceBackedResultV0<u64> {
+    crate::fingerprint::checked_add(left, right)
+}
+
+/// Warp's caller threads a `Result` through its digest builders, so the shared
+/// infallible helper keeps that shape here.
+pub(super) fn hash_bytes(digest: &mut Sha256, value: &[u8]) -> WarpSourceBackedResultV0<()> {
+    crate::fingerprint::hash_bytes(digest, value);
+    Ok(())
 }
 
 pub(super) fn parse_hex_digest(value: &str) -> WarpSourceBackedResultV0<[u8; 32]> {

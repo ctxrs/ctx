@@ -44,6 +44,12 @@ fn warp_validate_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+const WARP_INDEX_PROBE: ctx_history_source_sqlite::UniqueIndexProbe<'static> =
+    ctx_history_source_sqlite::UniqueIndexProbe {
+        provider: "Warp",
+        max_rows: 64,
+    };
+
 pub(super) fn warp_task_keyset_index(conn: &Connection) -> Result<String> {
     let task_id_not_null: i64 = conn.query_row(
         "select count(*) from pragma_table_info('agent_tasks') \
@@ -58,49 +64,21 @@ pub(super) fn warp_task_keyset_index(conn: &Connection) -> Result<String> {
         ));
     }
 
-    let mut indexes = conn.prepare(
-        "select name, \"unique\", partial from pragma_index_list('agent_tasks') order by seq",
-    )?;
-    let indexes = indexes
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)? != 0,
-                row.get::<_, i64>(2)? != 0,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    for (name, unique, partial) in indexes {
-        if !unique || partial {
-            continue;
-        }
-        let mut columns = conn.prepare(
-            "select seqno, name, \"desc\", coll from pragma_index_xinfo(?1) \
-             where key = 1 order by seqno",
-        )?;
-        let columns = columns
-            .query_map([name.as_str()], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, i64>(2)? != 0,
-                    row.get::<_, String>(3)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let supported = matches!(
-            columns.as_slice(),
-            [(0, Some(task_id), false, collation)]
-                if task_id == "task_id" && collation.eq_ignore_ascii_case("binary")
-        );
-        if supported {
-            return Ok(name);
-        }
-    }
-    Err(CaptureError::InvalidPayload(
-        "Warp agent_tasks requires a non-partial ascending UNIQUE BINARY index on task_id for bounded global keyset traversal"
-            .to_owned(),
-    ))
+    // Warp needs a single-column ascending UNIQUE BINARY index on task_id to
+    // traverse tasks by keyset; the shared prober also bounds how much schema
+    // it will inspect before refusing the source.
+    ctx_history_source_sqlite::sqlite_unique_index_for_columns(
+        conn,
+        "agent_tasks",
+        &["task_id"],
+        &WARP_INDEX_PROBE,
+    )?
+    .ok_or_else(|| {
+        CaptureError::InvalidPayload(
+            "Warp agent_tasks requires a non-partial ascending UNIQUE BINARY index on task_id for bounded global keyset traversal"
+                .to_owned(),
+        )
+    })
 }
 
 pub(super) fn warp_quote_identifier(identifier: &str) -> String {

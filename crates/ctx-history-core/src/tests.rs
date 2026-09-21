@@ -71,4 +71,8 @@ fn enum_string_roundtrips_and_defaults() {
         serde_json::from_str::<CaptureProvider>("\"fx\"").unwrap(),
         CaptureProvider::Fx
     );
+    assert_eq!(
+        serde_json::from_str::<CaptureProvider>("\"devin\"").unwrap(),
+        CaptureProvider::Devin
+    );
 }

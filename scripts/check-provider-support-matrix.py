@@ -18,7 +18,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MATRIX_PATH = REPO_ROOT / "docs/provider-support-matrix.json"
 ALLOWED_STATUSES = {"supported"}
-EXPECTED_SUPPORTED_PROVIDER_COUNT = 42
+EXPECTED_SUPPORTED_PROVIDER_COUNT = 43
 ALLOWED_PATH_KINDS = {"native_import"}
 ALLOWED_FIDELITY = {
     "imported",
@@ -58,6 +58,7 @@ EXPECTED_PROVIDER_LINEAGE_SUPPORT = {
     "mistral_vibe": ("exact_relationship", "unknown"),
     "mux": ("exact_relationship", "explicit_no_copy"),
     "fx": ("exact_relationship", "unknown"),
+    "devin": ("exact_relationship", "unknown"),
 }
 REQUIRED_FIDELITY_FIELDS = {
     "user_prompts",

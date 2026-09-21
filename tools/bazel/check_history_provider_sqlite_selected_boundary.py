@@ -62,8 +62,9 @@ EXPECTED_INTERNAL_BAZEL = {
 EXPECTED_TEST_INTERNAL_BAZEL = EXPECTED_INTERNAL_BAZEL - {
     "//crates/ctx-history-source-sqlite:lib"
 } | {"//crates/ctx-history-source-sqlite:test_support_lib"}
-PROVIDERS = {"firebender", "goose", "kiro", "warp"}
+PROVIDERS = {"devin", "firebender", "goose", "kiro", "warp"}
 PROVIDER_VARIANTS = {
+    "devin": "Devin",
     "firebender": "Firebender",
     "goose": "Goose",
     "kiro": "KiroCli",
@@ -157,6 +158,32 @@ use super::*;
 use crate::provider::source_backed::{{
     executable_route, family::document::CaptureSelectedSqliteBinding,
 }};
+
+pub(super) fn register_devin_source_backed_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    data_root: &Path,
+    source_root_lineage: Option<[u8; 32]>,
+) -> SourceBackedCoordinatorResult<()> {{
+    let driver = ctx_history_providers_sqlite_selected::devin_source_backed_driver_scoped::<
+        CaptureSelectedSqliteBinding,
+    >(
+        &source.path,
+        data_root,
+        source_root_lineage.map_or(
+            ctx_history_core::SourceAnchorScope::Unqualified,
+            ctx_history_core::SourceAnchorScope::Lineage,
+        ),
+    );
+    registry.register(executable_route(
+        source,
+        selection,
+        SourceBackedSelectorAuthority::{authorities["devin"]},
+        driver,
+    )?);
+    Ok(())
+}}
 
 pub(super) fn register_firebender_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
@@ -345,7 +372,7 @@ def validate_capture(cargo: Path, build: Path, root: Path) -> None:
     }
     expected_references = {
         "src/source_backed/family/document.rs": 1,
-        "src/source_backed/registration/families/sqlite/other.rs": 5,
+        "src/source_backed/registration/families/sqlite/other.rs": 6,
     }
     if selected_references != expected_references:
         raise BoundaryError(

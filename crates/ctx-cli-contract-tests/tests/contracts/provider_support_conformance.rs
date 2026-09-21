@@ -271,6 +271,12 @@ const ADAPTER_CASES: &[ProviderCase] = &[
         user_text: "fxuseroracle",
         assistant_text: "fxassistantoracle",
     },
+    ProviderCase {
+        matrix_id: "devin",
+        provider: "devin",
+        user_text: "devinclitooloracle",
+        assistant_text: "devincliassistantoracle",
+    },
 ];
 
 #[derive(Debug, PartialEq)]
@@ -290,7 +296,7 @@ fn supported_provider_defaults_conform_to_the_public_matrix() {
         .collect::<Vec<_>>();
     assert_eq!(
         provider_cases.len(),
-        42,
+        43,
         "support conformance must not be vacuous"
     );
     let temp = tempdir();
@@ -402,8 +408,8 @@ fn assert_closed_world_case_ids() -> BTreeSet<String> {
     );
     assert_eq!(
         supported_ids.len(),
-        42,
-        "support conformance must execute 42 rows"
+        43,
+        "support conformance must execute 43 rows"
     );
     supported_ids
 }

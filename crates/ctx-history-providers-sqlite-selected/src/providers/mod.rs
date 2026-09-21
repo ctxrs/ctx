@@ -1,8 +1,10 @@
+mod devin;
 mod firebender;
 mod goose;
 mod kiro;
 mod warp;
 
+pub use devin::{devin_source_backed_driver, devin_source_backed_driver_scoped};
 pub use firebender::{firebender_source_backed_driver, firebender_source_backed_driver_scoped};
 pub use goose::{goose_source_backed_driver, goose_source_backed_driver_scoped, GooseSourceRoute};
 pub use kiro::{kiro_source_backed_driver, kiro_source_backed_driver_scoped};

@@ -53,8 +53,8 @@ event-local Core capability has its own provider + route + source format +
 format version authority in
 [`mcp-tool-call-attribution-capabilities.json`](mcp-tool-call-attribution-capabilities.json).
 Capability revision 4 exact providers are Codex, Warp, and Copilot CLI. The
-complete evidence matrix contains 47 base routes and 51 capability lanes:
-three exact, 47 not-qualified, and one excluded. The Deep Agents hosted trace
+complete evidence matrix contains 48 base routes and 52 capability lanes:
+three exact, 48 not-qualified, and one excluded. The Deep Agents hosted trace
 is excluded from the local-only boundary, while its local SQLite history import
 remains Supported but not qualified for exact attribution. See
 [`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) for absence,
@@ -112,6 +112,7 @@ support matrix is:
 | Cline | Supported | `cline_sdk_session_store`, `cline_task_directory_json` |
 | Roo Code | Supported | `roo_task_directory_json` |
 | fx | Supported | `fx_sessions_tree` |
+| Devin | Supported | `devin_cli_sessions_sqlite` |
 
 Codex session-tree discovery and exact `--path` import accept both ordinary
 `.jsonl` rollouts and official standard-Zstandard `.jsonl.zst` rollouts. Both
@@ -177,6 +178,31 @@ to 16 MiB. A supported legacy snapshot and its schema-v3 migration retain their
 existing stable identities. Conversation migration retains the native session,
 but uses the conversation log's event identities. Marker-less schema-v3 snapshots,
 future schemas, hosted history, and exact MCP server/tool attribution are unsupported.
+
+Devin is Supported through the native `devin_cli_sessions_sqlite` route
+reading `~/.local/share/devin/cli/sessions.db`. The route is named for the CLI
+because Devin keeps per-surface state under a shared `devin/` data root, so a
+store written by another Devin surface would be a separate route rather than
+this one. Admission is structural rather than version-pinned: every table,
+column, and index the importer reads is probed, so a migration that removes or
+reshapes them is refused, while one that only adds keeps importing. The
+migration version feeds the capability digest, so any change to it rotates the
+published content digest and forces a full re-scan. Each session stores its
+messages as a forest, so the imported transcript is the walk from
+`sessions.main_chain_id` up `parent_node_id`, reversed, with pre-compaction
+history spliced in wherever a chain node records `metadata.summarized_from`.
+System prompts sit on that chain and are imported as notices; the node a
+compaction wrote is imported as a summary. Nodes off the chain are counted but
+not imported: summarizer threads, abandoned regenerated turns, and the
+pre-compaction copies Devin rewrote. Subagent threads become separate delegated
+sessions when Devin records either a foreground `subagent/chain_node_id`
+back-link or a durable `subagent_heads` chain tip, so foreground and durable
+background subagents are imported. A subagent tree without either exact tip
+link remains unclaimed. Native assistant messages with visible text retain
+generation metadata when Devin writes it; tool-only and empty-content events do
+not retain that payload. Session-level model, agent mode, cost, and token data
+are not projected as Core facts. Exact MCP server/tool attribution is not
+supported.
 
 `ctx sources --format json` reports each known provider source with `import_support`
 and `importable` fields. A source is importable only when provider-specific

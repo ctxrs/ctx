@@ -121,6 +121,11 @@ fn configured_exact_roots_register_with_named_identity_without_automatic_authori
             "kiro-cli-database",
         ),
         (
+            CaptureProvider::Devin,
+            "devin_cli_sessions_sqlite",
+            "devin-cli-sessions-database",
+        ),
+        (
             CaptureProvider::Antigravity,
             "antigravity_cli_transcript_jsonl_tree",
             "antigravity-brain",
