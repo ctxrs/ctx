@@ -208,6 +208,21 @@ print_tool_versions() {
   zip --version
 }
 
+emit_normal_ci_receipt() {
+if [[ "${check_args[*]}" == "--mode=ci" || "${check_args[*]}" == "--mode ci" ]]; then
+  python3 - <<'CI_RECEIPT'
+import json
+from pathlib import Path
+import subprocess
+source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+output = Path("target/ctx-artifacts/check/normal-ci.json")
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps({"kind": "ctx-normal-ci-result", "schema_version": 1,
+    "mode": "ci", "source_commit": source, "status": "passed"}, sort_keys=True) + "\n")
+CI_RECEIPT
+fi
+}
+
 init_buildkite_job_tool_env
 preflight_release_test_authority
 require_preinstalled_tools
@@ -218,3 +233,4 @@ bash scripts/check-sdks.sh --groups=contracts,typescript,python,go,jvm,dotnet --
 # check.sh mode; the direct gate above owns the other Linux SDK toolchains,
 # including the Linux-specific .NET process-tree implementation.
 bash scripts/check.sh "${check_args[@]}"
+emit_normal_ci_receipt

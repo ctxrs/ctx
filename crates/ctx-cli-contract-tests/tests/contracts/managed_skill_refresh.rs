@@ -229,3 +229,33 @@ fn observational_status_and_refresh_off_search_leave_owned_skill_unchanged() {
         .failure();
     assert_skill_unchanged(&skill_dir, &before);
 }
+
+#[test]
+fn native_blame_refreshes_unselected_managed_agents_and_preserves_edits() {
+    let temp = tempdir();
+    let binary = managed_candidate(&temp, "managed_skill_refresh_native_blame");
+    let roots = IsolatedAgentRoots::new(&temp);
+    let codex = roots.codex.join("skills/ctx");
+    let grok = roots.grok.join("skills/ctx");
+    let claude = roots.claude.join("skills/ctx");
+    for path in [&codex, &grok, &claude] {
+        write_stale_managed_skill(path);
+    }
+    let edited_body = b"A locally edited ctx skill that must be preserved.\n";
+    fs::write(claude.join("SKILL.md"), edited_body).unwrap();
+    let edited_metadata = fs::read(claude.join(METADATA_FILE)).unwrap();
+
+    // No agent selection is supplied. Pending attribution is still an ordinary
+    // command startup, so every existing managed global copy is considered.
+    isolated_ctx(&temp, &binary, &roots)
+        .args(["blame", "file", "authored.rs", "--format=json"])
+        .assert()
+        .failure();
+    assert_current_skill(&codex);
+    assert_current_skill(&grok);
+    assert_eq!(fs::read(claude.join("SKILL.md")).unwrap(), edited_body);
+    assert_eq!(
+        fs::read(claude.join(METADATA_FILE)).unwrap(),
+        edited_metadata
+    );
+}

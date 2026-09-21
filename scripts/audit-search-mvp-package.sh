@@ -43,6 +43,16 @@ grep_files() {
   fi
 }
 
+# These public packages own the ordinary Blame implementation. Include both
+# inherited package metadata and source in each package-boundary scan.
+attribution_source_paths=(
+  crates/ctx-attribution-model/Cargo.toml crates/ctx-attribution-model/src
+  crates/ctx-repository-evidence/Cargo.toml crates/ctx-repository-evidence/src
+  crates/ctx-attribution-index/Cargo.toml crates/ctx-attribution-index/src
+  crates/ctx-attribution/Cargo.toml crates/ctx-attribution/src
+  crates/ctx-attribution-derivation/Cargo.toml crates/ctx-attribution-derivation/src
+)
+
 public_user_docs=(
   README.md
   SECURITY.md
@@ -76,13 +86,13 @@ if tracked_files | grep -E '^(examples|assets)/' | grep -E -i 'dashboard|work-[r
   fail 'tracked examples or assets contain removed product-surface material'
 fi
 
-if grep_files 'dashboard|shim|shims|pull request|pull-request|pr evidence|pr-evidence|ctx publish|ctx evidence|ctx pr([^[:alnum:]_]|$)|ctx link-pr|ctx context|ctx update([[:space:]]+--|[^[:alnum:]_ -]|[[:space:]]*$)|ctx uninstall|\bADE\b|[Aa]mpcode|normalized-only|normalized only|normalized_import_only|normalized provider JSONL|CTX_PROVIDER_NORMALIZED_IMPORT_DEV|provider-live|completion-certificate|freebsd-native-release-proof|r2-|[W]ork Recorder|[w]ork recorder|\bwork-[r]ecord\b' \
+if grep_files 'dashboard|shim|shims|ctx publish|ctx evidence|ctx pr([^[:alnum:]_]|$)|ctx link-pr|ctx context|ctx update([[:space:]]+--|[^[:alnum:]_ -]|[[:space:]]*$)|\bADE\b|[Aa]mpcode|normalized-only|normalized only|normalized_import_only|normalized provider JSONL|CTX_PROVIDER_NORMALIZED_IMPORT_DEV|provider-live|completion-certificate|freebsd-native-release-proof|r2-|[W]ork Recorder|[w]ork recorder|\bwork-[r]ecord\b' \
   "${public_user_docs[@]}" >/dev/null 2>&1; then
   fail 'public docs contain removed product-surface wording'
 fi
 
 if grep_files '/home/[d]addy|/home/[^[:space:]]+/(code|Documents|Desktop)|/Users/[^[:space:]]+/(code|Documents|Desktop)|ctx-[p]rivate|ctx-multi-repo-workspace|\.ctx/worktrees' \
-  .bazelignore .bazelrc .bazelversion .buildkite .gitignore README.md SECURITY.md docs skills plugins scripts crates/ctx-agent-application/src crates/ctx-agent-integrations/src crates/ctx-app-config/Cargo.toml crates/ctx-app-config/src crates/ctx-cli/Cargo.toml crates/ctx-cli/src crates/ctx-cli-presentation/Cargo.toml crates/ctx-cli-presentation/src crates/ctx-client-observability/src crates/ctx-daemon-cli/src crates/ctx-daemon-application/src crates/ctx-daemon-runtime/src crates/ctx-daemon-service/src crates/ctx-history-cli/src crates/ctx-history-read-application/src crates/ctx-terminal/src crates/ctx-managed-pair-engine/src crates/ctx-upgrade-engine/src crates/ctx-history-capture-composition/Cargo.toml crates/ctx-history-capture-composition/src crates/ctx-history-capture-model/src crates/ctx-history-providers-sqlite-selected/src >/dev/null 2>&1; then
+  .bazelignore .bazelrc .bazelversion .buildkite .gitignore README.md SECURITY.md docs skills plugins scripts crates/ctx-agent-application/src crates/ctx-agent-integrations/src crates/ctx-app-config/Cargo.toml crates/ctx-app-config/src crates/ctx-cli/Cargo.toml crates/ctx-cli/src crates/ctx-cli-presentation/Cargo.toml crates/ctx-cli-presentation/src crates/ctx-client-observability/src crates/ctx-daemon-cli/src crates/ctx-daemon-application/src crates/ctx-daemon-runtime/src crates/ctx-daemon-service/src crates/ctx-history-cli/src crates/ctx-history-read-application/src crates/ctx-terminal/src crates/ctx-managed-pair-engine/src crates/ctx-upgrade-engine/src crates/ctx-history-capture-composition/Cargo.toml crates/ctx-history-capture-composition/src crates/ctx-history-capture-model/src crates/ctx-history-providers-sqlite-selected/src "${attribution_source_paths[@]}" >/dev/null 2>&1; then
   fail 'public package surface contains private host or workspace paths'
 fi
 
@@ -90,13 +100,18 @@ if ! diff -u skills/ctx/SKILL.md plugins/ctx/skills/ctx/SKILL.md >/dev/null; the
   fail 'plugin skill copy differs from public skill source'
 fi
 
-if grep_files '[W]ork Recorder|[w]ork recorder|ctx publish|ctx evidence|ctx pr([^[:alnum:]_]|$)|ctx link-pr|ctx context|ctx update([[:space:]]+--|[^[:alnum:]_ -]|[[:space:]]*$)|ctx uninstall|update checks|auto-update|update-state|auto_update|CTX_UPDATE|provider-live|completion-certificate|freebsd-native-release-proof|r2-|dashboard export|gh CLI|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|\bADE\b|[Aa]mpcode' \
-  .bazelignore .bazelrc .bazelversion .buildkite .gitignore README.md SECURITY.md docs skills scripts crates/ctx-agent-application/src crates/ctx-agent-integrations/src crates/ctx-app-config/Cargo.toml crates/ctx-app-config/src crates/ctx-cli/Cargo.toml crates/ctx-cli/src crates/ctx-cli-presentation/Cargo.toml crates/ctx-cli-presentation/src crates/ctx-client-observability/src crates/ctx-daemon-cli/src crates/ctx-daemon-application/src crates/ctx-daemon-runtime/src crates/ctx-daemon-service/src crates/ctx-history-cli/src crates/ctx-history-read-application/src crates/ctx-terminal/src crates/ctx-managed-pair-engine/src crates/ctx-upgrade-engine/src crates/ctx-history-capture-composition/Cargo.toml crates/ctx-history-capture-composition/src crates/ctx-history-capture-model/src crates/ctx-history-providers-sqlite-selected/src >/dev/null 2>&1; then
+if grep_files '[W]ork Recorder|[w]ork recorder|ctx publish|ctx evidence|ctx pr([^[:alnum:]_]|$)|ctx link-pr|ctx context|ctx update([[:space:]]+--|[^[:alnum:]_ -]|[[:space:]]*$)|update checks|auto-update|update-state|auto_update|CTX_UPDATE|provider-live|completion-certificate|freebsd-native-release-proof|r2-|dashboard export|(^|[^[:alnum:]_])gh CLI([^[:alnum:]_]|$)|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|\bADE\b|[Aa]mpcode' \
+  .bazelignore .bazelrc .bazelversion .buildkite .gitignore README.md SECURITY.md docs skills scripts crates/ctx-agent-application/src crates/ctx-agent-integrations/src crates/ctx-app-config/Cargo.toml crates/ctx-app-config/src crates/ctx-cli/Cargo.toml crates/ctx-cli/src crates/ctx-cli-presentation/Cargo.toml crates/ctx-cli-presentation/src crates/ctx-client-observability/src crates/ctx-daemon-cli/src crates/ctx-daemon-application/src crates/ctx-daemon-runtime/src crates/ctx-daemon-service/src crates/ctx-history-cli/src crates/ctx-history-read-application/src crates/ctx-terminal/src crates/ctx-managed-pair-engine/src crates/ctx-upgrade-engine/src crates/ctx-history-capture-composition/Cargo.toml crates/ctx-history-capture-composition/src crates/ctx-history-capture-model/src crates/ctx-history-providers-sqlite-selected/src "${attribution_source_paths[@]}" >/dev/null 2>&1; then
   fail 'public docs/help/release path contains removed product-surface text'
 fi
 
 if grep_files 'work-[r]ecord-(publish|report|vcs)[[:space:]]*=' \
   Cargo.toml \
+  crates/ctx-attribution-model/Cargo.toml \
+  crates/ctx-repository-evidence/Cargo.toml \
+  crates/ctx-attribution-index/Cargo.toml \
+  crates/ctx-attribution/Cargo.toml \
+  crates/ctx-attribution-derivation/Cargo.toml \
   crates/ctx-agent-application/Cargo.toml \
   crates/ctx-agent-integrations/Cargo.toml \
   crates/ctx-app-config/Cargo.toml \
@@ -159,7 +174,10 @@ if [[ "${CTX_AUDIT_SKIP_RELEASE_BUILD:-0}" != "1" ]]; then
     fail "native Bazel ctx binary missing: ${binary:-<unset>}"
   elif command -v strings >/dev/null 2>&1; then
     binary_strings="$(strings "${binary}")"
+    # Embedded docs carry this exact supported hosted/native distinction.
+    # Remove only that sentence; adjacent runnable recommendations still fail.
     if printf '%s\n' "${binary_strings}" \
+      | python3 -c 'import re, sys; sys.stdout.write(re.sub(r"There is no\s+native\s+`ctx uninstall`\s+command\.", "", sys.stdin.read()))' \
       | grep -E 'ctx (dashboard|shim|publish|evidence|link-pr|context|uninstall|watch)([^[:alnum:]_-]|$)|ctx update([[:space:]]+--|[^[:alnum:]_ -]|[[:space:]]*$)|ctx pr([^[:alnum:]_-]|$)|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|dashboard export|maybe_auto_update|check_or_apply_update|(^|[^[:alnum:]_])run_update([^[:alnum:]_]|$)|watch_strategy|polling_catch_up' >/dev/null; then
       fail 'release ctx binary contains removed dashboard/shim/PR-publish/watch command strings'
     fi

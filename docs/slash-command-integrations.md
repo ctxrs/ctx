@@ -10,8 +10,8 @@ file location, file format, invocation syntax, and argument behavior that ctx
 can manage idempotently without editing broad user config.
 
 The implemented command is a thin entry point. It tells the agent to choose
-local `ctx` search or ctx pro blame, inspect cited sessions or events, and
-answer with ctx citations. It does not install hooks or enable ctx pro.
+local `ctx` search or ctx blame, inspect cited sessions or events, and
+answer with ctx citations. It does not install hooks.
 
 ## Implemented Writers
 

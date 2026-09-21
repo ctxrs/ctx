@@ -5,13 +5,14 @@ mod upgrade;
 
 pub use ctx_managed_pair_engine::{
     apply_or_resume_managed_pair_under_installation_lock,
-    inspect_managed_pair_under_installation_lock,
-    resume_pending_managed_pair_under_installation_lock, ManagedPairApplyInput,
-    ManagedPairApplyOutcome, ManagedPairComponentIdentity, ManagedPairInstallationStatus,
-    ManagedPairTarget, ManagedPairVerifier, VerifiedManagedPairIdentity,
-    MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH, MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH,
-    MANAGED_PAIR_ENVELOPE_RELATIVE_PATH, MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH,
-    MANAGED_PAIR_STATE_RELATIVE_PATH,
+    inspect_managed_pair_under_installation_lock, pending_managed_pair_hint,
+    preflight_pending_managed_pair_under_installation_lock,
+    resume_pending_managed_pair_under_installation_lock,
+    stage_managed_pair_under_installation_lock, ManagedPairApplyInput, ManagedPairApplyOutcome,
+    ManagedPairComponentIdentity, ManagedPairInstallationStatus, ManagedPairTarget,
+    ManagedPairVerifier, VerifiedManagedPairIdentity, MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH,
+    MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH, MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
+    MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH, MANAGED_PAIR_STATE_RELATIVE_PATH,
 };
 
 pub use install_marker::{
@@ -20,9 +21,9 @@ pub use install_marker::{
 #[cfg(unix)]
 pub use upgrade::reconcile_managed_pair_integration_under_installation_lock;
 pub use upgrade::{
-    active_installation_upgrade_attempt_id, current_exe_has_managed_install_marker_hint,
-    current_exe_is_unmanaged, current_install_path, disable_current_man_pages,
-    ensure_hosted_transaction_inactive_under_installation_lock,
+    active_installation_upgrade_attempt_id, cleanup_legacy_managed_pair_under_installation_lock,
+    current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
+    disable_current_man_pages, ensure_hosted_transaction_inactive_under_installation_lock,
     installation_daemon_coordination_paths, installation_daemon_coordination_paths_for,
     installation_executable_path, installation_hosted_uninstall_is_active,
     installation_hosted_uninstall_is_active_for_executable,

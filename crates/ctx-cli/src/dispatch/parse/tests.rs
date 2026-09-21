@@ -279,3 +279,29 @@ fn affected_help_paths_trim_line_ends_in_the_human_clap_pipeline() {
         "{arguments:?}:\n{plain}"
     );
 }
+
+#[test]
+fn blame_json_argument_failures_keep_the_canonical_released_diagnostic() {
+    for arguments in [
+        &["ctx", "blame", "file", "a.rs", "--limit=0", "--format=json"][..],
+        &[
+            "ctx",
+            "blame",
+            "a.rs",
+            "--type=file",
+            "--lines=0",
+            "--format=json",
+        ][..],
+    ] {
+        let (error, arguments) = error_and_arguments(arguments);
+        let (mut ui, stdout, stderr) = pipe_ui(ColorMode::Never);
+        write_adapted_clap_output(&error, &arguments, true, &mut ui).unwrap();
+        ui.flush().unwrap();
+        assert!(stdout.bytes().is_empty());
+        let diagnostic: serde_json::Value = serde_json::from_slice(&stderr.bytes()).unwrap();
+        assert_eq!(
+            diagnostic,
+            serde_json::json!({"error":"invalid_request","error_code":"invalid_request","reason":"request_invalid","message":"The blame request is invalid.","retryable":false})
+        );
+    }
+}

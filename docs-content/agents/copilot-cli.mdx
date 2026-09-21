@@ -1,0 +1,43 @@
+---
+title: "Use ctx with Copilot CLI"
+sidebarTitle: "Copilot CLI"
+description: "Import Copilot CLI session-state history and search it from ctx."
+---
+
+Install ctx on the machine where Copilot CLI keeps local session state:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+```
+
+See [Install](/getting-started/install) for setup and data-root details.
+
+ctx can import supported Copilot CLI session-state history when it exists locally. After import, any shell-capable agent can search those sessions through ctx.
+
+## Import Copilot CLI history
+
+```bash
+ctx setup
+ctx import --provider copilot-cli
+ctx sources --json
+```
+
+`ctx sources --json` reports whether Copilot CLI history is available on this machine.
+
+## Search Copilot CLI history
+
+```bash
+ctx search "release script failure" --provider copilot-cli
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id>
+```
+
+Use `--provider copilot-cli` for Copilot-specific history. Drop the provider filter when the earlier work may have happened in another supported agent.
+
+## Prompt an agent
+
+```text
+Search ctx for prior Copilot CLI sessions related to this task. Inspect the best hit with `ctx show event` or `ctx show session`, then cite the ctx ID before using the retrieved history.
+```
+
+If no relevant Copilot CLI history appears, continue from the current repository state and say that ctx did not return a useful prior session.

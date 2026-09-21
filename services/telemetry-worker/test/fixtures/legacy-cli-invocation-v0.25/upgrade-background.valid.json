@@ -1,0 +1,50 @@
+{
+  "broker_install_id": "22222222-2222-4222-8222-222222222222",
+  "broker_device_id": "11111111-1111-4111-8111-111111111111",
+  "broker_runtime": "cli",
+  "broker_app_version": "0.25.0",
+  "broker_os": "linux",
+  "broker_arch": "x86_64",
+  "events": [
+    {
+      "event_id": "018f1f2e-7b3c-7ac0-8def-0123456789ab",
+      "event_name": "cli_invocation",
+      "event_version": 1,
+      "occurred_at": "2026-07-22T18:34:14.000Z",
+      "plane": "product",
+      "delivery": "remote",
+      "origin_runtime": "cli",
+      "origin_install_id": "22222222-2222-4222-8222-222222222222",
+      "origin_device_id": "11111111-1111-4111-8111-111111111111",
+      "app_version": "0.25.0",
+      "os": "linux",
+      "arch": "x86_64",
+      "surface": "cli",
+      "source": "ctx-cli",
+      "install_attempt_id": "attempt_01JZCTXHOSTED",
+      "duration_ms": 2850,
+      "duration_bucket": "lt_5s",
+      "status": "ok",
+      "success": true,
+      "properties": {
+        "action": "upgrade",
+        "json_output": true,
+        "analytics_client": "ctx-cli",
+        "install_manager": "ctx-hosted-installer",
+        "dry_run": false,
+        "background": true,
+        "upgrade_mode": "auto",
+        "upgrade_operation": "apply",
+        "upgrade_status": "applied",
+        "upgrade_applied": true,
+        "upgrade_scheduled": false,
+        "update_available": true,
+        "managed_install": true,
+        "self_upgrade_allowed": true,
+        "auto_upgrade_allowed": true,
+        "upgrade_warning_count_bucket": "0",
+        "upgrade_channel": "stable"
+      }
+    }
+  ]
+}

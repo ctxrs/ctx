@@ -15,12 +15,12 @@ use ctx_history_index::{
 use serde_json::Value;
 
 use super::{
-    CursorFailureKind, OpaqueMcpProxyError, QueryEventsRequest, ShowEventRequest,
-    ShowSessionRequest, StructuredToolError, ToolBackend, ToolBackendError, ToolEventContent,
-    ToolEventRangeDirection, ToolEventRangeScope, ToolExecutionError, ToolOperation, ToolOutcome,
-    ToolSearchBackend, ToolSearchContentScope, ToolSearchFailurePhase, ToolSearchRefreshStatus,
-    ToolSearchRequest, ToolSearchStopReason, ToolSearchTerminalFacts, ToolSearchUsageFacts,
-    ToolTranscriptMode, ToolUsageFacts,
+    CursorFailureKind, QueryEventsRequest, ShowEventRequest, ShowSessionRequest,
+    StructuredToolError, ToolBackend, ToolBackendError, ToolEventContent, ToolEventRangeDirection,
+    ToolEventRangeScope, ToolExecutionError, ToolOperation, ToolOutcome, ToolSearchBackend,
+    ToolSearchContentScope, ToolSearchFailurePhase, ToolSearchRefreshStatus, ToolSearchRequest,
+    ToolSearchStopReason, ToolSearchTerminalFacts, ToolSearchUsageFacts, ToolTranscriptMode,
+    ToolUsageFacts,
 };
 use crate::{
     commands::list::events::{
@@ -170,6 +170,7 @@ impl LocalToolBackend {
                         usage: Box::new(ToolUsageFacts {
                             search: None,
                             search_execution: Some(search_terminal_facts(observation)),
+                            ..ToolUsageFacts::default()
                         }),
                     });
                 }
@@ -396,6 +397,15 @@ const fn search_failure_phase(
 }
 
 impl HistoryReadPort for LocalToolBackend {
+    fn blame(
+        &self,
+        target: super::BlameTarget,
+        limit: u32,
+        cursor: Option<String>,
+    ) -> Result<ToolOutcome, ToolExecutionError> {
+        crate::commands::blame::tool(&self.data_root, target, limit, cursor)
+    }
+
     fn status(&self) -> Result<Value, ToolBackendError> {
         LocalToolBackend::status(self)
     }
@@ -437,17 +447,6 @@ impl SourceCatalogPort for LocalToolBackend {
 impl ToolBackend for LocalToolBackend {
     fn execute(&self, operation: ToolOperation) -> Result<ToolOutcome, ToolExecutionError> {
         invoke_mcp_tool_call(operation, self, self, self)
-    }
-
-    fn proxy_companion_mcp(&self, request: &[u8]) -> Result<Vec<u8>, OpaqueMcpProxyError> {
-        crate::companion::proxy_paid_mcp(request, &self.data_root).map_err(|error| match error {
-            crate::companion::CompanionRouteError::Unavailable => {
-                OpaqueMcpProxyError::CompanionUnavailable
-            }
-            crate::companion::CompanionRouteError::Incompatible => {
-                OpaqueMcpProxyError::CompanionIncompatible
-            }
-        })
     }
 
     fn parse_provider(&self, value: &str) -> Option<ctx_history_core::CaptureProvider> {

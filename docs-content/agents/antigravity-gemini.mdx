@@ -1,0 +1,59 @@
+---
+title: "Use ctx with Antigravity and Gemini CLI"
+sidebarTitle: "Antigravity / Gemini CLI"
+description: "Import Antigravity and Gemini CLI local history, then search it with ctx."
+---
+
+Install ctx on the machine where Antigravity or Gemini CLI has written local history:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+```
+
+See [Install](/getting-started/install) for setup and data-root details.
+
+ctx treats Antigravity and Gemini CLI as related local-history sources with distinct provider IDs. Use the provider that matches where the earlier work happened.
+
+## Import Antigravity or Gemini history
+
+Run setup, then import the source you care about:
+
+```bash
+ctx setup
+ctx import --provider antigravity
+ctx import --provider gemini
+ctx sources --json
+```
+
+Use `ctx sources --json` to see whether each source is present and `importable` on the current machine.
+
+## Search one provider
+
+For Antigravity history:
+
+```bash
+ctx search "failed migration" --provider antigravity
+ctx show event <ctx-event-id> --window 3
+```
+
+For Gemini CLI history:
+
+```bash
+ctx search "failed migration" --provider gemini
+ctx show session <ctx-session-id>
+```
+
+Search without `--provider` when you want the best match across all imported agent histories.
+
+## Prompt an agent
+
+```text
+Use ctx to search prior Antigravity and Gemini CLI sessions for this task. Inspect the best matching event or session, then cite the ctx ID if the result affects your answer.
+```
+
+When the result needs provenance, use:
+
+```bash
+ctx locate event <ctx-event-id>
+ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+```

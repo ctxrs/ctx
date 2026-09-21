@@ -1,0 +1,153 @@
+---
+title: "Supported agents"
+description: "Which coding-agent histories ctx can discover, import, and search locally."
+---
+
+ctx support means ordinary native local-history import. For the normal supported
+provider version, the CLI automatically discovers a default source, imports
+meaningful user and assistant history into a self-contained Tantivy Core, and
+returns searchable, showable, cited results without duplicate records on an
+unchanged repeat import.
+
+Support does not mean ctx launches the agent, installs the agent, changes the agent's files, or normalizes every provider-specific field into the same output shape.
+
+## Current support
+
+This table is a format-support summary. Use [Provider history support](/providers/native-imports) for source formats and `ctx sources --json` for the state of your machine.
+
+| Agent history | Support status | Source format |
+| --- | --- | --- |
+| Codex | Supported | `codex_session_jsonl_tree`, `codex_history_jsonl` |
+| Grok Build | Supported | `grok_build_session_updates_jsonl_tree` |
+| DeepSeek Harness | Supported | `deepseek_harness_session_jsonl_tree` |
+| Pi | Supported | `pi_session_jsonl` |
+| Claude Code | Supported | `claude_projects_jsonl_tree` |
+| OpenCode | Supported | `opencode_sqlite` |
+| Kilo Code | Supported | `kilo_sqlite` |
+| Kiro CLI | Supported | `kiro_cli_sqlite` |
+| Crush | Supported | `crush_sqlite` |
+| Goose | Supported | `goose_sessions_sqlite` |
+| Lingma | Supported | `lingma_sqlite` |
+| Qoder | Supported | `qoder_transcript_jsonl_tree` |
+| Warp | Supported | `warp_sqlite` |
+| CodeBuddy | Supported | `codebuddy_history_json` |
+| OpenClaw | Supported | `openclaw_session_jsonl_tree` |
+| Hermes Agent | Supported | `hermes_state_sqlite` |
+| NanoClaw | Supported | `nanoclaw_project` |
+| AstrBot | Supported | `astrbot_data_v4_sqlite` |
+| Shelley | Supported | `shelley_sqlite` |
+| Continue | Supported | `continue_cli_sessions_json` |
+| OpenHands | Supported | `openhands_file_events` |
+| Antigravity | Supported | `antigravity_cli_transcript_jsonl_tree` |
+| Gemini | Supported | `gemini_cli_chat_recording_jsonl` |
+| Tabnine | Supported | `tabnine_cli_chat_recording_jsonl` |
+| Cursor | Supported | `cursor_agent_transcript_jsonl_tree` |
+| Zed | Supported | `zed_threads_sqlite` |
+| Copilot CLI | Supported | `copilot_cli_session_events_jsonl` |
+| Factory AI Droid | Supported | `factory_ai_droid_sessions_jsonl` |
+| Qwen Code | Supported | `qwen_code_chat_jsonl_tree` |
+| Kimi Code CLI | Supported | `kimi_code_cli_wire_jsonl_tree` |
+| Auggie | Supported | `auggie_session_json` |
+| Junie | Supported | `junie_session_events_jsonl_tree` |
+| Firebender | Supported | `firebender_chat_history_sqlite` |
+| ForgeCode | Supported | `forgecode_sqlite` |
+| Deep Agents | Supported | `deepagents_sessions_sqlite` |
+| Mistral Vibe | Supported | `mistral_vibe_session_jsonl_tree` |
+| Mux | Supported | `mux_session_jsonl_tree` |
+| Rovo Dev | Supported | `rovodev_session_json_tree` |
+| Cline | Supported | `cline_task_directory_json` |
+| Roo Code | Supported | `roo_task_directory_json` |
+| MiMo Code | Supported | `mimocode_sqlite` |
+
+The table describes provider formats ctx currently knows how to read. It does not guarantee that a given machine has those histories available.
+
+## Verify on your machine
+
+Run:
+
+```bash
+ctx sources
+ctx sources --json
+```
+
+The JSON form is the clearest way to check support and availability:
+
+```json
+{
+  "provider": "codex",
+  "native_import": true,
+  "importable": true,
+  "status": "available"
+}
+```
+
+Read those fields separately:
+
+- `native_import: true` means ctx has parser support for that provider format;
+- `importable: true` means the local path exists and has supported data available to import;
+- `status` explains the current source state, such as `available`, `empty`, `missing`, `unknown`, or `unsupported`.
+
+A provider can have `native_import: true` and `importable: false`. That usually means the agent has not written local history on this machine, the expected path is empty, or ctx needs an explicit import path.
+
+## Import supported history
+
+The installer runs `ctx setup` by default. You can also import directly, for
+example:
+
+```bash
+ctx setup
+ctx import --all
+ctx import --provider codex
+ctx import --provider pi
+ctx import --provider claude
+ctx import --provider opencode
+ctx import --provider kilo
+ctx import --provider kiro-cli
+ctx import --provider openclaw
+ctx import --provider hermes
+ctx import --provider nanoclaw
+ctx import --provider astrbot
+ctx import --provider antigravity
+ctx import --provider gemini
+ctx import --provider zed
+ctx import --provider cursor
+ctx import --provider copilot-cli
+ctx import --provider factory-ai-droid
+ctx import --provider qwen-code
+ctx import --provider roo
+```
+
+Use `--path` when the provider history lives outside the location ctx normally checks:
+
+```bash
+ctx import --provider opencode --path ~/.local/share/opencode/opencode.db
+```
+
+## Search after import
+
+```bash
+ctx search "failed migration" --provider codex
+ctx search "database retry" --provider opencode
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id>
+```
+
+Search defaults to `--refresh background`. In automatic indexing mode it
+serves the latest published generation and requests daemon maintenance. In
+manual mode it uses the published generation without starting or waking a
+process. Use `--refresh wait` or an explicit import when you need fresh history
+before querying.
+Run `ctx import --provider <provider>` or `ctx import --all` to refresh
+history explicitly before searching.
+
+## What varies by provider
+
+Providers keep different kinds of local records. Some histories include fine-grained events with tool calls and outputs. Others expose less structure or store different metadata. ctx normalizes enough to search, show, locate, and write session transcript artifacts, but the exact fields in a result can vary by source.
+
+When exact behavior matters, inspect the local source record:
+
+```bash
+ctx search "the phrase" --provider <provider>
+ctx locate event <ctx-event-id>
+ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+```

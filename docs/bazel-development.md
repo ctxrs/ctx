@@ -29,8 +29,9 @@ with the minimal rustup profile plus rustfmt and Clippy. It matches the Bazel,
 CI, harness, and Linux factory pins. Update those declarations and the Bazel
 archive checksums together when deliberately changing the compiler, then run
 `scripts/bazelw test //:rust_toolchain_module_policy --config=test` and the
-normal CI gate. The maintained compiler is separate from the Rust 1.88 minimum
-supported version in `Cargo.toml`; a compiler update does not raise that floor.
+normal CI gate. The maintained compiler is separate from the Rust 1.95 minimum
+supported version in `Cargo.toml`, required by the retained OXC 0.146 parser.
+The maintained compiler remains Rust 1.97.1.
 
 ## Fast Linux loop
 

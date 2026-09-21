@@ -201,9 +201,24 @@ ctx_cli_contract_test(
 )
 
 ctx_cli_contract_test(
+    name = "native_blame_tests",
+    src = "tests/contracts/native_blame.rs",
+    deps = [
+        "//crates/ctx-attribution:test_support_lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-platform:lib",
+        "//crates/ctx-history-snapshot-reader:lib",
+    ],
+    test_support = ["base", "fixtures"],
+)
+
+ctx_cli_contract_test(
     name = "setup_sources_import_tests",
     src = "tests/contracts/setup_sources_import.rs",
-    deps = ["//crates/ctx-history-index:lib"],
+    deps = [
+        "//crates/ctx-attribution:lib",
+        "//crates/ctx-history-index:lib",
+    ],
     extra_srcs = [":setup_sources_import_extra_srcs"],
     test_support = [
         "base",

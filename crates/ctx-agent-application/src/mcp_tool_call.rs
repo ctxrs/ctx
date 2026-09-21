@@ -38,6 +38,11 @@ where
     S: SourceCatalogPort,
 {
     match operation {
+        ToolOperation::Blame {
+            target,
+            limit,
+            cursor,
+        } => history.blame(target, limit, cursor),
         ToolOperation::Status => history.status().map(ToolOutcome::plain).map_err(Into::into),
         ToolOperation::Sources => sources
             .source_catalog()
@@ -74,9 +79,11 @@ fn search_outcome(result: SearchReadOutcome) -> ToolOutcome {
     ToolOutcome {
         structured: result.structured,
         compact: Some(result.compact),
+        text: None,
         usage: ToolUsageFacts {
             search: Some(result.usage),
             search_execution: Some(result.execution),
+            ..ToolUsageFacts::default()
         },
     }
 }

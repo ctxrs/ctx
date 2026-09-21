@@ -344,7 +344,8 @@ fn is_sha256_identity(value: &str) -> bool {
 /// ownership of Core state, and callers must not turn delivery failures into
 /// Core publication failures or retries.
 pub trait CoreGenerationPublishedPort: Sync {
-    fn notify(&self, data_root: &Path, publication: &CoreGenerationPublished) -> Result<()>;
+    fn notify(&self, data_root: &Path, publication: Option<&CoreGenerationPublished>)
+        -> Result<()>;
 }
 
 pub trait DaemonObservationPort: Sync {

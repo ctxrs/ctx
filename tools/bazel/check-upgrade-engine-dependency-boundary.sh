@@ -23,8 +23,10 @@ query() {
 
 for target in lib test_support_lib qualification_lib; do
   expected="${tmp}/${target}-expected.txt"
+  bridge_target=lib
+  [[ "${target}" != qualification_lib ]] || bridge_target=qualification_lib
   printf '%s\n' \
-    '//crates/ctx-companion-bridge:lib' \
+    "//crates/ctx-companion-bridge:${bridge_target}" \
     '//crates/ctx-history-core:lib' \
     '//crates/ctx-history-platform:lib' \
     '//crates/ctx-managed-pair-engine:lib' \

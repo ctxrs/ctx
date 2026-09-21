@@ -36,7 +36,7 @@ pub(crate) struct McpArgs {
 enum McpCommand {
     #[command(
         about = "Serve local ctx tools over stdio",
-        long_about = "Serve local ctx tools over newline-delimited stdio JSON-RPC. Core tool calls execute locally; companion-owned tool calls are forwarded as bounded opaque request and response bytes.\n\nExample:\n  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"client\",\"version\":\"0\"}}}' | ctx mcp serve"
+        long_about = "Serve local ctx tools over newline-delimited stdio JSON-RPC. Search, Blame, and history tool calls execute locally.\n\nExample:\n  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"client\",\"version\":\"0\"}}}' | ctx mcp serve"
     )]
     Serve(McpServeArgs),
 }
@@ -113,16 +113,6 @@ impl McpUsagePort for LocalUsagePort {
             );
             Some((invocation, completion))
         });
-    }
-
-    fn record_companion_blame_delivered(
-        &mut self,
-        failed: bool,
-        encoded_response_bytes: usize,
-        duration: std::time::Duration,
-    ) {
-        self.recorder
-            .record_companion_blame_delivered(failed, encoded_response_bytes, duration);
     }
 }
 

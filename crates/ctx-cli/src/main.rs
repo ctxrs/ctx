@@ -32,7 +32,6 @@ mod analytics;
 mod analytics_outbox;
 mod cli;
 mod commands;
-mod companion;
 mod core_capability;
 mod dispatch;
 mod docs;
@@ -93,9 +92,6 @@ fn main() -> ExitCode {
     }
     let arguments = std::env::args_os().collect::<Vec<_>>();
     if let Some(exit) = core_capability::intercept(&arguments) {
-        return exit;
-    }
-    if let Some(exit) = companion::forward_paid_cli_if_selected(arguments.clone()) {
         return exit;
     }
     ui::bootstrap_color_choice(arguments);

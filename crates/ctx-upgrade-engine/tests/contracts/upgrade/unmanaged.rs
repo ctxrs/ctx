@@ -80,16 +80,7 @@ fn unmanaged_upgrade_enable_fails_before_config_write() {
 /// the upgrade subject.
 #[cfg(unix)]
 fn unmanaged_release_env<'a>(command: &'a mut Command, release: &FakeRelease) -> &'a mut Command {
-    command
-        .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
-        .env(
-            "CTX_RELEASE_METADATA_SIGNATURE_URL",
-            file_url(&release.signature),
-        )
-        .env(
-            "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
-            TEST_RELEASE_PUBLIC_KEY_PEM,
-        )
+    fake_release_env(command, release).env_remove("CTX_UPGRADE_TEST_TARGET")
 }
 
 #[cfg(unix)]

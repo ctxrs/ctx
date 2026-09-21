@@ -1,0 +1,4 @@
+Blame supports commit and pull request attribution. PR evidence keeps citations.
+There is no
+native `ctx uninstall` command. Use the hosted uninstall script.
+The same result is available through CLI JSON.

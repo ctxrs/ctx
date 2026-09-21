@@ -27,10 +27,9 @@ pub(super) fn wait_for_import_core_refresh(
         if import_rerenders_terminal_missing_path(update)? {
             return Ok(());
         }
-        if semantic_completion.is_enabled() && import_terminal_core_success(update)? {
-            // Core is durable, but semantic completion is part of Import's
-            // success contract. Hold only this final success frame until the
-            // exact semantic generation is query-ready.
+        if import_terminal_core_success(update)? {
+            // Hold Core success until command-owned attribution and any
+            // requested semantic completion have finished.
             deferred_terminal_core_success = Some(update.clone());
             return Ok(());
         }
@@ -56,6 +55,7 @@ pub(super) fn wait_for_import_core_refresh(
             refresh.pin.generation_id()
         );
     }
+    crate::semantic::complete_attribution(data_root, &refresh.pin)?;
     if semantic_completion.is_enabled() {
         progress
             .message("semantic", "Reconciling semantic search.")

@@ -47,11 +47,16 @@ pub(crate) fn run_doctor(
         ));
         telemetry.healthy = Some(findings.is_empty() && !coverage_issue);
         let source_report = &model.facts["source_epoch"];
-        let document = ctx_cli_presentation::commands::render_doctor_human(
+        let mut document = ctx_cli_presentation::commands::render_doctor_human(
             ui.stdout_context(),
             &findings,
             model.health.as_ref(),
             human_refresh_failure(source_report),
+        );
+        ctx_cli_presentation::commands::append_attribution(
+            ui.stdout_context(),
+            &mut document,
+            source_report,
         );
         ui.write_stdout(&document)?;
     }
@@ -112,10 +117,6 @@ fn human_refresh_failure(
         search,
         partial,
     })
-}
-
-pub(crate) fn doctor_facts(data_root: &std::path::Path) -> Result<Value> {
-    Ok(doctor_read_model(data_root)?.facts)
 }
 
 struct DoctorReadModel {

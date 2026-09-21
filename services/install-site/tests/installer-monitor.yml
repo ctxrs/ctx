@@ -1,0 +1,18 @@
+# Dedicated pipeline configuration; never upload the paired-release pipeline.
+# Existing default queue: hosted LINUX_AMD64_2X4 (2 vCPU / 4 GB).
+# No cache volumes, compilation, model downloads, or product artifact reuse.
+steps:
+  - label: ":linux: public default installer"
+    key: "installer-monitor-linux"
+    agents: {queue: "default"}
+    command: "python3 -B services/install-site/tests/installer-monitor.py"
+    timeout_in_minutes: 5
+    concurrency: 1
+    concurrency_group: "ctx-private/installer-monitor-linux"
+    retry:
+      automatic: false
+      manual: {allowed: false, reason: "Preserve the first failure; start a new diagnostic build."}
+
+# Reuse the organization's existing notification services/subscriptions.
+# Activation must verify failure AND recovery routing for this new pipeline.
+# No notification destination is invented here.

@@ -486,6 +486,7 @@ fn insert_client_operation_properties(
             insert_bool(properties, "provider_lookup", value.provider_lookup);
         }
         CliOperation::Search(value) => insert_search_properties(properties, value),
+        CliOperation::Blame(value) => value.insert_properties(properties),
         CliOperation::Docs(value) => {
             insert_optional_str(
                 properties,

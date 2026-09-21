@@ -1,0 +1,24 @@
+{
+  "event_id": "7dbf0670-d476-4f77-8b33-90c9bfd8ce26",
+  "event_name": "operation_completed",
+  "event_version": 1,
+  "occurred_at": "2026-07-22T12:34:00Z",
+  "surface": "cli",
+  "operation": "search",
+  "outcome": "success",
+  "duration_bucket": "lt_100ms",
+  "properties": {
+    "output": "human",
+    "has_query": true,
+    "has_provider_filter": false,
+    "has_workspace_filter": false,
+    "has_since_filter": false,
+    "has_event_type_filter": false,
+    "has_file_filter": false,
+    "has_session_filter": false,
+    "event_results": false,
+    "primary_only": false,
+    "include_current_session": false,
+    "limit_bucket": "21-100"
+  }
+}

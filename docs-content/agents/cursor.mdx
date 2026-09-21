@@ -1,0 +1,69 @@
+---
+title: "Use ctx with Cursor"
+sidebarTitle: "Cursor"
+description: "Import Cursor agent transcript history and ask Cursor to search cited prior work before editing."
+---
+
+Install ctx on the machine where Cursor has written local agent history:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+```
+
+See [Install](/getting-started/install) for setup and data-root details.
+
+ctx can import Cursor agent transcript history when it is present locally. After import, Cursor can use the same `ctx search`, `ctx show`, and `ctx locate` commands as any shell-capable agent.
+
+## Import Cursor history
+
+The installer runs `ctx setup` by default. To refresh Cursor history directly, run:
+
+```bash
+ctx import --provider cursor
+ctx sources --json
+```
+
+Use `ctx sources --json` to confirm whether Cursor history is `importable` on this machine.
+
+## Prompt Cursor to search first
+
+Paste this into Cursor before a follow-up task:
+
+```text
+Before editing, use ctx to search prior local agent sessions for related Cursor or cross-agent work.
+
+Run:
+ctx search "<focused query>" --provider cursor
+
+Inspect the best hit before relying on it:
+ctx show event <ctx-event-id> --window 3
+or:
+ctx show session <ctx-session-id>
+
+If the result affects the edit, cite the `ctx_event_id` or `ctx_session_id` in your response.
+```
+
+Use a provider filter when you specifically want Cursor history. Omit `--provider cursor` when prior work may have happened in another agent.
+
+## Inspect and cite
+
+For a specific command, error, or decision:
+
+```bash
+ctx show event <ctx-event-id> --window 3
+```
+
+For a broader task thread:
+
+```bash
+ctx show session <ctx-session-id>
+```
+
+When Cursor needs the original source path or a transcript file:
+
+```bash
+ctx locate event <ctx-event-id>
+ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+```
+
+Ask Cursor to include the ctx ID in its summary when retrieved history changes the implementation plan.

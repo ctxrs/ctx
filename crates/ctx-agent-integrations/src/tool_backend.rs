@@ -1,5 +1,7 @@
 use std::{fmt, path::PathBuf, time::Duration};
 
+pub use ctx_attribution_model::BlameTarget;
+use ctx_client_observability::analytics::BlameTerminalFacts;
 use ctx_history_core::CaptureProvider;
 use serde_json::Value;
 use uuid::Uuid;
@@ -13,6 +15,11 @@ pub enum ToolOperation {
     ShowSession(ShowSessionRequest),
     ShowEvent(ShowEventRequest),
     QueryEvents(QueryEventsRequest),
+    Blame {
+        target: BlameTarget,
+        limit: u32,
+        cursor: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +199,8 @@ pub struct ToolOutcome {
     pub structured: Value,
     /// Optional projection used only by the MCP adapter to render compact text.
     pub compact: Option<Value>,
+    /// Text rendered by the owning product from the same structured result.
+    pub text: Option<String>,
     pub usage: ToolUsageFacts,
 }
 
@@ -200,6 +209,7 @@ impl ToolOutcome {
         Self {
             structured,
             compact: None,
+            text: None,
             usage: ToolUsageFacts::default(),
         }
     }
@@ -208,6 +218,7 @@ impl ToolOutcome {
         Self {
             structured,
             compact: Some(compact),
+            text: None,
             usage: ToolUsageFacts::default(),
         }
     }
@@ -215,6 +226,7 @@ impl ToolOutcome {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ToolUsageFacts {
+    pub blame: Option<BlameTerminalFacts>,
     pub search: Option<ToolSearchUsageFacts>,
     pub search_execution: Option<ToolSearchTerminalFacts>,
 }
@@ -231,6 +243,9 @@ impl ToolUsageFacts {
     }
 
     pub fn merge(&mut self, additional: Self) {
+        if additional.blame.is_some() {
+            self.blame = additional.blame;
+        }
         if additional.search.is_some() {
             self.search = additional.search;
         }
@@ -268,18 +283,9 @@ impl ToolSearchUsageFacts {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpaqueMcpProxyError {
-    CompanionUnavailable,
-    CompanionIncompatible,
-}
-
 /// Product execution boundary. Implementations remain in the owning application.
 pub trait ToolBackend: Send + Sync {
     fn execute(&self, operation: ToolOperation) -> Result<ToolOutcome, ToolExecutionError>;
-
-    /// Proxies one already-framed companion-owned MCP request without parsing its arguments.
-    fn proxy_companion_mcp(&self, request: &[u8]) -> Result<Vec<u8>, OpaqueMcpProxyError>;
 
     /// Resolves an MCP provider spelling through the application's provider registry.
     fn parse_provider(&self, value: &str) -> Option<CaptureProvider>;
@@ -315,6 +321,7 @@ pub enum ToolBackendError {
         detail: String,
     },
     EventQuery(StructuredToolError),
+    Blame(StructuredToolError),
     SourceUnavailable,
     GenerationChanged,
     GenerationAuthority(StructuredToolError),
@@ -364,7 +371,7 @@ impl fmt::Display for ToolBackendError {
             Self::InvalidRequest { detail }
             | Self::Cursor { detail, .. }
             | Self::Internal { detail } => formatter.write_str(detail),
-            Self::EventQuery(error) | Self::GenerationAuthority(error) => {
+            Self::Blame(error) | Self::EventQuery(error) | Self::GenerationAuthority(error) => {
                 formatter.write_str(&error.detail)
             }
             Self::SourceUnavailable => formatter.write_str("source_unavailable"),

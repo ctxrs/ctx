@@ -1,7 +1,11 @@
 mod archive;
 mod durability;
 mod hosted_transaction;
+mod legacy_pair;
+#[cfg(test)]
+mod legacy_pair_tests;
 mod lock;
+pub use legacy_pair::cleanup_legacy_managed_pair_under_installation_lock;
 mod lock_fs;
 #[cfg(test)]
 mod lock_tests;
@@ -43,9 +47,6 @@ pub use marker::{
     current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
     invalid_install_marker_recovery_guidance, unmanaged_install_conversion_guidance, InstallMarker,
 };
-pub(in crate::upgrade) use marker::{
-    existing_install_attribution, install_marker_bytes, MAX_INSTALL_MARKER_BYTES,
-};
 pub use marker::{managed_install_marker_for_current_exe, ManagedInstallMarker};
 pub use path_identity::managed_install_path_identity_matches;
 pub(super) use transaction::ApplyResult;
@@ -55,8 +56,7 @@ pub(in crate::upgrade) use transaction::HelperOutcome;
 pub(super) use transaction::RECOVERY_REEXEC_ENV;
 #[cfg(windows)]
 pub(in crate::upgrade) use transaction::{
-    open_managed_pair_parent, prepare_managed_pair_helper, spawn_managed_pair_helper,
-    write_managed_pair_helper_ready,
+    open_managed_pair_parent, spawn_managed_pair_helper, write_managed_pair_helper_ready,
 };
 pub(super) use transaction::{PendingRecovery, TerminalRecovery};
 

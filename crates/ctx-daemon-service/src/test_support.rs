@@ -146,7 +146,11 @@ impl ArtifactFetcher for TestArtifact {
 pub(crate) struct TestCoreGenerationPublished;
 
 impl CoreGenerationPublishedPort for TestCoreGenerationPublished {
-    fn notify(&self, _data_root: &Path, _publication: &CoreGenerationPublished) -> Result<()> {
+    fn notify(
+        &self,
+        _data_root: &Path,
+        _publication: Option<&CoreGenerationPublished>,
+    ) -> Result<()> {
         Ok(())
     }
 }

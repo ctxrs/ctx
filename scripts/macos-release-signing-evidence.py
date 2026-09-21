@@ -299,7 +299,12 @@ def command_record_cli_execution_verification(args: argparse.Namespace) -> None:
 
 def command_verify_artifact(args: argparse.Namespace) -> None:
     require_helper_artifact(args.kind, args.platform, args.artifact)
-    document = require_base_document(read_json(args.evidence), args.platform, args.kind)
+    document = read_json(args.evidence)
+    if args.allow_pending_cli_execution and args.kind != "cli":
+        raise SystemExit("pending execution selection applies only to CLI evidence")
+    pending = (args.allow_pending_cli_execution
+               and document.get("artifact_verification", {}).get("status") == "pending")
+    document = require_base_document(document, args.platform, args.kind, allow_pending_cli=pending)
     actual = sha256(args.artifact)
     if document.get("artifact_sha256") != actual:
         raise SystemExit(
@@ -493,6 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--kind", required=True, choices=ARTIFACT_KINDS)
     verify.add_argument("--artifact", required=True, type=Path)
     verify.add_argument("--checksum", type=Path)
+    verify.add_argument("--allow-pending-cli-execution", action="store_true")
     verify.set_defaults(handler=command_verify_artifact)
 
     bind = subparsers.add_parser("bind-archive")

@@ -1,0 +1,163 @@
+---
+title: "Quickstart"
+sidebarTitle: "Quickstart"
+description: "Install ctx, confirm local sources, search indexed agent history, and open the result you found."
+---
+
+This walkthrough gets from a fresh install to one useful result in the local index.
+
+## Install and confirm setup
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+ctx status
+```
+
+The installer installs the standalone CLI, installs the bundled agent-history skill, and runs `ctx setup` by default. Setup creates the ctx data root, initializes self-contained Tantivy Core storage, discovers supported local history, and imports what it can read.
+
+The install script downloads release metadata and the ctx binary, then verifies release metadata and SHA-256 checksums before installing artifacts. Setup and import read local provider history; search, show, locate, and transcript output use the committed local Core for transcript content.
+
+If you need install-only behavior for packaging or CI, pass `--no-setup` to the installer. It skips both the skill step and history indexing unless you pass a skill target explicitly:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh -s -- --no-setup
+```
+
+Run setup yourself when you are ready to index local history:
+
+```bash
+ctx setup
+```
+
+Setup, import, search, and show do not call model APIs, require API keys, write into source repositories, or start a provider-history daemon.
+
+## Check available sources
+
+```bash
+ctx sources
+```
+
+Use this before debugging search results. It shows which provider history locations ctx found on this machine and whether they can be imported.
+
+For scripts or exact field extraction, use JSON:
+
+```bash
+ctx sources --json
+```
+
+In source JSON, `native_import: true` means ctx has parser support for that provider's history format. `importable: true` means the source exists on this machine and has supported data available to import.
+
+## Search for a remembered detail
+
+Search for a phrase, filename, tool output, error, decision, or feature name from earlier work:
+
+```bash
+ctx search "failed migration"
+```
+
+Search returns cited snippets with ctx-owned IDs. The two IDs you will use most often are:
+
+- `ctx_event_id`, which points at one matching event;
+- `ctx_session_id`, which points at the whole session that contained it.
+
+Search defaults to `--refresh background`. In automatic indexing mode it
+serves the latest published generation and requests daemon maintenance. In
+manual mode it uses the published generation without starting or waking a
+process. Use `--refresh wait` or an explicit import when you need fresh history
+before querying.
+
+If the wording changed across sessions, use explicit terms:
+
+```bash
+ctx search --term "failed migration" --term rollback --term "cursor rename"
+```
+
+Use `--refresh off` when you want only the current index:
+
+```bash
+ctx search "failed migration" --refresh off
+```
+
+Use `--refresh wait` when a failed refresh should fail the search:
+
+```bash
+ctx search "failed migration" --refresh wait
+```
+
+`--limit` defaults to `20` and is capped at `200`.
+
+## Open the matching event
+
+When a result has a `ctx_event_id`, open the surrounding context:
+
+```bash
+ctx show event <ctx-event-id> --window 3
+```
+
+Increase the window when the answer depends on the lead-up or the follow-up:
+
+```bash
+ctx show event <ctx-event-id> --window 8
+```
+
+## Open the session
+
+When the event is promising, open the session:
+
+```bash
+ctx show session <ctx-session-id>
+```
+
+Use JSON when another tool will consume the result:
+
+```bash
+ctx show session <ctx-session-id> --format json
+ctx show event <ctx-event-id> --format json
+```
+
+## Locate the original source
+
+Use `locate` when you need the provider identity and available source-level
+provenance behind a ctx result:
+
+```bash
+ctx locate session <ctx-session-id>
+ctx locate event <ctx-event-id>
+```
+
+If the original source has moved or been deleted, ctx can still return stored
+text from the committed Core. Source availability is reported when ctx has
+enough source-level information to check it.
+
+## Search as JSON
+
+JSON search output is useful for scripts, `jq`, and exact field extraction:
+
+```bash
+ctx search "sqlite migration failed" --workspace ctx --limit 5 --json
+```
+
+Search JSON includes result metadata, citations, suggested next commands, and a top-level `freshness` object that describes the refresh mode and outcome.
+
+## Built-in help and upgrade status
+
+```bash
+ctx docs search "search filters"
+ctx docs show cli-reference
+ctx upgrade status
+```
+
+`ctx docs` is available offline from the binary. `ctx upgrade status` shows whether the current binary is official-installer managed and eligible for signed self-upgrades.
+
+## A compact first-run script
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+ctx status
+ctx sources
+ctx search "build failure" --limit 5
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id>
+```
+
+If search misses work you expect to find, run `ctx sources --json` first. A supported provider can still be `missing`, `empty`, or unavailable on a particular machine.

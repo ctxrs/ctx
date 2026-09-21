@@ -32,43 +32,31 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-pub(crate) const TEST_RELEASE_PRIVATE_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC4czAqM5XMipjl
-QxTatkq8VmeS13e2aEpqT1v/XGL17o43i624H80xEbvB5tV/YzpO5N8sb4wEUj9h
-yNzB5/U4S6SM/QadcA9fk/V7KeBOcz15PvZaU0UNp/dKVvzEFtxv/rjQCfA80C2N
-30lTwti8pts4IulxVeB7BkIvqs3XADV5zBVwRACHWt5MKcMrXfBcmKRy8TLdNeml
-lPgU3V2pj4c54KQ0aoy3/970+ry3P+eT8BlatU4k8R+pS0Oy4s3Ezczj9UrPCREd
-1m2tAqaw8B0wRoei+nHEPWqbbzgx8fepv38U9LXmzYpCjSWSZ+zcZ4YBsXlyab3a
-2PjyZ42HAgMBAAECggEAHQvis1qhRe8zibMJJzIazdLrh5fP3dVJlrk9mxag7Oqu
-0bd42WyEoywQPcZMq71kEsV/EZ/VVF7hZVQ803pkRwO+e4djEcryWNJTj5w2GxSR
-wzSzleDUGITxb+8H6hdRin95+iT+hI0iB1v4z6x49ihukEYLLhJgge8n4BrNRISa
-P+SInTo/UzO5NIzh8HdQBJqkammS4c/Eij0jVw9onMpOFWKAxcs0hmk1SSy6KouD
-yDBqp6m6ILlAuggZutkn+7X4QUzvgBQePYy6BNX57dmFpBWt/8DVc5m4Ciwd+s1L
-CLRL86X6YLtc5wTQvdX/xHbW9m/FUXk5EvK2eQ+IyQKBgQD7B4aFQFwHiRjO323d
-I7FUcSgsBEz/pYiucEF5c+GQUpSq/ORgFg7sYLAv3312nbu/TdIw2O0KxhhfUX6j
-iRGe5NzSogUpRHk3Rq/tbQKULezDi9Lc7ROUuMYRpsHSjiVLB+zYdRDZULBqAdSo
-3A0c0/xfCKB0efIJt4SfTVtcvwKBgQC8Git0ry8csFgmwmuxHL1nBmxXBLyZ04Ko
-PQ+WyLPgL8cVP3Bf19zXDtmeoPSD8bZODys4UKit3zpZDEKN9S8JeN2E1h5MTgKN
-wmOxdimAo0xKHJ/EnvxzfR5UzbrGiuajCFvIDPjItl3gSJ2av1cwQ8ljZBtOoqdX
-KiTNCw7ZOQKBgQCTEuSom32P2K4VPmiC4M+blrSfnWFzgoujEBf8TX2BbjC2QXaY
-KTRTH476bWl3npCKU9DrV50B6/AJoJievcb6HkKWkeCOPhT64speQ7j4EjQemYRQ
-dgI750n8u4PhlfCZlioY4/WcLR8+7JWo3Uw9cKHzF/3SYEQDl2b3Yn49xwKBgFda
-g+HNVUCqeFWPpnl60k6dAgUrUvbQ7fV5Xdr1W+t55KdubZ5k3c8Vu2RadRMtVi9M
-BhNCCgOtDii6c9H/EhgBBEajNTDUbYUtyCRqrn1p2Iz2XA/wkWaErWhOnjWD3fXK
-dO0jcQms/02gC2kJANGOOWEp5TCQgswM60g5oWypAoGADlZTP+97w9NcOJoQdZVi
-+I5NLRKHUjAvax4BALtH5uuVIwj6cSwheRkBzd7rU1aQ65yuUYwIznDsC2rir26x
-ehIUvhTehZf04otZbIo7UUvFhohRmX5k4/Idf/njMa/dA5afBMM1xE7IkoeHQyLc
-3I9zapKTmyq90XvKHvA9eyA=
------END PRIVATE KEY-----"#;
+fn test_release_key_pair() -> &'static RsaKeyPair {
+    static KEY: std::sync::OnceLock<RsaKeyPair> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        #[cfg(not(windows))]
+        let output = std::process::Command::new("openssl")
+            .args(["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"])
+            .output().expect("generate ephemeral RSA release test key with openssl");
+        #[cfg(windows)]
+        let output = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$rsa = [System.Security.Cryptography.RSACng]::new(2048); try { [Convert]::ToBase64String($rsa.Key.Export([System.Security.Cryptography.CngKeyBlobFormat]::Pkcs8PrivateBlob)) } finally { $rsa.Dispose() }"])
+            .output().expect("generate ephemeral RSA release test key with Windows CNG");
+        assert!(output.status.success(), "ephemeral RSA test key generation failed");
+        let encoded = String::from_utf8(output.stdout).expect("encoded ephemeral key");
+        RsaKeyPair::from_pkcs8(&pem_der(&encoded)).expect("ephemeral PKCS8 RSA key")
+    })
+}
 
-pub(crate) const TEST_RELEASE_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
-MIIBCgKCAQEAuHMwKjOVzIqY5UMU2rZKvFZnktd3tmhKak9b/1xi9e6ON4utuB/N
-MRG7webVf2M6TuTfLG+MBFI/Ycjcwef1OEukjP0GnXAPX5P1eyngTnM9eT72WlNF
-Daf3Slb8xBbcb/640AnwPNAtjd9JU8LYvKbbOCLpcVXgewZCL6rN1wA1ecwVcEQA
-h1reTCnDK13wXJikcvEy3TXppZT4FN1dqY+HOeCkNGqMt//e9Pq8tz/nk/AZWrVO
-JPEfqUtDsuLNxM3M4/VKzwkRHdZtrQKmsPAdMEaHovpxxD1qm284MfH3qb9/FPS1
-5s2KQo0lkmfs3GeGAbF5cmm92tj48meNhwIDAQAB
------END RSA PUBLIC KEY-----"#;
+pub(crate) fn test_release_public_key_pem() -> String {
+    use ring::signature::KeyPair as _;
+    format!(
+        "-----BEGIN RSA PUBLIC KEY-----\n{}\n-----END RSA PUBLIC KEY-----",
+        BASE64.encode(test_release_key_pair().public_key().as_ref())
+    )
+}
 
 pub(crate) fn pem_der(pem: &str) -> Vec<u8> {
     let body: String = pem
@@ -80,7 +68,7 @@ pub(crate) fn pem_der(pem: &str) -> Vec<u8> {
 }
 
 pub(crate) fn sign_test_release_metadata(bytes: &[u8]) -> String {
-    let key_pair = RsaKeyPair::from_pkcs8(&pem_der(TEST_RELEASE_PRIVATE_KEY_PEM)).unwrap();
+    let key_pair = test_release_key_pair();
     let rng = SystemRandom::new();
     let mut signature = vec![0; key_pair.public().modulus_len()];
     key_pair
@@ -344,7 +332,7 @@ pub(crate) fn windows_runtime_repair_release_env<'a>(
         )
         .env(
             "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
-            TEST_RELEASE_PUBLIC_KEY_PEM,
+            test_release_public_key_pem(),
         )
 }
 
@@ -719,7 +707,7 @@ pub(crate) fn fake_release_env<'a>(
         )
         .env(
             "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
-            TEST_RELEASE_PUBLIC_KEY_PEM,
+            test_release_public_key_pem(),
         )
 }
 
@@ -842,6 +830,6 @@ pub(crate) fn managed_release_env<'a>(
         )
         .env(
             "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
-            TEST_RELEASE_PUBLIC_KEY_PEM,
+            test_release_public_key_pem(),
         )
 }

@@ -14,7 +14,7 @@ pub(crate) const fn observed_mcp_product_operation(
         McpToolKind::ShowSession => Some(ObservedMcpProductOperation::ShowSession),
         McpToolKind::ShowEvent => Some(ObservedMcpProductOperation::ShowEvent),
         McpToolKind::QueryEvents => Some(ObservedMcpProductOperation::QueryEvents),
-        McpToolKind::Blame | McpToolKind::ProStatus => None,
+        McpToolKind::Blame => Some(ObservedMcpProductOperation::Blame),
         McpToolKind::Unknown | McpToolKind::Missing => None,
     }
 }

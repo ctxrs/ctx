@@ -142,6 +142,13 @@ impl ClientOperationDraft {
         }
     }
 
+    pub fn blame_mut(&mut self) -> &mut BlameTerminalFacts {
+        match &mut self.operation {
+            CliOperation::Blame(value) => value,
+            _ => unreachable!("blame telemetry requested for a different operation"),
+        }
+    }
+
     pub fn docs_mut(&mut self) -> &mut DocsTelemetry {
         match &mut self.operation {
             CliOperation::Docs(value) => value,

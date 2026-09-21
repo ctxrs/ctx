@@ -430,16 +430,16 @@ fn local_import_status_and_daemon_are_network_inert_when_analytics_are_disabled(
         "ctx import attempted a connection"
     );
 
-    let pro_root = temp.path().join("pro");
-    write_network_endpoints(&pro_root, &endpoint, Some(false));
-    local_command(&temp, &pro_root)
+    let status_root = temp.path().join("status");
+    write_network_endpoints(&status_root, &endpoint, Some(false));
+    local_command(&temp, &status_root)
         .env("CTX_CLOUD_API_BASE", &endpoint)
         .args(["status", "--format=json"])
         .assert()
         .success();
     assert!(
         listener.accept().is_err(),
-        "ctx status Pro inspection attempted a connection"
+        "ctx status attribution inspection attempted a connection"
     );
 
     let daemon_root = temp.path().join("daemon");

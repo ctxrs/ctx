@@ -9,7 +9,8 @@ Command result JSON uses `schema_version: 1` except for
 `ctx import --format json`, `ctx search --format json`,
 `ctx status --format json` (including usage controls and errors), all `ctx index`
 JSON modes, `ctx daemon status`, `ctx daemon enable`, `ctx daemon disable`, and
-MCP `status`. Generic daemon command JSON uses version 2; uninstall-quiescence
+MCP `status`, and the Blame result/diagnostic contract described in
+[Blame](../blame.md). Generic daemon command JSON uses version 2; uninstall-quiescence
 receipts retain their separate schema.
 Progress-event JSON is stderr progress output and does not include
 `schema_version`.
@@ -30,6 +31,7 @@ ctx setup --format json --no-daemon
 Writes local storage and returns schema version 3:
 
 - `schema_version`;
+- `initialized`;
 - `data_root`;
 - `config_path`;
 - `mode`, one of `ready`, `pending`, `stale`, or `unavailable`;
@@ -39,9 +41,12 @@ Writes local storage and returns schema version 3:
 - `refresh`;
 - `refresh_request`;
 - `semantic`;
+- `attribution` (see below);
 - `daemon`;
 - `daemon_autostart`;
-- `source_rebuild_required`;
+- `indexed_items`, `indexed_sessions`, `indexed_events`, and `indexed_sources`
+  when their counts are available;
+- `network_required: false` and `repo_writes: false`.
 
 The `deprecated_catalog_only_ignored` field remains present for schema-2
 compatibility and is always `false`, because the ignored `--catalog-only` option
@@ -100,6 +105,7 @@ Reads local storage state and returns:
 - `lexical`;
 - `refresh`;
 - `semantic`;
+- `attribution` (see below);
 - `daemon`;
 - `indexed_items`;
 - `indexed_sessions`;
@@ -166,6 +172,47 @@ projection, including exact `flat_f32` document/event/chunk coverage when it is
 available. `daemon` reports process and relevant job state. These diagnostic
 objects can contain local paths and should not be persisted or forwarded outside
 local diagnostics.
+
+## Blame attribution readiness
+
+Setup and status keep schema version 3 and add `attribution`. Doctor includes
+the same observation in its schema-3 `source_epoch`; its outer schema remains 1.
+Status omits `catalog` and has `read_only: true`. Setup retains `catalog`, omits
+`read_only`, and keeps its existing setup-specific fields. Core health remains
+independent from attribution readiness.
+
+The `attribution` object is the runtime's serialized `CoreProjectionStatus`:
+
+| Field | Meaning |
+| --- | --- |
+| `currentness` | `not_materialized`, `partial`, `stale`, `needs_rebuild`, or `current`. |
+| `requested_core_generation_id` | Current Core generation requested for the observation, or null. |
+| `receipt` | Canonical completed Core materialization receipt, or null. |
+| `materialized_coverage` | `not_materialized`, `partial`, `complete`, `empty`, or `abstained`. |
+| `coverage` | Six repository evidence counts listed below. |
+| `local_repository_access` | Whether the projection has available local repository access. |
+| `availability` | Booleans `file_blame`, `commit_blame`, and `pull_request_blame`. |
+| `diagnostic` | Canonical Blame diagnostic for noncurrent state; omitted when absent. |
+
+The six coverage fields are `repository_candidate_events`,
+`logical_binding_events`, `certified_live_root_access_events`,
+`file_evidence_events`, `exact_commit_evidence_events`, and
+`exact_pull_request_evidence_events`.
+
+`currentness: "current"` with `materialized_coverage: "empty"` or `"abstained"`
+is terminal and has no import/rebuild instruction. Availability may still be
+false because there is no usable evidence. Noncurrent diagnostics carry the
+ordinary completion action under `diagnostic.next_action`:
+
+```json
+{ "kind": "import_all", "argv": ["ctx", "import", "--all"] }
+```
+
+An actual observation failure returns a canonical diagnostic at
+`attribution.error` while preserving the Core status report. A stale committed
+index may still answer a query with explicit freshness; readiness does not
+silently deny that result. Reading status, doctor, or index progress does not
+import, schedule work, create an attribution root, or open legacy product data.
 
 ## Semantic Lifecycle
 
@@ -432,11 +479,10 @@ The SQLite schema version and JSON report schema version are independent.
 CLI `delivered_output_bytes` counts the actual final stdout and stderr bytes
 accepted for delivery, including the selected terminal wrapping and ANSI mode.
 MCP output bytes count the serialized response transport. These are delivery
-measurements, not context measurements. CLI Blame is the exception: its public
-companion wrapper does not intercept output, so its zero byte aggregate means
-unavailable and human detail renders N/A. Blame rows report technical outcome
-and duration with `not_applicable` value classification and zero results; Core
-does not infer a private result collection.
+measurements, not context measurements. Definition-3 CLI Blame rows have no output-byte measurement;
+their zero byte aggregate means unavailable and human detail renders N/A.
+Blame rows report technical outcome and duration with `not_applicable` value
+classification and zero results, without storing transcript or target content.
 
 When complete search-context measurements are available, `estimates` contains
 `approximate_context_tokens` with `coefficient_version`,
@@ -1418,7 +1464,7 @@ removed generic `local_only` property.
 - `progress`;
 - `findings`.
 
-Doctor checks Core/Tantivy generation health, read-only semantic sidecar health,
+Doctor checks Core/Tantivy generation health, read-only attribution and semantic sidecar health,
 source/daemon state, and compact local-usage health. Its JSON includes daemon
 status. It does not initialize embedding executors or write sidecar data.
 Semantic or hybrid search may ask the daemon query service to use the selected

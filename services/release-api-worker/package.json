@@ -1,0 +1,30 @@
+{
+  "name": "ctx-release-api-worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@9.15.1",
+  "scripts": {
+    "dev": "wrangler dev --local --port 8791",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:prod": "wrangler deploy --env prod"
+  },
+  "pnpm": {
+    "overrides": {
+      "sharp": "0.35.4",
+      "undici": "7.29.0",
+      "nanoid": "3.3.18"
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260426.1",
+    "typescript": "^5.9.3",
+    "vite": "8.0.16",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.114.0"
+  },
+  "license": "Apache-2.0"
+}

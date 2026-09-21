@@ -230,7 +230,7 @@ fn reject_unexpected_inputs(args: &HostedTransactionArgs) -> Result<()> {
 }
 
 fn install(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
-    reject_managed_pair_material_for_core_only_install(&install_path)?;
+    ensure_legacy_pair_transaction_inactive(&install_path)?;
     let supplied_digest = normalized_sha256(
         args.binary_sha256
             .as_deref()
@@ -315,6 +315,7 @@ fn install(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
         }
     };
     complete_install(&source, &journal_path, &mut journal)?;
+    super::cleanup_legacy_managed_pair_under_installation_lock(&install_path)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&install_receipt(&journal))?
@@ -453,6 +454,9 @@ fn complete_install_with_fault(
 }
 
 fn uninstall_prepare(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
+    if read_journal(&journal_path(&install_path))?.is_none() {
+        super::cleanup_legacy_managed_pair_under_installation_lock(&install_path)?;
+    }
     let journal_path = journal_path(&install_path);
     let (mut journal, fresh) = match read_journal(&journal_path)? {
         Some(journal) => {

@@ -208,7 +208,7 @@ impl SemanticEnvironmentGuard {
 
     fn http_auth(endpoint: &str) -> Self {
         Self::set(
-            Some(OsString::from("passive-semantic-test-token")),
+            Some(OsString::from("synthetic-test")),
             Some(OsString::from(endpoint)),
             None,
         )

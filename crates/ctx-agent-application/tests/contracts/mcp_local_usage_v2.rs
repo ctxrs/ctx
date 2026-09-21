@@ -62,29 +62,17 @@ impl McpClient {
 
 #[cfg(unix)]
 #[test]
-fn companion_blame_records_only_core_observed_delivery_facts() {
-    use std::os::unix::fs::PermissionsExt as _;
-
+fn native_blame_records_only_delivered_aggregate_facts() {
     let temp = tempdir();
-    let pro = temp.path().join("ctx-pro");
-    fs::write(
-        &pro,
-        b"#!/bin/sh\nif [ \"$1\" = \"--ctx-pro-protocol-v3\" ] && [ \"$2\" = \"handshake\" ]; then\n  printf '{\"protocol_version\":3}\\n'\n  exit 0\nfi\nif [ \"$1\" = \"--ctx-pro-protocol-v3\" ] && [ \"$2\" = \"mcp-serve\" ]; then\n  IFS= read -r request || exit 92\n  printf '{\"jsonrpc\":\"2.0\",\"id\":\"blame\",\"result\":{\"opaque\":true}}\\n'\n  exit 0\nfi\nexit 91\n",
-    )
-    .unwrap();
-    fs::set_permissions(&pro, fs::Permissions::from_mode(0o700)).unwrap();
-
-    let mut command = mcp_command(&temp);
-    command.env("CTX_PRO_PATH", &pro);
-    let mut client = McpClient::start_command(command);
+    let mut client = McpClient::start(&temp);
     client.request(initialize());
     let marker = "PRIVATE_BLAME_TARGET_MUST_NOT_PERSIST_51f2";
     let response = client.request(tool_call(
         "blame",
         "blame",
-        json!({"private_target": marker}),
+        json!({"target": {"kind": "file", "path": marker}}),
     ));
-    assert_eq!(response.value["result"]["opaque"], true);
+    assert_eq!(response.value["result"]["isError"], true);
     client.finish();
 
     let usage_path = usage_db_path(&temp);
@@ -111,7 +99,7 @@ fn companion_blame_records_only_core_observed_delivery_facts() {
         row,
         (
             3,
-            "success".to_owned(),
+            "failure".to_owned(),
             "not_applicable".to_owned(),
             1,
             0,

@@ -74,9 +74,10 @@ After a failed download or interrupted managed install, keep the installed
 files and marker in place, address the reported network, disk-space, or
 permission problem, and rerun the same installer. If the installer says the
 binary was installed but setup did not finish, retry `ctx setup` instead.
-A Pro activation warning does not mean the installed companion is missing;
-follow the reported `ctx pro` action. A version check alone does not establish
-that setup completed.
+A version check alone does not establish that setup completed. For a cached
+installer script that expects retired setup commands, fetch the current hosted
+installer and rerun it. If replacement already completed, `ctx setup --wait`
+finishes local indexing.
 
 An absent install marker is normal for a source build or package-manager
 install and leaves ctx unmanaged. The hosted installer will not silently adopt
@@ -155,7 +156,7 @@ Running `ctx upgrade` again at the same CLI version repairs a missing or
 hash-mismatched selected semantic asset from the signed catalog without
 changing the CLI version.
 
-Upgrade downloads are temporary for the CLI and its companion. Verified model
+CLI upgrade downloads are temporary. Verified model
 and runtime archives may be reused, but `ctx upgrade` removes cached downloads
 that are no longer selected by the signed release metadata. This also cleans
 downloads left by older versions, even when ctx is already up to date. After

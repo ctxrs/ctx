@@ -1,0 +1,13 @@
+{
+  "fixture_version": 1,
+  "method": "POST",
+  "path": "/functions/v1/analytics",
+  "query": "",
+  "event_id": "56565656-5656-4656-8656-565656565656",
+  "signed_at_unix": 1787661240,
+  "installation_public_key_base64url": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+  "nonce_base64url": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "transcript_base64url": "Y3R4AHByby1jb21tZXJjaWFsLXJlcXVlc3QAdjEAUE9TVAAvZnVuY3Rpb25zL3YxL2FuYWx5dGljcwBuZTZQMkFTeXhZalpSc1AtS21wc2k4VjhTdzBSaWk1c3R4YVpYb0VGWHVNADQ3REVRcGo4SEJTYS1fVEltVy01SkNldVFlUmttNU5NcEpXWkczaFN1RlUANTY1NjU2NTYtNTY1Ni00NjU2LTg2NTYtNTY1NjU2NTY1NjU2ADE3ODc2NjEyNDAAQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOAA",
+  "signature_base64url": "N_QxusTjF8A3oTUZ95lnPoYXOqu_u4QEnsYx1sTKkeliYrLCtn-PNdT5KcD4sgCvFYG69nVDrX-lx7YHLONRAg",
+  "body_utf8": "{\"app_version\":\"1.1.0-rc.2+build.7\",\"arch\":\"x86_64\",\"events\":[{\"duration_bucket\":\"lt_1s\",\"event_id\":\"56565656-5656-4656-8656-565656565656\",\"event_name\":\"operation_completed\",\"event_version\":1,\"occurred_at\":\"2026-08-25T12:34:00Z\",\"operation\":\"blame\",\"outcome\":\"success\",\"properties\":{\"blame_access_state\":\"active\",\"blame_freshness\":\"current\",\"blame_has_more\":false,\"blame_output_served\":true,\"blame_pro_protocol_version\":3,\"blame_pro_version\":\"1.1.0-rc.2+build.7\",\"blame_target_kind\":\"file\",\"blame_request_kind\":\"first_request\",\"blame_result_state\":\"possible\",\"blame_schema_version\":1,\"blame_semantics_version\":1,\"blame_surface\":\"cli\"},\"surface\":\"pro_host\"}],\"os\":\"linux\"}"
+}

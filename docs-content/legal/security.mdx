@@ -1,0 +1,51 @@
+---
+title: "Security"
+description: "Security expectations for ctx local search and responsible reporting."
+---
+
+Last updated: August 1, 2026
+
+# Security
+
+ctx indexes local coding-agent history into a self-contained local Tantivy Core. That history can contain prompts, responses, source code, file paths, commands, output previews, credentials, customer data, and other sensitive material.
+
+Treat the ctx data root, Core index, local database sidecars, logs, and written command output as private developer data. Keep them out of source repositories, issue trackers, public terminals, screenshots, and shared support bundles unless you have reviewed and redacted them.
+
+ctx does not encrypt the data root for you. Use operating-system disk encryption, file permissions, endpoint controls, and backup exclusions appropriate for your environment. On shared machines, remove or reinitialize the ctx data root when the history should no longer be available to later users.
+
+## Responsible disclosure
+
+Report suspected security issues to [security@ctx.rs](mailto:security@ctx.rs).
+
+Please include enough detail to help us reproduce and understand the issue, such as affected versions, operating system, commands run, expected behavior, observed behavior, and a minimal reproduction when possible.
+
+Do not post vulnerabilities, exploit details, secrets, private transcripts, SQLite databases, logs, or sensitive command output publicly before we have had a reasonable opportunity to investigate.
+
+Good reports include the affected command or site surface, ctx version or commit, operating system, whether `CTX_DATA_ROOT` or `--data-root` was set, expected behavior, observed behavior, and a minimal redacted reproduction.
+
+Please avoid destructive testing, denial-of-service testing, social engineering, spam, accessing data that is not yours, or testing third-party coding-agent providers outside their own disclosure programs.
+
+## Install and supply-chain caution
+
+The public install command downloads and runs an installer:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+```
+
+Review installation scripts before running them in sensitive environments, use standard supply-chain controls where required, and prefer source builds or pinned packaging flows when your environment requires stricter review.
+
+The hosted installer is designed to verify release metadata and SHA-256
+checksums before installing artifacts. It writes a managed install marker next
+to the binary so `ctx upgrade` can verify installer ownership before replacing
+that binary. Official installer-managed installs can check signed release
+metadata for background auto-upgrade after successful non-JSON commands. Those
+checks do not replace your own approval, sandboxing, or package-review process.
+
+## Local storage caution
+
+The default ctx data root is `~/.ctx`, and it can be changed with `CTX_DATA_ROOT` or `--data-root`. Protect that location with appropriate filesystem permissions, backup rules, endpoint security, and retention policies for your environment.
+
+Raw provider files remain in provider-owned locations, but searchable text can persist in the ctx Core index after those raw files move or are deleted. Delete or rebuild the ctx data root when local retention requirements change.
+
+Before sharing diagnostics, search results, JSON output, logs, or database files, assume they may contain private local history and review them carefully.

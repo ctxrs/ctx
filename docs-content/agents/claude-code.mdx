@@ -1,0 +1,121 @@
+---
+title: "Use ctx with Claude Code"
+sidebarTitle: "Claude Code"
+description: "Install ctx, add the ctx skill for Claude Code, and use local session search before changing code."
+---
+
+Install ctx first if it is not already available:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+```
+
+See [Install](/getting-started/install) for setup and data-root details.
+
+Claude Code can use ctx because it can run shell commands and inspect command output. The skill teaches it to check local session history, open the cited event or session, and include the ctx ID when retrieved history affects the answer.
+
+## Install the skill
+
+Install the shared ctx skill:
+
+```bash
+ctx integrations install skill --agent claude-code
+```
+
+Omit `--agent claude-code` to install the universal `.agents` copy plus detected
+agent-specific folders. Add `--project` if you want a repository-local skill
+folder.
+
+After installation, Claude Code can load `ctx` when prior local agent sessions may contain relevant commands, attempts, decisions, or transcript context. In a new task, ask Claude Code to use ctx agent history search; it should begin by checking `ctx status --json` before searching.
+
+If you have not installed the skill yet, paste this guidance when you want Claude Code to use ctx:
+
+```text
+Use ctx before changing code if prior agent work could answer part of this task.
+
+Run a focused search:
+ctx search "<query>"
+
+If the wording is uncertain, search explicit terms:
+ctx search --term "<term one>" --term "<term two>"
+
+Inspect the best match before relying on it:
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id>
+
+If you need the source file path or full transcript, run:
+ctx locate event <ctx-event-id>
+ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+
+When you use retrieved context, cite the `ctx_event_id` or `ctx_session_id` and say which command produced it.
+```
+
+## Search first
+
+Ask Claude Code for a narrow search tied to the decision you need:
+
+```text
+Before editing, use ctx to search prior local agent sessions for the last time we touched the auth redirect flow. Inspect the best event with a small window, then summarize the relevant finding with the ctx_event_id you used.
+```
+
+Claude Code should start with:
+
+```bash
+ctx search "auth redirect flow"
+```
+
+Default search uses `--refresh background`: automatic mode requests daemon
+maintenance while serving the published generation; manual mode does not start
+or wake a process. If results look stale, wait for an explicit refresh before
+searching:
+
+```bash
+ctx search "auth redirect flow" --refresh wait
+```
+
+If you want only the current index:
+
+```bash
+ctx search "auth redirect flow" --refresh off
+```
+
+## Inspect the hit
+
+Search results should lead to one of these commands:
+
+```bash
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id>
+```
+
+Use `ctx show event` when a specific command, error, diff note, or decision appears in the search result. Use `ctx show session` when the result points to a longer thread and Claude needs the surrounding task shape.
+
+Ask for the cited finding before Claude edits:
+
+```text
+I found the prior redirect change in ctx_event_id evt_... via
+`ctx show event <ctx-event-id> --window 3`. The callback handler changed after
+the provider started returning relative paths. I will check that handler before
+editing.
+```
+
+## Locate or write a transcript for provenance
+
+When Claude Code needs the raw provider file or a full transcript, ask it to continue from the ctx ID:
+
+```bash
+ctx locate event <ctx-event-id>
+ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+```
+
+Use `locate` when you need to open the original provider history file. Use `show session --out` when the full transcript should be attached to an issue, review, or handoff after you have checked it for sensitive local content.
+
+## Keep the handoff cited
+
+Ask Claude Code to include ctx citations in its final summary:
+
+```text
+In your final response, include the ctx_event_id or ctx_session_id for any prior-session evidence you used. Do not describe it as memory. Treat it as retrieved local history.
+```
+
+A later agent can rerun the same `ctx show event`, `ctx show session`, or `ctx locate event` command instead of guessing which transcript supported the claim.

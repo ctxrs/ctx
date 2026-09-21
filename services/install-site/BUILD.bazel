@@ -1,0 +1,84 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library", "js_test")
+load("@rules_python//python:defs.bzl", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+js_library(
+    name = "sources",
+    srcs = glob(["src/**", "tests/**"]) + [
+        "BUILD.bazel",
+        "typecheck-managed-pair.mjs",
+        "tsconfig.managed-pair.json",
+        "deploy.mjs",
+        "package.json",
+        "package-lock.json",
+        "wrangler.toml",
+    ],
+)
+
+_INSTALL_SITE_TESTS = glob(["src/*.test.mjs", "src/test/*.test.mjs"], exclude = ["src/test/windows-installer-fixtures.test.mjs"])
+
+js_test(
+    name = "install_site_test",
+    entry_point = "src/run-node-test-suite.mjs",
+    args = ["$(rootpath %s)" % file for file in _INSTALL_SITE_TESTS],
+    data = [":sources"] + _INSTALL_SITE_TESTS,
+    tags = ["external"],
+)
+
+js_test(
+    name = "managed_pair_typecheck",
+    entry_point = "typecheck-managed-pair.mjs",
+    data = [
+        ":sources",
+        "tsconfig.managed-pair.json",
+        "//services/release-api-worker:node_modules/typescript",
+    ],
+    size = "small",
+)
+
+# Source packet contents and identity only; no native execution or publication.
+js_test(
+    name = "windows_installer_fixture_packet_test",
+    entry_point = "src/run-node-test-suite.mjs",
+    args = ["$(rootpath src/test/windows-installer-fixtures.test.mjs)"],
+    data = [":sources", "src/test/windows-installer-fixtures.test.mjs"],
+    tags = ["external"],
+)
+
+py_test(
+    name = "installer_monitor_test",
+    srcs = ["tests/installer_monitor_test.py"],
+    data = [
+        "tests/installer-monitor.yml",
+        "tests/installer-monitor.py",
+        "tests/installer-monitor-schedule.py",
+        "tests/install_live_smoke.sh",
+        "tests/install_linux_smoke.py",
+    ],
+    size = "small",
+)
+
+# Package-owned JS inputs for cross-package release publication tests.
+js_library(
+    name = "release_publication_test_inputs",
+    srcs = [
+        "package.json",
+        "src/cli-install-bridge.js",
+        "src/cli-install-managed-pair-contract.js",
+        "src/cli-install-script.js",
+        "src/cli-install-shell-integrations.js",
+        "src/cli-install-shell-man-pages.js",
+        "src/cli-install-shell-managed-pair.js",
+        "src/cli-install-shell-marker.js",
+        "src/cli-install-shell-platform.js",
+        "src/cli-install-shell-prior-integration.js",
+        "src/cli-install-shell-publication.js",
+        "src/cli-install-shell-release.js",
+        "src/cli-install-shell-rendering.js",
+        "src/cli-install-shell-validation.js",
+        "src/cli-install-shell-workflow.js",
+        "src/install-attempt-id.js",
+        "src/install-stage-contract.js",
+    ],
+)

@@ -55,10 +55,11 @@ ctx-created document chunks documented below.
   These commands do not reopen provider history at query time.
   `ctx show session --out` writes transcript artifacts. Search/show expose the
   provider-owned session ID when known; for Codex, it is the resume UUID.
-- Official managed distributions may pair Apache-licensed Core with a
-  separately signed private companion. Core-only distributions retain the OSS
-  commands, and paid routes return a typed companion-unavailable failure when
-  that companion is absent.
+- `ctx blame` is included in every build. It connects committed file lines,
+  commits, and pull requests to locally recorded agent evidence. Its unencrypted
+  derived index lives under `search/attribution`; complete history remains in
+  Core. Automatic indexing maintains attribution; in manual mode,
+  `ctx setup --wait` and `ctx import --all` complete it in the calling command.
 - `ctx doctor` reports local storage health.
 - `ctx docs` exposes embedded public documentation and generated man pages.
 - `ctx upgrade` checks and applies signed CLI releases for official
@@ -97,9 +98,9 @@ ctx-created document chunks documented below.
   owner-private `usage.sqlite` sidecar. This default-on product state is
   independent of remote event reporting, has no network path or identity, keeps
   only daily UTC content-free aggregates for approximately 400 days, and fails
-  open at foreground recording boundaries. Completed companion-backed Blame is
-  represented only by Core-observed calls, technical outcomes, durations, and
-  exact MCP response bytes; no private result semantics enter the store. The
+  open at foreground recording boundaries. Completed Blame is
+  represented by calls, technical outcomes, durations, and exact MCP response
+  bytes; transcript content and repository targets do not enter the store. The
   stats report is read-only, uncounted, and separates measured facts from
   versioned estimates. Detail is an option on `ctx stats`; enable, disable, and
   logical reset remain under `ctx status --usage`.
@@ -109,7 +110,7 @@ ctx-created document chunks documented below.
 
 ## Out Of Scope
 
-- hidden LLM calls, a ctx-hosted embedding service, or Pro/cloud authentication
+- hidden LLM calls, a ctx-hosted embedding service, or cloud authentication
   and credential provisioning for external executors; model selection and
   execution belong to the explicitly configured executor;
 - team and enterprise seats, invitations, SSO, SCIM, or organization

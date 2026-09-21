@@ -33,7 +33,7 @@ CTX_CLI_PRESENTATION_DEPS = [
 
 CTX_CLI_PRESENTATION_TEST_SUPPORT_DEPS = [
     "//crates/ctx-agent-application:test_support_lib",
-    "//crates/ctx-agent-integrations:lib",
+    "//crates/ctx-agent-integrations:test_support_lib",
     "//crates/ctx-client-observability:test_support_lib",
     "//crates/ctx-history-cli:test_support_lib",
     "//crates/ctx-history-core:lib",

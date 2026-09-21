@@ -62,6 +62,14 @@ fn pristine_status_doctor_and_mcp_status_create_nothing() {
     for report in [&status, &doctor["source_epoch"], mcp_status] {
         assert!(report.get("local_only").is_none(), "{report}");
         assert!(report.get("localOnly").is_none(), "{report}");
+        let attribution = &report["attribution"];
+        assert_eq!(attribution["currentness"], "not_materialized", "{report}");
+        assert_eq!(attribution["materialized_coverage"], "not_materialized");
+        assert!(attribution["receipt"].is_null());
+        assert_eq!(
+            attribution["diagnostic"]["next_action"]["argv"],
+            json!(["ctx", "import", "--all"])
+        );
     }
     assert!(
         !data_root.exists(),

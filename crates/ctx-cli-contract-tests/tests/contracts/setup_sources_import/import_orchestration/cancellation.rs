@@ -432,7 +432,7 @@ fn assert_private_worker_group(_pid: u32) {
 }
 
 #[cfg(any(unix, windows))]
-fn assert_blocked_owned_wait_exits_130(arguments: &[&str], capability_request: bool) {
+fn assert_blocked_owned_wait_exits_130(arguments: &[&str]) {
     let temp = tempdir();
     let root = data_root(&temp);
     fs::create_dir_all(&root).unwrap();
@@ -466,31 +466,10 @@ fn assert_blocked_owned_wait_exits_130(arguments: &[&str], capability_request: b
         .args(arguments)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if capability_request {
-        command.stdin(Stdio::piped());
-    }
     configure_interruptible_client(&mut command);
     let mut client = SourceRefreshDaemon {
         child: Some(command.spawn().expect("start blocked finite import")),
     };
-    if capability_request {
-        let request = json!({
-            "data_root": root.clone(),
-            "operation": "RefreshAndWait",
-            "options": {},
-            "protocol_version": 3,
-            "schema_version": 1,
-        });
-        let mut input = client
-            .child
-            .as_mut()
-            .unwrap()
-            .stdin
-            .take()
-            .expect("hidden capability stdin");
-        serde_json::to_writer(&mut input, &request).unwrap();
-        input.write_all(b"\n").unwrap();
-    }
     let client_pid = client.child.as_ref().unwrap().id();
 
     let marker_deadline = Instant::now() + Duration::from_secs(15);
@@ -576,7 +555,7 @@ fn blocked_import_sigint_exits_130_and_reaps_only_its_finite_worker() {
         &["import", "--all", "--format=json", "--progress", "none"],
         &["import", "--all", "--progress", "none", "--quiet"],
     ] {
-        assert_blocked_owned_wait_exits_130(arguments, false);
+        assert_blocked_owned_wait_exits_130(arguments);
     }
 }
 
@@ -605,14 +584,20 @@ fn blocked_search_wait_sigint_exits_130_and_reaps_only_its_finite_worker() {
             "--quiet",
         ],
     ] {
-        assert_blocked_owned_wait_exits_130(arguments, false);
+        assert_blocked_owned_wait_exits_130(arguments);
     }
 }
 
 #[cfg(any(unix, windows))]
 #[test]
-fn blocked_hidden_refresh_and_wait_exits_130_and_reaps_only_its_finite_worker() {
-    assert_blocked_owned_wait_exits_130(&["--ctx-core-capability-v1"], true);
+fn blocked_native_setup_wait_exits_130_and_reaps_only_its_finite_worker() {
+    assert_blocked_owned_wait_exits_130(&[
+        "setup",
+        "--wait",
+        "--format=json",
+        "--progress",
+        "none",
+    ]);
 }
 
 #[cfg(any(unix, windows))]
@@ -870,3 +855,155 @@ fn interrupted_search_joiner_leaves_persistent_daemon_untouched() {
 
 #[path = "cancellation/semantic.rs"]
 mod semantic;
+
+#[cfg(any(unix, windows))]
+#[test]
+fn native_attribution_wait_exceeds_two_seconds_and_cancels_without_revoking_core() {
+    use ctx_attribution::materializer::{SegmentMaterializer, CORE_MATERIALIZER_REVISION};
+
+    for mode in ["manual", "auto"] {
+        for cancel in [false, true] {
+            let temp = daemon_test_root();
+            let root = data_root(&temp);
+            fs::create_dir_all(&root).unwrap();
+            fs::write(
+                root.join("config.toml"),
+                "[indexing]\nmode = \"manual\"\n[search]\nsemantic = false\n",
+            )
+            .unwrap();
+            write_codex_setup_session(&temp);
+            let setup = json_output(ctx(&temp).args([
+                "setup",
+                "--wait",
+                "--format=json",
+                "--progress=none",
+            ]));
+            let original_generation = setup["refresh_request"]["published_generation"].clone();
+            let owner = SegmentMaterializer::open_for_revision(
+                root.join("search/attribution"),
+                CORE_MATERIALIZER_REVISION,
+            )
+            .unwrap();
+            let provider_path = temp
+                .path()
+                .join(".codex/sessions/2026/06/24/codex-session-setup.jsonl");
+            let body = fs::read_to_string(&provider_path).unwrap().replace(
+                "setup should import",
+                "setup should import with changed attribution input",
+            );
+            fs::write(provider_path, body).unwrap();
+            fs::write(
+                root.join("config.toml"),
+                format!("[indexing]\nmode = \"{mode}\"\n[search]\nsemantic = false\n"),
+            )
+            .unwrap();
+            let prepared = ctx(&temp);
+            let mut command = StdCommand::new(prepared.get_program());
+            for (name, value) in prepared.get_envs() {
+                match value {
+                    Some(value) => {
+                        command.env(name, value);
+                    }
+                    None => {
+                        command.env_remove(name);
+                    }
+                }
+            }
+            command
+                .args(["import", "--all", "--format=json", "--progress=none"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            configure_interruptible_client(&mut command);
+            let mut client = SourceRefreshDaemon {
+                child: Some(command.spawn().unwrap()),
+            };
+            // Observe the changed Core publication, so the measured wait is
+            // beyond Core completion, rather than just a slow provider scan.
+            let publication_deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                assert!(
+                    client.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+                    "{mode}: command exited while attribution writer was held"
+                );
+                let status = json_output(ctx(&temp).args(["status", "--format=json"]));
+                if status["refresh"]["status"] == "ready"
+                    && status["lexical"]["generation_id"] != original_generation
+                {
+                    assert_eq!(status["lexical"]["status"], "ready");
+                    break;
+                }
+                assert!(
+                    Instant::now() < publication_deadline,
+                    "{mode}: Core did not publish: {status:#}"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            let hold_until = Instant::now() + Duration::from_millis(2300);
+            while Instant::now() < hold_until {
+                assert!(
+                    client.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+                    "{mode}: native completion retained the obsolete two-second Busy deadline"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            let mut owner = Some(owner);
+            if cancel {
+                interrupt_client_group(client.child.as_ref().unwrap().id()).unwrap();
+            } else {
+                drop(owner.take());
+            }
+            let exit_deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if client.child.as_mut().unwrap().try_wait().unwrap().is_some() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < exit_deadline,
+                    "{mode}: attribution command failed to complete/cancel"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            let output = client.child.take().unwrap().wait_with_output().unwrap();
+            if cancel {
+                assert_eq!(
+                    output.status.code(),
+                    Some(130),
+                    "{mode}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(output.stdout.is_empty());
+                assert!(output.stderr.is_empty());
+                // Cancellation returned while another live writer still owns
+                // the lock; it did not steal, unlink or release that authority.
+                assert!(owner.is_some());
+                let search = json_output(ctx(&temp).args([
+                    "search",
+                    "changed attribution input",
+                    "--refresh=off",
+                    "--format=json",
+                ]));
+                assert!(!search["results"].as_array().unwrap().is_empty());
+                drop(owner.take());
+                ctx(&temp)
+                    .args(["import", "--all", "--progress=none"])
+                    .assert()
+                    .success();
+            } else {
+                assert!(
+                    output.status.success(),
+                    "{mode}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            let completed = json_output(ctx(&temp).args(["status", "--format=json"]));
+            assert_eq!(
+                completed["attribution"]["currentness"], "current",
+                "{completed:#}"
+            );
+            assert_eq!(
+                completed["attribution"]["receipt"]["core_generation_id"],
+                completed["lexical"]["generation_id"]
+            );
+        }
+    }
+}

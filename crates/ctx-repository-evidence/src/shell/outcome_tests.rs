@@ -1,0 +1,373 @@
+use std::path::Path;
+
+use crate::model::RepositoryAbstentionReason;
+
+use super::{
+    BoundedCommitProducer, BoundedOutcomeOperation, BoundedOutcomePlanDisposition, analyze,
+    bounded_outcome_operation, bounded_outcome_plan,
+};
+
+#[test]
+fn outcome_recognition_is_bounded_and_alias_free() {
+    assert_eq!(
+        bounded_outcome_operation("git commit -m exact && git rev-parse --verify HEAD"),
+        Some(BoundedOutcomeOperation::Commit {
+            producer: BoundedCommitProducer::Commit,
+            rewrites_history: false,
+            operation_kind: None,
+            exact_oid_output: true,
+        })
+    );
+    assert!(bounded_outcome_operation("git ci -m alias").is_none());
+    assert!(bounded_outcome_operation("git commit -m exact && echo $HEAD").is_none());
+    assert!(bounded_outcome_operation("bash -lc 'git commit -m hidden'").is_none());
+    assert_eq!(
+        bounded_outcome_operation("git add file && git commit -m $'line one\\nline two'"),
+        Some(BoundedOutcomeOperation::Commit {
+            producer: BoundedCommitProducer::Commit,
+            rewrites_history: false,
+            operation_kind: None,
+            exact_oid_output: false,
+        })
+    );
+    assert_eq!(
+        bounded_outcome_operation("git add file\ngit commit -m exact"),
+        Some(BoundedOutcomeOperation::Commit {
+            producer: BoundedCommitProducer::Commit,
+            rewrites_history: false,
+            operation_kind: None,
+            exact_oid_output: false,
+        })
+    );
+    assert!(bounded_outcome_operation("git commit -m exact\ngit rev-parse HEAD").is_none());
+    assert!(bounded_outcome_operation("git add file; git commit -m exact").is_none());
+    for command in [
+        "gh pr create --help",
+        "gh pr create --help=true",
+        "gh pr create -h",
+        "gh pr create -h=true",
+        "gh pr create --web",
+        "gh pr create --web=true",
+        "gh pr create -w",
+        "gh pr create -w=true",
+        "gh pr create --dry-run",
+        "gh pr create --dry-run=true",
+    ] {
+        assert!(bounded_outcome_operation(command).is_none(), "{command}");
+    }
+    assert_eq!(
+        bounded_outcome_operation("git merge --no-ff feature"),
+        Some(BoundedOutcomeOperation::Commit {
+            producer: BoundedCommitProducer::Merge,
+            rewrites_history: false,
+            operation_kind: None,
+            exact_oid_output: false,
+        })
+    );
+    assert!(bounded_outcome_operation("git merge feature").is_none());
+}
+
+#[test]
+fn quoted_expansion_cannot_hide_a_nonproducing_option() {
+    for command in [
+        r#"git commit "$MODE" && git rev-parse HEAD"#,
+        r#"git commit "${MODE}" && git rev-parse HEAD"#,
+        r#"git commit "$(printf -- --dry-run)" && git rev-parse HEAD"#,
+        r#"git commit "`printf -- --dry-run`" && git rev-parse HEAD"#,
+        r#"git commit --"$MODE" && git rev-parse HEAD"#,
+        r#"git commit -m literal && git rev-parse HEAD && echo "$UNKNOWN""#,
+        r#"git commit $'--dry\x2drun' && git rev-parse HEAD"#,
+    ] {
+        assert!(
+            matches!(
+                bounded_outcome_plan(command, Path::new("/repo")),
+                BoundedOutcomePlanDisposition::Abstained {
+                    reason: RepositoryAbstentionReason::UnsupportedShell,
+                    plan: None,
+                    ..
+                }
+            ),
+            "unresolved shell argument admitted a producer: {command}"
+        );
+    }
+}
+
+#[test]
+fn literal_quoted_and_escaped_arguments_remain_static() {
+    for command in [
+        r#"git commit -m '$MODE `literal`' && git rev-parse HEAD"#,
+        r#"git commit -m "\$MODE \`literal\`" && git rev-parse HEAD"#,
+        r#"git commit -m \$MODE && git rev-parse HEAD"#,
+        r#"git commit -m $'line one\nline two' && git rev-parse HEAD"#,
+    ] {
+        assert!(bounded_outcome_operation(command).is_some(), "{command}");
+    }
+    for (command, expected) in [
+        (r#"git commit -m "literal\q""#, "literal\\q"),
+        (r#"git commit -m $'line\nnext'"#, "line\nnext"),
+        ("git commit -m \"joined\\\nline\"", "joinedline"),
+    ] {
+        let tokens = super::tokenize(command).expect("static literal tokens");
+        assert_eq!(tokens.segments[0][3], expected);
+    }
+}
+
+#[test]
+fn shell_bound_failures_preserve_abstention_without_a_producer_plan() {
+    let command = format!("git commit -m {}", "x".repeat(super::MAX_COMMAND_BYTES));
+    let analysis = analyze(Some(&command), Some(Path::new("/repo")));
+    assert!(
+        analysis
+            .abstentions
+            .iter()
+            .any(|abstention| { abstention.reason == RepositoryAbstentionReason::CommandTooLarge })
+    );
+    assert!(matches!(
+        bounded_outcome_plan(&command, Path::new("/repo")),
+        BoundedOutcomePlanDisposition::Unrecognized
+    ));
+    assert!(matches!(
+        super::tokenize(&"x".repeat(super::MAX_PATH_BYTES + 1)),
+        Err((RepositoryAbstentionReason::CommandTooLarge, _))
+    ));
+}
+
+#[test]
+fn cd_routing_ignores_ambient_cdpath_by_construction() {
+    let base = Path::new("/workspace/control");
+    for (command, expected) in [
+        ("cd /repo && git status", "/repo"),
+        ("cd ./repo && git status", "/workspace/control/repo"),
+        ("cd ../repo && git status", "/workspace/repo"),
+        ("cd -- ./repo && git status", "/workspace/control/repo"),
+    ] {
+        let analysis = analyze(Some(command), Some(base));
+        assert_eq!(
+            analysis.derived_effective_cwd.as_deref(),
+            Some(Path::new(expected)),
+            "{command}"
+        );
+        assert_eq!(analysis.repository_paths.len(), 1, "{command}");
+        assert!(analysis.abstentions.is_empty(), "{command}");
+    }
+
+    for command in ["cd repo && git status", "cd -- repo && git status"] {
+        let analysis = analyze(Some(command), Some(base));
+        assert!(analysis.derived_effective_cwd.is_none(), "{command}");
+        assert!(analysis.repository_paths.is_empty(), "{command}");
+        assert!(analysis.abstentions.iter().any(|abstention| {
+            abstention.reason == RepositoryAbstentionReason::DynamicPath
+                && abstention.detail == "unsupported_or_dynamic_cd"
+        }));
+    }
+}
+
+#[test]
+fn literal_git_c_and_wrappers_are_candidates_but_wrappers_are_not_authority() {
+    let base = Path::new("/workspace/control");
+    for command in [
+        "git -C repo status",
+        "env -- A=1 git -C ../repo status",
+        "command -- git -C ../repo status",
+        "time -p git -C ../repo status",
+        "timeout 5s git -C ../repo status",
+    ] {
+        let analysis = analyze(Some(command), Some(base));
+        assert_eq!(analysis.repository_paths.len(), 1, "{command}");
+        assert!(analysis.abstentions.is_empty(), "{command}");
+    }
+
+    assert!(matches!(
+        bounded_outcome_plan(
+            "git -C ../repo commit -m exact && git -C ../repo rev-parse HEAD",
+            base,
+        ),
+        BoundedOutcomePlanDisposition::Planned(_)
+    ));
+    assert!(matches!(
+        bounded_outcome_plan(
+            "env -- git -C ../repo commit -m exact && git -C ../repo rev-parse HEAD",
+            base,
+        ),
+        BoundedOutcomePlanDisposition::Planned(_)
+    ));
+}
+
+#[test]
+fn build_governor_outcome_transport_requires_the_exact_exec_contract() {
+    assert_eq!(crate::model::BOUNDED_SHELL_SUBSET_REVISION, 6);
+    let base = Path::new("/workspace/repository");
+    let BoundedOutcomePlanDisposition::Planned(plan) =
+        bounded_outcome_plan("ctx-build-governor exec -- git commit -m exact", base)
+    else {
+        panic!("expected exact governor transport to preserve the commit plan");
+    };
+    assert_eq!(plan.operation_repository_path, base);
+    assert_eq!(
+        plan.operation,
+        BoundedOutcomeOperation::Commit {
+            producer: BoundedCommitProducer::Commit,
+            rewrites_history: false,
+            operation_kind: None,
+            exact_oid_output: false,
+        }
+    );
+
+    for command in [
+        "ctx-build-governor light -- git commit -m exact",
+        "ctx-build-governor exec git commit -m exact",
+        "ctx-build-governor exec --",
+        "other-build-governor exec -- git commit -m exact",
+        "ctx-build-governor --verbose exec -- git commit -m exact",
+        "ctx-build-governor exec --verbose -- git commit -m exact",
+        "ctx-build-governor exec -- -- git commit -m exact",
+        "ctx-build-governor exec -- -- -- git commit -m exact",
+        "ctx-build-governor exec -- bash -lc 'git commit -m exact'",
+        "ctx-build-governor exec -- git commit -m \"$(date)\"",
+    ] {
+        assert!(
+            !matches!(
+                bounded_outcome_plan(command, base),
+                BoundedOutcomePlanDisposition::Planned(_)
+            ),
+            "unexpected governor outcome plan for {command:?}"
+        );
+    }
+}
+
+#[test]
+fn exact_oid_plan_rejects_dry_runs_and_unsafe_intervening_commands() {
+    let base = Path::new("/repo");
+    assert!(matches!(
+        bounded_outcome_plan("git commit --dry-run && git rev-parse --verify HEAD", base,),
+        BoundedOutcomePlanDisposition::Abstained {
+            reason: RepositoryAbstentionReason::OutcomeResultInadmissible,
+            ..
+        }
+    ));
+    assert!(matches!(
+        bounded_outcome_plan(
+            "git commit --dry-run=true && git rev-parse --verify HEAD",
+            base,
+        ),
+        BoundedOutcomePlanDisposition::Abstained {
+            reason: RepositoryAbstentionReason::OutcomeResultInadmissible,
+            ..
+        }
+    ));
+
+    for command in [
+        "git commit -m exact && git reset --hard HEAD^ && git rev-parse HEAD",
+        "git commit -m exact && git checkout other && git rev-parse HEAD",
+        "git commit -m exact && git switch other && git rev-parse HEAD",
+        "git commit -m exact && git pull && git rev-parse HEAD",
+        "git commit -m exact && git branch --show-current && git rev-parse HEAD",
+        "git commit -m exact && git commit --allow-empty -m second && git rev-parse HEAD",
+        "git commit -m exact && git rev-parse HEAD && git commit --allow-empty -m second",
+        "git commit -m exact && custom-command && git rev-parse HEAD",
+    ] {
+        assert!(
+            matches!(
+                bounded_outcome_plan(command, base),
+                BoundedOutcomePlanDisposition::Abstained {
+                    reason: RepositoryAbstentionReason::Ambiguous,
+                    ..
+                }
+            ),
+            "{command}"
+        );
+    }
+
+    assert_eq!(
+        bounded_outcome_operation(
+            "git commit -m exact && git status --short && git rev-parse --verify HEAD"
+        ),
+        Some(BoundedOutcomeOperation::Commit {
+            producer: BoundedCommitProducer::Commit,
+            rewrites_history: false,
+            operation_kind: None,
+            exact_oid_output: true,
+        })
+    );
+    assert_eq!(
+        bounded_outcome_operation(
+            "git commit -m exact && git status --short && git rev-parse HEAD && sed -n '12,18p' src/lib.rs"
+        ),
+        Some(BoundedOutcomeOperation::Commit {
+            producer: BoundedCommitProducer::Commit,
+            rewrites_history: false,
+            operation_kind: None,
+            exact_oid_output: true,
+        })
+    );
+    assert_eq!(
+        bounded_outcome_operation(
+            "git commit -m exact -- --dry-run && git rev-parse --verify HEAD"
+        ),
+        Some(BoundedOutcomeOperation::Commit {
+            producer: BoundedCommitProducer::Commit,
+            rewrites_history: false,
+            operation_kind: None,
+            exact_oid_output: true,
+        })
+    );
+}
+
+#[test]
+fn exact_oid_inspection_commands_are_never_commit_producers() {
+    let base = Path::new("/repo");
+    let oid = "abcdef0123456789abcdef0123456789abcdef01";
+
+    for command in [
+        format!("git show --no-patch --format=%H {oid}"),
+        format!("git log -1 --format=%H {oid}"),
+        format!("git rev-parse --verify {oid}^{{commit}}"),
+        format!("git branch --contains {oid}"),
+    ] {
+        assert!(
+            !matches!(
+                bounded_outcome_plan(&command, base),
+                BoundedOutcomePlanDisposition::Planned(_)
+            ),
+            "inspection command was recognized as a producer: {command}"
+        );
+    }
+}
+
+#[test]
+fn cherry_pick_requires_one_full_source_and_a_producing_mode() {
+    let base = Path::new("/repo");
+    let source = "0123456789abcdef0123456789abcdef01234567";
+    let BoundedOutcomePlanDisposition::Planned(plan) =
+        bounded_outcome_plan(&format!("git cherry-pick {source}"), base)
+    else {
+        panic!("expected bounded cherry-pick plan");
+    };
+    assert_eq!(plan.operation_source_oid.as_deref(), Some(source));
+    assert_eq!(
+        plan.operation,
+        BoundedOutcomeOperation::Commit {
+            producer: BoundedCommitProducer::CherryPick,
+            rewrites_history: true,
+            operation_kind: Some(crate::model::RepositoryCommitOperationKind::CherryPick),
+            exact_oid_output: false,
+        }
+    );
+
+    for command in [
+        "git cherry-pick 0123456",
+        "git cherry-pick 0123456789abcdef0123456789abcdef01234567..1123456789abcdef0123456789abcdef01234567",
+        "git cherry-pick 0123456789abcdef0123456789abcdef01234567 1123456789abcdef0123456789abcdef01234567",
+        "git cherry-pick --no-commit 0123456789abcdef0123456789abcdef01234567",
+        "git cherry-pick -n 0123456789abcdef0123456789abcdef01234567",
+        "bash -lc 'git cherry-pick 0123456789abcdef0123456789abcdef01234567'",
+    ] {
+        assert!(
+            !matches!(
+                bounded_outcome_plan(command, base),
+                BoundedOutcomePlanDisposition::Planned(_)
+            ),
+            "{command}"
+        );
+    }
+}

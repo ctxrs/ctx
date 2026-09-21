@@ -1,0 +1,51 @@
+---
+title: "Use ctx with OpenCode"
+sidebarTitle: "OpenCode"
+description: "Import OpenCode local database history and search it from ctx."
+---
+
+Install ctx on the machine where OpenCode stores local history:
+
+```bash
+curl -fsSL https://ctx.rs/install | sh
+```
+
+See [Install](/getting-started/install) for setup and data-root details.
+
+ctx can import OpenCode history from its local SQLite database when that database exists on the machine. ctx opens provider-owned history read-only and stores complete normalized session records in its local Tantivy Core.
+
+## Import OpenCode history
+
+Run setup or target OpenCode directly:
+
+```bash
+ctx setup
+ctx import --provider opencode
+ctx sources --json
+```
+
+If your OpenCode database is outside the default location, pass the path explicitly:
+
+```bash
+ctx import --provider opencode --path ~/.local/share/opencode/opencode.db
+```
+
+## Search OpenCode history
+
+Use a provider filter when the prior work happened in OpenCode:
+
+```bash
+ctx search "database retry failure" --provider opencode
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id>
+```
+
+Omit the provider filter when the topic may have crossed agents.
+
+## Prompt an agent
+
+```text
+Use ctx to search prior OpenCode sessions for this task. Inspect the best event or session before relying on it, then cite the ctx ID if the retrieved history changes your plan.
+```
+
+That instruction works for any shell-capable coding agent, including Codex, Claude Code, Cursor, and OpenCode itself when it can run local commands.

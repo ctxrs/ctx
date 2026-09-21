@@ -143,7 +143,7 @@ fn only_the_exact_apply_argv_is_intercepted() {
         assert!(intercept(&["ctx".into(), removed.into()]).is_none());
     }
     assert!(intercept(&["ctx".into(), "--ctx-core-managed-pair-apply-v1=x".into(),]).is_none());
-    assert!(intercept(&["ctx".into(), INVOCATION.into()]).is_some());
+    assert!(intercept(&["ctx".into(), "--ctx-core-capability-v1".into()]).is_none());
 }
 
 #[cfg(unix)]
@@ -152,7 +152,7 @@ fn reconciliation_receipt_is_the_exact_bounded_typed_json_object() {
     let expected = br#"{"schema_version":1,"command":"managed_pair_reconcile_integration","ok":true,"status":"committed"}"#;
     let receipt = super::super::managed_pair_reconcile::success_receipt();
     assert_eq!(receipt, expected);
-    assert!(receipt.len() < MAX_RESPONSE_BYTES);
+    assert!(receipt.len() < 48 * 1024);
     let mut stdout = Vec::new();
     write_response_frame(&mut stdout, receipt).unwrap();
     assert_eq!(stdout, [expected.as_slice(), b"\n"].concat());
@@ -309,7 +309,7 @@ fn success_receipt_is_the_exact_bounded_typed_json_object() {
     let expected =
         br#"{"schema_version":1,"command":"managed_pair_apply","ok":true,"status":"committed"}"#;
     assert_eq!(success_receipt(), expected);
-    assert!(success_receipt().len() < MAX_RESPONSE_BYTES);
+    assert!(success_receipt().len() < 48 * 1024);
     let mut stdout = Vec::new();
     write_response_frame(&mut stdout, success_receipt()).unwrap();
     assert_eq!(stdout, [expected.as_slice(), b"\n"].concat());
@@ -322,22 +322,10 @@ fn success_receipt_is_the_exact_bounded_typed_json_object() {
 }
 
 #[test]
-fn removed_managed_pair_operations_are_not_in_the_capability_protocol() {
-    for operation in [
-        "ManagedPairBegin",
-        "ManagedPairStage",
-        "ManagedPairAbort",
-        "ManagedPairStatus",
-        "ManagedPairUninstall",
-    ] {
-        assert!(!API_INVENTORY.contains(operation));
-        let frame = json!({
-            "data_root": std::env::temp_dir(),
-            "operation": operation,
-            "options": {},
-            "protocol_version": CORE_PRO_PROTOCOL_VERSION.get(),
-            "schema_version": 1,
-        });
-        assert!(parse_frame(canonical(&frame).unwrap()).is_err());
-    }
+fn old_capability_protocol_is_not_intercepted() {
+    assert!(intercept(&[
+        OsString::from("ctx"),
+        OsString::from("--ctx-core-capability-v1")
+    ])
+    .is_none());
 }

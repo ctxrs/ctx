@@ -1,0 +1,27 @@
+[package]
+name = "ctx-attribution-derivation"
+version.workspace = true
+description = "Bounded attribution facts and evidence previews from retained Core records"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+test-support = ["ctx-attribution-index/test-support"]
+
+[dependencies]
+ctx-attribution-model = { path = "../ctx-attribution-model" }
+ctx-attribution-index = { path = "../ctx-attribution-index" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-repository-evidence = { path = "../ctx-repository-evidence" }
+hex.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"

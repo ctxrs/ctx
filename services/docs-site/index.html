@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b1014" />
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="preload" href="/fonts/inter-variable-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/inter-variable-italic-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/vt323-regular.woff2" as="font" type="font/woff2" crossorigin />
+    <script>
+      (() => {
+        const key = 'ctx-docs-theme';
+        const fallback = 'dark';
+        try {
+          const stored = window.localStorage.getItem(key);
+          const theme = stored === 'light' || stored === 'dark' ? stored : fallback;
+          document.documentElement.dataset.theme = theme;
+        } catch {
+          document.documentElement.dataset.theme = fallback;
+        }
+      })();
+    </script>
+    <style>
+      html,
+      body {
+        background: #0a0e0c;
+      }
+
+      html[data-theme='light'],
+      html[data-theme='light'] body {
+        background: #eef3f8;
+      }
+
+      html.ctx-fonts-loading #app {
+        visibility: hidden;
+      }
+    </style>
+    <script>
+      document.documentElement.classList.add('ctx-fonts-loading');
+      window.setTimeout(() => {
+        document.documentElement.classList.remove('ctx-fonts-loading');
+      }, 1700);
+    </script>
+    <!--app-head-->
+  </head>
+  <body>
+    <div id="app"><!--app-html--></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <!-- Cloudflare Web Analytics -->
+    <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token":"8bdba546b04d44a7b3f43363dc29265b"}'></script>
+    <!-- End Cloudflare Web Analytics -->
+  </body>
+</html>

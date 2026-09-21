@@ -172,7 +172,8 @@ exit 23
         self.assertIn("ctx-release-factory.json", source)
         self.assertIn('"${cargo_zigbuild_bin}" zigbuild', source)
         self.assertNotIn("cargo zigbuild", source)
-        self.assertIn('python_with_tomli=(env "PYTHONPATH=${repo_root}/${tomli_dir}" python3 -S)', source)
+        self.assertIn('[[ "${toolchain_dir}" == /* ]] || toolchain_dir="${repo_root}/${toolchain_dir}"', source)
+        self.assertIn('python_with_tomli=(env "PYTHONPATH=${tomli_dir}" python3 -S)', source)
         self.assertNotIn('export PYTHONPATH=', source)
 
     def test_release_matrix_has_one_narrow_linux_abi_authority(self) -> None:

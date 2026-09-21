@@ -1,0 +1,113 @@
+---
+title: "Provider history support"
+sidebarTitle: "Provider support"
+description: "Provider support means importing each provider's real local history format, not normalized adapter output."
+---
+
+# Provider history support
+
+ctx provider support is specific: for the normal supported provider version,
+the CLI automatically discovers an ordinary default native history source,
+imports it, and makes meaningful user and assistant content available through
+search, show, and durable citations. Repeating an unchanged import is stable
+and does not duplicate records.
+
+## Supported today
+
+The current search CLI imports these native source formats:
+
+| Provider | Source format |
+| --- | --- |
+| Codex | `codex_session_jsonl_tree`, `codex_history_jsonl` |
+| Grok Build | `grok_build_session_updates_jsonl_tree` |
+| DeepSeek Harness | `deepseek_harness_session_jsonl_tree` |
+| Pi | `pi_session_jsonl` |
+| Claude Code | `claude_projects_jsonl_tree` |
+| OpenCode | `opencode_sqlite` |
+| Kilo Code | `kilo_sqlite` |
+| Kiro CLI | `kiro_cli_sqlite` |
+| Crush | `crush_sqlite` |
+| Goose | `goose_sessions_sqlite` |
+| Lingma | `lingma_sqlite` |
+| Qoder | `qoder_transcript_jsonl_tree` |
+| Warp | `warp_sqlite` |
+| CodeBuddy | `codebuddy_history_json` |
+| OpenClaw | `openclaw_session_jsonl_tree` |
+| Hermes Agent | `hermes_state_sqlite` |
+| NanoClaw | `nanoclaw_project` |
+| AstrBot | `astrbot_data_v4_sqlite` |
+| Shelley | `shelley_sqlite` |
+| Continue | `continue_cli_sessions_json` |
+| OpenHands | `openhands_file_events` |
+| Antigravity | `antigravity_cli_transcript_jsonl_tree` |
+| Gemini | `gemini_cli_chat_recording_jsonl` |
+| Tabnine | `tabnine_cli_chat_recording_jsonl` |
+| Cursor | `cursor_agent_transcript_jsonl_tree` |
+| Zed | `zed_threads_sqlite` |
+| Copilot CLI | `copilot_cli_session_events_jsonl` |
+| Factory AI Droid | `factory_ai_droid_sessions_jsonl` |
+| Qwen Code | `qwen_code_chat_jsonl_tree` |
+| Kimi Code CLI | `kimi_code_cli_wire_jsonl_tree` |
+| Auggie | `auggie_session_json` |
+| Junie | `junie_session_events_jsonl_tree` |
+| Firebender | `firebender_chat_history_sqlite` |
+| ForgeCode | `forgecode_sqlite` |
+| Deep Agents | `deepagents_sessions_sqlite` |
+| Mistral Vibe | `mistral_vibe_session_jsonl_tree` |
+| Mux | `mux_session_jsonl_tree` |
+| Rovo Dev | `rovodev_session_json_tree` |
+| Cline | `cline_task_directory_json` |
+| Roo Code | `roo_task_directory_json` |
+| MiMo Code | `mimocode_sqlite` |
+
+Kiro CLI support currently targets the ordinary SQLite history route. Its
+opt-in ACP/v3 early release uses a newer session format that remains a
+documented follow-up limitation and is not imported yet.
+
+Use `ctx sources` for the truth on the current machine:
+
+```bash
+ctx sources
+ctx sources --json
+```
+
+In JSON output, `native_import: true` means ctx has parser support for that provider format. `importable: true` means the current path exists, has supported data, and can be imported on this machine. Source `status` can be `available`, `empty`, `unknown`, `missing`, or `unsupported`.
+
+CLI provider flags include `codex`, `grok-build`, `deepseek-harness`, `pi`,
+`claude`, `opencode`, `kilo`, `kiro-cli`, `crush`, `goose`, `lingma`, `qoder`,
+`warp`, `codebuddy`,
+`openclaw`, `hermes`, `nanoclaw`, `astrbot`, `shelley`, `continue`,
+`openhands`, `antigravity`, `gemini`, `tabnine`, `cursor`, `zed`,
+`copilot-cli`, `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `auggie`,
+`junie`, `firebender`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
+`rovodev`, `cline`, `roo`, and `mimocode`. Structured output uses provider IDs
+in ctx output;
+multiword IDs may appear as snake case, such as `copilot_cli` or
+`factory_ai_droid`.
+
+NanoClaw history is project-local and is discovered from the current workspace.
+Use `--path` only to target a different project root explicitly.
+
+## What support means
+
+Installed hooks, opt-in exporters, and separately configured sinks do not
+qualify as provider history support because they cannot backfill ordinary
+existing history. Support does not mean ctx launches or installs the agent, or
+that every provider-specific field is normalized into the same shape.
+
+## Custom formats
+
+For an agent history format ctx does not support natively, use a
+[custom history plugin](/providers/custom-history-plugins). A plugin is a local
+manifest identifying a durable provider-owned `ctx-history-jsonl-v2` file.
+Register it with an explicit plugin import; ctx does not execute an exporter.
+
+## Import rules
+
+Provider imports read provider-owned files without modifying them. Automatic
+indexing maintains native history through the daemon; default
+`--refresh background` search requests that maintenance while serving the
+published generation. In manual mode, background search does not start or wake
+a process. Use `ctx import` or `ctx search --refresh wait` for an explicit
+refresh. Imports remain safe to interrupt and re-run, conservative around
+unknown schemas, and clear about source citations.

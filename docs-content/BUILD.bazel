@@ -1,0 +1,6 @@
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "site_content",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)

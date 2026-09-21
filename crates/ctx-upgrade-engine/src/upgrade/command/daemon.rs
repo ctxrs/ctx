@@ -89,7 +89,6 @@ enum PreparedAutomaticUpgradeKind {
         lock: UpgradeLock,
         attempt: UpgradeAttempt,
         plan: UpgradePlan,
-        pair_mode: ManagedPairMode,
         core: PreparedCoreArtifact,
         provisioning: PreparedProvisioningArtifacts,
     },
@@ -256,6 +255,9 @@ where
         ) {
             return Ok(None);
         }
+        super::super::install::cleanup_legacy_managed_pair_under_installation_lock(
+            &current_install_path()?,
+        )?;
         let Some(attempt) = begin_automatic_attempt_locked(&lock, current.interval())? else {
             return Ok(None);
         };
@@ -270,8 +272,6 @@ where
             semantic_enabled: current.semantic_enabled(),
         };
         let plan = build_upgrade_plan(engine, policy, None, true)?;
-        let pair_mode =
-            inspect_plan_under_installation_lock(&plan, lock.as_ref().unwrap().installation())?;
         let repairs = classify_repair_requirements(
             engine.semantic_layout,
             &plan,
@@ -279,7 +279,7 @@ where
             policy.semantic_enabled,
         )?;
         prune_upgrade_downloads(data_root, &plan, lock.as_ref().unwrap());
-        if !plan.update_available && !pair_mode.pair_apply_required(&plan) && !repairs.any() {
+        if !plan.update_available && !repairs.any() {
             write_state_checked_locked(
                 data_root,
                 lock.as_ref().unwrap(),
@@ -310,7 +310,7 @@ where
                 plan.latest_version
             ));
         }
-        let core = download_core_artifact(engine.transport, data_root, &plan, &pair_mode)?;
+        let core = download_core_artifact(engine.transport, data_root, &plan)?;
         let runtime_artifact = if (plan.update_available || repairs.legacy_runtime)
             && plan.semantic_provisioning.is_none()
         {
@@ -372,7 +372,6 @@ where
                 lock: lock.take().unwrap(),
                 attempt: attempt.take().unwrap(),
                 plan,
-                pair_mode,
                 core,
                 provisioning: PreparedProvisioningArtifacts {
                     runtime: runtime_artifact,
@@ -438,7 +437,7 @@ where
     let restart = handoff
         .replacement_restart()
         .map(|restart| (restart.trigger, restart.loop_interval_seconds));
-    let (data_root, interval, started, lock, attempt, plan, pair_mode, mut core, mut provisioning) =
+    let (data_root, interval, started, lock, attempt, plan, mut core, mut provisioning) =
         match prepared.0 {
             PreparedAutomaticUpgradeKind::Apply {
                 data_root,
@@ -447,7 +446,6 @@ where
                 lock,
                 attempt,
                 plan,
-                pair_mode,
                 core,
                 provisioning,
             } => (
@@ -457,7 +455,6 @@ where
                 lock,
                 attempt,
                 plan,
-                pair_mode,
                 core,
                 provisioning,
             ),
@@ -752,13 +749,11 @@ where
         engine.semantic_layout,
         &lock,
         &plan,
-        &pair_mode,
         &mut core,
         provisioning.runtime.as_mut(),
         &mut provisioning.semantic,
         &data_root,
         &attempt,
-        interval,
         restart,
         &mut record_applying,
     );

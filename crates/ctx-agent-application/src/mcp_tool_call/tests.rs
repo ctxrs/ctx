@@ -21,6 +21,16 @@ impl Ports {
 }
 
 impl HistoryReadPort for Ports {
+    fn blame(
+        &self,
+        _target: ctx_agent_integrations::tool_backend::BlameTarget,
+        _limit: u32,
+        _cursor: Option<String>,
+    ) -> Result<ToolOutcome, ToolExecutionError> {
+        self.called("blame");
+        Ok(ToolOutcome::plain(json!({"payload_type": "blame"})))
+    }
+
     fn status(&self) -> Result<serde_json::Value, ToolBackendError> {
         self.called("status");
         Ok(json!({"payload_type": "status"}))

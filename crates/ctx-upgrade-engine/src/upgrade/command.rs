@@ -25,9 +25,9 @@ use super::install::{
     reexec_current_format_recovery, CurrentFormatRecoveryReexec, RECOVERY_REEXEC_ENV,
 };
 use super::managed_pair::{
-    apply_prepared_install, download_core_artifact, inspect_plan_under_installation_lock,
-    recover_foreground_before_generic, resume_or_confirm_pending_under_installation_lock,
-    ForegroundManagedPairRecovery, ManagedPairMode, PreparedCoreArtifact,
+    apply_prepared_install, download_core_artifact, recover_foreground_before_generic,
+    resume_or_confirm_pending_under_installation_lock, ForegroundManagedPairRecovery,
+    PreparedCoreArtifact,
 };
 #[cfg(windows)]
 use super::managed_pair::{run_windows_helper, schedule_existing_windows_helper};
@@ -580,6 +580,11 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
         return Err(absent_install_marker_error());
     }
     let upgrade_lock = UpgradeLock::acquire(data_root)?;
+    if !dry_run {
+        super::install::cleanup_legacy_managed_pair_under_installation_lock(
+            &current_install_path()?,
+        )?;
+    }
     let attempt = begin_manual_attempt_locked(data_root, &upgrade_lock, "manual_apply")?;
     let result = (|| -> Result<UpgradeOutcome> {
         let plan = build_upgrade_plan(engine, policy, channel_override, true)?;
@@ -616,7 +621,6 @@ fn apply_planned_upgrade<D: DaemonUpgradePort + ?Sized>(
     attempt: &UpgradeAttempt,
     plan: UpgradePlan,
 ) -> Result<UpgradeOutcome> {
-    let pair_mode = inspect_plan_under_installation_lock(&plan, upgrade_lock.installation())?;
     let repairs = classify_repair_requirements(
         engine.semantic_layout,
         &plan,
@@ -626,8 +630,7 @@ fn apply_planned_upgrade<D: DaemonUpgradePort + ?Sized>(
     if !dry_run {
         prune_upgrade_downloads(data_root, &plan, upgrade_lock);
     }
-    let pair_apply_required = pair_mode.pair_apply_required(&plan);
-    if !plan.update_available && !pair_apply_required && !repairs.any() {
+    if !plan.update_available && !repairs.any() {
         write_state_checked_locked(
             data_root,
             upgrade_lock,
@@ -672,11 +675,6 @@ fn apply_planned_upgrade<D: DaemonUpgradePort + ?Sized>(
                     "ctx {} would upgrade to {}.",
                     plan.current_version, plan.latest_version
                 )
-            } else if pair_apply_required {
-                format!(
-                    "ctx {} would repair its signed managed Core/companion installation.",
-                    plan.current_version
-                )
             } else if repairs.legacy_runtime {
                 format!(
                     "ctx {} would repair its signed legacy ONNX Runtime installation.",
@@ -695,7 +693,7 @@ fn apply_planned_upgrade<D: DaemonUpgradePort + ?Sized>(
             attempt_id: Some(attempt.id().to_owned()),
         });
     }
-    let mut core_artifact = download_core_artifact(engine.transport, data_root, &plan, &pair_mode)?;
+    let mut core_artifact = download_core_artifact(engine.transport, data_root, &plan)?;
     // Supplementary runtime metadata is optional for Core-only releases.
     // Preserve or repair the legacy runtime only when signed metadata
     // actually carries that runtime contract.
@@ -753,13 +751,11 @@ fn apply_planned_upgrade<D: DaemonUpgradePort + ?Sized>(
         engine.semantic_layout,
         upgrade_lock,
         &plan,
-        &pair_mode,
         &mut core_artifact,
         runtime_artifact.as_mut(),
         &mut semantic_artifacts,
         data_root,
         attempt,
-        policy.interval,
         daemon_restart.map(|restart| (restart.trigger, restart.loop_interval_seconds)),
         &mut before_publish,
     ) {
@@ -797,9 +793,6 @@ fn apply_planned_upgrade<D: DaemonUpgradePort + ?Sized>(
                 plan.latest_version,
                 plan.install_path.display()
             )
-        } else if pair_apply_required {
-            "scheduled signed managed Core/companion repair; replacement will finish after this process exits"
-                .to_owned()
         } else if repairs.legacy_runtime {
             "scheduled signed legacy ONNX Runtime repair; replacement will finish after this process exits"
                 .to_owned()
@@ -833,10 +826,19 @@ fn apply_planned_upgrade<D: DaemonUpgradePort + ?Sized>(
     // Filesystem publication is the commit point.  A daemon restart is a
     // follow-up operation: report it for retry, but never turn a committed
     // upgrade into scheduler failure/backoff.
-    if let Err(error) = daemon_handoff.resume_with(&plan.install_path) {
-        warnings.push(format!(
+    match daemon_handoff.resume_with(&plan.install_path) {
+        Err(error) => warnings.push(format!(
             "ctx upgrade applied, but daemon restart is pending: {error:#}"
-        ));
+        )),
+        Ok(()) => {
+            if let Err(error) = super::install::cleanup_legacy_managed_pair_under_installation_lock(
+                &plan.install_path,
+            ) {
+                warnings.push(format!(
+                    "ctx upgrade applied, but legacy installation cleanup is pending: {error:#}"
+                ));
+            }
+        }
     }
     let message = if plan.update_available {
         format!(
@@ -844,11 +846,6 @@ fn apply_planned_upgrade<D: DaemonUpgradePort + ?Sized>(
             plan.current_version,
             plan.latest_version,
             plan.install_path.display()
-        )
-    } else if pair_apply_required {
-        format!(
-            "repaired signed managed Core/companion installation for ctx {}",
-            plan.current_version
         )
     } else if repairs.legacy_runtime {
         format!(
@@ -982,5 +979,5 @@ fn build_upgrade_plan<D: DaemonUpgradePort + ?Sized>(
 }
 
 #[cfg(all(test, unix))]
-#[path = "command/first_pair_tests.rs"]
-mod first_pair_tests;
+#[path = "command/single_binary_tests.rs"]
+mod single_binary_tests;

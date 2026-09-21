@@ -67,14 +67,11 @@ fn upgrade_verifies_signed_metadata_and_fails_closed() {
     let default_signature_path = tempdir();
     let release = fake_release(&default_signature_path, "9.9.9");
     let check = json_output(
-        ctx(&default_signature_path)
-            .args(["upgrade", "check", "--format=json"])
-            .env("CTX_UPGRADE_TEST_TARGET", &release.target)
-            .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
-            .env(
-                "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
-                TEST_RELEASE_PUBLIC_KEY_PEM,
-            ),
+        fake_release_env(
+            ctx(&default_signature_path).args(["upgrade", "check", "--format=json"]),
+            &release,
+        )
+        .env_remove("CTX_RELEASE_METADATA_SIGNATURE_URL"),
     );
     assert_eq!(check["status"], "available");
 }

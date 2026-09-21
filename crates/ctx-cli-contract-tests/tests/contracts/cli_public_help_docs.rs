@@ -147,9 +147,7 @@ fn help_exposes_session_retrieval_commands() {
         .unwrap_or(&help);
 
     for expected in [
-        "pro",
         "blame",
-        "referral",
         "setup",
         "semantic",
         "status",
@@ -174,6 +172,8 @@ fn help_exposes_session_retrieval_commands() {
         );
     }
     for forbidden in [
+        "pro",
+        "referral",
         "dashboard",
         "shim",
         "evidence",

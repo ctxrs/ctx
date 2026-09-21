@@ -1,0 +1,16 @@
+Possible producer found
+
+Commit      abcdef
+Repository  ctxrs/ctx
+
+Possible producers
+  session possible
+    confidence    ambiguous
+    state         ambiguous
+    evidence      [1]
+
+! No producing session is asserted.
+
+Evidence
+  [1]
+    ctx show event 8cd765ac-68a3-8a2c-ae04-669a08be6370 · Core aaaaaaaaaaaa · source 0f989cc2-fb1b-8eaf-8403-078d7622424b · sequence 1

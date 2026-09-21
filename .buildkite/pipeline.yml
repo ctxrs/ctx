@@ -39,11 +39,11 @@ steps:
       - "bazel-testlogs/**/*.zip"
       - "target/ctx-artifacts/check/**"
 
-  - label: ":rocket: public release qualification"
-    key: "public-release"
+  - label: ":rocket: normal CI for release construction"
+    key: "public-release-ci"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
-      bash scripts/buildkite-public-ci.sh --mode=release
+      bash scripts/buildkite-public-ci.sh --mode=ci
     agents:
       queue: "release-linux-managed"
       ctx-runner-class: "release-linux-control"
@@ -78,11 +78,13 @@ steps:
 
   - label: ":package: five-platform public CLI factory on Linux"
     key: "public-cli-linux-factory"
+    depends_on: "public-release-ci"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
       source_commit="$$(git rev-parse --verify HEAD^{commit})"
       scripts/release/build-public-candidate-on-linux.sh \
         --source-commit "$${source_commit}" \
+        --work-dir "$${CTX_RELEASE_WORK_ROOT:?absolute disk-backed factory work directory}" \
         --macos-sdk "$${CTX_MACOS_SDK_ROOT:?}" \
         --output-dir target/public-cli-artifacts
     agents:
@@ -219,32 +221,38 @@ steps:
       - "target/public-cli-native-smoke/windows-x64/candidate-smoke.json"
       - "target/public-cli-native-smoke/windows-x64/ctx-windows-x64.native-execution.json"
 
-  - label: ":package: stage native-qualified Core release candidate"
+  - label: ":package: stage signed unified release candidate"
     key: "github-release-candidate"
     depends_on:
-      - "public-release"
+      - "public-release-ci"
       - "public-cli-linux-factory"
       - "public-cli-linux-x64-native-smoke"
       - "public-cli-linux-aarch64-native-smoke"
       - "public-cli-macos-arm64-native-smoke"
       - "public-cli-macos-x64-native-smoke"
       - "public-cli-windows-x64-native-smoke"
-    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
       source_commit="$$(git rev-parse --verify HEAD^{commit})"
       scripts/buildkite/download-linux-factory-artifacts.sh "*"
       mkdir -p target/public-cli-artifacts
-      buildkite-agent artifact download "target/public-cli-native-smoke/linux-x64/ctx-linux-x64.native-execution.json" . --step public-cli-linux-x64-native-smoke
-      buildkite-agent artifact download "target/public-cli-native-smoke/linux-aarch64/ctx-linux-aarch64.native-execution.json" . --step public-cli-linux-aarch64-native-smoke
-      buildkite-agent artifact download "target/public-cli-native-smoke/macos-arm64/ctx-macos-arm64.native-execution.json" . --step public-cli-macos-arm64-native-smoke
-      buildkite-agent artifact download "target/public-cli-native-smoke/macos-x64/ctx-macos-x64.native-execution.json" . --step public-cli-macos-x64-native-smoke
-      buildkite-agent artifact download "target/public-cli-native-smoke/windows-x64/ctx-windows-x64.native-execution.json" . --step public-cli-windows-x64-native-smoke
       BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
-        "target/public-cli-native-smoke/macos-arm64/ctx-macos-arm64.signing.json" . \
-        --step public-cli-macos-arm64-native-smoke
-      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
-        "target/public-cli-native-smoke/macos-x64/ctx-macos-x64.signing.json" . \
-        --step public-cli-macos-x64-native-smoke
+        "target/ctx-artifacts/check/normal-ci.json" . --step public-release-ci
+      export CTX_RELEASE_VALIDATION_POLICY=factory-only-human-override-v1
+      if [[ "$${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then
+        export CTX_RELEASE_VALIDATION_POLICY=native-receipts-required-v1
+        buildkite-agent artifact download "target/public-cli-native-smoke/linux-x64/ctx-linux-x64.native-execution.json" . --step public-cli-linux-x64-native-smoke
+        buildkite-agent artifact download "target/public-cli-native-smoke/linux-aarch64/ctx-linux-aarch64.native-execution.json" . --step public-cli-linux-aarch64-native-smoke
+        buildkite-agent artifact download "target/public-cli-native-smoke/macos-arm64/ctx-macos-arm64.native-execution.json" . --step public-cli-macos-arm64-native-smoke
+        buildkite-agent artifact download "target/public-cli-native-smoke/macos-x64/ctx-macos-x64.native-execution.json" . --step public-cli-macos-x64-native-smoke
+        buildkite-agent artifact download "target/public-cli-native-smoke/windows-x64/ctx-windows-x64.native-execution.json" . --step public-cli-windows-x64-native-smoke
+        BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
+          "target/public-cli-native-smoke/macos-arm64/ctx-macos-arm64.signing.json" . \
+          --step public-cli-macos-arm64-native-smoke
+        BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
+          "target/public-cli-native-smoke/macos-x64/ctx-macos-x64.signing.json" . \
+          --step public-cli-macos-x64-native-smoke
+      fi
       CTX_PUBLIC_RELEASE_SOURCE_COMMIT="$${source_commit}" \
         scripts/stage-github-release-assets.sh \
           target/public-cli-artifacts \
@@ -503,9 +511,11 @@ steps:
       - "semantic-runtime-windows-ml"
       - "public-cli-macos-arm64-release-pair-qualification"
       - "public-cli-macos-x64-release-pair-qualification"
-    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
       mkdir -p target/public-cli-artifacts target/macos-release-pair-qualification
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
+        "target/github-release-authority/*" . --step github-release-candidate
       BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/github-core-release-assets/*" . \
         --step github-release-candidate
@@ -516,20 +526,27 @@ steps:
         "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz*" . \
         --step semantic-runtime-portable
       BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
-        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz*" . \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64*" . \
         --step semantic-runtime-portable
       BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
-        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz*" . \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64*" . \
         --step public-cli-macos-x64-runtime-producer
       BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "*ctx-onnxruntime-windows-x64.zip*" . \
         --step semantic-runtime-windows-ml
-      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
-        "target/macos-release-pair-qualification/ctx-macos-arm64.release-pair.sha256" . \
-        --step public-cli-macos-arm64-release-pair-qualification
-      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
-        "target/macos-release-pair-qualification/ctx-macos-x64.release-pair.sha256" . \
-        --step public-cli-macos-x64-release-pair-qualification
+      export CTX_RELEASE_VALIDATION_POLICY=factory-only-human-override-v1
+      export CTX_RELEASE_AUTHORITY_DIR=target/github-release-authority
+      # Bind the artifact obtained from this build's completed staging producer.
+      export CTX_RELEASE_HANDOFF_SHA256="$$(sha256sum target/github-release-authority/ctx-core-github-handoff.json | cut -d' ' -f1)"
+      if [[ "$${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then
+        export CTX_RELEASE_VALIDATION_POLICY=native-receipts-required-v1
+        BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
+          "target/macos-release-pair-qualification/ctx-macos-arm64.release-pair.sha256" . \
+          --step public-cli-macos-arm64-release-pair-qualification
+        BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
+          "target/macos-release-pair-qualification/ctx-macos-x64.release-pair.sha256" . \
+          --step public-cli-macos-x64-release-pair-qualification
+      fi
       scripts/assemble-github-release-assets.sh \
         target/github-core-release-assets \
         target/public-cli-artifacts \
@@ -545,6 +562,7 @@ steps:
     timeout_in_minutes: 30
     artifact_paths:
       - "target/github-release-assets/*"
+      - "target/github-release-assets.assembly.json"
 
   - label: ":package: gather unsigned Semantic release handoff"
     key: "semantic-release-handoff"

@@ -3,6 +3,11 @@ members = [
     "crates/ctx-app-config",
     "crates/ctx-agent-application",
     "crates/ctx-agent-integrations",
+    "crates/ctx-attribution",
+    "crates/ctx-attribution-derivation",
+    "crates/ctx-attribution-model",
+    "crates/ctx-attribution-index",
+    "crates/ctx-repository-evidence",
     "crates/ctx-companion-bridge",
     "crates/ctx-cli",
     "crates/ctx-cli-contract-tests",
@@ -81,12 +86,12 @@ ignored-paths = [
 ]
 
 [workspace.package]
-version = "1.4.12"
+version = "1.5.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/ctxrs/ctx"
 homepage = "https://github.com/ctxrs/ctx"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -101,17 +106,28 @@ clap_mangen = "0.2"
 ctrlc = { version = "3.5.2", features = ["termination"] }
 directories = "5.0"
 dirs = "6.0"
+fs2 = "0.4.3"
+fst = "0.4"
+hex = "0.4"
 json5 = { version = "0.4", default-features = false }
 jsonc-parser = { version = "0.33", default-features = false, features = ["serde", "serde_json"] }
 libc = "0.2"
 memmap2 = "0.9"
 notify = "=9.0.0-rc.4"
+oxc_allocator = "0.146"
+oxc_ast = "0.146"
+oxc_parser = { version = "0.146", default-features = false }
+oxc_semantic = "0.146"
+oxc_span = "0.146"
+oxc_syntax = "0.146"
 predicates = "3.1"
 proptest = "1"
+rayon = "1.11"
 ring = "0.17"
 rmpv = "1.3"
 rusqlite = { version = "0.32", features = ["bundled", "functions", "hooks", "limits", "serialize"] }
 quick-xml = { version = "0.41.0", default-features = false }
+same-file = "1.0.6"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 serde_yaml = { version = "0.9", default-features = false }

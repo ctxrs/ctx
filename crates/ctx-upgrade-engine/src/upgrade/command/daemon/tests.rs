@@ -295,4 +295,4 @@ fn generic_committed_recovery_state_fault_emits_one_truthful_applied_event() {
     assert_eq!(state["update_available"], true);
 }
 
-mod first_pair;
+mod single_binary;

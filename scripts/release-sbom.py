@@ -123,6 +123,7 @@ RELEASE_AUTHORITY_HANDOFF_LEAVES = tuple(
             f"{HANDOFF_DOCUMENT}.sha256",
             FACTORY_COMPLETION,
             FACTORY_MANIFEST,
+            "normal-ci.json", "release-validation.json", "windows-authenticode.json",
             *WINDOWS_HANDOFF_LEAVES,
             *CORE_CANDIDATE_MANIFESTS,
             *(f"{name}.sha256" for name in CORE_CANDIDATE_MANIFESTS),
@@ -503,6 +504,8 @@ def verify_release_handoff(args: argparse.Namespace) -> str:
             "release_sums",
             "schema_version",
             "source_commit",
+            "validation",
+            "windows_signature",
         }
         or handoff_document.get("kind") != "ctx-public-core-github-handoff"
         or handoff_document.get("schema_version") != 1
@@ -570,6 +573,16 @@ def verify_release_handoff(args: argparse.Namespace) -> str:
         FACTORY_COMPLETION,
     )
     factory = factory_manifest_records(factory_document, source_commit)
+    import importlib.util
+    validation_spec = importlib.util.spec_from_file_location(
+        "ctx_release_validation", Path(__file__).with_name("release") / "release-validation.py"
+    )
+    if validation_spec is None or validation_spec.loader is None:
+        raise ValueError("release validation owner is unavailable")
+    validation_owner = importlib.util.module_from_spec(validation_spec)
+    validation_spec.loader.exec_module(validation_owner)
+    validation_owner.verify_handoff(handoff, handoff_document, source_commit, factory,
+                                    read_canonical_json, require_document_record)
     completion = completion_records(completion_document, source_commit)
     verify_factory_completion_binding(factory, completion, factory_record)
 

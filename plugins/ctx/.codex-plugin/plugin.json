@@ -1,6 +1,6 @@
 {
   "name": "ctx",
-  "version": "1.4.12",
+  "version": "1.5.0",
   "description": "Fast local search and 'git blame' for agent sessions.",
   "author": {
     "name": "ctx engineering inc",
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "ctx",
     "shortDescription": "Fast local search and 'git blame' for agent sessions.",
-    "longDescription": "ctx provides fast local search across messages and tool calls in your past agent sessions. ctx pro is a paid add-on that traces a line, file, commit, or PR back to the original agent session that produced it.",
+    "longDescription": "ctx searches messages and tool calls in your past agent sessions. Its included blame command traces a line, file, commit, or PR back to the original agent session, with citations.",
     "developerName": "ctx engineering inc",
     "category": "Developer Tools",
     "capabilities": [
@@ -30,7 +30,7 @@
     "websiteURL": "https://ctx.rs",
     "defaultPrompt": [
       "Search my past agent sessions for context relevant to this task.",
-      "Use ctx pro to find the agent session that produced this code."
+      "Use ctx blame to find the agent session that produced this code."
     ]
   }
 }

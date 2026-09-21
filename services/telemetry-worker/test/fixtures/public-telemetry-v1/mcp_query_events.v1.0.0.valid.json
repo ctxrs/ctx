@@ -1,0 +1,18 @@
+{
+  "event_id": "55555555-5555-4555-8555-555555555555",
+  "event_name": "operation_completed",
+  "event_version": 1,
+  "occurred_at": "2026-07-22T12:34:00Z",
+  "surface": "mcp",
+  "operation": "query_events",
+  "outcome": "success",
+  "duration_bucket": "lt_1s",
+  "properties": {
+    "method": "tools_call",
+    "tool": "query_events",
+    "result_count_bucket": "2-5",
+    "zero_result": false,
+    "result_truncated": false,
+    "response_bound": "within_limit"
+  }
+}

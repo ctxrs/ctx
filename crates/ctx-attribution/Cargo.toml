@@ -1,0 +1,58 @@
+[package]
+name = "ctx-attribution"
+version.workspace = true
+description = "Retained Core attribution, repository lineage, and bounded Blame queries"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "ctx_attribution"
+path = "src/lib.rs"
+
+[features]
+test-support = ["ctx-attribution-derivation/test-support", "ctx-attribution-index/test-support"]
+
+[dependencies]
+ctx-attribution-derivation = { path = "../ctx-attribution-derivation" }
+ctx-attribution-model = { path = "../ctx-attribution-model" }
+ctx-attribution-index = { path = "../ctx-attribution-index" }
+ctx-repository-evidence = { path = "../ctx-repository-evidence" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-platform = { path = "../ctx-history-platform" }
+ctx-history-snapshot-reader = { path = "../ctx-history-snapshot-reader" }
+ctx-terminal = { path = "../ctx-terminal" }
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+fs2.workspace = true
+hex.workspace = true
+same-file.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+ctx-attribution-derivation = { path = "../ctx-attribution-derivation", features = ["test-support"] }
+ctx-attribution-index = { path = "../ctx-attribution-index", features = ["test-support"] }
+ctx-history-index = { path = "../ctx-history-index" }
+ctx-history-index-format = { path = "../ctx-history-index-format" }
+ctx-history-index-query = { path = "../ctx-history-index-query" }
+anstream.workspace = true
+tempfile.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"

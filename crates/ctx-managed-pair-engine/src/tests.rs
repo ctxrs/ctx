@@ -252,3 +252,5 @@ fn managed_core_marker_uses_the_platform_install_marker_name() {
         }
     );
 }
+
+mod retirement;

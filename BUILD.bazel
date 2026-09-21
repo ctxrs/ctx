@@ -1,3 +1,7 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@aspect_bazel_lib//lib:directory_path.bzl", "directory_path")
+load("@bazel_skylib//rules:select_file.bzl", "select_file")
+load("@aspect_rules_js//js:defs.bzl", "js_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_java//java:defs.bzl", "java_binary")
@@ -25,6 +29,7 @@ exports_files([
     "contracts/ctx-managed-pair-release-authority-v1.json",
     "contracts/ctx-managed-pair-state-v1.schema.json",
     "scripts/check.sh",
+    "scripts/bazel/package-action.sh",
     "scripts/tests/native-candidate-outbox.json",
 ])
 
@@ -74,6 +79,11 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-agent-application:cargo_package_data",
     "//crates/ctx-agent-integrations:cargo_package_data",
     "//crates/ctx-app-config:cargo_package_data",
+    "//crates/ctx-attribution-model:cargo_package_data",
+    "//crates/ctx-attribution:cargo_package_data",
+    "//crates/ctx-attribution-derivation:cargo_package_data",
+    "//crates/ctx-attribution-index:cargo_package_data",
+    "//crates/ctx-repository-evidence:cargo_package_data",
     "//crates/ctx-companion-bridge:cargo_package_data",
     "//crates/ctx-cli:cargo_package_data",
     "//crates/ctx-cli-contract-tests:cargo_package_data",
@@ -188,6 +198,20 @@ filegroup(
         "contracts/telemetry-v1/*.md",
         "contracts/telemetry-v1/fixtures/*.json",
     ]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "legacy_unified_envelope_fixtures",
+    srcs = [
+        "scripts/release/tests/fixtures/unified/artifact.txt",
+        "scripts/release/tests/fixtures/unified/authority.json",
+        "scripts/release/tests/fixtures/unified/linux-arm64.json",
+        "scripts/release/tests/fixtures/unified/linux-x64.json",
+        "scripts/release/tests/fixtures/unified/macos-arm64.json",
+        "scripts/release/tests/fixtures/unified/macos-x64.json",
+        "scripts/release/tests/fixtures/unified/windows-x64.json",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -655,6 +679,7 @@ sh_test(
         "scripts/macos-release-signing-evidence.py",
         "scripts/macos-release-publisher-policy.sh",
         "scripts/native-execution-proof.py",
+        "scripts/release/release-validation.py",
         "scripts/release/release_bundle.py",
         "scripts/release/seal-linux-factory-candidate.py",
         "scripts/release-sbom.py",
@@ -673,6 +698,7 @@ sh_test(
     data = [
         "scripts/assemble-github-release-assets.sh",
         "scripts/release/release_bundle.py",
+        "scripts/release/verify-runtime-signatures.py",
     ],
     tags = ["release-gate"],
 )
@@ -800,6 +826,240 @@ py_test(
     ] + glob(["docs/**"]),
 )
 
+# Release tests need regular leaves for the unchanged no-follow authority reader.
+copy_to_directory(
+    name = "release_test_source_tree",
+    srcs = [
+        ":legacy_unified_envelope_fixtures",
+        ":release_publication_test_inputs",
+        "//services/install-site:src/cli-install-powershell-script.js",
+        "scripts/release/release-contract-managed-pair.cjs",
+        "scripts/release/release-contract-semantic.cjs",
+        "scripts/release/release-contract.cjs",
+        "scripts/release/release-contract.sh",
+        "scripts/release/release-validation.py",
+        "scripts/release/tests/ctx_cli_release_metadata_sign_contract.sh",
+        "scripts/release/tests/public_ctx_release_contract_smoke.sh",
+        "scripts/release/tests/release_integrity_driver_test.mjs",
+        "scripts/release/tests/release_integrity_gzip_fixture.mjs",
+        "scripts/release/tests/unified-release-inputs.test.mjs",
+    ],
+    hardlink = "off",
+    root_paths = ["."],
+    testonly = True,
+)
+
+select_file(
+    name = "release_test_node",
+    srcs = "@rules_nodejs//nodejs:current_node_runtime",
+    subpath = "bin/node",
+    testonly = True,
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+directory_path(
+    name = "unified_release_inputs_tests_entry_point",
+    directory = ":release_test_source_tree",
+    path = "scripts/release/tests/unified-release-inputs.test.mjs",
+    testonly = True,
+)
+
+directory_path(
+    name = "managed_pair_publication_tests_entry_point",
+    directory = ":release_test_source_tree",
+    path = "scripts/release/tests/managed-pair-publication.test.mjs",
+    testonly = True,
+)
+
+directory_path(
+    name = "hosted_publication_storage_tests_entry_point",
+    directory = ":release_test_source_tree",
+    path = "scripts/release/tests/hosted-publication-storage.test.mjs",
+    testonly = True,
+)
+
+directory_path(
+    name = "publication_orchestration_tests_entry_point",
+    directory = ":release_test_source_tree",
+    path = "scripts/release/tests/publication-orchestration.test.mjs",
+    testonly = True,
+)
+
+directory_path(
+    name = "hosted_managed_pair_release_tests_entry_point",
+    directory = ":release_test_source_tree",
+    path = "scripts/release/tests/hosted_managed_pair_release_test.mjs",
+    testonly = True,
+)
+
+directory_path(
+    name = "coreml_semantic_object_repair_tests_entry_point",
+    directory = ":release_test_source_tree",
+    path = "scripts/release/tests/repair_coreml_semantic_object_test.mjs",
+    testonly = True,
+)
+
+js_test(
+    name = "unified_release_inputs_tests",
+    entry_point = ":unified_release_inputs_tests_entry_point",
+    preserve_symlinks_main = False,
+    data = [":release_test_source_tree"],
+    size = "small",
+    tags = ["release-gate"],
+)
+
+# Shared current/frozen publication fixtures and their public source closure.
+filegroup(
+    name = "release_publication_test_inputs",
+    srcs = [
+        "contracts/ctx-managed-pair-release-authority-v1.json",
+        "contracts/release-targets-v1.json",
+        "contracts/release-version-v1.json",
+        "scripts/release/core-r2.mjs",
+        "scripts/release/ctx_cli_release_metadata_sign.sh",
+        "scripts/release/frozen-cli-bridge.cjs",
+        "scripts/release/hosted-managed-pair-release.mjs",
+        "scripts/release/hosted-semantic-release.mjs",
+        "scripts/release/managed-pair-release-contract.mjs",
+        "scripts/release/managed-pair-release-io.mjs",
+        "scripts/release/publish-hosted-managed-pair-stable.mjs",
+        "scripts/release/publish-hosted-managed-pair-stable.sh",
+        "scripts/release/release-authority.mjs",
+        "scripts/release/release-candidate-manifest-contract.cjs",
+        "scripts/release/release-manifest.mjs",
+        "scripts/release/release-signing-boundary.mjs",
+        "scripts/release/release-version.cjs",
+        "scripts/release/released-source-continuity.json",
+        "scripts/release/released-source-continuity.py",
+        "scripts/release/repair-coreml-semantic-object.mjs",
+        "scripts/release/repair-coreml-semantic-object.sh",
+        "scripts/release/runtime-transport-transcode.mjs",
+        "scripts/release/semantic-runtime-layout-v1.json",
+        "scripts/release/semantic_runtime_archive.py",
+        "scripts/release/semantic_runtime_metadata.py",
+        "scripts/release/stage-runtime-transport-handoff.mjs",
+        "scripts/release/tests/current_feed_publication_test.mjs",
+        "scripts/release/tests/current_runtime_boundary_test.mjs",
+        "scripts/release/tests/current_runtime_fixture.mjs",
+        "scripts/release/tests/current_signer_boundary_test.mjs",
+        "scripts/release/tests/current_signer_prebound.mjs",
+        "scripts/release/tests/frozen_bridge_publication_test.mjs",
+        "scripts/release/tests/hosted-publication-storage.test.mjs",
+        "scripts/release/tests/hosted_managed_pair_release_test.mjs",
+        "scripts/release/tests/managed-pair-publication.test.mjs",
+        "scripts/release/tests/publication-orchestration.test.mjs",
+        "scripts/release/tests/repair_coreml_semantic_object_test.mjs",
+        "scripts/release/unified-release-inputs.mjs",
+        "scripts/release/validate-hosted-managed-pair-metadata.mjs",
+        "scripts/release/verify-runtime-transport-handoff.mjs",
+        "//services/install-site:package.json",
+        "//services/install-site:src/cli-install-bridge.js",
+        "//services/install-site:src/cli-install-managed-pair-contract.js",
+        "//services/install-site:src/cli-install-script.js",
+        "//services/install-site:src/cli-install-shell-integrations.js",
+        "//services/install-site:src/cli-install-shell-man-pages.js",
+        "//services/install-site:src/cli-install-shell-managed-pair.js",
+        "//services/install-site:src/cli-install-shell-marker.js",
+        "//services/install-site:src/cli-install-shell-platform.js",
+        "//services/install-site:src/cli-install-shell-prior-integration.js",
+        "//services/install-site:src/cli-install-shell-publication.js",
+        "//services/install-site:src/cli-install-shell-release.js",
+        "//services/install-site:src/cli-install-shell-rendering.js",
+        "//services/install-site:src/cli-install-shell-validation.js",
+        "//services/install-site:src/cli-install-shell-workflow.js",
+        "//services/install-site:src/install-attempt-id.js",
+        "//services/install-site:src/install-stage-contract.js",
+    ],
+    testonly = True,
+)
+
+js_test(
+    name = "managed_pair_publication_tests",
+    entry_point = ":managed_pair_publication_tests_entry_point",
+    data = [":release_test_source_tree"],
+    node_options = ["--experimental-test-module-mocks"],
+    preserve_symlinks_main = False,
+    tags = ["artifact-publication", "release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+js_test(
+    name = "hosted_publication_storage_tests",
+    entry_point = ":hosted_publication_storage_tests_entry_point",
+    data = [":release_test_source_tree"],
+    preserve_symlinks_main = False,
+    tags = ["artifact-publication", "release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+js_test(
+    name = "publication_orchestration_tests",
+    entry_point = ":publication_orchestration_tests_entry_point",
+    data = [":release_test_source_tree"],
+    preserve_symlinks_main = False,
+    tags = ["artifact-publication", "release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+js_test(
+    name = "hosted_managed_pair_release_tests",
+    entry_point = ":hosted_managed_pair_release_tests_entry_point",
+    data = [":release_test_source_tree"],
+    node_options = ["--experimental-test-module-mocks"],
+    preserve_symlinks_main = False,
+    tags = ["artifact-publication", "release-gate", "requires-zstd"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+js_test(
+    name = "coreml_semantic_object_repair_tests",
+    entry_point = ":coreml_semantic_object_repair_tests_entry_point",
+    data = [":release_test_source_tree"],
+    preserve_symlinks_main = False,
+    tags = ["artifact-publication", "release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sh_test(
+    name = "public_ctx_release_metadata_sign_contract",
+    srcs = ["scripts/release/tests/ctx_cli_release_metadata_sign_contract.sh"],
+    args = [
+        "$(rootpath :release_test_source_tree)",
+        "$(rootpath :release_test_node)",
+    ],
+    data = [":release_test_source_tree", ":release_test_node"],
+    tags = ["release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sh_test(
+    name = "public_ctx_release_contract_smoke",
+    srcs = ["scripts/release/tests/public_ctx_release_contract_smoke.sh"],
+    args = [
+        "$(rootpath :release_test_source_tree)",
+        "$(rootpath :release_test_node)",
+    ],
+    data = [":release_test_source_tree", ":release_test_node"],
+    tags = ["release-gate", "requires-zstd"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+py_test(
+    name = "released_source_continuity_test",
+    srcs = ["scripts/tests/released_source_continuity_test.py"],
+    data = [
+        "scripts/release/publish-hosted-managed-pair-stable.sh",
+        "scripts/release/release-candidate-manifest-contract.cjs",
+        "scripts/release/release-manifest.mjs",
+        "scripts/release/released-source-continuity.json",
+        "scripts/release/released-source-continuity.py",
+        "scripts/release/unified-release-inputs.mjs",
+    ],
+    main = "scripts/tests/released_source_continuity_test.py",
+    size = "small",
+    tags = ["release-gate", "security"],
+)
+
 py_test(
     name = "release_sbom_tests",
     srcs = [
@@ -810,7 +1070,12 @@ py_test(
         "scripts/tests/release-sbom-test.py",
         "scripts/tests/release_sbom_test_lock.py",
     ],
-    data = ["contracts/release-candidate-manifest-v1.schema.json"],
+    data = [
+        "contracts/release-candidate-manifest-v1.schema.json",
+        "scripts/release/release-validation.py",
+        "scripts/release/release_bundle.py",
+        "scripts/release/seal-linux-factory-candidate.py",
+    ],
     deps = ["@ctx_tomli//:lib"],
     main = "scripts/tests/release-sbom-test.py",
     tags = ["release-gate"],
@@ -887,6 +1152,7 @@ py_binary(
         "scripts/release_sbom/dependency_materials.py",
         "scripts/release_sbom/generation.py",
     ],
+    data = ["scripts/release/release-validation.py"],
     deps = ["@ctx_tomli//:lib"],
     main = "scripts/release-sbom.py",
     tags = ["release-gate", "release-tool"],

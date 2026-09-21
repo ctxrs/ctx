@@ -820,6 +820,47 @@ grep -Fq '[redacted Apple notary log URL]' \
 grep -Fq 'notary-url-sentinel' \
   "${linux_recovery_dir}/ctx-macos-arm64.notary-submit.stderr" && \
   fail "accepted notarization recovery retained temporary log credentials"
+expect_failure 'does not record passed signed-exact-byte-version-execution' \
+  "${test_root}/pending-cli-default.log" \
+  python3 "${evidence_tool}" verify-artifact \
+    --evidence "${linux_recovery_dir}/ctx-macos-arm64.signing.json" \
+    --platform macos-arm64 --kind cli --artifact "${linux_recovery_artifact}"
+python3 "${evidence_tool}" verify-artifact --allow-pending-cli-execution \
+  --evidence "${linux_recovery_dir}/ctx-macos-arm64.signing.json" \
+  --platform macos-arm64 --kind cli --artifact "${linux_recovery_artifact}"
+for mutation in failed missing wrong-method codesign notarization; do
+  mutated_evidence="${test_root}/pending-cli-${mutation}.json"
+  python3 - "${linux_recovery_dir}/ctx-macos-arm64.signing.json" "$mutated_evidence" "$mutation" <<'PROOF'
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["artifact_verification"]["status"] == "pending"
+mutation = sys.argv[3]
+if mutation == "failed":
+    value["artifact_verification"]["status"] = "failed"
+elif mutation == "missing":
+    del value["artifact_verification"]
+elif mutation == "wrong-method":
+    value["artifact_verification"]["method"] = "unverified"
+elif mutation == "codesign":
+    value["codesign"]["verified"] = False
+else:
+    value["notarization"]["status"] = "Rejected"
+with open(sys.argv[2], "w") as output:
+    json.dump(value, output)
+PROOF
+  expect_failure 'signing evidence' "${test_root}/pending-cli-${mutation}.log" \
+    python3 "${evidence_tool}" verify-artifact --allow-pending-cli-execution \
+      --evidence "$mutated_evidence" --platform macos-arm64 --kind cli \
+      --artifact "${linux_recovery_artifact}"
+done
+# Omitting execution never promotes its status or admits different bytes.
+cp "${linux_recovery_artifact}" "${test_root}/altered-signed-cli"
+printf '\nchanged' >> "${test_root}/altered-signed-cli"
+expect_failure 'signed artifact does not match evidence' \
+  "${test_root}/pending-cli-altered.log" \
+  python3 "${evidence_tool}" verify-artifact --allow-pending-cli-execution \
+    --evidence "${linux_recovery_dir}/ctx-macos-arm64.signing.json" \
+    --platform macos-arm64 --kind cli --artifact "${test_root}/altered-signed-cli"
 "${execution_check}" macos-arm64 "${linux_recovery_artifact}" 0.25.0 \
   "${linux_recovery_dir}/ctx-macos-arm64.signing.json" >/dev/null
 python3 "${evidence_tool}" verify-artifact \
