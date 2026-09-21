@@ -409,6 +409,123 @@ fn a_durable_head_extends_the_same_foreground_subagent_chain() {
 }
 
 #[test]
+fn a_bad_splice_does_not_block_a_durable_head_at_its_valid_ancestor() {
+    let mut facts = BTreeMap::new();
+    chain_of(&mut facts, &[0]);
+    chain_of(&mut facts, &[10, 30]);
+    facts.get_mut(&0).unwrap().subagent_chain_node_id = Some(30);
+    facts.get_mut(&0).unwrap().subagent_agent_id = Some("agent-a".to_owned());
+    facts.insert(
+        20,
+        DevinNodeFacts {
+            parent_node_id: Some(19),
+            ..DevinNodeFacts::default()
+        },
+    );
+    facts.get_mut(&30).unwrap().summarized_from = Some(20);
+    let heads = [
+        DevinSubagentHead {
+            agent_id: "agent-a".to_owned(),
+            chain_node_id: 30,
+            updated_at: 1,
+        },
+        DevinSubagentHead {
+            agent_id: "agent-a".to_owned(),
+            chain_node_id: 30,
+            updated_at: 2,
+        },
+        DevinSubagentHead {
+            agent_id: "agent-a".to_owned(),
+            chain_node_id: 10,
+            updated_at: 3,
+        },
+    ];
+
+    // Foreground 30 reaches valid ancestor 10, but its splice to 20 ends at
+    // absent parent 19. Repeated bad 30 heads use the structural cache; the
+    // later durable head at 10 must still be admitted.
+    let plan = plan_session_with_limits(&facts, Some(0), &heads, facts.len(), 5);
+    assert!(plan.rejection.is_none());
+    assert_eq!(plan.counts.rejected_lineages, 3);
+    assert_eq!(plan.counts.ignored_nodes, 2);
+    assert_eq!(
+        plan.lineages[1]
+            .nodes
+            .iter()
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        [10]
+    );
+}
+
+#[test]
+fn a_primary_overlap_does_not_block_a_durable_head_at_its_valid_ancestor() {
+    let mut facts = BTreeMap::new();
+    chain_of(&mut facts, &[0]);
+    chain_of(&mut facts, &[10, 30]);
+    facts.get_mut(&0).unwrap().subagent_chain_node_id = Some(30);
+    facts.get_mut(&0).unwrap().subagent_agent_id = Some("agent-a".to_owned());
+    facts.get_mut(&30).unwrap().summarized_from = Some(0);
+    let mut heads = (0..4)
+        .map(|updated_at| DevinSubagentHead {
+            agent_id: "agent-a".to_owned(),
+            chain_node_id: 30,
+            updated_at,
+        })
+        .collect::<Vec<_>>();
+    heads.push(DevinSubagentHead {
+        agent_id: "agent-b".to_owned(),
+        chain_node_id: 10,
+        updated_at: 4,
+    });
+
+    // Primary 0, the rejected 30 candidate, and valid 10 consume four steps.
+    // Repeated 30 heads reject from the overlap cache without spending more.
+    let plan = plan_session_with_limits(&facts, Some(0), &heads, facts.len(), 4);
+    assert!(plan.rejection.is_none());
+    assert_eq!(plan.counts.rejected_lineages, 5);
+    assert_eq!(plan.counts.ignored_nodes, 1);
+    assert_eq!(
+        plan.lineages[1]
+            .nodes
+            .iter()
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        [10]
+    );
+}
+
+#[test]
+fn an_oversized_subagent_agent_id_rejects_only_that_lineage() {
+    let mut facts = BTreeMap::new();
+    chain_of(&mut facts, &[0, 1]);
+    chain_of(&mut facts, &[10, 11]);
+    chain_of(&mut facts, &[20, 21]);
+    facts.get_mut(&1).unwrap().subagent_chain_node_id = Some(11);
+    facts.get_mut(&1).unwrap().subagent_agent_id =
+        Some("x".repeat(super::chain::DEVIN_SUBAGENT_AGENT_ID_BYTES + 1));
+    let heads = [DevinSubagentHead {
+        agent_id: "agent-a".to_owned(),
+        chain_node_id: 21,
+        updated_at: 0,
+    }];
+
+    let plan = plan_session(&facts, Some(1), &heads);
+    assert!(plan.rejection.is_none());
+    assert_eq!(plan.counts.rejected_lineages, 1);
+    assert_eq!(plan.counts.ignored_nodes, 2);
+    assert_eq!(plan.lineages.len(), 2);
+    assert_eq!(
+        plan.lineages[1]
+            .nodes
+            .iter()
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        [20, 21]
+    );
+}
+
+#[test]
 fn an_invalid_first_tip_does_not_hide_a_valid_head_for_the_same_agent() {
     let mut facts = BTreeMap::new();
     chain_of(&mut facts, &[0, 1, 2]);
@@ -506,12 +623,73 @@ fn overlapping_durable_heads_share_one_walk_budget() {
         .collect::<Vec<_>>();
 
     // One step for the primary and nine for the first accepted head. Every
-    // later head must reject from the shared blocked set without another walk.
+    // later head must reject from the shared ownership index without another
+    // walk.
     let plan = plan_session_with_limits(&facts, Some(0), &heads, facts.len(), facts.len());
     assert!(plan.rejection.is_none());
     assert_eq!(plan.lineages.len(), 2);
     assert_eq!(plan.counts.rejected_lineages, 31);
     assert_eq!(plan.counts.ignored_nodes, 0);
+}
+
+#[test]
+fn repeated_rejected_overlaps_do_not_starve_a_later_valid_head() {
+    let mut facts = BTreeMap::new();
+    chain_of(&mut facts, &[0]);
+    chain_of(&mut facts, &(10..1_010).collect::<Vec<_>>());
+    facts.get_mut(&10).unwrap().parent_node_id = Some(0);
+    chain_of(&mut facts, &[2_000, 2_001]);
+    let mut heads = (0..4_000)
+        .map(|index| DevinSubagentHead {
+            agent_id: format!("overlap-{index:04}"),
+            chain_node_id: 1_009,
+            updated_at: index,
+        })
+        .collect::<Vec<_>>();
+    heads.push(DevinSubagentHead {
+        agent_id: "valid".to_owned(),
+        chain_node_id: 2_001,
+        updated_at: 4_001,
+    });
+
+    // Primary + one rejected overlap walk + the independent valid chain.
+    let plan = plan_session_with_limits(&facts, Some(0), &heads, facts.len(), 1_003);
+    assert!(plan.rejection.is_none());
+    assert_eq!(plan.lineages.len(), 2);
+    assert_eq!(
+        plan.lineages[1].key,
+        DevinLineageKey::Subagent("valid".to_owned())
+    );
+    assert_eq!(plan.counts.rejected_lineages, 4_000);
+}
+
+#[test]
+fn successive_same_agent_tips_walk_only_the_advancing_suffix() {
+    const NODES: i64 = 3_000;
+    let mut facts = BTreeMap::new();
+    chain_of(&mut facts, &(0..NODES).collect::<Vec<_>>());
+    chain_of(&mut facts, &(NODES..NODES * 2).collect::<Vec<_>>());
+    for node_id in 0..NODES {
+        let node = facts.get_mut(&node_id).unwrap();
+        node.subagent_chain_node_id = Some(NODES + node_id);
+        node.subagent_agent_id = Some("agent-a".to_owned());
+    }
+
+    // The primary and final subagent lineage each consume 3,000 steps. A
+    // repeated full-root comparison would exhaust this exact 6,000-step bound.
+    let plan = plan_session_with_limits(&facts, Some(NODES - 1), &[], facts.len(), facts.len());
+    assert!(plan.rejection.is_none());
+    assert_eq!(plan.lineages.len(), 2);
+    assert_eq!(plan.counts.rejected_lineages, 0);
+    assert_eq!(plan.counts.ignored_nodes, 0);
+    assert_eq!(
+        plan.lineages[1]
+            .nodes
+            .iter()
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        (NODES..NODES * 2).collect::<Vec<_>>()
+    );
 }
 
 #[test]

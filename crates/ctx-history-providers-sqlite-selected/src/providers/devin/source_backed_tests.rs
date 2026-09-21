@@ -2,6 +2,7 @@ use ctx_history_core::{
     AgentScope, CoreRecord, ProviderNativeSessionRelationship, ScannedSourceCounts,
     SourceAnchorScope,
 };
+use rusqlite::limits::Limit;
 
 use super::{
     schema::DevinNativeSchema,
@@ -161,6 +162,278 @@ fn malformed_scalar_rows_are_rejected_locally_during_a_mixed_validity_full_scan(
 }
 
 #[test]
+fn malformed_payload_fields_reject_only_the_affected_chain_node() {
+    for mutation in [
+        "update message_nodes set created_at = 'bad-time' where session_id = 'abounding-crest' and node_id = 28",
+        "update message_nodes set chat_message = x'80' where session_id = 'abounding-crest' and node_id = 28",
+    ] {
+        let (_temp, conn) = mutable_fixture();
+        conn.execute(mutation, []).unwrap();
+
+        let scanned = scan(&conn);
+        assert_eq!(scanned.counts.rejected_sessions, 0, "{mutation}");
+        assert_eq!(scanned.counts.rejected_records, 1, "{mutation}");
+        assert!(scanned.records.iter().any(|record| {
+            record.provider_session_id.as_deref() == Some("abounding-crest")
+                && record.content.normalized_body.as_deref() == Some("devincliassistantoracle")
+        }));
+        assert!(scanned.records.iter().any(|record| {
+            record.provider_session_id.as_deref() == Some("exclusive-bamboo")
+        }));
+    }
+}
+
+#[test]
+fn malformed_session_metadata_and_head_ids_are_local_rejections() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update sessions set title = x'80' where id = 'abounding-crest'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into subagent_heads (session_id, agent_id, chain_node_id, updated_at) \
+         values ('discovered-sandal', x'61', 35, 1789910400)",
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.counts.rejected_sessions, 0);
+    assert_eq!(scanned.counts.rejected_records, 1);
+    assert_eq!(scanned.counts.rejected_lineages, 1);
+    for session in ["abounding-crest", "exclusive-bamboo", "discovered-sandal"] {
+        assert!(scanned
+            .records
+            .iter()
+            .any(|record| record.provider_session_id.as_deref() == Some(session)));
+    }
+    for detail in [
+        "ignored malformed session metadata fields: title",
+        "<invalid-agent-id> was rejected: agent_id",
+    ] {
+        assert!(
+            scanned
+                .rejections
+                .iter()
+                .any(|rejection| rejection.detail.contains(detail)),
+            "missing {detail}: {:#?}",
+            scanned.rejections
+        );
+    }
+}
+
+#[test]
+fn malformed_session_ids_are_rejected_without_poisoning_later_rows() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update sessions set id = x'80' where id = 'abounding-crest'",
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.counts.rejected_sessions, 1);
+    for session in ["exclusive-bamboo", "discovered-sandal"] {
+        assert!(scanned
+            .records
+            .iter()
+            .any(|record| record.provider_session_id.as_deref() == Some(session)));
+    }
+    assert!(scanned.rejections.iter().any(|rejection| {
+        rejection
+            .detail
+            .contains("id has SQLite storage class blob and 1 bytes")
+    }));
+}
+
+#[test]
+fn an_empty_session_id_is_rejected_without_poisoning_later_rows() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update sessions set id = '' where id = 'abounding-crest'",
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.counts.rejected_sessions, 1);
+    for session in ["exclusive-bamboo", "discovered-sandal"] {
+        assert!(scanned
+            .records
+            .iter()
+            .any(|record| record.provider_session_id.as_deref() == Some(session)));
+    }
+    assert!(scanned.rejections.iter().any(|rejection| {
+        rejection
+            .detail
+            .contains("id has SQLite storage class text and 0 bytes")
+    }));
+}
+
+#[test]
+fn session_page_byte_rollover_preserves_every_session() {
+    let (_temp, conn) = mutable_fixture();
+    let large_title = "t".repeat(5 * 1024 * 1024);
+    for session in ["abounding-crest", "exclusive-bamboo"] {
+        conn.execute(
+            "update sessions set title = ?1 where id = ?2",
+            rusqlite::params![&large_title, session],
+        )
+        .unwrap();
+    }
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.counts.sessions, 3);
+    assert_eq!(scanned.counts.rejected_sessions, 0);
+    for session in ["abounding-crest", "exclusive-bamboo", "discovered-sandal"] {
+        assert!(scanned
+            .records
+            .iter()
+            .any(|record| record.provider_session_id.as_deref() == Some(session)));
+    }
+}
+
+#[test]
+fn an_oversized_foreground_agent_id_rejects_only_that_lineage() {
+    let baseline = fixture_scan();
+    let (_temp, conn) = mutable_fixture();
+    let oversized = "x".repeat(super::chain::DEVIN_SUBAGENT_AGENT_ID_BYTES + 1);
+    conn.execute(
+        "update message_nodes \
+         set chat_message = replace(chat_message, 'd8a8ea4c', ?1) \
+         where session_id = 'discovered-sandal' and node_id = 37",
+        [&oversized],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(
+        scanned.counts.rejected_lineages,
+        baseline.counts.rejected_lineages + 1
+    );
+    for session in ["abounding-crest", "exclusive-bamboo", "discovered-sandal"] {
+        assert!(scanned
+            .records
+            .iter()
+            .any(|record| record.provider_session_id.as_deref() == Some(session)));
+    }
+    assert!(!scanned.records.iter().any(|record| {
+        record
+            .provider_session_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("discovered-sandal/subagents/"))
+    }));
+}
+
+#[test]
+fn overlapping_malformed_categories_classify_an_off_chain_row_once() {
+    let baseline = fixture_scan();
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update message_nodes set created_at = 'bad-time', \
+             metadata = '{\"x\":1,\"x\":2}' \
+         where session_id = 'abounding-crest' and node_id = 26",
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.records, baseline.records);
+    assert_eq!(
+        scanned.counts.rejected_records,
+        baseline.counts.rejected_records + 1
+    );
+    assert_eq!(
+        scanned.scanned_counts.complete_records,
+        scanned.scanned_counts.retained_records
+            + scanned.scanned_counts.rejected_records
+            + scanned.scanned_counts.ignored_records
+    );
+}
+
+#[test]
+fn oversized_node_and_tool_state_values_are_rejected_under_the_production_limit() {
+    let baseline = fixture_scan();
+    let oversized = "x".repeat(crate::provider::sqlite::MAX_PROVIDER_SQLITE_VALUE_BYTES + 1);
+
+    let (_node_temp, node_conn) = mutable_fixture();
+    node_conn
+        .execute(
+            "update message_nodes set chat_message = ?1 \
+             where session_id = 'abounding-crest' and node_id = 26",
+            [&oversized],
+        )
+        .unwrap();
+    node_conn.set_limit(
+        Limit::SQLITE_LIMIT_LENGTH,
+        crate::provider::sqlite::MAX_PROVIDER_SQLITE_VALUE_BYTES as i32,
+    );
+    let node_scan = scan(&node_conn);
+    assert_eq!(node_scan.records, baseline.records);
+    assert_eq!(
+        node_scan.counts.rejected_records,
+        baseline.counts.rejected_records + 1
+    );
+
+    let (_tool_temp, tool_conn) = mutable_fixture();
+    tool_conn
+        .execute(
+            "update tool_call_state set tool_call_json = ?1 \
+             where session_id = 'abounding-crest' and tool_call_id = 'exec_0'",
+            [&oversized],
+        )
+        .unwrap();
+    tool_conn.set_limit(
+        Limit::SQLITE_LIMIT_LENGTH,
+        crate::provider::sqlite::MAX_PROVIDER_SQLITE_VALUE_BYTES as i32,
+    );
+    let tool_scan = scan(&tool_conn);
+    assert_eq!(
+        tool_scan.counts.rejected_records,
+        baseline.counts.rejected_records + 1
+    );
+    assert!(tool_scan.rejections.iter().any(|rejection| {
+        rejection
+            .detail
+            .contains("tool_call_json exceeds the provider value byte bound")
+    }));
+}
+
+#[test]
+fn planning_facts_from_an_unhydratable_node_still_rotate_the_fingerprint() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update message_nodes set created_at = 'bad-time', \
+             chat_message = replace(chat_message, 'd8a8ea4c', 'fingerprint-a') \
+         where session_id = 'discovered-sandal' and node_id = 37",
+        [],
+    )
+    .unwrap();
+    let first = scan(&conn);
+    conn.execute(
+        "update message_nodes set chat_message = replace(chat_message, 'fingerprint-a', 'fingerprint-b') \
+         where session_id = 'discovered-sandal' and node_id = 37",
+        [],
+    )
+    .unwrap();
+    let second = scan(&conn);
+    assert_ne!(first.fingerprint, second.fingerprint);
+    assert!(first.records.iter().any(|record| {
+        record
+            .provider_session_id
+            .as_deref()
+            .is_some_and(|id| id.ends_with("/subagents/fingerprint-a"))
+    }));
+    assert!(second.records.iter().any(|record| {
+        record
+            .provider_session_id
+            .as_deref()
+            .is_some_and(|id| id.ends_with("/subagents/fingerprint-b"))
+    }));
+}
+
+#[test]
 fn a_traversed_malformed_parent_rejects_that_session_with_its_row_diagnostic() {
     let (_temp, conn) = mutable_fixture();
     conn.execute(
@@ -257,6 +530,92 @@ fn empty_tool_text_is_enriched_through_the_full_scan() {
         .normalized_body
         .as_deref()
         .is_some_and(|body| body.contains("devinclitooloracle")));
+}
+
+#[test]
+fn malformed_optional_tool_state_is_visible_without_aborting_a_mixed_validity_full_scan() {
+    let baseline = fixture_scan();
+    let (_temp, conn) = mutable_fixture();
+    conn.execute(
+        "update tool_call_state set tool_call_json = x'00', tool_call_update_json = '{' \
+         where session_id = 'abounding-crest' and tool_call_id = 'exec_0'",
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_ne!(scanned.fingerprint, baseline.fingerprint);
+    assert_eq!(
+        scanned.counts.complete_records,
+        baseline.counts.complete_records
+    );
+    assert_eq!(
+        scanned.counts.rejected_records,
+        baseline.counts.rejected_records + 2
+    );
+    assert!(scanned
+        .records
+        .iter()
+        .any(|record| { record.provider_session_id.as_deref() == Some("exclusive-bamboo") }));
+    for detail in [
+        "node 28 ignored optional tool_call_state enrichment for call exec_0: tool_call_json has a BLOB SQLite scalar",
+        "node 28 ignored optional tool_call_state enrichment for call exec_0: tool_call_update_json is not valid JSON",
+    ] {
+        assert!(
+            scanned
+                .rejections
+                .iter()
+                .any(|rejection| rejection.detail.contains(detail)),
+            "missing rejection for {detail}: {:#?}",
+            scanned.rejections
+        );
+    }
+}
+
+#[test]
+fn megabyte_message_ids_are_deduplicated_with_a_fixed_size_key_during_full_scans() {
+    let (_temp, conn) = mutable_fixture();
+    let message = serde_json::json!({
+        "message_id": "m".repeat(1024 * 1024),
+        "role": "assistant",
+        "content": "megabyte dedup oracle",
+    })
+    .to_string();
+    conn.execute(
+        "update message_nodes set chat_message = ?1 \
+         where session_id = 'abounding-crest' and node_id = 30",
+        [&message],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into message_nodes (session_id, node_id, parent_node_id, chat_message, created_at, metadata) \
+         values ('abounding-crest', 999, 30, ?1, 1789910400, null)",
+        [&message],
+    )
+    .unwrap();
+    conn.execute(
+        "update sessions set main_chain_id = 999 where id = 'abounding-crest'",
+        [],
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(
+        scanned
+            .records
+            .iter()
+            .filter(
+                |record| record.content.normalized_body.as_deref() == Some("megabyte dedup oracle")
+            )
+            .count(),
+        1,
+    );
+    assert_eq!(
+        std::mem::size_of_val(&super::source_backed::message_pair_digest(
+            &message, &message
+        )),
+        32,
+    );
 }
 
 #[test]

@@ -140,6 +140,13 @@ impl DevinSessionPlan {
     }
 }
 
+/// Rejects a session whose indexed source scan proved that the forest exceeds
+/// the planning bound. The exact source row count is retained so additions
+/// beyond the bounded facts prefix still rotate evidence and scan counts.
+pub(super) fn reject_oversized_session(total_nodes: u64) -> DevinSessionPlan {
+    DevinSessionPlan::rejected(DevinSessionRejection::TooManyNodes, total_nodes)
+}
+
 /// The largest forest planning will walk before refusing the session.
 ///
 /// Planning holds one entry per node, so this is what bounds its memory. The
@@ -150,6 +157,9 @@ pub(super) const DEVIN_MAX_SESSION_NODES: usize = 1_000_000;
 /// Every lineage walk in one session shares this budget. It prevents many
 /// candidate heads from turning a bounded forest into repeated full walks.
 const DEVIN_MAX_SESSION_WALK_STEPS: usize = DEVIN_MAX_SESSION_NODES * 4;
+
+/// Native subagent identities are retained as repeatedly compared lineage keys.
+pub(super) const DEVIN_SUBAGENT_AGENT_ID_BYTES: usize = 16 * 1024;
 
 /// Plans one session's transcript from its forest.
 ///
@@ -199,9 +209,8 @@ pub(super) fn plan_session_with_limits(
     let mut claimed = BTreeSet::<i64>::new();
     let mut walk_steps = max_walk_steps;
 
-    let primary = match collect_lineage(facts, main_chain_id, &mut counts, None, &mut walk_steps) {
-        Ok(DevinCollectedLineage::Complete(nodes)) => nodes,
-        Ok(DevinCollectedLineage::Blocked(_)) => unreachable!("primary has no blocked nodes"),
+    let primary = match collect_lineage(facts, main_chain_id, &mut counts, &mut walk_steps) {
+        Ok(nodes) => nodes,
         Err(reason) => return DevinSessionPlan::rejected(reason, total),
     };
     claimed.extend(primary.iter().copied());
@@ -216,8 +225,18 @@ pub(super) fn plan_session_with_limits(
     // heads follow in the deterministic order supplied by the reader. A
     // subagent can move between foreground and background while keeping its
     // agent id, so a later head on the same chain replaces an earlier tip.
+    // Every accepted candidate owns its nodes while candidates are admitted.
+    // This makes a same-agent advancing tip walk only the new suffix, and
+    // makes an overlap with a different lineage fail at its first owned node.
+    // The `None` owner is the primary transcript.
+    let mut owners = primary
+        .iter()
+        .copied()
+        .map(|node_id| (node_id, None))
+        .collect::<BTreeMap<_, _>>();
     let mut candidate_indexes = BTreeMap::<String, usize>::new();
     let mut candidates = Vec::<DevinSubagentCandidate>::new();
+    let mut rejected_candidate_nodes = BTreeMap::<i64, DevinCandidateBlock>::new();
     for node_id in &primary {
         let node = &facts[node_id];
         let (Some(tip), Some(agent_id)) = (
@@ -232,6 +251,8 @@ pub(super) fn plan_session_with_limits(
             tip,
             &mut candidate_indexes,
             &mut candidates,
+            &mut owners,
+            &mut rejected_candidate_nodes,
             &mut counts,
             &mut walk_steps,
         );
@@ -243,21 +264,20 @@ pub(super) fn plan_session_with_limits(
             head.chain_node_id,
             &mut candidate_indexes,
             &mut candidates,
+            &mut owners,
+            &mut rejected_candidate_nodes,
             &mut counts,
             &mut walk_steps,
         );
     }
-    let mut blocked = claimed.clone();
     for candidate in candidates {
-        add_subagent_lineage(
-            facts,
-            candidate,
-            &mut claimed,
-            &mut blocked,
-            &mut lineages,
-            &mut counts,
-            &mut walk_steps,
-        );
+        counts.rejected_splices += candidate.rejected_splices;
+        claimed.extend(candidate.nodes.iter().copied());
+        lineages.push(DevinLineagePlan {
+            key: DevinLineageKey::Subagent(candidate.agent_id),
+            lineage_ord: lineages.len() as u32,
+            nodes: ordered_nodes(facts, &candidate.nodes, candidate.tip),
+        });
     }
 
     counts.ignored_nodes = total - claimed.len() as u64;
@@ -271,18 +291,23 @@ pub(super) fn plan_session_with_limits(
 struct DevinSubagentCandidate {
     agent_id: String,
     tip: i64,
+    nodes: BTreeSet<i64>,
+    rejected_splices: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn admit_subagent_candidate(
     facts: &BTreeMap<i64, DevinNodeFacts>,
     agent_id: &str,
     tip: i64,
     indexes: &mut BTreeMap<String, usize>,
     candidates: &mut Vec<DevinSubagentCandidate>,
+    owners: &mut BTreeMap<i64, Option<usize>>,
+    rejected_nodes: &mut BTreeMap<i64, DevinCandidateBlock>,
     counts: &mut DevinPlanCounts,
     walk_steps: &mut usize,
 ) {
-    if agent_id.trim().is_empty() {
+    if agent_id.trim().is_empty() || agent_id.len() > DEVIN_SUBAGENT_AGENT_ID_BYTES {
         counts.rejected_lineages += 1;
         return;
     }
@@ -290,107 +315,183 @@ fn admit_subagent_candidate(
         counts.rejected_lineages += 1;
         return;
     }
-    let Some(&index) = indexes.get(agent_id) else {
-        indexes.insert(agent_id.to_owned(), candidates.len());
-        candidates.push(DevinSubagentCandidate {
-            agent_id: agent_id.to_owned(),
-            tip,
-        });
-        return;
-    };
-    if candidates[index].tip == tip {
+    let existing = indexes.get(agent_id).copied();
+    if existing.is_some_and(|index| candidates[index].tip == tip) {
         return;
     }
-
-    let mut lineage_counts = DevinPlanCounts::default();
-    let candidate_nodes = match collect_lineage(facts, tip, &mut lineage_counts, None, walk_steps) {
-        Ok(DevinCollectedLineage::Complete(nodes)) => nodes,
-        Ok(DevinCollectedLineage::Blocked(_)) => unreachable!("candidate has no blocked nodes"),
-        Err(_) => {
-            counts.rejected_lineages += 1;
-            return;
-        }
-    };
-    if candidate_nodes.contains(&candidates[index].tip) {
-        candidates[index] = DevinSubagentCandidate {
-            agent_id: agent_id.to_owned(),
-            tip,
-        };
-        return;
-    }
-
-    let previous_nodes = collect_lineage(
+    let previous_tip = existing.map(|index| candidates[index].tip);
+    let collected = match collect_candidate_lineage(
         facts,
-        candidates[index].tip,
-        &mut DevinPlanCounts::default(),
-        None,
-        walk_steps,
-    );
-    let previous_nodes = match previous_nodes {
-        Ok(DevinCollectedLineage::Complete(nodes)) => nodes,
-        Ok(DevinCollectedLineage::Blocked(_)) => unreachable!("candidate has no blocked nodes"),
-        Err(_) => {
-            // An earlier malformed link must not hide this valid later tip.
-            counts.rejected_lineages += 1;
-            candidates[index] = DevinSubagentCandidate {
-                agent_id: agent_id.to_owned(),
-                tip,
-            };
-            return;
-        }
-    };
-    if !previous_nodes.contains(&tip) {
-        // Disjoint tips under one exact agent id are ambiguous. Keep the
-        // first native link and reject only the conflicting candidate.
-        counts.rejected_lineages += 1;
-    }
-}
-
-fn add_subagent_lineage(
-    facts: &BTreeMap<i64, DevinNodeFacts>,
-    candidate: DevinSubagentCandidate,
-    claimed: &mut BTreeSet<i64>,
-    blocked: &mut BTreeSet<i64>,
-    lineages: &mut Vec<DevinLineagePlan>,
-    counts: &mut DevinPlanCounts,
-    walk_steps: &mut usize,
-) {
-    if blocked.contains(&candidate.tip) {
-        counts.rejected_lineages += 1;
-        return;
-    }
-    let mut lineage_counts = DevinPlanCounts::default();
-    let nodes = match collect_lineage(
-        facts,
-        candidate.tip,
-        &mut lineage_counts,
-        Some(blocked),
+        tip,
+        owners,
+        rejected_nodes,
+        existing,
+        previous_tip,
         walk_steps,
     ) {
-        Ok(DevinCollectedLineage::Complete(nodes)) => nodes,
-        Ok(DevinCollectedLineage::Blocked(nodes)) => {
-            blocked.extend(nodes);
-            counts.rejected_lineages += 1;
-            return;
-        }
-        Err(_) => {
+        Ok(collected) => collected,
+        Err(DevinCandidateRejection::Overlap | DevinCandidateRejection::Malformed) => {
             counts.rejected_lineages += 1;
             return;
         }
     };
-    counts.rejected_splices += lineage_counts.rejected_splices;
-    blocked.extend(nodes.iter().copied());
-    claimed.extend(nodes.iter().copied());
-    lineages.push(DevinLineagePlan {
-        key: DevinLineageKey::Subagent(candidate.agent_id),
-        lineage_ord: lineages.len() as u32,
-        nodes: ordered_nodes(facts, &nodes, candidate.tip),
+
+    if let Some(index) = existing {
+        if collected.reaches_previous_tip {
+            candidates[index].tip = tip;
+            candidates[index].rejected_splices += collected.rejected_splices;
+            candidates[index]
+                .nodes
+                .extend(collected.nodes.iter().copied());
+            owners.extend(
+                collected
+                    .nodes
+                    .into_iter()
+                    .map(|node_id| (node_id, Some(index))),
+            );
+        } else if !candidates[index].nodes.contains(&tip) {
+            // Disjoint tips under one exact agent id are ambiguous. Keep the
+            // first native link and reject only the conflicting candidate.
+            counts.rejected_lineages += 1;
+        }
+        return;
+    }
+
+    let index = candidates.len();
+    owners.extend(
+        collected
+            .nodes
+            .iter()
+            .copied()
+            .map(|node_id| (node_id, Some(index))),
+    );
+    indexes.insert(agent_id.to_owned(), index);
+    candidates.push(DevinSubagentCandidate {
+        agent_id: agent_id.to_owned(),
+        tip,
+        nodes: collected.nodes,
+        rejected_splices: collected.rejected_splices,
     });
 }
 
-enum DevinCollectedLineage {
-    Complete(BTreeSet<i64>),
-    Blocked(BTreeSet<i64>),
+struct DevinCandidateCollectedLineage {
+    nodes: BTreeSet<i64>,
+    reaches_previous_tip: bool,
+    rejected_splices: u64,
+}
+
+enum DevinCandidateRejection {
+    Overlap,
+    Malformed,
+}
+
+#[derive(Clone, Copy)]
+enum DevinCandidateBlock {
+    Structural,
+    Overlap(Option<usize>),
+}
+
+fn cache_candidate_block(
+    rejected_nodes: &mut BTreeMap<i64, DevinCandidateBlock>,
+    nodes: &BTreeSet<i64>,
+    block: DevinCandidateBlock,
+) {
+    rejected_nodes.extend(nodes.iter().copied().map(|node_id| (node_id, block)));
+}
+
+fn cache_structural_candidate_block(
+    rejected_nodes: &mut BTreeMap<i64, DevinCandidateBlock>,
+    tip: i64,
+    anchor: i64,
+    nodes: &BTreeSet<i64>,
+) {
+    rejected_nodes.insert(tip, DevinCandidateBlock::Structural);
+    rejected_nodes.insert(anchor, DevinCandidateBlock::Structural);
+    cache_candidate_block(rejected_nodes, nodes, DevinCandidateBlock::Structural);
+}
+
+/// Walks only the portion of a candidate that no accepted lineage owns yet.
+/// Nodes already owned by this agent have been validated, so they are terminals
+/// for an advancing tip; another owner is an overlapping lineage.
+fn collect_candidate_lineage(
+    facts: &BTreeMap<i64, DevinNodeFacts>,
+    tip: i64,
+    owners: &BTreeMap<i64, Option<usize>>,
+    rejected_nodes: &mut BTreeMap<i64, DevinCandidateBlock>,
+    candidate_index: Option<usize>,
+    previous_tip: Option<i64>,
+    walk_steps: &mut usize,
+) -> Result<DevinCandidateCollectedLineage, DevinCandidateRejection> {
+    let mut nodes = BTreeSet::<i64>::new();
+    let mut pending = vec![tip];
+    let mut reaches_previous_tip = false;
+    let mut rejected_splices = 0;
+    while let Some(anchor) = pending.pop() {
+        let mut anchor_nodes = BTreeSet::<i64>::new();
+        let mut cursor = Some(anchor);
+        while let Some(node_id) = cursor {
+            if let Some(block) = rejected_nodes.get(&node_id).copied() {
+                let belongs_to_this_candidate = matches!(
+                    block,
+                    DevinCandidateBlock::Overlap(Some(owner_index))
+                        if Some(owner_index) == candidate_index
+                );
+                if !belongs_to_this_candidate {
+                    if matches!(block, DevinCandidateBlock::Structural) {
+                        cache_structural_candidate_block(
+                            rejected_nodes,
+                            tip,
+                            anchor,
+                            &anchor_nodes,
+                        );
+                    } else {
+                        rejected_nodes.insert(tip, block);
+                    }
+                    return Err(DevinCandidateRejection::Overlap);
+                }
+            }
+            if let Some(owner) = owners.get(&node_id) {
+                if owner.is_some_and(|owner_index| Some(owner_index) == candidate_index) {
+                    reaches_previous_tip |= previous_tip == Some(node_id);
+                    break;
+                }
+                rejected_nodes.insert(tip, DevinCandidateBlock::Overlap(*owner));
+                return Err(DevinCandidateRejection::Overlap);
+            }
+            let Some(node) = facts.get(&node_id) else {
+                cache_structural_candidate_block(rejected_nodes, tip, anchor, &anchor_nodes);
+                return Err(DevinCandidateRejection::Malformed);
+            };
+            if *walk_steps == 0 {
+                return Err(DevinCandidateRejection::Malformed);
+            }
+            *walk_steps -= 1;
+            if node
+                .parent_node_id
+                .is_some_and(|parent_node_id| parent_node_id >= node_id)
+            {
+                cache_structural_candidate_block(rejected_nodes, tip, anchor, &anchor_nodes);
+                return Err(DevinCandidateRejection::Malformed);
+            }
+            if !nodes.insert(node_id) {
+                break;
+            }
+            anchor_nodes.insert(node_id);
+            if let Some(summarized_from) = node.summarized_from {
+                if facts.contains_key(&summarized_from) {
+                    pending.push(summarized_from);
+                } else {
+                    rejected_splices += 1;
+                }
+            }
+            cursor = node.parent_node_id;
+        }
+    }
+    Ok(DevinCandidateCollectedLineage {
+        nodes,
+        reaches_previous_tip,
+        rejected_splices,
+    })
 }
 
 /// Walks one lineage from `tip`, following parents and splicing transitively.
@@ -399,9 +500,8 @@ fn collect_lineage(
     facts: &BTreeMap<i64, DevinNodeFacts>,
     tip: i64,
     counts: &mut DevinPlanCounts,
-    blocked: Option<&BTreeSet<i64>>,
     walk_steps: &mut usize,
-) -> Result<DevinCollectedLineage, DevinSessionRejection> {
+) -> Result<BTreeSet<i64>, DevinSessionRejection> {
     let mut collected = BTreeSet::<i64>::new();
     // Anchors still to expand. Bounded by the node count because an anchor is
     // only ever pushed when its node is first reached.
@@ -409,9 +509,6 @@ fn collect_lineage(
     while let Some(anchor) = pending.pop() {
         let mut cursor = Some(anchor);
         while let Some(node_id) = cursor {
-            if blocked.is_some_and(|nodes| nodes.contains(&node_id)) {
-                return Ok(DevinCollectedLineage::Blocked(collected));
-            }
             let Some(node) = facts.get(&node_id) else {
                 return Err(DevinSessionRejection::BrokenChainParent);
             };
@@ -444,7 +541,7 @@ fn collect_lineage(
             cursor = node.parent_node_id;
         }
     }
-    Ok(DevinCollectedLineage::Complete(collected))
+    Ok(collected)
 }
 
 /// Orders a lineage's nodes and marks which were on the recorded chain.

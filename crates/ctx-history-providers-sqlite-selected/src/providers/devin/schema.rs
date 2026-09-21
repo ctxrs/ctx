@@ -104,13 +104,19 @@ impl DevinNativeSchema {
             "Devin subagent_heads table",
             DEVIN_REQUIRED_SUBAGENT_HEAD_COLUMNS,
         )?;
+        conn.prepare("select rowid from sessions limit 0")
+            .map_err(CaptureError::from)?;
 
         // Every ordered scan and point lookup must ride a native unique key.
         // Without these keys keyset paging can skip duplicate sessions, head
         // ordering can spill to ambient temporary storage, and tool-state
         // enrichment can choose an arbitrary duplicate row.
         for (table, columns, purpose) in [
-            ("sessions", &["id"][..], "session keyset paging"),
+            (
+                "sessions",
+                &["id"][..],
+                "deterministic session identity lookups",
+            ),
             (
                 "message_nodes",
                 &["session_id", "node_id"][..],

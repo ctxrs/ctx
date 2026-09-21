@@ -319,6 +319,61 @@ fn devin_landed_route_publishes_the_main_chain_and_replays_exactly() {
 }
 
 #[test]
+fn devin_malformed_optional_tool_state_publishes_rejections_and_replays() {
+    let temp = test_support_paths::tempdir().unwrap();
+    let provider = temp.path().join("provider");
+    fs::create_dir(&provider).unwrap();
+    let database = provider.join("sessions.db");
+    fs::copy(
+        test_support_paths::capture_repo_root()
+            .join("tests/fixtures/provider-history/devin/v17/sessions.db"),
+        &database,
+    )
+    .unwrap();
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
+    connection
+        .execute(
+            "update tool_call_state set tool_call_json = x'00', tool_call_update_json = '{' \
+             where session_id = 'abounding-crest' and tool_call_id = 'exec_0'",
+            [],
+        )
+        .unwrap();
+    assert_active_wal(&database);
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    let source = provider_source_for_path(CaptureProvider::Devin, database);
+    register_landed_source_backed_route_with_data_root(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::Automatic,
+        &temp.path().join("data-root"),
+    )
+    .unwrap();
+    let index = temp.path().join("index");
+    let published = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_clean_refresh(&published);
+    assert_eq!(published.record_rejections.total(), 2);
+    let source = published
+        .sources
+        .iter()
+        .find(|source| source.observation().source().provider() == "devin")
+        .unwrap();
+    assert_eq!(source.counts().rejected_records, 2);
+    assert_eq!(
+        indexed_records_with_exact_text(&index, CaptureProvider::Devin, "devincliassistantoracle"),
+        1
+    );
+
+    let replay = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_clean_refresh(&replay);
+    assert_eq!(replay.commit.generation_id, published.commit.generation_id);
+    assert_eq!(replay.sources, published.sources);
+}
+
+#[test]
 fn kiro_schema_failure_reports_cleanup_failure_without_staging_leftovers() {
     let temp = test_support_paths::tempdir().unwrap();
     let provider = temp.path().join("provider");

@@ -19,8 +19,7 @@ use ctx_history_capture_model::{
     normalization::provider_timestamp_seconds, raw_object_keys_are_unique,
 };
 use ctx_history_capture_runtime::{
-    SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDraft,
-    SourceBackedRecordRejectionDrafts, MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS,
+    SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDrafts,
 };
 use ctx_history_core::{
     admit_optional_provider_call_id, derive_event_id, derive_native_session_id, ActivityInvocation,
@@ -36,25 +35,33 @@ use ctx_history_source_sqlite::{
 };
 
 use crate::{
-    fingerprint::{hash_optional_text, hash_text, CountOverflowError, RelationFingerprint},
+    fingerprint::{hash_text, CountOverflowError, RelationFingerprint},
     provider_sources::SqliteSourceAccessError,
     CaptureError, DEVIN_CLI_SESSIONS_SQLITE_SOURCE_FORMAT,
 };
 
 use super::{
-    chain::{
-        plan_session, DevinLineageKey, DevinSessionPlan, DevinSessionRejection, DevinSpliceKind,
-        DevinSubagentHead,
-    },
+    chain::{plan_session, reject_oversized_session, DevinLineageKey, DevinSessionPlan},
     normalization::{enrich_tool_output, normalize_node, DevinNativeEvent, DevinNodeDisposition},
     schema::DevinNativeSchema,
     stream::{
         hydrate_nodes, read_session_facts_with_row_shape_rejections, read_session_page,
-        read_subagent_heads_with_row_shape_rejections, DevinAmbiguousJsonNode,
-        DevinMalformedParentNode, DevinMalformedSubagentHead, DevinNodeRow, DevinSessionRow,
+        read_subagent_heads_with_row_shape_rejections, DevinMalformedNode, DevinNodeRow,
+        DevinSessionRow,
     },
     tool_state::read_tool_state,
 };
+
+mod diagnostics;
+mod evidence;
+
+use diagnostics::{
+    diagnostic_id, malformed_parent_traversed, record_ambiguous_json_rejection,
+    record_devin_rejection, record_malformed_head_rejection, record_malformed_node_rejection,
+    record_malformed_session_metadata_rejection, record_malformed_tool_state_rejections,
+    record_repeated_devin_rejection, session_rejection_detail,
+};
+use evidence::{malformed_session_evidence, node_evidence, session_evidence};
 
 pub(super) const DEVIN_SOURCE_BACKED_PARSER_REVISION: &str = "devin-cli-sessions-sqlite-v2";
 const DEVIN_SOURCE_ANCHOR_NAMESPACE: &str = "devin_cli.sessions_database";
@@ -317,17 +324,36 @@ pub(super) fn scan_devin_snapshot(
     let mut fingerprint =
         RelationFingerprint::new(DEVIN_LOGICAL_DATABASE_DOMAIN, &schema.capability_digest);
     let mut counts = DevinScanCounts::default();
-    let mut cursor = String::new();
+    let mut cursor = None;
     let mut event_sequence = 0_u64;
     let mut record_rejections = SourceBackedRecordRejectionDrafts::default();
 
     loop {
-        let page = read_session_page(conn, schema, &cursor)?;
+        let page = read_session_page(conn, schema, cursor)?;
         if page.is_empty() {
             break;
         }
         for session in &page {
             counts.sessions = checked_add(counts.sessions, 1)?;
+            if session.malformed_id {
+                counts.rejected_sessions = checked_add(counts.rejected_sessions, 1)?;
+                fingerprint.record::<DevinSourceBackedError>(
+                    DEVIN_LOGICAL_SESSION_RELATION,
+                    malformed_session_evidence(session),
+                )?;
+                record_devin_rejection(
+                    &mut record_rejections,
+                    source,
+                    source_selector,
+                    Some(session.sqlite_rowid),
+                    SourceBackedRecordRejectionClass::MalformedRecord,
+                    format!(
+                        "Devin sessions row {} was rejected: id has SQLite storage class {} and {} bytes",
+                        session.sqlite_rowid, session.id_storage_class, session.id_bytes
+                    ),
+                );
+                continue;
+            }
             if session.malformed_main_chain_id {
                 counts.rejected_sessions = checked_add(counts.rejected_sessions, 1)?;
                 fingerprint.record::<DevinSourceBackedError>(
@@ -347,33 +373,43 @@ pub(super) fn scan_devin_snapshot(
                 );
                 continue;
             }
+            if record_malformed_session_metadata_rejection(
+                &mut record_rejections,
+                source,
+                source_selector,
+                session,
+            ) {
+                counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+            }
             let session_facts = read_session_facts_with_row_shape_rejections(conn, &session.id)?;
             let heads = read_subagent_heads_with_row_shape_rejections(conn, &session.id)?;
-            let plan = plan_session(&session_facts.facts, session.main_chain_id, &heads.heads);
+            let plan = if session_facts.overflowed {
+                reject_oversized_session(session_facts.total_rows)
+            } else {
+                plan_session(&session_facts.facts, session.main_chain_id, &heads.heads)
+            };
             fingerprint.record::<DevinSourceBackedError>(
                 DEVIN_LOGICAL_SESSION_RELATION,
                 session_evidence(
                     session,
                     &plan,
+                    &session_facts.facts,
                     &heads.heads,
-                    &session_facts.malformed_parent_nodes,
+                    session_facts.total_rows,
+                    session_facts.overflowed,
+                    &session_facts.malformed_nodes,
                     &heads.malformed_heads,
                     &session_facts.ambiguous_json_nodes,
                 ),
             )?;
-            for malformed in &session_facts.malformed_parent_nodes {
+            for malformed in &session_facts.malformed_nodes {
                 counts.rejected_records = checked_add(counts.rejected_records, 1)?;
-                record_devin_rejection(
+                record_malformed_node_rejection(
                     &mut record_rejections,
                     source,
                     source_selector,
-                    Some(malformed.node_id),
-                    SourceBackedRecordRejectionClass::MalformedRecord,
-                    format!(
-                        "Devin session {} node {} was rejected: parent_node_id has a non-integer SQLite scalar",
-                        diagnostic_id(&session.id),
-                        malformed.node_id
-                    ),
+                    session,
+                    malformed,
                 );
             }
             if let Some(reason) = plan.rejection.as_ref() {
@@ -407,19 +443,44 @@ pub(super) fn scan_devin_snapshot(
                 .iter()
                 .flat_map(|lineage| lineage.nodes.iter().map(|node| node.node_id))
                 .collect::<std::collections::BTreeSet<_>>();
+            let malformed_node_ids = session_facts
+                .malformed_nodes
+                .iter()
+                .filter_map(|node| node.node_id)
+                .collect::<std::collections::BTreeSet<_>>();
             let ambiguous_unplanned = session_facts
                 .ambiguous_json_nodes
                 .iter()
-                .filter(|node| !planned_nodes.contains(&node.node_id))
+                .filter(|node| {
+                    !planned_nodes.contains(&node.node_id)
+                        && !malformed_node_ids.contains(&node.node_id)
+                })
                 .collect::<Vec<_>>();
-            let reclassified_ignored = u64::try_from(ambiguous_unplanned.len()).unwrap_or(u64::MAX);
+            let ambiguous_reclassified =
+                u64::try_from(ambiguous_unplanned.len()).unwrap_or(u64::MAX);
+            let malformed_unplanned = session_facts
+                .malformed_nodes
+                .iter()
+                .filter(|node| {
+                    session_facts.overflowed
+                        || (!node.malformed_node_id
+                            && !node.malformed_parent_node_id
+                            && node
+                                .node_id
+                                .is_some_and(|node_id| !planned_nodes.contains(&node_id)))
+                })
+                .count();
+            let reclassified_ignored = checked_add(
+                ambiguous_reclassified,
+                u64::try_from(malformed_unplanned).unwrap_or(u64::MAX),
+            )?;
             let session_ignored = plan
                 .counts
                 .ignored_nodes
                 .checked_sub(reclassified_ignored)
                 .ok_or(DevinSourceBackedError::CountOverflow)?;
             counts.ignored_nodes = checked_add(counts.ignored_nodes, session_ignored)?;
-            counts.rejected_records = checked_add(counts.rejected_records, reclassified_ignored)?;
+            counts.rejected_records = checked_add(counts.rejected_records, ambiguous_reclassified)?;
             for ambiguous in ambiguous_unplanned {
                 record_ambiguous_json_rejection(
                     &mut record_rejections,
@@ -476,6 +537,7 @@ pub(super) fn scan_devin_snapshot(
                 source,
                 session,
                 &plan,
+                &session_facts.malformed_nodes,
                 &mut fingerprint,
                 &mut counts,
                 source_selector,
@@ -484,10 +546,7 @@ pub(super) fn scan_devin_snapshot(
                 emit,
             )?;
         }
-        cursor = page
-            .last()
-            .map(|session| session.id.clone())
-            .unwrap_or_default();
+        cursor = page.last().map(|session| session.sqlite_rowid);
     }
 
     Ok(DevinSourceBackedScan {
@@ -504,6 +563,7 @@ fn project_session(
     source: &SourceKey,
     session: &DevinSessionRow,
     plan: &DevinSessionPlan,
+    malformed_nodes: &[DevinMalformedNode],
     fingerprint: &mut RelationFingerprint,
     counts: &mut DevinScanCounts,
     source_selector: &str,
@@ -516,6 +576,11 @@ fn project_session(
     };
     debug_assert_eq!(primary_plan.key, DevinLineageKey::Primary);
     let primary = primary_projection(source, session)?;
+    let unhydratable_nodes = malformed_nodes
+        .iter()
+        .filter(|node| !node.malformed_node_id && !node.malformed_parent_node_id)
+        .filter_map(|node| node.node_id)
+        .collect::<std::collections::BTreeSet<_>>();
 
     for lineage in &plan.lineages {
         let projection = match &lineage.key {
@@ -527,6 +592,7 @@ fn project_session(
         let node_ids = lineage
             .nodes
             .iter()
+            .filter(|node| !unhydratable_nodes.contains(&node.node_id))
             .map(|node| node.node_id)
             .collect::<Vec<_>>();
         let splice_kinds = lineage
@@ -536,7 +602,7 @@ fn project_session(
             .collect::<std::collections::BTreeMap<_, _>>();
         // Within one lineage a repeated message_id whose payload is
         // byte-identical is a copy Devin rewrote, not a second turn.
-        let mut seen_messages = std::collections::BTreeSet::<(String, [u8; 32])>::new();
+        let mut seen_messages = std::collections::BTreeSet::<[u8; 32]>::new();
         let mut emit_error = None;
 
         hydrate_nodes::<DevinSourceBackedError>(conn, &session.id, &node_ids, &mut |node| {
@@ -602,8 +668,7 @@ fn project_session(
                 None => {}
             }
             if let Some(message_id) = normalized.message_id.as_deref() {
-                let message_digest = message_payload_digest(&node.chat_message);
-                if !seen_messages.insert((message_id.to_owned(), message_digest)) {
+                if !seen_messages.insert(message_pair_digest(message_id, &node.chat_message)) {
                     counts.ignored_nodes = checked_add(counts.ignored_nodes, 1)?;
                     return Ok(());
                 }
@@ -613,6 +678,19 @@ fn project_session(
                 if event.event_type == EventType::ToolOutput {
                     if let Some(call_id) = event.provider_call_id.clone() {
                         let state = read_tool_state(conn, &session.id, &call_id)?;
+                        counts.rejected_records = checked_add(
+                            counts.rejected_records,
+                            u64::try_from(state.malformed_fields().count()).unwrap_or(u64::MAX),
+                        )?;
+                        record_malformed_tool_state_rejections(
+                            record_rejections,
+                            source,
+                            source_selector,
+                            session,
+                            node.node_id,
+                            &call_id,
+                            &state,
+                        );
                         enrich_tool_output(
                             &mut event,
                             state.tool_call.as_ref(),
@@ -672,153 +750,6 @@ fn project_session(
     Ok(())
 }
 
-fn diagnostic_id(value: &str) -> String {
-    value.chars().take(128).collect()
-}
-
-fn malformed_parent_traversed(
-    facts: &std::collections::BTreeMap<i64, super::chain::DevinNodeFacts>,
-    main_chain_id: Option<i64>,
-    malformed_parent_nodes: &[DevinMalformedParentNode],
-) -> Option<i64> {
-    let malformed = malformed_parent_nodes
-        .iter()
-        .map(|node| node.node_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut cursor = main_chain_id?;
-    let mut visited = std::collections::BTreeSet::new();
-    loop {
-        if !visited.insert(cursor) {
-            return None;
-        }
-        if malformed.contains(&cursor) {
-            return Some(cursor);
-        }
-        let node = facts.get(&cursor)?;
-        let Some(parent) = node.parent_node_id else {
-            return None;
-        };
-        if malformed.contains(&parent) {
-            return Some(parent);
-        }
-        cursor = parent;
-    }
-}
-
-fn session_rejection_detail(reason: &DevinSessionRejection) -> &'static str {
-    match reason {
-        DevinSessionRejection::MissingChainAnchor => "main_chain_id names an absent node",
-        DevinSessionRejection::BrokenChainParent => "a retained chain parent is absent",
-        DevinSessionRejection::NonMonotonicParent => {
-            "a retained chain parent does not precede its child"
-        }
-        DevinSessionRejection::TooManyNodes => "the message forest exceeds the planning bound",
-    }
-}
-
-fn record_devin_rejection(
-    rejections: &mut SourceBackedRecordRejectionDrafts,
-    source: &SourceKey,
-    source_selector: &str,
-    node_id: Option<i64>,
-    class: SourceBackedRecordRejectionClass,
-    detail: String,
-) {
-    rejections.record(SourceBackedRecordRejectionDraft {
-        source: source.clone(),
-        provider: CaptureProvider::Devin,
-        source_selector: source_selector.to_owned(),
-        line_number: node_id
-            .and_then(|value| u64::try_from(value).ok())
-            .unwrap_or(0),
-        payload_type: Some("sqlite_row".to_owned()),
-        class,
-        detail,
-    });
-}
-
-fn record_malformed_head_rejection(
-    rejections: &mut SourceBackedRecordRejectionDrafts,
-    source: &SourceKey,
-    source_selector: &str,
-    session: &DevinSessionRow,
-    malformed: &DevinMalformedSubagentHead,
-) {
-    let fields = match (
-        malformed.malformed_chain_node_id,
-        malformed.malformed_updated_at,
-    ) {
-        (true, true) => "chain_node_id and updated_at",
-        (true, false) => "chain_node_id",
-        (false, true) => "updated_at",
-        (false, false) => unreachable!("malformed durable head must name a malformed field"),
-    };
-    record_devin_rejection(
-        rejections,
-        source,
-        source_selector,
-        None,
-        SourceBackedRecordRejectionClass::MalformedRecord,
-        format!(
-            "Devin session {} durable subagent head {} was rejected: {fields} has a non-integer SQLite scalar",
-            diagnostic_id(&session.id),
-            diagnostic_id(&malformed.agent_id),
-        ),
-    );
-}
-
-fn record_ambiguous_json_rejection(
-    rejections: &mut SourceBackedRecordRejectionDrafts,
-    source: &SourceKey,
-    source_selector: &str,
-    session: &DevinSessionRow,
-    ambiguous: &DevinAmbiguousJsonNode,
-) {
-    let fields = match (ambiguous.metadata, ambiguous.chat_message) {
-        (true, true) => "metadata and chat_message",
-        (true, false) => "metadata",
-        (false, true) => "chat_message",
-        (false, false) => unreachable!("ambiguous JSON row must name an ambiguous field"),
-    };
-    record_devin_rejection(
-        rejections,
-        source,
-        source_selector,
-        Some(ambiguous.node_id),
-        SourceBackedRecordRejectionClass::MalformedRecord,
-        format!(
-            "Devin session {} node {} was rejected: {fields} has ambiguous duplicate JSON keys",
-            diagnostic_id(&session.id),
-            ambiguous.node_id,
-        ),
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_repeated_devin_rejection(
-    rejections: &mut SourceBackedRecordRejectionDrafts,
-    source: &SourceKey,
-    source_selector: &str,
-    node_id: Option<i64>,
-    count: u64,
-    class: SourceBackedRecordRejectionClass,
-    detail: String,
-) {
-    let retained = count.min(MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS as u64);
-    for _ in 0..retained {
-        record_devin_rejection(
-            rejections,
-            source,
-            source_selector,
-            node_id,
-            class,
-            detail.clone(),
-        );
-    }
-    let omitted = count.saturating_sub(retained);
-    rejections.record_omitted(usize::try_from(omitted).unwrap_or(usize::MAX));
-}
-
 /// The logical row digest for one node, over the columns that carry content.
 ///
 /// `row_id` is deliberately excluded: it is an insertion artifact, and a
@@ -836,104 +767,11 @@ fn node_row_digest(node: &DevinNodeRow) -> [u8; 32] {
 /// Content identity used only to collapse Devin's rewritten compaction copy.
 /// Row timestamps and metadata remain in the logical fingerprint, but they do
 /// not make the same exact native message a second searchable turn.
-fn message_payload_digest(chat_message: &str) -> [u8; 32] {
-    sqlite_logical_record_digest_bytes(&[NativeSqliteValue::Text(chat_message.to_owned())])
-}
-
-fn session_evidence(
-    session: &DevinSessionRow,
-    plan: &DevinSessionPlan,
-    heads: &[DevinSubagentHead],
-    malformed_parent_nodes: &[DevinMalformedParentNode],
-    malformed_heads: &[DevinMalformedSubagentHead],
-    ambiguous_json_nodes: &[DevinAmbiguousJsonNode],
-) -> [u8; 32] {
+pub(super) fn message_pair_digest(message_id: &str, chat_message: &str) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
-    hash_text(&mut digest, &session.id);
-    hash_text(&mut digest, &session.working_directory);
-    hash_optional_text(&mut digest, session.title.as_deref());
-    hash_optional_text(&mut digest, session.model.as_deref());
-    hash_optional_text(&mut digest, session.agent_mode.as_deref());
-    digest.update(session.main_chain_id.unwrap_or(-1).to_be_bytes());
-    digest.update([u8::from(session.malformed_main_chain_id)]);
-    digest.update(session.created_at_ms.unwrap_or(-1).to_be_bytes());
-    digest.update(session.last_activity_at_ms.unwrap_or(-1).to_be_bytes());
-    digest.update([u8::from(session.hidden)]);
-    // The disposition is part of the evidence so a session that starts or
-    // stops being importable cannot look unchanged.
-    digest.update([plan.rejection.is_some() as u8]);
-    digest.update(plan.imported_nodes().to_be_bytes());
-    digest.update(plan.counts.ignored_nodes.to_be_bytes());
-    digest.update(plan.counts.rejected_lineages.to_be_bytes());
-    digest.update(plan.counts.rejected_splices.to_be_bytes());
-    digest.update(u64::try_from(heads.len()).unwrap_or(u64::MAX).to_be_bytes());
-    for head in heads {
-        hash_text(&mut digest, &head.agent_id);
-        digest.update(head.chain_node_id.to_be_bytes());
-        digest.update(head.updated_at.to_be_bytes());
-    }
-    digest.update(
-        u64::try_from(malformed_parent_nodes.len())
-            .unwrap_or(u64::MAX)
-            .to_be_bytes(),
-    );
-    for node in malformed_parent_nodes {
-        digest.update(node.node_id.to_be_bytes());
-    }
-    digest.update(
-        u64::try_from(malformed_heads.len())
-            .unwrap_or(u64::MAX)
-            .to_be_bytes(),
-    );
-    for head in malformed_heads {
-        hash_text(&mut digest, &head.agent_id);
-        digest.update([u8::from(head.malformed_chain_node_id)]);
-        digest.update([u8::from(head.malformed_updated_at)]);
-    }
-    digest.update(
-        u64::try_from(ambiguous_json_nodes.len())
-            .unwrap_or(u64::MAX)
-            .to_be_bytes(),
-    );
-    for node in ambiguous_json_nodes {
-        digest.update(node.node_id.to_be_bytes());
-        digest.update([u8::from(node.metadata)]);
-        digest.update([u8::from(node.chat_message)]);
-    }
-    digest.finalize().into()
-}
-
-fn malformed_session_evidence(session: &DevinSessionRow) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut digest = Sha256::new();
-    hash_text(&mut digest, &session.id);
-    hash_text(&mut digest, &session.working_directory);
-    hash_optional_text(&mut digest, session.title.as_deref());
-    hash_optional_text(&mut digest, session.model.as_deref());
-    hash_optional_text(&mut digest, session.agent_mode.as_deref());
-    digest.update([u8::from(session.malformed_main_chain_id)]);
-    digest.update(session.created_at_ms.unwrap_or(-1).to_be_bytes());
-    digest.update(session.last_activity_at_ms.unwrap_or(-1).to_be_bytes());
-    digest.update([u8::from(session.hidden)]);
-    digest.finalize().into()
-}
-
-fn node_evidence(
-    node: &DevinNodeRow,
-    lineage_ord: u32,
-    chain_ord: u32,
-    splice_kind: DevinSpliceKind,
-    row_digest: [u8; 32],
-) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut digest = Sha256::new();
-    digest.update(lineage_ord.to_be_bytes());
-    digest.update(chain_ord.to_be_bytes());
-    digest.update(node.node_id.to_be_bytes());
-    digest.update(node.parent_node_id.unwrap_or(-1).to_be_bytes());
-    digest.update([splice_kind.code()]);
-    digest.update(row_digest);
+    hash_text(&mut digest, message_id);
+    hash_text(&mut digest, chat_message);
     digest.finalize().into()
 }
 

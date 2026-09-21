@@ -1,8 +1,9 @@
+use ctx_history_capture_model::file_references::MAX_PROVIDER_FILE_REFERENCES_PER_EVENT;
 use ctx_history_core::{EventRole, EventType};
 use serde_json::{json, Value};
 
 use super::normalization::{
-    enrich_tool_output, normalize_node, DevinNativeEvent, DevinNodeDisposition,
+    enrich_tool_output, literal_file_paths, normalize_node, DevinNativeEvent, DevinNodeDisposition,
 };
 
 fn normalize(value: Value) -> Vec<DevinNativeEvent> {
@@ -232,6 +233,53 @@ fn acp_enrichment_is_additive_and_never_overwrites_the_node() {
     let mut pending = normalize(json!({"role": "tool", "content": "x"})).remove(0);
     enrich_tool_output(&mut pending, None, Some(&json!({"status": "in_progress"})));
     assert_eq!(pending.status, None);
+}
+
+#[test]
+fn acp_path_collection_keeps_first_seen_order_and_stops_at_the_provider_limit() {
+    let mut event = normalize(json!({"role": "tool", "content": "result"})).remove(0);
+    let locations = (0..=MAX_PROVIDER_FILE_REFERENCES_PER_EVENT)
+        .map(|index| json!({"path": format!("/work/{index}.rs")}))
+        .collect::<Vec<_>>();
+    let call = json!({
+        "locations": locations,
+        "rawInput": {"file_path": "/work/after-limit.rs"},
+    });
+    let update = json!({
+        "locations": [
+            {"path": "/work/0.rs"},
+        ],
+        "rawInput": {"file_path": "/work/0.rs"},
+    });
+
+    enrich_tool_output(&mut event, Some(&call), Some(&update));
+
+    assert_eq!(
+        event.file_paths.len(),
+        MAX_PROVIDER_FILE_REFERENCES_PER_EVENT
+    );
+    assert_eq!(
+        event.file_paths.first().map(String::as_str),
+        Some("/work/0.rs")
+    );
+    assert_eq!(
+        event.file_paths.last().map(String::as_str),
+        Some("/work/65535.rs")
+    );
+    assert!(!event
+        .file_paths
+        .contains(&"/work/after-limit.rs".to_owned()));
+}
+
+#[test]
+fn literal_path_collection_stops_at_the_provider_limit() {
+    let arguments = (0..=MAX_PROVIDER_FILE_REFERENCES_PER_EVENT)
+        .map(|index| json!({"file_path": format!("/src/{index}.rs")}))
+        .collect::<Vec<_>>();
+    let paths = literal_file_paths(&Value::Array(arguments));
+
+    assert_eq!(paths.len(), MAX_PROVIDER_FILE_REFERENCES_PER_EVENT);
+    assert_eq!(paths.last().map(String::as_str), Some("/src/65535.rs"));
 }
 
 #[test]

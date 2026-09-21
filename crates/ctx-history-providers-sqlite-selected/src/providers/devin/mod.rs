@@ -29,6 +29,9 @@ mod schema_tests;
 #[cfg(test)]
 #[path = "source_backed_tests.rs"]
 mod source_backed_tests;
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod stream_tests;
 
 pub fn devin_source_backed_driver<B: crate::SelectedSqliteCaptureBinding>(
     source_path: &std::path::Path,

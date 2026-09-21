@@ -12,12 +12,16 @@
 //! it is a provider attestation over the reasoning text, not content, and
 //! retaining it would republish a signature ctx cannot verify.
 
+use std::collections::HashSet;
+
 use ctx_history_core::{EventRole, EventType};
 use serde_json::{json, Map, Value};
 
 use ctx_history_capture_model::{
     acp::{acp_terminal_status, acp_visible_text},
-    file_references::visit_literal_file_reference_drafts,
+    file_references::{
+        visit_literal_file_reference_drafts, MAX_PROVIDER_FILE_REFERENCES_PER_EVENT,
+    },
     normalization::provider_role,
     raw_object_keys_are_unique, tool_input,
 };
@@ -318,6 +322,7 @@ pub(super) fn enrich_tool_output(
     tool_call_json: Option<&Value>,
     tool_call_update_json: Option<&Value>,
 ) {
+    let mut file_paths = BoundedPathCollection::from_paths(std::mem::take(&mut event.file_paths));
     for blob in [tool_call_update_json, tool_call_json]
         .into_iter()
         .flatten()
@@ -344,12 +349,9 @@ pub(super) fn enrich_tool_output(
                 }
             }
         }
-        for path in acp_location_paths(blob) {
-            if !event.file_paths.contains(&path) {
-                event.file_paths.push(path);
-            }
-        }
+        append_acp_location_paths(blob, &mut file_paths);
     }
+    event.file_paths = file_paths.into_paths();
     let structured = [
         ("tool_call", tool_call_json),
         ("tool_call_update", tool_call_update_json),
@@ -363,39 +365,71 @@ pub(super) fn enrich_tool_output(
 }
 
 /// File paths an ACP record names, from `locations[]` and its raw input.
-fn acp_location_paths(blob: &Value) -> Vec<String> {
-    let mut paths = blob
-        .get("locations")
-        .and_then(Value::as_array)
-        .map(|locations| {
-            locations
-                .iter()
-                .filter_map(|location| location.get("path").and_then(Value::as_str))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if let Some(raw_input) = blob.get("rawInput") {
-        for path in literal_file_paths(raw_input) {
-            if !paths.contains(&path) {
-                paths.push(path);
+fn append_acp_location_paths(blob: &Value, paths: &mut BoundedPathCollection) {
+    if let Some(locations) = blob.get("locations").and_then(Value::as_array) {
+        for path in locations
+            .iter()
+            .filter_map(|location| location.get("path").and_then(Value::as_str))
+        {
+            if !paths.push(path.to_owned()) {
+                return;
             }
         }
     }
-    paths
+    if let Some(raw_input) = blob.get("rawInput") {
+        append_literal_file_paths(raw_input, paths);
+    }
 }
 
 /// File paths named literally in a provider-supplied value.
 ///
 /// Only `File` drafts are taken; the shared visitor also reports URLs and
 /// other literal kinds, which are not file touches.
-fn literal_file_paths(value: &Value) -> Vec<String> {
-    let mut paths = Vec::new();
-    let _ = visit_literal_file_reference_drafts::<std::convert::Infallible>(value, |draft| {
-        if draft.kind == LiteralFactKind::File && !paths.contains(&draft.value) {
-            paths.push(draft.value);
+pub(super) fn literal_file_paths(value: &Value) -> Vec<String> {
+    let mut paths = BoundedPathCollection::default();
+    append_literal_file_paths(value, &mut paths);
+    paths.into_paths()
+}
+
+fn append_literal_file_paths(value: &Value, paths: &mut BoundedPathCollection) {
+    let _ = visit_literal_file_reference_drafts::<()>(value, |draft| {
+        if draft.kind == LiteralFactKind::File && !paths.push(draft.value) {
+            return Err(());
         }
         Ok(())
     });
-    paths
+}
+
+/// First-seen paths with bounded retained state.
+#[derive(Default)]
+struct BoundedPathCollection {
+    paths: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl BoundedPathCollection {
+    fn from_paths(paths: Vec<String>) -> Self {
+        let mut collection = Self::default();
+        for path in paths {
+            if !collection.push(path) {
+                break;
+            }
+        }
+        collection
+    }
+
+    /// Returns false once the provider-wide reference cap has been retained.
+    fn push(&mut self, path: String) -> bool {
+        if self.paths.len() == MAX_PROVIDER_FILE_REFERENCES_PER_EVENT {
+            return false;
+        }
+        if self.seen.insert(path.clone()) {
+            self.paths.push(path);
+        }
+        true
+    }
+
+    fn into_paths(self) -> Vec<String> {
+        self.paths
+    }
 }
