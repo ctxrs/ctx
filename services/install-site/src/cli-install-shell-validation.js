@@ -270,7 +270,7 @@ json_document_is_well_formed() {
       return 0
     }
     {
-      if (NR > 1024) too_many_records = 1
+      if (NR > 4096) too_many_records = 1
       if (!too_many_records) {
         if (NR > 1) document = document newline
         document = document $0
