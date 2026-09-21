@@ -183,9 +183,9 @@ export async function runDeployment({ directory, nativeDirectory, apply }, hooks
 async function main(argv) {
   const [action, rawDirectory, flag, rawInput, ...extra] = argv;
   if (!["prepare", "check", "apply"].includes(action) || !rawDirectory
-      || extra.length || !rawInput || (action === "prepare" ? flag !== "--release-evidence"
-        : flag !== "--native-results")) {
-    throw new Error("usage: deploy.mjs prepare DIR --release-evidence FILE | {check|apply} DIR --native-results DIR");
+      || extra.length || (action === "prepare" ? flag !== "--release-evidence" || !rawInput
+        : flag !== undefined && (flag !== "--native-results" || !rawInput))) {
+    throw new Error("usage: deploy.mjs prepare DIR --release-evidence FILE | {check|apply} DIR [--native-results DIR]");
   }
   const directory = path.resolve(rawDirectory);
   if (action === "prepare") return prepare(directory, path.resolve(rawInput));
@@ -197,7 +197,7 @@ async function main(argv) {
     throw new Error("fixture execution or skipped installation cannot qualify deployment");
   }
   const result = await runDeployment({
-    directory, nativeDirectory: path.resolve(rawInput), apply: action === "apply",
+    directory, nativeDirectory: rawInput === undefined ? undefined : path.resolve(rawInput), apply: action === "apply",
   });
   process.stdout.write(`Installer ${action}: ${result.status}; retained evidence: ${directory}\n`);
 }
