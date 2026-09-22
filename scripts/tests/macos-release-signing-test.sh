@@ -421,6 +421,9 @@ attestation_check="${repo_root}/scripts/verify-macos-release-attestation.sh"
 evidence_tool="${repo_root}/scripts/macos-release-signing-evidence.py"
 execution_check="${repo_root}/scripts/verify-macos-signed-cli.sh"
 
+grep -Fq 'export CTX_MACOS_SIGNING_SECRET_SOURCE="$${CTX_MACOS_SIGNING_SECRET_SOURCE:-infisical}"' "${repo_root}/.buildkite/pipeline.yml" || \
+  fail "runtime producer does not preserve an explicit signing secret source"
+
 if grep -Eq '(^|[[:space:]])(mapfile|readarray)([[:space:]]|$)' "${check_script}"; then
   fail "macOS release signing check requires a Bash 4-only line reader"
 fi
@@ -478,6 +481,15 @@ trusted_buildkite_injected() {
     BUILDKITE_COMMIT=0000000000000000000000000000000000000001 \
     BUILDKITE_REPO=https://github.com/ctxrs/ctx.git \
     CTX_MACOS_SIGNING_SECRET_SOURCE=injected \
+    "$@"
+}
+
+file_secrets() {
+  local secret_dir="$1"
+  shift
+  env -u BUILDKITE -u CI -u GITHUB_ACTIONS \
+    CTX_MACOS_SIGNING_SECRET_SOURCE=file \
+    CTX_MACOS_SIGNING_SECRET_FILE_DIR="${secret_dir}" \
     "$@"
 }
 
@@ -1019,7 +1031,50 @@ for handoff_file in "${TMPDIR}/fake-attester-argv.txt" "${TMPDIR}/fake-attester-
       && fail "secret variable reached final-archive attester environment"
   done
 done
-
+file_secret_dir="${test_root}/file-secrets"
+mkdir -m 0700 "${file_secret_dir}"
+for secret_name in APPLE_CODESIGN_CERT_P12_B64 APPLE_CODESIGN_CERT_PASSWORD \
+  NOTARY_ISSUER NOTARY_KEY_ID NOTARY_KEY_P8_B64; do
+  printf '%s' fixture >"${file_secret_dir}/${secret_name}"
+done
+chmod 0600 "${file_secret_dir}"/*
+file_attest() {
+  file_secrets "${1:-${file_secret_dir}}" env CTX_TEST_ONLY_MACOS_ATTESTER_PATH="${fake_attester}" \
+    "${launcher}" --attest-runtime-archive macos-x64 "${runtime_archive}" \
+    "${runtime_dir}/package/lib/libonnxruntime.dylib" "${runtime_dir}"
+}
+rm -f "${TMPDIR}/infisical.log"
+file_artifact="$(new_artifact file-source-runtime)"
+file_secrets "${file_secret_dir}" env CTX_TEST_ONLY_MACOS_SIGNER_PATH="${fake_signer}" \
+  "${launcher}" macos-x64 runtime "${file_artifact}" "${runtime_dir}"
+file_attest
+[[ ! -e "${TMPDIR}/infisical.log" ]] || \
+  fail "file-source sign/attest unexpectedly accessed Infisical"
+ln -s "${file_secret_dir}" "${test_root}/file-secrets-link"
+expect_failure 'must not end in / or /.' "${test_root}/file-source-symlink-slash.log" file_attest "${test_root}/file-secrets-link/"
+expect_failure 'must not end in / or /.' "${test_root}/file-source-symlink-dot.log" file_attest "${test_root}/file-secrets-link/."
+chmod 0755 "${file_secret_dir}"
+expect_failure 'must have owner-only mode 0700' "${test_root}/file-source-directory-mode.log" \
+  file_attest
+chmod 0700 "${file_secret_dir}"
+chmod 0644 "${file_secret_dir}/APPLE_CODESIGN_CERT_PASSWORD"
+expect_failure 'must have owner-only mode 0600' "${test_root}/file-source-file-mode.log" \
+  file_attest
+chmod 0600 "${file_secret_dir}/APPLE_CODESIGN_CERT_PASSWORD"
+rm "${file_secret_dir}/APPLE_CODESIGN_CERT_PASSWORD"
+ln -s "${file_secret_dir}/APPLE_CODESIGN_CERT_P12_B64" \
+  "${file_secret_dir}/APPLE_CODESIGN_CERT_PASSWORD"
+expect_failure 'must be an owned regular non-symlink file' "${test_root}/file-source-symlink.log" \
+  file_attest
+rm "${file_secret_dir}/APPLE_CODESIGN_CERT_PASSWORD"
+printf '%s' fixture >"${file_secret_dir}/APPLE_CODESIGN_CERT_PASSWORD"
+chmod 0600 "${file_secret_dir}/APPLE_CODESIGN_CERT_PASSWORD"
+printf '%s' ignored >"${file_secret_dir}/unexpected"
+chmod 0600 "${file_secret_dir}/unexpected"
+expect_failure 'has unexpected entry unexpected' "${test_root}/file-source-extra.log" \
+  file_attest
+rm "${test_root}/file-secrets-link"
+rm -rf "${file_secret_dir}"
 rm -f "${TMPDIR}/infisical.log"
 trusted_infisical "${launcher}" --attest-runtime-archive macos-x64 \
   "${runtime_archive}" "${runtime_dir}/package/lib/libonnxruntime.dylib" \

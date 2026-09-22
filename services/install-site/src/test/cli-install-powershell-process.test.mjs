@@ -58,15 +58,31 @@ test("rendered installer captures native stderr without PowerShell redirection",
   assert.match(body, /managed lifecycle handoff \(exit code \$\(\$upgradeCommand.ExitCode\)\)/u);
 });
 
-test("released 1.3.1 compatibility is selected before execution, not after failure", () => {
+test("released 1.3.1 pair compatibility is selected before execution, not after failure", () => {
   const body = renderCliInstallPowerShellScript();
   assert.match(body, /\$releasedPairInstall = \$managedPair -and \$version -ceq "1\.3\.1"/u);
   assert.match(body, /elseif \(\$managedPair\) \{\s+if \(\$releasedPairInstall\) \{\s+Invoke-HostedInstallTransaction\s+Invoke-ReleasedManagedPairInstall/u);
   assert.match(body, /\} else \{\s+Invoke-ManagedCoreUpgrade\s+if \(\$releasedPairInstall\) \{\s+Invoke-ReleasedManagedPairInstall/u);
-  assert.match(body, /-AllowPrettyJson:\(\$version -ceq "1\.3\.1"\)/u);
   const current = body.match(/function Invoke-ManagedPairApply\([^\n]+\) \{[\s\S]*?^\}/m)?.[0];
   assert.ok(current);
   assert.doesNotMatch(current, /ReleasedManagedPair|hosted-pair-install|AllowPrettyJson/u);
+});
+
+test("hosted transaction accepts the released CLI's bounded pretty JSON proof", {
+  skip: powershell ? false : "PowerShell is not installed",
+}, () => {
+  const root = mkdtempSync(path.join(tmpdir(), "ctx-hosted-receipt-"));
+  try {
+    const helpers = path.join(root, "helpers.ps1");
+    writeFileSync(helpers, CLI_INSTALL_POWERSHELL_PROCESS_HELPERS + "\n" + CLI_INSTALL_POWERSHELL_MANAGED_INSTALL);
+    const result = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-File",
+      path.join(here, "hosted-install-receipt-fixture.ps1"), "-HelperPath", helpers, "-WorkRoot", root],
+    { encoding: "utf8", timeout: 30_000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(JSON.parse(result.stdout.trim()).passed, 5);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("ordinary managed upgrade accepts the CLI's pretty JSON without a version exception", () => {
