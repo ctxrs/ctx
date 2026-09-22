@@ -8,6 +8,29 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 1.6.3
+
+Released: 2026-09-22
+
+### Added
+
+- Blame indexing remains enabled by default. Set `enabled = false` in the
+  `[blame]` section of `config.toml` to stop new foreground and background
+  indexing passes. Existing results remain readable; an active pass may finish.
+  Re-enable it and run `ctx import --all` to catch up retained history.
+- `ctx import --no-blame` skips Blame completion for that import, without
+  changing the configuration or stopping an independently enabled daemon.
+- Imports and `ctx setup --wait` report Blame preparation, indexing and
+  publication progress. Status shows active work separately from the last
+  committed index's readiness. Plain and JSON progress are supported;
+  `--progress none` remains silent.
+
+### Commits and PRs
+
+- Source commit: [14b8c2e4](https://github.com/ctxrs/ctx/commit/14b8c2e412a2513c15cdca83a2c4a69de6623b81).
+- Full diff: [v1.6.2...14b8c2e4](https://github.com/ctxrs/ctx/compare/v1.6.2...14b8c2e412a2513c15cdca83a2c4a69de6623b81).
+- [#1043](https://github.com/ctxrs/ctx/pull/1043) — add Blame indexing controls and progress.
+
 ## 1.6.2
 
 Released: 2026-09-22
