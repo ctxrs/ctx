@@ -220,6 +220,9 @@ fn reconcile_current_attribution(
     data_root: &Path,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<()> {
+    if !ctx_app_config::AppConfig::load(data_root)?.blame.enabled {
+        return Ok(());
+    }
     let Some(generation) = ctx_history_snapshot_reader::load_active_generation_id(data_root)?
     else {
         return Ok(());
@@ -236,7 +239,11 @@ fn reconcile_current_attribution(
 pub(crate) fn complete_attribution(
     data_root: &Path,
     pin: &PinnedSourceBackedGeneration,
+    progress: &mut crate::progress::ProgressReporter<'_>,
 ) -> Result<()> {
+    if !ctx_app_config::AppConfig::load(data_root)?.blame.enabled {
+        return Ok(());
+    }
     ctx_daemon_cli::foreground_checkpoint()?;
     // The command keeps its verified Core pin alive through the entire synchronous catch-up.
     let result: Result<()> = (|| {
@@ -245,9 +252,59 @@ pub(crate) fn complete_attribution(
             pin.generation_id(),
             &ctx_history_snapshot_reader::SnapshotContract::current()?,
         )?;
-        ctx_attribution::catch_up(data_root, &snapshot, &|| {
-            ctx_daemon_cli::foreground_checkpoint().is_err()
-        })?;
+        let cancelled = || ctx_daemon_cli::foreground_checkpoint().is_err();
+        if progress.is_enabled() {
+            let progress = Mutex::new(progress);
+            ctx_attribution::catch_up_with_progress(data_root, &snapshot, &cancelled, &|update| {
+                use ctx_attribution::materializer::MaterializationPhase;
+                let (phase, message) = match update.phase {
+                    MaterializationPhase::SnapshotUnavailable => (
+                        "blame_active",
+                        "Blame indexing is active; counters temporarily unavailable.".to_owned(),
+                    ),
+                    MaterializationPhase::WaitingForWriter => {
+                        ("blame_waiting", "Waiting for Blame indexing.".to_owned())
+                    }
+                    MaterializationPhase::Preparing => {
+                        ("blame_preparing", "Preparing Blame indexing.".to_owned())
+                    }
+                    MaterializationPhase::Indexing => (
+                        "blame_indexing",
+                        format!(
+                            "Indexing Blame: {}/{} sources; {} changes applied.",
+                            update
+                                .completed_sources
+                                .map_or_else(|| "?".to_owned(), |count| count.to_string()),
+                            update
+                                .total_sources
+                                .map_or_else(|| "?".to_owned(), |total| total.to_string()),
+                            update
+                                .applied_changes
+                                .map_or_else(|| "?".to_owned(), |count| count.to_string()),
+                        ),
+                    ),
+                    MaterializationPhase::Publishing => {
+                        ("blame_publishing", "Publishing Blame index.".to_owned())
+                    }
+                    MaterializationPhase::Complete => {
+                        ("blame_complete", "Blame indexing complete.".to_owned())
+                    }
+                };
+                progress
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .indexing(
+                        phase,
+                        message,
+                        update.completed_sources,
+                        update.total_sources,
+                        update.applied_changes,
+                    )
+                    .map_err(anyhow::Error::new)
+            })?;
+        } else {
+            ctx_attribution::catch_up(data_root, &snapshot, &cancelled)?;
+        }
         Ok(())
     })();
     ctx_daemon_cli::foreground_checkpoint()?;
@@ -442,6 +499,12 @@ pub(crate) fn source_epoch_status_report(
         Ok(status) => serde_json::to_value(status)?,
         Err(error) => serde_json::json!({"error": error}),
     };
+    source.report["attribution"]["indexing_enabled"] = serde_json::json!(config.blame.enabled);
+    source.report["attribution"]["progress"] = serde_json::to_value(
+        ctx_attribution::materialization_progress(data_root)
+            .ok()
+            .flatten(),
+    )?;
     Ok(source)
 }
 

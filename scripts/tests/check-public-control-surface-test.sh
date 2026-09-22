@@ -41,12 +41,12 @@ cp "${repo_root}/scripts/smoke-daemon-semantic-release.sh" "${fixture}/scripts/"
 cp "${repo_root}/docs/storage.md" "${fixture}/docs/"
 
 python3 "${checker}" "${fixture}" > "${tmp}/pass.out"
-grep -Fq '7 empty-config released defaults' "${tmp}/pass.out"
+grep -Fq '8 empty-config released defaults' "${tmp}/pass.out"
 
 mkdir "${tmp}/no-git-bin"
 ln -s "$(command -v python3)" "${tmp}/no-git-bin/python3"
 PATH="${tmp}/no-git-bin" python3 "${checker}" "${fixture}" > "${tmp}/no-git.out"
-grep -Fq '7 empty-config released defaults' "${tmp}/no-git.out"
+grep -Fq '8 empty-config released defaults' "${tmp}/no-git.out"
 
 expect_fail() {
   local name="$1"

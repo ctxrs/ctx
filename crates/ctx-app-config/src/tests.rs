@@ -151,6 +151,7 @@ fn load_without_config_file_uses_defaults() {
     assert_eq!(config.upgrade.channel, "stable");
     assert_eq!(config.upgrade.interval, Duration::from_secs(24 * 60 * 60));
     assert_eq!(config.indexing.mode, IndexingMode::Automatic);
+    assert!(config.blame.enabled);
     assert_eq!(config.daemon.mode, DaemonMode::Full);
     assert_eq!(config.search.semantic, None);
     assert!(!config.semantic_search_enabled());
@@ -197,6 +198,25 @@ fn empty_config_runtime_defaults_match_public_control_inventory() {
         released("search.semantic"),
         serde_json::json!(config.semantic_search_enabled())
     );
+    assert_eq!(
+        released("blame.enabled"),
+        serde_json::json!(config.blame.enabled)
+    );
+}
+
+#[test]
+fn blame_indexing_can_be_disabled_without_changing_history_or_semantic_policy() {
+    let values = parse_toml_subset("[blame]\nenabled = false\n").unwrap();
+    let mut config = AppConfig::default();
+    config.apply_values(&values).unwrap();
+    assert!(!config.blame.enabled);
+    assert_eq!(config.indexing.mode, IndexingMode::Automatic);
+    assert_eq!(config.search.semantic, None);
+    let values = parse_toml_subset("[blame]\nenabled = true\n").unwrap();
+    config.apply_values(&values).unwrap();
+    assert!(config.blame.enabled);
+    let values = parse_toml_subset("[blame]\nenabled = \"false\"\n").unwrap();
+    assert!(config.apply_values(&values).is_err());
 }
 
 #[test]

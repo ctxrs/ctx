@@ -205,6 +205,7 @@ fn sync_core_feed_attempt_with_launch(
             reconcile_sources.push(reconciliation);
         }
     }
+    session.start_progress(u32::try_from(reconcile_sources.len())?);
     reconcile_ordered_source_events(
         index,
         &mut session,

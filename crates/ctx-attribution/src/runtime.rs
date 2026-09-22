@@ -174,3 +174,99 @@ pub fn catch_up(
         Some(cancelled),
     )
 }
+
+/// Reads active materializer progress without waiting, creating files, or inspecting index bodies.
+pub fn materialization_progress(
+    data_root: &Path,
+) -> anyhow::Result<Option<crate::materializer::MaterializationProgress>> {
+    crate::materializer::locking::OperationLock::read_progress(&index_root(data_root))
+        .map_err(Into::into)
+}
+
+/// Delivers advisory progress at cooperative checkpoints, including writer-lock waits.
+/// Observer failures cancel unfinished work; an already committed index stays committed.
+pub fn catch_up_with_progress(
+    data_root: &Path,
+    snapshot: &CoreSnapshot,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    report: &(dyn Fn(&crate::materializer::MaterializationProgress) -> anyhow::Result<()> + Sync),
+) -> anyhow::Result<CoreMaterializationSyncOutcome> {
+    use crate::materializer::{MaterializationPhase, MaterializationProgress};
+    use std::{
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    if cancelled() {
+        return Err(crate::materializer::SegmentMaterializerError::Cancelled.into());
+    }
+
+    let waiting = MaterializationProgress {
+        phase: MaterializationPhase::WaitingForWriter,
+        core_generation_id: Some(snapshot.generation_id().to_owned()),
+        ..Default::default()
+    };
+    let observer = Mutex::new((None::<Instant>, None::<anyhow::Error>));
+    let owns_writer = AtomicBool::new(false);
+    let checkpoint = || {
+        if cancelled() {
+            return true;
+        }
+        let mut observer = observer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if observer.1.is_some() {
+            return true;
+        }
+        if observer
+            .0
+            .is_none_or(|last| last.elapsed() >= Duration::from_millis(500))
+        {
+            observer.0 = Some(Instant::now());
+            let progress = if owns_writer.load(Ordering::Relaxed) {
+                materialization_progress(data_root)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            } else {
+                waiting.clone()
+            };
+            if let Err(error) = report(&progress) {
+                observer.1 = Some(error);
+                return true;
+            }
+        }
+        false
+    };
+    let result = (|| {
+        let mut materializer = SegmentMaterializer::open_cancellable(
+            index_root(data_root),
+            crate::core_materialization::CORE_MATERIALIZER_REVISION,
+            &checkpoint,
+        )?;
+        owns_writer.store(true, Ordering::Relaxed);
+        report(&materializer.progress())?;
+        let outcome = crate::catch_up::sync_generation_pinned_core(
+            data_root,
+            snapshot,
+            &mut materializer,
+            Some(&checkpoint),
+        )?;
+        let mut progress = materializer.progress();
+        progress.phase = MaterializationPhase::Complete;
+        progress.core_generation_id = Some(snapshot.generation_id().to_owned());
+        report(&progress)?;
+        Ok(outcome)
+    })();
+    if let Some(error) = observer
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .1
+    {
+        return Err(error);
+    }
+    result
+}

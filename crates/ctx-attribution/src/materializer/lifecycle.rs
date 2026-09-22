@@ -88,6 +88,21 @@ struct FinishGenerationIntegrity<'a> {
 }
 
 impl CoreMaterializationSession<'_> {
+    pub(crate) fn start_progress(&mut self, total_sources: u32) {
+        if let Some(lock) = self.materializer.writer_lease.as_mut() {
+            lock.update_progress(
+                |progress| {
+                    progress.phase = super::MaterializationPhase::Indexing;
+                    progress.core_generation_id = Some(self.head.core_generation_id.clone());
+                    progress.total_sources = Some(total_sources);
+                    progress.completed_sources = Some(0);
+                    progress.applied_changes = Some(0);
+                },
+                true,
+            );
+        }
+    }
+
     #[must_use]
     pub fn materialization_id(&self) -> &str {
         &self.materialization_id
@@ -169,6 +184,7 @@ impl CoreMaterializationSession<'_> {
             page.core_generation_id
                 .clone_from(&self.head.core_generation_id);
         }
+        let completed_sources = pages.iter().filter(|page| page.terminal).count() as u32;
         let page_count =
             u32::try_from(pages.len()).map_err(|_| SegmentMaterializerError::Bounds)?;
         let mutations = pages.iter().try_fold(0_u64, |total, page| {
@@ -210,6 +226,20 @@ impl CoreMaterializationSession<'_> {
             .event_mutations
             .checked_add(mutations)
             .ok_or(SegmentMaterializerError::Bounds)?;
+        if let Some(lock) = self.materializer.writer_lease.as_mut() {
+            lock.update_progress(
+                |progress| {
+                    progress.completed_sources = Some(
+                        progress
+                            .completed_sources
+                            .unwrap_or_default()
+                            .saturating_add(completed_sources),
+                    );
+                    progress.applied_changes = Some(self.event_mutations);
+                },
+                false,
+            );
+        }
         Ok(())
     }
 
@@ -223,6 +253,12 @@ impl CoreMaterializationSession<'_> {
     ) -> Result<CoreMaterializationReceipt, SegmentMaterializerError> {
         if cancelled.is_some_and(|check| check()) {
             return Err(SegmentMaterializerError::Cancelled);
+        }
+        if let Some(lock) = self.materializer.writer_lease.as_mut() {
+            lock.update_progress(
+                |progress| progress.phase = super::MaterializationPhase::Publishing,
+                true,
+            );
         }
         let _finish_phase = self
             .preparer
@@ -334,6 +370,12 @@ impl CoreMaterializationSession<'_> {
             .metrics
             .reconciliation_cursor_reserved_bytes = 0;
         self.completed = true;
+        if let Some(lock) = self.materializer.writer_lease.as_mut() {
+            lock.update_progress(
+                |progress| progress.phase = super::MaterializationPhase::Complete,
+                true,
+            );
+        }
         Ok(receipt)
     }
 

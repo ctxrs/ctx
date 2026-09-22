@@ -20,6 +20,7 @@ pub(super) fn wait_for_import_core_refresh(
     no_daemon: bool,
     selection: RefreshSelection,
     semantic_completion: &ImportSemanticCompletion,
+    complete_blame: bool,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<SourceBackedRefreshObservation> {
     let mut deferred_terminal_core_success = None;
@@ -55,7 +56,9 @@ pub(super) fn wait_for_import_core_refresh(
             refresh.pin.generation_id()
         );
     }
-    crate::semantic::complete_attribution(data_root, &refresh.pin)?;
+    if complete_blame {
+        crate::semantic::complete_attribution(data_root, &refresh.pin, progress)?;
+    }
     if semantic_completion.is_enabled() {
         progress
             .message("semantic", "Reconciling semantic search.")

@@ -6,6 +6,8 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
+mod json;
+use json::progress_json;
 use serde_json::json;
 
 use crate::ui::{
@@ -548,6 +550,39 @@ impl<'a> ProgressReporter<'a> {
             done: false,
             refresh: None,
             callout: None,
+            indexing: None,
+        })
+    }
+
+    /// Reports a derived index independently from Core byte/import counters.
+    pub fn indexing(
+        &mut self,
+        phase: &'static str,
+        message: impl Into<String>,
+        completed_sources: Option<u32>,
+        total_sources: Option<u32>,
+        applied_changes: Option<u64>,
+    ) -> Result<(), ProgressWriterError> {
+        if !self.is_enabled() {
+            return Ok(());
+        }
+        self.presentation_agent_histories = None;
+        self.emit_status(ProgressLine {
+            phase: phase.to_owned(),
+            message: bounded_progress_text(&message.into(), MAX_PROGRESS_MESSAGE_BYTES),
+            completed_bytes: 0,
+            total_bytes: 0,
+            completed_files: None,
+            total_files: None,
+            imported_events: None,
+            done: false,
+            refresh: None,
+            callout: None,
+            indexing: Some(IndexingCounts {
+                completed_sources,
+                total_sources,
+                applied_changes,
+            }),
         })
     }
 
@@ -573,6 +608,7 @@ impl<'a> ProgressReporter<'a> {
             done: true,
             refresh: None,
             callout: None,
+            indexing: None,
         })
     }
 
@@ -625,6 +661,7 @@ impl<'a> ProgressReporter<'a> {
                     done: false,
                     refresh: None,
                     callout: None,
+                    indexing: None,
                 },
                 elapsed,
             )
@@ -672,6 +709,7 @@ impl<'a> ProgressReporter<'a> {
                     done: false,
                     refresh: None,
                     callout: Some(callout_json(&presentation)),
+                    indexing: None,
                 },
                 elapsed,
             )
@@ -739,6 +777,13 @@ struct ProgressLine {
     done: bool,
     refresh: Option<RefreshProgressSnapshot>,
     callout: Option<serde_json::Value>,
+    indexing: Option<IndexingCounts>,
+}
+
+struct IndexingCounts {
+    completed_sources: Option<u32>,
+    total_sources: Option<u32>,
+    applied_changes: Option<u64>,
 }
 
 fn write_progress(
@@ -774,58 +819,6 @@ fn write_progress(
     }
 }
 
-fn progress_json(operation: &'static str, line: &ProgressLine, elapsed: StdDuration) -> String {
-    let (completed_bytes, total_bytes) = progress_line_bytes(line);
-    let mut value = json!({
-        "type": "ctx_progress",
-        "operation": operation,
-        "phase": line.phase,
-        "message": line.message,
-        "completed_bytes": completed_bytes,
-        "total_bytes": total_bytes,
-        "percent": progress_line_percent(line),
-        "elapsed_seconds": elapsed.as_secs_f64(),
-        // Compatibility: this documented legacy field remains byte-rate based.
-        // Source-backed consumers use estimated_remaining_millis below for the
-        // explicit whole-run time until the refreshed generation is usable.
-        "eta_seconds": progress_line_eta_seconds(line, elapsed),
-        "completed_files": line.completed_files,
-        "total_files": line.total_files,
-        "imported_events": line.imported_events,
-        "done": line.done,
-    });
-    if let Some(snapshot) = line.refresh.as_ref() {
-        let progress = snapshot.progress();
-        value["completed_sources"] = json!(progress.completed_sources);
-        value["total_sources"] = json!(progress.total_sources);
-        value["total_sources_known"] = json!(snapshot.total_sources_known());
-        value["source_completed_records"] = json!(progress.completed_records);
-        value["source_completed_bytes"] = json!(progress.completed_bytes);
-        value["agent_histories"] = json!(progress.agent_histories);
-        value["processed_sessions"] = json!(progress.processed_sessions);
-        value["processed_messages"] = json!(progress.processed_messages);
-        value["processed_tool_calls"] = json!(progress.processed_tool_calls);
-        value["processed_bytes"] = json!(progress.processed_bytes);
-        value["whole_run_stage"] = json!(progress.whole_run_stage.as_str());
-        value["estimated_remaining_millis"] = json!(progress.estimated_remaining_millis);
-        value["refresh_elapsed_millis"] = json!(progress.elapsed_millis);
-        value["current_source"] = json!(progress
-            .current_source
-            .as_deref()
-            .map(|source| bounded_progress_text(source, MAX_PROGRESS_SOURCE_BYTES)));
-        value["current_source_progress"] = progress
-            .current_source_progress
-            .as_ref()
-            .map(crate::ui::RefreshCurrentSourceProgress::to_json)
-            .unwrap_or(serde_json::Value::Null);
-        snapshot.append_json_fields(&mut value);
-    }
-    if let Some(callout) = line.callout.as_ref() {
-        value["callout"] = callout.clone();
-    }
-    value.to_string()
-}
-
 fn source_refresh_line(
     snapshot: RefreshProgressSnapshot,
     legacy_terminal_total_bytes: u64,
@@ -854,6 +847,7 @@ fn source_refresh_line(
         done,
         refresh: Some(snapshot),
         callout: None,
+        indexing: None,
     }
 }
 
