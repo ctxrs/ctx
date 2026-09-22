@@ -72,15 +72,11 @@ pub(crate) fn render_daemon_status_human(
         .get("last_error")
         .and_then(Value::as_str)
         .is_some_and(|error| !error.is_empty());
-    let heartbeat_stale = daemon.get("heartbeat_stale").and_then(Value::as_bool) == Some(true);
     let image_unavailable = daemon
         .pointer("/lock_identity/owner_image_status")
         .and_then(Value::as_str);
-    let service_issue = config_issue
-        || supervisor_issue.is_some()
-        || daemon_error
-        || heartbeat_stale
-        || image_unavailable.is_some();
+    let service_issue =
+        config_issue || supervisor_issue.is_some() || daemon_error || image_unavailable.is_some();
     let service_failed =
         recoverable || matches!(status, "failed" | "stale_lock") || (!running && enabled);
 
@@ -114,11 +110,6 @@ pub(crate) fn render_daemon_status_human(
 
     let (outcome_state, title, detail) = match presentation {
         DaemonPresentation::Healthy => (OutcomeState::Success, "Daemon is healthy", None),
-        DaemonPresentation::Partial if heartbeat_stale => (
-            OutcomeState::Warning,
-            "Daemon is running; heartbeat is stale",
-            Some("Work may be stalled. Live ownership is retained; a stale heartbeat alone does not prove the process is dead."),
-        ),
         DaemonPresentation::Partial if history_paused => (
             OutcomeState::Warning,
             "Daemon is running; history refresh is paused",
@@ -228,12 +219,6 @@ pub(crate) fn render_daemon_status_human(
             Token::Warning,
         ));
     }
-    if heartbeat_stale {
-        service.push(state_field("Heartbeat", "stale", Token::Warning));
-        if let Some(age) = daemon.get("heartbeat_age_ms").and_then(Value::as_u64) {
-            service_details.push(("Last heartbeat", format!("{} seconds ago", age / 1000)));
-        }
-    }
     if let Some(mode) = daemon
         .get("mode")
         .and_then(Value::as_str)
@@ -338,7 +323,9 @@ pub(crate) fn render_daemon_status_human(
         if rejected_records > 0 {
             history_details.push(("Skipped records", rejected_records.to_string()));
         }
-        if history_paused || history_partially_paused {
+        if let Some(detail) = job_resource_failure_detail(core_refresh) {
+            history_details.push(("Issue", detail.to_owned()));
+        } else if history_paused || history_partially_paused {
             history_details.push((
                 "Issue",
                 "The same internal refresh failure happened twice.".to_owned(),
@@ -434,6 +421,14 @@ pub(crate) fn render_daemon_status_human(
         ));
     }
     document
+}
+
+fn job_resource_failure_detail(job: Option<&Value>) -> Option<&str> {
+    let outcome = job?.get("structured_outcome")?;
+    (outcome.get("code").and_then(Value::as_str) == Some("resource_unavailable"))
+        .then(|| outcome.get("detail").and_then(Value::as_str))
+        .flatten()
+        .filter(|detail| !detail.is_empty())
 }
 
 /// Builds the `ctx daemon enable` receipt from values the lifecycle operation

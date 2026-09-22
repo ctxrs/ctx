@@ -345,6 +345,32 @@ fn setup_terminal_reconciles_empty_refresh_counters_with_committed_history() {
 }
 
 #[test]
+fn terminal_resource_failure_shows_the_capacity_detail() {
+    let context = RenderContext::for_test(TestContext::tty(StreamKind::Stderr, 120));
+    let mut terminal = terminal_status(
+        RefreshRequestState::Failed,
+        "resource_unavailable",
+        "resource_unavailable",
+        RefreshTerminalPresentation::Failed,
+    );
+    let RefreshStatusKind::Logical(logical) = &mut terminal.kind else {
+        unreachable!();
+    };
+    logical.structured_outcome.as_mut().unwrap().detail =
+        Some("current publication needs 1024 bytes; 512 are available".to_owned());
+
+    let shared = refresh_progress(&context, &terminal).render_plain();
+    assert!(shared.contains("Failure"), "{shared}");
+    assert!(shared.contains("1024 bytes; 512 are available"), "{shared}");
+
+    terminal.set_presentation_agent_histories(Some(vec!["Codex".to_owned()]));
+    terminal.use_setup_live_presentation();
+    let setup = refresh_progress(&context, &terminal).render_plain();
+    assert!(setup.contains("Failure"), "{setup}");
+    assert!(setup.contains("1024 bytes; 512 are available"), "{setup}");
+}
+
+#[test]
 fn indeterminate_bar_moves_one_cell_per_tick_and_reverses_at_edges() {
     let context = RenderContext::for_test(TestContext::tty(StreamKind::Stderr, 80));
     assert_eq!(indeterminate_position(&context, 0), 0);

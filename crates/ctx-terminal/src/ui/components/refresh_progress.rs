@@ -506,6 +506,9 @@ fn shared_refresh_progress(
         Field::new("Elapsed", &elapsed),
         Field::new("Remaining", &remaining),
     ]);
+    if let Some(detail) = terminal_resource_detail(snapshot) {
+        detail_fields.push(Field::new("Failure", detail));
+    }
     document.push_blank();
     document.append(fields(context, &detail_fields));
     document
@@ -588,6 +591,10 @@ fn setup_live_refresh_progress(
         .map(format_eta_duration_millis)
         .unwrap_or_else(|| "Estimating".to_owned());
     let Some(histories) = snapshot.presentation_agent_histories.as_ref() else {
+        if let Some(detail) = terminal_resource_detail(snapshot) {
+            document.push_blank();
+            document.append(fields(context, &[Field::new("Failure", detail)]));
+        }
         return document;
     };
     let mut history_fields = Vec::with_capacity(histories.len());
@@ -608,6 +615,9 @@ fn setup_live_refresh_progress(
     if !snapshot.is_terminal() {
         metric_fields.push(Field::new("Estimated remaining", &remaining));
     }
+    if let Some(detail) = terminal_resource_detail(snapshot) {
+        metric_fields.push(Field::new("Failure", detail));
+    }
     document.push_blank();
     document.append(fields_with_label_width(
         context,
@@ -621,6 +631,17 @@ fn setup_live_refresh_progress(
         REFRESH_TABLE_LABEL_WIDTH,
     ));
     document
+}
+
+fn terminal_resource_detail(snapshot: &RefreshProgressSnapshot) -> Option<&str> {
+    let RefreshStatusKind::Logical(logical) = &snapshot.kind else {
+        return None;
+    };
+    let outcome = logical.structured_outcome.as_ref()?;
+    (outcome.code == "resource_unavailable")
+        .then_some(outcome.detail.as_deref())
+        .flatten()
+        .filter(|detail| !detail.is_empty())
 }
 
 fn indeterminate_position(context: &RenderContext, elapsed_millis: u64) -> u64 {

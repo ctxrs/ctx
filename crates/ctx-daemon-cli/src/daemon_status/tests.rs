@@ -14,20 +14,15 @@ fn context(width: usize) -> RenderContext {
 }
 
 #[test]
-fn stale_heartbeat_warns_without_claiming_the_live_daemon_is_dead() {
+fn scheduler_heartbeat_age_does_not_downgrade_a_live_daemon() {
     let mut daemon = running_report();
     daemon["heartbeat_stale"] = json!(true);
     daemon["heartbeat_age_ms"] = json!(223_200_000);
     let rendered =
         render_daemon_status_human(&context(120), DaemonStatusView::daemon_only(&daemon))
             .render_plain();
-    assert!(
-        rendered.contains("Daemon is running; heartbeat is stale"),
-        "{rendered}"
-    );
-    assert!(rendered.contains("223200 seconds ago"), "{rendered}");
-    assert!(!rendered.contains("Daemon is healthy"), "{rendered}");
-    assert!(!rendered.contains("Restarting it is safe"), "{rendered}");
+    assert!(rendered.starts_with("✓ Daemon is healthy\n"), "{rendered}");
+    assert!(!rendered.contains("heartbeat"), "{rendered}");
 }
 
 fn styled_context(width: usize) -> RenderContext {
@@ -871,6 +866,27 @@ fn failed_source_refresh_is_bounded_actionable_and_never_leaks_backend_details()
     assert!(!rendered.contains("ctx daemon enable"));
     assert!(!rendered.contains("all_provider_terminal_coverage_unavailable"));
     assert!(!rendered.contains("/tmp/private/source"));
+}
+
+#[test]
+fn resource_failure_explains_required_and_available_headroom() {
+    let mut report = running_report();
+    report["jobs"]["core_refresh"] = json!({
+        "status": "failed",
+        "request_state": "failed",
+        "structured_outcome": {
+            "code": "resource_unavailable",
+            "class": "resource_unavailable",
+            "retryable": true,
+            "detail": "current publication needs 1024 bytes of headroom, but only 512 are available",
+        },
+    });
+
+    let rendered = render_status(&context(120), &report).render_plain();
+    assert!(rendered.contains("Issue"), "{rendered}");
+    assert!(rendered.contains("1024 bytes"), "{rendered}");
+    assert!(rendered.contains("512 are available"), "{rendered}");
+    assert!(!rendered.contains("confirming"), "{rendered}");
 }
 
 #[test]
