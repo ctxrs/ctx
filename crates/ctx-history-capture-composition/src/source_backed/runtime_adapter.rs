@@ -204,6 +204,19 @@ impl CaptureLifecycleSink for IndexCaptureLifecycle {
         index_writer_invariant(detail)
     }
 
+    fn route_error(error: Self::Error) -> ctx_history_capture_runtime::SourceBackedRouteError {
+        let kind = match &error {
+            IndexError::CurrentRepublishInsufficientHeadroom { .. }
+            | IndexError::CandidateFailureWithLowSpace { .. }
+            | IndexError::IndexMemoryTooSmall { .. }
+            | IndexError::VerificationScratchLimitExceeded { .. } => {
+                ctx_history_capture_runtime::SourceBackedRouteErrorKind::ResourceUnavailable
+            }
+            _ => ctx_history_capture_runtime::SourceBackedRouteErrorKind::Internal,
+        };
+        ctx_history_capture_runtime::SourceBackedRouteError::new(kind, error.to_string())
+    }
+
     fn open(
         root: &Path,
         options: Self::OpenOptions,

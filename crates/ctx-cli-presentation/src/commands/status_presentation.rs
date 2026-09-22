@@ -190,7 +190,12 @@ pub fn render_status_human(
             ));
         }
     }
-    if automatic_retry_pause.is_some() {
+    if let Some(detail) = refresh_resource_detail(report) {
+        history_values.push((
+            "Issue",
+            super::doctor_presentation::bounded_terminal_detail(detail),
+        ));
+    } else if automatic_retry_pause.is_some() {
         history_values.push((
             "Issue",
             "The same internal refresh failure happened twice.".to_owned(),
@@ -211,11 +216,7 @@ pub fn render_status_human(
     super::append_attribution(context, &mut document, report);
     let daemon = &report["daemon"];
     let daemon_status = if daemon.get("running").and_then(Value::as_bool) == Some(true) {
-        if daemon.get("heartbeat_stale").and_then(Value::as_bool) == Some(true) {
-            "running; heartbeat is stale".to_owned()
-        } else {
-            "running".to_owned()
-        }
+        "running".to_owned()
     } else {
         component_display(daemon)
     };
@@ -287,6 +288,14 @@ pub fn render_status_human(
         document.append(section("Next", actions));
     }
     document
+}
+
+fn refresh_resource_detail(report: &Value) -> Option<&str> {
+    let outcome = report.pointer("/refresh/structured_outcome")?;
+    (outcome.get("code").and_then(Value::as_str) == Some("resource_unavailable"))
+        .then(|| outcome.get("detail").and_then(Value::as_str))
+        .flatten()
+        .filter(|detail| !detail.is_empty())
 }
 
 pub(super) fn humanize_code(value: &str) -> String {
@@ -504,20 +513,19 @@ mod tests {
     }
 
     #[test]
-    fn actionable_daemon_or_semantic_state_prevents_a_healthy_headline() {
+    fn scheduler_heartbeat_age_does_not_downgrade_a_live_daemon() {
         let mut stale_heartbeat = status_report(true, "ready", "ready");
         stale_heartbeat["daemon"]["heartbeat_stale"] = json!(true);
         let rendered =
             render_report(&context(80, ColorMode::Never), &stale_heartbeat).render_plain();
-        assert!(
-            rendered.starts_with("! ctx needs attention\n"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("running; heartbeat is stale"),
-            "{rendered}"
-        );
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(rendered.starts_with("✓ ctx is healthy\n"), "{rendered}");
+        assert!(normalized.contains("Daemon running"), "{rendered}");
+        assert!(!rendered.contains("heartbeat"), "{rendered}");
+    }
 
+    #[test]
+    fn actionable_daemon_or_semantic_state_prevents_a_healthy_headline() {
         let mut daemon_failed = status_report(true, "ready", "ready");
         daemon_failed["daemon"] = json!({
             "status": "failed",
@@ -551,6 +559,20 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("projection missing"), "{rendered}");
+    }
+
+    #[test]
+    fn resource_failure_explains_required_and_available_headroom() {
+        let mut report = status_report(true, "ready", "failed");
+        report["refresh"]["structured_outcome"] = json!({
+            "code": "resource_unavailable",
+            "detail": "current publication needs 1024 bytes of headroom, but only 512 are available",
+        });
+
+        let rendered = render_report(&context(120, ColorMode::Never), &report).render_plain();
+        assert!(rendered.contains("Issue"), "{rendered}");
+        assert!(rendered.contains("1024 bytes"), "{rendered}");
+        assert!(rendered.contains("512 are available"), "{rendered}");
     }
 
     #[test]

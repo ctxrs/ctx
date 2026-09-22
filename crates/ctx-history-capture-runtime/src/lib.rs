@@ -217,6 +217,10 @@ pub trait CaptureLifecycleSink: Sized {
 
     fn invariant_error(detail: &'static str) -> Self::Error;
 
+    fn route_error(error: Self::Error) -> SourceBackedRouteError {
+        SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, error.to_string())
+    }
+
     fn open(
         root: &Path,
         options: Self::OpenOptions,

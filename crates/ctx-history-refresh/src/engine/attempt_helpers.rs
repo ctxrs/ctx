@@ -380,6 +380,7 @@ pub(super) fn source_backed_refresh_failure_outcome(
                 RefreshRetryAdvice::RetryAffectedRoutes,
             ),
             IndexError::Io(_)
+            | IndexError::CurrentRepublishInsufficientHeadroom { .. }
             | IndexError::CandidateFailureWithLowSpace { .. }
             | IndexError::IndexMemoryTooSmall { .. }
             | IndexError::VerificationScratchLimitExceeded { .. } => (

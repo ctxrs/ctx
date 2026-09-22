@@ -40,6 +40,23 @@ fn paused_automatic_terminal_outcomes_and_aggregate_schema_advice_are_valid() {
 }
 
 #[test]
+fn resource_exhaustion_does_not_enter_internal_failure_confirmation() {
+    let outcome = RefreshTerminalOutcome::with_uniform_route_disposition(
+        RefreshOutcomeCode::ResourceUnavailable,
+        true,
+        BTreeSet::from([route("ab")]),
+        uuid::Uuid::nil().to_string(),
+        None,
+        None,
+        Some(RefreshRetryAdvice::RetryRequest),
+        Some("insufficient disk headroom".to_owned()),
+    )
+    .unwrap();
+
+    assert!(!outcome.is_automatic_retry_eligible());
+}
+
+#[test]
 fn retry_route_moves_ignore_empty_and_unrelated_sets() {
     let affected = route("ab");
     let unrelated = BTreeSet::from([route("cd")]);
