@@ -58,7 +58,7 @@ timestamps, and Git ancestry alone do not establish an agent attribution.
 
 ## Indexing and readiness
 
-Automatic indexing keeps the attribution index up to date with retained local
+Blame indexing is enabled by default. Automatic indexing keeps the attribution index up to date with retained local
 history. Use `ctx status` and `ctx doctor` to inspect health. For an explicit
 completion, run:
 
@@ -73,6 +73,28 @@ command, including when Core history was already current. `ctx index`,
 `ctx index watch`, `ctx index wait`, status, and doctor observe existing work;
 they do not start an attribution rebuild. `ctx setup --no-daemon`, even with
 `--wait`, explicitly suppresses refresh.
+
+To import history without waiting for Blame, use `ctx import --all --no-blame`
+(also supported for a selected provider or path). This only skips the calling
+command's Blame completion; an enabled daemon may still index in the background.
+To disable both foreground and background Blame indexing, add this to the data
+root's `config.toml`:
+
+```toml
+[blame]
+enabled = false
+```
+
+The setting is read before each indexing pass; an already-running pass may
+finish. History import and search continue, and existing Blame data is retained
+and readable with its usual freshness limits. Set `enabled = true` (or remove
+the setting), then run `ctx import --all` to catch up retained history.
+
+`import` and `setup --wait` report Blame preparation, indexing and publication
+with `--progress plain` or `--progress json`; `--progress none` stays silent.
+Status reports active work separately from the last committed index's readiness.
+Source counters count completed sources in this pass; changes count accepted
+additions, replacements and deletions, not every record in retained history.
 
 If work is pending or interrupted, retry `ctx import --all` or
 `ctx setup --wait`. Committed history remains searchable while attribution is

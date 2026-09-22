@@ -61,33 +61,8 @@ pub fn normalized_analytics_environment_override() -> Option<bool> {
         .map(|value| value.to_str().and_then(parse_bool_value).unwrap_or(false))
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum IndexingMode {
-    #[default]
-    Automatic,
-    Manual,
-}
-
-impl IndexingMode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Automatic => "auto",
-            Self::Manual => "manual",
-        }
-    }
-
-    pub const fn is_automatic(self) -> bool {
-        matches!(self, Self::Automatic)
-    }
-
-    const fn from_legacy_daemon_enabled(enabled: bool) -> Self {
-        if enabled {
-            Self::Automatic
-        } else {
-            Self::Manual
-        }
-    }
-}
+mod indexing;
+pub use indexing::IndexingMode;
 
 #[cfg(any(test, feature = "test-support"))]
 pub static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -139,6 +114,7 @@ pub struct AppConfig {
     pub local_usage: LocalUsageConfig,
     pub upgrade: UpgradeConfig,
     pub indexing: IndexingConfig,
+    pub blame: BlameConfig,
     pub daemon: DaemonConfig,
     pub semantic: SemanticConfig,
     pub search: SearchConfig,
@@ -150,6 +126,12 @@ pub struct AppConfig {
 pub struct AnalyticsConfig {
     pub enabled: bool,
     pub endpoint: String,
+}
+
+/// Controls foreground and background attribution indexing, retaining existing data.
+#[derive(Debug, Clone)]
+pub struct BlameConfig {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +331,7 @@ impl Default for AppConfig {
             indexing: IndexingConfig {
                 mode: IndexingMode::Automatic,
             },
+            blame: BlameConfig { enabled: true },
             daemon: DaemonConfig {
                 mode: DaemonMode::Full,
             },
@@ -528,6 +511,9 @@ impl AppConfig {
                 }
                 "indexing.mode" => {
                     indexing_mode = Some(parse_indexing_mode(value)?);
+                }
+                "blame.enabled" => {
+                    self.blame.enabled = parse_config_bool(key, value)?;
                 }
                 "semantic.executor" => {
                     semantic_executor = Some(parse_non_empty_string(key, value)?);

@@ -278,9 +278,11 @@ fn document_spool_admission_error(
     error: DeferredCoreRecordAdmissionError,
 ) -> SourceBackedRouteError {
     let kind = match error {
-        DeferredCoreRecordAdmissionError::Bounds { .. } => {
-            SourceBackedRouteErrorKind::ResourceUnavailable
-        }
+        // This fixed ceiling belongs to one logical source. Classify it as a
+        // recoverable source failure so the coordinator can retain that
+        // source (when present) and still publish certified peers. Shared
+        // route scratch exhaustion remains ResourceUnavailable at reserve().
+        DeferredCoreRecordAdmissionError::Bounds { .. } => SourceBackedRouteErrorKind::Unavailable,
         DeferredCoreRecordAdmissionError::Arithmetic { .. } => SourceBackedRouteErrorKind::Internal,
     };
     SourceBackedRouteError::new(kind, error.to_string())
@@ -361,7 +363,15 @@ mod tests {
         let admitted_bytes = std::fs::metadata(&path).unwrap().len();
 
         let error = spool.push(core_record(3, "not admitted")).unwrap_err();
-        assert_eq!(error.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+        assert_eq!(error.kind, SourceBackedRouteErrorKind::Unavailable);
+        assert!(error.kind.is_logical_source_failure());
+        assert_eq!(
+            error
+                .kind
+                .source_failure_class()
+                .map(|class| class.as_str()),
+            Some("unavailable")
+        );
         assert!(error.detail.contains(
             "logical-snapshot Core-record spool core-record-count bound exceeded: \
              maximum 2, observed 3"
@@ -388,7 +398,15 @@ mod tests {
         .unwrap();
 
         let error = spool.push(record).unwrap_err();
-        assert_eq!(error.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+        assert_eq!(error.kind, SourceBackedRouteErrorKind::Unavailable);
+        assert!(error.kind.is_logical_source_failure());
+        assert_eq!(
+            error
+                .kind
+                .source_failure_class()
+                .map(|class| class.as_str()),
+            Some("unavailable")
+        );
         assert!(error.detail.contains(&format!(
             "logical-snapshot Core-record spool encoded-byte bound exceeded: maximum \
              {encoded_record_bytes}, observed {}",

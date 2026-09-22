@@ -85,6 +85,17 @@
       "environment_variable": "CTX_DAEMON_MODE"
     },
     {
+      "behavior": "Blame indexing",
+      "config_key": "blame.enabled",
+      "environment_variable": null,
+      "released_default": {
+        "value": true,
+        "state": "on",
+        "scope": "all_cli_installations"
+      },
+      "introduced_after": "v0.25.0"
+    },
+    {
       "behavior": "semantic search",
       "config_key": "search.semantic",
       "environment_variable": "CTX_SEARCH_SEMANTIC",

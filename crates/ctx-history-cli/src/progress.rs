@@ -96,6 +96,23 @@ impl<'a> ProgressReporter<'a> {
         self.0.is_enabled()
     }
 
+    pub fn indexing(
+        &mut self,
+        phase: &'static str,
+        message: impl Into<String>,
+        completed_sources: Option<u32>,
+        total_sources: Option<u32>,
+        applied_changes: Option<u64>,
+    ) -> Result<(), ProgressWriterError> {
+        self.0.indexing(
+            phase,
+            message,
+            completed_sources,
+            total_sources,
+            applied_changes,
+        )
+    }
+
     pub fn source_refresh(&mut self, status: &RefreshStatus) -> Result<(), ProgressWriterError> {
         let snapshot = presentation_snapshot(status).map_err(|error| {
             ProgressWriterError::from(std::io::Error::new(std::io::ErrorKind::InvalidData, error))

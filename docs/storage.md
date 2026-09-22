@@ -199,6 +199,14 @@ only source refresh; the caller completes attribution after that worker.
 and index wait/watch only observe existing state and do not create or rebuild
 an attribution index.
 
+Blame indexing defaults on. `[blame] enabled = false` in `config.toml` prevents
+new foreground and background passes; an active pass may finish. It preserves
+the existing index and does not affect history search. `import --no-blame`
+only skips the calling command's completion. Re-enable and import to catch up.
+An owner-private `attribution-progress.json` sidecar carries advisory counters;
+status reads it only while the native writer lock is held. Stale counters after
+a stopped process are ignored and never replace committed readiness.
+
 A current empty or abstained index is terminal. It does not need another
 completion pass just because it has no evidence for a target. Missing history,
 ambiguous repository identity, and unavailable local Git objects can still

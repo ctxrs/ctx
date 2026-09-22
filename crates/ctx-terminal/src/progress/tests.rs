@@ -422,6 +422,7 @@ fn done_progress_json_forces_complete_bytes_with_incomplete_bytes() {
     let line = ProgressLine {
         phase: "finalizing".to_owned(),
         message: "done".to_owned(),
+        indexing: None,
         completed_bytes: 0,
         total_bytes: 4 * 1024,
         completed_files: None,
@@ -476,6 +477,7 @@ fn progress_json_remains_exact_and_ansi_free() {
     let line = ProgressLine {
         phase: "cataloging".to_owned(),
         message: "cataloging".to_owned(),
+        indexing: None,
         completed_bytes: 1024,
         total_bytes: 4096,
         completed_files: Some(1),
@@ -506,6 +508,7 @@ fn plain_and_json_progress_keep_explicit_stream_contracts() {
     let line = ProgressLine {
         phase: "indexing".to_owned(),
         message: "Indexed 2 sources".to_owned(),
+        indexing: None,
         completed_bytes: 2,
         total_bytes: 4,
         completed_files: Some(2),
@@ -563,6 +566,7 @@ fn progress_write_and_flush_failures_remain_errors() {
     let line = ProgressLine {
         phase: "logical_scan".to_owned(),
         message: "Scanning SQLite history".to_owned(),
+        indexing: None,
         completed_bytes: 0,
         total_bytes: 0,
         completed_files: None,

@@ -181,7 +181,8 @@ Status omits `catalog` and has `read_only: true`. Setup retains `catalog`, omits
 `read_only`, and keeps its existing setup-specific fields. Core health remains
 independent from attribution readiness.
 
-The `attribution` object is the runtime's serialized `CoreProjectionStatus`:
+The `attribution` object includes the runtime's serialized `CoreProjectionStatus`
+and advisory indexing observations:
 
 | Field | Meaning |
 | --- | --- |
@@ -193,6 +194,19 @@ The `attribution` object is the runtime's serialized `CoreProjectionStatus`:
 | `local_repository_access` | Whether the projection has available local repository access. |
 | `availability` | Booleans `file_blame`, `commit_blame`, and `pull_request_blame`. |
 | `diagnostic` | Canonical Blame diagnostic for noncurrent state; omitted when absent. |
+| `indexing_enabled` | Effective `blame.enabled` configuration (default true); independent of committed readiness. |
+| `progress` | Active writer observation, or null when no writer is observed. |
+
+`progress` contains `phase` (`preparing`, `indexing`, `publishing`, briefly
+`complete`, or `snapshot_unavailable` during an incomplete advisory read),
+nullable `core_generation_id`, nullable `completed_sources`, nullable
+`total_sources`, nullable `applied_changes`, and `elapsed_millis`. Counts describe accepted
+work in this pass. Changes include additions, replacements and deletions and
+exclude unchanged records. Preparing and unavailable snapshots have null counts, not
+invented zeros. The observation is
+best effort, never waits for a writer, and ignores stale sidecar bytes after the
+writer releases its lock. It is not proof of a committed or current index.
+Disabled indexing can coexist with an already-running pass or retained results.
 
 The six coverage fields are `repository_candidate_events`,
 `logical_binding_events`, `certified_live_root_access_events`,

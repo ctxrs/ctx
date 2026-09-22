@@ -2,6 +2,48 @@ use std::io::Write as _;
 
 use super::*;
 
+#[test]
+fn progress_is_nonblocking_and_stale_counters_do_not_imply_an_active_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("graph");
+    assert!(OperationLock::read_progress(&root).unwrap().is_none());
+    assert!(!root.exists());
+    prepare_private_root(&root).unwrap();
+    let mut writer = OperationLock::acquire(&root).unwrap();
+    writer.update_progress(
+        |progress| {
+            progress.phase = super::super::MaterializationPhase::Indexing;
+            progress.total_sources = Some(4);
+            progress.completed_sources = Some(2);
+            progress.applied_changes = Some(100);
+        },
+        true,
+    );
+    let started = Instant::now();
+    let progress = OperationLock::read_progress(&root).unwrap().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(progress.completed_sources, Some(2));
+    assert_eq!(progress.applied_changes, Some(100));
+    writer
+        .progress_file
+        .as_ref()
+        .unwrap()
+        .file()
+        .set_len(0)
+        .unwrap();
+    let unavailable = OperationLock::read_progress(&root).unwrap().unwrap();
+    assert_eq!(
+        unavailable.phase,
+        super::super::MaterializationPhase::SnapshotUnavailable
+    );
+    assert!(unavailable.completed_sources.is_none());
+    assert!(unavailable.applied_changes.is_none());
+    writer.update_progress(|_| {}, true);
+    drop(writer);
+    assert!(root.join(MATERIALIZER_PROGRESS_FILE).exists());
+    assert!(OperationLock::read_progress(&root).unwrap().is_none());
+}
+
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 

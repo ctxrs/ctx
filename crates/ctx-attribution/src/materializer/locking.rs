@@ -5,7 +5,7 @@ use fs2::FileExt;
 #[cfg(any(test, not(unix)))]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -18,10 +18,18 @@ use std::os::windows::fs::OpenOptionsExt as _;
 
 use same_file::Handle;
 
-use super::SegmentMaterializerError;
+use super::{MaterializationProgress, SegmentMaterializerError};
 
 const MATERIALIZER_LOCK_FILE: &str = "attribution-materializer.lock";
+const MATERIALIZER_PROGRESS_FILE: &str = "attribution-progress.json";
 const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+fn lock_is_contended(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error
+            .raw_os_error()
+            .is_some_and(|code| Some(code) == fs2::lock_contended_error().raw_os_error())
+}
 
 #[cfg(test)]
 #[path = "locking/tests.rs"]
@@ -32,6 +40,10 @@ const NATIVE_DIRECTORY_SYNC_SUPPORTED: bool = false;
 
 pub struct OperationLock {
     file: VerifiedFile,
+    progress_file: Option<VerifiedFile>,
+    progress: MaterializationProgress,
+    started: Instant,
+    last_reported: Option<Instant>,
 }
 impl OperationLock {
     pub fn acquire(root: &Path) -> Result<Self, SegmentMaterializerError> {
@@ -64,7 +76,7 @@ impl OperationLock {
             }
             match file.file().try_lock_exclusive() {
                 Ok(()) => break,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(error) if lock_is_contended(&error) => {
                     if cancelled.is_none() && started.elapsed() >= LOCK_WAIT {
                         return Err(SegmentMaterializerError::Busy);
                     }
@@ -74,10 +86,107 @@ impl OperationLock {
             }
         }
         file.verify_identity()?;
-        Ok(Self { file })
+        let progress_path = root.join(MATERIALIZER_PROGRESS_FILE);
+        let progress_file = (|| {
+            match platform_security::create_private_file_new(&progress_path) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(io_error(&progress_path, error)),
+            }
+            open_private_file(&progress_path, true)
+        })()
+        .ok();
+        let mut lock = Self {
+            file,
+            progress_file,
+            progress: MaterializationProgress::default(),
+            started: Instant::now(),
+            last_reported: None,
+        };
+        lock.update_progress(|_| {}, true);
+        Ok(lock)
     }
     pub fn verify_identity(&self) -> Result<(), SegmentMaterializerError> {
         self.file.verify_identity()
+    }
+
+    pub(super) fn progress(&self) -> MaterializationProgress {
+        let mut progress = self.progress.clone();
+        progress.elapsed_millis =
+            u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        progress
+    }
+
+    /// Progress is an advisory sidecar, never part of committed index state.
+    /// A partial or failed advisory write must not fail history or attribution work.
+    pub(super) fn update_progress(
+        &mut self,
+        update: impl FnOnce(&mut MaterializationProgress),
+        force: bool,
+    ) {
+        update(&mut self.progress);
+        if !force
+            && self
+                .last_reported
+                .is_some_and(|last| last.elapsed() < Duration::from_millis(500))
+        {
+            return;
+        }
+        self.last_reported = Some(Instant::now());
+        self.progress.elapsed_millis =
+            u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let Some(progress_file) = &self.progress_file else {
+            return;
+        };
+        let _ = (|| -> io::Result<()> {
+            let bytes = serde_json::to_vec(&self.progress)?;
+            let mut file = progress_file.file();
+            file.seek(SeekFrom::Start(0))?;
+            file.set_len(0)?;
+            file.write_all(&bytes)
+        })();
+    }
+
+    /// Does not create files or wait for a writer. Stale bytes after a crash are ignored.
+    pub(crate) fn read_progress(
+        root: &Path,
+    ) -> Result<Option<MaterializationProgress>, SegmentMaterializerError> {
+        let path = root.join(MATERIALIZER_LOCK_FILE);
+        let file = match open_private_file(&path, false) {
+            Ok(file) => file,
+            Err(SegmentMaterializerError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        match FileExt::try_lock_shared(file.file()) {
+            Ok(()) => {
+                FileExt::unlock(file.file()).map_err(|error| io_error(&path, error))?;
+                Ok(None)
+            }
+            Err(error) if lock_is_contended(&error) => {
+                // The writer can be between truncate and write. Its lock still proves
+                // activity, even when this read has no complete counter snapshot.
+                let snapshot = (|| -> Result<MaterializationProgress, SegmentMaterializerError> {
+                    let progress_path = root.join(MATERIALIZER_PROGRESS_FILE);
+                    let progress = open_private_file(&progress_path, false)?;
+                    let mut bytes = Vec::new();
+                    progress
+                        .file()
+                        .take(4096)
+                        .read_to_end(&mut bytes)
+                        .map_err(|error| io_error(&progress_path, error))?;
+                    serde_json::from_slice(&bytes).map_err(|_| SegmentMaterializerError::Encoding)
+                })();
+                Ok(Some(snapshot.unwrap_or_else(|_| MaterializationProgress {
+                    phase: super::MaterializationPhase::SnapshotUnavailable,
+                    ..Default::default()
+                })))
+            }
+            Err(error) => Err(io_error(&path, error)),
+        }
     }
 }
 

@@ -3,6 +3,7 @@
 mod lifecycle;
 pub(crate) mod locking;
 pub(crate) mod model;
+mod progress;
 mod publication;
 mod publication_plan;
 mod reconciliation_cursor;
@@ -13,6 +14,7 @@ mod tests;
 
 pub use crate::core_materialization::CORE_MATERIALIZER_REVISION;
 pub use lifecycle::{CoreGenerationStart, CoreMaterializationSession};
+pub use progress::{MaterializationPhase, MaterializationProgress};
 
 use std::io;
 use std::path::PathBuf;
@@ -31,6 +33,15 @@ pub struct SegmentMaterializer {
     metrics: model::MaterializerMetrics,
     writer_lease: Option<locking::OperationLock>,
     rollback_cleanup_failed: bool,
+}
+
+impl SegmentMaterializer {
+    pub(crate) fn progress(&self) -> MaterializationProgress {
+        self.writer_lease
+            .as_ref()
+            .map(locking::OperationLock::progress)
+            .unwrap_or_default()
+    }
 }
 
 #[allow(dead_code)]
