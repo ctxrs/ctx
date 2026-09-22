@@ -287,14 +287,7 @@ pub(super) fn record_repeated_devin_rejection(
 ) {
     let retained = count.min(1);
     if retained != 0 {
-        record_devin_rejection(
-            rejections,
-            source,
-            source_selector,
-            node_id,
-            class,
-            detail,
-        );
+        record_devin_rejection(rejections, source, source_selector, node_id, class, detail);
     }
     let omitted = count.saturating_sub(retained);
     rejections.record_omitted(usize::try_from(omitted).unwrap_or(usize::MAX));

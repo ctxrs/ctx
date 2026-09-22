@@ -1,6 +1,101 @@
 use super::*;
 
 #[test]
+fn devin_rejections_and_nested_compaction_publish_and_replay() {
+    let temp = tempdir();
+    let database = temp.path().join("sessions.db");
+    fs::copy(provider_history_fixture("devin/v17/sessions.db"), &database).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "insert into subagent_heads \
+         select id, 'overlap-a', main_chain_id, 1 from sessions where id = 'discovered-sandal'; \
+         insert into subagent_heads \
+         select id, 'overlap-b', main_chain_id, 1 from sessions where id = 'discovered-sandal';",
+        )
+        .unwrap();
+    let _daemon = start_isolated_provider_daemon(&temp);
+    let import = || {
+        json_output(ctx(&temp).args([
+            "import",
+            "--provider",
+            "devin",
+            "--path",
+            database.to_str().unwrap(),
+            "--no-daemon",
+            "--format=json",
+            "--progress",
+            "none",
+        ]))
+    };
+    let first = import();
+    assert_eq!(first["outcome"], "completed_with_rejections");
+    assert_eq!(first["totals"]["failed_sources"], 0);
+    assert_eq!(
+        first["sources"][0]["rejection_diagnostics"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(first["totals"]["current_rejected_records"], 2);
+    let before = provider_core_records(&data_root(&temp), "devin");
+    assert_eq!(before.len(), 49);
+    let replay = import();
+    assert_eq!(replay["outcome"], "completed_with_rejections");
+    assert_eq!(replay["totals"]["failed_sources"], 0);
+    assert_eq!(replay["totals"]["current_rejected_records"], 2);
+    assert_eq!(provider_core_records(&data_root(&temp), "devin"), before);
+
+    // Supplement the native forest with a persistent sidekick compaction and
+    // an explicitly linked grandchild. The summary points before the old tip.
+    connection.execute_batch(
+        "delete from subagent_heads; \
+         insert into message_nodes \
+         (session_id, node_id, parent_node_id, chat_message, created_at, metadata) values \
+         ('discovered-sandal', 50, 31, \
+          '{\"role\":\"system\",\"content\":\"sidekick compacted summary\"}', 2, '{\"summarized_from\":33}'), \
+         ('discovered-sandal', 51, 50, \
+          '{\"role\":\"assistant\",\"content\":\"sidekick continued oracle\",\"metadata\":{\"extensions\":{\"subagent/agent_id\":\"nested\",\"subagent/chain_node_id\":61}}}', 2, null), \
+         ('discovered-sandal', 60, null, \
+          '{\"role\":\"user\",\"content\":\"nested request oracle\"}', 2, null), \
+         ('discovered-sandal', 61, 60, \
+          '{\"role\":\"assistant\",\"content\":\"nested reply oracle\"}', 2, null); \
+         insert into subagent_heads values ('discovered-sandal', 'd8a8ea4c', 51, 2);",
+    ).unwrap();
+    let changed = import();
+    assert_explicit_source_publication(&changed, "devin", "devin_cli_sessions_sqlite");
+    assert_eq!(changed["totals"]["current_rejected_records"], 0);
+    let after = provider_core_records(&data_root(&temp), "devin");
+    for previous in &before {
+        assert!(after
+            .iter()
+            .any(|record| record.event_id == previous.event_id));
+    }
+    let parent = after
+        .iter()
+        .find(|record| record.content.meaningful_text() == "sidekick continued oracle")
+        .unwrap();
+    let child = after
+        .iter()
+        .find(|record| record.content.meaningful_text() == "nested reply oracle")
+        .unwrap();
+    let root = after
+        .iter()
+        .find(|record| record.provider_session_id.as_deref() == Some("discovered-sandal"))
+        .unwrap();
+    assert_eq!(child.parent_session_id, Some(parent.session_id));
+    assert_eq!(child.root_session_id, Some(root.session_id));
+    assert_eq!(parent.parent_session_id, Some(root.session_id));
+    assert_eq!(after.len(), before.len() + 4);
+
+    let replay = import();
+    assert_explicit_source_publication(&replay, "devin", "devin_cli_sessions_sqlite");
+    assert_eq!(replay["totals"]["current_rejected_records"], 0);
+    assert_eq!(provider_core_records(&data_root(&temp), "devin"), after);
+}
+
+#[test]
 fn warp_cli_imports_default_sqlite() {
     let temp = tempdir();
     install_default_warp_fixture(&temp);

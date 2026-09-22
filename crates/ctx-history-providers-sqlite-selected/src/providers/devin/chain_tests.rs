@@ -410,7 +410,13 @@ fn a_durable_head_extends_the_same_foreground_subagent_chain() {
 
 #[test]
 fn a_compaction_fork_extends_a_persistent_same_agent_lineage() {
-    let mut facts = forest(&[(0, None), (1, Some(0)), (2, Some(1)), (3, Some(2)), (4, Some(3))]);
+    let mut facts = forest(&[
+        (0, None),
+        (1, Some(0)),
+        (2, Some(1)),
+        (3, Some(2)),
+        (4, Some(3)),
+    ]);
     chain_of(&mut facts, &[10, 11, 12, 13, 14, 15, 16, 17, 18, 20]);
     chain_of(&mut facts, &[11, 21, 22, 23]);
     facts.get_mut(&21).unwrap().summarized_from = Some(18);
@@ -743,6 +749,32 @@ fn successive_same_agent_tips_walk_only_the_advancing_suffix() {
             .map(|node| node.node_id)
             .collect::<Vec<_>>(),
         (NODES..NODES * 2).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn nested_links_walk_each_node_once_without_recursion() {
+    const DEPTH: i64 = 2_000;
+    let facts = (0..=DEPTH)
+        .map(|id| {
+            (
+                id,
+                DevinNodeFacts {
+                    subagent_chain_node_id: (id < DEPTH).then_some(id + 1),
+                    subagent_agent_id: (id < DEPTH).then(|| format!("agent-{}", id + 1)),
+                    ..DevinNodeFacts::default()
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let plan = plan_session_with_limits(&facts, Some(0), &[], facts.len(), facts.len());
+    assert!(plan.rejection.is_none());
+    assert_eq!(plan.lineages.len(), facts.len());
+    assert_eq!(plan.counts.ignored_nodes, 0);
+    assert_eq!(plan.counts.rejected_lineages, 0);
+    assert_eq!(
+        plan.lineages.last().unwrap().parent_key,
+        Some(DevinLineageKey::Subagent(format!("agent-{}", DEPTH - 1)))
     );
 }
 

@@ -2339,7 +2339,7 @@
             "Devin CLI versions 3000.4.25 and 3000.6.14 write sessions to ~/.local/share/devin/cli/sessions.db; version 3000.10.21 migrates that database to schema 17 and adds subagent_heads(session_id, agent_id, chain_node_id, updated_at) alongside sessions, message_nodes, and tool_call_state.",
             "message_nodes per session is a forest; the imported transcript is the walk from sessions.main_chain_id up parent_node_id, reversed, with pre-compaction history spliced in through metadata.summarized_from.",
             "Admission is structural rather than version-pinned: required tables, columns, and the native session, node, tool-state, and subagent-head unique keys are probed, and max(refinery_schema_history.version) feeds the capability digest so a migration rotates the published content digest.",
-            "Foreground subagent back-links and durable subagent_heads entries are imported as delegated child sessions."
+            "Foreground subagent back-links, including nested links, and durable subagent_heads entries are imported as delegated sessions. Same-agent continuations retain history across compaction. Foreground links identify the immediate parent when unambiguous; durable heads alone identify only the root session."
           ]
         }
       ],
@@ -2370,7 +2370,7 @@
       },
       "limitations": [
         "Only the main chain and the pre-compaction history reachable from it are imported. Summarizer threads, abandoned regenerated turns, and subagent threads without a foreground back-link or durable head are counted but not imported.",
-        "Foreground back-linked and durable background subagent trees are imported; a subagent forest without an exact chain tip remains unclaimed.",
+        "Foreground back-linked, nested, and durable background subagent trees are imported; a subagent forest without an exact chain tip remains unclaimed. An immediate parent is not claimed when only a durable head is available or foreground callers disagree.",
         "Native assistant messages with visible text retain generation metadata when Devin writes it; tool-only and empty-content events do not retain that payload. Session-level model, agent mode, cost, and token data are not projected as Core facts. Exact MCP server/tool attribution is not supported."
       ],
       "public_docs": "docs/provider-support.md"

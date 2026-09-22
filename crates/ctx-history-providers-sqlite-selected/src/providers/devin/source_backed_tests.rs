@@ -10,6 +10,9 @@ use super::{
     source_backed::{devin_source_key_scoped, scan_devin_snapshot, DevinScanCounts},
 };
 
+#[path = "lineage_tests.rs"]
+mod lineage_tests;
+
 struct Scanned {
     records: Vec<CoreRecord>,
     counts: DevinScanCounts,
@@ -196,7 +199,9 @@ fn repeated_subagent_lineage_and_splice_diagnostics_are_unique_and_accounted_for
         .rejections
         .iter()
         .filter(|rejection| {
-            rejection.detail.contains("invalid, ambiguous, or overlapping subagent lineage")
+            rejection
+                .detail
+                .contains("invalid, ambiguous, or overlapping subagent lineage")
                 || rejection
                     .detail
                     .contains("compaction splice whose referenced node is absent")
@@ -775,7 +780,7 @@ fn a_durable_background_head_projects_a_child_and_rotates_with_its_evidence() {
     assert!(!child.is_empty(), "durable background child present");
     for record in child {
         assert_eq!(record.agent_scope, Some(AgentScope::Subagent));
-        assert_eq!(record.parent_session_id, Some(primary_session_id));
+        assert_eq!(record.parent_session_id, None);
         assert_eq!(record.root_session_id, Some(primary_session_id));
         assert_eq!(
             record.session_relationship,
