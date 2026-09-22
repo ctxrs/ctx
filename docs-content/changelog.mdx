@@ -8,6 +8,23 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 1.6.2
+
+Released: 2026-09-22
+
+### Fixed
+
+- When one logical history source exceeds its bounded staging spool, ctx keeps
+  other providers available and retains that source's last good data when
+  possible. Diagnostics identify the affected source path and exceeded limit.
+
+### Commits and PRs
+
+- Source commit: [23d118ca](https://github.com/ctxrs/ctx/commit/23d118ca7d7cce419e0fc70b26dddf2de6a9e90b).
+- Full diff: [v1.6.1...23d118ca](https://github.com/ctxrs/ctx/compare/v1.6.1...23d118ca7d7cce419e0fc70b26dddf2de6a9e90b).
+- [#1040](https://github.com/ctxrs/ctx/pull/1040) — isolate per-source logical spool overflow.
+- [#1041](https://github.com/ctxrs/ctx/pull/1041) — prepare the 1.6.2 release.
+
 ## 1.6.1
 
 Released: 2026-09-22
