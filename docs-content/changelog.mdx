@@ -8,6 +8,49 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 1.6.1
+
+Released: 2026-09-22
+
+### Added
+
+- ctx now discovers and imports conversations from Devin CLI's standard local
+  history store. Main and compacted history, linked subagent sessions, and tool
+  activity are available to ctx search and replay. Hosted Devin history and
+  unlinked background threads are not included.
+
+### Changed
+
+- The website and documentation describe Blame as part of the open-source ctx
+  CLI and remove retired commercial-product pages.
+
+### Fixed
+
+- When an index refresh lacks disk space, ctx reports the required and
+  available capacity and backs off instead of repeatedly retrying it as an
+  internal failure.
+- Status and doctor output no longer label a confirmed running daemon unhealthy
+  solely because its scheduler heartbeat is old. The heartbeat age remains
+  available as a diagnostic in JSON output.
+- OpenCode-family imports reject only the affected logical record when an
+  individual SQLite value exceeds 16 MiB, while valid sibling history
+  continues to import.
+- Hosted installs accept setup results with multiline progress output, avoiding
+  false setup failures after a successful import.
+- Windows hosted installs accept valid multiline transaction receipts, avoiding
+  a false installer failure after a successful upgrade.
+
+### Commits and PRs
+
+- Source commit: [6ba80f7e](https://github.com/ctxrs/ctx/commit/6ba80f7e1a4b0ab091dc8cb043e948c58c4a4f4f).
+- Full diff: [v1.5.0...6ba80f7e](https://github.com/ctxrs/ctx/compare/v1.5.0...6ba80f7e1a4b0ab091dc8cb043e948c58c4a4f4f).
+- [#1017](https://github.com/ctxrs/ctx/pull/1017) — add Devin as a history provider.
+- [#1024](https://github.com/ctxrs/ctx/pull/1024) — isolate oversized OpenCode-family history rows.
+- [#1032](https://github.com/ctxrs/ctx/pull/1032) — stop low-headroom refresh retry loops and correct status diagnostics.
+- [#1033](https://github.com/ctxrs/ctx/pull/1033) — prepare the 1.6.1 release.
+- [#1037](https://github.com/ctxrs/ctx/pull/1037) — accept valid multiline Windows hosted transaction receipts.
+- [#1038](https://github.com/ctxrs/ctx/pull/1038) — support file-backed macOS release-signing secrets.
+
 ## 1.5.0
 
 Released: 2026-09-21
