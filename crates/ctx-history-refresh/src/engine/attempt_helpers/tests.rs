@@ -169,6 +169,16 @@ fn route_index_and_internal_failures_have_stable_retry_classes() {
             false,
         ),
         (
+            IndexError::CurrentRepublishInsufficientHeadroom {
+                required: 1_024,
+                available: 512,
+            }
+            .into(),
+            RefreshOutcomeCode::ResourceUnavailable,
+            RefreshOutcomeClass::ResourceUnavailable,
+            true,
+        ),
+        (
             IndexError::SchemaMismatch(1).into(),
             RefreshOutcomeCode::IndexIncompatible,
             RefreshOutcomeClass::Incompatible,

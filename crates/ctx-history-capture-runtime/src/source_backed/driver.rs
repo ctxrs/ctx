@@ -603,7 +603,10 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
     ) -> SourceBackedCoordinatorResult<(), L::Error> {
         let (prepared, reservation) = emission.into_prepared();
         self.report_index_writer_activity()?;
-        self.lifecycle.add_prepared(prepared)?;
+        self.lifecycle
+            .add_prepared(prepared)
+            .map_err(L::route_error)
+            .map_err(SourceBackedCoordinatorError::CoreEmission)?;
         self.flush_intermediate_activity()?;
         drop(reservation);
         Ok(())

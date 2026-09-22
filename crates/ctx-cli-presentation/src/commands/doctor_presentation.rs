@@ -25,13 +25,6 @@ pub struct DoctorRefreshFailure {
 
 pub fn source_epoch_findings(report: &Value, semantic_required: bool) -> Vec<String> {
     let mut findings = Vec::new();
-    if report
-        .pointer("/daemon/heartbeat_stale")
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        findings.push("daemon is running (heartbeat_stale)".to_owned());
-    }
     for (name, required) in [
         ("history_epoch", true),
         ("lexical", true),
@@ -165,15 +158,7 @@ pub fn render_doctor_human(
         .and_then(|coverage| coverage.provider_roots)
         .is_some_and(|roots| roots.partial > 0 || roots.excluded > 0 || roots.unknown > 0);
     let coverage_has_refresh_issues = coverage.is_some_and(|coverage| coverage.source_failures > 0);
-    let (text, command) = if findings
-        .iter()
-        .any(|finding| finding.contains("(heartbeat_stale)"))
-    {
-        (
-            "Inspect the daemon and retained work before retrying.",
-            "ctx daemon status",
-        )
-    } else if refresh_failure.is_some() {
+    let (text, command) = if refresh_failure.is_some() {
         (
             "Fix the refresh error above, then retry.",
             "ctx import --all",
@@ -384,7 +369,7 @@ mod ui_tests {
     }
 
     #[test]
-    fn doctor_reports_stale_heartbeat_as_observation_not_process_death() {
+    fn doctor_ignores_scheduler_heartbeat_age_for_a_live_daemon() {
         let report = json!({
             "history_epoch": {"status": "ready"},
             "lexical": {"status": "ready"},
@@ -393,11 +378,9 @@ mod ui_tests {
             "daemon": {"running": true, "heartbeat_stale": true},
         });
         let findings = source_epoch_findings(&report, false);
-        assert_eq!(findings, ["daemon is running (heartbeat_stale)"]);
+        assert!(findings.is_empty());
         let rendered = render_doctor_human(&context(120), &findings, None, None).render_plain();
-        assert!(rendered.contains("Daemon heartbeat is stale"), "{rendered}");
-        assert!(rendered.contains("ctx daemon status"), "{rendered}");
-        assert!(!rendered.contains("No problems found"), "{rendered}");
+        assert_eq!(rendered, "✓ No problems found\n");
     }
 
     #[test]

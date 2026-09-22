@@ -45,6 +45,22 @@ fn index_preparation_classifies_only_source_contract_failures_as_invalid() {
 }
 
 #[test]
+fn index_capture_lifecycle_classifies_low_headroom_as_resource_unavailable() {
+    let error =
+        IndexCaptureLifecycle::route_error(IndexError::CurrentRepublishInsufficientHeadroom {
+            required: 1_024,
+            available: 512,
+        });
+
+    assert_eq!(
+        error.kind,
+        ctx_history_capture_runtime::SourceBackedRouteErrorKind::ResourceUnavailable
+    );
+    assert!(error.detail.contains("1024"));
+    assert!(error.detail.contains("512"));
+}
+
+#[test]
 fn index_preparation_delegates_exact_size_and_capacity_without_reencoding() {
     let temporary = crate::test_support_paths::tempdir().unwrap();
     let writer = GenerationWriter::open(
