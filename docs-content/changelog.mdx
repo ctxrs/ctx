@@ -37,15 +37,18 @@ Released: 2026-09-22
   continues to import.
 - Hosted installs accept setup results with multiline progress output, avoiding
   false setup failures after a successful import.
+- Windows hosted installs accept valid multiline transaction receipts, avoiding
+  a false installer failure after a successful upgrade.
 
 ### Commits and PRs
 
-- Source commit: [8f017f9f](https://github.com/ctxrs/ctx/commit/8f017f9f59a429613848157ab8c6d2758e7a4134).
-- Full diff: [v1.5.0...8f017f9f](https://github.com/ctxrs/ctx/compare/v1.5.0...8f017f9f59a429613848157ab8c6d2758e7a4134).
+- Source commit: [90c7e129](https://github.com/ctxrs/ctx/commit/90c7e1292c0484a587896bde0a31b0a62453dc52).
+- Full diff: [v1.5.0...90c7e129](https://github.com/ctxrs/ctx/compare/v1.5.0...90c7e1292c0484a587896bde0a31b0a62453dc52).
 - [#1017](https://github.com/ctxrs/ctx/pull/1017) — add Devin as a history provider.
 - [#1024](https://github.com/ctxrs/ctx/pull/1024) — isolate oversized OpenCode-family history rows.
 - [#1032](https://github.com/ctxrs/ctx/pull/1032) — stop low-headroom refresh retry loops and correct status diagnostics.
 - [#1033](https://github.com/ctxrs/ctx/pull/1033) — prepare the 1.6.1 release.
+- [#1037](https://github.com/ctxrs/ctx/pull/1037) — accept valid multiline Windows hosted transaction receipts.
 
 ## 1.5.0
 
