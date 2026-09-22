@@ -409,6 +409,60 @@ fn a_durable_head_extends_the_same_foreground_subagent_chain() {
 }
 
 #[test]
+fn a_compaction_fork_extends_a_persistent_same_agent_lineage() {
+    let mut facts = forest(&[(0, None), (1, Some(0)), (2, Some(1)), (3, Some(2)), (4, Some(3))]);
+    chain_of(&mut facts, &[10, 11, 12, 13, 14, 15, 16, 17, 18, 20]);
+    chain_of(&mut facts, &[11, 21, 22, 23]);
+    facts.get_mut(&21).unwrap().summarized_from = Some(18);
+    for (linker, tip) in [(2, 20), (3, 23), (4, 20)] {
+        facts.get_mut(&linker).unwrap().subagent_chain_node_id = Some(tip);
+        facts.get_mut(&linker).unwrap().subagent_agent_id = Some("sidekick".to_owned());
+    }
+    let heads = [DevinSubagentHead {
+        agent_id: "sidekick".to_owned(),
+        chain_node_id: 23,
+        updated_at: 1,
+    }];
+
+    let plan = plan_session(&facts, Some(4), &heads);
+    assert_eq!(plan.lineages.len(), 2);
+    assert_eq!(plan.counts.rejected_lineages, 0);
+    assert_eq!(plan.counts.rejected_splices, 0);
+    assert_eq!(plan.counts.ignored_nodes, 0);
+    let sidekick = &plan.lineages[1];
+    assert_eq!(
+        sidekick.key,
+        DevinLineageKey::Subagent("sidekick".to_owned())
+    );
+    assert_eq!(
+        sidekick
+            .nodes
+            .iter()
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        [10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21, 22, 23]
+    );
+    assert_eq!(
+        sidekick
+            .nodes
+            .iter()
+            .filter(|node| node.splice_kind == DevinSpliceKind::Chain)
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        [10, 11, 21, 22, 23]
+    );
+    assert_eq!(
+        sidekick
+            .nodes
+            .iter()
+            .filter(|node| node.splice_kind == DevinSpliceKind::Spliced)
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+        [12, 13, 14, 15, 16, 17, 18, 20]
+    );
+}
+
+#[test]
 fn a_bad_splice_does_not_block_a_durable_head_at_its_valid_ancestor() {
     let mut facts = BTreeMap::new();
     chain_of(&mut facts, &[0]);

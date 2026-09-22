@@ -63,7 +63,7 @@ use diagnostics::{
 };
 use evidence::{malformed_session_evidence, node_evidence, session_evidence};
 
-pub(super) const DEVIN_SOURCE_BACKED_PARSER_REVISION: &str = "devin-cli-sessions-sqlite-v2";
+pub(super) const DEVIN_SOURCE_BACKED_PARSER_REVISION: &str = "devin-cli-sessions-sqlite-v3";
 const DEVIN_SOURCE_ANCHOR_NAMESPACE: &str = "devin_cli.sessions_database";
 const DEVIN_SOURCE_ANCHOR_KEY: &str = "devin_cli_sessions_sqlite";
 const DEVIN_SOURCE_SCHEMA_VARIANT: &str = "devin-cli-sessions-sqlite-v1";

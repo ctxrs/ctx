@@ -221,13 +221,9 @@ pub(super) fn plan_session_with_limits(
         nodes: ordered_nodes(facts, &primary, main_chain_id),
     }];
 
-    // Foreground links retain their primary-transcript order. Durable-only
-    // heads follow in the deterministic order supplied by the reader. A
-    // subagent can move between foreground and background while keeping its
-    // agent id, so a later head on the same chain replaces an earlier tip.
-    // Every accepted candidate owns its nodes while candidates are admitted.
-    // This makes a same-agent advancing tip walk only the new suffix, and
-    // makes an overlap with a different lineage fail at its first owned node.
+    // Foreground links retain primary order; durable-only heads follow reader
+    // order. Same-agent candidates extend when their walk reaches any node in
+    // that lineage; a different owner's node remains an overlap.
     // The `None` owner is the primary transcript.
     let mut owners = primary
         .iter()
@@ -316,17 +312,15 @@ fn admit_subagent_candidate(
         return;
     }
     let existing = indexes.get(agent_id).copied();
-    if existing.is_some_and(|index| candidates[index].tip == tip) {
+    if existing.is_some_and(|index| candidates[index].nodes.contains(&tip)) {
         return;
     }
-    let previous_tip = existing.map(|index| candidates[index].tip);
     let collected = match collect_candidate_lineage(
         facts,
         tip,
         owners,
         rejected_nodes,
         existing,
-        previous_tip,
         walk_steps,
     ) {
         Ok(collected) => collected,
@@ -337,8 +331,8 @@ fn admit_subagent_candidate(
     };
 
     if let Some(index) = existing {
-        if collected.reaches_previous_tip {
-            candidates[index].tip = tip;
+        if collected.touches_own_lineage {
+            candidates[index].tip = candidates[index].tip.max(tip);
             candidates[index].rejected_splices += collected.rejected_splices;
             candidates[index]
                 .nodes
@@ -349,9 +343,9 @@ fn admit_subagent_candidate(
                     .into_iter()
                     .map(|node_id| (node_id, Some(index))),
             );
-        } else if !candidates[index].nodes.contains(&tip) {
-            // Disjoint tips under one exact agent id are ambiguous. Keep the
-            // first native link and reject only the conflicting candidate.
+        } else {
+            // With no connection to the accepted same-agent nodes, the tips
+            // remain disjoint. Keep the accepted lineage and reject this one.
             counts.rejected_lineages += 1;
         }
         return;
@@ -376,7 +370,7 @@ fn admit_subagent_candidate(
 
 struct DevinCandidateCollectedLineage {
     nodes: BTreeSet<i64>,
-    reaches_previous_tip: bool,
+    touches_own_lineage: bool,
     rejected_splices: u64,
 }
 
@@ -410,21 +404,20 @@ fn cache_structural_candidate_block(
     cache_candidate_block(rejected_nodes, nodes, DevinCandidateBlock::Structural);
 }
 
-/// Walks only the portion of a candidate that no accepted lineage owns yet.
-/// Nodes already owned by this agent have been validated, so they are terminals
-/// for an advancing tip; another owner is an overlapping lineage.
+/// Walks the candidate until its ancestry reaches an existing owner or ends.
+/// Reaching this agent's lineage connects a continuation; another owner is an
+/// overlapping lineage.
 fn collect_candidate_lineage(
     facts: &BTreeMap<i64, DevinNodeFacts>,
     tip: i64,
     owners: &BTreeMap<i64, Option<usize>>,
     rejected_nodes: &mut BTreeMap<i64, DevinCandidateBlock>,
     candidate_index: Option<usize>,
-    previous_tip: Option<i64>,
     walk_steps: &mut usize,
 ) -> Result<DevinCandidateCollectedLineage, DevinCandidateRejection> {
     let mut nodes = BTreeSet::<i64>::new();
     let mut pending = vec![tip];
-    let mut reaches_previous_tip = false;
+    let mut touches_own_lineage = false;
     let mut rejected_splices = 0;
     while let Some(anchor) = pending.pop() {
         let mut anchor_nodes = BTreeSet::<i64>::new();
@@ -452,7 +445,7 @@ fn collect_candidate_lineage(
             }
             if let Some(owner) = owners.get(&node_id) {
                 if owner.is_some_and(|owner_index| Some(owner_index) == candidate_index) {
-                    reaches_previous_tip |= previous_tip == Some(node_id);
+                    touches_own_lineage = true;
                     break;
                 }
                 rejected_nodes.insert(tip, DevinCandidateBlock::Overlap(*owner));
@@ -489,7 +482,7 @@ fn collect_candidate_lineage(
     }
     Ok(DevinCandidateCollectedLineage {
         nodes,
-        reaches_previous_tip,
+        touches_own_lineage,
         rejected_splices,
     })
 }
