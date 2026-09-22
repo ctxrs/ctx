@@ -26,12 +26,17 @@ use super::{
 /// deliberately limited to concrete filesystem/catalog/daemon side effects.
 pub(super) struct CliImportHost {
     semantic_completion: crate::semantic::ImportSemanticCompletion,
+    complete_blame: bool,
 }
 
 impl CliImportHost {
-    pub(super) fn new(semantic_completion: crate::semantic::ImportSemanticCompletion) -> Self {
+    pub(super) fn new(
+        semantic_completion: crate::semantic::ImportSemanticCompletion,
+        complete_blame: bool,
+    ) -> Self {
         Self {
             semantic_completion,
+            complete_blame,
         }
     }
 }
@@ -106,6 +111,7 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
             no_daemon,
             selection,
             &self.semantic_completion,
+            self.complete_blame,
             progress,
         )
         .map_err(|error| {

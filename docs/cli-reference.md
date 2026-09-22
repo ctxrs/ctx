@@ -543,6 +543,7 @@ ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json
 ctx import --resume
 ctx import --no-daemon
+ctx import --all --no-blame
 ctx import --format json
 ctx import --progress json --format json
 ```
@@ -562,7 +563,12 @@ provider/path. It creates the data root if needed, reads provider transcript
 files, builds a private immutable Core/Tantivy candidate containing complete
 normalized stored records plus lexical fields, identities, and filter metadata,
 verifies it, and atomically publishes it under `search/lexical`. With semantic
-search disabled, it returns after that Core publication. With semantic search
+search disabled, it returns after Core publication and Blame completion. Blame
+indexing is on by default. `--no-blame` skips only this command's Blame wait;
+it does not disable independently running background indexing. Set
+`[blame] enabled = false` in `config.toml` to prevent new foreground and
+background Blame passes without deleting existing results. Re-enable and run
+`ctx import --all` to catch up. With semantic search
 enabled, a successful import waits until the exact Core generation it published
 has a complete compatible semantic generation: a full daemon owns that write,
 while manual and source-refresh-only operation reconcile it in the foreground.
@@ -1105,6 +1111,14 @@ Progress JSON is a best-effort operation stream. Each object has
 `type: "ctx_progress"` plus `operation`, `phase`, `message`,
 `completed_bytes`, `total_bytes`, `percent`, `elapsed_seconds`, `eta_seconds`,
 `completed_files`, `total_files`, `imported_events`, and `done`.
+
+Blame work uses `blame_waiting`, `blame_preparing`, `blame_indexing`,
+`blame_publishing`, and `blame_complete` phases; `blame_active` means counters
+are temporarily unavailable. These also expose nullable
+`completed_sources`, `total_sources`, and `applied_changes` for the
+current pass. Changes include additions, replacements and deletions; unchanged
+records do not count. Byte totals and ETA are unknown, not estimates of Blame
+completion. A complete Blame phase does not mean subsequent semantic work is done.
 
 During daemon-owned history refresh, the same object also projects the physical
 job authority and source progress: source counts, `source_completed_records`,

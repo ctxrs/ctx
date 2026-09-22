@@ -217,6 +217,11 @@ pub(crate) struct ImportArgs {
         help = "Do not start or restart the daemon; require an already-running daemon"
     )]
     pub(crate) no_daemon: bool,
+    #[arg(
+        long,
+        help = "Skip this import's Blame indexing; automatic background indexing is unchanged"
+    )]
+    pub(crate) no_blame: bool,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
     #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]

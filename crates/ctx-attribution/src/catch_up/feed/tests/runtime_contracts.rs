@@ -2,6 +2,87 @@ use super::*;
 use crate::protocol::MaterializedCoverage;
 
 #[test]
+fn progress_counts_accepted_work_and_retains_final_counters() {
+    use crate::materializer::MaterializationPhase;
+    use std::sync::Mutex;
+    let fixture = Fixture::new();
+    let source = source("progress");
+    for (revision, records, expected_changes) in [
+        (
+            1,
+            vec![(1, "first".to_owned()), (2, "second".to_owned())],
+            2,
+        ),
+        (
+            2,
+            vec![
+                (1, "first".to_owned()),
+                (2, "second".to_owned()),
+                (3, "third".to_owned()),
+            ],
+            1,
+        ),
+    ] {
+        let generation = fixture.publish(revision, &[(source.clone(), records)], None);
+        let snapshot =
+            crate::catch_up::open_exact_core_snapshot(&fixture.data_root, &generation).unwrap();
+        let updates = Mutex::new(Vec::new());
+        crate::catch_up_with_progress(&fixture.data_root, &snapshot, &|| false, &|progress| {
+            updates.lock().unwrap().push(progress.clone());
+            Ok(())
+        })
+        .unwrap();
+        let updates = updates.into_inner().unwrap();
+        let complete = updates.last().unwrap();
+        assert_eq!(complete.phase, MaterializationPhase::Complete);
+        assert_eq!(
+            complete.core_generation_id.as_deref(),
+            Some(generation.as_str())
+        );
+        assert_eq!(complete.completed_sources, Some(1));
+        assert_eq!(complete.total_sources, Some(1));
+        assert_eq!(complete.applied_changes, Some(expected_changes));
+        assert!(
+            crate::materialization_progress(&fixture.data_root)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            crate::readiness(&fixture.data_root).unwrap().currentness,
+            CoreProjectionCurrentness::Current
+        );
+        crate::catch_up_with_progress(&fixture.data_root, &snapshot, &|| false, &|progress| {
+            if progress.phase == MaterializationPhase::Complete {
+                assert_eq!(progress.applied_changes, None);
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn progress_observer_failure_cancels_wait_without_modifying_writer() {
+    use crate::materializer::MaterializationPhase;
+    let fixture = Fixture::new();
+    let generation = fixture.publish(1, &[], None);
+    let snapshot =
+        crate::catch_up::open_exact_core_snapshot(&fixture.data_root, &generation).unwrap();
+    let mut owner = fixture.materializer();
+    let error =
+        crate::catch_up_with_progress(&fixture.data_root, &snapshot, &|| false, &|progress| {
+            assert_eq!(progress.phase, MaterializationPhase::WaitingForWriter);
+            anyhow::bail!("authored observer failure")
+        })
+        .unwrap_err();
+    assert_eq!(error.to_string(), "authored observer failure");
+    assert_eq!(
+        sync(&fixture, &generation, &mut owner).core_generation_id,
+        generation
+    );
+}
+
+#[test]
 fn read_only_absence_empty_and_abstained_are_honest_terminal_states() {
     let fixture = Fixture::new();
     let legacy = fixture.data_root.join("pro-graph");

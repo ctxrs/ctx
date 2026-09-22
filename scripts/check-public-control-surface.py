@@ -28,6 +28,7 @@ TEXT_SUFFIXES = {
 }
 SKIP_PARTS = {".git", "bazel-bin", "bazel-out", "bazel-testlogs", "target"}
 RELEASED_DEFAULT_SCOPES = {
+    "blame.enabled": "all_cli_installations",
     "analytics.enabled": "all_cli_installations",
     "local_usage.enabled": "all_cli_installations",
     "upgrade.auto": "official_installer_managed",
@@ -145,6 +146,11 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
         defaults["semantic.builtin_throttling"] = constants[
             "SEMANTIC_BUILTIN_THROTTLING_DEFAULT_ENABLED"
         ]
+    if "BlameConfig" in default_source:
+        defaults["blame.enabled"] = default_field(
+            r"blame:\s*BlameConfig\s*\{.*?enabled:\s*([^,}\n]+)",
+            "Blame indexing",
+        )
     if "SourcesConfig" in default_source:
         defaults["sources.automatic"] = default_field(
             r"sources:\s*SourcesConfig\s*\{.*?automatic:\s*([^,}\n]+)",

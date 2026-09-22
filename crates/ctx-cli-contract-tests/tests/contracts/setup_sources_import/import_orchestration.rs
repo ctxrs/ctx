@@ -7,6 +7,8 @@ use std::{
     process::{Child, Command as StdCommand, Stdio},
 };
 
+#[path = "import_orchestration/blame_indexing.rs"]
+mod blame_indexing;
 #[path = "import_orchestration/cancellation.rs"]
 mod cancellation;
 #[path = "import_orchestration/relocation.rs"]
@@ -1260,7 +1262,11 @@ fn persistent_daemon_startup_reconciles_absent_attribution_without_core_publicat
     // Observe ownership release before starting a different daemon in this root.
     wait_for_daemon_status(&temp, "disabled", false, "setup");
     fs::remove_dir_all(data_root(&temp).join("search/attribution")).unwrap();
-    let _daemon = start_source_refresh_daemon_with_config(&temp, "source-refresh-only", "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n[sources]\nautomatic = false\n[search]\nsemantic = false\n");
+    let _daemon = start_source_refresh_daemon_with_config(
+        &temp,
+        "source-refresh-only",
+        "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n[sources]\nautomatic = false\n[search]\nsemantic = false\n",
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let status = json_output(ctx(&temp).args(["status", "--format=json"]));

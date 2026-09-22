@@ -32,11 +32,43 @@ pub fn append_attribution(context: &RenderContext, document: &mut Document, repo
                 .join(" ")
         });
     let mut rows = vec![Field::new("Index", state)];
+    let progress = attribution
+        .get("progress")
+        .filter(|value| value.is_object());
+    let work = progress
+        .and_then(|progress| progress["phase"].as_str())
+        .map(|phase| match phase {
+            "preparing" => "preparing index",
+            "indexing" => "indexing history",
+            "publishing" => "publishing index",
+            "complete" => "finishing",
+            _ => "running",
+        });
+    let counts = progress.and_then(|progress| {
+        let completed = progress["completed_sources"].as_u64()?;
+        let total = progress["total_sources"].as_u64()?;
+        let changes = progress["applied_changes"].as_u64()?;
+        Some(format!(
+            "{completed}/{total} sources; {changes} changes applied"
+        ))
+    });
+    if let Some(work) = work {
+        rows.push(Field::new("Activity", work));
+    }
+    if let Some(counts) = &counts {
+        rows.push(Field::new("Progress", counts));
+    }
+    let indexing_disabled = attribution["indexing_enabled"] == false;
+    if indexing_disabled {
+        rows.push(Field::new("Indexing", "disabled by blame.enabled = false"));
+    }
     if let Some(detail) = detail {
         rows.push(Field::new("Detail", detail));
     }
-    if let Some(action) = &action {
-        rows.push(Field::new("Complete", action));
+    if !indexing_disabled {
+        if let Some(action) = &action {
+            rows.push(Field::new("Complete", action));
+        }
     }
     document.push_blank();
     document.append(section("Blame", fields(context, &rows)));
@@ -69,5 +101,26 @@ mod tests {
         );
         assert!(doc.render_plain().contains("ctx import --all"));
         assert!(!doc.render_plain().contains("index watch"));
+    }
+
+    #[test]
+    fn active_work_and_disabled_indexing_do_not_replace_committed_readiness() {
+        let context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+        let mut doc = Document::new();
+        append_attribution(
+            &context,
+            &mut doc,
+            &json!({"attribution": {
+                "currentness": "stale", "indexing_enabled": false,
+                "diagnostic": {"next_action": {"argv": ["ctx", "import", "--all"]}},
+                "progress": {"phase": "indexing", "completed_sources": 2, "total_sources": 7, "applied_changes": 89}
+            }}),
+        );
+        let text = doc.render_plain();
+        assert!(text.contains("behind current history"));
+        assert!(text.contains("disabled by blame.enabled = false"));
+        assert!(text.contains("indexing history"));
+        assert!(text.contains("2/7 sources; 89 changes applied"));
+        assert!(!text.contains("ctx import --all"));
     }
 }

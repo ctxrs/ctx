@@ -294,7 +294,7 @@ fn request_source_refresh(
                 if receipt.published_generation != observation.pin.generation_id() {
                     bail!("Core refresh receipt and retained generation disagree");
                 }
-                crate::semantic::complete_attribution(data_root, &observation.pin)?;
+                crate::semantic::complete_attribution(data_root, &observation.pin, progress)?;
             }
             if let Some(status) = deferred_terminal_success {
                 progress
