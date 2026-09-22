@@ -248,13 +248,21 @@ fn fail_route_after_scan(
 }
 
 fn fail_route_before_scan(
+    route: SourceBackedRoute,
+    kind: SourceBackedRouteErrorKind,
+) -> SourceBackedRoute {
+    fail_route_before_scan_with_detail(route, kind, "fixture route failure")
+}
+
+fn fail_route_before_scan_with_detail(
     mut route: SourceBackedRoute,
     kind: SourceBackedRouteErrorKind,
+    detail: &'static str,
 ) -> SourceBackedRoute {
     let original = route.driver.take().unwrap();
     let owns = Arc::clone(&original.owns_source);
     route.driver = Some(SourceBackedRouteDriver::new_fallible(
-        move |_| Err(SourceBackedRouteError::new(kind, "fixture route failure")),
+        move |_| Err(SourceBackedRouteError::new(kind, detail)),
         move |source| owns(source),
         |_| Ok(false),
     ));
@@ -386,9 +394,10 @@ fn cold_opencode_capacity_failure_publishes_healthy_peer() {
     let failing_id = failing.metadata.route_identity.clone().unwrap();
     let mut registry = SourceBackedProviderRegistry::new();
     registry.register(healthy);
-    registry.register(fail_route_before_scan(
+    registry.register(fail_route_before_scan_with_detail(
         failing,
         SourceBackedRouteErrorKind::Unavailable,
+        "logical-snapshot Core-record spool encoded-byte bound exceeded: maximum 268435456, observed 268436253",
     ));
     let temp = tempdir().unwrap();
 
@@ -403,6 +412,13 @@ fn cold_opencode_capacity_failure_publishes_healthy_peer() {
         SourceBackedSourceFailureClass::Unavailable
     );
     assert!(!receipt.failed_routes[0].carried_forward);
+    assert_eq!(receipt.failed_routes[0].provider, CaptureProvider::OpenCode);
+    let diagnostic = &receipt.source_failures.failures()[0];
+    assert_eq!(diagnostic.source_selector, "/fixture/opencode");
+    assert_eq!(
+        diagnostic.detail,
+        "logical-snapshot Core-record spool encoded-byte bound exceeded: maximum 268435456, observed 268436253"
+    );
     assert!(receipt
         .commit
         .manifest()
@@ -414,6 +430,66 @@ fn cold_opencode_capacity_failure_publishes_healthy_peer() {
         .source_route(&failing_id)
         .is_none());
     assert_eq!(receipt.commit.indexed_documents, 1);
+}
+
+#[test]
+fn warm_opencode_capacity_failure_carries_last_good_source_while_peer_advances() {
+    let healthy_v1 = fixture_route_with_body(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        51,
+        "healthy v1".to_owned(),
+    );
+    let opencode = fixture_route(CaptureProvider::OpenCode, "opencode_sqlite", 52);
+    let opencode_id = opencode.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(healthy_v1);
+    initial_registry.register(opencode.clone());
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+    let retained_opencode = initial
+        .commit
+        .manifest()
+        .source_route(&opencode_id)
+        .unwrap()
+        .clone();
+
+    let healthy_v2 = fixture_route_with_body(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        51,
+        "healthy v2".to_owned(),
+    );
+    let healthy_id = healthy_v2.metadata.route_identity.clone().unwrap();
+    let mut refresh_registry = SourceBackedProviderRegistry::new();
+    refresh_registry.register(healthy_v2);
+    refresh_registry.register(fail_route_before_scan_with_detail(
+        opencode,
+        SourceBackedRouteErrorKind::Unavailable,
+        "logical-snapshot Core-record spool core-record-count bound exceeded: maximum 2, observed 3",
+    ));
+
+    let refreshed =
+        refresh_source_backed_generation(temp.path(), &refresh_registry, WriterOptions::default())
+            .unwrap();
+
+    assert_eq!(refreshed.successful_route_ids, vec![healthy_id]);
+    assert_eq!(refreshed.failed_routes.len(), 1);
+    assert_eq!(
+        refreshed.failed_routes[0].route_identity,
+        opencode_id.clone()
+    );
+    assert!(refreshed.failed_routes[0].carried_forward);
+    let diagnostic = &refreshed.source_failures.failures()[0];
+    assert_eq!(diagnostic.source_selector, "/fixture/opencode");
+    assert!(diagnostic.detail.contains("maximum 2, observed 3"));
+    assert_eq!(
+        refreshed.commit.manifest().source_route(&opencode_id),
+        Some(&retained_opencode)
+    );
+    assert_eq!(refreshed.commit.indexed_documents, 2);
 }
 
 #[test]
