@@ -162,7 +162,7 @@ fn malformed_scalar_rows_are_rejected_locally_during_a_mixed_validity_full_scan(
 }
 
 #[test]
-fn multiple_overlapping_subagent_heads_emit_one_unique_lineage_diagnostic() {
+fn repeated_subagent_lineage_and_splice_diagnostics_are_unique_and_accounted_for() {
     let (_temp, conn) = mutable_fixture();
     conn.execute_batch(
         "insert into subagent_heads (session_id, agent_id, chain_node_id, updated_at) \
@@ -173,21 +173,38 @@ fn multiple_overlapping_subagent_heads_emit_one_unique_lineage_diagnostic() {
                  (select main_chain_id from sessions where id = 'discovered-sandal'), 1789910400);",
     )
     .unwrap();
+    conn.execute_batch(
+        "insert into sessions \
+             (id, working_directory, backend_type, model, agent_mode, created_at, \
+              last_activity_at, main_chain_id, hidden) \
+             values ('splice-diagnostics', '/workspace', 'local', 'model', 'agent', 1, 1, 10002, 0); \
+         insert into message_nodes \
+             (session_id, node_id, parent_node_id, chat_message, created_at, metadata) \
+             values ('splice-diagnostics', 10001, null, \
+                     '{\"role\":\"assistant\",\"content\":\"first\"}', 1, \
+                     '{\"summarized_from\":20001}'), \
+                    ('splice-diagnostics', 10002, 10001, \
+                     '{\"role\":\"assistant\",\"content\":\"second\"}', 2, \
+                     '{\"summarized_from\":20002}');",
+    )
+    .unwrap();
 
     let scanned = scan(&conn);
     assert_eq!(scanned.counts.rejected_lineages, 2);
-    let lineage_rejections = scanned
+    assert_eq!(scanned.counts.rejected_splices, 2);
+    let repeated_rejections = scanned
         .rejections
         .iter()
         .filter(|rejection| {
-            rejection
-                .detail
-                .contains("invalid, ambiguous, or overlapping subagent lineage")
+            rejection.detail.contains("invalid, ambiguous, or overlapping subagent lineage")
+                || rejection
+                    .detail
+                    .contains("compaction splice whose referenced node is absent")
         })
         .count();
     assert_eq!(
-        lineage_rejections + scanned.omitted_rejections,
-        scanned.counts.rejected_lineages as usize
+        repeated_rejections + scanned.omitted_rejections,
+        (scanned.counts.rejected_lineages + scanned.counts.rejected_splices) as usize
     );
     let unique_keys = scanned
         .rejections
