@@ -236,7 +236,7 @@ function Invoke-HostedInstallTransaction {
         "schema_version", "command", "ok", "status", "attempt_id",
         "install_path", "binary_sha256", "marker_sha256"
     )
-    $hostedProof = Read-BoundedSuccessReceipt -Path $transaction.OutputPath -MaximumBytes 64KB -RequiredNames $required -OptionalNames @("warnings") -AllowPrettyJson:($version -ceq "1.3.1")
+    $hostedProof = Read-BoundedSuccessReceipt -Path $transaction.OutputPath -MaximumBytes 64KB -RequiredNames $required -OptionalNames @("warnings") -AllowPrettyJson
     if ($null -eq $hostedProof) {
         Fail "ctx did not return valid hosted install transaction proof"
     }
