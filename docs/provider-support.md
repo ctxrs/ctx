@@ -197,8 +197,14 @@ not imported: summarizer threads, abandoned regenerated turns, and the
 pre-compaction copies Devin rewrote. Subagent threads become separate delegated
 sessions when Devin records either a foreground `subagent/chain_node_id`
 back-link or a durable `subagent_heads` chain tip, so foreground and durable
-background subagents are imported. A subagent tree without either exact tip
-link remains unclaimed. Native assistant messages with visible text retain
+background subagents are imported. Foreground links inside a subagent also
+retain nested children and identify their immediate parent. Durable heads
+identify the root session; an immediate parent is claimed only when foreground
+links identify one unambiguous caller. Persistent subagent history is retained
+across compaction when the continuation reaches the same agent's earlier
+history, including when the summary points before its previous tip. A subagent
+tree without either exact tip link remains unclaimed. Native assistant messages
+with visible text retain
 generation metadata when Devin writes it; tool-only and empty-content events do
 not retain that payload. Session-level model, agent mode, cost, and token data
 are not projected as Core facts. Exact MCP server/tool attribution is not

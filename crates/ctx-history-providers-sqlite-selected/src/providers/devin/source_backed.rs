@@ -63,7 +63,7 @@ use diagnostics::{
 };
 use evidence::{malformed_session_evidence, node_evidence, session_evidence};
 
-pub(super) const DEVIN_SOURCE_BACKED_PARSER_REVISION: &str = "devin-cli-sessions-sqlite-v2";
+pub(super) const DEVIN_SOURCE_BACKED_PARSER_REVISION: &str = "devin-cli-sessions-sqlite-v3";
 const DEVIN_SOURCE_ANCHOR_NAMESPACE: &str = "devin_cli.sessions_database";
 const DEVIN_SOURCE_ANCHOR_KEY: &str = "devin_cli_sessions_sqlite";
 const DEVIN_SOURCE_SCHEMA_VARIANT: &str = "devin-cli-sessions-sqlite-v1";
@@ -215,15 +215,38 @@ fn primary_projection(
 
 /// An exactly linked subagent thread, projected as a delegated child session.
 ///
-/// Devin records either a foreground link on the primary transcript's tool
-/// node or a durable head scoped to the primary session, so the parent and root
-/// are the same session and the claim is exact rather than inferred.
+/// A foreground link names the immediate parent transcript. A durable head
+/// names only the containing root session, so it alone does not claim a parent.
 fn subagent_projection(
     source: &SourceKey,
     session: &DevinSessionRow,
     primary: &DevinLineageProjection,
     agent_id: &str,
+    parent_key: Option<&DevinLineageKey>,
 ) -> DevinResult<DevinLineageProjection> {
+    let parent_session_id = match parent_key {
+        Some(DevinLineageKey::Primary) => Some(primary.session_id),
+        Some(DevinLineageKey::Subagent(parent_id)) => {
+            Some(subagent_session_id(source, session, parent_id)?)
+        }
+        None => None,
+    };
+    Ok(DevinLineageProjection {
+        session_id: subagent_session_id(source, session, agent_id)?,
+        provider_session_id: format!("{}/subagents/{agent_id}", session.id),
+        agent_scope: AgentScope::Subagent,
+        parent_session_id,
+        root_session_id: Some(primary.session_id),
+        relationship: Some(ProviderNativeSessionRelationship::Delegated),
+        working_directory: primary.working_directory.clone(),
+    })
+}
+
+fn subagent_session_id(
+    source: &SourceKey,
+    session: &DevinSessionRow,
+    agent_id: &str,
+) -> DevinResult<StableEntityId> {
     let key = NativeSessionKey::composite(
         DEVIN_SESSION_NAMESPACE,
         vec![
@@ -232,20 +255,13 @@ fn subagent_projection(
             TypedKey::utf8(agent_id.to_owned())?,
         ],
     )?;
-    let session_id = ctx_history_core::derive_session_id(ctx_history_core::SessionIdentityInput {
-        source,
-        logical_session_kind: DEVIN_LOGICAL_SESSION_KIND,
-        native_session_key: &key,
-    })?;
-    Ok(DevinLineageProjection {
-        session_id,
-        provider_session_id: format!("{}/subagents/{agent_id}", session.id),
-        agent_scope: AgentScope::Subagent,
-        parent_session_id: Some(primary.session_id),
-        root_session_id: Some(primary.session_id),
-        relationship: Some(ProviderNativeSessionRelationship::Delegated),
-        working_directory: primary.working_directory.clone(),
-    })
+    Ok(ctx_history_core::derive_session_id(
+        ctx_history_core::SessionIdentityInput {
+            source,
+            logical_session_kind: DEVIN_LOGICAL_SESSION_KIND,
+            native_session_key: &key,
+        },
+    )?)
 }
 
 fn non_empty(value: &str) -> Option<String> {
@@ -585,9 +601,13 @@ fn project_session(
     for lineage in &plan.lineages {
         let projection = match &lineage.key {
             DevinLineageKey::Primary => primary.clone(),
-            DevinLineageKey::Subagent(agent_id) => {
-                subagent_projection(source, session, &primary, agent_id)?
-            }
+            DevinLineageKey::Subagent(agent_id) => subagent_projection(
+                source,
+                session,
+                &primary,
+                agent_id,
+                lineage.parent_key.as_ref(),
+            )?,
         };
         let node_ids = lineage
             .nodes

@@ -10,6 +10,9 @@ use super::{
     source_backed::{devin_source_key_scoped, scan_devin_snapshot, DevinScanCounts},
 };
 
+#[path = "lineage_tests.rs"]
+mod lineage_tests;
+
 struct Scanned {
     records: Vec<CoreRecord>,
     counts: DevinScanCounts,
@@ -158,6 +161,76 @@ fn malformed_scalar_rows_are_rejected_locally_during_a_mixed_validity_full_scan(
         scanned.scanned_counts.retained_records
             + scanned.scanned_counts.rejected_records
             + scanned.scanned_counts.ignored_records
+    );
+}
+
+#[test]
+fn repeated_subagent_lineage_and_splice_diagnostics_are_unique_and_accounted_for() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute_batch(
+        "insert into subagent_heads (session_id, agent_id, chain_node_id, updated_at) \
+             values ('discovered-sandal', 'overlap-a', \
+                 (select main_chain_id from sessions where id = 'discovered-sandal'), 1789910400); \
+         insert into subagent_heads (session_id, agent_id, chain_node_id, updated_at) \
+             values ('discovered-sandal', 'overlap-b', \
+                 (select main_chain_id from sessions where id = 'discovered-sandal'), 1789910400);",
+    )
+    .unwrap();
+    conn.execute_batch(
+        "insert into sessions \
+             (id, working_directory, backend_type, model, agent_mode, created_at, \
+              last_activity_at, main_chain_id, hidden) \
+             values ('splice-diagnostics', '/workspace', 'local', 'model', 'agent', 1, 1, 10002, 0); \
+         insert into message_nodes \
+             (session_id, node_id, parent_node_id, chat_message, created_at, metadata) \
+             values ('splice-diagnostics', 10001, null, \
+                     '{\"role\":\"assistant\",\"content\":\"first\"}', 1, \
+                     '{\"summarized_from\":20001}'), \
+                    ('splice-diagnostics', 10002, 10001, \
+                     '{\"role\":\"assistant\",\"content\":\"second\"}', 2, \
+                     '{\"summarized_from\":20002}');",
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.counts.rejected_lineages, 2);
+    assert_eq!(scanned.counts.rejected_splices, 2);
+    let repeated_rejections = scanned
+        .rejections
+        .iter()
+        .filter(|rejection| {
+            rejection
+                .detail
+                .contains("invalid, ambiguous, or overlapping subagent lineage")
+                || rejection
+                    .detail
+                    .contains("compaction splice whose referenced node is absent")
+        })
+        .count();
+    assert_eq!(
+        repeated_rejections + scanned.omitted_rejections,
+        (scanned.counts.rejected_lineages + scanned.counts.rejected_splices) as usize
+    );
+    let unique_keys = scanned
+        .rejections
+        .iter()
+        .map(|rejection| {
+            (
+                rejection.source.identity().digest(),
+                rejection.provider.as_str(),
+                rejection.source_selector.as_str(),
+                rejection.line_number,
+                rejection.payload_type.as_deref(),
+                rejection.class.as_str(),
+                rejection.detail.as_str(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique_keys.len(),
+        scanned.rejections.len(),
+        "{:#?}",
+        scanned.rejections
     );
 }
 
@@ -707,7 +780,7 @@ fn a_durable_background_head_projects_a_child_and_rotates_with_its_evidence() {
     assert!(!child.is_empty(), "durable background child present");
     for record in child {
         assert_eq!(record.agent_scope, Some(AgentScope::Subagent));
-        assert_eq!(record.parent_session_id, Some(primary_session_id));
+        assert_eq!(record.parent_session_id, None);
         assert_eq!(record.root_session_id, Some(primary_session_id));
         assert_eq!(
             record.session_relationship,
