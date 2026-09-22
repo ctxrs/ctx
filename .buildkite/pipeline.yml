@@ -188,7 +188,7 @@ steps:
     if: build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
       export CTX_MACOS_RELEASE_SIGNING=required
-      export CTX_MACOS_SIGNING_SECRET_SOURCE=infisical
+      export CTX_MACOS_SIGNING_SECRET_SOURCE="$${CTX_MACOS_SIGNING_SECRET_SOURCE:-infisical}"
       scripts/build-onnxruntime-sidecar.sh macos-x64
       scripts/stage-github-release-assets.sh --transcode-runtime macos-x64
     agents:

@@ -107,7 +107,8 @@ fi
 case "${secret_source}" in
   infisical) ;;
   injected) ;;
-  *) die "CTX_MACOS_SIGNING_SECRET_SOURCE must be infisical or injected" ;;
+  file) ;;
+  *) die "CTX_MACOS_SIGNING_SECRET_SOURCE must be infisical, injected, or file" ;;
 esac
 
 for command_name in base64 find git openssl python3 stat; do
@@ -149,10 +150,63 @@ else
   worker_path="${root_dir}/scripts/sign-notarize-macos-release-artifact.sh"
   test_worker_variable=CTX_TEST_ONLY_MACOS_SIGNER_PATH
 fi
+file_secret_names=(
+  APPLE_CODESIGN_CERT_P12_B64
+  APPLE_CODESIGN_CERT_PASSWORD
+  NOTARY_ISSUER
+  NOTARY_KEY_ID
+  NOTARY_KEY_P8_B64
+)
+
+path_mode() {
+  if [[ "${host_system}" == "Darwin" ]]; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+
+validate_file_secret_dir() {
+  local source_dir="${CTX_MACOS_SIGNING_SECRET_FILE_DIR:-}"
+  local path name known secret_name
+
+  [[ "${source_dir}" == /* ]] || \
+    die "CTX_MACOS_SIGNING_SECRET_FILE_DIR must be an absolute directory"
+  case "${source_dir}" in
+    */|*/.) die "CTX_MACOS_SIGNING_SECRET_FILE_DIR must not end in / or /." ;;
+  esac
+  [[ -d "${source_dir}" && ! -L "${source_dir}" && -O "${source_dir}" ]] || \
+    die "CTX_MACOS_SIGNING_SECRET_FILE_DIR must be an owned non-symlink directory"
+  [[ "$(path_mode "${source_dir}")" == "700" ]] || \
+    die "CTX_MACOS_SIGNING_SECRET_FILE_DIR must have owner-only mode 0700"
+
+  while IFS= read -r -d '' path; do
+    name="${path##*/}"
+    known=false
+    for secret_name in "${file_secret_names[@]}"; do
+      [[ "${name}" == "${secret_name}" ]] && known=true
+    done
+    "${known}" || die "CTX_MACOS_SIGNING_SECRET_FILE_DIR has unexpected entry ${name}"
+    [[ -f "${path}" && ! -L "${path}" && -O "${path}" ]] || \
+      die "file secret ${name} must be an owned regular non-symlink file"
+    [[ "$(path_mode "${path}")" == "600" ]] || \
+      die "file secret ${name} must have owner-only mode 0600"
+    [[ -s "${path}" ]] || die "file secret ${name} was empty"
+  done < <(find "${source_dir}" -mindepth 1 -maxdepth 1 -print0)
+
+  for secret_name in "${secret_names[@]}"; do
+    path="${source_dir}/${secret_name}"
+    [[ -f "${path}" && ! -L "${path}" ]] || \
+      die "required file secret ${secret_name} is missing"
+  done
+}
 
 if [[ "${secret_source}" == "infisical" ]]; then
   require_command infisical
   infisical --version >/dev/null 2>&1 || die "Infisical CLI version check failed"
+fi
+if [[ "${secret_source}" == "file" ]]; then
+  require_command cp
 fi
 
 umask 077
@@ -162,6 +216,10 @@ cleanup() {
   rm -rf "${secret_root}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+
+if [[ "${secret_source}" == "file" ]]; then
+  validate_file_secret_dir
+fi
 
 fetch_secret() {
   local name="$1"
@@ -199,6 +257,9 @@ PY
     injected)
       [[ -n "${!name:-}" ]] || die "missing required injected macOS signing value ${name}"
       printf '%s' "${!name}" >"${output}"
+      ;;
+    file)
+      cp "${CTX_MACOS_SIGNING_SECRET_FILE_DIR}/${name}" "${output}"
       ;;
   esac
   chmod 0600 "${output}"
