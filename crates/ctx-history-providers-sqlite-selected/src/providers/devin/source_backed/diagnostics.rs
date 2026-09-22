@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ctx_history_capture_runtime::{
     SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDraft,
-    SourceBackedRecordRejectionDrafts, MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS,
+    SourceBackedRecordRejectionDrafts,
 };
 use ctx_history_core::{CaptureProvider, SourceKey};
 
@@ -285,15 +285,15 @@ pub(super) fn record_repeated_devin_rejection(
     class: SourceBackedRecordRejectionClass,
     detail: String,
 ) {
-    let retained = count.min(MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS as u64);
-    for _ in 0..retained {
+    let retained = count.min(1);
+    if retained != 0 {
         record_devin_rejection(
             rejections,
             source,
             source_selector,
             node_id,
             class,
-            detail.clone(),
+            detail,
         );
     }
     let omitted = count.saturating_sub(retained);

@@ -162,6 +162,57 @@ fn malformed_scalar_rows_are_rejected_locally_during_a_mixed_validity_full_scan(
 }
 
 #[test]
+fn multiple_overlapping_subagent_heads_emit_one_unique_lineage_diagnostic() {
+    let (_temp, conn) = mutable_fixture();
+    conn.execute_batch(
+        "insert into subagent_heads (session_id, agent_id, chain_node_id, updated_at) \
+             values ('discovered-sandal', 'overlap-a', \
+                 (select main_chain_id from sessions where id = 'discovered-sandal'), 1789910400); \
+         insert into subagent_heads (session_id, agent_id, chain_node_id, updated_at) \
+             values ('discovered-sandal', 'overlap-b', \
+                 (select main_chain_id from sessions where id = 'discovered-sandal'), 1789910400);",
+    )
+    .unwrap();
+
+    let scanned = scan(&conn);
+    assert_eq!(scanned.counts.rejected_lineages, 2);
+    let lineage_rejections = scanned
+        .rejections
+        .iter()
+        .filter(|rejection| {
+            rejection
+                .detail
+                .contains("invalid, ambiguous, or overlapping subagent lineage")
+        })
+        .count();
+    assert_eq!(
+        lineage_rejections + scanned.omitted_rejections,
+        scanned.counts.rejected_lineages as usize
+    );
+    let unique_keys = scanned
+        .rejections
+        .iter()
+        .map(|rejection| {
+            (
+                rejection.source.identity().digest(),
+                rejection.provider.as_str(),
+                rejection.source_selector.as_str(),
+                rejection.line_number,
+                rejection.payload_type.as_deref(),
+                rejection.class.as_str(),
+                rejection.detail.as_str(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique_keys.len(),
+        scanned.rejections.len(),
+        "{:#?}",
+        scanned.rejections
+    );
+}
+
+#[test]
 fn malformed_payload_fields_reject_only_the_affected_chain_node() {
     for mutation in [
         "update message_nodes set created_at = 'bad-time' where session_id = 'abounding-crest' and node_id = 28",
