@@ -8,13 +8,17 @@ use crate::local_usage;
 use crate::output::print_json;
 use crate::semantic::source_epoch_status_report;
 use crate::ui::Ui;
+use crate::unified_health::UnifiedHealth;
 use crate::StatusArgs;
 use ctx_app_config::{self as config, CONFIG_FILE};
 use ctx_cli_presentation::commands::compact_usage_health_json;
 
 mod usage;
 
-pub(crate) use usage::{malformed_config_failure, removed_cloud_config_failure, run_usage_action};
+pub(crate) use usage::{
+    malformed_config_failure_with_components, removed_cloud_config_failure_with_components,
+    run_usage_action,
+};
 
 pub(super) fn upgrade_report(config: &config::AppConfig) -> serde_json::Value {
     crate::upgrade::upgrade_diagnostics(config).report
@@ -31,11 +35,22 @@ pub(crate) struct StatusReadModel {
     indexed_sources: Option<u64>,
 }
 
+#[cfg(test)]
 pub(crate) fn status_read_model_authorized(
     data_root: &Path,
     config: &config::AppConfig,
     storage: &local_usage::LocalUsageStorageAuthority,
     control: &local_usage::UsageControlSnapshot,
+) -> Result<StatusReadModel> {
+    status_read_model_authorized_with_components(data_root, config, storage, control, None)
+}
+
+pub(crate) fn status_read_model_authorized_with_components(
+    data_root: &Path,
+    config: &config::AppConfig,
+    storage: &local_usage::LocalUsageStorageAuthority,
+    control: &local_usage::UsageControlSnapshot,
+    components: Option<&UnifiedHealth>,
 ) -> Result<StatusReadModel> {
     let source = source_epoch_status_report(data_root, config)?;
     let health = source.health;
@@ -55,6 +70,9 @@ pub(crate) fn status_read_model_authorized(
         );
         object.insert("read_only".to_owned(), json!(true));
     }
+    if let Some(components) = components {
+        components.append_json(&mut report)?;
+    }
     Ok(StatusReadModel {
         report,
         health,
@@ -71,7 +89,7 @@ pub(crate) fn status_read_model_authorized(
 // Bundling them would only move this call boundary into `dispatch.rs` without
 // simplifying status orchestration or ownership.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_status_authorized(
+pub(crate) fn run_status_authorized_with_components(
     args: StatusArgs,
     data_root: &Path,
     config: &config::AppConfig,
@@ -79,13 +97,29 @@ pub(crate) fn run_status_authorized(
     telemetry: &mut StatusTelemetry,
     storage: &local_usage::LocalUsageStorageAuthority,
     control: &local_usage::UsageControlSnapshot,
+    components: Option<&UnifiedHealth>,
     ui: &mut Ui,
 ) -> Result<()> {
     if let Some(mode) = args.usage {
         return run_usage_action(mode, data_root, storage, args.format.is_json(), quiet, ui);
     }
     let config_path = data_root.join(CONFIG_FILE);
-    let mut status = status_read_model_authorized(data_root, config, storage, control)?;
+    let mut status = match status_read_model_authorized_with_components(
+        data_root, config, storage, control, components,
+    ) {
+        Ok(status) => status,
+        Err(error) => {
+            return match components {
+                Some(components) => crate::unified_health::history_health_failure(
+                    2,
+                    args.format.is_json(),
+                    components,
+                    ui,
+                ),
+                None => Err(error),
+            };
+        }
+    };
     telemetry.initialized = Some(status.initialized);
     telemetry.indexed_items = status.indexed_items.map(count_bucket);
     telemetry.indexed_sessions = status.indexed_sessions.map(count_bucket);
@@ -94,8 +128,19 @@ pub(crate) fn run_status_authorized(
     if args.format.is_json() {
         print_json(status.report)?;
     } else if !quiet {
-        super::history_health::reconcile_history_inventory(&mut status.health, data_root, config)?;
-        let document = ctx_cli_presentation::commands::render_status_human(
+        if let Err(error) = super::history_health::reconcile_history_inventory(
+            &mut status.health,
+            data_root,
+            config,
+        ) {
+            return match components {
+                Some(components) => {
+                    crate::unified_health::history_health_failure(2, false, components, ui)
+                }
+                None => Err(error),
+            };
+        }
+        let mut document = ctx_cli_presentation::commands::render_status_human(
             ui.stdout_context(),
             &status.report,
             status.health.as_ref(),
@@ -104,6 +149,9 @@ pub(crate) fn run_status_authorized(
             &status.report["upgrade"],
             &status.local_usage,
         );
+        if let Some(components) = components {
+            components.append_human(ui.stdout_context(), &mut document);
+        }
         ui.write_stdout(&document)?;
     }
     Ok(())
@@ -156,6 +204,24 @@ mod tests {
         assert_eq!(status.report["indexing"]["mode"], "auto");
         assert_eq!(status.report["lexical"]["generation_id"], generation_id);
         assert!(status.report.get("catalog").is_none());
+
+        let components = UnifiedHealth::inspect(None);
+        let storage = crate::observability_composition::local_usage_storage_authority(&data_root);
+        let control =
+            crate::observability_composition::usage_control_snapshot(config.local_usage.enabled);
+        let unified = status_read_model_authorized_with_components(
+            &data_root,
+            &config,
+            &storage,
+            &control,
+            Some(&components),
+        )
+        .unwrap();
+        assert_eq!(unified.report["lexical"], status.report["lexical"]);
+        assert_eq!(unified.report["local_usage"], status.report["local_usage"]);
+        assert_eq!(unified.report["graph"]["status"], "not_indexed");
+        assert_eq!(unified.report["output"]["status"], "available");
+        assert!(!data_root.join(".graf").exists());
     }
 
     #[test]

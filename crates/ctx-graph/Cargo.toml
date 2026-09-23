@@ -1,0 +1,35 @@
+[package]
+name = "ctx-graph"
+version.workspace = true
+description = "ctx graph command adapter for the public Graf library"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+graf.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3 = "1"
+axum = "0.8"
+futures-util = { version = "0.3", features = ["sink"] }
+jsonc-parser = { version = "0.29", features = ["serde"] }
+rmcp = { version = "3.4", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rusqlite.workspace = true
+schemars = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "net", "signal", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tempfile.workspace = true
+toml_edit = "0.23"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }

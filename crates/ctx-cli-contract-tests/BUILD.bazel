@@ -122,6 +122,7 @@ ctx_cli_contract_test(
 ctx_cli_contract_test(
     name = "managed_skill_refresh_tests",
     src = "tests/contracts/managed_skill_refresh.rs",
+    binary = "//crates/ctx-cli:ctx_managed_test_binary",
     extra_compile_data = [
         "//crates/ctx-agent-integrations:src/skill/testdata/legacy_skill_v0_17_0.md",
     ],
@@ -216,6 +217,7 @@ ctx_cli_contract_test(
 ctx_cli_contract_test(
     name = "setup_sources_import_tests",
     src = "tests/contracts/setup_sources_import.rs",
+    binary = "//crates/ctx-cli:ctx_managed_test_binary",
     deps = [
         "//crates/ctx-attribution:lib",
         "//crates/ctx-history-index:lib",

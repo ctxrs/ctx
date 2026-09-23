@@ -246,7 +246,7 @@ pub(super) fn read_session_page(
     after_rowid: Option<i64>,
 ) -> Result<Vec<DevinSessionRow>> {
     let mut statement = conn.prepare(&session_page_sql(schema, after_rowid.is_some()))?;
-    let _length_guard = SqliteLengthPreflightGuard::new(conn);
+    let _length_guard = SqliteLengthPreflightGuard::new(conn)?;
     let rows = statement.query_map(
         rusqlite::params![
             after_rowid,
@@ -436,7 +436,7 @@ fn read_session_facts_with_limit(
     node_limit: usize,
 ) -> Result<DevinSessionFacts> {
     let mut statement = conn.prepare(SESSION_FACTS_SQL)?;
-    let _length_guard = SqliteLengthPreflightGuard::new(conn);
+    let _length_guard = SqliteLengthPreflightGuard::new(conn)?;
     let row_limit = i64::try_from(node_limit.saturating_add(1)).map_err(|_| {
         CaptureError::InvalidPayload("Devin session-node row limit exceeds i64".to_owned())
     })?;
@@ -608,7 +608,7 @@ pub(super) fn read_subagent_heads_with_row_shape_rejections(
     }
     let row_limit = DEVIN_MAX_SESSION_NODES.saturating_add(1) as i64;
     let mut statement = conn.prepare(SUBAGENT_HEADS_SQL)?;
-    let _length_guard = SqliteLengthPreflightGuard::new(conn);
+    let _length_guard = SqliteLengthPreflightGuard::new(conn)?;
     let mut rows = statement.query(rusqlite::params![
         session_id,
         row_limit,

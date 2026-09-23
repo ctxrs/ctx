@@ -30,6 +30,7 @@ pub(crate) fn refresh_existing_managed_skills_on_startup(command: &CommandRoot) 
 
 fn command_is_refresh_eligible(command: &CommandRoot) -> bool {
     match command {
+        CommandRoot::Unified(_) => false,
         CommandRoot::Blame(_) | CommandRoot::Setup(_) | CommandRoot::Import(_) => true,
         CommandRoot::Semantic(args) => !matches!(&args.command, SemanticCommand::Status(_)),
         CommandRoot::Sources(args) => matches!(

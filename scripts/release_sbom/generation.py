@@ -208,22 +208,24 @@ def third_party_notices(
                     f"{item['logical']}@sha256:{item['sha256']}" for item in files
                 )
             )
-            for item in files:
-                entry = texts.setdefault(
-                    str(item["sha256"]),
-                    {
-                        "files": set(),
-                        "packages": set(),
-                        "text": item["text"],
-                    },
-                )
-                entry["files"].add(str(item["logical"]))
-                entry["packages"].add(f"{identity[0]} {identity[1]}")
         else:
             lines.append(
                 "  notice_files: none in the published Cargo package; "
                 "the license grant is the package license expression above"
             )
+    # Workspace adapters also carry third-party source and dependency notices.
+    for identity in sorted(selected):
+        for item in metadata[identity]["notice_files"]:
+            entry = texts.setdefault(
+                str(item["sha256"]),
+                {
+                    "files": set(),
+                    "packages": set(),
+                    "text": item["text"],
+                },
+            )
+            entry["files"].add(str(item["logical"]))
+            entry["packages"].add(f"{identity[0]} {identity[1]}")
     lines.extend(["", "License and notice texts", "========================"])
     for digest in sorted(texts):
         entry = texts[digest]

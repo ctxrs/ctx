@@ -52,7 +52,7 @@ write_expected_external() {
 @crates//fs2-0.4.3:fs2-0.4.3
 @crates//libc-0.2.186:libc-0.2.186
 @crates//memmap2-0.9.11:memmap2-0.9.11
-@crates//rusqlite-0.32.1:rusqlite-0.32.1
+@crates//rusqlite-0.40.2:rusqlite-0.40.2
 @crates//serde-1.0.228:serde-1.0.228
 @crates//serde_json-1.0.150:serde_json-1.0.150
 @crates//sha2-0.10.9:sha2-0.10.9

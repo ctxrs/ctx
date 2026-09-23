@@ -94,6 +94,9 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-daemon-application:cargo_package_data",
     "//crates/ctx-daemon-runtime:cargo_package_data",
     "//crates/ctx-daemon-service:cargo_package_data",
+    "//crates/ctx-graph:cargo_package_data",
+    "//crates/ctx-output:cargo_package_data",
+    "//crates/ctx-output-codec:cargo_package_data",
     "//crates/ctx-history-capture:cargo_package_data",
     "//crates/ctx-history-capture-composition:cargo_package_data",
     "//crates/ctx-history-capture-composition-qualification:cargo_package_data",
@@ -1686,6 +1689,15 @@ sh_test(
     srcs = ["scripts/tests/check-sdk-no-publish-test.sh"],
     data = ["scripts/check-sdk-no-publish.sh"],
 )
+py_test(
+    name = "sdk_cargo_workspace_tests",
+    srcs = [
+        "scripts/prepare-sdk-cargo-workspace.py",
+        "scripts/tests/prepare-sdk-cargo-workspace-test.py",
+    ],
+    main = "scripts/tests/prepare-sdk-cargo-workspace-test.py",
+)
+
 non_rust_gate(
     name = "sdk_package_dry_run",
     args = [

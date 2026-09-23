@@ -440,7 +440,7 @@ pub fn open_provider_sqlite_readonly(
             ))
         })?;
         let connection = conn.connection()?;
-        connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+        connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "query_only", true)?;
         Ok(())

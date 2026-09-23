@@ -548,9 +548,21 @@ def main() -> None:
                 f"implemented={present} declared={sorted(declared_controls)}"
             )
         consumer_paths.add(path)
+    # These exact test files exercise read-only normalization of retired settings.
+    # Keep neighboring production files and unlisted tests subject to the scan.
+    read_only_migration_tests = {
+        root / "crates/ctx-app-config/src/loading_tests.rs",
+        root / "crates/ctx-cli/tests/unified_context.rs",
+    }
     violations: list[str] = []
     for path in tracked_text_files(
-        root, {contract_path, retired_reference, *retired_containment_paths}
+        root,
+        {
+            contract_path,
+            retired_reference,
+            *retired_containment_paths,
+            *read_only_migration_tests,
+        },
     ):
         text = path.read_text(encoding="utf-8", errors="replace")
         for control in retired_controls_present(text):

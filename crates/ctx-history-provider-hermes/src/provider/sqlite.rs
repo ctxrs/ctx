@@ -931,7 +931,7 @@ fn with_length_preflight<T>(
     conn: &Connection,
     query: impl FnOnce() -> rusqlite::Result<T>,
 ) -> Result<T> {
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     query().map_err(CaptureError::from)
 }
 

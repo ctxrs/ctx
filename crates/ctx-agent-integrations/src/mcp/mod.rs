@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use crate::tool_backend::{
     ToolBackend, ToolBackendError, ToolOperation, ToolOutcome, ToolSearchContentScope,
-    ToolSearchRequest, ToolUsageFacts,
+    ToolSearchRequest, ToolUsageFacts, UnifiedToolKind,
 };
 
 mod arguments;
@@ -15,6 +15,7 @@ mod query_events;
 mod response;
 mod response_bound;
 mod show;
+mod unified;
 mod value_support;
 
 use arguments::{
@@ -95,6 +96,7 @@ pub enum McpToolKind {
     ShowEvent,
     QueryEvents,
     Blame,
+    Unified(UnifiedToolKind),
     Unknown,
     Missing,
 }
@@ -159,7 +161,11 @@ impl McpToolKind {
             Some("show_event") => Self::ShowEvent,
             Some("query_events") => Self::QueryEvents,
             Some("blame") => Self::Blame,
-            Some(_) => Self::Unknown,
+            Some(name) => UnifiedToolKind::ALL
+                .into_iter()
+                .find(|kind| kind.tool_name() == name)
+                .map(Self::Unified)
+                .unwrap_or(Self::Unknown),
             None => Self::Missing,
         }
     }
@@ -173,6 +179,7 @@ impl McpToolKind {
             Self::ShowEvent => "show_event",
             Self::QueryEvents => "query_events",
             Self::Blame => "blame",
+            Self::Unified(kind) => kind.tool_name(),
             Self::Unknown => "unknown",
             Self::Missing => "missing",
         }
@@ -186,6 +193,7 @@ impl McpToolKind {
             Self::ShowEvent => Some(SHOW_EVENT_ARGUMENTS),
             Self::QueryEvents => Some(QUERY_EVENTS_ARGUMENTS),
             Self::Blame => Some(&["target", "limit", "cursor"]),
+            Self::Unified(kind) => Some(kind.allowed_arguments()),
             _ => None,
         }
     }
@@ -378,6 +386,7 @@ pub fn handle_protocol_message<B: ToolBackend>(
             response_id,
             MCP_PRESENTATION_MAX_OUTPUT_BYTES,
         ),
+        Some(McpToolKind::Unified(_)) => unified::bound_response(handled.value, response_id),
         _ => handled.value,
     };
     McpHandled {
@@ -399,7 +408,7 @@ fn initialize_result(params: &Value, server_identity: McpServerIdentity<'_>) -> 
             "name": server_identity.name,
             "version": server_identity.version
         },
-        "instructions": "Local access to ctx search, cited Blame, and history tools. Tool output may include absolute paths, source metadata, snippets, and transcript text; MCP hosts may log or forward it."
+        "instructions": "Local access to ctx search, cited Blame, history, read-only graph, and pure output tools. Graph uses the database selected at server startup. Tool output may include absolute paths, source metadata, snippets, and transcript text; MCP hosts may log or forward it."
     })
 }
 
@@ -438,6 +447,9 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
             Some(json!({ "error": format!("unknown tool {name}") })),
         )));
     };
+    if let McpToolKind::Unified(kind) = operation {
+        return Ok(unified::handle(kind, &params, backend, render_text));
+    }
     let mut usage = McpUsage {
         operation,
         facts: if operation == McpToolKind::Search {
@@ -613,7 +625,7 @@ fn search_request<B: ToolBackend>(
 }
 
 fn tool_definitions(provider_names: Vec<&'static str>) -> Vec<Value> {
-    vec![
+    let mut definitions = vec![
         blame::tool_definition(),
         json!({
             "name": McpToolKind::Status.tool_name(),
@@ -728,7 +740,9 @@ fn tool_definitions(provider_names: Vec<&'static str>) -> Vec<Value> {
             }), vec![]),
             "annotations": { "readOnlyHint": true },
         }),
-    ]
+    ];
+    definitions.extend(unified::definitions());
+    definitions
 }
 
 fn object_schema(properties: Value, required: Vec<&str>) -> Value {
@@ -770,206 +784,4 @@ fn event_type_names() -> Vec<&'static str> {
 }
 
 #[cfg(test)]
-mod request_id_tests {
-    use ctx_history_core::CaptureProvider;
-    use serde_json::{json, Value};
-
-    use super::{
-        encoded_json_string_bytes, handle_protocol_message, request_id_is_accepted, search_request,
-        tool_definitions, McpServerIdentity, RequestDescriptor, MCP_MAX_ENCODED_REQUEST_ID_BYTES,
-        PROVIDER_ROOT_SELECTOR_PATTERN,
-    };
-    use crate::tool_backend::{
-        ToolBackend, ToolExecutionError, ToolOperation, ToolOutcome, ToolSearchBackend,
-    };
-
-    struct UnusedBackend;
-
-    impl ToolBackend for UnusedBackend {
-        fn execute(&self, _operation: ToolOperation) -> Result<ToolOutcome, ToolExecutionError> {
-            panic!("request-ID validation must run before the backend")
-        }
-
-        fn parse_provider(&self, _value: &str) -> Option<CaptureProvider> {
-            panic!("request-ID validation must run before the backend")
-        }
-
-        fn provider_names(&self) -> Vec<&'static str> {
-            Vec::new()
-        }
-    }
-
-    #[test]
-    fn encoded_request_id_boundary_is_exact() {
-        let accepted = "x".repeat(MCP_MAX_ENCODED_REQUEST_ID_BYTES - 2);
-        let rejected = "x".repeat(MCP_MAX_ENCODED_REQUEST_ID_BYTES - 1);
-        assert_eq!(
-            encoded_json_string_bytes(&accepted),
-            MCP_MAX_ENCODED_REQUEST_ID_BYTES
-        );
-        assert_eq!(
-            serde_json::to_vec(&accepted).unwrap().len(),
-            MCP_MAX_ENCODED_REQUEST_ID_BYTES
-        );
-        assert!(request_id_is_accepted(Some(&Value::String(
-            accepted.clone()
-        ))));
-        assert!(!request_id_is_accepted(Some(&Value::String(
-            rejected.clone()
-        ))));
-
-        let escaped = "\"\\\n\u{0001}雪";
-        assert_eq!(
-            encoded_json_string_bytes(escaped),
-            serde_json::to_vec(escaped).unwrap().len()
-        );
-        assert!(request_id_is_accepted(Some(&json!(u64::MAX))));
-        assert!(!request_id_is_accepted(Some(&Value::Null)));
-
-        let mut initialized = true;
-        let accepted_response = handle_protocol_message(
-            json!({"jsonrpc": "2.0", "id": accepted, "method": "ping"}),
-            RequestDescriptor::Ping,
-            &mut initialized,
-            McpServerIdentity {
-                name: "ctx",
-                version: "test",
-            },
-            &UnusedBackend,
-            |_| panic!("request-ID validation must run before text rendering"),
-        )
-        .value
-        .unwrap();
-        assert_eq!(
-            serde_json::to_vec(&accepted_response["id"]).unwrap().len(),
-            MCP_MAX_ENCODED_REQUEST_ID_BYTES
-        );
-
-        let rejected_response = handle_protocol_message(
-            json!({"jsonrpc": "2.0", "id": rejected, "method": "ping"}),
-            RequestDescriptor::Ping,
-            &mut initialized,
-            McpServerIdentity {
-                name: "ctx",
-                version: "test",
-            },
-            &UnusedBackend,
-            |_| panic!("request-ID validation must run before text rendering"),
-        )
-        .value
-        .unwrap();
-        assert_eq!(rejected_response["id"], Value::Null);
-        assert_eq!(rejected_response["error"]["code"], -32600);
-    }
-
-    #[test]
-    fn manifest_registers_native_blame_and_no_commercial_tools() {
-        let definitions = tool_definitions(Vec::new());
-        let names = definitions
-            .iter()
-            .filter_map(|tool| tool["name"].as_str())
-            .collect::<Vec<_>>();
-        assert!(names.contains(&"blame"));
-        assert!(!names.contains(&"pro_status"));
-        assert!(!names.contains(&"referral"));
-        let blame = definitions
-            .iter()
-            .find(|tool| tool["name"] == "blame")
-            .unwrap();
-        assert_eq!(blame["annotations"]["readOnlyHint"], true);
-        assert_eq!(blame["inputSchema"]["properties"]["limit"]["maximum"], 8);
-    }
-
-    #[test]
-    fn search_root_and_group_arrays_are_typed_and_forwarded_across_backends() {
-        for (backend, expected_backend) in [
-            ("lexical", ToolSearchBackend::Lexical),
-            ("semantic", ToolSearchBackend::Semantic),
-            ("hybrid", ToolSearchBackend::Hybrid),
-        ] {
-            let request = search_request(
-                &json!({
-                    "query": "fixture",
-                    "source_roots": ["personal", "archive"],
-                    "source_groups": ["work"],
-                    "backend": backend,
-                }),
-                &UnusedBackend,
-            )
-            .unwrap();
-            assert_eq!(request.source_roots, ["personal", "archive"]);
-            assert_eq!(request.source_groups, ["work"]);
-            assert_eq!(request.backend, Some(expected_backend));
-        }
-
-        let error = search_request(
-            &json!({"query": "fixture", "source_roots": ["personal", 7]}),
-            &UnusedBackend,
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("source_roots entries must be strings"));
-
-        let definitions = tool_definitions(Vec::new());
-        let search = definitions
-            .iter()
-            .find(|tool| tool["name"] == "search")
-            .unwrap();
-        assert_eq!(
-            search["inputSchema"]["properties"]["source_roots"]["maxItems"],
-            64
-        );
-        assert_eq!(
-            search["inputSchema"]["properties"]["source_groups"]["items"]["maxLength"],
-            64
-        );
-        for key in ["source_roots", "source_groups"] {
-            assert_eq!(
-                search["inputSchema"]["properties"][key]["items"]["pattern"],
-                PROVIDER_ROOT_SELECTOR_PATTERN
-            );
-        }
-    }
-
-    #[test]
-    fn search_root_and_group_schema_matches_the_runtime_token_grammar() {
-        for value in ["a", "A0_-", &"x".repeat(64)] {
-            for key in ["source_roots", "source_groups"] {
-                let mut arguments = json!({"query": "fixture"});
-                arguments[key] = json!([value]);
-                assert!(
-                    search_request(&arguments, &UnusedBackend).is_ok(),
-                    "{key} should accept {value:?}"
-                );
-            }
-        }
-
-        for value in ["", "bad.root", " spaced ", "café", &"x".repeat(65)] {
-            for key in ["source_roots", "source_groups"] {
-                let mut arguments = json!({"query": "fixture"});
-                arguments[key] = json!([value]);
-                let error = search_request(&arguments, &UnusedBackend).unwrap_err();
-                let rendered = error.to_string();
-                assert!(
-                    rendered.contains("ASCII letters, digits"),
-                    "{key} unexpectedly accepted {value:?}: {error}"
-                );
-                if !value.is_empty() {
-                    assert!(
-                        !rendered.contains(value),
-                        "{key} rejection leaked selector content: {rendered}"
-                    );
-                }
-            }
-        }
-
-        let too_many = vec!["root"; 65];
-        for key in ["source_roots", "source_groups"] {
-            let mut arguments = json!({"query": "fixture"});
-            arguments[key] = json!(&too_many);
-            let error = search_request(&arguments, &UnusedBackend).unwrap_err();
-            assert!(error.to_string().contains("maximum of 64 entries"));
-        }
-    }
-}
+mod request_id_tests;

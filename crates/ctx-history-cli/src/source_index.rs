@@ -14,13 +14,23 @@ pub use locate::run_locate;
 #[cfg(test)]
 use search::mcp_search;
 pub use search::{
-    mcp_search_with_compact, normalize_mcp_search_request, run_search,
+    cli_snapshot_search, mcp_search_with_compact, normalize_mcp_search_request, run_search,
     validate_explicit_semantic_scope, McpSearchError, McpSearchExecutionFailure,
     SourceSearchRequest,
 };
 pub use show::{
     mcp_show_event_application, mcp_show_session_application, run_show, ShowApplicationError,
 };
+
+/// Render a saved CLI history search with the same citations and result cards as
+/// ordinary history search. The caller owns its stream and surrounding scopes.
+pub fn render_snapshot_search(
+    value: &serde_json::Value,
+    verbose: bool,
+    context: &crate::ui::RenderContext,
+) -> crate::ui::Document {
+    render::render_search_document(value, verbose, context)
+}
 
 #[cfg(test)]
 use std::path::{Path, PathBuf};

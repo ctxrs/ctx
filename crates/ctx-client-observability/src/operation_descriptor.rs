@@ -19,6 +19,9 @@ pub enum OperationDescriptor {
 
 #[derive(Debug)]
 pub enum CliOperation {
+    /// Independent local engines do not record history usage or emit analytics.
+    Graph,
+    Output,
     Setup(SetupTelemetry),
     SemanticEnable,
     SemanticStatus,
@@ -50,6 +53,8 @@ pub enum CliOperation {
 impl CliOperation {
     pub const fn analytics_name(&self) -> &'static str {
         match self {
+            Self::Graph => "graph",
+            Self::Output => "output",
             Self::Setup(_) => "setup",
             Self::SemanticEnable => "semantic_enable",
             Self::SemanticStatus => "semantic_status",
@@ -100,6 +105,7 @@ impl CliOperation {
 
     pub const fn local_usage_operation(&self) -> Option<LocalUsageOperation> {
         match self {
+            Self::Graph | Self::Output => None,
             Self::Setup(_) => Some(LocalUsageOperation::Setup),
             Self::SemanticEnable | Self::SemanticStatus | Self::SemanticDisable => None,
             Self::Status(_) | Self::Stats => None,

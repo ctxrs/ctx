@@ -21,6 +21,10 @@ mod state;
 mod version;
 mod version_probe;
 
+/// Current executable budget shared by downloads and managed marker validation.
+/// Released clients keep their own limits; this does not change legacy admission.
+pub(crate) const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
+
 pub use command::{PreparedAutomaticUpgrade, UpgradeOutcome};
 pub use diagnostics::{
     managed_install_executable, upgrade_diagnostics, ManagedInstallDiagnostic, UpgradeDiagnostics,

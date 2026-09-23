@@ -132,7 +132,7 @@ pub(super) fn deepagents_write_candidate_page(
          order by candidate.thread_id, candidate.checkpoint_id, candidate.task_id, candidate.idx \
          limit ?4"
     );
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     let mut statement = conn.prepare(&sql)?;
     let mut rows = statement.query(rusqlite::params![has_after, prior_rowid, limit, page_rows])?;
     let mut candidates = Vec::with_capacity(usize::try_from(page_rows).unwrap_or_default());
@@ -230,7 +230,7 @@ pub(super) fn deepagents_checkpoint_contexts(
     let mut parameters = Vec::with_capacity(thread_ids.len() + 1);
     parameters.push(rusqlite::types::Value::Integer(limit));
     parameters.extend(thread_ids.iter().cloned().map(rusqlite::types::Value::Text));
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     let mut statement = conn.prepare(&sql)?;
     let mut rows = statement.query(rusqlite::params_from_iter(parameters))?;
     let mut seen_pairs = BTreeSet::new();
@@ -324,7 +324,7 @@ pub(super) fn deepagents_logical_fingerprint(
 }
 
 fn hash_deepagents_writes(conn: &Connection, limit: i64, digest: &mut Sha256) -> Result<()> {
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     let mut statement = conn.prepare(
         "select typeof(thread_id), coalesce(octet_length(thread_id), 0), \
                 typeof(checkpoint_id), coalesce(octet_length(checkpoint_id), 0), \
@@ -432,7 +432,7 @@ fn hash_deepagents_writes(conn: &Connection, limit: i64, digest: &mut Sha256) ->
 }
 
 fn hash_deepagents_checkpoints(conn: &Connection, limit: i64, digest: &mut Sha256) -> Result<()> {
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     let mut statement = conn.prepare(
         "select typeof(thread_id), coalesce(octet_length(thread_id), 0), \
                 typeof(checkpoint_id), coalesce(octet_length(checkpoint_id), 0), \

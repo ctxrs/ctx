@@ -12,7 +12,7 @@ _BASE_SUPPORT_DEPS = [
 
 _FIXTURE_SUPPORT_DEPS = [
     "@crates//:libc-0.2.186",
-    "@crates//:rusqlite-0.32.1",
+    "@crates//:rusqlite-0.40.2",
     "@crates//:sha2-0.10.9",
     "@crates//:windows-sys-0.61.2",
     "//crates/ctx-history-index:lib",

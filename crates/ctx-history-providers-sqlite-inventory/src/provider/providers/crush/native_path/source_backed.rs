@@ -386,15 +386,13 @@ pub(crate) fn open_source_snapshot(
     let configure = (|| {
         let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
             .map_err(|_| CrushSourceBackedErrorV0::CountOverflow)?;
-        read_snapshot
-            .connection()?
-            .set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
-        read_snapshot
-            .connection()?
-            .busy_timeout(std::time::Duration::from_secs(5))
+        let connection = read_snapshot.connection()?;
+        connection
+            .set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit)
+            .and_then(|_| connection.busy_timeout(std::time::Duration::from_secs(5)))
             .map_err(|source| {
                 read_snapshot.diagnose_provider_query_error(
-                    "setting the private Crush SQLite busy timeout",
+                    "configuring the private Crush SQLite value limit and busy timeout",
                     source,
                     SqliteFailurePhase::SourceValidation,
                 )

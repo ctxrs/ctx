@@ -7,8 +7,7 @@ use ctx_cli_presentation::commands::{DoctorArgs, SemanticArgs, SetupArgs, Status
 use crate::{
     commands,
     commands::{
-        list::ListArgs, locate::LocateArgs, search::SearchArgs, show::ShowArgs,
-        sources::SourcesArgs, stats::StatsArgs,
+        list::ListArgs, locate::LocateArgs, show::ShowArgs, sources::SourcesArgs, stats::StatsArgs,
     },
     docs, integrations, mcp,
     output::JsonOutputFormat,
@@ -69,7 +68,7 @@ impl From<CliColorMode> for ColorMode {
     name = "ctx",
     bin_name = "ctx",
     version,
-    about = "Search local agent history",
+    about = "Search agent history, navigate code, and compact command output",
     max_term_width = 100,
     styles = crate::cli::CLAP_STYLES
 )]
@@ -121,6 +120,8 @@ pub(crate) struct IndexDashboardFixtureArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CommandRoot {
+    #[command(flatten)]
+    Unified(crate::unified::UnifiedCommand),
     #[command(about = "Show cited agent provenance for committed code or a pull request")]
     Blame(commands::blame::BlameArgs),
     #[command(about = "Create local ctx storage and index discovered history")]
@@ -143,8 +144,8 @@ pub(crate) enum CommandRoot {
     List(ListArgs),
     #[command(about = "Locate Core source identity for an indexed session or event")]
     Locate(LocateArgs),
-    #[command(about = "Search indexed agent history")]
-    Search(SearchArgs),
+    #[command(about = "Search indexed history, the local graph, or both")]
+    Search(crate::unified_search::ScopedSearchArgs),
     #[command(about = "Read embedded ctx documentation")]
     Docs(docs::DocsArgs),
     #[command(about = "Install, inspect, or remove ctx integrations")]

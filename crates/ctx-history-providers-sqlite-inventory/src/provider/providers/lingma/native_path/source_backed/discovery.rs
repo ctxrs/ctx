@@ -61,7 +61,9 @@ impl LingmaRootAuthorizedSource {
         let connection = snapshot.connection()?;
         let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
             .map_err(|_| LingmaSourceBackedErrorV0::CountOverflow)?;
-        connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
+        connection
+            .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit)
+            .map_err(CaptureError::from)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(CaptureError::from)?;

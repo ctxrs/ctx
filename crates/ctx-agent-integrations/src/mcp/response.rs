@@ -22,6 +22,10 @@ pub(super) fn tool_result_with_text(structured: Value, text: String) -> Value {
 pub(super) fn tool_error_result(error: ToolBackendError) -> Value {
     let text = error.to_string();
     let structured = match error {
+        ToolBackendError::Unified { code, detail } => json!({
+            "error": detail,
+            "error_code": code.as_str(),
+        }),
         ToolBackendError::InvalidRequest { detail } => json!({
             "error": detail,
             "error_code": "invalid_request",

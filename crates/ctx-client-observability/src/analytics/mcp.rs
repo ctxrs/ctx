@@ -405,8 +405,10 @@ mod tests {
         assert_eq!(properties["error_class"], "tool_failure");
         assert_eq!(properties["result_count_bucket"], "0");
         assert_eq!(properties["zero_result"], true);
+        let mut keys = properties.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
         assert_eq!(
-            properties.keys().map(String::as_str).collect::<Vec<_>>(),
+            keys,
             [
                 "error_class",
                 "error_layer",

@@ -499,7 +499,7 @@ fn next_rows(
         (1_i64, updated, row)
     });
     increment(&mut counters.candidate_queries, 1)?;
-    let _guard = SqliteLengthPreflightGuard::new(connection);
+    let _guard = SqliteLengthPreflightGuard::new(connection).map_err(CaptureError::from)?;
     let mut statement = connection.prepare(&sql).map_err(CaptureError::from)?;
     let rows = statement
         .query_map(

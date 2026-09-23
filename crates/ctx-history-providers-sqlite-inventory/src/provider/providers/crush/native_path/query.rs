@@ -97,7 +97,7 @@ pub(super) fn next_candidate_batch(
     };
     let sql =
         format!("select {rowid}, {retained} from {from}{after} order by {rowid} limit {limit}");
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     let mut statement = conn.prepare(&sql)?;
     let read = |row: &rusqlite::Row<'_>| {
         let rowid = row.get::<_, i64>(0)?;

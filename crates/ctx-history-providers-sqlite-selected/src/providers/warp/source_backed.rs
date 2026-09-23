@@ -359,7 +359,7 @@ fn observe_warp_logical_fingerprint(
 ) -> WarpSourceBackedResultV0<[u8; 32]> {
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
-    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     let schema = WarpSqliteSchema::detect(connection)?;
     let invalid_rowid: bool = connection.query_row(
@@ -395,7 +395,7 @@ fn observe_warp_conversation_rows(
         .ok_or(WarpSourceBackedErrorV0::CountOverflow)?;
     let hydration_limit =
         i64::try_from(hydration_limit).map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
-    let _guard = crate::provider::sqlite::SqliteLengthPreflightGuard::new(connection);
+    let _guard = crate::provider::sqlite::SqliteLengthPreflightGuard::new(connection)?;
     let mut statement = connection.prepare(
         "select rowid, \
                 typeof(conversation_id), coalesce(octet_length(conversation_id), 0), \
@@ -460,7 +460,7 @@ fn observe_warp_task_rows(
              + {WARP_NATIVE_SQLITE_ROW_OVERHEAD_BYTES} \
              <= {MAX_PROVIDER_SQLITE_VALUE_BYTES}"
     );
-    let _guard = crate::provider::sqlite::SqliteLengthPreflightGuard::new(connection);
+    let _guard = crate::provider::sqlite::SqliteLengthPreflightGuard::new(connection)?;
     let mut statement = connection.prepare(&format!(
         "select t.rowid, \
                 typeof(t.conversation_id), coalesce(octet_length(t.conversation_id), 0), \
@@ -509,7 +509,7 @@ where
 {
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
-    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     let mut projection = WarpProjectionSink::new(source.clone(), sink, sink_failure);
     let native_scan = scan_warp_source_backed_connection(connection, &mut projection)?;

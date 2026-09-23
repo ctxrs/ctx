@@ -108,17 +108,20 @@ pub struct SqliteLengthPreflightGuard<'connection> {
 }
 
 impl<'connection> SqliteLengthPreflightGuard<'connection> {
-    pub fn new(conn: &'connection Connection) -> Self {
-        Self {
+    pub fn new(conn: &'connection Connection) -> rusqlite::Result<Self> {
+        Ok(Self {
             conn,
-            prior_limit: conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, i32::MAX),
-        }
+            prior_limit: conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, i32::MAX)?,
+        })
     }
 }
 
 impl Drop for SqliteLengthPreflightGuard<'_> {
     fn drop(&mut self) {
-        self.conn
+        // The same supported limit and SQLite-returned nonnegative value
+        // cannot fail the range checks in set_limit, including during unwind.
+        let _ = self
+            .conn
             .set_limit(Limit::SQLITE_LIMIT_LENGTH, self.prior_limit);
     }
 }
@@ -236,8 +239,12 @@ mod tests {
 
     fn connection_with_test_length_limit() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, TEST_LENGTH_LIMIT);
-        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), TEST_LENGTH_LIMIT);
+        conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, TEST_LENGTH_LIMIT)
+            .unwrap();
+        assert_eq!(
+            conn.limit(Limit::SQLITE_LIMIT_LENGTH).unwrap(),
+            TEST_LENGTH_LIMIT
+        );
         conn
     }
 
@@ -245,16 +252,22 @@ mod tests {
     fn length_preflight_guard_restores_prior_limit_on_success_and_unwind() {
         let conn = connection_with_test_length_limit();
         {
-            let _guard = SqliteLengthPreflightGuard::new(&conn);
-            assert!(conn.limit(Limit::SQLITE_LIMIT_LENGTH) > TEST_LENGTH_LIMIT);
+            let _guard = SqliteLengthPreflightGuard::new(&conn).unwrap();
+            assert!(conn.limit(Limit::SQLITE_LIMIT_LENGTH).unwrap() > TEST_LENGTH_LIMIT);
         }
-        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), TEST_LENGTH_LIMIT);
+        assert_eq!(
+            conn.limit(Limit::SQLITE_LIMIT_LENGTH).unwrap(),
+            TEST_LENGTH_LIMIT
+        );
         let unwind = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = SqliteLengthPreflightGuard::new(&conn);
+            let _guard = SqliteLengthPreflightGuard::new(&conn).unwrap();
             panic!("exercise SQLite preflight guard cleanup");
         }));
         assert!(unwind.is_err());
-        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), TEST_LENGTH_LIMIT);
+        assert_eq!(
+            conn.limit(Limit::SQLITE_LIMIT_LENGTH).unwrap(),
+            TEST_LENGTH_LIMIT
+        );
     }
 
     #[test]

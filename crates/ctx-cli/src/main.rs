@@ -63,6 +63,11 @@ mod tool_backend;
 mod transcript;
 #[allow(dead_code, unused_imports)]
 mod ui;
+mod unified;
+mod unified_health;
+#[cfg(test)]
+mod unified_json_tests;
+mod unified_search;
 mod upgrade;
 mod value_parsers;
 
@@ -84,13 +89,18 @@ pub(crate) use transcript::TranscriptMode;
 pub(crate) use value_parsers::parse_event_window_limit;
 
 fn main() -> ExitCode {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    if let Some(status) = unified::intercept(&arguments) {
+        // The host owns process termination; preserve the child's full Windows
+        // status as well as Unix shell statuses, rather than narrowing to u8.
+        std::process::exit(status);
+    }
     if let Err(error) = ctx_daemon_cli::apply_supervisor_environment_handoff() {
         output::write_stderr_line(format_args!(
             "ctx supervisor environment handoff failed: {error:#}"
         ));
         return ExitCode::FAILURE;
     }
-    let arguments = std::env::args_os().collect::<Vec<_>>();
     if let Some(exit) = core_capability::intercept(&arguments) {
         return exit;
     }

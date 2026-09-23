@@ -287,8 +287,16 @@ fn selected_schema_execution_cannot_attach_or_change_unrelated_objects() {
             execute_schema(&target, "messages", sql).is_err(),
             "accepted {sql}"
         );
+        target
+            .execute_batch(
+                "CREATE TABLE scratch_after_denial(value); DROP TABLE scratch_after_denial;",
+            )
+            .expect("a denied schema statement must clear its authorizer");
     }
     execute_schema(&target, "messages", "CREATE TABLE messages(value)").unwrap();
+    target
+        .execute("CREATE TABLE scratch_after_success(value)", [])
+        .expect("an allowed schema statement must clear its authorizer");
     assert!(execute_schema(
         &target,
         "messages",

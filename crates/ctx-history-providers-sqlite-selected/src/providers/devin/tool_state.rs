@@ -58,7 +58,7 @@ pub(super) fn read_tool_state(
     session_id: &str,
     tool_call_id: &str,
 ) -> DevinResult<DevinToolState> {
-    let _length_guard = SqliteLengthPreflightGuard::new(conn);
+    let _length_guard = SqliteLengthPreflightGuard::new(conn)?;
     let state = conn
         .query_row(
             TOOL_STATE_SQL,

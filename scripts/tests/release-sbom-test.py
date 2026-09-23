@@ -834,6 +834,58 @@ repository = "https://example.invalid/{name}"
         size = json.loads(self.size_report.read_bytes())
         self.assertEqual(size["artifact"]["size_bytes"], self.artifact.stat().st_size)
 
+    def test_workspace_notices_preserve_git_attribution_and_deduplicate_text(self) -> None:
+        # Model a Git package whose MIT license lives outside its package root.
+        source = f"git+https://example.invalid/engine?rev={COMMIT}#{COMMIT}"
+        old_package = self.package("base64", "0.22.0", external=True)
+        git_package = (
+            '[[package]]\nname = "base64"\nversion = "0.22.0"\n'
+            f'source = "{source}"'
+        )
+        lock = self.cargo_lock.read_text(encoding="utf-8")
+        self.assertIn(old_package, lock)
+        self.cargo_lock.write_text(lock.replace(old_package, git_package), encoding="utf-8")
+        self.write_build_info()
+        repository = f"{CRATE_REPOSITORY_PREFIX}crates__base64-0.22.0"
+        manifest = self.runfiles / repository / "Cargo.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'license = "MIT OR Apache-2.0"', 'license = "MIT"'
+            ),
+            encoding="utf-8",
+        )
+        (manifest.parent / "LICENSE").unlink()
+        material_lines = self.license_materials.read_text(encoding="utf-8").splitlines()
+        material_lines.remove(f"external\t{repository}/LICENSE")
+        attribution = "Synthetic enclosing-repository MIT attribution.\n"
+        ordinary_license = "Synthetic license text for tantivy.\n"
+        notices = {
+            "crates/ctx-cli/NOTICE-local-engine": attribution,
+            "crates/ctx-agent-integrations/NOTICE-local-engine-copy": attribution,
+            "crates/ctx-cli/NOTICE-shared-license": ordinary_license,
+        }
+        for logical, text in notices.items():
+            (self.main_runfiles / logical).write_text(text, encoding="utf-8")
+            material_lines.append(f"main\t{logical}")
+        self.license_materials.write_text(
+            "\n".join(sorted(material_lines)) + "\n", encoding="utf-8"
+        )
+        digest = self.generate()
+        rendered = self.notices.read_text(encoding="utf-8")
+        self.assertIn(f"  source: {source}\n", rendered)
+        self.assertIn("base64 0.22.0\n  license: MIT\n", rendered)
+        self.assertIn("Synthetic workspace MIT license.\n", rendered)
+        for logical in notices:
+            self.assertIn(logical, rendered)
+        self.assertIn(
+            f"{CRATE_REPOSITORY_PREFIX}crates__tantivy-0.26.1/LICENSE", rendered
+        )
+        for text in (attribution, ordinary_license):
+            self.assertEqual(rendered.count(text), 1)
+            content_hash = hashlib.sha256(text.encode()).hexdigest()
+            self.assertEqual(rendered.count(f"\nsha256: {content_hash}\n"), 1)
+        self.assertEqual(self.run_command("verify-bundle").stdout.strip(), digest)
+
     def test_unselected_lock_package_is_not_reported(self) -> None:
         self.cargo_lock.write_text(
             self.cargo_lock.read_text(encoding="utf-8")

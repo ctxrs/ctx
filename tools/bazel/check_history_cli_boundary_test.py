@@ -117,6 +117,57 @@ class HistoryCliBoundaryMutations(unittest.TestCase):
     def test_clean_head_passes(self) -> None:
         self.validate()
 
+    def test_optimized_binary_wrappers_are_exact(self) -> None:
+        ordinary = (
+            'ctx_optimized_test_binary(\n'
+            '    name = "ctx_managed_test_binary",\n'
+            '    binary = ":ctx",\n'
+            ')'
+        )
+        qualification = (
+            'ctx_optimized_test_binary(\n'
+            '    name = "ctx_managed_upgrade_test_binary",\n'
+            '    binary = ":ctx_upgrade_test_harness",\n'
+            ')'
+        )
+        reviewed = ordinary + "\n\n" + qualification
+        for replacement in (
+            ordinary,
+            qualification,
+            reviewed + "\n" + ordinary,
+            reviewed + "\n" + qualification,
+            reviewed.replace('"ctx_managed_test_binary"', '"ctx"'),
+            reviewed.replace('"ctx_managed_upgrade_test_binary"', '"unexpected"'),
+            reviewed.replace('binary = ":ctx",', 'binary = ":ctx_upgrade_test_harness",'),
+            reviewed.replace('binary = ":ctx_upgrade_test_harness",', 'binary = ":ctx",'),
+            reviewed.replace('binary = ":ctx",', 'binary = ":" + "ctx",'),
+            reviewed.replace('binary = ":ctx",', 'binary = CTX_BINARY,'),
+            reviewed.replace('binary = ":ctx",', 'binary = ":ctx", testonly = False,'),
+            reviewed.replace('binary = ":ctx",', 'binary = ":ctx", deps = [],'),
+            reviewed.replace('    binary = ":ctx",\n', ''),
+        ):
+            with self.subTest(replacement=replacement):
+                self.reset()
+                self.replace(self.final_build, reviewed, replacement)
+                with self.assertRaisesRegex(BoundaryError, "optimized test binary"):
+                    self.validate()
+
+    def test_optimized_binary_macro_load_and_call_stay_closed(self) -> None:
+        load = 'load("//tools/bazel:binary_contracts.bzl", "ctx_optimized_test_binary")'
+        for before, after, error in (
+            (load, load.replace("binary_contracts.bzl", "unknown.bzl"), "load source"),
+            (load, load + "\n" + load, "duplicate load source"),
+            (load, load.replace('"ctx_optimized_test_binary")', '"ctx_optimized_test_binary", "ctx_binary_contract_test")'), "load bindings"),
+            (load, load.replace('"ctx_optimized_test_binary")', 'wrapper = "ctx_optimized_test_binary")'), "load aliases"),
+            ("ctx_optimized_test_binary(\n", "unknown_wrapper(\n", "unsupported rule or macro"),
+            (load, load + "\nWRAPPER = ctx_optimized_test_binary\n", "may not be rebound or aliased"),
+        ):
+            with self.subTest(after=after):
+                self.reset()
+                self.replace(self.final_build, before, after)
+                with self.assertRaisesRegex(BoundaryError, error):
+                    self.validate()
+
     def test_semantic_cargo_dependency_resolves_in_dev_scope(self) -> None:
         for kind in ("renamed", "workspace"):
             with self.subTest(kind=kind):

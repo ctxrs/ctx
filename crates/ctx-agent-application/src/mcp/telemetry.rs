@@ -29,7 +29,7 @@ fn observed_operation(kind: McpToolKind) -> Option<ObservedMcpProductOperation> 
         McpToolKind::ShowEvent => Some(ObservedMcpProductOperation::ShowEvent),
         McpToolKind::QueryEvents => Some(ObservedMcpProductOperation::QueryEvents),
         McpToolKind::Blame => Some(ObservedMcpProductOperation::Blame),
-        McpToolKind::Unknown | McpToolKind::Missing => None,
+        McpToolKind::Unknown | McpToolKind::Missing | McpToolKind::Unified(_) => None,
     }
 }
 
@@ -80,6 +80,14 @@ impl McpTelemetry {
         usage: Option<&ToolUsageFacts>,
         duration: Duration,
     ) {
+        if matches!(
+            descriptor,
+            RequestDescriptor::ToolCall {
+                operation: McpToolKind::Unified(_)
+            }
+        ) {
+            return;
+        }
         let Some(observation) = &mut self.observation else {
             return;
         };
@@ -94,6 +102,14 @@ impl McpTelemetry {
         class: McpErrorClassV1,
         usage: Option<&ToolUsageFacts>,
     ) {
+        if matches!(
+            descriptor,
+            RequestDescriptor::ToolCall {
+                operation: McpToolKind::Unified(_)
+            }
+        ) {
+            return;
+        }
         if let Some(observation) = &mut self.observation {
             observation.record_response_failure_with_result(
                 request_observation(descriptor),

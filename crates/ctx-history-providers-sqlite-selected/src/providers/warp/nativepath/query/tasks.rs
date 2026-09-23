@@ -37,7 +37,7 @@ pub(super) fn scan_tasks(
          from agent_tasks t indexed by {index} \
          order by t.task_id collate binary"
     ))?;
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     let mut rows = candidates.query([])?;
     while let Some(row) = rows.next()? {
         let candidate = task_candidate_from_row(row)?;

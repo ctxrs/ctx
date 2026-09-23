@@ -1383,29 +1383,25 @@ fn ordinary_release_binary_ignores_upgrade_test_harness_authority() {
     };
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
-    let stderr = failure_stderr(fake_release_env(
-        ctx_from_binary(&temp, &binary).args(["upgrade", "check"]),
-        &release,
-    ));
+    let protected_paths = [
+        release.target.clone(),
+        install_marker_path(&release.target),
+        release.metadata.clone(),
+        release.signature.clone(),
+    ];
+    let original_bytes: Vec<_> = protected_paths
+        .iter()
+        .map(|path| fs::read(path).unwrap())
+        .collect();
     let ordinary_binary = fs::canonicalize(&binary).unwrap();
     let ordinary_marker = hosted_install_marker_path(&ordinary_binary);
-    let ordinary_directory = ordinary_binary.parent().unwrap();
-    let ordinary_path_failures = [
-        format!(
-            "ctx executable is not an owner-safe regular file: {}",
-            ordinary_binary.display()
-        ),
-        format!(
-            "ctx executable directory is not owner-safe: {}",
-            ordinary_directory.display()
-        ),
-        format!("read ctx install marker {}", ordinary_marker.display()),
-    ];
-
+    assert!(!ordinary_marker.exists());
+    let stderr = failure_stderr(fake_release_env(
+        ctx_from_binary(&temp, &binary).args(["upgrade", "--dry-run"]),
+        &release,
+    ));
     assert!(
-        ordinary_path_failures
-            .iter()
-            .any(|failure| stderr.contains(failure)),
+        stderr.contains("ctx is not installed by the hosted installer"),
         "{stderr}"
     );
     let fake_target = fs::canonicalize(&release.target).unwrap();
@@ -1416,6 +1412,10 @@ fn ordinary_release_binary_ignores_upgrade_test_harness_authority() {
             && !stderr.contains("metadata signature"),
         "ordinary release binary accepted test-harness target authority: {stderr}"
     );
+    for (path, original) in protected_paths.iter().zip(original_bytes) {
+        assert_eq!(fs::read(path).unwrap(), original, "{}", path.display());
+    }
+    assert!(!ordinary_marker.exists());
 }
 
 #[cfg(unix)]

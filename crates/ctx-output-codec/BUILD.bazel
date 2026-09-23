@@ -1,0 +1,67 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps", "crate_edition")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script", "cargo_toml_env_vars")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["BUILD.bazel", "Cargo.toml"])
+
+filegroup(
+    name = "cargo_package_data",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+cargo_toml_env_vars(
+    name = "cargo_toml_env_vars",
+    src = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs", "src/tokenizer_data.rs"],
+    crate_root = "build.rs",
+    edition = crate_edition(),
+    aliases = aliases(build = True, build_proc_macro = True),
+    # crate_universe classifies this shared build/dev dependency as dev-only.
+    deps = all_crate_deps(build = True) + crate_deps(["bpe-openai"]),
+    proc_macro_deps = all_crate_deps(build_proc_macro = True),
+    rustc_env_files = [":cargo_toml_env_vars"],
+    pkg_name = "ctx-output-codec",
+)
+
+rust_library(
+    name = "lib",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "sift",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = [":build_script"] + all_crate_deps(normal = True),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env_files = [":cargo_toml_env_vars"],
+)
+
+ctx_rust_test(
+    name = "unit_tests",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "sift",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = [":build_script"] + all_crate_deps(normal = True, normal_dev = True),
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    rustc_env_files = [":cargo_toml_env_vars"],
+)
+
+ctx_rust_test(
+    name = "tokenizer_tests",
+    srcs = ["tests/tokenizer.rs", "src/tokenizer.rs", "src/tokenizer_data.rs"],
+    crate_root = "tests/tokenizer.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = [":build_script", ":lib"] + all_crate_deps(normal = True, normal_dev = True),
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    rustc_env_files = [":cargo_toml_env_vars"],
+)

@@ -83,6 +83,14 @@ impl Drop for ConfigMutationLock {
 }
 
 pub(super) fn read_config_text(path: &Path) -> Result<Option<String>> {
+    read_config_text_with_policy(path, true)
+}
+
+pub(super) fn read_config_text_read_only(path: &Path) -> Result<Option<String>> {
+    read_config_text_with_policy(path, false)
+}
+
+fn read_config_text_with_policy(path: &Path, repair_permissions: bool) -> Result<Option<String>> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -103,7 +111,9 @@ pub(super) fn read_config_text(path: &Path) -> Result<Option<String>> {
         };
 
         options
-            .access_mode(GENERIC_READ | READ_CONTROL | WRITE_DAC)
+            .access_mode(
+                GENERIC_READ | READ_CONTROL | if repair_permissions { WRITE_DAC } else { 0 },
+            )
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
@@ -112,8 +122,12 @@ pub(super) fn read_config_text(path: &Path) -> Result<Option<String>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
     };
-    ensure_private_file_handle(&file)
-        .with_context(|| format!("protect private config {}", path.display()))?;
+    if repair_permissions {
+        ensure_private_file_handle(&file)
+    } else {
+        verify_private_file_handle(&file)
+    }
+    .with_context(|| format!("verify private config {}", path.display()))?;
     let mut text = String::new();
     file.read_to_string(&mut text)
         .with_context(|| format!("read {}", path.display()))?;

@@ -1,0 +1,30 @@
+[package]
+name = "ctx-output"
+version.workspace = true
+description = "Embedded command output compaction and recovery for ctx"
+edition = "2024"
+license = "MIT"
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json = { git = "https://github.com/serde-rs/json", rev = "de8500740cdcabffb9734f503e4889def823cf10", features = ["arbitrary_precision", "preserve_order", "raw_value"] }
+sift.workspace = true
+fs2.workspace = true
+sha2.workspace = true
+ureq = { version = "3.3", default-features = false, features = ["json", "rustls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+signal-hook = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tiktoken-rs = "0.12"

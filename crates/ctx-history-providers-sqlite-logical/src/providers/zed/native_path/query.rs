@@ -162,7 +162,7 @@ fn invalid_candidate_page(
     statement: &mut rusqlite::Statement<'_>,
     after: Option<ZedInvalidCandidateKey>,
 ) -> ZedNativeResult<Vec<ZedCandidate>> {
-    let _guard = SqliteLengthPreflightGuard::new(connection);
+    let _guard = SqliteLengthPreflightGuard::new(connection)?;
     let mut rows = match after {
         Some(key) => statement.query(rusqlite::params![
             key.storage_error,
@@ -191,7 +191,7 @@ fn candidate_page(
     statement: &mut rusqlite::Statement<'_>,
     after_id: Option<&str>,
 ) -> ZedNativeResult<Vec<ZedCandidate>> {
-    let _guard = SqliteLengthPreflightGuard::new(connection);
+    let _guard = SqliteLengthPreflightGuard::new(connection)?;
     let mut rows = match after_id {
         Some(id) => statement.query([id])?,
         None => statement.query([])?,

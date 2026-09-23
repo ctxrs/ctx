@@ -49,8 +49,8 @@ impl ReleaseTransport for Transport {
         assert_eq!(endpoint, self.url, "must use the ordinary executable slot");
         assert_eq!(
             max,
-            128 * 1024 * 1024,
-            "retain the incoming executable bound"
+            256 * 1024 * 1024,
+            "use the current executable download bound"
         );
         self.log.lock().unwrap().push(endpoint.to_owned());
         destination.write_all(&self.bytes)?;

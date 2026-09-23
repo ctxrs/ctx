@@ -94,7 +94,7 @@ observability_binary_contract(
 
 observability_binary_contract(
     name = "local_usage_tests",
-    extra_deps = ["@crates//:rusqlite-0.32.1"],
+    extra_deps = ["@crates//:rusqlite-0.40.2"],
     src = "tests/contracts/local_usage.rs",
     tags = ["privacy"],
 )

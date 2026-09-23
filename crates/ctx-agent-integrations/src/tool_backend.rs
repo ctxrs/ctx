@@ -6,6 +6,10 @@ use ctx_history_core::CaptureProvider;
 use serde_json::Value;
 use uuid::Uuid;
 
+#[path = "tool_backend_unified.rs"]
+mod unified;
+pub use unified::*;
+
 /// One transport-neutral application operation exposed through MCP.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolOperation {
@@ -287,6 +291,18 @@ impl ToolSearchUsageFacts {
 pub trait ToolBackend: Send + Sync {
     fn execute(&self, operation: ToolOperation) -> Result<ToolOutcome, ToolExecutionError>;
 
+    /// Optional graph/output capability; history-only backends retain their contract.
+    fn execute_unified(
+        &self,
+        _operation: UnifiedToolOperation,
+    ) -> Result<ToolOutcome, ToolExecutionError> {
+        Err(ToolBackendError::Unified {
+            code: UnifiedErrorCode::Unsupported,
+            detail: "this backend does not support local graph/output tools".to_owned(),
+        }
+        .into())
+    }
+
     /// Resolves an MCP provider spelling through the application's provider registry.
     fn parse_provider(&self, value: &str) -> Option<CaptureProvider>;
 
@@ -317,6 +333,10 @@ pub struct StructuredToolError {
 
 #[derive(Debug)]
 pub enum ToolBackendError {
+    Unified {
+        code: UnifiedErrorCode,
+        detail: String,
+    },
     InvalidRequest {
         detail: String,
     },
@@ -369,6 +389,7 @@ impl fmt::Display for ToolBackendError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRequest { detail }
+            | Self::Unified { detail, .. }
             | Self::Cursor { detail, .. }
             | Self::Internal { detail } => formatter.write_str(detail),
             Self::Blame(error) | Self::EventQuery(error) | Self::GenerationAuthority(error) => {

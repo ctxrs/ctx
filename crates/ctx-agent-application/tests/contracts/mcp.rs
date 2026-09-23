@@ -134,7 +134,7 @@ fn mcp_status_matches_cli_compact_error_for_malformed_usage_store() {
 }
 
 #[test]
-fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
+fn mcp_startup_and_observational_tools_do_not_start_enabled_history_daemon() {
     let temp = daemon_test_root();
     let data_root = data_root(&temp);
     let responses = mcp_roundtrip(
@@ -294,7 +294,7 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
         .expect("history epoch status");
     assert!(
         matches!(core_status, "ready" | "pending" | "unavailable"),
-        "startup health may observe a queued initial refresh or its terminal empty-source result: {status:#}"
+        "observational status reports retained history readiness: {status:#}"
     );
     assert_eq!(initialized, core_status == "ready", "{status:#}");
     assert_eq!(status["lexical"]["status"], core_status, "{status:#}");
@@ -318,10 +318,15 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
         json!(data_root.join("search/semantic"))
     );
     assert_eq!(status["daemon"]["enabled"], true);
-    assert_eq!(status["daemon"]["running"], true, "{status:#}");
-    assert_eq!(status["daemon"]["core_refresh_endpoint"]["available"], true);
-    assert_eq!(status["daemon"]["start_mode"], "auto");
-    assert_eq!(status["daemon"]["supervisor"]["status"], "fallback");
+    assert_eq!(status["daemon"]["running"], false, "{status:#}");
+    assert_eq!(
+        status["daemon"]["core_refresh_endpoint"]["available"],
+        false
+    );
+    assert!(
+        status["daemon"]["start_mode"].is_null(),
+        "an unstarted daemon has no recorded start mode: {status:#}"
+    );
     assert!(!responses[2]["result"]["content"]
         .to_string()
         .contains("local_only:"));
@@ -344,10 +349,10 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
             "daemon_endpoint:",
         ],
     );
-    assert!(data_root.join("daemon/daemon.lock").is_file());
-    assert!(data_root
+    assert!(!data_root.join("daemon/daemon.lock").exists());
+    assert!(!data_root
         .join("daemon/source-refresh-endpoint.json")
-        .is_file());
+        .exists());
     assert!(!data_root.join("relational.sqlite").exists());
     assert!(
         !data_root.join("work.sqlite").exists(),
@@ -375,6 +380,71 @@ fn mcp_initialize_negotiates_client_supported_protocol_version() {
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(responses[0]["result"]["serverInfo"]["name"], "ctx");
+}
+
+#[test]
+fn mcp_pure_output_and_tool_discovery_work_without_history_setup_or_valid_config() {
+    for malformed in [false, true] {
+        // This root permits normal autostart: independence must not rely on a
+        // daemon-disable override in the ordinary contract harness.
+        let temp = daemon_test_root();
+        let root = data_root(&temp);
+        fs::create_dir_all(&root).unwrap();
+        if malformed {
+            fs::write(root.join("config.toml"), "[invalid").unwrap();
+        }
+        let before = tree_snapshot(&root);
+        let mut requests = vec![
+            json!({"jsonrpc":"2.0", "id":0, "method":"initialize", "params":{}}),
+            json!({"jsonrpc":"2.0", "id":1, "method":"tools/list"}),
+            json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{
+                "name":"output_compact", "arguments":{"text":"small text"}
+            }}),
+        ];
+        if malformed {
+            requests.push(
+                json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{
+                    "name":"search", "arguments":{"query":"synthetic history"}
+                }}),
+            );
+        }
+        requests.push(json!({"jsonrpc":"2.0", "id":4, "method":"tools/call", "params":{
+            "name":"output_restore", "arguments":{"text":"after history failure\n", "encoding":"raw"}
+        }}));
+        let responses = mcp_roundtrip(&temp, &requests);
+        assert_eq!(responses.len(), requests.len());
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "ctx");
+        let tools = responses[1]["result"]["tools"].as_array().unwrap();
+        for name in [
+            "graph_query",
+            "graph_stats",
+            "output_compact",
+            "output_restore",
+            "search",
+        ] {
+            assert!(tools.iter().any(|tool| tool["name"] == name));
+        }
+        assert_ne!(responses[2]["result"]["isError"], true);
+        if malformed {
+            assert_eq!(responses[3]["result"]["isError"], true);
+        }
+        assert_eq!(
+            responses.last().unwrap()["result"]["structuredContent"]["text"],
+            "after history failure\n"
+        );
+        assert_eq!(
+            tree_snapshot(&root),
+            before,
+            "MCP independent operations must leave history untouched"
+        );
+        assert!(!root.join("daemon/daemon.lock").exists());
+        assert!(!root.join("daemon/source-refresh-endpoint.json").exists());
+        if malformed {
+            // Restore the default configuration after all preservation checks;
+            // the test root's daemon teardown command requires valid config.
+            fs::remove_file(root.join("config.toml")).unwrap();
+        }
+    }
 }
 
 #[test]
