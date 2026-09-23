@@ -229,7 +229,7 @@ ctx uses heuristics and Jev to cut noisy tool output before it reaches your codi
 
 Unlike RTK, it leaves the original commands untouched for safety, and allows retrieval of the full output if any of the removed content is needed.
 
-## Why ctx output
+## Why Sift
 
 * **Use less context.** Spend tokens on the task instead of repeated paths, logs,
     and formatting.
@@ -244,27 +244,27 @@ Unlike RTK, it leaves the original commands untouched for safety, and allows ret
 
 ## Try it
 
-Run commands through ctx:
+Run commands through Sift:
 
 ```sh
-ctx run --capture -- git status
-ctx run --capture -- cargo test
+ctx sift -- git status
+ctx sift -- cargo test
 ctx status
 ```
 
-After `ctx integrations install output-hook --agent claude-code`, supported agents use ctx automatically. You can also compact
+After `ctx integrations install sift --agent claude-code`, supported agents use Sift automatically. You can also sift
 a saved result or stdin directly:
 
 ```sh
-ctx compact build.log
-long-command | ctx compact
+ctx sift build.log
+ctx sift -- long-command
 ```
 
 ctx only chooses a representation when the complete result uses fewer
 `o200k_base` tokens. Short output, live progress, and binary data pass through.
 When compaction is not useful or supported, the original output wins.
 
-## Why ctx output instead of RTK
+## Why Sift instead of RTK
 
 ctx favors broad, conservative compaction over a large collection of
 command-specific summaries. That gives it consistent behavior on arbitrary tool

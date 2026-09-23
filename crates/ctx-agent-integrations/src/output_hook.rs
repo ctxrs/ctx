@@ -129,18 +129,18 @@ fn expected(agent: Agent, executable: &Path) -> Result<Value> {
     if agent == Agent::Copilot {
         return Ok(
             json!({"type":"command", "matcher":"bash|powershell", "exec":path,
-            "args":["output","hook","copilot"], "timeoutSec":10}),
+            "args":["sift","hook","copilot"], "timeoutSec":10}),
         );
     }
     let command = if cfg!(windows) {
         format!(
-            "& '{}' output hook {}",
+            "& '{}' sift hook {}",
             path.replace('\'', "''"),
             agent.name()
         )
     } else {
         format!(
-            "'{}' output hook {}",
+            "'{}' sift hook {}",
             path.replace('\'', "'\\''"),
             agent.name()
         )
@@ -181,22 +181,27 @@ fn hook_entries_mut<'a>(value: &'a mut Value, event: &str) -> Result<&'a mut Vec
 }
 
 fn invocation(value: &Value, name: &str, agent: Agent) -> bool {
-    let suffix = if name == "ctx" {
-        format!(" output hook {}", agent.name())
+    let suffixes = if name == "ctx" {
+        vec![
+            format!(" sift hook {}", agent.name()),
+            format!(" output hook {}", agent.name()),
+        ]
     } else {
-        format!(" hook {}", agent.name())
+        vec![format!(" hook {}", agent.name())]
     };
     let shell_command_matches = |v: &str| {
-        v.strip_suffix(&suffix).is_some_and(|prefix| {
-            let prefix = prefix.trim_start_matches("& ").trim();
-            let unescaped = if cfg!(windows) {
-                prefix.replace("''", "'")
-            } else {
-                prefix.replace("'\\''", "'")
-            };
-            Path::new(unescaped.trim_matches('\''))
-                .file_stem()
-                .is_some_and(|stem| stem == name)
+        suffixes.iter().any(|suffix| {
+            v.strip_suffix(suffix).is_some_and(|prefix| {
+                let prefix = prefix.trim_start_matches("& ").trim();
+                let unescaped = if cfg!(windows) {
+                    prefix.replace("''", "'")
+                } else {
+                    prefix.replace("'\\''", "'")
+                };
+                Path::new(unescaped.trim_matches('\''))
+                    .file_stem()
+                    .is_some_and(|stem| stem == name)
+            })
         })
     };
     if ["command", "bash", "powershell", "windows", "linux", "osx"]
@@ -212,12 +217,16 @@ fn invocation(value: &Value, name: &str, agent: Agent) -> bool {
     }
     let exec = value.get("exec").and_then(Value::as_str);
     exec.is_some_and(|v| Path::new(v).file_stem().is_some_and(|stem| stem == name))
-        && value.get("args")
-            == Some(&if name == "ctx" {
-                json!(["output", "hook", agent.name()])
-            } else {
-                json!(["hook", agent.name()])
-            })
+        && if name == "ctx" {
+            matches!(
+                value.get("args"),
+                Some(args)
+                    if args == &json!(["sift", "hook", agent.name()])
+                        || args == &json!(["output", "hook", agent.name()])
+            )
+        } else {
+            value.get("args") == Some(&json!(["hook", agent.name()]))
+        }
 }
 
 fn contains_invocation(value: &Value, name: &str, agent: Agent) -> bool {
@@ -255,8 +264,12 @@ fn owned_entry(entry: &Value, agent: Agent) -> bool {
             .first()?
             .get("command")?
             .as_str()?;
-        let suffix = format!(" output hook {}", agent.name());
-        let prefix = command.strip_suffix(&suffix)?;
+        let (prefix, _) = [
+            format!(" sift hook {}", agent.name()),
+            format!(" output hook {}", agent.name()),
+        ]
+        .iter()
+        .find_map(|suffix| command.strip_suffix(suffix).map(|prefix| (prefix, suffix)))?;
         if cfg!(windows) {
             Some(PathBuf::from(
                 prefix
@@ -410,9 +423,9 @@ pub fn install(agent: Agent, project: bool, context: &Context) -> Result<State> 
     let state = status(agent, project, context)?;
     match state {
         State::Current => return Ok(state),
-        State::Unsupported => bail!("{} output hook is unsupported here: {}", agent.name(), agent.limitation()),
-        State::SiftConflict => bail!("standalone Sift output hook detected; remove it explicitly before installing ctx output hook"),
-        State::Conflict => bail!("existing ctx output hook differs; inspect it manually before installing"),
+        State::Unsupported => bail!("{} Sift hook is unsupported here: {}", agent.name(), agent.limitation()),
+        State::SiftConflict => bail!("standalone Sift hook detected; remove it explicitly before installing the ctx Sift hook"),
+        State::Conflict => bail!("existing ctx Sift hook differs; inspect it manually before installing"),
         State::Missing => {}
     }
     let target = path(agent, project, context);

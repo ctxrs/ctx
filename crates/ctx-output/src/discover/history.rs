@@ -119,7 +119,7 @@ pub fn run(args: &[OsString]) -> Result<()> {
         }
         writeln!(
             out,
-            "{} files; {} records; {} missed opportunities; {} recognized Sift/ctx output calls; {} malformed records; {} skipped files; {} excluded rows; scan limited: {}",
+            "{} files; {} records; {} missed opportunities; {} recognized Sift/ctx sift calls; {} malformed records; {} skipped files; {} excluded rows; scan limited: {}",
             report.files_scanned,
             report.records_scanned,
             report.missed_opportunities,

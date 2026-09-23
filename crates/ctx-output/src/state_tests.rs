@@ -438,7 +438,7 @@ fn text_history_is_readable_and_help_does_not_create_state() {
     assert!(
         String::from_utf8(output)
             .unwrap()
-            .contains("Usage: ctx output gain")
+            .contains("Usage: ctx sift gain")
     );
     assert!(!dir.exists());
     state::record_at(&dir, &Settings::default(), event(), None).unwrap();

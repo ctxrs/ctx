@@ -707,7 +707,7 @@ fn actual_rewrite_output_and_command_prefixes_count_as_sift_without_execution() 
     for row in report["rows"].as_array().unwrap() {
         assert!(matches!(
             row["command"].as_str(),
-            Some("sift run" | "ctx output run")
+            Some("sift run" | "ctx sift run" | "ctx output run")
         ));
         assert_eq!(row["classification"], "sift_usage");
         assert!(row["potential_saved_tokens"].is_null());

@@ -52,7 +52,7 @@ impl Settings {
         match File::open(path) {
             Ok(file) => {
                 let settings: Self = serde_json::from_reader(file)
-                    .context("invalid ctx output config; file left unchanged")?;
+                    .context("invalid ctx sift config; file left unchanged")?;
                 ensure!(
                     settings.exclude_commands.iter().all(|s| valid_label(s)),
                     "exclude_commands must contain exact executable basenames"
@@ -120,7 +120,7 @@ impl Settings {
         if let Ok(meta) = fs::symlink_metadata(path) {
             ensure!(
                 meta.is_file() && !meta.file_type().is_symlink(),
-                "ctx output config must be a regular file"
+                "ctx sift config must be a regular file"
             );
         }
         let mut bytes = serde_json::to_vec_pretty(self)?;
@@ -162,7 +162,7 @@ impl Settings {
             }
             return result;
         }
-        bail!("cannot allocate a temporary ctx output config file")
+        bail!("cannot allocate a temporary ctx sift config file")
     }
 }
 

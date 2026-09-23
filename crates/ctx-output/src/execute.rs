@@ -18,7 +18,7 @@ pub(crate) fn execute(
         Err(error) => {
             let _ = writeln!(
                 io::stderr(),
-                "ctx output: {error:#}; passing command output through"
+                "ctx sift: {error:#}; passing command output through"
             );
             state::Settings {
                 enabled: false,

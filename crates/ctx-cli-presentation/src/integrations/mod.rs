@@ -46,8 +46,9 @@ struct IntegrationInstallArgs {
 #[derive(Debug, Subcommand)]
 enum IntegrationInstallTarget {
     #[command(
-        name = "output-hook",
-        about = "Explicitly install a supported automatic output hook"
+        name = "sift",
+        alias = "output-hook",
+        about = "Explicitly install the Sift output hook"
     )]
     OutputHook(output_hook::OutputHookArgs),
     #[command(about = "Install the local ctx MCP server into coding-agent clients")]
@@ -77,8 +78,9 @@ struct IntegrationRemoveArgs {
 #[derive(Debug, Subcommand)]
 enum IntegrationRemoveTarget {
     #[command(
-        name = "output-hook",
-        about = "Remove a ctx-owned automatic output hook"
+        name = "sift",
+        alias = "output-hook",
+        about = "Remove the ctx-owned Sift output hook"
     )]
     OutputHook(output_hook::OutputHookArgs),
     #[command(about = "Remove the local ctx MCP server from coding-agent clients")]
@@ -108,8 +110,9 @@ struct IntegrationStatusArgs {
 #[derive(Debug, Subcommand)]
 enum IntegrationStatusTarget {
     #[command(
-        name = "output-hook",
-        about = "Inspect automatic output-hook registration"
+        name = "sift",
+        alias = "output-hook",
+        about = "Inspect Sift output-hook registration"
     )]
     OutputHook(output_hook::OutputHookArgs),
     #[command(about = "Inspect local ctx MCP server integration state")]

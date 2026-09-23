@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 
-const HELP: &str = "ctx output — token-counted command output and recovery
+const HELP: &str = "ctx sift — token-counted command output and recovery
 
 Usage:
   ctx run [--raw|--capture] -- COMMAND [ARG...]
@@ -17,20 +17,20 @@ Usage:
   ctx compact --protocol=json-v1|session-v1|session-v2
   ctx restore --encoding ENCODING [FILE|-]
   ctx recall --list | ID [--stderr] [--from N] [--lines N] [--grep TEXT]
-  ctx output run|compact|restore|recall ...
-  ctx output proxy [--] COMMAND [ARG...]
-  ctx output filter [--capture]
-  ctx output read [FILE|-] [--from N] [--lines N] [--grep TEXT]
-  ctx output json [FILE|-] [--pointer POINTER] [--field KEY] [--limit N]
-  ctx output summary|err|test [OPTIONS] -- COMMAND [ARG...]
-  ctx output gain [--json|--csv] [--history] [--daily] [--graph]
-  ctx output config [show|--create]
-  ctx output semantic enable|shadow|disable|status [--project PATH]
-  ctx output discover [--json] [FILE ...]
-  ctx output discover --history PATH [--suggest] [--json]
-  ctx output ccusage --import FILE [--json|--csv]
-  ctx output hook HOST
-  ctx output rewrite [--json] [--shell posix|powershell] -- 'COMMAND'
+  ctx sift run|compact|restore|recall ...
+  ctx sift proxy [--] COMMAND [ARG...]
+  ctx sift filter [--capture]
+  ctx sift read [FILE|-] [--from N] [--lines N] [--grep TEXT]
+  ctx sift json [FILE|-] [--pointer POINTER] [--field KEY] [--limit N]
+  ctx sift summary|err|test [OPTIONS] -- COMMAND [ARG...]
+  ctx sift gain [--json|--csv] [--history] [--daily] [--graph]
+  ctx sift config [show|--create]
+  ctx sift semantic enable|shadow|disable|status [--project PATH]
+  ctx sift discover [--json] [FILE ...]
+  ctx sift discover --history PATH [--suggest] [--json]
+  ctx sift ccusage --import FILE [--json|--csv]
+  ctx sift hook HOST
+  ctx sift rewrite [--json] [--shell posix|powershell] -- 'COMMAND'
 
 Encodings: raw, json-v1, json-rows-v1, json-min-v1, json-columns-v1,
            text-runs-v1, text-prefixes-v1, text-refs-v1, text-lines-v1,
@@ -46,7 +46,7 @@ Recall requires keep_originals and record_usage in output config; streaming runs
 CTX_OUTPUT_CONFIG_DIR / CTX_OUTPUT_STATE_DIR select output stores independently.
 Nonempty SIFT_CONFIG_DIR / SIFT_STATE_DIR are fallback overrides; no automatic data migration.
 Defaults: XDG config/state ctx/output; APPDATA/LOCALAPPDATA ctx/output on Windows.
-Output state is separate from history --data-root. Install automatic hooks explicitly with ctx integrations install output-hook.
+Output state is separate from history --data-root. Install automatic hooks explicitly with ctx integrations install sift.
 Pi sessions require --record-source pi with --record-tool bash (v1) or pi (v2).
 Semantic selection is off by default; explicit enable/shadow uses TypeSafe and TYPESAFE_API_KEY.
 Only enabled projects and eligible session-v2 selections can use the remote service.
@@ -64,7 +64,7 @@ fn parse_encoding(value: &str) -> Result<Encoding> {
         "text-refs-v1" => Ok(Encoding::TextRefsV1),
         "text-lines-v1" => Ok(Encoding::TextLinesV1),
         "text-symbols-v1" => Ok(Encoding::TextSymbolsV1),
-        _ => bail!("unsupported encoding; use 'ctx output --help' for supported encodings"),
+        _ => bail!("unsupported encoding; use 'ctx sift --help' for supported encodings"),
     }
 }
 
@@ -81,7 +81,7 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
     if command == "--version" {
         writeln!(
             io::stdout(),
-            "ctx output {}",
+            "ctx sift {}",
             option_env!("CARGO_PKG_VERSION").unwrap_or("development")
         )?;
         return Ok(0);
@@ -200,7 +200,7 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
             return execute(&remaining, raw, capture, None);
         }
         bail!(
-            "unknown output command {}; use 'ctx output --help'",
+            "unknown sift command {}; use 'ctx sift --help'",
             command.to_string_lossy()
         );
     }
@@ -274,7 +274,7 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
         } else {
             ensure!(
                 positional || !value.is_some_and(|v| v.starts_with('-') && v != "-"),
-                "unknown option; use 'ctx output --help'"
+                "unknown option; use 'ctx sift --help'"
             );
             ensure!(file.is_none(), "expected at most one input file");
             file = Some(arg);

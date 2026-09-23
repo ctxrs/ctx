@@ -84,11 +84,11 @@ use graph command filters for more specific graph navigation. Consult
 
 ## Compact output when requested
 
-Use `ctx run` or `ctx compact` when the user requests output compaction or an
+Use `ctx sift` when the user requests output compaction or an
 existing explicit project or user instruction opts in. Installing ctx alone
 does not opt ordinary commands into wrapping; run those commands directly.
 For persistent automatic handling, explicitly install a supported host hook
-with `ctx integrations install output-hook --agent claude-code` (or
+with `ctx integrations install sift --agent claude-code` (or
 `github-copilot`, or `codex` on POSIX). Use matching `status` and `remove`
 commands to inspect or remove ctx-owned entries. With no `--agent`, the command
 selects detected supported hosts; installation never runs as part of the
@@ -99,10 +99,10 @@ Copilot support is CLI post-tool output only. Codex support requires host hook
 support and user trust review; its pre-tool adapter is POSIX only.
 
 ```sh
-ctx run --capture -- cargo test
-ctx compact output.txt
-ctx compact --protocol=json-v1 < requests.jsonl
-ctx restore --encoding text-runs-v1 compacted.txt
+ctx sift -- cargo test
+ctx sift compact output.txt
+ctx sift compact --protocol=json-v1 < requests.jsonl
+ctx sift restore --encoding text-runs-v1 compacted.txt
 ```
 
 `run` executes argv directly once, inheriting stdin, environment and working
@@ -127,7 +127,7 @@ Command-specific presentations may abbreviate Git status or omit passing test
 rows. Those presentations differ from reversible compaction. Use raw output
 when exact bytes matter. `ctx recall --list` and `ctx recall ID` inspect
 originals only when retention was enabled and a complete capture was saved;
-streamed output is not a recoverable transcript. Use `ctx output --help` for
+streamed output is not a recoverable transcript. Use `ctx sift --help` for
 output settings and available integration controls.
 
 ## Health and integrations
@@ -168,8 +168,8 @@ directories. To select an existing Sift configuration or state directory, set
 `CTX_OUTPUT_CONFIG_DIR` or `CTX_OUTPUT_STATE_DIR`; nonempty `SIFT_CONFIG_DIR` and
 `SIFT_STATE_DIR` remain fallbacks when the corresponding ctx override is unset
 or empty. ctx does not move or delete
-either product's data. `ctx output config show` reports effective settings;
-`ctx output config --help` explains the default directory locations.
+either product's data. `ctx sift config show` reports effective settings;
+`ctx sift config --help` explains the default directory locations.
 
 Use `ctx integrations` for the managed ctx skill and MCP server. The standalone
 Sift `init` installer is not exposed by ctx; existing hooks remain unchanged.

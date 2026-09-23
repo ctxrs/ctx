@@ -3,6 +3,15 @@
 use super::*;
 
 #[test]
+fn sift_is_the_public_output_command() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.output(&["sift", "--help"], b"");
+
+    assert_success(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ctx sift"));
+}
+
+#[test]
 fn output_hook_preserves_already_wrapped_output_without_duplicate_accounting() {
     let sandbox = Sandbox::new();
     sandbox.write("output/config/config.json", br#"{"keep_originals":true}"#);
@@ -25,7 +34,7 @@ fn output_hook_preserves_already_wrapped_output_without_duplicate_accounting() {
         "ctx --color=never output run --capture --raw -- cat fixture",
         "ctx --quiet output proxy -- cat fixture",
     ] {
-        let output = sandbox.output(&["output", "hook", "claude"], request(command).as_bytes());
+        let output = sandbox.output(&["sift", "hook", "claude"], request(command).as_bytes());
         assert_eq!(json_output(output), json!({}), "wrapped command: {command}");
         assert!(
             !sandbox.root.join("output/state").exists(),
@@ -33,10 +42,7 @@ fn output_hook_preserves_already_wrapped_output_without_duplicate_accounting() {
         );
         assert_eq!(sandbox.protected_state(), before);
     }
-    let output = sandbox.output(
-        &["output", "hook", "claude"],
-        request("cat --raw").as_bytes(),
-    );
+    let output = sandbox.output(&["sift", "hook", "claude"], request("cat --raw").as_bytes());
     let replacement = json_output(output);
     assert_eq!(
         replacement["hookSpecificOutput"]["hookEventName"],
@@ -61,7 +67,7 @@ fn explicit_output_hook_registration_invokes_the_existing_runtime() {
     let install = sandbox.json(&[
         "integrations",
         "install",
-        "output-hook",
+        "sift",
         "--agent",
         "claude-code",
         "--project",
@@ -78,19 +84,17 @@ fn explicit_output_hook_registration_invokes_the_existing_runtime() {
     let command = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    assert!(command.contains(" output hook claude"));
+    assert!(command.contains(" sift hook claude"));
     assert!(command.contains(sandbox.binary.to_str().unwrap()));
 
     let stdout = "synthetic command output remains long\n".repeat(160);
     let request = json!({"hook_event_name":"PostToolUse", "tool_name":"Bash",
         "tool_input":{"command":"cargo test"},
         "tool_response":{"stdout":stdout,"stderr":"","interrupted":false,"isImage":false}});
-    let response = sandbox.json(&["output", "hook", "claude"]);
+    let response = sandbox.json(&["sift", "hook", "claude"]);
     assert_eq!(response, json!({}), "missing request must pass through");
-    let transformed = json_output(sandbox.output(
-        &["output", "hook", "claude"],
-        request.to_string().as_bytes(),
-    ));
+    let transformed =
+        json_output(sandbox.output(&["sift", "hook", "claude"], request.to_string().as_bytes()));
     let replacement = transformed["hookSpecificOutput"]["updatedToolOutput"]["stdout"]
         .as_str()
         .unwrap();

@@ -188,7 +188,7 @@ pub(super) fn command_label(words: &[String]) -> (String, bool) {
                 })));
     let sift = matches!(first, "sift" | "sift.exe") || ctx_output;
     let safe = match first {
-        _ if ctx_output => "ctx output",
+        _ if ctx_output => "ctx sift",
         "git" | "cargo" | "npm" | "pnpm" | "yarn" | "python" | "python3" | "node" | "go"
         | "rustc" | "rg" | "grep" | "ls" | "cat" | "find" | "make" | "pytest" | "docker"
         | "kubectl" | "echo" | "printf" | "sh" | "bash" | "zsh" => first,
@@ -198,7 +198,7 @@ pub(super) fn command_label(words: &[String]) -> (String, bool) {
     let mut label = safe.to_owned();
     if matches!(
         safe,
-        "git" | "cargo" | "npm" | "pnpm" | "yarn" | "go" | "sift" | "ctx output"
+        "git" | "cargo" | "npm" | "pnpm" | "yarn" | "go" | "sift" | "ctx sift"
     ) && let Some(sub) = words.get(
         if ctx_output && words.get(1).is_some_and(|s| s == "output") {
             2

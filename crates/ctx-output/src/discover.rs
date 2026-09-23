@@ -28,7 +28,7 @@ fn replay(args: &[OsString]) -> Result<()> {
         } else if !positional && (arg == "--help" || arg == "-h") {
             writeln!(
                 io::stdout().lock(),
-                "Usage: ctx output discover [--json] [--] [FILE ...]\nReplay saved output files (stdin when omitted). Never executes their contents.\nReports potential ordinary o200k_base savings, not actual agent usage.\nHistory: ctx output discover --history PATH [--json] [--since YYYY-MM-DD] [--project PATH] [--suggest]\nOnly the selected file/directory is inspected; bounded, read-only, no symlink traversal.\nHistory reports include relative file/record locators, but omit arguments and transcripts. --suggest only reports observed patterns."
+                "Usage: ctx sift discover [--json] [--] [FILE ...]\nReplay saved output files (stdin when omitted). Never executes their contents.\nReports potential ordinary o200k_base savings, not actual agent usage.\nHistory: ctx sift discover --history PATH [--json] [--since YYYY-MM-DD] [--project PATH] [--suggest]\nOnly the selected file/directory is inspected; bounded, read-only, no symlink traversal.\nHistory reports include relative file/record locators, but omit arguments and transcripts. --suggest only reports observed patterns."
             )?;
             return Ok(());
         } else if !positional && arg.to_string_lossy().starts_with('-') && arg != "-" {

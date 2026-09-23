@@ -1,6 +1,9 @@
 //! Dispatch independent local engines before opening history or its configuration.
 
-use std::ffi::{OsStr, OsString};
+use std::{
+    ffi::{OsStr, OsString},
+    path::Path,
+};
 
 use clap::{Args, Subcommand};
 
@@ -30,6 +33,9 @@ pub(crate) enum UnifiedCommand {
     /// Configure output handling, inspect savings, or manage command hooks.
     #[command(disable_help_flag = true, disable_help_subcommand = true)]
     Output(EngineArgs),
+    /// Sift command output before it reaches an agent.
+    #[command(disable_help_flag = true, disable_help_subcommand = true)]
+    Sift(EngineArgs),
 }
 
 impl UnifiedCommand {
@@ -58,6 +64,7 @@ impl UnifiedCommand {
             Self::Restore(args) => ("restore", args),
             Self::Recall(args) => ("recall", args),
             Self::Output(args) => ("output", args),
+            Self::Sift(args) => ("sift", args),
         };
         let original = std::env::args_os().collect::<Vec<_>>();
         let arguments = preserved_output_arguments(&original, name).unwrap_or(args.arguments);
@@ -100,7 +107,9 @@ fn root_option_width(argument: &OsStr) -> Option<usize> {
     }
 }
 
-const COMMANDS: &[&str] = &["graph", "run", "compact", "restore", "recall", "output"];
+const COMMANDS: &[&str] = &[
+    "graph", "run", "compact", "restore", "recall", "output", "sift",
+];
 
 /// The common command path avoids parsing the history CLI and touching its state.
 /// Root options still use the normal parser and the same engine dispatcher.
@@ -138,8 +147,54 @@ fn run_engine(name: &str, arguments: &[OsString]) -> i32 {
     if name == "graph" {
         return ctx_graph::run(arguments.iter().cloned());
     }
-    let prefix = (name != "output").then(|| OsString::from(name));
+    if name == "sift" {
+        return run_sift(arguments);
+    }
+    let prefix = (!matches!(name, "output" | "sift")).then(|| OsString::from(name));
     ctx_output::run(prefix.into_iter().chain(arguments.iter().cloned()))
+}
+
+fn run_sift(arguments: &[OsString]) -> i32 {
+    let Some(first) = arguments.first().and_then(|argument| argument.to_str()) else {
+        return ctx_output::run([OsString::from("--help")]);
+    };
+    if matches!(
+        first,
+        "--help"
+            | "-h"
+            | "--version"
+            | "hook"
+            | "filter"
+            | "read"
+            | "json"
+            | "summary"
+            | "err"
+            | "test"
+            | "gain"
+            | "config"
+            | "semantic"
+            | "discover"
+            | "ccusage"
+            | "rewrite"
+            | "run"
+            | "proxy"
+            | "compact"
+            | "restore"
+            | "recall"
+    ) {
+        return ctx_output::run(arguments.iter().cloned());
+    }
+    let mut forwarded = vec![OsString::from("run"), OsString::from("--capture")];
+    if first == "--" {
+        forwarded.extend(arguments.iter().skip(1).cloned());
+    } else if Path::new(first).is_file() {
+        forwarded[0] = OsString::from("compact");
+        forwarded.truncate(1);
+        forwarded.extend(arguments.iter().cloned());
+    } else {
+        forwarded.extend(arguments.iter().cloned());
+    }
+    ctx_output::run(forwarded)
 }
 
 #[cfg(test)]

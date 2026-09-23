@@ -12,11 +12,11 @@ use std::fmt;
 use std::io::{self, Read, Write};
 
 pub const HELP: &str = "Explicit views (selection can omit information):
-  ctx output read [FILE|-] [--from N] [--lines N] [--grep LITERAL]
-  ctx output json [FILE|-] [--pointer POINTER] [--field KEY]... [--limit N]
-  ctx output summary [--lines N] -- COMMAND [ARG...]
-  ctx output err [--context N] -- COMMAND [ARG...]
-  ctx output test [--context N] -- COMMAND [ARG...]
+  ctx sift read [FILE|-] [--from N] [--lines N] [--grep LITERAL]
+  ctx sift json [FILE|-] [--pointer POINTER] [--field KEY]... [--limit N]
+  ctx sift summary [--lines N] -- COMMAND [ARG...]
+  ctx sift err [--context N] -- COMMAND [ARG...]
+  ctx sift test [--context N] -- COMMAND [ARG...]
 
 Read selects literal, case-sensitive matching lines at/after source line N
 (1-based); --lines limits matches. Selected lines preserve their original bytes.
@@ -36,7 +36,7 @@ These are substring matches and can include lines such as '0 failures'.
 No keyword matches or non-text input passes through unchanged.
 Command views require the runner's bounded complete capture; progress is delayed.
 Capture overflow passes through raw. Child argv and exit status stay unchanged.
-Use ctx output run -- test ... to invoke the native test utility.
+Use ctx sift run -- test ... to invoke the native test utility.
 Use '--' before a filename starting '-'. FILE defaults to stdin.
 ";
 
@@ -151,7 +151,7 @@ pub fn parse(name: &str, args: &[OsString]) -> Result<Action> {
                 (View::Errors { context } | View::Test { context }, "--context") => {
                     *context = number(value)?
                 }
-                _ => bail!("unsupported {name} option {key}; use 'ctx output {name} --help'"),
+                _ => bail!("unsupported {name} option {key}; use 'ctx sift {name} --help'"),
             }
         } else if command {
             ensure!(!arg.is_empty(), "missing command");
@@ -167,7 +167,7 @@ pub fn parse(name: &str, args: &[OsString]) -> Result<Action> {
     }
     ensure!(
         !command,
-        "{name} requires COMMAND; use 'ctx output {name} --help'"
+        "{name} requires COMMAND; use 'ctx sift {name} --help'"
     );
     Ok(Action::Input { path, view })
 }
@@ -459,7 +459,7 @@ fn text_view(view: &View, input: &[u8]) -> Vec<u8> {
     for (start, end) in ranges {
         if start > previous {
             out.extend_from_slice(
-                format!("[ctx output: {} lines omitted]\n", start - previous).as_bytes(),
+                format!("[ctx sift: {} lines omitted]\n", start - previous).as_bytes(),
             );
         }
         for line in &lines[start..end] {
@@ -472,7 +472,7 @@ fn text_view(view: &View, input: &[u8]) -> Vec<u8> {
             out.push(b'\n');
         }
         out.extend_from_slice(
-            format!("[ctx output: {} lines omitted]\n", lines.len() - previous).as_bytes(),
+            format!("[ctx sift: {} lines omitted]\n", lines.len() - previous).as_bytes(),
         );
     }
     out

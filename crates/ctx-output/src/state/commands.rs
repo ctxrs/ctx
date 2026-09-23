@@ -141,22 +141,22 @@ fn utc_date(epoch_days: u64) -> String {
     }
     format!("{year:04}-{:02}-{:02}", month + 1, days + 1)
 }
-const GAIN_HELP: &str = "Usage: ctx output gain [--json|--csv|--format text|json|csv] [--history]
+const GAIN_HELP: &str = "Usage: ctx sift gain [--json|--csv|--format text|json|csv] [--history]
        [--daily] [--weekly] [--monthly] [--graph] [--project [PATH]]
        [--since TIME] [--until TIME] [--command NAME] [--source NAME]
-       ctx output gain --reset
+       ctx sift gain --reset
 Show measured token savings from retained records (all projects by default).
 --project defaults to the current checkout; legacy records have no project.
 TIME is YYYY-MM-DD at UTC midnight or Unix milliseconds; since includes, until excludes.
 Weeks start Monday UTC. --graph uses daily buckets unless a period is selected.
 CSV exports totals, selected periods, or --history records. --reset clears metrics only.";
-const RECALL_HELP: &str = "Usage: ctx output recall --list
-       ctx output recall ID-OR-PREFIX [--stderr] [--from LINE] [--lines COUNT] [--grep TEXT]
+const RECALL_HELP: &str = "Usage: ctx sift recall --list
+       ctx sift recall ID-OR-PREFIX [--stderr] [--from LINE] [--lines COUNT] [--grep TEXT]
 Without navigation, writes the entire saved stream as raw bytes.
 --from is one-based; --grep is literal and case-sensitive; --lines limits matches.
 Navigation returns at most 200 lines by default (maximum --lines 10000).
 Only opt-in saved originals are available; commands are never rerun.";
-const CONFIG_HELP: &str = "Usage: ctx output config [show|--create]
+const CONFIG_HELP: &str = "Usage: ctx sift config [show|--create]
 Show effective settings. --create writes defaults only if no config exists.
 CTX_OUTPUT_CONFIG_DIR and CTX_OUTPUT_STATE_DIR override output directories independently.
 Nonempty SIFT_CONFIG_DIR and SIFT_STATE_DIR are fallback overrides.
@@ -571,10 +571,10 @@ pub fn config(args: &[OsString]) -> Result<()> {
     Ok(())
 }
 
-const SEMANTIC_HELP: &str = "Usage: ctx output semantic enable [--project PATH]
-       ctx output semantic shadow [--project PATH]
-       ctx output semantic disable
-       ctx output semantic status
+const SEMANTIC_HELP: &str = "Usage: ctx sift semantic enable [--project PATH]
+       ctx sift semantic shadow [--project PATH]
+       ctx sift semantic disable
+       ctx sift semantic status
 Enable emits smaller recoverable semantic selections; shadow only records decisions.
 Enable and shadow send the current task and eligible Pi grep result passages to TypeSafe.
 The API key is read from TYPESAFE_API_KEY and is never stored.";

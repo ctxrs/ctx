@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
 
-const HELP: &str = "Usage: ctx output ccusage --import FILE [--json|--csv]
+const HELP: &str = "Usage: ctx sift ccusage --import FILE [--json|--csv]
 
 Report an existing local ccusage daily/session JSON export (including daily
 --instances). Accepts daily, sessions, or session arrays, or a projects object.
@@ -20,9 +20,9 @@ Totals are reported only when supplied; conflicting totals are rejected.
 An empty [] export is accepted. Combined --sections exports are unsupported.
 
 Cost is USD as reported by ccusage; it may be calculated or incompletely priced,
-not an invoice or money saved. No prices or savings are calculated by ctx output.
+not an invoice or money saved. No prices or savings are calculated by ctx sift.
 This command reads only FILE; it does not run ccusage, fetch packages, scan
-history, or read/write ctx output's measured compaction statistics.
+history, or read/write ctx sift's measured compaction statistics.
 ";
 const COST_NOTE: &str =
     "USD reported by ccusage; may be calculated or incompletely priced; not an invoice or savings";
@@ -223,7 +223,7 @@ fn parse(bytes: &[u8]) -> Result<Report> {
     }
     let import: Import = serde_json::from_slice(bytes).map_err(|error| {
         anyhow::anyhow!(
-            "invalid ccusage daily/session schema at line {}, column {}; use 'ctx output ccusage --help'",
+            "invalid ccusage daily/session schema at line {}, column {}; use 'ctx sift ccusage --help'",
             error.line(),
             error.column()
         )
@@ -475,10 +475,10 @@ pub(crate) fn run_to(args: &[OsString], out: &mut impl Write) -> Result<()> {
             ensure!(format == "text", "choose only one of --json or --csv");
             format = if arg == "--json" { "json" } else { "csv" };
         } else {
-            bail!("unknown ccusage option; use 'ctx output ccusage --help'");
+            bail!("unknown ccusage option; use 'ctx sift ccusage --help'");
         }
     }
-    let path = path.context("ccusage requires --import FILE; use 'ctx output ccusage --help'")?;
+    let path = path.context("ccusage requires --import FILE; use 'ctx sift ccusage --help'")?;
     ensure!(path != "-", "--import requires a local file, not stdin");
     ensure!(
         std::fs::metadata(path)

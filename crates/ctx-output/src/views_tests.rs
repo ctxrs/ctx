@@ -243,7 +243,7 @@ fn non_utf8_filenames_and_child_arguments_survive_parsing() {
 #[test]
 fn summary_marks_exact_omissions_and_keeps_ends() {
     let out = render(&View::Summary { lines: 1 }, b"first\r\nsecond\nthird\nlast").unwrap();
-    assert_eq!(out, b"Sift summary head/tail view: 2/4 source lines; 2 omitted.\nfirst\r\n[ctx output: 2 lines omitted]\nlast");
+    assert_eq!(out, b"Sift summary head/tail view: 2/4 source lines; 2 omitted.\nfirst\r\n[ctx sift: 2 lines omitted]\nlast");
     assert_eq!(
         render(&View::Summary { lines: 1 }, b"one\ntwo").unwrap(),
         b"one\ntwo"
@@ -254,7 +254,7 @@ fn summary_marks_exact_omissions_and_keeps_ends() {
     );
     assert_eq!(
         render(&View::Summary { lines: 0 }, b"one\ntwo").unwrap(),
-        b"Sift summary head/tail view: 0/2 source lines; 2 omitted.\n[ctx output: 2 lines omitted]\n"
+        b"Sift summary head/tail view: 0/2 source lines; 2 omitted.\n[ctx sift: 2 lines omitted]\n"
     );
 }
 
@@ -262,7 +262,7 @@ fn summary_marks_exact_omissions_and_keeps_ends() {
 fn diagnostics_keep_context_and_fallback_without_inventing_results() {
     let source = b"noise\nsetup\nassertion\nERROR mismatch\nstack frame\nmore noise\nend\n";
     let out = render(&View::Errors { context: 1 }, source).unwrap();
-    assert_eq!(out, b"Sift diagnostic keyword/context view: 3/7 source lines; 4 omitted.\n[ctx output: 2 lines omitted]\nassertion\nERROR mismatch\nstack frame\n[ctx output: 2 lines omitted]\n");
+    assert_eq!(out, b"Sift diagnostic keyword/context view: 3/7 source lines; 4 omitted.\n[ctx sift: 2 lines omitted]\nassertion\nERROR mismatch\nstack frame\n[ctx sift: 2 lines omitted]\n");
     let source = b"start\nFAILED item\nexplanation\npanic next\nend\n";
     let out = render(&View::Test { context: 1 }, source).unwrap();
     assert!(out.ends_with(source));

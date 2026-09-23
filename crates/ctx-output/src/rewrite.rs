@@ -367,7 +367,7 @@ pub fn run(args: &[OsString]) -> Result<i32> {
             }
             Some(value) if !value.starts_with('-') && input.is_none() => input = Some(value),
             _ => {
-                anyhow::bail!("ctx output rewrite [--json] [--shell posix|powershell] -- 'COMMAND'")
+                anyhow::bail!("ctx sift rewrite [--json] [--shell posix|powershell] -- 'COMMAND'")
             }
         }
     }

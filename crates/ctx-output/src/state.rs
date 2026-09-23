@@ -297,7 +297,7 @@ fn private_dir(path: &Path) -> Result<()> {
     builder.create(path)?;
     ensure!(
         !fs::symlink_metadata(path)?.file_type().is_symlink(),
-        "ctx output directory must not be a symlink"
+        "ctx sift directory must not be a symlink"
     );
     #[cfg(unix)]
     {
@@ -310,7 +310,7 @@ fn private_open(path: &Path, append: bool, new: bool) -> Result<File> {
     if let Ok(meta) = fs::symlink_metadata(path) {
         ensure!(
             meta.is_file() && !meta.file_type().is_symlink(),
-            "ctx output state path must be a regular file"
+            "ctx sift state path must be a regular file"
         );
     }
     let mut options = OpenOptions::new();

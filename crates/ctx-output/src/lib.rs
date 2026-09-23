@@ -34,7 +34,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
         Ok(status) => status,
         Err(error) if is_broken_pipe(&error) => 0,
         Err(error) => {
-            let _ = writeln!(io::stderr().lock(), "ctx output: {error:#}");
+            let _ = writeln!(io::stderr().lock(), "ctx sift: {error:#}");
             1
         }
     }

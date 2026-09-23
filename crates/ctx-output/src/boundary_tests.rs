@@ -36,7 +36,7 @@ fn namespace_rejects_other_ctx_commands_and_has_no_install_lifecycle() {
         let result = output(root.path(), &[name]);
         assert_eq!(result.status.code(), Some(1), "{name}");
         assert!(result.stdout.is_empty());
-        assert!(String::from_utf8_lossy(&result.stderr).contains("unknown output command"));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("unknown sift command"));
     }
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }

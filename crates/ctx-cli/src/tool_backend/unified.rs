@@ -174,7 +174,7 @@ fn output_result(text: String, mut metadata: Value) -> Result<ToolOutcome, ToolB
         ));
     }
     let mut rendered = format!(
-        "ctx output\nencoding: {}\n",
+        "ctx sift\nencoding: {}\n",
         metadata["encoding"].as_str().unwrap_or("raw")
     );
     if let (Some(input), Some(output)) = (

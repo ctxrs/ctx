@@ -73,7 +73,7 @@ impl OutputHookArgs {
                 if !supported(agent) {
                     if !self.agent.is_empty() {
                         bail!(
-                            "{} output hook is unsupported here: {}",
+                            "{} Sift hook is unsupported here: {}",
                             agent.name(),
                             agent.limitation()
                         );
@@ -90,7 +90,7 @@ impl OutputHookArgs {
         }
         if !self.agent.is_empty() && !skipped.is_empty() {
             bail!(
-                "no native output hook for {}; supported: claude-code, github-copilot, codex",
+                "no native Sift hook for {}; supported: claude-code, github-copilot, codex",
                 skipped
                     .iter()
                     .map(|a| a.id())
@@ -122,7 +122,7 @@ pub(crate) fn run(
     let mut failed = false;
     for skill in skipped {
         let detail =
-            Agent::from_skill(skill).map_or("no supported native output hook", Agent::limitation);
+            Agent::from_skill(skill).map_or("no supported native Sift hook", Agent::limitation);
         rows.push(json!({"agent":skill.id(), "status":"skipped", "detail":detail}));
     }
     for agent in selected {
@@ -134,8 +134,8 @@ pub(crate) fn run(
         let (status, detail) = match result {
             Ok(State::Missing) => ("absent", String::new()),
             Ok(State::Current) => ("installed", agent.limitation().to_owned()),
-            Ok(State::SiftConflict) => ("conflict", "standalone Sift output hook detected; remove it explicitly before installing ctx output hook".to_owned()),
-            Ok(State::Conflict) => ("conflict", "ctx output hook differs; inspect manually".to_owned()),
+            Ok(State::SiftConflict) => ("conflict", "standalone Sift hook detected; remove it explicitly before installing the ctx Sift hook".to_owned()),
+            Ok(State::Conflict) => ("conflict", "ctx Sift hook differs; inspect manually".to_owned()),
             Ok(State::Unsupported) => ("unsupported", agent.limitation().to_owned()),
             Err(error) => { failed = true; ("error", format!("{error:#}")) },
         };
@@ -149,7 +149,7 @@ pub(crate) fn run(
         ui.write_stdout_bytes(body.as_bytes())?;
     } else {
         if rows.is_empty() {
-            ui.write_stdout_bytes(b"No detected hosts support an automatic output hook. Use --agent HOST to select one explicitly.\n")?;
+            ui.write_stdout_bytes(b"No detected hosts support an automatic Sift hook. Use --agent HOST to select one explicitly.\n")?;
         }
         for row in rows {
             let agent = row["agent"].as_str().unwrap_or("host");
@@ -169,7 +169,7 @@ pub(crate) fn run(
         }
     }
     if failed {
-        bail!("one or more output-hook operations failed")
+        bail!("one or more Sift-hook operations failed")
     }
     Ok(())
 }

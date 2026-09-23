@@ -170,7 +170,7 @@ pub fn run_presented(
     let child = match command.spawn() {
         Ok(child) => child,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            eprintln!("ctx output: {}: {error}", program.to_string_lossy());
+            eprintln!("ctx sift: {}: {error}", program.to_string_lossy());
             observer(Observation {
                 stdout: Default::default(),
                 stderr: Default::default(),
@@ -180,7 +180,7 @@ pub fn run_presented(
             return Ok(127);
         }
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            eprintln!("ctx output: {}: {error}", program.to_string_lossy());
+            eprintln!("ctx sift: {}: {error}", program.to_string_lossy());
             observer(Observation {
                 stdout: Default::default(),
                 stderr: Default::default(),
