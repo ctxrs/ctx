@@ -43,9 +43,10 @@ Interactive and long-running output passes through; --raw always passes through.
 --capture delays progress until completion or the combined 8 MiB streaming limit.
 Git/Cargo/Tape presentations can omit formatting or passing rows; use --raw for native bytes.
 Recall requires keep_originals and record_usage in output config; streaming runs aren't retained.
-SIFT_CONFIG_DIR / SIFT_STATE_DIR select existing stores; no automatic data migration.
+CTX_OUTPUT_CONFIG_DIR / CTX_OUTPUT_STATE_DIR select output stores independently.
+Nonempty SIFT_CONFIG_DIR / SIFT_STATE_DIR are fallback overrides; no automatic data migration.
 Defaults: XDG config/state ctx/output; APPDATA/LOCALAPPDATA ctx/output on Windows.
-Output state is separate from history --data-root. Hook installation is explicit and external.
+Output state is separate from history --data-root. Install automatic hooks explicitly with ctx integrations install output-hook.
 Pi sessions require --record-source pi with --record-tool bash (v1) or pi (v2).
 Semantic selection is off by default; explicit enable/shadow uses TypeSafe and TYPESAFE_API_KEY.
 Only enabled projects and eligible session-v2 selections can use the remote service.

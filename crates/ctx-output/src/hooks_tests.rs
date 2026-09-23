@@ -80,7 +80,7 @@ fn completion_command(host: &str, command: Option<&str>) -> String {
 }
 
 #[test]
-fn literal_sift_raw_and_proxy_skip_entire_completion() {
+fn literal_output_wrappers_skip_entire_completion() {
     for host in ["claude", "copilot"] {
         assert!(
             hooks::transform(host, &completion_command(host, None))
@@ -89,6 +89,13 @@ fn literal_sift_raw_and_proxy_skip_entire_completion() {
         );
         for command in [
             "sift proxy cat file",
+            "sift run cat file",
+            "sift run --capture -- cat file",
+            "sift run -- cat --raw",
+            "sift run cat --raw",
+            "sift run -- --raw cat",
+            "ctx run -- cat file",
+            "ctx --color never output run --capture -- cat file",
             "sift proxy --capture -- cat file",
             "sift run --raw cat file",
             "sift run --capture --raw --capture -- cat file",
@@ -109,16 +116,11 @@ fn literal_sift_raw_and_proxy_skip_entire_completion() {
 }
 
 #[test]
-fn child_flags_lookalikes_and_unknown_commands_keep_existing_compaction() {
+fn lookalikes_and_unknown_commands_keep_existing_compaction() {
     for host in ["claude", "copilot"] {
         let expected = hooks::transform(host, &completion_command(host, None)).unwrap();
         assert!(expected.is_some());
         for command in [
-            "sift run cat file",
-            "sift run --capture -- cat file",
-            "sift run -- cat --raw",
-            "sift run cat --raw",
-            "sift run -- --raw cat",
             "sift run --future --raw cat",
             "sift run --rawish cat",
             "sift run --raw --help",
@@ -161,7 +163,7 @@ fn child_flags_lookalikes_and_unknown_commands_keep_existing_compaction() {
 }
 
 #[test]
-fn raw_detection_does_not_guess_missing_malformed_or_powershell_arguments() {
+fn wrapper_detection_does_not_guess_missing_or_malformed_arguments() {
     for host in ["claude", "copilot"] {
         let input = completion_command(host, Some("sift proxy cat file"));
         let expected = hooks::transform(host, &completion_command(host, None)).unwrap();
@@ -221,12 +223,37 @@ fn raw_detection_does_not_guess_missing_malformed_or_powershell_arguments() {
         } else {
             ("\"bash\"", "\"powershell\"")
         };
-        let powershell = input.replace(from, to);
+        for command in [
+            "ctx run --raw -- cat file",
+            "ctx output run -- cat file",
+            "& 'C:\\Program Files\\ctx.exe' run --raw -- cat file",
+            "& 'C:\\User''s tools\\ctx.exe' output run --capture -- cat file",
+        ] {
+            let input = completion_command(host, Some(command)).replace(from, to);
+            assert!(
+                hooks::transform(host, &input).unwrap().is_none(),
+                "{command}"
+            );
+        }
         let counterpart = completion_command(host, None).replace(from, to);
-        assert_eq!(
-            hooks::transform(host, &powershell).unwrap(),
-            hooks::transform(host, &counterpart).unwrap()
-        );
+        let expected = hooks::transform(host, &counterpart).unwrap();
+        assert!(expected.is_some());
+        for command in [
+            "cat file",
+            "Write-Output 'ctx run --raw'",
+            "& $program run --raw cat",
+            "ctx run --raw cat; Get-Date",
+            "ctx run --raw cat | Measure-Object",
+            "ctx run --raw `cat",
+            "ctx --future run --raw cat",
+        ] {
+            let input = completion_command(host, Some(command)).replace(from, to);
+            assert_eq!(
+                hooks::transform(host, &input).unwrap(),
+                expected,
+                "{command}"
+            );
+        }
     }
 }
 
@@ -882,13 +909,18 @@ impl Sandbox {
 }
 
 #[test]
-fn cli_explicit_raw_skips_replacement_usage_and_original_storage() {
+fn cli_wrapped_output_skips_replacement_usage_and_original_storage() {
     for host in ["claude", "copilot", "hermes"] {
         if host == "hermes" && !cfg!(unix) {
             continue;
         }
         for command in [
             "sift proxy -- cat file",
+            "sift run -- cat file",
+            "sift run -- cat --raw",
+            "ctx run -- tool --raw",
+            "ctx --color never run -- tool --raw",
+            "ctx --data-root='/tmp/ctx data' --quiet output run -- tool --raw",
             "sift run --capture --raw -- cat file",
             "ctx --color never run --raw -- cat file",
             "ctx --color=never run --raw -- cat file",
@@ -909,12 +941,9 @@ fn cli_explicit_raw_skips_replacement_usage_and_original_storage() {
             );
         }
         for command in [
-            "sift run -- cat file",
-            "sift run -- cat --raw",
+            "cat file",
+            "ctx graph query Widget",
             "sift proxy cat; echo done",
-            "ctx run -- tool --raw",
-            "ctx --color never run -- tool --raw",
-            "ctx --data-root='/tmp/ctx data' --quiet output run -- tool --raw",
             "ctx --color never run --raw cat | cat",
         ] {
             let sandbox = Sandbox::new();

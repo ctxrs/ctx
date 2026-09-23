@@ -16,6 +16,8 @@ where
     command
         .args(["--exact", "test_support::entry", "--nocapture"])
         .env(ARGS, encode(&args))
+        .env_remove("CTX_OUTPUT_CONFIG_DIR")
+        .env_remove("CTX_OUTPUT_STATE_DIR")
         .env_remove("TYPESAFE_API_KEY");
     command
 }

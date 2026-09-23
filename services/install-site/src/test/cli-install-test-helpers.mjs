@@ -421,7 +421,7 @@ EOF
   exit 0
 fi
 if [ "\${1-}" = "upgrade" ] && [ "\${2-}" = "--hosted-transaction" ] &&
-   [ "\${3-}" = "install" ]; then
+   { [ "\${3-}" = "install" ] || [ "\${3-}" = "migrate" ]; }; then
   shift 3
   hosted_install_path=
   hosted_attempt_id=
@@ -449,12 +449,29 @@ if [ "\${1-}" = "upgrade" ] && [ "\${2-}" = "--hosted-transaction" ] &&
   cp "$0" "$hosted_binary_tmp"
   chmod 0755 "$hosted_binary_tmp"
   mv -f "$hosted_binary_tmp" "$hosted_install_path"
+  hosted_journal="$(dirname "$hosted_install_path")/.$(basename "$hosted_install_path").hosted-install-transaction.json"
+  hosted_pending_marker="$hosted_install_path.hosted-pending-marker"
+  hosted_pending_ownership="$hosted_install_path.hosted-pending-ownership"
+  if [ "$CTX_FAKE_HOSTED_PARTIAL_FAILURE" = "1" ]; then
+    cp "$hosted_marker_source" "$hosted_pending_marker"
+    cp "$hosted_ownership_source" "$hosted_pending_ownership"
+    printf '%s\n' 'fixture binary_replaced' >"$hosted_journal"
+    chmod 0600 "$hosted_journal"
+    exit 75
+  fi
+  if [ -f "$hosted_journal" ]; then
+    hosted_marker_source="$hosted_pending_marker"
+    hosted_ownership_source="$hosted_pending_ownership"
+  fi
   if [ -n "$hosted_ownership_source" ]; then
     cp "$hosted_ownership_source" "$hosted_install_path.install-integrations"
     chmod 0600 "$hosted_install_path.install-integrations"
   fi
   cp "$hosted_marker_source" "$hosted_install_path.install.json"
   chmod 0600 "$hosted_install_path.install.json"
+  if [ -f "$hosted_journal" ]; then
+    rm "$hosted_journal" "$hosted_pending_marker" "$hosted_pending_ownership"
+  fi
   hosted_marker_sha256="$(sha256sum "$hosted_install_path.install.json" | awk '{ print $1 }')"
   json_hosted_path="$(printf '%s' "$hosted_install_path" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')"
   printf '{\\n'
@@ -584,6 +601,12 @@ if [ "\${1-}" = "upgrade" ] && [ "\${4-}" = "--format=json" ]; then
   fi
   fixture_metadata="$CTX_FAKE_METADATA"
   fixture_artifact="$CTX_FAKE_ARTIFACT"
+  if [ "\${CTX_FAKE_ENFORCE_OLD_CAP:-0}" = "1" ] &&
+     [ "$fixture_version" = "1.6.3" ] &&
+     [ "$(wc -c < "$fixture_artifact")" -gt 134217728 ]; then
+    printf '%s\n' 'released updater refuses executable above 128 MiB' >&2
+    exit 74
+  fi
   fixture_feed="https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env"
   case "$fixture_version" in
     0.*|1.0.*|1.1.*|1.2.*|1.3.0|1.3.1)
@@ -948,6 +971,7 @@ esac
     CTX_SETUP_PROGRESS: "none",
     CTX_INSTALL_NO_DAEMON: "",
     CTX_FAKE_GZIP_PROBE_NOISE: "0",
+    CTX_FAKE_HOSTED_PARTIAL_FAILURE: "0",
     CTX_INSTALL_PRO_TRIAL: "",
     CTX_INSTALL_NO_PRO_TRIAL: "",
     CTX_ALLOW_CUSTOM_RELEASE_BASE_URL: "1",
@@ -1054,6 +1078,7 @@ esac
     configPath,
     configContents,
     childEnv,
+    metadataPrivateKeyPem: signedMetadata.privateKeyPem,
     dataRoot,
     sandbox,
     scriptPath,

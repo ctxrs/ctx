@@ -156,6 +156,15 @@ pub trait DaemonUpgradePort: Send + Sync {
 
     fn begin(&self, data_root: &Path, attempt_id: &str) -> Result<Self::Lease>;
 
+    fn begin_for_installation(
+        &self,
+        data_root: &Path,
+        attempt_id: &str,
+        _install_path: &Path,
+    ) -> Result<Self::Lease> {
+        self.begin(data_root, attempt_id)
+    }
+
     fn begin_current(
         &self,
         data_root: &Path,

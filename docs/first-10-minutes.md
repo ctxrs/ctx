@@ -21,8 +21,8 @@ metadata. On Windows, use `irm https://ctx.rs/install.ps1 | iex`.
 The hosted installer runs the bundled agent-history skill installer and
 `ctx setup` by default. The skill step opens an agent picker when interactive
 and otherwise installs the universal skill copy plus detected agent-specific
-folders. Use `--no-setup` only for install-only automation; it also skips skill
-setup unless you pass an explicit skill option.
+folders. Use `--no-setup` to skip history setup while retaining normal skill
+installation. Add `--no-skill` for binary-only automation.
 
 ## 2. Set Up And Index
 

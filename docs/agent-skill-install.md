@@ -17,7 +17,7 @@ curl -fsSL https://ctx.rs/install | sh
 ```
 
 Use the native ctx CLI directly after a source or package-manager install, when
-installer setup was skipped, or when refreshing the skill after an upgrade:
+installer skill installation was skipped, or when refreshing the skill after an upgrade:
 
 ```bash
 ctx integrations install skill
@@ -110,8 +110,8 @@ curl -fsSL https://ctx.rs/install | sh -s -- --skill-agent codex --skill-agent c
 curl -fsSL https://ctx.rs/install | sh -s -- --all-skill-agents
 ```
 
-`--no-setup` is install-only mode and skips skill setup and history indexing
-unless a skill option is passed explicitly.
+`--no-setup` skips history setup but still installs the skill. Add `--no-skill`
+for a binary-only install; explicit skill options still select their targets.
 
 ## Portable Agent Plugin
 

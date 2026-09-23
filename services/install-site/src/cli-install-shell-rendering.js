@@ -45,8 +45,7 @@ Prerequisites:
 Options:
   --semantic           Explicitly enable signed Semantic runtime provisioning
                        and semantic setup for this install.
-  --no-setup           Install only; do not install the skill or run ctx setup
-                       unless a skill option is also passed.
+  --no-setup           Skip history setup; the skill still installs unless --no-skill is set.
   --no-daemon          Run installer setup with ctx setup --no-daemon.
   --no-skill           Do not install the bundled ctx agent skill.
   --skill-agent AGENT  Install the skill into a specific agent skill dir.
@@ -61,8 +60,7 @@ Options:
 Environment:
   CTX_INSTALL_SEMANTIC=1              Enable signed Semantic runtime provisioning.
   CTX_SEARCH_SEMANTIC=true|false      Override persisted Semantic search for this install.
-  CTX_INSTALL_NO_SETUP=1             Install only; do not install the skill or run ctx setup
-                                     unless a skill option is also passed.
+  CTX_INSTALL_NO_SETUP=1             Skip history setup; the skill still installs.
   CTX_INSTALL_NO_DAEMON=1            Run installer setup with ctx setup --no-daemon.
   CTX_INSTALL_NO_SKILL=1             Do not install the bundled ctx agent skill.
   CTX_INSTALL_SKILL_AGENTS=codex,... Install the skill into specific agent dirs.

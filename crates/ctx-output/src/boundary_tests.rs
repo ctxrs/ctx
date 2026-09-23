@@ -132,6 +132,7 @@ fn defaults_and_legacy_overrides_have_one_authoritative_location() {
     let defaults = if cfg!(windows) { &appdata } else { &xdg };
     let mut create = command(root.path(), &["config", "--create"]);
     create
+        .env("CTX_OUTPUT_CONFIG_DIR", "")
         .env("SIFT_CONFIG_DIR", "")
         .env("XDG_CONFIG_HOME", &xdg)
         .env("APPDATA", &appdata);
@@ -140,6 +141,7 @@ fn defaults_and_legacy_overrides_have_one_authoritative_location() {
     assert_eq!(fs::read(old.join("config.json")).unwrap(), old_bytes);
     let result = test_support::clean(
         command(root.path(), &["config"])
+            .env("CTX_OUTPUT_CONFIG_DIR", "")
             .env("SIFT_CONFIG_DIR", &old)
             .env("XDG_CONFIG_HOME", &xdg)
             .env("APPDATA", &appdata)
@@ -182,6 +184,7 @@ fn defaults_and_legacy_overrides_have_one_authoritative_location() {
     ] {
         let result = test_support::clean(
             command(root.path(), &flags)
+                .env("CTX_OUTPUT_STATE_DIR", "")
                 .env("SIFT_STATE_DIR", &old_state)
                 .env("XDG_STATE_HOME", root.path().join("unused"))
                 .env("LOCALAPPDATA", root.path().join("unused"))
@@ -193,6 +196,154 @@ fn defaults_and_legacy_overrides_have_one_authoritative_location() {
     }
     assert!(!root.path().join("unused").exists());
     assert!(!root.path().join("state").exists());
+}
+
+#[test]
+fn canonical_output_overrides_win_independently_without_moving_legacy_data() {
+    let root = tempfile::tempdir().unwrap();
+    let old_config = root.path().join("legacy-config");
+    let new_config = root.path().join("ctx config");
+    fs::create_dir(&old_config).unwrap();
+    let old_bytes = b"{\"enabled\":false}";
+    fs::write(old_config.join("config.json"), old_bytes).unwrap();
+    let created = test_support::clean(
+        command(root.path(), &["config", "--create"])
+            .env("SIFT_CONFIG_DIR", &old_config)
+            .env("CTX_OUTPUT_CONFIG_DIR", &new_config)
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(new_config.join("config.json").is_file());
+    assert_eq!(fs::read(old_config.join("config.json")).unwrap(), old_bytes);
+    let selected = test_support::clean(
+        command(root.path(), &["config"])
+            .env("SIFT_CONFIG_DIR", &old_config)
+            .env("CTX_OUTPUT_CONFIG_DIR", &new_config)
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        serde_json::from_slice::<state::Settings>(&selected.stdout)
+            .unwrap()
+            .enabled
+    );
+
+    let old_state = root.path().join("legacy-state");
+    let new_state = root.path().join("ctx-state");
+    let settings = state::Settings {
+        keep_originals: true,
+        ..Default::default()
+    };
+    let record = |path: &std::path::Path, bytes: &[u8]| {
+        state::record_at(
+            path,
+            &settings,
+            state::Event {
+                unix_millis: state::unix_millis(),
+                command: "fixture".into(),
+                input_tokens: None,
+                output_tokens: None,
+                input_bytes: 1,
+                output_bytes: bytes.len() as u64,
+                duration_ms: 0,
+                exit_code: Some(0),
+                source: None,
+                original_id: None,
+            },
+            Some((bytes, b"")),
+        )
+        .unwrap();
+        state::list_originals_at(path).unwrap().remove(0).id
+    };
+    let old_id = record(&old_state, b"old");
+    let new_id = record(&new_state, b"new");
+    let recalled = test_support::clean(
+        command(root.path(), &["recall", &new_id])
+            .env("SIFT_STATE_DIR", &old_state)
+            .env("CTX_OUTPUT_STATE_DIR", &new_state)
+            .output()
+            .unwrap(),
+    );
+    assert!(recalled.status.success());
+    assert_eq!(recalled.stdout, b"new");
+    let missing_old = test_support::clean(
+        command(root.path(), &["recall", &old_id])
+            .env("SIFT_STATE_DIR", &old_state)
+            .env("CTX_OUTPUT_STATE_DIR", &new_state)
+            .output()
+            .unwrap(),
+    );
+    assert!(!missing_old.status.success());
+    assert_eq!(fs::read(old_config.join("config.json")).unwrap(), old_bytes);
+    assert!(old_state.exists());
+}
+
+#[test]
+fn default_output_state_directory_is_used_when_both_overrides_are_empty() {
+    let root = tempfile::tempdir().unwrap();
+    let native = root.path().join("native-state");
+    let default = native.join("ctx/output");
+    let settings = state::Settings {
+        keep_originals: true,
+        ..Default::default()
+    };
+    state::record_at(
+        &default,
+        &settings,
+        state::Event {
+            unix_millis: state::unix_millis(),
+            command: "fixture".into(),
+            input_tokens: None,
+            output_tokens: None,
+            input_bytes: 1,
+            output_bytes: 7,
+            duration_ms: 0,
+            exit_code: Some(0),
+            source: None,
+            original_id: None,
+        },
+        Some((b"default", b"")),
+    )
+    .unwrap();
+    let id = state::list_originals_at(&default).unwrap().remove(0).id;
+    let result = test_support::clean(
+        command(root.path(), &["recall", &id])
+            .env("CTX_OUTPUT_STATE_DIR", "")
+            .env("SIFT_STATE_DIR", "")
+            .env("XDG_STATE_HOME", &native)
+            .env("LOCALAPPDATA", &native)
+            .output()
+            .unwrap(),
+    );
+    assert!(result.status.success());
+    assert_eq!(result.stdout, b"default");
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_config_override_accepts_native_non_utf8_paths() {
+    use std::os::unix::ffi::OsStringExt;
+    let root = tempfile::tempdir().unwrap();
+    let native = root
+        .path()
+        .join(OsString::from_vec(b"config-\xff".to_vec()));
+    let result = test_support::clean(
+        command(root.path(), &["config", "--create"])
+            .env("CTX_OUTPUT_CONFIG_DIR", &native)
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(native.join("config.json").is_file());
 }
 
 #[cfg(unix)]

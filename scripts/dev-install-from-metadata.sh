@@ -37,8 +37,7 @@ Options:
   --no-runtime           Do not install optional ONNX Runtime sidecar metadata.
   --no-modify-path       Do not update shell startup files when the install
                          directory is not on PATH.
-  --no-setup             Install only; do not install the skill or run ctx setup
-                         unless a skill flag is also passed.
+  --no-setup             Skip history setup; the skill still installs unless --no-skill is set.
   --no-daemon            Run installer setup with ctx setup --no-daemon.
                          CTX_INSTALL_NO_DAEMON=1 is equivalent.
   --no-skill             Do not install the bundled ctx agent skill.
@@ -830,10 +829,6 @@ fi
 
 if ((all_skill_agents && ${#skill_agents[@]} > 0)); then
   fail "cannot combine --all-skill-agents with --skill-agent or CTX_INSTALL_SKILL_AGENTS"
-fi
-
-if ((! run_setup && ! explicit_skill_request)); then
-  run_skill=0
 fi
 
 if ((dry_run)); then

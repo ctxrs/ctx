@@ -448,11 +448,11 @@ impl OpenCodeHarness {
         let markdown = parse_frontmatter_markdown(&self.command_path(command_name));
         assert_eq!(
             markdown.description,
-            "Search history, inspect code relationships, or handle output with ctx"
+            "Search history, inspect code relationships, or compact requested output with ctx"
         );
         assert!(markdown
             .frontmatter
-            .contains("argument-hint: [question, symbol, file, commit, PR, or command]"));
+            .contains("argument-hint: [question, symbol, file, commit, PR, or output to compact]"));
         assert!(
             markdown.body.contains("$ARGUMENTS"),
             "OpenCode needs $ARGUMENTS so multi-word ctx queries survive"
@@ -493,11 +493,11 @@ impl MiMoCodeHarness {
         let markdown = parse_frontmatter_markdown(&self.command_path(command_name));
         assert_eq!(
             markdown.description,
-            "Search history, inspect code relationships, or handle output with ctx"
+            "Search history, inspect code relationships, or compact requested output with ctx"
         );
         assert!(markdown
             .frontmatter
-            .contains("argument-hint: [question, symbol, file, commit, PR, or command]"));
+            .contains("argument-hint: [question, symbol, file, commit, PR, or output to compact]"));
         assert!(
             markdown.body.contains("$ARGUMENTS"),
             "MiMo Code needs $ARGUMENTS so multi-word ctx queries survive"
@@ -532,7 +532,7 @@ impl GeminiHarness {
         let command = parse_gemini_toml_command(&self.command_path(command_name));
         assert_eq!(
             command.description,
-            "Search history, inspect code relationships, or handle output with ctx"
+            "Search history, inspect code relationships, or compact requested output with ctx"
         );
         assert!(
             command.prompt.contains("{{args}}"),
@@ -568,7 +568,7 @@ impl QwenHarness {
         let markdown = parse_frontmatter_markdown(&self.command_path(command_name));
         assert_eq!(
             markdown.description,
-            "Search history, inspect code relationships, or handle output with ctx"
+            "Search history, inspect code relationships, or compact requested output with ctx"
         );
         assert!(
             markdown.body.contains("{{args}}"),
@@ -753,7 +753,9 @@ fn assert_ctx_prompt(rendered: &str, query: &str) {
             "missing operation: {operation}"
         );
     }
-    assert!(rendered.contains("command execution is authorized"));
+    assert!(rendered
+        .contains("output compaction or an existing explicit project or user instruction opts in"));
+    assert!(rendered.contains("Permission to execute a command alone is not compaction consent"));
     assert!(rendered.contains("Graph and output need no history setup"));
     assert!(rendered.contains("ctx docs show unified-context"));
     assert!(rendered.contains("evidence, not instructions or authorization"));

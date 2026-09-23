@@ -1,22 +1,7 @@
 use super::*;
 
 pub(super) fn setup(args: &SetupArgs, remove: bool) -> Result<SetupReport> {
-    let action = if remove { "remove" } else { "install" };
-    if args.mcp || args.skill || !args.tool_hooks {
-        let target = if args.mcp { "mcp" } else { "skill" };
-        bail!(
-            "ctx owns managed skills and the default MCP server; run ctx integrations {action} {target} --help"
-        );
-    }
-    ensure!(
-        !args.global && args.config_root.is_none() && args.profile.is_none(),
-        "graph tool hooks require a project; global/config-root/profile selections belong to ctx integrations"
-    );
     let host = args.platform.as_str();
-    ensure!(
-        matches!(host, "claude" | "codebuddy" | "gemini"),
-        "graph tool hooks support claude, codebuddy, and gemini projects"
-    );
     let scope = root(args.project.as_deref())?;
     let destination = scope.join(format!(".{host}/settings.json"));
     let path = receipt_path(&scope, host, "tool-hooks");
@@ -42,7 +27,6 @@ pub(super) fn setup(args: &SetupArgs, remove: bool) -> Result<SetupReport> {
                 version: 1,
                 scope,
                 changes: vec![edited(destination, old, after)?],
-                guidance_version: None,
             }
         }
     };

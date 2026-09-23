@@ -207,9 +207,18 @@ fn generated_command_bytes_match_the_public_contract() {
     assert_eq!(
         opencode_command_body(),
         format!(
-            "---\ndescription: Search history, inspect code relationships, or handle output with ctx\nargument-hint: [question, symbol, file, commit, PR, or command]\n---\n\n{COMMAND_INSTRUCTIONS}"
+            "---\ndescription: Search history, inspect code relationships, or compact requested output with ctx\nargument-hint: [question, symbol, file, commit, PR, or output to compact]\n---\n\n{COMMAND_INSTRUCTIONS}"
         )
     );
+    for guidance in [COMMAND_INSTRUCTIONS, crate::skill::BUNDLED_SKILL_BODY] {
+        let normalized = guidance.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains("user requests output compaction"));
+        assert!(
+            normalized.contains("run ordinary commands directly")
+                || normalized.contains("run those commands directly")
+        );
+        assert!(!normalized.contains("when command execution is authorized"));
+    }
     assert!(gemini_command_body().contains("User request: {{args}}"));
     assert!(qwen_command_body().ends_with(
         COMMAND_INSTRUCTIONS

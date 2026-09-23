@@ -1,6 +1,6 @@
 ---
 name: ctx
-description: Use ctx as working memory for prior agent work. Search earlier sessions and use blame for code provenance; use the local graph for code relationships and impact. Use ctx run or compact when executing an authorized command or reducing its output. Relevant when earlier decisions, attempts, transcript evidence, code structure, or command output matter.
+description: Use ctx as working memory for prior agent work. Search earlier sessions, trace code provenance with blame, and inspect local graph relationships. Use output compaction only when the user requests it or an existing explicit project or user instruction opts in; ordinary command execution alone is not compaction consent.
 ---
 
 # ctx
@@ -16,9 +16,8 @@ relationships with the graph. ctx retrieves evidence; you perform the analysis.
   `ctx blame commit <sha>`; PR targets are also supported.
 - Code relationships or potential impact: `ctx graph search <symbol>`,
   `ctx graph callers <symbol>`, or `ctx graph impact <symbol>`.
-- Execute an authorized command with compact output:
-  `ctx run -- PROGRAM ARG...`. Use `ctx run --raw -- PROGRAM ARG...` for
-  unchanged streams. `ctx compact <file>` processes existing output.
+- Requested or explicitly opted-in output compaction: `ctx run -- PROGRAM
+  ARG...` for a command, or `ctx compact <file>` for existing output.
 
 These commands are built into the installed ctx executable. Graph and output
 commands do not require history setup. Only history search and blame need
@@ -83,8 +82,12 @@ and truncation limits; potential impact is not proof of runtime behavior.
 each scope's availability and completeness. The default remains history;
 `--content-scope outputs` filters historical tool outputs, not new command runs.
 
-`ctx run` executes argv once and preserves stdin, stream separation and exit
-status. Pass an explicit shell only when shell syntax is intended. Compact
+Use `ctx run` or `ctx compact` only when the user requests output compaction or
+an existing explicit project or user instruction opts into it. Permission to
+execute a command, or installation of ctx, does not opt ordinary commands in;
+run those commands directly. When opted in, `ctx run` executes argv once and
+preserves stdin, stream separation and exit status. Pass an explicit shell only
+when shell syntax is intended. Compact
 presentations may omit passing test rows; use raw output when exact bytes matter.
 Use `ctx restore --encoding <encoding> <file>` only for a representation with
 that reversible encoding. Consult `ctx docs show unified-context` for streaming,

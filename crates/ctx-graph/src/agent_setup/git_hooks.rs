@@ -151,7 +151,6 @@ pub fn hook(args: &HookArgs) -> Result<SetupReport> {
             version: 1,
             scope: scope.clone(),
             changes,
-            guidance_version: None,
         }
     };
     report.files = receipt.changes.iter().map(|c| c.path.clone()).collect();

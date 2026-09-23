@@ -182,9 +182,16 @@ pub fn state_dir() -> Result<PathBuf> {
 }
 fn directory(config: bool) -> Result<PathBuf> {
     if let Some(path) = env_path(if config {
-        "SIFT_CONFIG_DIR"
+        "CTX_OUTPUT_CONFIG_DIR"
     } else {
-        "SIFT_STATE_DIR"
+        "CTX_OUTPUT_STATE_DIR"
+    })
+    .or_else(|| {
+        env_path(if config {
+            "SIFT_CONFIG_DIR"
+        } else {
+            "SIFT_STATE_DIR"
+        })
     }) {
         return Ok(path);
     }
@@ -205,7 +212,11 @@ fn directory(config: bool) -> Result<PathBuf> {
             return Ok(path.join("ctx").join("output"));
         }
         Ok(env_path("HOME")
-            .context("HOME unavailable; set SIFT_CONFIG_DIR and SIFT_STATE_DIR")?
+            .context(if config {
+                "HOME unavailable; set CTX_OUTPUT_CONFIG_DIR"
+            } else {
+                "HOME unavailable; set CTX_OUTPUT_STATE_DIR"
+            })?
             .join(if config {
                 ".config/ctx/output"
             } else {

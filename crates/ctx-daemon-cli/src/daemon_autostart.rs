@@ -59,8 +59,8 @@ pub(super) use handoff::{
 };
 pub use handoff::{
     begin_current_daemon_upgrade_handoff, begin_daemon_upgrade_handoff,
-    complete_replacement_daemon_handoff, finish_replacement_daemon_handoff,
-    mark_replacement_helper_handoff, DaemonUpgradeHandoff,
+    begin_daemon_upgrade_handoff_for_installation, complete_replacement_daemon_handoff,
+    finish_replacement_daemon_handoff, mark_replacement_helper_handoff, DaemonUpgradeHandoff,
 };
 #[cfg(test)]
 use handoff::{read_daemon_upgrade_handoff, write_daemon_upgrade_handoff};

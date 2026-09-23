@@ -38,30 +38,48 @@ pub(crate) fn literal_argv(command: &str) -> Option<Vec<OsString>> {
         .collect()
 }
 
+// Only literal simple PowerShell invocations establish wrapper ownership.
+// Escapes/expansions and compound commands remain on the existing path.
+fn powershell_argv(command: &str) -> Option<Vec<OsString>> {
+    if command.contains(['`', '\r', '\0']) {
+        return None;
+    }
+    let command = command.trim_start();
+    let command = command.strip_prefix("& ").unwrap_or(command);
+    rewrite::lex(command, Shell::PowerShell)?
+        .into_iter()
+        .map(|token| match (token.word, token.operator) {
+            (Some(word), None) => Some(OsString::from(word)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Match wrapper raw flags, never a child's --raw or a history/graph command.
 pub(crate) fn explicit_raw(argv: &[OsString]) -> bool {
+    wrapper_mode(argv) == Some(true)
+}
+
+/// A known output wrapper already owns lossless/raw selection and accounting.
+/// None means this is not a literal, complete wrapper invocation.
+fn wrapper_mode(argv: &[OsString]) -> Option<bool> {
     let argv = if argv.first().is_some_and(|word| word == "command") {
         &argv[1..]
     } else {
         argv
     };
-    let Some(program) = argv.first().and_then(|word| word.to_str()) else {
-        return false;
-    };
+    let program = argv.first()?.to_str()?;
     let program = program.rsplit(['/', '\\']).next().unwrap_or(program);
     let command = match program {
         "sift" | "sift.exe" => &argv[1..],
-        "ctx" | "ctx.exe" => match ctx_output_command(&argv[1..]) {
-            Some(command) => command,
-            None => return false,
-        },
-        _ => return false,
+        "ctx" | "ctx.exe" => ctx_output_command(&argv[1..])?,
+        _ => return None,
     };
     if !command
         .first()
         .is_some_and(|word| word == "run" || word == "proxy")
     {
-        return false;
+        return None;
     }
     let mut raw = command[0] == "proxy";
     let mut remaining = &command[1..];
@@ -76,12 +94,17 @@ pub(crate) fn explicit_raw(argv: &[OsString]) -> bool {
         .first()
         .is_some_and(|word| word == "--help" || word == "-h")
     {
-        return false;
+        return None;
     }
     if remaining.first().is_some_and(|word| word == "--") {
         remaining = &remaining[1..];
+    } else if remaining
+        .first()
+        .is_some_and(|word| word.as_encoded_bytes().starts_with(b"-"))
+    {
+        return None;
     }
-    raw && !remaining.is_empty()
+    (!remaining.is_empty()).then_some(raw)
 }
 
 /// Consume only known root options, stopping before any output/child arguments.
@@ -283,11 +306,11 @@ fn transform_inner(
     if !(256..=MAX_TEXT).contains(&total) {
         return Ok(None);
     }
-    // Establish literal POSIX argv once, shared by explicit raw handling and
-    // Claude presentation. PowerShell and unknown terminal backends are opaque.
+    // Establish literal argv once for wrapper handling. Semantic presentation
+    // remains POSIX-only; unknown terminal backends stay opaque.
     let argv = if matches!(
         (host, tool.as_str()),
-        ("claude", "Bash") | ("copilot", "bash")
+        ("claude", "Bash" | "PowerShell") | ("copilot", "bash" | "powershell")
     ) || (host == "hermes"
         && cfg!(unix)
         && std::env::var("TERMINAL_ENV").as_deref() == Ok("local"))
@@ -301,15 +324,19 @@ fn transform_inner(
         };
         arguments
             .and_then(|input| input.string("command"))
-            // The shared rewrite lexer is permissive about backslashes inside
-            // double quotes and treats CR as whitespace. Neither establishes
-            // exact POSIX argv, so keep those commands on the lossless path.
-            .and_then(|command| literal_argv(&command))
+            .and_then(|command| {
+                if matches!(tool.as_str(), "PowerShell" | "powershell") {
+                    powershell_argv(&command)
+                } else {
+                    literal_argv(&command)
+                }
+            })
     } else {
         None
     };
-    if argv.as_deref().is_some_and(explicit_raw) {
-        // No replacement and no measured event for explicitly raw output.
+    if argv.as_deref().and_then(wrapper_mode).is_some() {
+        // A manual wrapper owns this output: never compact it twice, undo raw
+        // selection, or account for the same output a second time.
         return Ok(None);
     }
     // Claude's success-only PostToolUse normally omits exitCode. An explicit

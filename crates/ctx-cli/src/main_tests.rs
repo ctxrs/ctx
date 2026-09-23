@@ -157,13 +157,13 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
     let command = Cli::command();
     let mut paths = Vec::new();
     collect_paths(&command, &[], &mut paths);
-    // Integrations exposes install, status, and remove for four canonical
+    // Integrations exposes install, status, and remove for five canonical
     // targets; hidden compatibility aliases do not add grammar nodes.
     // The original 63 nodes remain; Graf contributes its nested command tree
     // and output commands add five top-level entry points.
     assert_eq!(
         paths.len(),
-        131,
+        134,
         "unexpected public CLI grammar depth: {paths:?}"
     );
 

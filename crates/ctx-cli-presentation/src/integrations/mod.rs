@@ -13,6 +13,7 @@ use ctx_agent_application::{
 };
 
 mod mcp;
+mod output_hook;
 mod plugin;
 mod slash_commands;
 
@@ -44,6 +45,11 @@ struct IntegrationInstallArgs {
 
 #[derive(Debug, Subcommand)]
 enum IntegrationInstallTarget {
+    #[command(
+        name = "output-hook",
+        about = "Explicitly install a supported automatic output hook"
+    )]
+    OutputHook(output_hook::OutputHookArgs),
     #[command(about = "Install the local ctx MCP server into coding-agent clients")]
     Mcp(mcp::McpInstallArgs),
     #[command(
@@ -70,6 +76,11 @@ struct IntegrationRemoveArgs {
 
 #[derive(Debug, Subcommand)]
 enum IntegrationRemoveTarget {
+    #[command(
+        name = "output-hook",
+        about = "Remove a ctx-owned automatic output hook"
+    )]
+    OutputHook(output_hook::OutputHookArgs),
     #[command(about = "Remove the local ctx MCP server from coding-agent clients")]
     Mcp(mcp::McpRemoveArgs),
     #[command(
@@ -96,6 +107,11 @@ struct IntegrationStatusArgs {
 
 #[derive(Debug, Subcommand)]
 enum IntegrationStatusTarget {
+    #[command(
+        name = "output-hook",
+        about = "Inspect automatic output-hook registration"
+    )]
+    OutputHook(output_hook::OutputHookArgs),
     #[command(about = "Inspect local ctx MCP server integration state")]
     Mcp(mcp::McpStatusArgs),
     #[command(
@@ -118,18 +134,21 @@ impl IntegrationsArgs {
     pub fn json_output(&self) -> bool {
         match &self.command {
             IntegrationCommand::Install(args) => match &args.target {
+                IntegrationInstallTarget::OutputHook(args) => args.json_output(),
                 IntegrationInstallTarget::Mcp(args) => args.format.is_json(),
                 IntegrationInstallTarget::Skill(args) => args.json_output(),
                 IntegrationInstallTarget::Plugin(args) => args.json_output(),
                 IntegrationInstallTarget::SlashCommand(args) => args.format.is_json(),
             },
             IntegrationCommand::Remove(args) => match &args.target {
+                IntegrationRemoveTarget::OutputHook(args) => args.json_output(),
                 IntegrationRemoveTarget::Mcp(args) => args.format.is_json(),
                 IntegrationRemoveTarget::Skill(args) => args.json_output(),
                 IntegrationRemoveTarget::Plugin(args) => args.json_output(),
                 IntegrationRemoveTarget::SlashCommand(args) => args.format.is_json(),
             },
             IntegrationCommand::Status(args) => match &args.target {
+                IntegrationStatusTarget::OutputHook(args) => args.json_output(),
                 IntegrationStatusTarget::Mcp(args) => args.format.is_json(),
                 IntegrationStatusTarget::Skill(args) => args.json_output(),
                 IntegrationStatusTarget::Plugin(args) => args.json_output(),
@@ -147,6 +166,11 @@ pub fn run(
 ) -> Result<()> {
     match args.command {
         IntegrationCommand::Install(args) => match args.target {
+            IntegrationInstallTarget::OutputHook(args) => {
+                telemetry.action = Some(IntegrationAction::Install);
+                telemetry.target = Some(IntegrationTarget::OutputHook);
+                output_hook::run(args, output_hook::Operation::Install, telemetry, ui)
+            }
             IntegrationInstallTarget::Mcp(args) => {
                 telemetry.action = Some(IntegrationAction::Install);
                 telemetry.target = Some(IntegrationTarget::Mcp);
@@ -176,6 +200,11 @@ pub fn run(
             }
         },
         IntegrationCommand::Remove(args) => match args.target {
+            IntegrationRemoveTarget::OutputHook(args) => {
+                telemetry.action = Some(IntegrationAction::Remove);
+                telemetry.target = Some(IntegrationTarget::OutputHook);
+                output_hook::run(args, output_hook::Operation::Remove, telemetry, ui)
+            }
             IntegrationRemoveTarget::Mcp(args) => {
                 telemetry.action = Some(IntegrationAction::Remove);
                 telemetry.target = Some(IntegrationTarget::Mcp);
@@ -205,6 +234,11 @@ pub fn run(
             }
         },
         IntegrationCommand::Status(args) => match args.target {
+            IntegrationStatusTarget::OutputHook(args) => {
+                telemetry.action = Some(IntegrationAction::Status);
+                telemetry.target = Some(IntegrationTarget::OutputHook);
+                output_hook::run(args, output_hook::Operation::Status, telemetry, ui)
+            }
             IntegrationStatusTarget::Mcp(args) => {
                 telemetry.action = Some(IntegrationAction::Status);
                 telemetry.target = Some(IntegrationTarget::Mcp);

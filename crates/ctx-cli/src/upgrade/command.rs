@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use ctx_cli_presentation::upgrade::{
-    render_auto_mode, render_error, render_outcome, AutoModeInstallAuthority, UpgradeArgs,
-    UpgradeCommand,
+    render_auto_mode, render_error, render_outcome, AutoModeInstallAuthority,
+    HostedTransactionActionArg, UpgradeArgs, UpgradeCommand,
 };
 use ctx_upgrade_engine::{
     managed_install_marker_for_current_exe, run_hosted_transaction,
@@ -35,7 +35,7 @@ pub fn run(
     validate_hidden_upgrade_protocol(&args)?;
     if let Some(action) = args.hosted_transaction {
         telemetry.suppress_event = true;
-        return run_hosted_transaction(HostedTransactionArgs {
+        let transaction = HostedTransactionArgs {
             action: action.into(),
             install_path: args
                 .install_path
@@ -44,7 +44,12 @@ pub fn run(
             marker_source: args.marker_source,
             ownership_source: args.ownership_source,
             binary_sha256: args.binary_sha256,
-        });
+        };
+        return if action == HostedTransactionActionArg::Migrate {
+            ports::engine().migrate_hosted_install(&data_root, transaction)
+        } else {
+            run_hosted_transaction(transaction)
+        };
     }
     #[cfg(windows)]
     if args.replacement_helper {

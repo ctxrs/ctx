@@ -193,6 +193,21 @@ impl DaemonUpgradePort for CliDaemonUpgrade {
         ))
     }
 
+    fn begin_for_installation(
+        &self,
+        data_root: &Path,
+        attempt_id: &str,
+        install_path: &Path,
+    ) -> Result<Self::Lease> {
+        Ok(CliDaemonUpgradeLease(
+            crate::semantic::begin_daemon_upgrade_handoff_for_installation(
+                data_root,
+                attempt_id,
+                install_path,
+            )?,
+        ))
+    }
+
     fn begin_current(
         &self,
         data_root: &Path,

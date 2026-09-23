@@ -15,9 +15,10 @@ ctx --quiet setup
 CTX_QUIET=1 ctx status
 ```
 
-`--data-root` overrides the default ctx root for every command. The environment
+`--data-root` overrides the default agent-history root only. The environment
 variable `CTX_DATA_ROOT` provides the same value. The root is used directly; ctx
-does not append another product directory.
+does not append another product directory. Graph databases use `ctx graph --db`;
+output config and state use `CTX_OUTPUT_CONFIG_DIR` and `CTX_OUTPUT_STATE_DIR`.
 
 `--quiet` suppresses successful human status/onboarding output for `setup` and
 top-level `status`. `CTX_QUIET=1` provides the same default for scripts and

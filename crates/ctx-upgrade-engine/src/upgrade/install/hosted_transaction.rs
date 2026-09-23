@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::lock::{installation_lock_path, OwnerFileLock};
 use super::marker::{install_marker_path, is_valid_install_attempt_id};
 use super::path_identity::managed_install_path_identity_matches;
 use crate::upgrade::{platform_key, sha256_hex};
@@ -11,12 +10,22 @@ use ctx_managed_pair_engine::ManagedPairVerifier;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+mod entry;
 mod filesystem;
 mod managed_pair;
+mod migration;
 mod post_exit;
+pub use entry::run;
+use entry::run_locked;
 use filesystem::*;
 pub use managed_pair::ensure_hosted_transaction_inactive_under_installation_lock;
 use managed_pair::*;
+use migration::complete_install;
+#[cfg(test)]
+pub(in crate::upgrade) use migration::set_hosted_install_fault_for_test;
+pub(in crate::upgrade) use migration::{
+    hosted_install_journal_exists, run_under_upgrade_lock, validated_hosted_pair_digest,
+};
 
 const SCHEMA_VERSION: u32 = 1;
 const JOURNAL_SUFFIX: &str = "hosted-install-transaction.json";
@@ -101,18 +110,6 @@ struct Journal {
     managed_pair_companion_sha256: Option<String>,
     phase: Phase,
     binding_sha256: String,
-}
-
-pub fn run(args: HostedTransactionArgs) -> Result<()> {
-    reject_unexpected_inputs(&args)?;
-    let install_path = validate_install_path(&args.install_path)?;
-    let _installation_lock = OwnerFileLock::acquire(&installation_lock_path(&install_path)?)?;
-    match args.action {
-        HostedTransactionAction::Install => install(args, install_path),
-        HostedTransactionAction::UninstallPrepare => uninstall_prepare(args, install_path),
-        HostedTransactionAction::UninstallArm => uninstall_arm(args, install_path),
-        HostedTransactionAction::UninstallCommit => uninstall_commit(args, install_path),
-    }
 }
 
 pub fn installation_hosted_uninstall_is_active() -> Result<bool> {
@@ -229,8 +226,12 @@ fn reject_unexpected_inputs(args: &HostedTransactionArgs) -> Result<()> {
     Ok(())
 }
 
-fn install(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
-    ensure_legacy_pair_transaction_inactive(&install_path)?;
+fn install(
+    args: HostedTransactionArgs,
+    install_path: PathBuf,
+    migration_owns_state: bool,
+) -> Result<()> {
+    ensure_legacy_pair_transaction_inactive_with_state(&install_path, migration_owns_state)?;
     let supplied_digest = normalized_sha256(
         args.binary_sha256
             .as_deref()
@@ -315,16 +316,14 @@ fn install(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
         }
     };
     complete_install(&source, &journal_path, &mut journal)?;
-    super::cleanup_legacy_managed_pair_under_installation_lock(&install_path)?;
+    if !migration_owns_state {
+        super::cleanup_legacy_managed_pair_under_installation_lock(&install_path)?;
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&install_receipt(&journal))?
     );
     Ok(())
-}
-
-fn complete_install(source: &Path, journal_path: &Path, journal: &mut Journal) -> Result<()> {
-    complete_install_with_fault(source, journal_path, journal, &mut |_| Ok(()))
 }
 
 fn complete_install_with_fault(

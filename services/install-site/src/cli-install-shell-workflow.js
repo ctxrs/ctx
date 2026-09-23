@@ -34,14 +34,36 @@ export function renderCliInstallShellWorkflow({
   managed_core_handoff=1
   verify_installed_target_identity
 else`
-    : `if [ "$managed_reinstall" = "1" ] &&
+    : `if [ "$pending_hosted_migration" = "1" ]; then
+  managed_core_handoff=1
+  stage_integration_ownership
+  stage_install_marker "$tmp_dir/install-marker.XXXXXX"
+  publish_fresh_or_legacy_binary migrate
+  verify_installed_target_identity
+  # The journal supplied the first attempt's authenticated sidecar. Restore
+  # its records before later integration reconciliation uses our manifest.
+  load_previous_integration_ownership
+  stage_integration_ownership
+elif [ "$managed_reinstall" = "1" ] &&
    ! previous_install_predates_persistent_daemon; then
   managed_core_handoff=1
   if [ "$install_man" != "1" ] && [ "$release_phase" != "bridge" ]; then
     # Core serializes the opt-out with runtime refresh and upgrade publication.
     disable_core_man_pages_before_upgrade
   fi
-  run_managed_core_upgrade
+  if [ "$release_phase" = "final" ] &&
+     [ "$(compare_release_versions "$previous_version" "1.6.3")" != "1" ] &&
+     [ "$(path_size_bytes "$artifact_path")" -gt 134217728 ]; then
+    # Released 1.6.3 cannot download this signed executable. The candidate
+    # fences the installed daemon before its hosted replacement transaction.
+    load_previous_man_page_receipt "$previous_marker"
+    stage_integration_ownership
+    stage_install_marker "$tmp_dir/install-marker.XXXXXX"
+    publish_fresh_or_legacy_binary migrate
+    verify_installed_target_identity
+  else
+    run_managed_core_upgrade
+  fi
 else
   if [ "$managed_reinstall" = "1" ] && [ "$preserve_core_man_pages" = "1" ]; then
     # Pre-daemon managed releases use the direct publication path, so there is
@@ -556,10 +578,6 @@ if [ "$all_skill_agents" = "1" ] && [ -n "$skill_agents" ]; then
   fail "cannot combine --all-skill-agents with --skill-agent or CTX_INSTALL_SKILL_AGENTS"
 fi
 
-if [ "$run_setup" != "1" ] && [ "$explicit_skill_request" != "1" ]; then
-  run_skill=0
-fi
-
 start_install_animation() {
   if [ "$styled_output" != "1" ]; then
     log "Installing ctx $version..."
@@ -603,7 +621,9 @@ if [ -L "$install_path.install.json" ] ||
 fi
 ${renderCliInstallShellManagedPairApply()}
 try_resume_interrupted_managed_pair
-if [ -e "$install_path" ] || [ -L "$install_path" ] ||
+if [ "$pending_hosted_migration" = "1" ]; then
+  managed_reinstall=1
+elif [ -e "$install_path" ] || [ -L "$install_path" ] ||
    [ -e "$install_path.install.json" ] || [ -L "$install_path.install.json" ]; then
   validate_existing_managed_install
   if [ "$stable_bridge" = "1" ]; then
@@ -616,7 +636,9 @@ if [ -e "$install_path" ] || [ -L "$install_path" ] ||
     preserve_core_man_pages=1
   fi
 fi
-load_previous_integration_ownership
+if [ "$pending_hosted_migration" != "1" ]; then
+  load_previous_integration_ownership
+fi
 if [ "$managed_reinstall" != "1" ]; then
   initialize_man_page_receipt
 fi

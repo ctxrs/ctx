@@ -384,7 +384,10 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "unified_context_tests",
     src = "tests/unified_context.rs",
-    extra_srcs = ["tests/unified_context/history_fixture.rs"],
+    extra_srcs = [
+        "tests/unified_context/history_fixture.rs",
+        "tests/unified_context/output_hooks.rs",
+    ],
     extra_crates = ["assert_cmd", "serde_json", "tempfile"],
     test_support = [],
 )

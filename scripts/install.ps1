@@ -626,9 +626,6 @@ try {
     $setupNoDaemon = [bool]$NoDaemon -or $env:CTX_INSTALL_NO_DAEMON -eq "1"
     $runSkill = -not $noSkillRequested
     $installRuntime = -not $NoRuntime -and $env:CTX_INSTALL_NO_RUNTIME -ne "1"
-    if (-not $runSetup -and -not $explicitSkillRequest) {
-        $runSkill = $false
-    }
     $modifyPath = -not $NoModifyPath -and $env:CTX_INSTALL_NO_MODIFY_PATH -ne "1"
 
     if ($DryRun) {

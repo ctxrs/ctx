@@ -153,7 +153,8 @@ test("rendered CLI installer defaults to cli.ctx.rs release metadata", () => {
   assert.match(body, /CTX_ANALYTICS_ENABLED=false/);
   assert.match(body, /CTX_UPGRADE_FUNCTIONS_BASE/);
   assert.match(body, /CTX_UPGRADE_CHANNEL/);
-  assert.match(body, /--hosted-transaction install/);
+  assert.ok(body.includes('hosted_action="${1:-install}"'));
+  assert.ok(body.includes('--hosted-transaction "$hosted_action"'));
   assert.match(body, /--marker-source "\$marker_tmp_path"/);
   assert.match(body, /--ownership-source "\$integration_manifest_tmp"/);
   assert.match(body, /--binary-sha256 "\$actual_checksum"/);

@@ -93,7 +93,6 @@ pub(super) fn planned(path: PathBuf, after: Vec<u8>, dedicated: bool) -> Result<
         after,
         permission_source: None,
         executable: false,
-        previous_after: None,
     })
 }
 
@@ -138,12 +137,7 @@ pub(super) fn load(path: &Path, scope: &Path, allowed: &[PathBuf]) -> Result<Opt
     Ok(Some(receipt))
 }
 pub(super) fn recorded(change: &Change, current: &Option<Vec<u8>>) -> bool {
-    current.as_deref() == Some(change.after.as_slice())
-        || *current == change.before
-        || change
-            .previous_after
-            .as_ref()
-            .is_some_and(|old| current.as_deref() == Some(old.as_slice()))
+    current.as_deref() == Some(change.after.as_slice()) || *current == change.before
 }
 
 pub(super) fn verify(receipt: &Receipt) -> Result<()> {
@@ -210,19 +204,6 @@ pub(super) fn apply(path: &Path, receipt: &Receipt) -> Result<bool> {
             )?;
             changed = true;
         }
-    }
-    if receipt.changes.iter().any(|c| c.previous_after.is_some()) {
-        let mut completed = receipt.clone();
-        for change in &mut completed.changes {
-            change.previous_after = None;
-        }
-        atomic(
-            path,
-            &serde_json::to_vec(&completed)?,
-            Some(&bytes),
-            None,
-            false,
-        )?;
     }
     Ok(changed)
 }

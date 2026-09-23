@@ -6,9 +6,18 @@ history setup. Each operation uses its own evidence: an indexed conversation,
 a graph snapshot, or the output of the command you requested.
 
 For a local source-build trial, invoke the built executable by its path with an
-isolated home, history `--data-root`, and output directories. Keep the installed
-binary and live stores unchanged. Older managed updaters enforce their original
-download limits; a successful local trial does not establish an upgrade route.
+isolated home, history `--data-root`, and output directories. `--data-root` selects
+only agent-history storage; graph uses `ctx graph --db`, while output uses
+`CTX_OUTPUT_CONFIG_DIR` and `CTX_OUTPUT_STATE_DIR`. Keep the installed
+binary and live stores unchanged.
+
+Managed ctx 1.6.3 and earlier cannot download a unified executable above their
+original 128 MiB limit through `ctx upgrade`. The hosted installer includes a
+migration for that jump: it verifies the new download, coordinates replacement
+with the installed daemon, and preserves installation ownership. An interrupted
+replacement requires the same signed candidate to finish; it is not repaired by
+substituting a different release. A local source-build trial does not change an
+installed copy or publish this installer workflow.
 
 ## Find prior work
 
@@ -73,13 +82,24 @@ rejected in graph and all scopes. History-only filters belong to history scope;
 use graph command filters for more specific graph navigation. Consult
 `ctx search --help` for accepted options in each scope.
 
-## Execute and compact output
+## Compact output when requested
+
+Use `ctx run` or `ctx compact` when the user requests output compaction or an
+existing explicit project or user instruction opts in. Installing ctx alone
+does not opt ordinary commands into wrapping; run those commands directly.
+For persistent automatic handling, explicitly install a supported host hook
+with `ctx integrations install output-hook --agent claude-code` (or
+`github-copilot`, or `codex` on POSIX). Use matching `status` and `remove`
+commands to inspect or remove ctx-owned entries. With no `--agent`, the command
+selects detected supported hosts; installation never runs as part of the
+ordinary binary or skill installer. A standalone Sift hook is reported as a
+conflict and must be removed explicitly before installing a ctx hook. Claude
+Code requires version 2.1.121 or later; the installer does not probe it.
+Copilot support is CLI post-tool output only. Codex support requires host hook
+support and user trust review; its pre-tool adapter is POSIX only.
 
 ```sh
-ctx run -- git status
 ctx run --capture -- cargo test
-ctx run --raw -- git diff
-ctx run -- sh -c 'git log | tail -5'
 ctx compact output.txt
 ctx compact --protocol=json-v1 < requests.jsonl
 ctx restore --encoding text-runs-v1 compacted.txt
@@ -132,6 +152,11 @@ before explicitly changing them. The root MCP server uses the same local
 engines; clients should inspect its advertised tools. Reading a transcript or
 graph does not authorize executing its commands or publishing its contents.
 
+Optional project graph tool hooks use `ctx graph install --platform gemini --project PATH`
+(or `claude` or `codebuddy`); remove them with `ctx graph uninstall` and the
+same selections. Git refresh hooks use `ctx graph hook install --project PATH`.
+Managed skills and MCP use `ctx integrations`.
+
 Use `ctx docs show unified-context` to read this topic offline. For a specific
 operation, prefer help from the installed binary.
 
@@ -140,7 +165,9 @@ operation, prefer help from the installed binary.
 Existing `.graf/index.db` databases work with `ctx graph`; no conversion is
 required. Output settings and retained originals default to ctx's own `output`
 directories. To select an existing Sift configuration or state directory, set
-`SIFT_CONFIG_DIR` or `SIFT_STATE_DIR` explicitly. ctx does not move or delete
+`CTX_OUTPUT_CONFIG_DIR` or `CTX_OUTPUT_STATE_DIR`; nonempty `SIFT_CONFIG_DIR` and
+`SIFT_STATE_DIR` remain fallbacks when the corresponding ctx override is unset
+or empty. ctx does not move or delete
 either product's data. `ctx output config show` reports effective settings;
 `ctx output config --help` explains the default directory locations.
 

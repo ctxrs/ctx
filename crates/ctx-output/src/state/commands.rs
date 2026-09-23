@@ -158,7 +158,8 @@ Navigation returns at most 200 lines by default (maximum --lines 10000).
 Only opt-in saved originals are available; commands are never rerun.";
 const CONFIG_HELP: &str = "Usage: ctx output config [show|--create]
 Show effective settings. --create writes defaults only if no config exists.
-SIFT_CONFIG_DIR and SIFT_STATE_DIR override ctx output directories independently.
+CTX_OUTPUT_CONFIG_DIR and CTX_OUTPUT_STATE_DIR override output directories independently.
+Nonempty SIFT_CONFIG_DIR and SIFT_STATE_DIR are fallback overrides.
 Otherwise use XDG config/state ctx/output (APPDATA/LOCALAPPDATA on Windows).
 Existing Sift data is never moved or searched automatically; select it with overrides.
 Output state is independent of the history --data-root option.

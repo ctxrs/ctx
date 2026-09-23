@@ -36,14 +36,25 @@ pub fn ensure_hosted_transaction_inactive_under_installation_lock(
     bail!("finish the pending hosted installation transaction before changing the installation")
 }
 
+#[cfg(test)]
 pub(super) fn ensure_legacy_pair_transaction_inactive(install_path: &Path) -> Result<()> {
+    ensure_legacy_pair_transaction_inactive_with_state(install_path, false)
+}
+
+pub(super) fn ensure_legacy_pair_transaction_inactive_with_state(
+    install_path: &Path,
+    migration_owns_upgrade_state: bool,
+) -> Result<()> {
     let Some((root, _, _, _)) = managed_pair_paths(install_path) else {
         return Ok(());
     };
     if path_entry_exists(&root.join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH))? {
         bail!("finish the pending managed-pair upgrade before reinstalling");
     }
-    crate::upgrade::state::ensure_legacy_pair_scheduler_terminal(install_path)
+    if !migration_owns_upgrade_state {
+        crate::upgrade::state::ensure_legacy_pair_scheduler_terminal(install_path)?;
+    }
+    Ok(())
 }
 
 pub(super) fn snapshot_managed_pair_files(

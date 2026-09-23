@@ -33,6 +33,28 @@ normal CI gate. The maintained compiler is separate from the Rust 1.95 minimum
 supported version in `Cargo.toml`, required by the retained OXC 0.146 parser.
 The maintained compiler remains Rust 1.97.1.
 
+## Engine ownership
+
+The workspace owns the unified CLI, installation, managed skill, MCP routing,
+and the `ctx-graph` / `ctx-output` adapters. Change these here rather than
+recopying a standalone CLI or restoring its installer.
+
+Graph models, indexing, storage and analysis come from the pinned public Graf
+library. Engine fixes belong in that library, followed by a reviewed dependency
+update here. `ctx-graph` owns command translation and ctx-specific integration.
+
+`ctx-output` and `ctx-output-codec` are maintained workspace code, originally
+adapted from the Sift revision recorded in their notices. Fix their unified
+behavior here; the recorded revision is provenance, not a second source tree
+to keep synchronized. Preserve the upstream notices when changing this code.
+
+Keep compatibility where it carries user data: existing `.graf/index.db`
+stores and explicit legacy `SIFT_*` directory overrides remain supported.
+They do not authorize installing another skill, updater or background service.
+The two pinned `serde_json` identities are also intentional: output codecs need
+features that would change history JSON serialization if unified by Cargo.
+Keep the serialization boundary tests when updating either dependency.
+
 ## Fast Linux loop
 
 Start with the narrowest real Bazel test that covers the change:

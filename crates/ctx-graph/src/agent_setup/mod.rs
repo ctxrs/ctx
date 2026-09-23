@@ -8,7 +8,7 @@ use std::{
     process::Command,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -24,30 +24,12 @@ use git_hooks::quote;
 
 #[derive(Debug, Args)]
 pub struct SetupArgs {
-    /// Agent host for explicit tool hooks; skills and MCP use ctx integrations.
-    #[arg(long, default_value = "agents")]
+    /// Project tool-hook host (claude, codebuddy, or gemini).
+    #[arg(long, value_parser = ["claude", "codebuddy", "gemini"])]
     pub platform: String,
     /// Project directory (defaults to the current directory).
-    #[arg(long, conflicts_with = "global")]
+    #[arg(long)]
     pub project: Option<PathBuf>,
-    /// Explicitly select the user-global installation.
-    #[arg(long)]
-    pub global: bool,
-    /// Existing Claude, Codex or Hermes configuration root; also select it in the host.
-    #[arg(long, requires = "global", conflicts_with = "profile")]
-    pub config_root: Option<PathBuf>,
-    /// Existing VS Code user-profile directory (locate via MCP: Open User Configuration).
-    #[arg(long, requires = "global", conflicts_with = "config_root")]
-    pub profile: Option<PathBuf>,
-    /// Use ctx integrations install mcp for the managed ctx MCP server.
-    #[arg(long)]
-    pub mcp: bool,
-    /// Use ctx integrations install skill for managed guidance.
-    #[arg(long)]
-    pub skill: bool,
-    /// Opt in to fail-open source read/search guidance (Claude, CodeBuddy, Gemini projects).
-    #[arg(long)]
-    pub tool_hooks: bool,
 }
 
 #[derive(Debug, Args)]
@@ -95,9 +77,6 @@ struct Change {
     /// A hook backup retains the original access permissions, including ACLs.
     permission_source: Option<PathBuf>,
     executable: bool,
-    /// Previous installed bytes accepted only while a guidance upgrade is pending.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    previous_after: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,8 +85,6 @@ struct Receipt {
     version: u32,
     scope: PathBuf,
     changes: Vec<Change>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    guidance_version: Option<u32>,
 }
 
 fn root(path: Option<&Path>) -> Result<PathBuf> {

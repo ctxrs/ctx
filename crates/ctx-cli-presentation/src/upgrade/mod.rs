@@ -73,6 +73,7 @@ pub struct UpgradeStatusArgs {
 #[value(rename_all = "kebab-case")]
 pub enum HostedTransactionActionArg {
     Install,
+    Migrate,
     UninstallPrepare,
     UninstallArm,
     UninstallCommit,
@@ -82,6 +83,7 @@ impl From<HostedTransactionActionArg> for HostedTransactionAction {
     fn from(value: HostedTransactionActionArg) -> Self {
         match value {
             HostedTransactionActionArg::Install => Self::Install,
+            HostedTransactionActionArg::Migrate => Self::Install,
             HostedTransactionActionArg::UninstallPrepare => Self::UninstallPrepare,
             HostedTransactionActionArg::UninstallArm => Self::UninstallArm,
             HostedTransactionActionArg::UninstallCommit => Self::UninstallCommit,

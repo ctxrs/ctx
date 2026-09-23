@@ -2,6 +2,7 @@
 
 pub mod mcp;
 pub mod mcp_config;
+pub mod output_hook;
 pub mod plugin;
 pub mod skill;
 pub mod slash_commands;

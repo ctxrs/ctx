@@ -93,23 +93,40 @@ fn native_graph_reads_stay_on_the_snapshot_until_explicit_update() {
 }
 
 #[test]
-fn managed_installations_return_the_ctx_owner_without_creating_files() {
+fn graph_install_help_and_rejected_legacy_flags_leave_project_untouched() {
     let temp = tempfile::tempdir().unwrap();
-    for (component, target) in [("--skill", "skill"), ("--mcp", "mcp")] {
-        let error = run_parsed(parse(&[
+    let help = cli::Cli::try_parse_from(["ctx graph", "install", "--help"])
+        .unwrap_err()
+        .to_string();
+    assert!(help.contains("--platform"));
+    assert!(help.contains("--project"));
+    assert!(help.contains("claude, codebuddy, or gemini"));
+    for flag in [
+        "--skill",
+        "--mcp",
+        "--global",
+        "--config-root",
+        "--profile",
+        "--tool-hooks",
+    ] {
+        assert!(!help.contains(flag), "obsolete flag in help: {flag}");
+        let error = cli::Cli::try_parse_from([
+            "ctx graph",
             "install",
-            component,
+            "--platform",
+            "gemini",
             "--project",
             temp.path().to_str().unwrap(),
-        ]))
+            flag,
+        ])
         .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("ctx integrations install {target}"))
-        );
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
     }
+    for args in [vec!["install"], vec!["install", "--platform", "agents"]] {
+        assert!(cli::Cli::try_parse_from(std::iter::once("ctx graph").chain(args)).is_err());
+    }
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
 }
 
 #[test]
@@ -135,7 +152,6 @@ fn explicit_tool_hooks_preserve_user_settings_and_standalone_graf_receipts() {
     std::fs::create_dir_all(old_receipt.parent().unwrap()).unwrap();
     std::fs::write(&old_receipt, b"standalone Graf receipt").unwrap();
     let args = [
-        "--tool-hooks",
         "--platform",
         "gemini",
         "--project",
@@ -161,6 +177,25 @@ fn explicit_tool_hooks_preserve_user_settings_and_standalone_graf_receipts() {
         std::fs::read(&old_receipt).unwrap(),
         b"standalone Graf receipt"
     );
+}
+
+#[test]
+fn git_refresh_hooks_remain_installable() {
+    let temp = tempfile::tempdir().unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(temp.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let project = temp.path().to_str().unwrap();
+    run_parsed(parse(&["hook", "install", "--project", project])).unwrap();
+    for name in ["post-commit", "post-checkout", "post-merge"] {
+        assert!(temp.path().join(".git/hooks").join(name).is_file());
+    }
+    run_parsed(parse(&["hook", "uninstall", "--project", project])).unwrap();
 }
 
 #[test]

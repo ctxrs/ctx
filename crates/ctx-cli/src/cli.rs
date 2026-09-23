@@ -73,7 +73,13 @@ impl From<CliColorMode> for ColorMode {
     styles = crate::cli::CLAP_STYLES
 )]
 pub(crate) struct Cli {
-    #[arg(long, env = "CTX_DATA_ROOT", hide_env_values = true, global = true)]
+    #[arg(
+        long,
+        env = "CTX_DATA_ROOT",
+        hide_env_values = true,
+        global = true,
+        help = "Agent-history data root only; graph and output stores use separate paths"
+    )]
     pub(crate) data_root: Option<PathBuf>,
     #[arg(
         long,

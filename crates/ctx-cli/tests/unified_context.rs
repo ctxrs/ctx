@@ -18,6 +18,9 @@ use tempfile::TempDir;
 mod history_fixture;
 use history_fixture::import_synthetic_history;
 
+#[path = "unified_context/output_hooks.rs"]
+mod output_hooks;
+
 const PYTHON_SOURCE: &str = "def kernel():\n    return 41\n\ndef launch():\n    return kernel()\n\ndef idle():\n    return 0\n";
 const RUNS_HEADER: &str = "sift:text-runs-v1 counts repeat exact JSON strings; concatenate\n";
 
@@ -1020,50 +1023,6 @@ fn root_options_preserve_the_separator_before_a_dash_prefixed_output_file() {
         }
     }
     assert_eq!(sandbox.protected_state(), before);
-    sandbox.assert_no_connection();
-}
-
-#[test]
-fn output_hook_honors_wrapper_raw_flags_after_root_options_but_not_child_flags() {
-    let sandbox = Sandbox::new();
-    sandbox.write("output/config/config.json", br#"{"keep_originals":true}"#);
-    let before = sandbox.protected_state();
-    let stdout = "synthetic hook output remains complete\n".repeat(160);
-    let request = |command| {
-        json!({
-            "hook_event_name":"PostToolUse", "tool_name":"Bash",
-            "tool_input":{"command":command},
-            "tool_response":{"stdout":stdout, "stderr":"", "interrupted":false, "isImage":false}
-        })
-        .to_string()
-    };
-    for command in [
-        "ctx run --raw -- cat fixture",
-        "ctx --color never run --raw -- cat fixture",
-        "ctx --color=never output run --capture --raw -- cat fixture",
-        "ctx --quiet output proxy -- cat fixture",
-    ] {
-        let output = sandbox.output(&["output", "hook", "claude"], request(command).as_bytes());
-        assert_eq!(json_output(output), json!({}), "raw command: {command}");
-        assert!(
-            !sandbox.root.join("output/state").exists(),
-            "raw hook recorded output"
-        );
-        assert_eq!(sandbox.protected_state(), before);
-    }
-    let output = sandbox.output(
-        &["output", "hook", "claude"],
-        request("ctx --color never run -- cat --raw").as_bytes(),
-    );
-    let replacement = json_output(output);
-    assert_eq!(
-        replacement["hookSpecificOutput"]["hookEventName"],
-        "PostToolUse"
-    );
-    let changed = replacement["hookSpecificOutput"]["updatedToolOutput"]["stdout"]
-        .as_str()
-        .expect("child --raw must not suppress hook compaction");
-    assert!(changed.len() < stdout.len());
     sandbox.assert_no_connection();
 }
 

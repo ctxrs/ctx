@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { execFileSync, spawnSync } from "node:child_process";
+import { truncateSync } from "node:fs";
 
 import {
   assert,
@@ -12,6 +14,7 @@ import {
   readdirSync,
   renderCliInstallScript,
   runRenderedCliInstaller,
+  signMetadataBase64,
   sha256,
   statSync,
   test,
@@ -19,6 +22,107 @@ import {
 } from "./cli-install-test-helpers.mjs";
 
 export function registerCliInstallShellManagedUpgradeTests() {
+  test("installer retry retains prior integration ownership after binary publication fault", () => {
+    const fixture = runRenderedCliInstaller({
+      releaseVersion: "1.6.3",
+      compressedArtifact: "missing",
+    });
+    const binaryPath = path.join(fixture.installBin, "ctx");
+    try {
+      assert.equal(fixture.result.status, 0, fixture.result.stderr);
+      const priorRecords = readOwnershipRecords(fixture.installBin);
+      assert.ok(priorRecords.length > 0);
+      const smallDigest = sha256(readFileSync(fixture.artifactPath));
+      const candidate = readFileSync(fixture.artifactPath, "utf8")
+        .replace("fixture_version=1.6.3", "fixture_version=1.7.0");
+      writeFileSync(fixture.artifactPath, candidate, { mode: 0o755 });
+      truncateSync(fixture.artifactPath, 134217729);
+      const largeDigest = execFileSync("sha256sum", [fixture.artifactPath], {
+        encoding: "utf8",
+      }).split(" ")[0];
+      assert.ok(statSync(fixture.artifactPath).size > 134217728);
+      const metadataPath = fixture.childEnv.CTX_FAKE_METADATA;
+      const signaturePath = fixture.childEnv.CTX_FAKE_METADATA_SIGNATURE;
+      const metadata = readFileSync(metadataPath, "utf8")
+        .replace("CTX_RELEASE_VERSION=1.6.3", "CTX_RELEASE_VERSION=1.7.0")
+        .replaceAll(smallDigest, largeDigest);
+      writeFileSync(metadataPath, metadata);
+      writeFileSync(signaturePath,
+        `${signMetadataBase64(metadata, fixture.metadataPrivateKeyPem)}\n`);
+
+      const args = ["--no-setup", "--no-skill", "--no-man"];
+      const fault = fixture.rerun(args, {
+        CTX_FAKE_HOSTED_PARTIAL_FAILURE: "1",
+        CTX_INSTALL_NO_DAEMON: "1",
+      });
+      assert.notEqual(fault.status, 0);
+      assert.equal(sha256(readFileSync(binaryPath)), largeDigest);
+      assert.equal(JSON.parse(readFileSync(`${binaryPath}.install.json`, "utf8")).sha256,
+        smallDigest);
+      assert.ok(statSync(path.join(fixture.installBin,
+        ".ctx.hosted-install-transaction.json")).isFile());
+      const retry = fixture.rerun(args, { CTX_INSTALL_NO_DAEMON: "1" });
+      assert.equal(retry.status, 0, retry.stderr);
+      assert.equal(JSON.parse(readFileSync(`${binaryPath}.install.json`, "utf8")).sha256,
+        largeDigest);
+      assert.deepEqual(readOwnershipRecords(fixture.installBin), priorRecords);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("shipped 128 MiB updater reaches a larger signed target through installer migration", () => {
+    const fixture = runRenderedCliInstaller({
+      releaseVersion: "1.6.3",
+      compressedArtifact: "missing",
+    });
+    const binaryPath = path.join(fixture.installBin, "ctx");
+    const markerPath = `${binaryPath}.install.json`;
+    try {
+      assert.equal(fixture.result.status, 0, fixture.result.stderr);
+      const oldBinary = readFileSync(binaryPath);
+      const oldMarker = readFileSync(markerPath);
+      const smallDigest = sha256(readFileSync(fixture.artifactPath));
+      const candidate = readFileSync(fixture.artifactPath, "utf8")
+        .replace("fixture_version=1.6.3", "fixture_version=1.7.0");
+      writeFileSync(fixture.artifactPath, candidate, { mode: 0o755 });
+      truncateSync(fixture.artifactPath, 134217729);
+      const largeDigest = execFileSync("sha256sum", [fixture.artifactPath], {
+        encoding: "utf8",
+      }).split(" ")[0];
+      const metadataPath = fixture.childEnv.CTX_FAKE_METADATA;
+      const signaturePath = fixture.childEnv.CTX_FAKE_METADATA_SIGNATURE;
+      const metadata = readFileSync(metadataPath, "utf8")
+        .replace("CTX_RELEASE_VERSION=1.6.3", "CTX_RELEASE_VERSION=1.7.0")
+        .replaceAll(smallDigest, largeDigest);
+      writeFileSync(metadataPath, metadata);
+      writeFileSync(signaturePath,
+        `${signMetadataBase64(metadata, fixture.metadataPrivateKeyPem)}\n`);
+
+      const oldAttempt = spawnSync(binaryPath,
+        ["upgrade", "--channel", "stable", "--format=json"], {
+          encoding: "utf8",
+          env: { ...fixture.childEnv, CTX_FAKE_ENFORCE_OLD_CAP: "1" },
+        });
+      assert.equal(oldAttempt.status, 74, oldAttempt.stderr);
+      assert.match(oldAttempt.stderr, /above 128 MiB/u);
+      assert.deepEqual(readFileSync(binaryPath), oldBinary);
+      assert.deepEqual(readFileSync(markerPath), oldMarker);
+
+      const migrated = fixture.rerun([], {
+        CTX_FAKE_ENFORCE_OLD_CAP: "1",
+        CTX_FAKE_LOG_MUTATIONS: "1",
+      });
+      assert.equal(migrated.status, 0, migrated.stderr);
+      assert.equal(statSync(binaryPath).size, 134217729);
+      assert.equal(JSON.parse(readFileSync(markerPath, "utf8")).sha256, largeDigest);
+      assert.match(readFileSync(fixture.commandLogPath, "utf8"),
+        /upgrade --hosted-transaction migrate --install-path/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   test("managed installer rerun delegates replacement without mutating an up-to-date image", () => {
     const fixture = runRenderedCliInstaller();
     const binaryPath = path.join(fixture.installBin, "ctx");

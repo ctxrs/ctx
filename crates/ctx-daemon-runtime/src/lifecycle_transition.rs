@@ -249,7 +249,10 @@ pub fn block_daemon_enabled_after_config_for_test(data_root: &Path, enabled: boo
     ));
     fs::write(&blocked, format!("{}\n", std::process::id()))
         .with_context(|| format!("publish daemon policy test marker {}", blocked.display()))?;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // The caller may authenticate and stage the complete executable before
+    // releasing this rendezvous. Parallel debug tests of the unified binary
+    // can exceed 30 seconds; this watchdog is only a test-fixture escape hatch.
+    let deadline = Instant::now() + Duration::from_secs(120);
     while block.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }

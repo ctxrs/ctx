@@ -6,7 +6,8 @@ Selected sources: src/main.rs, runner.rs, state.rs, command_view.rs, tap_view.rs
 views.rs, filter.rs, hooks.rs, pre_hooks.rs, rewrite.rs, discover.rs, usage.rs,
 semantic.rs, jev.rs and their relevant tests.
 Changes: library entry point, explicit output routing, ctx self-invocation,
-configuration namespace, module separation, and adapted behavioral tests.
+configuration namespace, module separation, wrapper-aware completion hooks,
+and adapted behavioral tests.
 The unchanged codec/tokenizer source from that revision is maintained in the
 ctx-output-codec workspace crate, which records its source and license notices.
 
