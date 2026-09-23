@@ -912,6 +912,7 @@ dependencies = [
  "ctx-companion-bridge",
  "ctx-daemon-cli",
  "ctx-graph",
+ "ctx-graph-core",
  "ctx-history-capture",
  "ctx-history-cli",
  "ctx-history-core",
@@ -921,13 +922,12 @@ dependencies = [
  "ctx-history-read-application",
  "ctx-history-refresh",
  "ctx-history-snapshot-reader",
- "ctx-output",
- "ctx-output-codec",
+ "ctx-sift",
+ "ctx-sift-codec",
  "ctx-terminal",
  "ctx-upgrade-engine",
  "flate2",
  "fs2",
- "graf-cli",
  "libc",
  "predicates",
  "proptest",
@@ -1303,8 +1303,8 @@ dependencies = [
  "axum",
  "blake3",
  "clap",
+ "ctx-graph-core",
  "futures-util",
- "graf-cli",
  "jsonc-parser 0.29.0",
  "libc",
  "reqwest",
@@ -1318,6 +1318,79 @@ dependencies = [
  "tokio-util",
  "toml_edit 0.23.7",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ctx-graph-core"
+version = "1.6.3"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "blake3",
+ "clap",
+ "futures-util",
+ "globset",
+ "hickory-resolver",
+ "ignore",
+ "jsonc-parser 0.29.0",
+ "libc",
+ "lopdf",
+ "network_partitions",
+ "png",
+ "pulldown-cmark",
+ "quick-xml",
+ "rand 0.10.2",
+ "reqwest",
+ "rmcp",
+ "rusqlite",
+ "schemars",
+ "scraper",
+ "serde",
+ "serde_json 1.0.150",
+ "serde_yaml_ng",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml_edit 0.23.7",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-commonlisp",
+ "tree-sitter-cpp",
+ "tree-sitter-cuda",
+ "tree-sitter-dart",
+ "tree-sitter-dm",
+ "tree-sitter-elixir",
+ "tree-sitter-fortran",
+ "tree-sitter-go",
+ "tree-sitter-groovy",
+ "tree-sitter-hcl",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-julia",
+ "tree-sitter-kotlin-ng",
+ "tree-sitter-lua",
+ "tree-sitter-luau",
+ "tree-sitter-objc",
+ "tree-sitter-ocaml",
+ "tree-sitter-pascal",
+ "tree-sitter-php",
+ "tree-sitter-powershell",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-scala",
+ "tree-sitter-sequel",
+ "tree-sitter-sfapex",
+ "tree-sitter-swift",
+ "tree-sitter-typescript",
+ "tree-sitter-verilog",
+ "tree-sitter-zig",
+ "unicode-normalization",
+ "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]
@@ -2051,40 +2124,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctx-output"
-version = "1.6.3"
-dependencies = [
- "anyhow",
- "ctx-output-codec",
- "fs2",
- "libc",
- "serde",
- "serde_json 1.0.151",
- "sha2 0.10.9",
- "signal-hook",
- "tempfile",
- "tiktoken-rs",
- "ureq 3.3.0",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ctx-output-codec"
-version = "1.6.3"
-dependencies = [
- "aneubeck-daachorse",
- "anyhow",
- "bpe",
- "bpe-openai",
- "regex-automata",
- "rkyv",
- "rmp-serde",
- "serde",
- "serde_json 1.0.151",
- "tiktoken-rs",
-]
-
-[[package]]
 name = "ctx-protocol"
 version = "1.6.3"
 dependencies = [
@@ -2174,6 +2213,40 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "xz2",
+]
+
+[[package]]
+name = "ctx-sift"
+version = "1.6.3"
+dependencies = [
+ "anyhow",
+ "ctx-sift-codec",
+ "fs2",
+ "libc",
+ "serde",
+ "serde_json 1.0.151",
+ "sha2 0.10.9",
+ "signal-hook",
+ "tempfile",
+ "tiktoken-rs",
+ "ureq 3.3.0",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ctx-sift-codec"
+version = "1.6.3"
+dependencies = [
+ "aneubeck-daachorse",
+ "anyhow",
+ "bpe",
+ "bpe-openai",
+ "regex-automata",
+ "rkyv",
+ "rmp-serde",
+ "serde",
+ "serde_json 1.0.151",
+ "tiktoken-rs",
 ]
 
 [[package]]
@@ -2926,80 +2999,6 @@ dependencies = [
  "log",
  "regex-automata",
  "regex-syntax",
-]
-
-[[package]]
-name = "graf-cli"
-version = "0.6.0"
-source = "git+https://github.com/ctxrs/graf?rev=b7d179d950710981383814183601024537d9a440#b7d179d950710981383814183601024537d9a440"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "blake3",
- "clap",
- "futures-util",
- "globset",
- "hickory-resolver",
- "ignore",
- "jsonc-parser 0.29.0",
- "libc",
- "lopdf",
- "network_partitions",
- "png",
- "pulldown-cmark",
- "quick-xml",
- "rand 0.10.2",
- "reqwest",
- "rmcp",
- "rusqlite",
- "schemars",
- "scraper",
- "serde",
- "serde_json 1.0.150",
- "serde_yaml_ng",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml_edit 0.23.7",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-commonlisp",
- "tree-sitter-cpp",
- "tree-sitter-cuda",
- "tree-sitter-dart",
- "tree-sitter-dm",
- "tree-sitter-elixir",
- "tree-sitter-fortran",
- "tree-sitter-go",
- "tree-sitter-groovy",
- "tree-sitter-hcl",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-julia",
- "tree-sitter-kotlin-ng",
- "tree-sitter-lua",
- "tree-sitter-luau",
- "tree-sitter-objc",
- "tree-sitter-ocaml",
- "tree-sitter-pascal",
- "tree-sitter-php",
- "tree-sitter-powershell",
- "tree-sitter-python",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-scala",
- "tree-sitter-sequel",
- "tree-sitter-sfapex",
- "tree-sitter-swift",
- "tree-sitter-typescript",
- "tree-sitter-verilog",
- "tree-sitter-zig",
- "unicode-normalization",
- "windows-sys 0.61.2",
- "zip",
 ]
 
 [[package]]

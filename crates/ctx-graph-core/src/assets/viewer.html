@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Graf graph explorer</title>
+<style>
+:root{color-scheme:light dark;font:15px system-ui}body{margin:0;background:#101827;color:#e5edf8}header{padding:1rem;border-bottom:1px solid #455269}h1{margin:0 0 .6rem;font-size:1.3rem}.controls{display:flex;gap:.8rem;flex-wrap:wrap;align-items:end}label{display:grid;gap:.3rem}input,select,button{font:inherit;padding:.4rem;border:1px solid #718096;border-radius:4px;background:#19263b;color:inherit}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}:focus-visible{outline:3px solid #fbbf24}main{display:grid;grid-template-columns:minmax(0,3fr) minmax(300px,1fr)}#canvas{width:100%;height:68vh;background:#111c30;touch-action:none}aside{min-width:0;overflow-wrap:anywhere;padding:1rem;overflow:auto;max-height:68vh}pre{white-space:pre-wrap;overflow-wrap:anywhere}#status{margin:.8rem 0 0}#list{padding:1rem;max-height:30vh;overflow:auto}#list button{margin:.2rem;text-align:left;max-width:100%;overflow-wrap:anywhere}svg text{fill:#e5edf8;pointer-events:none;font:12px system-ui}.node{cursor:pointer}.node circle{stroke:#e5edf8;stroke-width:1.5}.node.is-selected circle{stroke:#fbbf24;stroke-width:5}.edge{stroke:#718096;stroke-width:1.5;fill:none}.edge.is-selected{stroke:#fbbf24;stroke-width:2.5}small{color:#becbe0}#neighbors{padding-left:1.2rem}#neighbors li{margin:1rem 0}#neighbors button{text-align:left;overflow-wrap:anywhere;max-width:100%}#neighbors small{display:block}summary{cursor:pointer}[hidden]{display:none!important}@media(max-width:700px){main{display:block}aside{max-height:50vh}}
+.group-hull{pointer-events:none;stroke-linejoin:round;stroke-linecap:round}.legend-key{display:inline-block;border:3px solid;border-radius:50%;width:.7em;height:.7em;margin-right:.4em}#learning-panel,#groups-panel{padding:1rem;border-top:1px solid #455269}#learning-legend{display:flex;flex-wrap:wrap;gap:1rem}#groups li{margin:.7rem 0}#groups button{text-align:left;overflow-wrap:anywhere;max-width:100%}
+</style></head><body>
+<header><h1>Graf graph explorer</h1><div class="controls">
+<label>Search labels, IDs, sources or metadata<input id="search" type="search" placeholder="Search graph"></label>
+<label>Kind<input id="kind" list="kind-options" placeholder="All kinds"><datalist id="kind-options"></datalist></label>
+<label>Community ID<input id="community" list="community-options" placeholder="All communities"><datalist id="community-options"></datalist></label>
+<label>Relation<input id="relation" list="relation-options" placeholder="All relations"><datalist id="relation-options"></datalist></label>
+<label>View<select id="mode"><option value="auto">Automatic</option><option value="detail">Detailed pages</option><option value="aggregate">Communities</option></select></label>
+<button id="back" type="button" disabled>Back</button><button id="metadata" type="button">Graph metadata</button><button id="reset" type="button">Reset view</button><button id="download" type="button">Download snapshot JSON</button>
+</div><div><button id="previous" type="button">Previous page</button><span id="page-status"></span><button id="next" type="button">Next page</button> <button id="fit" type="button">Fit graph</button><button id="zoom-in" type="button">Zoom in</button><button id="zoom-out" type="button">Zoom out</button></div>
+<p id="status" role="status" aria-live="polite"></p><small>Scroll to zoom; drag the background to pan. Select a node for evidence or a community to open its members. Layout separates connected components and places nodes by hops from a hub, using only drawn edges; distance is not relationship strength. Arrows retain recorded direction. Large views aggregate and page automatically; search and downloads cover the complete snapshot. Communities describe connectivity, not inferred responsibilities. No network access.</small></header>
+<main><svg id="canvas" role="img" aria-label="Graph with directed arrows and curved parallel edges; use the node list below to select by keyboard"></svg><aside aria-label="Graph details">
+<h2 id="selected" tabindex="-1">Node details</h2><p id="selection-status" role="status"></p><button id="focus-node" type="button" hidden>Focus selected node</button>
+<section id="learning-detail" aria-labelledby="learning-heading" hidden><h3 id="learning-heading">Work-memory observation</h3><pre id="learning-node"></pre></section>
+<section id="neighbor-panel" aria-labelledby="neighbor-heading" hidden><h3 id="neighbor-heading">Neighbors and relations</h3><small>All recorded relations, including nodes outside the current graph filters and page. Following a hidden node opens its detailed page; Back restores your previous view (up to 100 steps).</small>
+<label>Neighbor direction<select id="neighbor-direction"><option value="all">All directions</option><option value="outgoing">Outgoing</option><option value="incoming">Incoming</option><option value="undirected">Undirected</option><option value="self">Self-loop</option></select></label>
+<label>Search neighbors, relations or sources<input id="neighbor-search" type="search"></label>
+<p id="neighbor-status" role="status" aria-live="polite"></p><ul id="neighbors"></ul><button id="neighbor-previous" type="button">Previous relations</button><button id="neighbor-next" type="button">Next relations</button></section>
+<details open><summary>Recorded details</summary><pre id="details">Select a node in the graph or the accessible list below.</pre></details>
+</aside></main>
+<section id="list" aria-label="Visible nodes"></section>
+<section id="groups-panel" aria-labelledby="groups-heading" hidden><h2 id="groups-heading">Recorded groups and hyperedges</h2>
+<p>Outlines show visible recorded members, not extra pairwise relations. Group nodes and incidence edges remain separate. Partial outlines do not describe the whole group. Open a group for its source record and paged membership evidence.</p>
+<label>Search group labels, IDs, sources or metadata<input id="group-search" type="search"></label>
+<p id="group-status" role="status" aria-live="polite"></p><ul id="groups"></ul><button id="group-previous" type="button">Previous groups</button><button id="group-next" type="button">Next groups</button></section>
+<section id="learning-panel" aria-labelledby="lessons-heading" hidden><h2 id="lessons-heading">Work-memory lessons</h2>
+<p id="learning-summary"></p><div id="learning-legend" aria-label="Learning ring legend"></div>
+<p>Rings annotate individual nodes in detailed views. Cited-source verification does not certify the whole project or answer correctness. Dashed rings mark unverified, stale or unmarked observations. Community summaries do not combine learning statuses.</p>
+<details><summary>Recorded lessons and event provenance</summary><p id="lesson-status" role="status" aria-live="polite"></p><pre id="lessons"></pre><button id="lesson-previous" type="button">Previous lesson text</button><button id="lesson-next" type="button">Next lesson text</button></details></section>
+<script id="graf-data" type="application/json">__GRAF_DATA__</script>
+<script>
+'use strict';
+const data = JSON.parse(document.getElementById('graf-data').textContent), graph = data.snapshot, analysis = data.analysis;
+const nodeLimit = data.viewer.node_limit, edgeLimit = data.viewer.edge_limit;
+const neighborLimit = Math.min(50, nodeLimit, edgeLimit);
+const el = id => document.getElementById(id), svg = el('canvas'), ns = 'http://www.w3.org/2000/svg';
+const metrics = new Map(analysis.nodes.map(n => [n.id, n])), communities = new Map(analysis.communities.map(c => [c.id, c]));
+const nodeById = new Map(graph.nodes.map(n => [n.id, n]));
+const recordedGroups = data.groups || [], groupById = new Map(recordedGroups.map(group => [group.id, group]));
+const learning = data.learning, learningById = new Map(Object.entries(learning ? learning.nodes : {}));
+const learningColors = {preferred: '#34d399', tentative: '#60a5fa', contested: '#fb923c', corrected: '#f472b6', dead_end: '#f87171', stale: '#9ca3af', unmarked: '#cbd5e1'};
+const learningColor = status => Object.hasOwn(learningColors, status) ? learningColors[status] : '#cbd5e1';
+const learningDashed = entry => entry.unverified > 0 || ['stale', 'unmarked'].includes(entry.status);
+function learningText(entry) {
+ return `${entry.status} · score ${entry.score} · useful ${entry.useful} · negative ${entry.negative} · verified useful ${entry.verified_useful} · unverified ${entry.unverified}\n${entry.reason}`;
+}
+const nodeIndex = new Map(graph.nodes.map((n, i) => [n.id, i]));
+const searchable = new Map(graph.nodes.map(n => [n.id, JSON.stringify(n).toLocaleLowerCase()]));
+const incidence = new Map(graph.nodes.map(n => [n.id, []]));
+for (const edge of graph.edges) {
+ incidence.get(edge.source).push(edge);
+ if (edge.source !== edge.target) incidence.get(edge.target).push(edge);
+}
+function options(id, values) {
+ for (const value of [...new Set(values)].sort().slice(0, nodeLimit)) {
+  const option = document.createElement('option');
+  option.value = String(value); option.textContent = String(value); el(id + '-options').append(option);
+ }
+}
+options('kind', graph.nodes.map(n => n.kind)); options('community', analysis.nodes.map(n => n.community)); options('relation', graph.edges.map(e => e.relation));
+function element(tag, attrs, parent) {
+ const node = document.createElementNS(ns, tag);
+ for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+ if (parent) parent.append(node);
+ return node;
+}
+function title(parent, text) { const node = element('title', {}, parent); node.textContent = text; }
+function textElement(tag, text, parent) { const node = document.createElement(tag); node.textContent = text; parent.append(node); return node; }
+function source(record) {
+ const file = record.file || 'No recorded source';
+ return file + (record.line == null ? '' : `:L${record.line}`) + (record.end_line == null ? '' : `–L${record.end_line}`);
+}
+function direction(edge, id) {
+ if (edge.source === edge.target) return 'self';
+ return edge.directed ? (edge.source === id ? 'outgoing' : 'incoming') : 'undirected';
+}
+const directionLabels = {outgoing: 'Outgoing →', incoming: 'Incoming ←', undirected: 'Undirected ↔', self: 'Self-loop ↻'};
+const filterIds = ['search', 'kind', 'community', 'relation', 'mode'];
+let view = {x: 0, y: 0, w: 1000, h: 800}, fittedView = {...view}, page = 0, pageCount = 1;
+let panel = {type: 'empty'}, neighborPage = 0, neighborPageCount = 1, visiblePositions = new Map(), aggregateView = false;
+let groupPage = 0, groupPageCount = 1, lessonPage = 0;
+const navigationHistory = [];
+function selectedId() { return panel.type === 'node' ? panel.id : null; }
+function remember() {
+ navigationHistory.push({filters: filterIds.map(id => el(id).value), page, view: {...view}, panel: {...panel}, neighborPage,
+  neighborDirection: el('neighbor-direction').value, neighborSearch: el('neighbor-search').value, groupPage, groupSearch: el('group-search').value});
+ if (navigationHistory.length > 100) navigationHistory.shift();
+ el('back').disabled = false;
+}
+function setView() { svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`); }
+function showSelection() {
+ const id = selectedId(), visible = id !== null && !aggregateView && visiblePositions.has(id);
+ for (const node of svg.querySelectorAll('.node')) node.classList.toggle('is-selected', visible && node.dataset.nodeId === id);
+ for (const edge of svg.querySelectorAll('.edge')) edge.classList.toggle('is-selected', visible && (edge.dataset.source === id || edge.dataset.target === id));
+ for (const button of el('list').children) button.setAttribute('aria-pressed', String(visible && button.dataset.nodeId === id));
+ el('selection-status').textContent = id === null ? '' : visible ? 'Selected node is highlighted in the graph.' : 'Selected node is outside the current view. Focus selected node to reveal it.';
+ el('focus-node').hidden = id === null;
+}
+function renderNeighbors() {
+ const id = selectedId();
+ el('neighbors').replaceChildren();
+ if (id === null) return;
+ const query = el('neighbor-search').value.toLocaleLowerCase(), wanted = el('neighbor-direction').value;
+ const relations = incidence.get(id), matches = relations.filter(edge => {
+  const other = edge.source === id ? edge.target : edge.source;
+  return (wanted === 'all' || direction(edge, id) === wanted) && (!query || searchable.get(other).includes(query) || JSON.stringify(edge).toLocaleLowerCase().includes(query));
+ });
+ neighborPageCount = Math.max(1, Math.ceil(matches.length / neighborLimit));
+ neighborPage = Math.min(neighborPage, neighborPageCount - 1);
+ for (const edge of matches.slice(neighborPage * neighborLimit, (neighborPage + 1) * neighborLimit)) {
+  const other = nodeById.get(edge.source === id ? edge.target : edge.source), row = document.createElement('li');
+  const button = textElement('button', `${directionLabels[direction(edge, id)]} ${edge.relation} · ${other.label}`, row);
+  button.type = 'button'; button.dataset.nodeId = other.id; button.addEventListener('click', () => navigate(other.id));
+  button.setAttribute('aria-label', `${button.textContent} · Node ${other.id} · ${source(other)} · Edge ${edge.id}`);
+  textElement('small', `Node: ${other.id} · ${other.kind} · ${source(other)}`, row);
+  textElement('small', `Edge: ${edge.id} · ${edge.directed ? 'directed' : 'undirected'} · ${edge.confidence} · Evidence: ${source(edge)}`, row);
+  const detail = document.createElement('details'); textElement('summary', 'Recorded relation', detail); textElement('pre', JSON.stringify(edge, null, 2), detail); row.append(detail);
+  el('neighbors').append(row);
+ }
+ el('neighbor-status').textContent = `${matches.length} / ${relations.length} relation records · Page ${neighborPage + 1} of ${neighborPageCount} · up to ${neighborLimit} per page. Parallel records and self-loops are retained.`;
+ el('neighbor-previous').disabled = neighborPage === 0; el('neighbor-next').disabled = neighborPage + 1 >= neighborPageCount;
+}
+function renderPanel(focus = false) {
+ const id = selectedId(); el('neighbor-panel').hidden = id === null;
+ const annotation = learningById.get(id); el('learning-detail').hidden = !annotation;
+ el('learning-node').textContent = annotation ? learningText(annotation) : '';
+ if (id !== null) {
+  const node = nodeById.get(id); el('selected').textContent = node.label;
+  const group = groupById.get(id);
+  el('details').textContent = JSON.stringify({node, metrics: metrics.get(id), relation_count: incidence.get(id).length,
+   group: group ? {member_count: group.members.length, membership_records: group.incidences.length} : undefined}, null, 2);
+ } else if (panel.type === 'community') {
+  el('selected').textContent = `Community ${panel.id}: ${communities.get(panel.id).label}`;
+  el('details').textContent = `${panel.count} matching members. Detailed pages show at most ${nodeLimit} nodes and ${edgeLimit} edges. Select a member for evidence; the download contains all records.`;
+ } else if (panel.type === 'metadata') {
+  el('selected').textContent = 'Graph metadata';
+  el('details').textContent = JSON.stringify({schema_version: graph.schema_version, generation: graph.generation, kind: graph.kind, root: graph.root, metadata: graph.metadata, methodology: analysis.methodology, excluded_hubs: analysis.excluded_hubs, noise_filtered_hubs: analysis.noise_filtered_hubs}, null, 2);
+ } else {
+  el('selected').textContent = 'Node details'; el('details').textContent = 'Select a node in the graph or the accessible list below.';
+ }
+ renderNeighbors(); showSelection();
+ if (focus) el('selected').focus();
+}
+function focusNode(id) {
+ if (aggregateView || !visiblePositions.has(id)) {
+  for (const key of filterIds) el(key).value = key === 'mode' ? 'detail' : '';
+  page = Math.floor(nodeIndex.get(id) / nodeLimit); draw();
+ }
+ const [x, y] = visiblePositions.get(id), w = Math.min(fittedView.w, 700), h = w * .8;
+ view = {x: x - w / 2, y: y - h / 2, w, h}; setView(); showSelection();
+}
+function navigate(id) {
+ remember(); panel = {type: 'node', id}; neighborPage = 0;
+ el('neighbor-direction').value = 'all'; el('neighbor-search').value = '';
+ focusNode(id); renderPanel(true);
+}
+function renderLessons() {
+ if (!learning) return;
+ const limit = 16384, text = learning.lessons, pages = Math.max(1, Math.ceil(text.length / limit));
+ lessonPage = Math.max(0, Math.min(lessonPage, pages - 1));
+ let start = lessonPage * limit, end = Math.min(text.length, start + limit);
+ // Keep surrogate pairs on the preceding page instead of displaying half a character.
+ const low = index => text.charCodeAt(index) >= 0xdc00 && text.charCodeAt(index) <= 0xdfff;
+ if (start && low(start)) start++; if (low(end)) end++;
+ el('lessons').textContent = text.slice(start, end);
+ el('lesson-status').textContent = `Text page ${lessonPage + 1} of ${pages} · at most ${limit + 1} UTF-16 code units per page`;
+ el('lesson-previous').disabled = lessonPage === 0; el('lesson-next').disabled = lessonPage + 1 >= pages;
+}
+if (learning) {
+ el('learning-panel').hidden = false;
+ el('learning-summary').textContent = `Explicit observations generated at Unix time ${learning.generated_unix_secs} · ${learningById.size} annotated IDs · matched to this exact exported snapshot; no live freshness check in the viewer.`;
+ const statuses = new Set([...learningById.values()].map(entry => entry.status));
+ const legend = Object.keys(learningColors).filter(status => statuses.has(status));
+ if ([...statuses].some(status => !Object.hasOwn(learningColors, status))) legend.push('other');
+ for (const status of legend) {
+  const item = textElement('span', '', el('learning-legend')), key = textElement('span', '', item);
+  key.className = 'legend-key'; key.style.borderColor = learningColor(status); key.setAttribute('aria-hidden', 'true');
+  item.append(document.createTextNode(status));
+ }
+ renderLessons();
+}
+// Monotone chain, O(k log k) over the bounded visible member sample. Removing
+// collinear interior points also yields a segment or point for degenerate groups.
+function convexHull(points) {
+ const sorted = points.map(point => [...point]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+ const unique = sorted.filter((p, i) => !i || p[0] !== sorted[i - 1][0] || p[1] !== sorted[i - 1][1]);
+ if (unique.length < 3) return unique;
+ const cross = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+ const half = points => { const result = []; for (const point of points) { while (result.length > 1 && cross(result.at(-2), result.at(-1), point) <= 0) result.pop(); result.push(point); } return result; };
+ return half(unique).slice(0, -1).concat(half([...unique].reverse()).slice(0, -1));
+}
+function renderGroups() {
+ el('groups-panel').hidden = !recordedGroups.length; el('groups').replaceChildren();
+ const query = el('group-search').value.toLocaleLowerCase();
+ const matches = recordedGroups.filter(group => !query || searchable.get(group.id).includes(query)).map(group => ({group,
+  visible: aggregateView ? [] : group.members.filter(id => visiblePositions.has(id))}));
+ // Prioritize outlines relevant to the current view, retaining full group search.
+ matches.sort((a, b) => Number(b.visible.length > 0) - Number(a.visible.length > 0) || nodeIndex.get(a.group.id) - nodeIndex.get(b.group.id));
+ groupPageCount = Math.max(1, Math.ceil(matches.length / neighborLimit)); groupPage = Math.min(groupPage, groupPageCount - 1);
+ let remaining = edgeLimit, drawn = 0, sampled = 0;
+ for (const {group, visible} of matches.slice(groupPage * neighborLimit, (groupPage + 1) * neighborLimit)) {
+  const node = nodeById.get(group.id), members = visible.slice(0, remaining);
+  remaining -= members.length; sampled += members.length;
+  const summary = `${members.length} outlined / ${visible.length} visible / ${group.members.length} recorded members · ${group.incidences.length} membership records${members.length < group.members.length ? ' · partial group' : ''}`;
+  if (members.length) {
+   const hull = convexHull(members.map(id => visiblePositions.get(id))), color = `hsl(${metrics.get(group.id).community * 137.508 % 360} 60% 65%)`;
+   const attrs = {class: 'group-hull', 'data-group-id': group.id, 'data-member-count': members.length,
+    fill: color, 'fill-opacity': .08, stroke: color, 'stroke-opacity': .25, 'stroke-width': 48};
+   let shape;
+   if (hull.length === 1) shape = element('circle', {...attrs, cx: hull[0][0], cy: hull[0][1], r: 24, 'stroke-width': 2}, svg);
+   else if (hull.length === 2) shape = element('line', {...attrs, x1: hull[0][0], y1: hull[0][1], x2: hull[1][0], y2: hull[1][1]}, svg);
+   else shape = element('polygon', {...attrs, points: hull.map(point => point.join(',')).join(' ')}, svg);
+   title(shape, `${node.label} · ${summary}`); drawn++;
+  }
+  const row = textElement('li', '', el('groups')), button = textElement('button', `${node.label} · ${group.id} · ${source(node)}`, row);
+  button.type = 'button'; button.dataset.groupId = group.id; button.addEventListener('click', () => navigate(group.id));
+  textElement('p', summary, row);
+ }
+ el('group-status').textContent = `${matches.length} / ${recordedGroups.length} groups · Page ${groupPage + 1} of ${groupPageCount} · ${drawn} outlines · ${sampled} / ${edgeLimit} member samples · at most ${neighborLimit} groups per page${aggregateView ? ' · open a detailed view to see member outlines' : ''}. Hidden or unsampled members do not contribute to outlines.`;
+ el('group-previous').disabled = groupPage === 0; el('group-next').disabled = groupPage + 1 >= groupPageCount;
+}
+// A breadth-first spanning forest gives each component hop rings around its
+// highest-degree hub. Leaf-weighted sectors keep branches together. Only the
+// bounded, drawn graph participates; no all-pairs forces or background solver.
+function topologyLayout(nodes, edges) {
+ const adjacent = new Map(nodes.map(n => [n.id, new Set()]));
+ for (const edge of edges) if (edge.source !== edge.target) {
+  adjacent.get(edge.source).add(edge.target); adjacent.get(edge.target).add(edge.source);
+ }
+ const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+ const roots = nodes.map(n => n.id).sort((a, b) => adjacent.get(b).size - adjacent.get(a).size || compare(a, b));
+ const visited = new Set(), components = [];
+ for (const root of roots) {
+  if (visited.has(root)) continue;
+  const queue = [root], depth = new Map([[root, 0]]), children = new Map(), weights = new Map(); visited.add(root);
+  for (let i = 0; i < queue.length; i++) {
+   const id = queue[i], next = []; children.set(id, next);
+   for (const neighbor of [...adjacent.get(id)].sort(compare)) if (!visited.has(neighbor)) {
+    visited.add(neighbor); queue.push(neighbor); next.push(neighbor); depth.set(neighbor, depth.get(id) + 1);
+   }
+  }
+  for (let i = queue.length - 1; i >= 0; i--) {
+   const id = queue[i]; weights.set(id, Math.max(1, children.get(id).reduce((sum, child) => sum + weights.get(child), 0)));
+  }
+  const sectors = new Map([[root, [0, Math.PI * 2]]]), points = new Map(), step = Math.max(90, weights.get(root) * 8);
+  let minX = 0, maxX = 0, minY = 0, maxY = 0;
+  for (const id of queue) {
+   const [start, width] = sectors.get(id), angle = start + width / 2, radius = depth.get(id) * step;
+   const x = radius * Math.cos(angle), y = radius * Math.sin(angle); points.set(id, [x, y]);
+   minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+   let cursor = start;
+   for (const child of children.get(id)) {
+    const span = width * weights.get(child) / weights.get(id); sectors.set(child, [cursor, span]); cursor += span;
+   }
+  }
+  components.push({points, minX, minY, w: maxX - minX + 400, h: maxY - minY + 240});
+ }
+ const shelfWidth = Math.max(1000, Math.sqrt(components.reduce((area, c) => area + c.w * c.h, 0)) * 1.25);
+ const positions = new Map(); let x = 0, y = 0, rowHeight = 0, width = 0;
+ for (const c of components) {
+  if (x && x + c.w > shelfWidth) { y += rowHeight; x = 0; rowHeight = 0; }
+  for (const [id, [u, v]] of c.points) positions.set(id, [x + 120 + u - c.minX, y + 120 + v - c.minY]);
+  x += c.w; width = Math.max(width, x); rowHeight = Math.max(rowHeight, c.h);
+ }
+ const w = Math.max(500, width), h = Math.max(400, y + rowHeight);
+ return {positions, view: {x: 0, y: 0, w, h}};
+}
+function draw() {
+ const query = el('search').value.toLocaleLowerCase(), kind = el('kind').value, community = el('community').value, relation = el('relation').value;
+ const related = relation ? new Set(graph.edges.filter(e => e.relation === relation).flatMap(e => [e.source, e.target])) : null;
+ const matched = graph.nodes.filter(n => (!query || searchable.get(n.id).includes(query)) && (!kind || n.kind === kind) && (community === '' || String(metrics.get(n.id).community) === community) && (!related || related.has(n.id)));
+ const matchedIds = new Set(matched.map(n => n.id)), matchedEdges = graph.edges.filter(e => matchedIds.has(e.source) && matchedIds.has(e.target) && (!relation || e.relation === relation));
+ const aggregate = el('mode').value === 'aggregate' || (el('mode').value === 'auto' && matched.length > nodeLimit);
+ let allNodes, allEdges;
+ if (aggregate) {
+  const groups = new Map();
+  for (const node of matched) {
+   const id = metrics.get(node.id).community;
+   if (!groups.has(id)) groups.set(id, {id: String(id), community: id, label: communities.get(id).label, count: 0});
+   groups.get(id).count++;
+  }
+  allNodes = [...groups.values()].sort((a, b) => a.community - b.community);
+  const links = new Map();
+  for (const edge of matchedEdges) {
+   let a = metrics.get(edge.source).community, b = metrics.get(edge.target).community;
+   if (!edge.directed && a > b) [a, b] = [b, a];
+   const key = JSON.stringify([a, b, edge.directed, edge.relation]);
+   if (!links.has(key)) links.set(key, {id: key, source: String(a), target: String(b), directed: edge.directed, relation: edge.relation, count: 0});
+   links.get(key).count++;
+  }
+  allEdges = [...links.values()];
+ } else { allNodes = matched.map(n => ({...n, community: metrics.get(n.id).community, count: 1})); allEdges = matchedEdges; }
+ pageCount = Math.max(1, Math.ceil(allNodes.length / nodeLimit)); page = Math.min(page, pageCount - 1);
+ const nodes = allNodes.slice(page * nodeLimit, (page + 1) * nodeLimit), ids = new Set(nodes.map(n => n.id));
+ const pageEdges = allEdges.filter(e => ids.has(e.source) && ids.has(e.target)), edges = pageEdges.slice(0, edgeLimit);
+ const nodeRadius = aggregate ? 18 : 12;
+ const layout = topologyLayout(nodes, edges), positions = layout.positions;
+ visiblePositions = positions; aggregateView = aggregate; fittedView = layout.view; view = {...fittedView};
+ svg.replaceChildren(); el('list').replaceChildren();
+ const defs = element('defs', {}, svg), marker = element('marker', {id: 'arrow', viewBox: '0 0 10 10', refX: 10, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse'}, defs);
+ element('path', {d: 'M0 0 L10 5 L0 10 z', fill: '#a6b5cf'}, marker);
+ renderGroups();
+ const order = new Map(nodes.map((n, i) => [n.id, i])), pairs = new Map(), totals = new Map();
+ const pairKey = edge => { const a = order.get(edge.source), b = order.get(edge.target); return JSON.stringify([Math.min(a, b), Math.max(a, b)]); };
+ for (const edge of edges) { const key = pairKey(edge); totals.set(key, (totals.get(key) || 0) + 1); }
+ for (const edge of edges) {
+  const [x, y] = positions.get(edge.source), [u, v] = positions.get(edge.target), a = order.get(edge.source), b = order.get(edge.target);
+  const key = pairKey(edge), ordinal = (pairs.get(key) || 0) + 1, total = totals.get(key); pairs.set(key, ordinal);
+  const bend = total === 1 ? 18 : -90 + 180 * ordinal / (total + 1); let path;
+  if (a === b) { const loop = 25 + 65 * ordinal / (total + 1); path = `M${x} ${y - nodeRadius} C${x + loop} ${y - loop * 2} ${x - loop} ${y - loop * 2} ${x - 2} ${y - nodeRadius - 2}`; }
+  else {
+   const len = Math.hypot(u - x, v - y), sign = a < b ? 1 : -1;
+   path = `M${x} ${y} Q${(x + u) / 2 - (v - y) / len * bend * sign} ${(y + v) / 2 + (u - x) / len * bend * sign} ${u - (u - x) / len * (nodeRadius + 2)} ${v - (v - y) / len * (nodeRadius + 2)}`;
+  }
+  const line = element('path', {d: path, class: 'edge', 'data-source': edge.source, 'data-target': edge.target}, svg);
+  if (edge.directed) line.setAttribute('marker-end', 'url(#arrow)');
+  title(line, `${edge.relation} · ${edge.source} ${edge.directed ? '→' : '↔'} ${edge.target} · ${aggregate ? edge.count + ' records' : edge.id}`);
+ }
+ for (const node of nodes) {
+  const [x, y] = positions.get(node.id), group = element('g', {class: 'node', transform: `translate(${x} ${y})`, 'data-node-id': node.id}, svg), color = `hsl(${node.community * 137.508 % 360} 60% 55%)`;
+  const label = aggregate ? `${node.label} (${node.count} nodes)` : node.label;
+  const activate = () => {
+   if (aggregate) {
+    remember(); el('community').value = String(node.community); el('mode').value = 'detail'; page = 0;
+    panel = {type: 'community', id: node.community, count: node.count}; draw(); renderPanel(true);
+   } else navigate(node.id);
+  };
+  element('circle', {r: nodeRadius, fill: color}, group);
+  const annotation = aggregate ? null : learningById.get(node.id);
+  if (annotation) {
+   const ring = element('circle', {r: nodeRadius + 6, fill: 'none', class: 'learning-ring', 'data-learning-status': annotation.status,
+    style: `stroke:${learningColor(annotation.status)};stroke-width:4`, 'stroke-dasharray': learningDashed(annotation) ? '4 4' : 'none'}, group);
+   title(ring, learningText(annotation));
+  }
+  const text = element('text', {x: 22, y: 4}, group), characters = Array.from(label);
+  text.textContent = characters.slice(0, 28).join('') + (characters.length > 28 ? '…' : '');
+  title(group, aggregate ? label : `${node.label} · ${source(node)}${annotation ? '\nWork memory: ' + learningText(annotation) : ''}`); group.addEventListener('click', activate);
+  const button = textElement('button', aggregate ? `Community ${node.community}: ${label}` : `${node.label} · ${node.kind} · ${source(node)}${annotation ? ' · Work memory: ' + annotation.status : ''}`, el('list'));
+  button.type = 'button'; button.dataset.nodeId = node.id; button.addEventListener('click', activate);
+ }
+ el('status').textContent = `${matched.length} / ${graph.nodes.length} matching nodes · ${matchedEdges.length} / ${graph.edges.length} matching edges · ${aggregate ? 'Community summary' : 'Detailed view'}: ${nodes.length} ${aggregate ? 'communities' : 'nodes'}, ${edges.length} / ${allEdges.length} drawn ${aggregate ? 'relation groups' : 'edges'} · limits ${nodeLimit} nodes / ${edgeLimit} edges · topology uses drawn edges only · full data in download`;
+ el('page-status').textContent = ` Page ${page + 1} of ${pageCount} `; el('previous').disabled = page === 0; el('next').disabled = page + 1 >= pageCount;
+ setView(); showSelection();
+}
+for (const id of filterIds) el(id).addEventListener('input', () => { page = 0; draw(); });
+el('previous').addEventListener('click', () => { if (page > 0) { page--; draw(); } });
+el('next').addEventListener('click', () => { if (page + 1 < pageCount) { page++; draw(); } });
+for (const id of ['neighbor-direction', 'neighbor-search']) el(id).addEventListener('input', () => { neighborPage = 0; renderNeighbors(); });
+el('group-search').addEventListener('input', () => { groupPage = 0; draw(); });
+el('group-previous').addEventListener('click', () => { if (groupPage > 0) { groupPage--; draw(); } });
+el('group-next').addEventListener('click', () => { if (groupPage + 1 < groupPageCount) { groupPage++; draw(); } });
+el('lesson-previous').addEventListener('click', () => { lessonPage--; renderLessons(); });
+el('lesson-next').addEventListener('click', () => { lessonPage++; renderLessons(); });
+el('neighbor-previous').addEventListener('click', () => { if (neighborPage > 0) { neighborPage--; renderNeighbors(); } });
+el('neighbor-next').addEventListener('click', () => { if (neighborPage + 1 < neighborPageCount) { neighborPage++; renderNeighbors(); } });
+el('focus-node').addEventListener('click', () => { if (selectedId() !== null) { remember(); focusNode(selectedId()); el('selected').focus(); } });
+el('back').addEventListener('click', () => {
+ if (!navigationHistory.length) return;
+ const previous = navigationHistory.pop(); filterIds.forEach((id, i) => el(id).value = previous.filters[i]);
+ page = previous.page; panel = previous.panel; neighborPage = previous.neighborPage;
+ groupPage = previous.groupPage; el('group-search').value = previous.groupSearch;
+ el('neighbor-direction').value = previous.neighborDirection; el('neighbor-search').value = previous.neighborSearch;
+ draw(); view = previous.view; setView(); renderPanel(true); el('back').disabled = !navigationHistory.length;
+});
+el('metadata').addEventListener('click', () => { remember(); panel = {type: 'metadata'}; renderPanel(true); });
+el('reset').addEventListener('click', () => {
+ remember(); for (const id of filterIds) el(id).value = id === 'mode' ? 'auto' : '';
+ page = 0; groupPage = 0; el('group-search').value = ''; panel = {type: 'empty'}; draw(); renderPanel();
+});
+el('fit').addEventListener('click', () => { view = {...fittedView}; setView(); });
+function zoom(factor, x = .5, y = .5) {
+ if (view.w * factor < 20 || view.w * factor > Math.max(100000, fittedView.w * 4)) return;
+ view.x += view.w * x * (1 - factor); view.y += view.h * y * (1 - factor); view.w *= factor; view.h *= factor; setView();
+}
+el('zoom-in').addEventListener('click', () => zoom(1 / 1.4)); el('zoom-out').addEventListener('click', () => zoom(1.4));
+svg.addEventListener('wheel', event => {
+ event.preventDefault(); const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(svg.getScreenCTM().inverse());
+ zoom(event.deltaY > 0 ? 1.15 : 1 / 1.15, (point.x - view.x) / view.w, (point.y - view.y) / view.h);
+}, {passive: false});
+let dragging = null;
+svg.addEventListener('pointerdown', event => { if (event.target.closest('.node')) return; dragging = {x: event.clientX, y: event.clientY, vx: view.x, vy: view.y, scale: svg.getScreenCTM().a}; svg.setPointerCapture(event.pointerId); });
+svg.addEventListener('pointermove', event => {
+ if (!dragging) return;
+ view.x = dragging.vx - (event.clientX - dragging.x) / dragging.scale; view.y = dragging.vy - (event.clientY - dragging.y) / dragging.scale; setView();
+});
+for (const type of ['pointerup', 'pointercancel']) svg.addEventListener(type, () => dragging = null);
+el('download').addEventListener('click', () => { const url = URL.createObjectURL(new Blob([JSON.stringify(graph, null, 2)], {type: 'application/json'})), a = document.createElement('a'); a.href = url; a.download = 'graf-snapshot.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); });
+draw();
+</script></body></html>

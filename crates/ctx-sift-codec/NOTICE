@@ -1,4 +1,4 @@
-ctx-output-codec contains the unmodified Sift codec and tokenizer library.
+ctx-sift-codec contains the unmodified Sift codec and tokenizer library.
 
 Public source: https://github.com/ctxrs/sift
 Revision: 4d987c2038882d720acf704b321dd3f62f2a6f78

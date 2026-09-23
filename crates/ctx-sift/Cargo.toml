@@ -1,7 +1,7 @@
 [package]
-name = "ctx-output"
+name = "ctx-sift"
 version.workspace = true
-description = "Embedded command output compaction and recovery for ctx"
+description = "Embedded Sift command output compaction and recovery for ctx"
 edition = "2024"
 license = "MIT"
 repository.workspace = true

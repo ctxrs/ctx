@@ -1,0 +1,92 @@
+[package]
+name = "ctx-graph-core"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Local graph engine for the ctx CLI"
+license = "Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["code-graph", "code-search", "mcp", "knowledge-graph"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "ctx_graph_core"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+network_partitions = { git = "https://github.com/microsoft/graspologic-native", rev = "773181488b4e5b81925e302b972b294fd51f61a4", default-features = false }
+rand = "0.10"
+base64 = "0.22"
+axum = "0.8"
+futures-util = { version = "0.3", features = ["sink"] }
+blake3 = "1"
+clap = { version = "4.6", features = ["derive"] }
+ignore = "0.4.33"
+globset = "0.4"
+jsonc-parser = { version = "0.29", features = ["serde"] }
+rmcp = { version = "3.4", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "net", "signal", "time"] }
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tempfile = "3"
+toml_edit = "0.23"
+tree-sitter = "0.27"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-go = "0.25"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-cuda = "=0.21.2"
+tree-sitter-java = "0.23.5"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter-swift = "0.7.3"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-php = "0.24.2"
+tree-sitter-lua = "0.5.0"
+tree-sitter-luau = "1.2.0"
+tree-sitter-bash = "0.25.1"
+tree-sitter-powershell = "0.26.4"
+tree-sitter-elixir = "0.3.5"
+tree-sitter-sequel = "0.3.11"
+tree-sitter-hcl = "1.1.0"
+tree-sitter-scala = "0.26.2"
+tree-sitter-dart = "0.2.0"
+tree-sitter-objc = "3.0.2"
+tree-sitter-julia = "0.23.1"
+tree-sitter-fortran = "0.6.0"
+tree-sitter-ocaml = "0.26.0"
+tree-sitter-pascal = "0.10.2"
+tree-sitter-commonlisp = "0.4.1"
+tree-sitter-verilog = "1.0.3"
+tree-sitter-zig = "1.1.2"
+tree-sitter-groovy = "0.1.2"
+tree-sitter-dm = "0.25.4"
+tree-sitter-sfapex = "3.0.1"
+unicode-normalization = "0.1.25"
+pulldown-cmark = "0.13"
+scraper = "0.27"
+serde_yaml_ng = "0.10"
+lopdf = { version = "0.45", default-features = false }
+png = "0.18.1"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+quick-xml = "0.41"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use graf::{
+use ctx_graph_core::{
     model::{Direction, QueryOptions},
     query::{ImpactOptions, SearchOptions},
     store::Store,

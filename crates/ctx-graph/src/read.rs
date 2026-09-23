@@ -14,8 +14,8 @@ pub(crate) enum ReadCommand {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub(crate) enum Output {
-    Search(graf::query::SearchResult),
-    SearchPath(graf::query::PathSearchResult),
+    Search(ctx_graph_core::query::SearchResult),
+    SearchPath(ctx_graph_core::query::PathSearchResult),
     Graph(GraphResult),
     Path(PathResult),
     Stats(Stats),
@@ -110,7 +110,7 @@ pub(crate) fn read(db: &Path, command: ReadCommand) -> Result<Output> {
             nonempty(&a.symbol, "symbol")?;
             let result = store.impact_extended(
                 &a.symbol,
-                &graf::query::ImpactOptions {
+                &ctx_graph_core::query::ImpactOptions {
                     search: a.navigation.options(options(
                         a.depth,
                         a.limit,

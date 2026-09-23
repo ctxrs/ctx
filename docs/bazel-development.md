@@ -36,14 +36,15 @@ The maintained compiler remains Rust 1.97.1.
 ## Engine ownership
 
 The workspace owns the unified CLI, installation, managed skill, MCP routing,
-and the `ctx-graph` / `ctx-output` adapters. Change these here rather than
+and the `ctx-graph` / `ctx-sift` adapters. Change these here rather than
 recopying a standalone CLI or restoring its installer.
 
-Graph models, indexing, storage and analysis come from the pinned public Graf
-library. Engine fixes belong in that library, followed by a reviewed dependency
-update here. `ctx-graph` owns command translation and ctx-specific integration.
+Graph models, indexing, storage and analysis live in the local `ctx-graph-core`
+crate. It preserves the Graf/Graphify storage and migration formats where those
+are user data, while `ctx-graph` owns command translation and ctx-specific
+integration.
 
-`ctx-output` and `ctx-output-codec` are maintained workspace code, originally
+`ctx-sift` and `ctx-sift-codec` are maintained workspace code, originally
 adapted from the Sift revision recorded in their notices. Fix their unified
 behavior here; the recorded revision is provenance, not a second source tree
 to keep synchronized. Preserve the upstream notices when changing this code.

@@ -24,8 +24,8 @@ pub(crate) fn export_graph(
             ),
             "--memory-dir is supported by HTML, Markdown, wiki, and Obsidian reports"
         );
-        options.learning = Some(graf::memory::learning_overlay(
-            &graf::memory::ReflectArgs {
+        options.learning = Some(ctx_graph_core::memory::learning_overlay(
+            &ctx_graph_core::memory::ReflectArgs {
                 memory_dir: memory_dir.clone(),
                 out: PathBuf::new(),
                 half_life_days: 30.0,
@@ -64,7 +64,7 @@ pub(crate) fn export_graph(
         {
             let previous = match format {
                 Format::SnapshotJson => snapshot::read(output),
-                Format::GraphifyJson => graf::import::read_graphify_export(output),
+                Format::GraphifyJson => ctx_graph_core::import::read_graphify_export(output),
                 _ => unreachable!(),
             }
             .context(
@@ -122,7 +122,7 @@ pub(crate) fn report_context(
             .root
             .as_deref()
             .context("native source root is unavailable")
-            .and_then(|root| graf::index::check_update(Path::new(root), path))
+            .and_then(|root| ctx_graph_core::index::check_update(Path::new(root), path))
         {
             Ok(result) => {
                 ensure!(

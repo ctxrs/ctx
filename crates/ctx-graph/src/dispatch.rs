@@ -12,7 +12,7 @@ pub(crate) fn native_root(db: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn retryable_update(error: &anyhow::Error) -> bool {
-    error.is::<graf::store::StaleStore>() || error.chain().any(|cause| {
+    error.is::<ctx_graph_core::store::StaleStore>() || error.chain().any(|cause| {
         matches!(cause.downcast_ref::<rusqlite::Error>(), Some(rusqlite::Error::SqliteFailure(code, _)) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
     })
 }
@@ -149,7 +149,7 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
                     .db
                     .clone()
                     .unwrap_or_else(|| output.join(".graf/index.db"));
-                Some(graf::index::run(&output, &db)?)
+                Some(ctx_graph_core::index::run(&output, &db)?)
             } else {
                 None
             };
@@ -250,11 +250,11 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
                     "add requires this project's native graph"
                 );
             }
-            let capture = graf::ingest::CaptureMetadata {
+            let capture = ctx_graph_core::ingest::CaptureMetadata {
                 contributor,
                 captured_at_unix_secs,
             };
-            let (record, report) = graf::sources::add_and_index(
+            let (record, report) = ctx_graph_core::sources::add_and_index(
                 &root,
                 &db,
                 &source,
@@ -353,7 +353,9 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
                     },
                     refresh,
                 ),
-                ImportFormat::Graf { file, refresh } => (graf::snapshot::read(&file)?, refresh),
+                ImportFormat::Graf { file, refresh } => {
+                    (ctx_graph_core::snapshot::read(&file)?, refresh)
+                }
             };
             if let Some(parent) = db.parent().filter(|p| !p.as_os_str().is_empty()) {
                 std::fs::create_dir_all(parent)?;

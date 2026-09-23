@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use ctx_graph::graf::store::Store;
+use ctx_graph::ctx_graph_core::store::Store;
 use serde_json::{json, Value};
 
 use crate::ui::{

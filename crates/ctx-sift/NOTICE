@@ -1,4 +1,4 @@
-ctx-output adapts selected command adapters from Sift:
+ctx-sift adapts selected command adapters from Sift:
 https://github.com/ctxrs/sift
 Revision: 4d987c2038882d720acf704b321dd3f62f2a6f78
 
@@ -9,7 +9,7 @@ Changes: library entry point, explicit output routing, ctx self-invocation,
 configuration namespace, module separation, wrapper-aware completion hooks,
 and adapted behavioral tests.
 The unchanged codec/tokenizer source from that revision is maintained in the
-ctx-output-codec workspace crate, which records its source and license notices.
+ctx-sift-codec workspace crate, which records its source and license notices.
 
 MIT License
 

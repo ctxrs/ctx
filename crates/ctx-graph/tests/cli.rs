@@ -262,11 +262,11 @@ fn compact_reclaims_native_space_without_source_access_or_graph_changes() {
         .collect::<String>();
     fs::write(source.join("discard.py"), discarded).unwrap();
     let db = dir.path().join("index.db");
-    graf::index::run(&source, &db).unwrap();
+    ctx_graph_core::index::run(&source, &db).unwrap();
     fs::remove_file(source.join("discard.py")).unwrap();
-    graf::index::run(&source, &db).unwrap();
+    ctx_graph_core::index::run(&source, &db).unwrap();
     let before = serde_json::to_value(
-        graf::store::Store::open_read_only(&db)
+        ctx_graph_core::store::Store::open_read_only(&db)
             .unwrap()
             .snapshot()
             .unwrap(),
@@ -306,7 +306,7 @@ fn compact_reclaims_native_space_without_source_access_or_graph_changes() {
             .contains("Compacted database:")
     );
     let after = serde_json::to_value(
-        graf::store::Store::open_read_only(&db)
+        ctx_graph_core::store::Store::open_read_only(&db)
             .unwrap()
             .snapshot()
             .unwrap(),
@@ -370,8 +370,8 @@ fn learning_cli_fixture() -> (TempDir, String) {
     )
     .unwrap();
     let db = dir.path().join("learning.db");
-    graf::index::run(&dir.path().join("source"), &db).unwrap();
-    let graph = graf::store::Store::open_read_only(&db)
+    ctx_graph_core::index::run(&dir.path().join("source"), &db).unwrap();
+    let graph = ctx_graph_core::store::Store::open_read_only(&db)
         .unwrap()
         .snapshot()
         .unwrap();

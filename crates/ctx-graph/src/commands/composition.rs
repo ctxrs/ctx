@@ -85,7 +85,7 @@ pub(crate) fn merge(args: &MergeArgs, db: Option<&Path>, json_output: bool) -> R
         0
     };
     let reference_links = if args.link_references {
-        graf::composition::link_references(&mut graph)?
+        ctx_graph_core::composition::link_references(&mut graph)?
     } else {
         0
     };
@@ -277,7 +277,7 @@ pub(crate) fn global(args: &GlobalArgs, db: Option<&Path>, json_output: bool) ->
     // generation makes refresh_import reject a concurrent registry update.
     let mut graph = compose(&registry.entries, &path)?;
     let package_links = link_packages(&mut graph);
-    let reference_links = graf::composition::link_references(&mut graph)?;
+    let reference_links = ctx_graph_core::composition::link_references(&mut graph)?;
     graph.metadata["graf_registry"] = serde_json::to_value(&registry)?;
     let fingerprint = aggregate_fingerprint(&graph)?;
     if let Some(store) = &store

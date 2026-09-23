@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand, ValueEnum};
-use graf::{
+use ctx_graph_core::{
     analysis::{self, AnalysisOptions},
     export::{self, ExportFormat, ExportOptions},
     model::{Direction, Edge, GraphSnapshot, ImportedGraph, QueryOptions, SCHEMA_VERSION, Stats},
@@ -39,24 +39,24 @@ pub fn run(args: &Command, db: Option<&Path>, json_output: bool) -> Result<()> {
     match args {
         Command::SaveResult(args) => {
             let graph = optional_graph(args.snapshot.as_deref(), db)?;
-            let path = graf::memory::save_result(&args.input, graph.as_ref())?;
+            let path = ctx_graph_core::memory::save_result(&args.input, graph.as_ref())?;
             print(&json!({"saved":path}), json_output)
         }
         Command::Reflect(args) => {
             let graph = optional_graph(args.snapshot.as_deref(), db)?;
-            let result = graf::memory::reflect(&args.input, graph.as_ref())?;
+            let result = ctx_graph_core::memory::reflect(&args.input, graph.as_ref())?;
             print(&serde_json::to_value(result)?, json_output)
         }
         Command::Prs(args) => {
             let graph = optional_graph(args.snapshot.as_deref(), db)?;
-            let report = graf::prs::run(&args.input, graph.as_ref())?;
+            let report = ctx_graph_core::prs::run(&args.input, graph.as_ref())?;
             if json_output {
                 print(&report, true)
             } else {
                 writeln!(
                     std::io::stdout().lock(),
                     "{}",
-                    crate::human(&graf::prs::format_text(&report))
+                    crate::human(&ctx_graph_core::prs::format_text(&report))
                 )?;
                 Ok(())
             }

@@ -1,4 +1,4 @@
-//! Graph commands backed by the unchanged public Graf engine.
+//! Graph commands backed by the local graph engine.
 use std::{
     ffi::OsString,
     io::{self, Write},
@@ -7,9 +7,9 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use clap::{CommandFactory, FromArgMatches};
-use graf::{hook_guard, import, index, model::*, store::Store};
+use ctx_graph_core::{hook_guard, import, index, model::*, store::Store};
 
-pub use graf;
+pub use ctx_graph_core;
 
 mod agent_setup;
 mod cli;
@@ -71,8 +71,8 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
 pub fn search(
     db: &Path,
     text: &str,
-    options: &graf::query::SearchOptions,
-) -> Result<graf::query::SearchResult> {
+    options: &ctx_graph_core::query::SearchOptions,
+) -> Result<ctx_graph_core::query::SearchResult> {
     Store::open_read_only(db)?.query_extended(text, options)
 }
 

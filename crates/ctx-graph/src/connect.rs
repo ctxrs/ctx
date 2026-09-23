@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
-use graf::{export, languages::configs, sources, store::Store};
+use ctx_graph_core::{export, languages::configs, sources, store::Store};
 use serde_json::json;
 
 #[derive(Debug, Subcommand)]

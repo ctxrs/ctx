@@ -759,7 +759,7 @@ fn wrapper_mentions_changed_guards_and_unsupported_syntax_are_not_sift_usage() {
 }
 
 #[test]
-fn ctx_output_commands_are_distinct_from_history_and_graph() {
+fn ctx_sift_commands_are_distinct_from_history_and_graph() {
     let sandbox = Sandbox::new();
     let output_commands = [
         "ctx run -- git status",

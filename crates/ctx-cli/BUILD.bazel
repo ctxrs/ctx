@@ -79,9 +79,10 @@ RELEASE_BUILD_RUSTC_ENV = select({
 })
 
 CTX_CLI_DEPS = [
+    "//crates/ctx-graph-core:lib",
     "//crates/ctx-graph:lib",
-    "//crates/ctx-output:lib",
-    "//crates/ctx-output-codec:lib",
+    "//crates/ctx-sift:lib",
+    "//crates/ctx-sift-codec:lib",
     "//crates/ctx-agent-application:lib",
     "//crates/ctx-attribution-model:lib",
     "//crates/ctx-attribution:lib",
@@ -106,9 +107,10 @@ CTX_CLI_DEPS = [
 ]
 
 CTX_CLI_TEST_DEPS = [
+    "//crates/ctx-graph-core:lib",
     "//crates/ctx-graph:lib",
-    "//crates/ctx-output:lib",
-    "//crates/ctx-output-codec:lib",
+    "//crates/ctx-sift:lib",
+    "//crates/ctx-sift-codec:lib",
     "//crates/ctx-attribution-model:lib",
     "//crates/ctx-attribution:lib",
     "//crates/ctx-history-snapshot-reader:lib",
@@ -135,9 +137,10 @@ CTX_CLI_TEST_DEPS = [
 ]
 
 CTX_CLI_QUALIFICATION_DEPS = [
+    "//crates/ctx-graph-core:lib",
     "//crates/ctx-graph:lib",
-    "//crates/ctx-output:lib",
-    "//crates/ctx-output-codec:lib",
+    "//crates/ctx-sift:lib",
+    "//crates/ctx-sift-codec:lib",
     "//crates/ctx-agent-application:lib",
     "//crates/ctx-attribution-model:lib",
     "//crates/ctx-attribution:lib",

@@ -28,7 +28,7 @@ cargo_build_script(
     deps = all_crate_deps(build = True) + crate_deps(["bpe-openai"]),
     proc_macro_deps = all_crate_deps(build_proc_macro = True),
     rustc_env_files = [":cargo_toml_env_vars"],
-    pkg_name = "ctx-output-codec",
+    pkg_name = "ctx-sift-codec",
 )
 
 rust_library(

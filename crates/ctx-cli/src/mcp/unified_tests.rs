@@ -2,7 +2,7 @@ use std::{fs, io::Cursor, path::Path, time::Duration};
 
 use ctx_agent_application::mcp::{serve_stdio, McpTelemetry, McpUsagePort, ProductIdentity};
 use ctx_agent_integrations::{mcp::McpToolKind, tool_backend::ToolUsageFacts};
-use graf::{
+use ctx_graph_core::{
     model::{Edge, ImportedGraph, Node},
     store::Store,
 };

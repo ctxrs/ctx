@@ -63,7 +63,10 @@ pub(crate) fn print_graph(out: &mut impl Write, graph: &GraphResult) -> io::Resu
 }
 
 /// Write the native human-readable graph search result.
-pub fn write_search(out: &mut impl Write, result: &graf::query::SearchResult) -> io::Result<()> {
+pub fn write_search(
+    out: &mut impl Write,
+    result: &ctx_graph_core::query::SearchResult,
+) -> io::Result<()> {
     print_graph(out, &result.graph)?;
     writeln!(out, "Estimated JSON tokens: {}", result.estimated_tokens)?;
     for reason in &result.truncation_reasons {
@@ -182,7 +185,7 @@ pub(crate) fn learning_annotations(
     snapshot: Option<&GraphSnapshot>,
     token_budget: Option<usize>,
 ) -> serde_json::Value {
-    use graf::memory::{ReflectArgs, learning_overlay};
+    use ctx_graph_core::memory::{ReflectArgs, learning_overlay};
     use serde_json::json;
 
     let Some(snapshot) = snapshot else {

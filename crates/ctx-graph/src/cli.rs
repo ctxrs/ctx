@@ -254,13 +254,13 @@ impl NavigationArgs {
             || self.induced_edges
             || self.infer_context
     }
-    pub(crate) fn options(self, graph: QueryOptions) -> graf::query::SearchOptions {
-        graf::query::SearchOptions {
+    pub(crate) fn options(self, graph: QueryOptions) -> ctx_graph_core::query::SearchOptions {
+        ctx_graph_core::query::SearchOptions {
             graph,
             traversal: if self.dfs {
-                graf::query::Traversal::Dfs
+                ctx_graph_core::query::Traversal::Dfs
             } else {
-                graf::query::Traversal::Bfs
+                ctx_graph_core::query::Traversal::Bfs
             },
             contexts: self.context,
             files: self.file,

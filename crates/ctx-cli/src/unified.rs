@@ -151,12 +151,12 @@ fn run_engine(name: &str, arguments: &[OsString]) -> i32 {
         return run_sift(arguments);
     }
     let prefix = (!matches!(name, "output" | "sift")).then(|| OsString::from(name));
-    ctx_output::run(prefix.into_iter().chain(arguments.iter().cloned()))
+    ctx_sift::run(prefix.into_iter().chain(arguments.iter().cloned()))
 }
 
 fn run_sift(arguments: &[OsString]) -> i32 {
     let Some(first) = arguments.first().and_then(|argument| argument.to_str()) else {
-        return ctx_output::run([OsString::from("--help")]);
+        return ctx_sift::run([OsString::from("--help")]);
     };
     if matches!(
         first,
@@ -182,7 +182,7 @@ fn run_sift(arguments: &[OsString]) -> i32 {
             | "restore"
             | "recall"
     ) {
-        return ctx_output::run(arguments.iter().cloned());
+        return ctx_sift::run(arguments.iter().cloned());
     }
     let mut forwarded = vec![OsString::from("run"), OsString::from("--capture")];
     if first == "--" {
@@ -194,7 +194,7 @@ fn run_sift(arguments: &[OsString]) -> i32 {
     } else {
         forwarded.extend(arguments.iter().cloned());
     }
-    ctx_output::run(forwarded)
+    ctx_sift::run(forwarded)
 }
 
 #[cfg(test)]

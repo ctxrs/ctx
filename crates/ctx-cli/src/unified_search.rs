@@ -185,7 +185,7 @@ pub(crate) fn run(
 }
 
 fn graph_query(query: &str, limit: usize, explicit: Option<&Path>) -> Result<Value> {
-    use ctx_graph::graf::{model::QueryOptions, query::SearchOptions, store::Store};
+    use ctx_graph::ctx_graph_core::{model::QueryOptions, query::SearchOptions, store::Store};
     let db = ctx_graph::discover_database(explicit)?;
     let store = Store::open_read_only(&db)?;
     let options = SearchOptions {
@@ -239,7 +239,7 @@ fn render_scope(
                 let document = ctx_history_cli::render_snapshot_search(result, verbose, context);
                 write!(out, "{}", document.render(context))?;
             } else {
-                let search: ctx_graph::graf::query::SearchResult =
+                let search: ctx_graph::ctx_graph_core::query::SearchResult =
                     serde_json::from_value(result.clone())?;
                 ctx_graph::write_search(&mut out, &search)?;
             }

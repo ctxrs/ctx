@@ -18,9 +18,10 @@ members = [
     "crates/ctx-daemon-application",
     "crates/ctx-daemon-service",
     "crates/ctx-daemon-runtime",
+    "crates/ctx-graph-core",
     "crates/ctx-graph",
-    "crates/ctx-output",
-    "crates/ctx-output-codec",
+    "crates/ctx-sift",
+    "crates/ctx-sift-codec",
     "crates/ctx-managed-pair-engine",
     "crates/ctx-upgrade-engine",
     "crates/ctx-history-capture",
@@ -111,7 +112,7 @@ directories = "5.0"
 dirs = "6.0"
 fs2 = "0.4.3"
 fst = "0.4"
-graf = { package = "graf-cli", git = "https://github.com/ctxrs/graf", rev = "b7d179d950710981383814183601024537d9a440" }
+ctx_graph_core = { package = "ctx-graph-core", path = "crates/ctx-graph-core" }
 hex = "0.4"
 json5 = { version = "0.4", default-features = false }
 jsonc-parser = { version = "0.33", default-features = false, features = ["serde", "serde_json"] }
@@ -138,7 +139,7 @@ serde_json = { version = "=1.0.150", features = ["raw_value"] }
 serde_yaml = { version = "0.9", default-features = false }
 semver = "1.0"
 sha2 = "0.10"
-sift = { package = "ctx-output-codec", path = "crates/ctx-output-codec" }
+sift = { package = "ctx-sift-codec", path = "crates/ctx-sift-codec" }
 supports-unicode = "3.0"
 tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "columnar-zstd-compression"] }
 tempfile = "3.10"

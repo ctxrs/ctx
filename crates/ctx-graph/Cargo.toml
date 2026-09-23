@@ -1,7 +1,7 @@
 [package]
 name = "ctx-graph"
 version.workspace = true
-description = "ctx graph command adapter for the public Graf library"
+description = "ctx graph command adapter for the local graph engine"
 edition = "2024"
 license.workspace = true
 repository.workspace = true
@@ -10,7 +10,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-graf.workspace = true
+ctx_graph_core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

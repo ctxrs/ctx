@@ -37,7 +37,7 @@ url.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
 fs2 = "0.4.3"
-graf.workspace = true
+ctx_graph_core.workspace = true
 sift.workspace = true
 ctx-agent-application = { path = "../ctx-agent-application" }
 ctx-agent-integrations = { path = "../ctx-agent-integrations" }
@@ -48,7 +48,7 @@ ctx-history-snapshot-reader = { path = "../ctx-history-snapshot-reader" }
 ctx-cli-presentation = { path = "../ctx-cli-presentation" }
 ctx-daemon-cli = { path = "../ctx-daemon-cli" }
 ctx-graph = { path = "../ctx-graph" }
-ctx-output = { path = "../ctx-output" }
+ctx-sift = { path = "../ctx-sift" }
 ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-client-observability = { path = "../ctx-client-observability" }
 ctx-companion-bridge = { path = "../ctx-companion-bridge" }

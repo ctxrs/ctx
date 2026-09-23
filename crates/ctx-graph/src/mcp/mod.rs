@@ -7,8 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
-use futures_util::StreamExt;
-use graf::{
+use ctx_graph_core::{
     analysis::{self, AnalysisOptions, AnalysisReport, PreservedCommunity},
     export::{self, ExportFormat},
     model::{Direction, GraphSnapshot, QueryOptions},
@@ -16,6 +15,7 @@ use graf::{
     query::{SearchOptions, SearchResult, Traversal},
     store::Store,
 };
+use futures_util::StreamExt;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},

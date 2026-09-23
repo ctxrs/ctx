@@ -37,7 +37,7 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct PrsCommandArgs {
     #[command(flatten)]
-    pub input: graf::prs::PrsArgs,
+    pub input: ctx_graph_core::prs::PrsArgs,
     /// Use this Graf snapshot for changed-file impact instead of a database.
     #[arg(long)]
     pub snapshot: Option<PathBuf>,
@@ -46,7 +46,7 @@ pub struct PrsCommandArgs {
 #[derive(Debug, Args)]
 pub struct MemorySaveArgs {
     #[command(flatten)]
-    pub input: graf::memory::SaveResultArgs,
+    pub input: ctx_graph_core::memory::SaveResultArgs,
     /// Validate cited nodes against this Graf snapshot instead of a database.
     #[arg(long)]
     pub snapshot: Option<PathBuf>,
@@ -55,7 +55,7 @@ pub struct MemorySaveArgs {
 #[derive(Debug, Args)]
 pub struct MemoryReflectArgs {
     #[command(flatten)]
-    pub input: graf::memory::ReflectArgs,
+    pub input: ctx_graph_core::memory::ReflectArgs,
     /// Validate citations and group lessons using this Graf snapshot.
     #[arg(long)]
     pub snapshot: Option<PathBuf>,

@@ -17,7 +17,7 @@ pub(super) struct AtomicOutputFile {
 impl AtomicOutputFile {
     pub(super) fn create(path: &Path) -> Result<Self> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let temporary = parent.join(format!(".ctx-output-{}.tmp", Uuid::new_v4()));
+        let temporary = parent.join(format!(".ctx-sift-{}.tmp", Uuid::new_v4()));
         #[cfg(unix)]
         let file = {
             use std::os::unix::fs::OpenOptionsExt;

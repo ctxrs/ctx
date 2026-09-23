@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
-use graf::{import, model::QueryOptions, store::Store};
+use ctx_graph_core::{import, model::QueryOptions, store::Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

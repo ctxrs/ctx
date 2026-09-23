@@ -61,7 +61,7 @@ fn native_graph_reads_stay_on_the_snapshot_until_explicit_update() {
     std::fs::write(&source, "def old_policy():\n    return 1\n").unwrap();
     let db = root.join(".graf/index.db");
     index::run(&root, &db).unwrap();
-    let options = graf::query::SearchOptions::default();
+    let options = ctx_graph_core::query::SearchOptions::default();
     let first = search(&db, "old_policy", &options).unwrap();
     assert!(
         first
@@ -215,7 +215,7 @@ fn learning_omits_proof_from_a_snapshot_newer_than_the_selected_graph() {
         .id;
     let selected = Store::open_read_only(&db)
         .unwrap()
-        .neighbors_resolved(id, &graf::query::SearchOptions::default())
+        .neighbors_resolved(id, &ctx_graph_core::query::SearchOptions::default())
         .unwrap();
     std::fs::write(root.join("policy.py"), "def policy():\n    return 2\n").unwrap();
     index::run(&root, &db).unwrap();

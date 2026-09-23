@@ -72,7 +72,7 @@ fn wrapper_mode(argv: &[OsString]) -> Option<bool> {
     let program = program.rsplit(['/', '\\']).next().unwrap_or(program);
     let command = match program {
         "sift" | "sift.exe" => &argv[1..],
-        "ctx" | "ctx.exe" => ctx_output_command(&argv[1..])?,
+        "ctx" | "ctx.exe" => ctx_sift_command(&argv[1..])?,
         _ => return None,
     };
     if !command
@@ -108,7 +108,7 @@ fn wrapper_mode(argv: &[OsString]) -> Option<bool> {
 }
 
 /// Consume only known root options, stopping before any output/child arguments.
-fn ctx_output_command(mut args: &[OsString]) -> Option<&[OsString]> {
+fn ctx_sift_command(mut args: &[OsString]) -> Option<&[OsString]> {
     loop {
         let word = args.first()?.to_str()?;
         let consumed = match word {

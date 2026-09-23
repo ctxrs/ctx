@@ -14,7 +14,7 @@ filegroup(
 )
 
 COMMON_RUSTC_ENV = {
-    "CARGO_MANIFEST_DIR": "crates/ctx-output",
+    "CARGO_MANIFEST_DIR": "crates/ctx-sift",
 }
 
 cargo_toml_env_vars(
@@ -29,11 +29,11 @@ PROD_SRCS = glob(["src/**/*.rs"], exclude = RUST_PROD_SRC_EXCLUDES)
 rust_library(
     name = "lib",
     srcs = PROD_SRCS,
-    crate_name = "ctx_output",
+    crate_name = "ctx_sift",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(),
-    deps = ["//crates/ctx-output-codec:lib"] + all_crate_deps(normal = True),
+    deps = ["//crates/ctx-sift-codec:lib"] + all_crate_deps(normal = True),
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = [":cargo_toml_env_vars"],
@@ -42,11 +42,11 @@ rust_library(
 ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
-    crate_name = "ctx_output",
+    crate_name = "ctx_sift",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
-    deps = ["//crates/ctx-output-codec:lib"] + all_crate_deps(normal = True, normal_dev = True),
+    deps = ["//crates/ctx-sift-codec:lib"] + all_crate_deps(normal = True, normal_dev = True),
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = [":cargo_toml_env_vars"],

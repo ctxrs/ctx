@@ -1,5 +1,5 @@
 //! Explicit native output-hook registration. The host's permission settings and
-//! unrelated hooks are never changed; runtime transformation lives in ctx-output.
+//! unrelated hooks are never changed; runtime transformation lives in ctx-sift.
 use std::{
     fs,
     path::{Path, PathBuf},

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
-use graf::{
+use ctx_graph_core::{
     index::IndexOptions,
     ingest::{self, CommandAdapter, Provider, SemanticOptions},
 };
@@ -227,7 +227,7 @@ impl ExtractionArgs {
                 );
                 prompt.clone()
             } else if db.try_exists()? {
-                graf::store::Store::open_read_only(db)?
+                ctx_graph_core::store::Store::open_read_only(db)?
                     .transcription_topics()?
                     .join(", ")
             } else {

@@ -158,7 +158,7 @@ pub(super) fn command_label(words: &[String]) -> (String, bool) {
         return ("unknown".into(), false);
     };
     let first = basename(first);
-    let ctx_output = matches!(first, "ctx" | "ctx.exe")
+    let ctx_sift_invocation = matches!(first, "ctx" | "ctx.exe")
         && (words
             .get(1)
             .is_some_and(|s| matches!(s.as_str(), "run" | "compact" | "restore" | "recall"))
@@ -186,9 +186,9 @@ pub(super) fn command_label(words: &[String]) -> (String, bool) {
                             | "semantic"
                     )
                 })));
-    let sift = matches!(first, "sift" | "sift.exe") || ctx_output;
+    let sift = matches!(first, "sift" | "sift.exe") || ctx_sift_invocation;
     let safe = match first {
-        _ if ctx_output => "ctx sift",
+        _ if ctx_sift_invocation => "ctx sift",
         "git" | "cargo" | "npm" | "pnpm" | "yarn" | "python" | "python3" | "node" | "go"
         | "rustc" | "rg" | "grep" | "ls" | "cat" | "find" | "make" | "pytest" | "docker"
         | "kubectl" | "echo" | "printf" | "sh" | "bash" | "zsh" => first,
@@ -200,7 +200,7 @@ pub(super) fn command_label(words: &[String]) -> (String, bool) {
         safe,
         "git" | "cargo" | "npm" | "pnpm" | "yarn" | "go" | "sift" | "ctx sift"
     ) && let Some(sub) = words.get(
-        if ctx_output && words.get(1).is_some_and(|s| s == "output") {
+        if ctx_sift_invocation && words.get(1).is_some_and(|s| s == "output") {
             2
         } else {
             1
