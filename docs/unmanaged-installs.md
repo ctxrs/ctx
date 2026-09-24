@@ -304,3 +304,14 @@ the `install` command overwrites an existing ctx executable or before deleting
 a source-installed executable. The repository pins its Rust toolchain and
 includes the FreeBSD host/toolchain support used by this build; the wrapper
 requires the repository's pinned Bazel version and Python 3.11 to be available.
+
+Native dependencies also need C/C++ build tools: `rusqlite` compiles bundled
+SQLite to read SQLite-based agent histories. For native Windows builds using
+MSVC, install **Desktop development with C++**, the MSVC x64/x86 tools, and a
+Windows SDK. The standalone [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+also provide them. Installing Rust alone does not; a prebuilt ctx release does
+not require these build tools.
+
+Run the repository's shell scripts from Bash. See [Bazel's Windows setup
+guide](https://bazel.build/install/windows) for MSYS2 setup and troubleshooting
+if Bazel cannot find Bash or Visual C++.
