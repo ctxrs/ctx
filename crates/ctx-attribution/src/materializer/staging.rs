@@ -1,6 +1,6 @@
 //! Bounded page-local output passed directly to one publication candidate.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core_materialization::ordered_parallel_map_owned;
 use crate::core_materialization::{
@@ -159,12 +159,22 @@ impl StagedPage {
                 "prepared page projection ownership is inconsistent",
             ));
         }
+        let oversized_events = projected
+            .omissions
+            .iter()
+            .filter(|omission| {
+                omission.reason
+                    == crate::graph::segment::ProjectionOmissionReason::OversizedFlatRecord
+            })
+            .map(|omission| (omission.source_id.clone(), omission.event_id.clone()))
+            .collect::<BTreeSet<_>>();
         populate_output_commitments(
             &event_source,
             graph_generation,
             &mut records,
             &projected.records,
             &record_evidence,
+            &oversized_events,
         )?;
         let index_lineage = lineage.finish(&mut records)?;
         if records.len() != expected_records
@@ -280,6 +290,31 @@ pub(super) fn apply_event_pages(
             materializer_revision,
         );
         let validated = validated?;
+        let original_coverage = projection
+            .projected
+            .omissions
+            .iter()
+            .any(|omission| {
+                omission.reason
+                    == crate::graph::segment::ProjectionOmissionReason::OversizedFlatRecord
+            })
+            .then(|| {
+                validated
+                    .output
+                    .mutations
+                    .iter()
+                    .filter_map(|mutation| match mutation {
+                        SegmentPublicationMutation::Added(event)
+                        | SegmentPublicationMutation::Replaced {
+                            replacement: event, ..
+                        } => Some((
+                            event.event_identity.to_string(),
+                            event.prepared.coverage.clone(),
+                        )),
+                        SegmentPublicationMutation::Tombstoned(_) => None,
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            });
         let sequence = original
             .staged_page_count
             .checked_add(u32::try_from(ordinal).map_err(|_| SegmentMaterializerError::Bounds)?)
@@ -301,6 +336,21 @@ pub(super) fn apply_event_pages(
             rebuild,
         );
         let page = page?;
+        if let Some(original_coverage) = original_coverage {
+            for state in &page.index_records {
+                let original = original_coverage.get(&state.event_id.to_string()).ok_or(
+                    SegmentMaterializerError::Corrupt(
+                        "projected event coverage has no prepared source",
+                    ),
+                )?;
+                if original != &state.coverage {
+                    next.control.coverage = super::model::add_coverage(
+                        &super::model::subtract_coverage(&next.control.coverage, original)?,
+                        &state.coverage,
+                    )?;
+                }
+            }
+        }
         staged.push(page);
     }
     super::lifecycle::support::stage_direct_pages(direct, &mut next, staged)?;
@@ -578,11 +628,12 @@ fn populate_output_commitments(
     states: &mut [CompactIndexedCoreEventState],
     serving_records: &[ServingRecord],
     record_evidence: &[ProjectedCoreRecordEvidence],
+    oversized_events: &BTreeSet<(String, String)>,
 ) -> Result<(), SegmentMaterializerError> {
     let mut grouped = grouped_record_digests(serving_records, record_evidence)?;
     for state in states {
         let key = (state.source_storage_key.clone(), state.event_id.to_string());
-        let records = grouped.remove(&key).unwrap_or_default();
+        let summary = grouped.remove(&key).unwrap_or_default();
         let (flat_record_count, root) = event_output_root(
             publication_generation,
             &source.source,
@@ -590,13 +641,17 @@ fn populate_output_commitments(
             state.event_sequence,
             &state.core_record_sha256,
             &state.core_record_leaf_sha256,
-            records
+            summary
+                .records
                 .iter()
                 .map(|(record_id, digest)| (record_id.as_str(), *digest)),
         )
         .map_err(|_| SegmentMaterializerError::Corrupt("event output commitment failed"))?;
         state.flat_record_count = flat_record_count;
         state.event_output_root = root;
+        if oversized_events.contains(&key) {
+            retain_projected_coverage(&mut state.coverage, &summary);
+        }
     }
     if !grouped.is_empty() {
         return Err(SegmentMaterializerError::Corrupt(
@@ -606,7 +661,70 @@ fn populate_output_commitments(
     Ok(())
 }
 
-type EventRecordDigests = BTreeMap<(String, String), Vec<(String, [u8; 32])>>;
+#[derive(Default)]
+struct EventRecordSummary {
+    records: Vec<(String, [u8; 32])>,
+    file: bool,
+    commit: bool,
+    pull_request: bool,
+    live_access: bool,
+}
+
+type EventRecordDigests = BTreeMap<(String, String), EventRecordSummary>;
+
+fn retain_projected_coverage(
+    coverage: &mut crate::graph::segment_state::SegmentCoreCoverage,
+    summary: &EventRecordSummary,
+) {
+    if summary.records.is_empty() {
+        *coverage = Default::default();
+        return;
+    }
+    if !summary.file {
+        coverage.file_evidence_events = 0;
+    }
+    if !summary.commit {
+        coverage.exact_commit_evidence_events = 0;
+    }
+    if !summary.pull_request {
+        coverage.exact_pull_request_evidence_events = 0;
+    }
+    if !summary.live_access {
+        coverage.certified_live_root_access_events = 0;
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn omitted_fact_cannot_advertise_unstored_commit_evidence() {
+    use crate::graph::segment_state::SegmentCoreCoverage;
+
+    let original = SegmentCoreCoverage {
+        repository_candidate_events: 1,
+        logical_binding_events: 1,
+        certified_live_root_access_events: 1,
+        file_evidence_events: 1,
+        exact_commit_evidence_events: 1,
+        exact_pull_request_evidence_events: 1,
+    };
+    let mut empty = original.clone();
+    retain_projected_coverage(&mut empty, &EventRecordSummary::default());
+    assert_eq!(empty, SegmentCoreCoverage::default());
+
+    let mut file_only = original;
+    retain_projected_coverage(
+        &mut file_only,
+        &EventRecordSummary {
+            records: vec![("file-fact".into(), [0; 32])],
+            file: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(file_only.file_evidence_events, 1);
+    assert_eq!(file_only.exact_commit_evidence_events, 0);
+    assert_eq!(file_only.exact_pull_request_evidence_events, 0);
+    assert_eq!(file_only.certified_live_root_access_events, 0);
+}
 
 fn grouped_record_digests(
     serving_records: &[ServingRecord],
@@ -619,16 +737,30 @@ fn grouped_record_digests(
     }
     let mut grouped = EventRecordDigests::new();
     for (record, evidence) in serving_records.iter().zip(record_evidence) {
-        grouped
+        let summary = grouped
             .entry((
                 record.event_owner.source_id.clone(),
                 record.event_owner.event_id.clone(),
             ))
-            .or_default()
+            .or_default();
+        summary
+            .records
             .push((record.record_id.clone(), evidence.canonical_sha256));
+        for resource in [Some(&record.subject), record.object.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            summary.file |= resource.kind == crate::protocol::ResourceKind::File.wire_name();
+            summary.commit |= resource.kind == crate::protocol::ResourceKind::Commit.wire_name();
+            summary.pull_request |=
+                resource.kind == crate::protocol::ResourceKind::PullRequest.wire_name();
+        }
+        summary.live_access |= record.fact_family.as_str() == "_ctx.repository.live_access";
     }
-    for records in grouped.values_mut() {
-        records.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    for summary in grouped.values_mut() {
+        summary
+            .records
+            .sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     }
     Ok(grouped)
 }

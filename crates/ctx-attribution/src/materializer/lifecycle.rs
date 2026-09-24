@@ -195,23 +195,28 @@ impl CoreMaterializationSession<'_> {
                 )
                 .ok_or(SegmentMaterializerError::Bounds)
         })?;
-        let prepared = self
-            .preparer
-            .prepare_event_delta_pages(pages)
-            .map_err(protocol_error)?;
-        let result = super::staging::apply_event_pages(
-            self.materializer,
-            self.candidate
-                .as_mut()
-                .ok_or(SegmentMaterializerError::Conflict)?,
-            self.direct_candidate
-                .as_mut()
-                .ok_or(SegmentMaterializerError::Conflict)?,
-            &self.reconciliation_cursor,
-            &self.preparer,
-            &prepared,
-            crate::core_materialization::CORE_MATERIALIZER_REVISION,
-        );
+        // Each page has its own bounded prepared output. A count-bounded batch
+        // can otherwise exceed the aggregate byte limit before the writer sees
+        // any page, even though every page is individually valid.
+        let result = pages.into_iter().try_for_each(|page| {
+            let prepared = self
+                .preparer
+                .prepare_event_delta_page(page)
+                .map_err(protocol_error)?;
+            super::staging::apply_event_pages(
+                self.materializer,
+                self.candidate
+                    .as_mut()
+                    .ok_or(SegmentMaterializerError::Conflict)?,
+                self.direct_candidate
+                    .as_mut()
+                    .ok_or(SegmentMaterializerError::Conflict)?,
+                &self.reconciliation_cursor,
+                &self.preparer,
+                &[prepared],
+                crate::core_materialization::CORE_MATERIALIZER_REVISION,
+            )
+        });
         if let Err(error) = result {
             if let Some(direct) = self.direct_candidate.take() {
                 self.materializer.rollback_cleanup_failed = direct.abort().is_err();

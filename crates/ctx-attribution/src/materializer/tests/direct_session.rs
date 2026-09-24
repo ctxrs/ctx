@@ -3,6 +3,116 @@ use super::*;
 use crate::materializer::CoreGenerationStart;
 
 #[test]
+fn multi_page_batch_publishes_and_reopens_every_event_in_order() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().join("graph");
+    let template = one_record()?;
+    let records = [indexed_record(&template, 0)?, indexed_record(&template, 1)?];
+    let mut source = source_state(&template, 0x61);
+    source.event_count = 2;
+    let generation = head(0x61, std::slice::from_ref(&source))?;
+    let mut materializer = SegmentMaterializer::open(&root)?;
+    let mut session = match materializer.start_core_generation(generation.clone())? {
+        CoreGenerationStart::Started(session) => session,
+        CoreGenerationStart::Current(_) => panic!("fresh generation"),
+    };
+    let reconciliations = session.reconcile_source_page(protocol(CoreSourceDeltaPage::new(
+        "0".repeat(64),
+        generation.core_generation_id.clone(),
+        0,
+        true,
+        vec![CoreSourceDelta::Present(source.clone())],
+    ))?)?;
+    let pages = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| CoreEventDeltaPage {
+            materialization_id: "0".repeat(64),
+            core_generation_id: generation.core_generation_id.clone(),
+            reconciliation: reconciliations[0].clone(),
+            page_index: index as u32,
+            terminal: index == 1,
+            deltas: vec![CoreEventDelta::Added(record.clone())],
+        })
+        .collect();
+    session.ingest_event_pages(pages)?;
+    let receipt = session.activate()?;
+    assert_eq!(receipt.event_count, 2);
+    assert_eq!(receipt.source_count, 1);
+    drop(materializer);
+
+    let mut reopened = SegmentMaterializer::open(&root)?;
+    let status = reopened.projection_status(&StatusRequest {
+        requested_core_generation_id: Some(generation.core_generation_id.clone()),
+    })?;
+    assert_eq!(status.currentness, CoreProjectionCurrentness::Current);
+    assert_eq!(status.receipt, Some(receipt));
+    let mut next_source = source;
+    next_source.core_record_accumulator = hex::encode([0x62; 32]);
+    let next_generation = head(0x62, std::slice::from_ref(&next_source))?;
+    let mut query = match reopened.start_core_generation(next_generation.clone())? {
+        CoreGenerationStart::Started(session) => session,
+        CoreGenerationStart::Current(_) => panic!("successor generation"),
+    };
+    let next_reconciliations = query.reconcile_source_page(protocol(CoreSourceDeltaPage::new(
+        "0".repeat(64),
+        next_generation.core_generation_id,
+        0,
+        true,
+        vec![CoreSourceDelta::Present(next_source)],
+    ))?)?;
+    let (states, terminal) = query.event_states(&next_reconciliations[0], None)?;
+    assert!(terminal);
+    assert_eq!(states.len(), 2);
+    assert_eq!(states[0].event_id, records[0].event_id);
+    assert_eq!(states[1].event_id, records[1].event_id);
+    Ok(())
+}
+
+#[test]
+fn later_invalid_page_aborts_earlier_staged_page() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().join("graph");
+    let template = one_record()?;
+    let records = [indexed_record(&template, 0)?, indexed_record(&template, 1)?];
+    let mut source = source_state(&template, 0x63);
+    source.event_count = 2;
+    let generation = head(0x63, std::slice::from_ref(&source))?;
+    let mut materializer = SegmentMaterializer::open(&root)?;
+    let mut session = match materializer.start_core_generation(generation.clone())? {
+        CoreGenerationStart::Started(session) => session,
+        CoreGenerationStart::Current(_) => panic!("fresh generation"),
+    };
+    let reconciliations = session.reconcile_source_page(protocol(CoreSourceDeltaPage::new(
+        "0".repeat(64),
+        generation.core_generation_id.clone(),
+        0,
+        true,
+        vec![CoreSourceDelta::Present(source)],
+    ))?)?;
+    let pages = records
+        .iter()
+        .map(|record| CoreEventDeltaPage {
+            materialization_id: "0".repeat(64),
+            core_generation_id: generation.core_generation_id.clone(),
+            reconciliation: reconciliations[0].clone(),
+            page_index: 0, // The second page cannot replay the first index.
+            terminal: false,
+            deltas: vec![CoreEventDelta::Added(record.clone())],
+        })
+        .collect();
+    assert!(session.ingest_event_pages(pages).is_err());
+    assert!(session.activate().is_err());
+    drop(materializer);
+    assert!(
+        crate::graph::segment::SegmentStore::new(&root)
+            .load_active()?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn direct_session_publication_failure_preserves_active_and_drop_cleans_candidate() -> TestResult {
     let directory = tempfile::tempdir()?;
     let root = directory.path().join("graph");

@@ -292,6 +292,7 @@ impl CoreProjectionPreparer {
             checked_prepared_output_bytes(total, page.encoded_len)
         })?;
         let mut output_budget = PreparedOutputBudget::new(wrapper_bytes)?;
+        let mut omitted_bound_events = Vec::new();
 
         let mut jobs = Vec::new();
         for (page_slot, canonical) in pages.iter().enumerate() {
@@ -330,6 +331,7 @@ impl CoreProjectionPreparer {
             }
         }
 
+        let mut adjudicated = 0_usize;
         ordered_parallel_for_each_with_budget(
             &self.inner.pool,
             &jobs,
@@ -344,9 +346,7 @@ impl CoreProjectionPreparer {
                         job.record_sha256,
                         &job.repository,
                     )?;
-                    let encoding = prepared_unit_encoding(&unit.origin_event_id, &unit)?;
-                    validate_prepared_unit_hard_max(encoding)?;
-                    Ok(SizedPreparedCoreUnit { unit, encoding })
+                    bounded_prepared_unit(unit)
                 })()
                 .map_err(|mut error: ProtocolError| {
                     if error.class == ErrorClass::Bounds {
@@ -360,15 +360,42 @@ impl CoreProjectionPreparer {
                     error
                 })
             },
-            |job, sized, budget| {
+            |job| {
+                let unit = PreparedCoreUnit {
+                    origin_event_id: job.record.event_id.to_string(),
+                    producer_authority_disposition: producer_authority_disposition(job.record),
+                    stable_entities: vec![job.record.event_id],
+                    facts: Vec::new(),
+                    evidence: None,
+                    coverage: CoreProjectionCoverage::default(),
+                };
+                let encoding = prepared_unit_encoding(&unit.origin_event_id, &unit)?;
+                if encoding.entry_len_with_separator > MAX_OMITTED_PREPARED_UNIT_BYTES {
+                    return Err(prepared_output_bound_error());
+                }
+                Ok((SizedPreparedCoreUnit { unit, encoding }, true))
+            },
+            |job, (sized, omitted), budget| {
                 let accumulated = accumulated_pages
                     .get_mut(job.page_slot)
                     .ok_or_else(invalid_preparation_page_slot)?;
                 if accumulated.units.contains_key(&sized.unit.origin_event_id) {
                     return Err(duplicate_prepared_event_error());
                 }
-                let entry_bytes = sized.encoding.entry_bytes(!accumulated.units.is_empty())?;
-                budget.retain(entry_bytes)?;
+                adjudicated += 1;
+                let (sized, omitted, entry_bytes) = retain_prepared_unit(
+                    sized,
+                    omitted,
+                    !accumulated.units.is_empty(),
+                    jobs.len() - adjudicated,
+                    budget,
+                )?;
+                if omitted {
+                    omitted_bound_events.push((
+                        core_source_storage_id(&job.source.source),
+                        job.record.event_id.to_string(),
+                    ));
+                }
                 accumulated.retain(
                     sized.unit.origin_event_id.clone(),
                     sized.unit,
@@ -392,8 +419,66 @@ impl CoreProjectionPreparer {
                 "Core prepared event delta page accounting diverged",
             ));
         }
+        for (source_id, event_id) in omitted_bound_events {
+            eprintln!(
+                "warning: Blame omitted event {event_id} from source {source_id}; prepared output size bound"
+            );
+        }
         Ok(prepared_pages)
     }
+}
+
+const MAX_OMITTED_PREPARED_UNIT_BYTES: usize = 4 * 1024;
+
+pub(super) fn retain_prepared_unit(
+    mut sized: SizedPreparedCoreUnit,
+    mut omitted: bool,
+    needs_separator: bool,
+    remaining_jobs: usize,
+    budget: &mut PreparedOutputBudget,
+) -> Result<(SizedPreparedCoreUnit, bool, usize), ProtocolError> {
+    let minimum_remaining = remaining_jobs
+        .checked_mul(MAX_OMITTED_PREPARED_UNIT_BYTES)
+        .ok_or_else(prepared_output_overflow_error)?;
+    let mut entry_bytes = sized.encoding.entry_bytes(needs_separator)?;
+    if checked_prepared_output_bytes(budget.retained_bytes, entry_bytes)
+        .and_then(|total| checked_prepared_output_bytes(total, minimum_remaining))
+        .is_err()
+    {
+        sized = omit_prepared_unit(sized.unit)?;
+        entry_bytes = sized.encoding.entry_bytes(needs_separator)?;
+        omitted = true;
+    }
+    budget.retain(entry_bytes)?;
+    Ok((sized, omitted, entry_bytes))
+}
+
+fn omit_prepared_unit(mut unit: PreparedCoreUnit) -> Result<SizedPreparedCoreUnit, ProtocolError> {
+    unit.stable_entities
+        .retain(|entity| entity.to_string() == unit.origin_event_id);
+    unit.facts.clear();
+    unit.evidence = None;
+    unit.coverage = CoreProjectionCoverage::default();
+    let encoding = prepared_unit_encoding(&unit.origin_event_id, &unit)?;
+    if encoding.entry_len_with_separator > MAX_OMITTED_PREPARED_UNIT_BYTES {
+        return Err(ProtocolError::new(
+            ErrorClass::Bounds,
+            "omitted Core event identity exceeds its prepared output allowance",
+        ));
+    }
+    Ok(SizedPreparedCoreUnit { unit, encoding })
+}
+
+pub(super) fn bounded_prepared_unit(
+    unit: PreparedCoreUnit,
+) -> Result<(SizedPreparedCoreUnit, bool), ProtocolError> {
+    let encoding = prepared_unit_encoding(&unit.origin_event_id, &unit)?;
+    let omitted = encoding.entry_len_with_separator > MAX_CORE_PREPARED_UNIT_BYTES;
+    if omitted {
+        return Ok((omit_prepared_unit(unit)?, true));
+    }
+    validate_prepared_unit_hard_max(encoding)?;
+    Ok((SizedPreparedCoreUnit { unit, encoding }, omitted))
 }
 
 pub fn core_preparation_peak_workers() -> Result<u16, ProtocolError> {
@@ -700,6 +785,7 @@ pub(super) fn ordered_parallel_for_each_with_budget<T, U>(
     credits: &CorePreparationCredits,
     budget: &mut PreparedOutputBudget,
     operation: impl Fn(&T) -> Result<U, ProtocolError> + Send + Sync,
+    fallback: impl Fn(&T) -> Result<U, ProtocolError>,
     mut adjudicate: impl FnMut(&T, U, &mut PreparedOutputBudget) -> Result<(), ProtocolError>,
 ) -> Result<(), ProtocolError>
 where
@@ -708,6 +794,20 @@ where
 {
     let mut cursor = 0_usize;
     while cursor < items.len() {
+        if credits.capacity == 0 {
+            return Err(ProtocolError::new(
+                ErrorClass::Internal,
+                "Core preparation credit count is invalid",
+            ));
+        }
+        if MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES - budget.retained_bytes
+            < MAX_CORE_PREPARED_UNIT_BYTES
+        {
+            for item in &items[cursor..] {
+                adjudicate(item, fallback(item)?, budget)?;
+            }
+            break;
+        }
         let width = budget.next_wave_width(items.len() - cursor, credits.capacity)?;
         let wave = &items[cursor..cursor + width];
         let results = ordered_parallel_wave_with_credits(pool, wave, credits, &operation)?;
