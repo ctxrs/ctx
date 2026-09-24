@@ -1,6 +1,8 @@
 <img src="docs/assets/ctx-readme-banner.png" alt="Search your agent history. Blame code on the agent that wrote it. Map your codebase. Cut noisy tool output." width="100%">
 
-You already have months of coding agent history on your machine. **ctx** lets you search it and blame code to the sessions that wrote it. `ctx graph` maps relationships across your codebase, and `ctx sift` cuts noisy tool output before your agent reads it. Search and blame work after setup; you choose which projects to index and whether to install a Sift hook.
+You already have months of coding agent history on your machine. **ctx** lets you search it and blame code to the sessions that wrote it. `ctx graph` maps relationships across your codebase, and `ctx sift` cuts noisy tool output before your agent reads it.
+
+Together it is an open, local, fast CLI toolchain for context engineering.
 
 ## Install and set up ctx
 
