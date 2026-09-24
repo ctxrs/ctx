@@ -1,3 +1,4 @@
+use super::canonical::CanonicalCoreEventDeltaPage;
 use super::prepared_page::{
     PreparedCoreEventDeltaPageAccumulator, PreparedCoreUnitEncoding, SizedPreparedCoreUnit,
 };
@@ -11,6 +12,9 @@ use super::*;
 #[derive(Clone)]
 pub struct CoreProjectionPreparer {
     pub(super) inner: Arc<CoreProjectionPreparerInner>,
+    repository: Arc<Mutex<RepositoryPreparationState>>,
+    #[cfg(any(test, feature = "test-support"))]
+    output_limit_for_test: Option<usize>,
 }
 
 pub(super) struct CoreProjectionPreparerInner {
@@ -19,10 +23,9 @@ pub(super) struct CoreProjectionPreparerInner {
     pub(super) workers: CorePreparationCredits,
     pub(super) credits: CorePreparationCredits,
     pub(super) budget: Arc<ProviderWorkerBudget>,
-    repository: Mutex<RepositoryPreparationState>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RepositoryPreparationState {
     core_generation_id: Option<String>,
     source: Option<crate::protocol::SourceKey>,
@@ -41,6 +44,7 @@ pub(super) struct CorePreparationPermit<'a> {
 
 pub(super) struct PreparedOutputBudget {
     pub(super) retained_bytes: usize,
+    limit: usize,
     #[cfg(test)]
     pub(super) peak_reserved_bytes: usize,
     #[cfg(test)]
@@ -49,7 +53,38 @@ pub(super) struct PreparedOutputBudget {
     pub(super) maximum_wave_width: usize,
 }
 
+type PreparedPageParts = (
+    Vec<PreparedCoreEventDeltaPageAccumulator>,
+    PreparedOutputBudget,
+    Vec<(String, String)>,
+);
+
 impl CoreProjectionPreparer {
+    fn repository_checkpoint(&self) -> Result<RepositoryPreparationState, ProtocolError> {
+        self.repository
+            .lock()
+            .map(|state| state.clone())
+            .map_err(|_| {
+                ProtocolError::new(
+                    ErrorClass::Internal,
+                    "Core repository preparation state was poisoned",
+                )
+            })
+    }
+
+    fn restore_repository_checkpoint(
+        &self,
+        checkpoint: RepositoryPreparationState,
+    ) -> Result<(), ProtocolError> {
+        *self.repository.lock().map_err(|_| {
+            ProtocolError::new(
+                ErrorClass::Internal,
+                "Core repository preparation state was poisoned",
+            )
+        })? = checkpoint;
+        Ok(())
+    }
+
     /// Builds the process-wide preparer from the sanitized host launch budget.
     pub fn new() -> Result<Self, ProtocolError> {
         let inner = DEFAULT_CORE_PROJECTION_PREPARER.get_or_init(|| {
@@ -62,6 +97,9 @@ impl CoreProjectionPreparer {
             .as_ref()
             .map(|inner| Self {
                 inner: Arc::clone(inner),
+                repository: Arc::new(Mutex::new(RepositoryPreparationState::default())),
+                #[cfg(any(test, feature = "test-support"))]
+                output_limit_for_test: None,
             })
             .map_err(Clone::clone)
     }
@@ -71,7 +109,23 @@ impl CoreProjectionPreparer {
         let budget = ProviderWorkerBudget::isolated(parallelism);
         CoreProjectionPreparerInner::new(parallelism, budget).map(|inner| Self {
             inner: Arc::new(inner),
+            repository: Arc::new(Mutex::new(RepositoryPreparationState::default())),
+            #[cfg(any(test, feature = "test-support"))]
+            output_limit_for_test: None,
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_output_limit_for_test(&mut self, limit: usize) {
+        self.output_limit_for_test = Some(limit);
+    }
+
+    fn output_limit(&self) -> usize {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(limit) = self.output_limit_for_test {
+            return limit;
+        }
+        MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES
     }
 
     #[must_use]
@@ -84,7 +138,7 @@ impl CoreProjectionPreparer {
     /// boundary.
     pub fn start_measurement(&self, materialization_id: String) -> Result<(), ProtocolError> {
         let lease = self.inner.budget.begin_preparation()?;
-        self.inner.reset_repository_preparation()?;
+        self.reset_repository_preparation()?;
         lease.commit(materialization_id)
     }
 
@@ -131,12 +185,8 @@ impl CoreProjectionPreparer {
             .encode_stored()
             .map_err(|_| ProtocolError::new(ErrorClass::Internal, "Core record encoding failed"))?;
         let record_sha256 = hex::encode(Sha256::digest(record_bytes));
-        let repository = self.inner.evaluate_repository_record(
-            core_generation_id,
-            source,
-            record,
-            &record_sha256,
-        )?;
+        let repository =
+            self.evaluate_repository_record(core_generation_id, source, record, &record_sha256)?;
         self.prepare_validated_record(
             core_generation_id,
             source,
@@ -265,11 +315,39 @@ impl CoreProjectionPreparer {
         &self,
         page: CoreEventDeltaPage,
     ) -> Result<PreparedCoreEventDeltaPage, ProtocolError> {
-        let mut prepared = self.prepare_event_delta_pages(vec![page])?;
+        self.prepare_event_delta_page_recoverable(page)
+            .map_err(|(error, _)| error)
+    }
+
+    /// Returns the owned page on a preparation failure so a caller can split
+    /// and retry a large page without cloning every ordinary Core record.
+    pub fn prepare_event_delta_page_recoverable(
+        &self,
+        page: CoreEventDeltaPage,
+    ) -> Result<PreparedCoreEventDeltaPage, (ProtocolError, Option<Box<CoreEventDeltaPage>>)> {
+        let checkpoint = self
+            .repository_checkpoint()
+            .map_err(|error| (error, None))?;
+        let canonical = canonical::canonicalize_event_delta_pages(self, vec![page])
+            .map_err(|error| (error, None))?;
+        let mut prepared = match self.prepare_canonical_event_delta_pages(canonical) {
+            Ok(prepared) => prepared,
+            Err((error, pages)) => {
+                self.restore_repository_checkpoint(checkpoint)
+                    .map_err(|restore_error| (restore_error, None))?;
+                return Err((
+                    error,
+                    pages.into_iter().next().map(|page| Box::new(page.page)),
+                ));
+            }
+        };
         prepared.pop().ok_or_else(|| {
-            ProtocolError::new(
-                ErrorClass::Internal,
-                "Core event delta page preparation produced no page",
+            (
+                ProtocolError::new(
+                    ErrorClass::Internal,
+                    "Core event delta page preparation produced no page",
+                ),
+                None,
             )
         })
     }
@@ -284,6 +362,49 @@ impl CoreProjectionPreparer {
         pages: Vec<CoreEventDeltaPage>,
     ) -> Result<Vec<PreparedCoreEventDeltaPage>, ProtocolError> {
         let pages = canonical::canonicalize_event_delta_pages(self, pages)?;
+        self.prepare_canonical_event_delta_pages(pages)
+            .map_err(|(error, _)| error)
+    }
+
+    fn prepare_canonical_event_delta_pages(
+        &self,
+        pages: Vec<CanonicalCoreEventDeltaPage>,
+    ) -> Result<Vec<PreparedCoreEventDeltaPage>, (ProtocolError, Vec<CanonicalCoreEventDeltaPage>)>
+    {
+        let (accumulated_pages, output_budget, omitted_bound_events) =
+            match self.prepare_canonical_event_delta_page_units(&pages) {
+                Ok(value) => value,
+                Err(error) => return Err((error, pages)),
+            };
+        let prepared_pages = pages
+            .into_iter()
+            .zip(accumulated_pages)
+            .map(|(page, accumulated)| PreparedCoreEventDeltaPage::new(page, accumulated))
+            .collect::<Vec<_>>();
+        let exact_bytes = prepared_pages.iter().try_fold(0_usize, |total, page| {
+            checked_prepared_output_bytes(total, page.prepared_output_encoded_len())
+        });
+        if exact_bytes != Ok(output_budget.retained_bytes) {
+            return Err((
+                ProtocolError::new(
+                    ErrorClass::Internal,
+                    "Core prepared event delta page accounting diverged",
+                ),
+                Vec::new(),
+            ));
+        }
+        for (source_id, event_id) in omitted_bound_events {
+            eprintln!(
+                "warning: Blame omitted event {event_id} from source {source_id}; prepared unit exceeded {MAX_CORE_PREPARED_UNIT_BYTES} bytes"
+            );
+        }
+        Ok(prepared_pages)
+    }
+
+    fn prepare_canonical_event_delta_page_units(
+        &self,
+        pages: &[CanonicalCoreEventDeltaPage],
+    ) -> Result<PreparedPageParts, ProtocolError> {
         let mut accumulated_pages = pages
             .iter()
             .map(PreparedCoreEventDeltaPageAccumulator::new)
@@ -291,7 +412,8 @@ impl CoreProjectionPreparer {
         let wrapper_bytes = accumulated_pages.iter().try_fold(0_usize, |total, page| {
             checked_prepared_output_bytes(total, page.encoded_len)
         })?;
-        let mut output_budget = PreparedOutputBudget::new(wrapper_bytes)?;
+        let mut output_budget =
+            PreparedOutputBudget::with_limit(wrapper_bytes, self.output_limit())?;
         let mut omitted_bound_events = Vec::new();
 
         let mut jobs = Vec::new();
@@ -316,7 +438,7 @@ impl CoreProjectionPreparer {
                             "canonical Core event record digest is unavailable",
                         )
                     })?,
-                    repository: self.inner.evaluate_repository_record(
+                    repository: self.evaluate_repository_record(
                         &page.core_generation_id,
                         source,
                         record,
@@ -331,7 +453,6 @@ impl CoreProjectionPreparer {
             }
         }
 
-        let mut adjudicated = 0_usize;
         ordered_parallel_for_each_with_budget(
             &self.inner.pool,
             &jobs,
@@ -360,21 +481,6 @@ impl CoreProjectionPreparer {
                     error
                 })
             },
-            |job| {
-                let unit = PreparedCoreUnit {
-                    origin_event_id: job.record.event_id.to_string(),
-                    producer_authority_disposition: producer_authority_disposition(job.record),
-                    stable_entities: vec![job.record.event_id],
-                    facts: Vec::new(),
-                    evidence: None,
-                    coverage: CoreProjectionCoverage::default(),
-                };
-                let encoding = prepared_unit_encoding(&unit.origin_event_id, &unit)?;
-                if encoding.entry_len_with_separator > MAX_OMITTED_PREPARED_UNIT_BYTES {
-                    return Err(prepared_output_bound_error());
-                }
-                Ok((SizedPreparedCoreUnit { unit, encoding }, true))
-            },
             |job, (sized, omitted), budget| {
                 let accumulated = accumulated_pages
                     .get_mut(job.page_slot)
@@ -382,14 +488,8 @@ impl CoreProjectionPreparer {
                 if accumulated.units.contains_key(&sized.unit.origin_event_id) {
                     return Err(duplicate_prepared_event_error());
                 }
-                adjudicated += 1;
-                let (sized, omitted, entry_bytes) = retain_prepared_unit(
-                    sized,
-                    omitted,
-                    !accumulated.units.is_empty(),
-                    jobs.len() - adjudicated,
-                    budget,
-                )?;
+                let entry_bytes = sized.encoding.entry_bytes(!accumulated.units.is_empty())?;
+                budget.retain(entry_bytes)?;
                 if omitted {
                     omitted_bound_events.push((
                         core_source_storage_id(&job.source.source),
@@ -405,53 +505,11 @@ impl CoreProjectionPreparer {
             },
         )?;
 
-        let prepared_pages = pages
-            .into_iter()
-            .zip(accumulated_pages)
-            .map(|(page, accumulated)| PreparedCoreEventDeltaPage::new(page, accumulated))
-            .collect::<Vec<_>>();
-        let exact_bytes = prepared_pages.iter().try_fold(0_usize, |total, page| {
-            checked_prepared_output_bytes(total, page.prepared_output_encoded_len())
-        })?;
-        if exact_bytes != output_budget.retained_bytes {
-            return Err(ProtocolError::new(
-                ErrorClass::Internal,
-                "Core prepared event delta page accounting diverged",
-            ));
-        }
-        for (source_id, event_id) in omitted_bound_events {
-            eprintln!(
-                "warning: Blame omitted event {event_id} from source {source_id}; prepared output size bound"
-            );
-        }
-        Ok(prepared_pages)
+        Ok((accumulated_pages, output_budget, omitted_bound_events))
     }
 }
 
 const MAX_OMITTED_PREPARED_UNIT_BYTES: usize = 4 * 1024;
-
-pub(super) fn retain_prepared_unit(
-    mut sized: SizedPreparedCoreUnit,
-    mut omitted: bool,
-    needs_separator: bool,
-    remaining_jobs: usize,
-    budget: &mut PreparedOutputBudget,
-) -> Result<(SizedPreparedCoreUnit, bool, usize), ProtocolError> {
-    let minimum_remaining = remaining_jobs
-        .checked_mul(MAX_OMITTED_PREPARED_UNIT_BYTES)
-        .ok_or_else(prepared_output_overflow_error)?;
-    let mut entry_bytes = sized.encoding.entry_bytes(needs_separator)?;
-    if checked_prepared_output_bytes(budget.retained_bytes, entry_bytes)
-        .and_then(|total| checked_prepared_output_bytes(total, minimum_remaining))
-        .is_err()
-    {
-        sized = omit_prepared_unit(sized.unit)?;
-        entry_bytes = sized.encoding.entry_bytes(needs_separator)?;
-        omitted = true;
-    }
-    budget.retain(entry_bytes)?;
-    Ok((sized, omitted, entry_bytes))
-}
 
 fn omit_prepared_unit(mut unit: PreparedCoreUnit) -> Result<SizedPreparedCoreUnit, ProtocolError> {
     unit.stable_entities
@@ -459,6 +517,7 @@ fn omit_prepared_unit(mut unit: PreparedCoreUnit) -> Result<SizedPreparedCoreUni
     unit.facts.clear();
     unit.evidence = None;
     unit.coverage = CoreProjectionCoverage::default();
+    unit.coverage.bounded_omission_events = 1;
     let encoding = prepared_unit_encoding(&unit.origin_event_id, &unit)?;
     if encoding.entry_len_with_separator > MAX_OMITTED_PREPARED_UNIT_BYTES {
         return Err(ProtocolError::new(
@@ -535,10 +594,11 @@ impl CoreProjectionPreparerInner {
             workers: CorePreparationCredits::new(parallelism),
             credits: CorePreparationCredits::new(MAX_CORE_PREPARATION_CREDITS),
             budget,
-            repository: Mutex::new(RepositoryPreparationState::default()),
         })
     }
+}
 
+impl CoreProjectionPreparer {
     fn reset_repository_preparation(&self) -> Result<(), ProtocolError> {
         let mut repository = self.repository.lock().map_err(|_| {
             ProtocolError::new(
@@ -666,10 +726,19 @@ where
 }
 
 impl PreparedOutputBudget {
+    #[cfg(test)]
     pub(super) fn new(retained_bytes: usize) -> Result<Self, ProtocolError> {
-        checked_prepared_output_bytes(0, retained_bytes)?;
+        Self::with_limit(
+            retained_bytes,
+            MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES,
+        )
+    }
+
+    fn with_limit(retained_bytes: usize, limit: usize) -> Result<Self, ProtocolError> {
+        checked_prepared_output_bytes_with_limit(0, retained_bytes, limit)?;
         Ok(Self {
             retained_bytes,
+            limit,
             #[cfg(test)]
             peak_reserved_bytes: retained_bytes,
             #[cfg(test)]
@@ -693,7 +762,8 @@ impl PreparedOutputBudget {
                 "Core preparation credit count is invalid",
             ));
         }
-        let remaining_bytes = MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES
+        let remaining_bytes = self
+            .limit
             .checked_sub(self.retained_bytes)
             .ok_or_else(prepared_output_bound_error)?;
         let width = pending_jobs
@@ -709,7 +779,7 @@ impl PreparedOutputBudget {
             .retained_bytes
             .checked_add(active_bytes)
             .ok_or_else(prepared_output_overflow_error)?;
-        if reserved_bytes > MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES {
+        if reserved_bytes > self.limit {
             return Err(prepared_output_bound_error());
         }
         #[cfg(test)]
@@ -721,7 +791,8 @@ impl PreparedOutputBudget {
     }
 
     pub(super) fn retain(&mut self, bytes: usize) -> Result<(), ProtocolError> {
-        self.retained_bytes = checked_prepared_output_bytes(self.retained_bytes, bytes)?;
+        self.retained_bytes =
+            checked_prepared_output_bytes_with_limit(self.retained_bytes, bytes, self.limit)?;
         #[cfg(test)]
         {
             self.peak_retained_bytes = self.peak_retained_bytes.max(self.retained_bytes);
@@ -785,7 +856,6 @@ pub(super) fn ordered_parallel_for_each_with_budget<T, U>(
     credits: &CorePreparationCredits,
     budget: &mut PreparedOutputBudget,
     operation: impl Fn(&T) -> Result<U, ProtocolError> + Send + Sync,
-    fallback: impl Fn(&T) -> Result<U, ProtocolError>,
     mut adjudicate: impl FnMut(&T, U, &mut PreparedOutputBudget) -> Result<(), ProtocolError>,
 ) -> Result<(), ProtocolError>
 where
@@ -794,20 +864,6 @@ where
 {
     let mut cursor = 0_usize;
     while cursor < items.len() {
-        if credits.capacity == 0 {
-            return Err(ProtocolError::new(
-                ErrorClass::Internal,
-                "Core preparation credit count is invalid",
-            ));
-        }
-        if MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES - budget.retained_bytes
-            < MAX_CORE_PREPARED_UNIT_BYTES
-        {
-            for item in &items[cursor..] {
-                adjudicate(item, fallback(item)?, budget)?;
-            }
-            break;
-        }
         let width = budget.next_wave_width(items.len() - cursor, credits.capacity)?;
         let wave = &items[cursor..cursor + width];
         let results = ordered_parallel_wave_with_credits(pool, wave, credits, &operation)?;
@@ -926,10 +982,22 @@ pub(super) fn checked_prepared_output_bytes(
     current: usize,
     additional: usize,
 ) -> Result<usize, ProtocolError> {
+    checked_prepared_output_bytes_with_limit(
+        current,
+        additional,
+        MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES,
+    )
+}
+
+fn checked_prepared_output_bytes_with_limit(
+    current: usize,
+    additional: usize,
+    limit: usize,
+) -> Result<usize, ProtocolError> {
     let total = current
         .checked_add(additional)
         .ok_or_else(prepared_output_overflow_error)?;
-    if total > MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES {
+    if total > limit {
         return Err(prepared_output_bound_error());
     }
     Ok(total)

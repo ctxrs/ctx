@@ -388,6 +388,7 @@ pub(super) fn protocol_coverage(value: &SegmentCoreCoverage) -> CoreProjectionCo
         file_evidence_events: value.file_evidence_events,
         exact_commit_evidence_events: value.exact_commit_evidence_events,
         exact_pull_request_evidence_events: value.exact_pull_request_evidence_events,
+        bounded_omission_events: value.bounded_omission_events,
     }
 }
 

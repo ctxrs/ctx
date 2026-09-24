@@ -10,6 +10,8 @@ pub struct SegmentCoreCoverage {
     pub file_evidence_events: u64,
     pub exact_commit_evidence_events: u64,
     pub exact_pull_request_evidence_events: u64,
+    #[serde(default)]
+    pub bounded_omission_events: u64,
 }
 
 /// Existing bounded Core corpus ceiling encoded by the event-index format.

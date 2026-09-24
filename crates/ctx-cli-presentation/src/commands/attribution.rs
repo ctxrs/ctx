@@ -10,6 +10,7 @@ pub fn append_attribution(context: &RenderContext, document: &mut Document, repo
         Some("current") => match attribution["materialized_coverage"].as_str() {
             Some("empty") => "ready; no indexed evidence",
             Some("abstained") => "ready; evidence did not support attribution",
+            Some("partial") => "ready; some attribution omitted by size limits",
             _ => "ready",
         },
         Some("not_materialized") => "not indexed",
@@ -32,6 +33,13 @@ pub fn append_attribution(context: &RenderContext, document: &mut Document, repo
                 .join(" ")
         });
     let mut rows = vec![Field::new("Index", state)];
+    let omitted_note = attribution["coverage"]["bounded_omission_events"]
+        .as_u64()
+        .filter(|count| *count > 0)
+        .map(|count| format!("{count} event(s) exceeded size limits"));
+    if let Some(note) = omitted_note.as_deref() {
+        rows.push(Field::new("Omitted", note));
+    }
     let progress = attribution
         .get("progress")
         .filter(|value| value.is_object());
@@ -101,6 +109,23 @@ mod tests {
         );
         assert!(doc.render_plain().contains("ctx import --all"));
         assert!(!doc.render_plain().contains("index watch"));
+    }
+
+    #[test]
+    fn current_partial_reports_omissions_without_hiding_retained_readiness() {
+        let context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+        let mut doc = Document::new();
+        append_attribution(
+            &context,
+            &mut doc,
+            &json!({"attribution": {
+                "currentness": "current", "materialized_coverage": "partial",
+                "coverage": {"bounded_omission_events": 2}
+            }}),
+        );
+        let rendered = doc.render_plain();
+        assert!(rendered.contains("ready; some attribution omitted by size limits"));
+        assert!(rendered.contains("2 event(s) exceeded size limits"));
     }
 
     #[test]

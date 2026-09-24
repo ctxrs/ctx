@@ -39,6 +39,7 @@ pub struct CoreProjectionCoverage {
     pub file_evidence_events: u64,
     pub exact_commit_evidence_events: u64,
     pub exact_pull_request_evidence_events: u64,
+    pub bounded_omission_events: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

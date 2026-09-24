@@ -42,7 +42,7 @@ const HEADER_BYTES: usize = 128;
 const EVENT_DIGEST_BYTES: usize = 32;
 const CORE_DIGEST_BYTES: usize = 64;
 const PACKED_COVERAGE_BYTES: usize = 1;
-const PACKED_COVERAGE_MASK: u8 = 0b00_111111;
+const PACKED_COVERAGE_MASK: u8 = 0b01_111111;
 const RECORD_BYTES: usize = 4
     + EVENT_DIGEST_BYTES
     + 8

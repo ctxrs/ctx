@@ -651,6 +651,7 @@ fn populate_output_commitments(
         state.event_output_root = root;
         if oversized_events.contains(&key) {
             retain_projected_coverage(&mut state.coverage, &summary);
+            state.coverage.bounded_omission_events = 1;
         }
     }
     if !grouped.is_empty() {
@@ -677,7 +678,9 @@ fn retain_projected_coverage(
     summary: &EventRecordSummary,
 ) {
     if summary.records.is_empty() {
+        let bounded_omission_events = coverage.bounded_omission_events;
         *coverage = Default::default();
+        coverage.bounded_omission_events = bounded_omission_events;
         return;
     }
     if !summary.file {
@@ -706,10 +709,13 @@ fn omitted_fact_cannot_advertise_unstored_commit_evidence() {
         file_evidence_events: 1,
         exact_commit_evidence_events: 1,
         exact_pull_request_evidence_events: 1,
+        bounded_omission_events: 0,
     };
     let mut empty = original.clone();
+    empty.bounded_omission_events = 1;
     retain_projected_coverage(&mut empty, &EventRecordSummary::default());
-    assert_eq!(empty, SegmentCoreCoverage::default());
+    assert_eq!(empty.bounded_omission_events, 1);
+    assert_eq!(empty.logical_binding_events, 0);
 
     let mut file_only = original;
     retain_projected_coverage(

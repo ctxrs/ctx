@@ -28,7 +28,7 @@ fn git(root: &Path, args: &[&str]) -> TestResult<String> {
 }
 
 // Synthetic consumer-contract witness, not a provider capture or origin-policy change.
-fn record(root: &Path, oid: &str) -> TestResult<CoreRecord> {
+pub(super) fn record(root: &Path, oid: &str) -> TestResult<CoreRecord> {
     let source = SourceKey::derive(
         "codex",
         "codex_session_jsonl",

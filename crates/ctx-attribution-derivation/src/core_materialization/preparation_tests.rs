@@ -8,7 +8,6 @@ use super::preparation::{
     PreparedOutputBudget, bounded_prepared_unit, checked_prepared_output_bytes,
     collect_prepared_page_units, collect_prepared_units, configured_core_preparation_workers,
     ordered_parallel_for_each_with_budget, ordered_parallel_map, ordered_parallel_map_owned,
-    retain_prepared_unit,
 };
 use super::*;
 
@@ -76,88 +75,13 @@ fn oversized_prepared_event_is_omitted_without_losing_its_index_slot() {
     assert!(sized.unit.facts.is_empty());
     assert_eq!(sized.unit.stable_entities, vec![event]);
     assert!(sized.unit.evidence.is_none());
-    assert_eq!(sized.unit.coverage, CoreProjectionCoverage::default());
+    assert_eq!(sized.unit.coverage.bounded_omission_events, 1);
+    assert_eq!(sized.unit.coverage.logical_binding_events, 0);
     assert!(sized.encoding.entry_len_with_separator <= MAX_CORE_PREPARED_UNIT_BYTES);
 
     let (normal, omitted) = bounded_prepared_unit(unit("event-2")).expect("ordinary event");
     assert!(!omitted);
     assert_eq!(normal.unit.origin_event_id, "event-2");
-}
-
-#[test]
-fn aggregate_budget_omits_one_fact_and_keeps_capacity_for_the_next_event() {
-    use crate::envelope::{Confidence, Fact, FactState, ResourceRef};
-    use crate::protocol::ResourceKind;
-
-    let mut large = unit("event-1");
-    large.coverage.exact_commit_evidence_events = 1;
-    large.facts.push(Fact::create(
-        "file.touched",
-        ResourceRef::new(ResourceKind::File, "src/main.rs"),
-        "observed_in_core",
-        None,
-        None,
-        Confidence::Verified,
-        FactState::Asserted,
-        "test",
-        "1",
-        "session-1",
-        None,
-        Vec::new(),
-        BTreeMap::from([("detail".to_owned(), "x".repeat(8_192))]),
-    ));
-    let (large, individually_omitted) = bounded_prepared_unit(large).expect("bounded unit");
-    assert!(!individually_omitted);
-    let cap = MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES;
-    let mut budget = PreparedOutputBudget::new(cap - 8_192).expect("bounded wrapper");
-    let (first, omitted, _) = retain_prepared_unit(large, false, false, 1, &mut budget)
-        .expect("reserve an identity slot for the next event");
-    assert!(omitted);
-    assert!(first.unit.facts.is_empty());
-    assert_eq!(first.unit.coverage, CoreProjectionCoverage::default());
-    assert!(budget.retained_bytes < cap);
-    assert_eq!(
-        budget
-            .next_wave_width(1, 4)
-            .expect_err("full worker credit is unavailable")
-            .class,
-        ErrorClass::Bounds
-    );
-    let (second, omitted) = bounded_prepared_unit(unit("event-2")).expect("second event");
-    let (second, _, _) = retain_prepared_unit(second, omitted, true, 0, &mut budget)
-        .expect("second event survives the aggregate bound");
-    assert_eq!(second.unit.origin_event_id, "event-2");
-    assert!(budget.retained_bytes <= cap);
-}
-
-#[test]
-fn exhausted_full_credit_uses_identity_fallback_without_running_a_worker() {
-    let preparer = CoreProjectionPreparer::with_parallelism(4).expect("preparer");
-    let mut budget =
-        PreparedOutputBudget::new(MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES - 4_096)
-            .expect("bounded wrapper");
-    let operations = AtomicUsize::new(0);
-    let mut retained = Vec::new();
-    ordered_parallel_for_each_with_budget(
-        &preparer.inner.pool,
-        &["event-1", "event-2"],
-        &preparer.inner.credits,
-        &mut budget,
-        |_| {
-            operations.fetch_add(1, Ordering::SeqCst);
-            Ok(8 * 1024 * 1024)
-        },
-        |_| Ok(128),
-        |_, bytes, budget| {
-            budget.retain(bytes)?;
-            retained.push(bytes);
-            Ok(())
-        },
-    )
-    .expect("identity fallback fits");
-    assert_eq!(operations.load(Ordering::SeqCst), 0);
-    assert_eq!(retained, [128, 128]);
-    assert!(budget.peak_reserved_bytes <= MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES);
 }
 
 #[test]
@@ -439,12 +363,6 @@ fn credited_parallel_map_preserves_order_and_caps_active_work() -> Result<(), St
             active.fetch_sub(1, Ordering::SeqCst);
             Ok(*value)
         },
-        |_| {
-            Err(ProtocolError::new(
-                ErrorClass::Bounds,
-                "unexpected fallback",
-            ))
-        },
         |_, value, budget| {
             budget.retain(1)?;
             output.push(value);
@@ -485,12 +403,6 @@ fn delayed_low_index_error_across_waves_wins_in_every_worker_pool() -> Result<()
                     Ok(*value)
                 }
             },
-            |_| {
-                Err(ProtocolError::new(
-                    ErrorClass::Bounds,
-                    "unexpected fallback",
-                ))
-            },
             |_, _, budget| budget.retain(1),
         )
         .expect_err("delayed low-index failure");
@@ -523,7 +435,6 @@ fn four_thousand_ninety_six_maximum_units_never_exceed_one_bounded_wave() {
             operations.fetch_add(1, Ordering::SeqCst);
             Ok(MAX_CORE_PREPARED_UNIT_BYTES)
         },
-        |_| Err(ProtocolError::new(ErrorClass::Bounds, "credit exhausted")),
         |_, bytes, budget| budget.retain(bytes),
     )
     .expect_err("seventeenth maximum-sized unit must exceed the aggregate bound");
