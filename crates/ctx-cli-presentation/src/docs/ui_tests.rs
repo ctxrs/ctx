@@ -178,7 +178,7 @@ fn unified_context_is_searchable_and_available_as_an_embedded_topic() {
         "ctx blame",
         "ctx graph",
         "ctx run",
-        "ctx restore",
+        "ctx sift restore",
     ] {
         assert!(body.contains(command), "missing command: {command}");
     }

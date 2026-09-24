@@ -1321,29 +1321,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctx-graph-configs"
+version = "1.6.3"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "ctx-graph-types",
+ "globset",
+ "quick-xml",
+ "serde_json 1.0.150",
+ "serde_yaml_ng",
+ "toml_edit 0.23.7",
+ "tree-sitter",
+ "tree-sitter-hcl",
+ "tree-sitter-sequel",
+]
+
+[[package]]
 name = "ctx-graph-core"
 version = "1.6.3"
 dependencies = [
  "anyhow",
- "axum",
- "base64 0.22.1",
  "blake3",
  "clap",
- "futures-util",
+ "ctx-graph-ingest",
+ "ctx-graph-languages",
+ "ctx-graph-python",
+ "ctx-graph-storage",
+ "ctx-graph-types",
  "globset",
- "hickory-resolver",
  "ignore",
  "jsonc-parser 0.29.0",
  "libc",
- "lopdf",
  "network_partitions",
- "png",
- "pulldown-cmark",
  "quick-xml",
  "rand 0.10.2",
  "reqwest",
- "rmcp",
  "rusqlite",
+ "serde",
+ "serde_json 1.0.150",
+ "serde_yaml_ng",
+ "tempfile",
+ "toml_edit 0.23.7",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-go",
+ "tree-sitter-rust",
+ "tree-sitter-swift",
+]
+
+[[package]]
+name = "ctx-graph-ingest"
+version = "1.6.3"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "ctx-graph-types",
+ "hickory-resolver",
+ "libc",
+ "lopdf",
+ "pulldown-cmark",
+ "quick-xml",
+ "reqwest",
  "schemars",
  "scraper",
  "serde",
@@ -1351,8 +1391,24 @@ dependencies = [
  "serde_yaml_ng",
  "tempfile",
  "tokio",
- "tokio-util",
- "toml_edit 0.23.7",
+ "zip",
+]
+
+[[package]]
+name = "ctx-graph-languages"
+version = "1.6.3"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "ctx-graph-configs",
+ "ctx-graph-ingest",
+ "ctx-graph-python",
+ "ctx-graph-types",
+ "png",
+ "pulldown-cmark",
+ "quick-xml",
+ "serde",
+ "serde_json 1.0.150",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",
@@ -1366,7 +1422,6 @@ dependencies = [
  "tree-sitter-fortran",
  "tree-sitter-go",
  "tree-sitter-groovy",
- "tree-sitter-hcl",
  "tree-sitter-java",
  "tree-sitter-javascript",
  "tree-sitter-julia",
@@ -1378,19 +1433,55 @@ dependencies = [
  "tree-sitter-pascal",
  "tree-sitter-php",
  "tree-sitter-powershell",
- "tree-sitter-python",
  "tree-sitter-ruby",
  "tree-sitter-rust",
  "tree-sitter-scala",
- "tree-sitter-sequel",
  "tree-sitter-sfapex",
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "tree-sitter-verilog",
  "tree-sitter-zig",
+]
+
+[[package]]
+name = "ctx-graph-python"
+version = "1.6.3"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "ctx-graph-types",
+ "serde_json 1.0.150",
+ "tree-sitter",
+ "tree-sitter-python",
  "unicode-normalization",
- "windows-sys 0.61.2",
- "zip",
+]
+
+[[package]]
+name = "ctx-graph-storage"
+version = "1.6.3"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "ctx-graph-languages",
+ "ctx-graph-types",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json 1.0.150",
+ "tempfile",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "ctx-graph-types"
+version = "1.6.3"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "libc",
+ "serde",
+ "serde_json 1.0.150",
+ "tree-sitter",
 ]
 
 [[package]]

@@ -136,7 +136,7 @@ fn relevant(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| root.join(".graf/index.db"));
     let store = snapshot(&db)?;
-    let conn = store.conn.unchecked_transaction().ok()?;
+    let conn = store.connection().unchecked_transaction().ok()?;
     let (kind, stored_root, generation): (String, String, i64) = conn
         .query_row(
             "SELECT kind,root,generation FROM metadata WHERE singleton=1",

@@ -46,17 +46,6 @@ pub struct PrsArgs {
     pub wrong_base: bool,
 }
 
-fn parse_number(value: &str) -> Result<u64, String> {
-    let value = value.strip_prefix('#').unwrap_or(value);
-    let number = value
-        .parse::<u64>()
-        .map_err(|_| "PR number must be a positive integer".to_owned())?;
-    if number == 0 || number > i32::MAX as u64 {
-        return Err("PR number is outside the supported range".into());
-    }
-    Ok(number)
-}
-
 /// Runtime-only overrides for isolated tests. Never saved in graph/configuration.
 #[derive(Debug, Clone)]
 pub struct PrsRuntime {
@@ -232,70 +221,9 @@ pub fn validate_repo(repo: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_args(args: &PrsArgs) -> Result<()> {
-    if let Some(repo) = &args.repo {
-        validate_repo(repo)?;
-    }
-    if let Some(number) = args.number {
-        parse_number(&number.to_string()).map_err(anyhow::Error::msg)?;
-    }
-    if let Some(base) = &args.base {
-        ensure!(
-            !base.is_empty() && base.len() <= 1024 && !base.chars().any(char::is_control),
-            "invalid expected base"
-        );
-    }
-    Ok(())
-}
-
 struct Commands<'a> {
     runtime: &'a PrsRuntime,
     started: Instant,
-}
-impl Commands<'_> {
-    fn call(&self, program: &str, args: Vec<String>) -> Result<String> {
-        let left = std::time::Duration::from_secs(self.runtime.timeout_secs)
-            .checked_sub(self.started.elapsed())
-            .context("PR inspection timed out")?;
-        ensure!(!left.is_zero(), "PR inspection timed out");
-        run_command(&CommandAdapter { program: program.into(), args, output_file: false }, None, None,
-            left.as_secs() + u64::from(left.subsec_nanos() > 0), self.runtime.max_output_bytes)
-            .context("PR command failed; check installed gh/git and GitHub authentication (child output omitted)")
-    }
-    fn git(&self, args: &[&str]) -> Result<String> {
-        let cwd = self
-            .runtime
-            .cwd
-            .canonicalize()
-            .context("cannot resolve PR working directory")?;
-        let cwd = cwd.to_str().context("PR working directory must be UTF-8")?;
-        // CommandAdapter expands placeholders; reject them in filesystem argv.
-        ensure!(
-            !cwd.contains('{') && !cwd.contains('}'),
-            "unsupported braces in PR working directory"
-        );
-        let mut argv = vec!["-C".into(), cwd.into()];
-        argv.extend(args.iter().map(|s| (*s).into()));
-        self.call(&self.runtime.git_program, argv)
-    }
-    fn origin(&self) -> Result<String> {
-        let raw = self.git(&["remote", "get-url", "origin"])?;
-        let raw = raw.trim();
-        let repo = raw
-            .strip_prefix("https://github.com/")
-            .or_else(|| raw.strip_prefix("git@github.com:"))
-            .or_else(|| raw.strip_prefix("ssh://git@github.com/"))
-            .context("origin is not a supported GitHub remote; use --repo OWNER/REPO")?;
-        let repo = repo.strip_suffix(".git").unwrap_or(repo);
-        validate_repo(repo)?;
-        Ok(repo.to_owned())
-    }
-    fn gh_json<T: serde::de::DeserializeOwned>(&self, args: Vec<String>) -> Result<T> {
-        let raw = self.call(&self.runtime.gh_program, args)?;
-        // serde's data errors may echo values from child output; deliberately omit them.
-        serde_json::from_str(&raw)
-            .map_err(|_| anyhow::anyhow!("gh returned invalid or unexpected JSON"))
-    }
 }
 
 /// Explicit network operation. Uses only gh repo view / pr list / pr view and
@@ -480,138 +408,9 @@ pub fn ci_status(checks: Option<&[Check]>) -> CiStatus {
 
 // GitHub's UTC second-precision timestamp. Invalid/future timestamps stay unknown,
 // rather than classifying malformed input as old. Gregorian conversion, no locale.
-fn timestamp(text: &str) -> Option<u64> {
-    if text.len() != 20
-        || !text.is_ascii()
-        || &text[4..5] != "-"
-        || &text[7..8] != "-"
-        || &text[10..11] != "T"
-        || &text[13..14] != ":"
-        || &text[16..17] != ":"
-        || &text[19..] != "Z"
-    {
-        return None;
-    }
-    let n = |a, b| {
-        let part = &text[a..b];
-        if part.bytes().all(|b| b.is_ascii_digit()) {
-            part.parse::<u64>().ok()
-        } else {
-            None
-        }
-    };
-    let (y, m, d, h, min, s) = (
-        n(0, 4)?,
-        n(5, 7)?,
-        n(8, 10)?,
-        n(11, 13)?,
-        n(14, 16)?,
-        n(17, 19)?,
-    );
-    if !(1970..=9999).contains(&y) || !(1..=12).contains(&m) || h > 23 || min > 59 || s > 59 {
-        return None;
-    }
-    let leap = |y: u64| y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
-    let months = [
-        31,
-        28 + u64::from(leap(y)),
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    if d == 0 || d > months[(m - 1) as usize] {
-        return None;
-    }
-    let before = |y: u64| (y - 1) / 4 - (y - 1) / 100 + (y - 1) / 400;
-    let days = (y - 1970) * 365 + before(y) - before(1970)
-        + months[..(m - 1) as usize].iter().sum::<u64>()
-        + d
-        - 1;
-    Some(days * 86400 + h * 3600 + min * 60 + s)
-}
 
-fn path_valid(path: &str) -> bool {
-    !path.is_empty()
-        && path.len() <= 4096
-        && !path.starts_with('/')
-        && !path.contains('\0')
-        && !path
-            .split('/')
-            .any(|p| p == "." || p == ".." || p.is_empty())
-}
-
-fn boundary_match(a: &str, b: &str) -> bool {
-    a == b
-        || a.strip_suffix(b)
-            .is_some_and(|prefix| prefix.ends_with('/'))
-        || b.strip_suffix(a)
-            .is_some_and(|prefix| prefix.ends_with('/'))
-}
-
-fn namespace(node: &Node) -> String {
-    let mut value = &node.metadata;
-    let mut projects = Vec::new();
-    while let (Some(project), Some(_), Some(original)) = (
-        value.get("project").and_then(Value::as_str),
-        value.get("original_id").and_then(Value::as_str),
-        value.get("original_metadata"),
-    ) {
-        projects.push(project);
-        value = original;
-    }
-    serde_json::to_string(&projects).expect("string vector serializes")
-}
-
-/// Match the MCP structural-analysis budget without allocating a serialized copy.
-/// This gates computation only; larger snapshots still support direct PR impact.
-fn community_limit_notice(graph: &GraphSnapshot) -> Result<Option<&'static str>> {
-    let references = graph
-        .metadata
-        .get("graf_unresolved_references")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    if graph.nodes.len() > 5_000 || graph.edges.len() > 20_000 || references > 20_000 {
-        return Ok(Some(
-            "Computed communities omitted: unlabeled snapshot exceeds the analysis limit of 5000 nodes, 20000 edges or 20000 unresolved references. File/node impact remains available; empty communities do not mean no community overlap.",
-        ));
-    }
-    struct ByteLimit {
-        bytes: usize,
-        exceeded: bool,
-    }
-    impl std::io::Write for ByteLimit {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if buf.len() > MAX_BYTES - self.bytes {
-                self.exceeded = true;
-                return Err(std::io::Error::other("analysis byte limit"));
-            }
-            self.bytes += buf.len();
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut limit = ByteLimit {
-        bytes: 0,
-        exceeded: false,
-    };
-    let serialized = serde_json::to_writer(&mut limit, graph);
-    if limit.exceeded {
-        return Ok(Some(
-            "Computed communities omitted: unlabeled snapshot exceeds the 8 MiB serialized analysis limit. File/node impact remains available; empty communities do not mean no community overlap.",
-        ));
-    }
-    serialized.context("cannot measure PR analysis snapshot")?;
-    Ok(None)
-}
+// Match the MCP structural-analysis budget without allocating a serialized copy.
+// This gates computation only; larger snapshots still support direct PR impact.
 
 struct GraphIndex<'a> {
     graph: &'a GraphSnapshot,
@@ -619,146 +418,6 @@ struct GraphIndex<'a> {
     memberships: BTreeMap<String, String>,
     communities: BTreeMap<String, CommunityIdentity>,
     community_notice: Option<&'static str>,
-}
-impl<'a> GraphIndex<'a> {
-    fn new(graph: &'a GraphSnapshot) -> Result<Self> {
-        ensure!(
-            graph.nodes.len() <= 100_000 && graph.edges.len() <= 1_000_000,
-            "PR impact snapshot exceeds node/edge count limits"
-        );
-        crate::analysis::validate(graph)?;
-        let preserved = crate::analysis::preserved_communities(graph);
-        let mut memberships = BTreeMap::new();
-        let mut communities = BTreeMap::new();
-        let community_notice = if preserved.is_empty() {
-            community_limit_notice(graph)?
-        } else {
-            None
-        };
-        if preserved.is_empty() && community_notice.is_none() {
-            let analysis = crate::analysis::analyze(graph, &Default::default())?;
-            for group in analysis.communities {
-                let key = group.id.to_string();
-                for node in group.nodes {
-                    memberships.insert(node, key.clone());
-                }
-                communities.insert(
-                    key,
-                    CommunityIdentity {
-                        source: "computed".into(),
-                        project: vec![],
-                        id: serde_json::json!(group.id),
-                        names: vec![group.label],
-                    },
-                );
-            }
-        } else {
-            // Do not mix newly computed IDs with partially recorded memberships.
-            for group in preserved {
-                let key = serde_json::json!([group.project, group.id]).to_string();
-                for node in group.nodes {
-                    memberships.insert(node, key.clone());
-                }
-                communities.insert(
-                    key,
-                    CommunityIdentity {
-                        source: "stored".into(),
-                        project: group.project,
-                        id: group.id,
-                        names: group.names,
-                    },
-                );
-            }
-        }
-        let mut files: BTreeMap<_, Vec<_>> = BTreeMap::new();
-        for node in &graph.nodes {
-            if !node.file.is_empty() {
-                files
-                    .entry((namespace(node), node.file.clone()))
-                    .or_default()
-                    .push(node);
-            }
-        }
-        Ok(Self {
-            graph,
-            files,
-            memberships,
-            communities,
-            community_notice,
-        })
-    }
-    fn impact(&self, paths: &[ChangedFile]) -> Impact {
-        let mut selected: BTreeSet<(String, String)> = BTreeSet::new();
-        let mut unmatched = Vec::new();
-        let mut ambiguous = Vec::new();
-        for changed in paths {
-            let matches: Vec<_> = self
-                .files
-                .keys()
-                .filter(|(_, file)| {
-                    let relative = self
-                        .graph
-                        .root
-                        .as_deref()
-                        .and_then(|root| file.strip_prefix(root.trim_end_matches('/')))
-                        .and_then(|tail| tail.strip_prefix('/'))
-                        .unwrap_or(file);
-                    boundary_match(relative, &changed.path)
-                })
-                .collect();
-            // Exact path wins over a weaker suffix, but duplicate composed sources
-            // remain ambiguous: choosing a project by basename would erase provenance.
-            let exact: Vec<_> = matches
-                .iter()
-                .copied()
-                .filter(|(_, file)| {
-                    file == &changed.path
-                        || self.graph.root.as_deref().is_some_and(|root| {
-                            file == &format!(
-                                "{}/{path}",
-                                root.trim_end_matches('/'),
-                                path = changed.path
-                            )
-                        })
-                })
-                .collect();
-            let candidates = if exact.is_empty() { matches } else { exact };
-            match candidates.as_slice() {
-                [] => unmatched.push(changed.path.clone()),
-                [key] => {
-                    selected.insert((**key).clone());
-                }
-                _ => ambiguous.push(changed.path.clone()),
-            }
-        }
-        let mut nodes: Vec<Node> = selected
-            .iter()
-            .flat_map(|key| self.files[key].iter().map(|node| (*node).clone()))
-            .collect();
-        nodes.sort_by(|a, b| a.id.cmp(&b.id));
-        let nodes_without_community = nodes
-            .iter()
-            .filter(|node| !self.memberships.contains_key(&node.id))
-            .count();
-        let communities = nodes
-            .iter()
-            .filter_map(|node| self.memberships.get(&node.id))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|key| self.communities[key].clone())
-            .collect();
-        Impact {
-            generation: self.graph.generation,
-            graph_kind: self.graph.kind.clone(),
-            graph_root: self.graph.root.clone(),
-            graph_metadata: self.graph.metadata.clone(),
-            nodes,
-            communities,
-            nodes_without_community,
-            unmatched_files: unmatched,
-            ambiguous_files: ambiguous,
-        }
-    }
 }
 
 /// Pure, deterministic projection of a captured GitHub response and optional snapshot.
@@ -1091,3 +750,9 @@ pub fn format_text(report: &PrsReport) -> String {
     lines.extend(report.notices.iter().map(|s| safe(s)));
     lines.join("\n") + "\n"
 }
+
+mod commands_call;
+mod graphindex_new;
+
+mod parse_number;
+use parse_number::*;

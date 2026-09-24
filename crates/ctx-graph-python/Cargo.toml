@@ -1,0 +1,24 @@
+[package]
+name = "ctx-graph-python"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Local graph python for the ctx CLI"
+license = "Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["code-graph", "code-search", "mcp", "knowledge-graph"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "ctx_graph_python"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+serde_json = "1"
+tree-sitter = "0.27"
+tree-sitter-python = "0.25"
+unicode-normalization = "0.1.25"
+ctx_graph_types = { package = "ctx-graph-types", path = "../ctx-graph-types" }

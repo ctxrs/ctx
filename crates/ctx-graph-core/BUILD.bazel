@@ -6,6 +6,11 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
+alias(
+    name = "ctx-graph-core",
+    actual = ":lib",
+)
+
 exports_files(["BUILD.bazel", "Cargo.toml", "LICENSE-GRAF"])
 
 filegroup(
@@ -34,7 +39,7 @@ rust_library(
     edition = crate_edition(),
     aliases = aliases(),
     compile_data = glob(["src/assets/**"]),
-    deps = all_crate_deps(normal = True),
+    deps = ["//crates/ctx-graph-types", "//crates/ctx-graph-ingest", "//crates/ctx-graph-python", "//crates/ctx-graph-languages", "//crates/ctx-graph-storage"] + all_crate_deps(normal = True),
     rustc_env = COMMON_RUSTC_ENV,
 )
 
@@ -46,6 +51,6 @@ ctx_rust_test(
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
     compile_data = glob(["src/assets/**"]),
-    deps = all_crate_deps(normal = True, normal_dev = True),
+    deps = ["//crates/ctx-graph-types", "//crates/ctx-graph-ingest", "//crates/ctx-graph-python", "//crates/ctx-graph-languages", "//crates/ctx-graph-storage"] + all_crate_deps(normal = True, normal_dev = True),
     rustc_env = COMMON_RUSTC_ENV,
 )
