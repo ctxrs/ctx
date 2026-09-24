@@ -51,6 +51,66 @@ fn explicit_lifecycle_preserves_user_fields_and_other_hooks() {
 }
 
 #[test]
+fn legacy_ctx_output_hook_is_upgraded_or_removed_without_touching_user_hooks() {
+    for agent in [Agent::Claude, Agent::Copilot, Agent::Codex] {
+        if !agent.supported() {
+            continue;
+        }
+        let (_temp, context) = context();
+        let target = path(agent, true, &context);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let user_hook = json!({"matcher":"Other","hooks":[{"command":"/user/hook"}]});
+        let legacy = expected_route(agent, &context.executable, "output").unwrap();
+        let original = json!({"version":1,"permissions":{"deny":["Bash(rm:*)"]},
+            "hooks":{agent.event():[user_hook.clone(), legacy.clone()]}});
+        fs::write(&target, json::render(&original).unwrap()).unwrap();
+
+        assert_eq!(status(agent, true, &context).unwrap(), State::Legacy);
+        assert_eq!(install(agent, true, &context).unwrap(), State::Current);
+        let upgraded = document(&target).unwrap().unwrap();
+        assert_eq!(upgraded["permissions"], original["permissions"]);
+        assert_eq!(upgraded["hooks"][agent.event()][0], user_hook);
+        assert_eq!(
+            upgraded["hooks"][agent.event()][1],
+            expected(agent, &context.executable).unwrap()
+        );
+        assert_eq!(remove(agent, true, &context).unwrap(), State::Missing);
+        assert_eq!(
+            document(&target).unwrap().unwrap()["hooks"][agent.event()],
+            json!([user_hook])
+        );
+
+        fs::write(&target, json::render(&original).unwrap()).unwrap();
+        assert_eq!(remove(agent, true, &context).unwrap(), State::Missing);
+        assert_eq!(
+            document(&target).unwrap().unwrap()["hooks"][agent.event()],
+            json!([user_hook])
+        );
+    }
+}
+
+#[test]
+fn ambiguous_or_modified_legacy_hook_is_not_replaced() {
+    let (_temp, context) = context();
+    let target = path(Agent::Claude, true, &context);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let legacy = expected_route(Agent::Claude, &context.executable, "output").unwrap();
+    for entries in [
+        json!([legacy.clone(), legacy.clone()]),
+        json!([{"matcher":"Edited","hooks":legacy["hooks"]}]),
+    ] {
+        let original = json::render(&json!({"hooks":{"PostToolUse":entries}})).unwrap();
+        fs::write(&target, &original).unwrap();
+        assert_eq!(
+            status(Agent::Claude, true, &context).unwrap(),
+            State::Conflict
+        );
+        assert!(install(Agent::Claude, true, &context).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), original);
+    }
+}
+
+#[test]
 fn standalone_sift_hook_blocks_install_without_mutation() {
     for agent in [Agent::Claude, Agent::Copilot, Agent::Codex] {
         if !agent.supported() {

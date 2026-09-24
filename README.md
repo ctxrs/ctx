@@ -209,7 +209,7 @@ Optional project graph tool hooks use `ctx graph install --platform gemini --pro
 
 `ctx sift` cuts noisy tool output before it reaches your coding agent. It leaves the original commands untouched and spends fewer tokens on repeated paths, logs, and formatting while keeping useful details visible.
 
-Ordinary compaction runs locally. If you enable original retention, `ctx recall` can recover the complete captured output. The optional Jev selector is off by default and sends eligible passages to an external service only when you enable it.
+Ordinary compaction runs locally. If you enable original retention, `ctx sift recall` can recover the complete captured output. The optional Jev selector is off by default and sends eligible passages to an external service only when you enable it.
 
 ### Try it
 

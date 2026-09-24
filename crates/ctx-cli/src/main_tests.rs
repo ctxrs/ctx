@@ -160,10 +160,10 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
     // Integrations exposes install, status, and remove for five canonical
     // targets; hidden compatibility aliases do not add grammar nodes.
     // The original 63 nodes remain; graph contributes its nested command tree
-    // and output commands include the ctx sift subcommands.
+    // and Sift owns its subcommands.
     assert_eq!(
         paths.len(),
-        135,
+        130,
         "unexpected public CLI grammar depth: {paths:?}"
     );
 
@@ -172,20 +172,15 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
         argv.extend(path.iter().cloned());
         argv.push("--help".to_owned());
         let parsed = Cli::try_parse_from(argv);
-        // Sift and output's native parser own their help; the root parser must preserve
+        // Sift's native parser owns its help; the root parser must preserve
         // that request. Real process tests check the rendered engine help.
         if let Ok(cli) = parsed {
             use crate::{cli::CommandRoot, unified::UnifiedCommand};
-            let (name, args) = match cli.command {
-                CommandRoot::Unified(UnifiedCommand::Run(args)) => ("run", args),
-                CommandRoot::Unified(UnifiedCommand::Compact(args)) => ("compact", args),
-                CommandRoot::Unified(UnifiedCommand::Restore(args)) => ("restore", args),
-                CommandRoot::Unified(UnifiedCommand::Recall(args)) => ("recall", args),
-                CommandRoot::Unified(UnifiedCommand::Output(args)) => ("output", args),
-                CommandRoot::Unified(UnifiedCommand::Sift(args)) => ("sift", args),
+            let args = match cli.command {
+                CommandRoot::Unified(UnifiedCommand::Sift(args)) => args,
                 other => panic!("unexpected help delegation for {path:?}: {other:?}"),
             };
-            assert_eq!(path, [name]);
+            assert_eq!(path, ["sift"]);
             assert_eq!(args.arguments, [std::ffi::OsString::from("--help")]);
             continue;
         }

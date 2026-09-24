@@ -54,7 +54,7 @@ write_expected_external() {
 @crates//memmap2-0.9.11:memmap2-0.9.11
 @crates//rusqlite-0.40.2:rusqlite-0.40.2
 @crates//serde-1.0.228:serde-1.0.228
-@crates//serde_json-1.0.150:serde_json-1.0.150
+@crates//serde_json-1.0.151:serde_json-1.0.151
 @crates//sha2-0.10.9:sha2-0.10.9
 @crates//thiserror-1.0.69:thiserror-1.0.69
 @crates//url-2.5.8:url-2.5.8

@@ -259,16 +259,14 @@ crate.annotation(
     repositories = ["crates"],
     version = "2.0.0-rc.12",
 )
-# crate_universe 0.71.3 flattens host/target JSON features. Tree-sitter 0.27.0
-# declares preserve_order only for its build script, which never uses serde_json.
-# Restore Cargo resolver-2 runtime semantics in the generated Bazel rules only;
-# keep upstream Rust sources and the isolated output JSON 1.0.151 unchanged.
+# crate_universe flattens host/build JSON features. Tree-sitter's build script
+# requests preserve_order, but runtime history JSON must keep Cargo's ordering.
 crate.annotation(
     crate = "serde_json",
     patch_args = ["-p1"],
     patches = ["//tools/bazel/patches:serde-json-runtime-features.patch"],
     repositories = ["crates"],
-    version = "=1.0.150",
+    version = "=1.0.151",
 )
 crate.from_cargo(
     name = "crates",
