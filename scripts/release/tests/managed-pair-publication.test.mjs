@@ -28,13 +28,13 @@ function signingFixture() {
     authority: { channel: "stable", releaseKeyId: "ctx-release-fixture",
       publicKey, publicKeyDigest: sha256(publicKey.export({ format: "der", type: "pkcs1" })) } };
 }
-function fixture(t) {
+function fixture(t, releaseName = "v1.5.0") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-public-publication-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const artifact = path.join(root, "authored-artifact.txt");
   const bytes = Buffer.from("authored unified fixture; not an executable or release receipt\n");
   fs.writeFileSync(artifact, bytes);
-  const candidate = { channel: "stable", release_name: "v1.5.0", rollback_generation: 27 };
+  const candidate = { channel: "stable", release_name: releaseName, rollback_generation: 27 };
   const inputs = projectUnifiedReleaseInputs({ candidate, matrix, sourceCommit: source,
     artifacts: new Map([...matrix.targets.keys()].map((id) => [id, {
       path: artifact, sha256: sha256(bytes), sizeBytes: bytes.length, buildFingerprint: "b".repeat(64),
@@ -185,9 +185,18 @@ test("hosted loader verifies signed publication before accepting candidate artif
   const loaded = loadHostedManagedPairPublication(generated.publicationPath);
   assert.equal(loaded.version, "1.5.0");
   assert.equal(loaded.publicCommit, source); assert.equal(loaded.privateCommit, source);
+  const next = fixture(t, "v2.0.0");
+  const nextPublication = finalizeManagedPairRelease(next.prepared("hosted-v2"), next.privateKey).publicationPath;
+  assert.equal(loadHostedManagedPairPublication(nextPublication).version, "2.0.0");
+  for (const releaseName of ["v2.0.0-rc1", "v02.0.0"]) {
+    fs.writeFileSync(nextPublication, canonicalJsonBytes({
+      ...JSON.parse(fs.readFileSync(nextPublication)), release_name: releaseName,
+    }));
+    assert.throws(() => loadHostedManagedPairPublication(nextPublication), /exact stable release authority/);
+  }
   const publication = generated.publication;
   fs.writeFileSync(generated.publicationPath, canonicalJsonBytes({ ...publication, release_name: "v1.5.1" }));
-  assert.throws(() => loadHostedManagedPairPublication(generated.publicationPath), /selected stable 1\.x release/);
+  assert.throws(() => loadHostedManagedPairPublication(generated.publicationPath), /selected stable release/);
   fs.writeFileSync(generated.publicationPath, canonicalJsonBytes(publication));
   const releaseSet = JSON.parse(fs.readFileSync(publication.release_set_object.path));
   releaseSet.signature_base64 = Buffer.alloc(256).toString("base64");
