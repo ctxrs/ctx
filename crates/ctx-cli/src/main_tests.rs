@@ -159,7 +159,7 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
     collect_paths(&command, &[], &mut paths);
     // Integrations exposes install, status, and remove for five canonical
     // targets; hidden compatibility aliases do not add grammar nodes.
-    // The original 63 nodes remain; Graf contributes its nested command tree
+    // The original 63 nodes remain; graph contributes its nested command tree
     // and output commands include the ctx sift subcommands.
     assert_eq!(
         paths.len(),
