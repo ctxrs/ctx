@@ -8,6 +8,37 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.0.0
+
+Released: 2026-09-24
+
+### Added
+
+- `ctx graph` indexes a chosen codebase and answers symbol, dependency, and impact questions from a local SQLite graph. Existing `.graf/index.db` databases can be used without conversion.
+- `ctx sift` compacts tool output locally. Supported agent hooks can be installed explicitly; the optional Jev selector remains off unless enabled.
+
+### Changed
+
+- Agent-history search, Blame, code graph, and Sift now ship in one `ctx` executable. Search and Blame remain available after the ordinary setup. Graph indexing and Sift hooks are opt-in.
+- The README now introduces the unified workflows, including the Graphify comparison and migration path.
+
+### Fixed
+
+- Devin sessions with repeated rejected subagent lineages no longer block Devin history indexing. Compacted sidekick handoffs remain connected to the original lineage.
+
+### Commits and PRs
+
+- Source commit: [d7b1da6f](https://github.com/ctxrs/ctx/commit/d7b1da6fe580c2ce757cc9a803e7b7560204dba6).
+- Full diff: [v1.6.3...d7b1da6f](https://github.com/ctxrs/ctx/compare/v1.6.3...d7b1da6fe580c2ce757cc9a803e7b7560204dba6).
+- [#1044](https://github.com/ctxrs/ctx/pull/1044) — repair Devin history imports across compaction.
+- [#1047](https://github.com/ctxrs/ctx/pull/1047) — unify history, graph, and Sift for ctx 2.0.
+- [#1048](https://github.com/ctxrs/ctx/pull/1048) — align macOS release checks with graph DNS imports.
+- [#1049](https://github.com/ctxrs/ctx/pull/1049) — align the README opening with ctx.rs.
+- [#1050](https://github.com/ctxrs/ctx/pull/1050) — align Windows release checks with graph system imports.
+- [#1051](https://github.com/ctxrs/ctx/pull/1051) — accept the unified executable size in release staging.
+- [#1052](https://github.com/ctxrs/ctx/pull/1052) — accept ctx 2.0 in hosted release verification.
+- [#1053](https://github.com/ctxrs/ctx/pull/1053) — qualify the current installer feed before ctx 2.0.
+
 ## 1.6.3
 
 Released: 2026-09-22
