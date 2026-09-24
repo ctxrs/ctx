@@ -173,7 +173,7 @@ You might not need ctx graph or Graphify for a smaller project. Agents are surpr
 
 **If you train coding models, try giving ctx graph to the agents in your rollouts.**
 
-## Try it
+### Try it
 
 From any project:
 
@@ -211,13 +211,13 @@ It is also stricter about correctness. Updates become visible as one complete ge
 
 ctx graph is an independent implementation, not a fork or a drop-in replacement for Graphify's Python API. The chart uses the complete 19,036-file VS Code repository on an M1 Mac mini. Cold indexing was effectively tied, while ctx graph produced 2.4x as many nodes and 1.7x as many edges with 31% less peak memory. See the [benchmark method, results, and tradeoffs](docs/unified-context.md).
 
-## Migrate from Graphify
+### Migrate from Graphify
 
 Existing `.graf/index.db` databases work with `ctx graph`; no conversion is required.
 
 Use `ctx graph --help` for the full command set.
 
-## Use ctx graph with an agent
+### Use ctx graph with an agent
 
 Use `ctx integrations install skill` and `ctx integrations install mcp --agent codex`.
 
@@ -242,7 +242,7 @@ Unlike RTK, it leaves the original commands untouched for safety, and allows ret
 * **See the result.** Optional original retention lets you recover complete captured output with
     `ctx recall`.
 
-## Try it
+### Try it
 
 Run commands through Sift:
 
@@ -277,7 +277,7 @@ ctx was faster than RTK 0.49 on all ten of our sample workloads and stayed withi
 1.35 ms of running the command directly. Across workloads collected from our own real usage,
 ctx reduced tool call output by 43%.
 
-## How it works
+### How it works
 
 ctx tries several compact representations for complete output and counts the
 full result with its embedded tokenizer. It uses the smallest result only when
@@ -294,16 +294,6 @@ off by default, limited to explicitly allowed projects, and saves the complete
 original for `ctx recall`. It uses TypeSafe Jev and therefore sends eligible
 passages to an external service. See the reference before enabling it.
 
-## Why is ctx so fast?
-
-ctx is written in Rust, but that's not the main reason why it's fast. Instead of ingesting your history into a local relational database like SQLite, ctx scans it with parallel workers and writes searchable records directly to [Tantivy](https://github.com/quickwit-oss/tantivy). That removes an entire database ingest step while still supporting structured filtering and complete record retrieval.
-
-Tantivy builds the index in parallel. It creates a compact map from each term to the records containing it and searches memory-mapped segments without loading your entire history into memory. The same index stores the complete record for every result, so `ctx search`, `ctx show`, and `ctx locate` can read it without a second database or reopening and reparsing the original agent logs.
-
-In our benchmark, this was 16x faster than ctx's previous optimized SQLite implementation.
-
-<img src="docs/assets/ctx-cold-indexing-chart.png" alt="Cold indexing time: ctx with Tantivy, 9.65 seconds; previous ctx SQLite pipeline, 155.09 seconds. Lower is better." width="100%">
-
 ## How ctx differs from agent memory and codebase intelligence
 
 | Category | Starts from | Answers |
@@ -317,6 +307,16 @@ ctx gives coding agents exact recall of prior work. They can search the original
 An agent might use all three in one investigation: memory for a durable rule, codebase intelligence to find the relevant subsystem, and ctx to recover the historical work that explains the change.
 
 Read more about [agent memory](https://ctx.rs/comparisons/agent-memory), [codebase graphs](https://ctx.rs/comparisons/codebase-graphs), and [grep or log search](https://ctx.rs/comparisons/grep-log-search).
+
+## Why is ctx so fast?
+
+ctx is written in Rust, but that's not the main reason why it's fast. Instead of ingesting your history into a local relational database like SQLite, ctx scans it with parallel workers and writes searchable records directly to [Tantivy](https://github.com/quickwit-oss/tantivy). That removes an entire database ingest step while still supporting structured filtering and complete record retrieval.
+
+Tantivy builds the index in parallel. It creates a compact map from each term to the records containing it and searches memory-mapped segments without loading your entire history into memory. The same index stores the complete record for every result, so `ctx search`, `ctx show`, and `ctx locate` can read it without a second database or reopening and reparsing the original agent logs.
+
+In our benchmark, this was 16x faster than ctx's previous optimized SQLite implementation.
+
+<img src="docs/assets/ctx-cold-indexing-chart.png" alt="Cold indexing time: ctx with Tantivy, 9.65 seconds; previous ctx SQLite pipeline, 155.09 seconds. Lower is better." width="100%">
 
 ## Supported agent histories
 
