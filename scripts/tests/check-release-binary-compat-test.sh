@@ -354,10 +354,22 @@ Import {
   Name: ADVAPI32.dll
 }
 Import {
+  Name: api-ms-win-core-winrt-error-l1-1-0.dll
+}
+Import {
+  Name: api-ms-win-crt-convert-l1-1-0.dll
+}
+Import {
   Name: api-ms-win-crt-environment-l1-1-0.dll
 }
 Import {
+  Name: api-ms-win-crt-filesystem-l1-1-0.dll
+}
+Import {
   Name: api-ms-win-crt-heap-l1-1-0.dll
+}
+Import {
+  Name: api-ms-win-crt-locale-l1-1-0.dll
 }
 Import {
   Name: api-ms-win-crt-math-l1-1-0.dll
@@ -393,13 +405,22 @@ Import {
   Name: crypt32.dll
 }
 Import {
+  Name: iphlpapi.dll
+}
+Import {
   Name: KERNEL32.dll
+}
+Import {
+  Name: ktmw32.dll
 }
 Import {
   Name: ntdll.dll
 }
 Import {
   Name: ole32.dll
+}
+Import {
+  Name: oleaut32.dll
 }
 Import {
   Name: shell32.dll
@@ -661,6 +682,7 @@ mutate_and_fail windows_subsystem_version windows-x64 "${windows}" 's/MajorSubsy
 mutate_and_fail windows_retired_restart_manager windows-x64 "${windows}" 's/Name: shell32.dll/Name: shell32.dll\nName: rstrtmgr.dll/'
 mutate_and_fail windows_retired_process_status windows-x64 "${windows}" 's/Name: shell32.dll/Name: shell32.dll\nName: psapi.dll/'
 mutate_and_fail windows_crypt32_sibling windows-x64 "${windows}" 's/crypt32.dll/cryptnet.dll/'
+mutate_and_fail windows_missing_graph_dns_import windows-x64 "${windows}" '/Name: iphlpapi.dll/d'
 mutate_and_fail windows_dll windows-x64 "${windows}" 's/ws2_32.dll/winhttp.dll/'
 mutate_and_fail windows_static_symbols windows-x64 "${windows}" 's/Import {/Symbols [\n  Symbol {\n    Name: main (1)\n  }\n]\nImport {/'
 # The no-Buildkite local runner validates published bytes through this public

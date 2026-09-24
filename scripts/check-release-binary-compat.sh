@@ -578,9 +578,14 @@ check_windows() {
   # which imports crypt32.dll. Keep every DLL exact so unrelated imports fail.
   # Current releases no longer import the retired pre-bridge Process Status
   # and Restart Manager helpers (psapi.dll and rstrtmgr.dll).
+  # Graph DNS and native Windows APIs add these exact system imports.
   assert_exact_lines "PE imported DLLs" "$(pe_imports)" "advapi32.dll
+api-ms-win-core-winrt-error-l1-1-0.dll
+api-ms-win-crt-convert-l1-1-0.dll
 api-ms-win-crt-environment-l1-1-0.dll
+api-ms-win-crt-filesystem-l1-1-0.dll
 api-ms-win-crt-heap-l1-1-0.dll
+api-ms-win-crt-locale-l1-1-0.dll
 api-ms-win-crt-math-l1-1-0.dll
 api-ms-win-crt-private-l1-1-0.dll
 api-ms-win-crt-runtime-l1-1-0.dll
@@ -592,9 +597,12 @@ api-ms-win-core-synch-l1-2-0.dll
 bcrypt.dll
 bcryptprimitives.dll
 crypt32.dll
+iphlpapi.dll
 kernel32.dll
+ktmw32.dll
 ntdll.dll
 ole32.dll
+oleaut32.dll
 shell32.dll
 userenv.dll
 ws2_32.dll"
