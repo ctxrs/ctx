@@ -1,0 +1,88 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -76,41 +76,7 @@
+         "default",
+         "raw_value",
+         "std",
+-    ] + select({
+-        "@@//tools/bazel/platforms:aarch64-apple-darwin": [
+-            "indexmap",  # aarch64-apple-darwin
+-            "preserve_order",  # aarch64-apple-darwin
+-        ],
+-        "@@//tools/bazel/platforms:aarch64-unknown-linux-gnu": [
+-            "indexmap",  # aarch64-unknown-linux-gnu
+-            "preserve_order",  # aarch64-unknown-linux-gnu
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-apple-darwin": [
+-            "indexmap",  # x86_64-apple-darwin
+-            "preserve_order",  # x86_64-apple-darwin
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-pc-windows-gnu": [
+-            "indexmap",  # x86_64-pc-windows-gnu
+-            "preserve_order",  # x86_64-pc-windows-gnu
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-pc-windows-msvc": [
+-            "indexmap",  # x86_64-pc-windows-msvc
+-            "preserve_order",  # x86_64-pc-windows-msvc
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-unknown-freebsd": [
+-            "indexmap",  # x86_64-unknown-freebsd
+-            "preserve_order",  # x86_64-unknown-freebsd
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-unknown-linux-gnu": [
+-            "indexmap",  # x86_64-unknown-linux-gnu
+-            "preserve_order",  # x86_64-unknown-linux-gnu
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-unknown-nixos-gnu": [
+-            "indexmap",  # x86_64-unknown-linux-gnu, x86_64-unknown-nixos-gnu
+-            "preserve_order",  # x86_64-unknown-linux-gnu, x86_64-unknown-nixos-gnu
+-        ],
+-        "//conditions:default": [],
+-    }),
++    ],
+     crate_root = "src/lib.rs",
+     edition = "2021",
+     rustc_env_files = [
+@@ -166,41 +132,7 @@
+         "default",
+         "raw_value",
+         "std",
+-    ] + select({
+-        "@@//tools/bazel/platforms:aarch64-apple-darwin": [
+-            "indexmap",  # aarch64-apple-darwin
+-            "preserve_order",  # aarch64-apple-darwin
+-        ],
+-        "@@//tools/bazel/platforms:aarch64-unknown-linux-gnu": [
+-            "indexmap",  # aarch64-unknown-linux-gnu
+-            "preserve_order",  # aarch64-unknown-linux-gnu
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-apple-darwin": [
+-            "indexmap",  # x86_64-apple-darwin
+-            "preserve_order",  # x86_64-apple-darwin
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-pc-windows-gnu": [
+-            "indexmap",  # x86_64-pc-windows-gnu
+-            "preserve_order",  # x86_64-pc-windows-gnu
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-pc-windows-msvc": [
+-            "indexmap",  # x86_64-pc-windows-msvc
+-            "preserve_order",  # x86_64-pc-windows-msvc
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-unknown-freebsd": [
+-            "indexmap",  # x86_64-unknown-freebsd
+-            "preserve_order",  # x86_64-unknown-freebsd
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-unknown-linux-gnu": [
+-            "indexmap",  # x86_64-unknown-linux-gnu
+-            "preserve_order",  # x86_64-unknown-linux-gnu
+-        ],
+-        "@@//tools/bazel/platforms:x86_64-unknown-nixos-gnu": [
+-            "indexmap",  # x86_64-unknown-linux-gnu, x86_64-unknown-nixos-gnu
+-            "preserve_order",  # x86_64-unknown-linux-gnu, x86_64-unknown-nixos-gnu
+-        ],
+-        "//conditions:default": [],
+-    }),
++    ],
+     crate_name = "build_script_build",
+     crate_root = "build.rs",
+     data = glob(

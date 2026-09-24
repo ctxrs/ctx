@@ -1,6 +1,7 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
+load("//tools/bazel:binary_contracts.bzl", "ctx_optimized_test_binary")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_binary", "ctx_rust_test")
 load(":test_targets.bzl", "CTX_CLI_RUSTC_FLAGS", "ctx_cli_integration_test", "ctx_cli_test_data")
 
@@ -78,6 +79,10 @@ RELEASE_BUILD_RUSTC_ENV = select({
 })
 
 CTX_CLI_DEPS = [
+    "//crates/ctx-graph-core:lib",
+    "//crates/ctx-graph:lib",
+    "//crates/ctx-sift:lib",
+    "//crates/ctx-sift-codec:lib",
     "//crates/ctx-agent-application:lib",
     "//crates/ctx-attribution-model:lib",
     "//crates/ctx-attribution:lib",
@@ -102,6 +107,10 @@ CTX_CLI_DEPS = [
 ]
 
 CTX_CLI_TEST_DEPS = [
+    "//crates/ctx-graph-core:lib",
+    "//crates/ctx-graph:lib",
+    "//crates/ctx-sift:lib",
+    "//crates/ctx-sift-codec:lib",
     "//crates/ctx-attribution-model:lib",
     "//crates/ctx-attribution:lib",
     "//crates/ctx-history-snapshot-reader:lib",
@@ -128,6 +137,10 @@ CTX_CLI_TEST_DEPS = [
 ]
 
 CTX_CLI_QUALIFICATION_DEPS = [
+    "//crates/ctx-graph-core:lib",
+    "//crates/ctx-graph:lib",
+    "//crates/ctx-sift:lib",
+    "//crates/ctx-sift-codec:lib",
     "//crates/ctx-agent-application:lib",
     "//crates/ctx-attribution-model:lib",
     "//crates/ctx-attribution:lib",
@@ -187,6 +200,16 @@ ctx_rust_binary(
     ],
     rustc_flags = CTX_CLI_RUSTC_FLAGS,
     stamp = -1,
+)
+
+ctx_optimized_test_binary(
+    name = "ctx_managed_test_binary",
+    binary = ":ctx",
+)
+
+ctx_optimized_test_binary(
+    name = "ctx_managed_upgrade_test_binary",
+    binary = ":ctx_upgrade_test_harness",
 )
 
 # The auto-upgrade acceptance harness needs its deterministic crash and pause
@@ -359,6 +382,17 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "status_store_cutover_tests",
     src = "tests/status_store_cutover.rs",
+)
+
+ctx_cli_integration_test(
+    name = "unified_context_tests",
+    src = "tests/unified_context.rs",
+    extra_srcs = [
+        "tests/unified_context/history_fixture.rs",
+        "tests/unified_context/output_hooks.rs",
+    ],
+    extra_crates = ["assert_cmd", "serde_json", "tempfile"],
+    test_support = [],
 )
 
 test_suite(

@@ -122,7 +122,9 @@ impl SkillAgentArg {
                 .join(".gemini")
                 .join("antigravity-cli")
                 .join("skills"),
-            Self::GitHubCopilot => context.home.join(".copilot").join("skills"),
+            Self::GitHubCopilot => context
+                .env_or_home_child("COPILOT_HOME", ".copilot")
+                .join("skills"),
             Self::Pi => context.home.join(".pi").join("agent").join("skills"),
             Self::Goose => context.xdg_config_home.join("goose").join("skills"),
         }
@@ -145,6 +147,11 @@ impl SkillAgentArg {
                 .get("CLAUDE_CONFIG_DIR")
                 .cloned()
                 .unwrap_or_else(|| context.home.clone()),
+            Self::GitHubCopilot => context
+                .env_overrides
+                .get("COPILOT_HOME")
+                .cloned()
+                .unwrap_or_else(|| context.home.clone()),
             Self::OpenCode | Self::Amp | Self::Goose => context.xdg_config_home.clone(),
             Self::MiMoCode => context
                 .env_overrides
@@ -157,7 +164,6 @@ impl SkillAgentArg {
             | Self::GeminiCli
             | Self::Antigravity
             | Self::AntigravityCli
-            | Self::GitHubCopilot
             | Self::Pi => context.home.clone(),
         }
     }
@@ -179,7 +185,7 @@ impl SkillAgentArg {
             Self::GeminiCli => Some(context.home.join(".gemini")),
             Self::Antigravity => Some(context.home.join(".gemini").join("antigravity")),
             Self::AntigravityCli => Some(context.home.join(".gemini").join("antigravity-cli")),
-            Self::GitHubCopilot => Some(context.home.join(".copilot")),
+            Self::GitHubCopilot => Some(context.env_or_home_child("COPILOT_HOME", ".copilot")),
             Self::Pi => Some(context.home.join(".pi").join("agent")),
             Self::Goose => Some(context.xdg_config_home.join("goose")),
         }
@@ -284,5 +290,26 @@ mod tests {
     #[test]
     fn grok_build_reads_universal_skills_without_an_automatic_native_copy() {
         assert!(!SkillAgentArg::GrokBuild.needs_agent_specific_default());
+    }
+
+    #[test]
+    fn copilot_home_override_is_detected_and_owns_its_active_skill_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let override_home = temp.path().join("copilot-home");
+        let context = PathContext::for_tests(temp.path().join("home"), temp.path().join("project"))
+            .with_env_override("COPILOT_HOME", override_home.clone());
+        assert!(context.agent_detected(SkillAgentArg::GitHubCopilot));
+        assert_eq!(
+            SkillAgentArg::GitHubCopilot.detect_dir(&context),
+            Some(override_home.clone())
+        );
+        assert_eq!(
+            SkillAgentArg::GitHubCopilot.global_skills_dir(&context),
+            override_home.join("skills")
+        );
+        assert_eq!(
+            SkillAgentArg::GitHubCopilot.global_skills_authority_root(&context),
+            override_home
+        );
     }
 }

@@ -64,6 +64,8 @@ test("rendered Windows CLI installer defaults to cli.ctx.rs release metadata", (
   assert.match(body, /\[switch\]\$AllSkillAgents/);
   assert.match(body, /\[switch\]\$NoModifyPath/);
   assert.match(body, /CTX_INSTALL_NO_SETUP/);
+  assert.match(body, /\$runSkill = -not \$noSkillRequested/);
+  assert.doesNotMatch(body, /-not \$runSetup -and -not \$explicitSkillRequest/);
   assert.match(body, /CTX_INSTALL_NO_DAEMON/);
   assert.match(body, /CTX_INSTALL_SEMANTIC/);
   assert.match(body, /function Get-PersistedConfigControls/);
@@ -267,9 +269,12 @@ test("rendered Windows CLI installer defaults to cli.ctx.rs release metadata", (
   assert.match(body, /CtxInstallerPathGuard\]::AcquireLeaf\(\$installPath\)/);
   assert.match(body, /CtxInstallerPathGuard\]::AcquireLeaf\(\$markerPath\)/);
   assert.match(body, /function Invoke-HostedInstallTransaction/);
+  assert.match(body, /\$hostedAction = if \(\$Migrate\) \{ "migrate" \} else \{ "install" \}/);
+  assert.match(body, /\$pendingHostedMigration = Test-Path -LiteralPath \(Join-Path \$BinDir "\.ctx\.exe\.hosted-install-transaction\.json"\) -PathType Leaf/);
+  assert.match(body, /\(Get-Item -LiteralPath \$downloadPath\)\.Length -gt 128MB[\s\S]*Invoke-HostedInstallTransaction -Migrate/);
   assert.match(
     body,
-    /"upgrade", "--hosted-transaction", "install",\s+"--install-path", \$installPath,/,
+    /"upgrade", "--hosted-transaction", \$hostedAction,\s+"--install-path", \$installPath,/,
   );
   assert.match(body, /"--marker-source", \$markerSourcePath/);
   assert.match(body, /"--binary-sha256", \$actualChecksum/);
@@ -403,7 +408,7 @@ test("rendered Windows fresh install delegates atomic publication to Core", () =
   );
   assert.match(
     body,
-    /function Invoke-HostedInstallTransaction \{[\s\S]*--hosted-transaction", "install"/,
+    /function Invoke-HostedInstallTransaction\(\[switch\]\$Migrate\) \{[\s\S]*--hosted-transaction", \$hostedAction/,
   );
   assert.match(
     body,

@@ -160,7 +160,7 @@ pub(super) fn with_shelley_length_preflight<T>(
     // SQLITE_LIMIT_LENGTH rejects even integer-only octet_length inspection of
     // an oversized stored record. The preflight SQL returns no raw TEXT/BLOB;
     // restore the provider cap before any hydration statement can run.
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     query().map_err(CaptureError::from)
 }
 

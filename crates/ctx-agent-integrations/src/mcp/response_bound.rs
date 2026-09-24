@@ -21,7 +21,7 @@ impl io::Write for SerializedByteCounter {
     }
 }
 
-fn serialized_json_line_bytes(value: &Value) -> serde_json::Result<usize> {
+pub(super) fn serialized_json_line_bytes(value: &Value) -> serde_json::Result<usize> {
     let mut counter = SerializedByteCounter::default();
     serde_json::to_writer(&mut counter, value)?;
     Ok(counter.bytes.saturating_add(1))

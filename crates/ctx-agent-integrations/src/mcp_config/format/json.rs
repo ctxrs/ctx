@@ -126,7 +126,7 @@ pub fn remove(
     render(&doc)
 }
 
-fn parse(body: &str, path: &Path) -> Result<Value> {
+pub(crate) fn parse(body: &str, path: &Path) -> Result<Value> {
     if path
         .extension()
         .is_some_and(|extension| extension == "jsonc")
@@ -230,7 +230,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
     }
 }
 
-fn render(value: &Value) -> Result<String> {
+pub(crate) fn render(value: &Value) -> Result<String> {
     let mut body = serde_json::to_string_pretty(value)?;
     body.push('\n');
     Ok(body)

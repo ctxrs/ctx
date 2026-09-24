@@ -232,6 +232,15 @@ rust.repository_set(
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.annotation(
+    # The Git package is under packages/network_partitions. Preserve the
+    # upstream root license in the stripped crate source/notice closure.
+    crate = "network_partitions",
+    patch_args = ["-p1"],
+    patches = ["//tools/bazel/patches:network-partitions-license.patch"],
+    repositories = ["crates"],
+    version = "0.3.0",
+)
+crate.annotation(
     # Share the macOS shutdown correction with the Cargo release factory.
     # Remove both applications when notify releases the lost-stop fix.
     crate = "notify",
@@ -249,6 +258,17 @@ crate.annotation(
     patches = ["//tools/bazel/patches:ort-freebsd-release-env-order.patch"],
     repositories = ["crates"],
     version = "2.0.0-rc.12",
+)
+# crate_universe 0.71.3 flattens host/target JSON features. Tree-sitter 0.27.0
+# declares preserve_order only for its build script, which never uses serde_json.
+# Restore Cargo resolver-2 runtime semantics in the generated Bazel rules only;
+# keep upstream Rust sources and the isolated output JSON 1.0.151 unchanged.
+crate.annotation(
+    crate = "serde_json",
+    patch_args = ["-p1"],
+    patches = ["//tools/bazel/patches:serde-json-runtime-features.patch"],
+    repositories = ["crates"],
+    version = "=1.0.150",
 )
 crate.from_cargo(
     name = "crates",
@@ -291,6 +311,26 @@ cargo_tools.spec(
     repositories = ["ctx_cargo_tools"],
     version = "=1.13.4",
 )
+# ra-ap-rustc_lexer's const check requires both tables to use Unicode 17.
+# unicode-ident 1.0.26 moved to Unicode 18 while unicode-properties is still 17.
+cargo_tools.spec(
+    package = "unicode-ident",
+    repositories = ["ctx_cargo_tools"],
+    version = "=1.0.24",
+)
+cargo_tools.spec(
+    default_features = False,
+    package = "unicode-properties",
+    repositories = ["ctx_cargo_tools"],
+    version = "=0.1.4",
+)
+# Keep libgit2's declared header inputs on the exact patched tool version.
+cargo_tools.spec(
+    default_features = False,
+    package = "libssh2-sys",
+    repositories = ["ctx_cargo_tools"],
+    version = "=0.3.3",
+)
 cargo_tools.annotation(
     crate = "cargo-fixit",
     gen_all_binaries = True,
@@ -298,9 +338,9 @@ cargo_tools.annotation(
 )
 cargo_tools.annotation(
     build_script_data = [
-        "@@rules_rust++crate+ctx_cargo_tools__libssh2-sys-0.3.2//:libssh2/include/libssh2.h",
-        "@@rules_rust++crate+ctx_cargo_tools__libssh2-sys-0.3.2//:libssh2/include/libssh2_publickey.h",
-        "@@rules_rust++crate+ctx_cargo_tools__libssh2-sys-0.3.2//:libssh2/include/libssh2_sftp.h",
+        "@@rules_rust++crate+ctx_cargo_tools__libssh2-sys-0.3.3//:libssh2/include/libssh2.h",
+        "@@rules_rust++crate+ctx_cargo_tools__libssh2-sys-0.3.3//:libssh2/include/libssh2_publickey.h",
+        "@@rules_rust++crate+ctx_cargo_tools__libssh2-sys-0.3.3//:libssh2/include/libssh2_sftp.h",
         "@@rules_rust++crate+ctx_cargo_tools__libz-sys-1.1.29//:src/zlib/zconf.h",
         "@@rules_rust++crate+ctx_cargo_tools__libz-sys-1.1.29//:src/zlib/zlib.h",
     ],
@@ -318,7 +358,7 @@ cargo_tools.annotation(
     patch_args = ["-p1"],
     patches = ["//tools/bazel/patches:libssh2-sys-disable-zlib.patch"],
     repositories = ["ctx_cargo_tools"],
-    version = "0.3.2",
+    version = "=0.3.3",
 )
 cargo_tools.annotation(
     crate = "cargo-shear",

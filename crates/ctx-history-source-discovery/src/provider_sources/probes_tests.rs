@@ -193,6 +193,49 @@ fn sqlite_probe_deadline_interrupts_expensive_queries() {
 }
 
 #[test]
+fn sqlite_probe_operation_budget_interrupts_expensive_queries_but_allows_small_select() {
+    let temp = tempdir();
+    let data = tempdir();
+    let path = temp.path().join("operation-budget.db");
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("create table conversations (id text);")
+        .unwrap();
+    let limits = SqliteProbeLimits {
+        deadline: Duration::from_secs(60),
+        max_progress_calls: 1,
+        ..SqliteProbeLimits::default()
+    };
+    let (authority, snapshot) = open_structural_probe_snapshot(data.path(), &path);
+    let error =
+        execute_sqlite_structural_probe(snapshot, limits, configure_sqlite_probe, |connection| {
+            connection.query_row(
+                "with recursive counter(value) as (\
+                     values(0) union all select value + 1 from counter where value < 1000000\
+                 ) select max(value) = 1000000 from counter",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+        })
+        .unwrap_err();
+    assert!(matches!(
+        *error,
+        SqliteReadFinalizationError::Primary(SqliteProbePrimaryError::BudgetExhausted)
+    ));
+    assert_structural_probe_finished(&authority);
+
+    let (authority, snapshot) = open_structural_probe_snapshot(data.path(), &path);
+    assert!(execute_sqlite_structural_probe(
+        snapshot,
+        limits,
+        configure_sqlite_probe,
+        |connection| { connection.query_row("SELECT 1", [], |row| row.get::<_, bool>(0)) }
+    )
+    .unwrap());
+    assert_structural_probe_finished(&authority);
+}
+
+#[test]
 fn sqlite_probe_connection_error_finalizes_and_preserves_cleanup_failure() {
     let temp = tempdir();
     let data = tempdir();

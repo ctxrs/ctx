@@ -262,7 +262,7 @@ pub(super) fn goose_fetch_native_session_page(
          join sessions s on s.rowid = selected.sqlite_rowid
          order by selected.canonical_native_identity"
     ))?;
-    let _length_guard = SqliteLengthPreflightGuard::new(conn);
+    let _length_guard = SqliteLengthPreflightGuard::new(conn)?;
     let rows = statement.query_map(params_from_iter(parameters), |row| {
         let raw_observed_bytes: i64 = row.get(2)?;
         let observed_bytes = u64::try_from(raw_observed_bytes)
@@ -502,7 +502,7 @@ pub(super) fn goose_fetch_native_message_page(
          order by native_order"
     );
 
-    let _length_guard = SqliteLengthPreflightGuard::new(conn);
+    let _length_guard = SqliteLengthPreflightGuard::new(conn)?;
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(parameters), |row| {
         let native_order = row.get::<_, Option<i64>>(1)?.ok_or_else(|| {

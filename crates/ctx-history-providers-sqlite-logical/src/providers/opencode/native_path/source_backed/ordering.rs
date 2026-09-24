@@ -407,7 +407,7 @@ fn hydrate_requested_events(
     // The query masks every oversized payload and bounds every variable-width
     // key before it crosses into Rust. Temporarily lift SQLite's row limit so
     // two independently accepted 16 MiB values can share one result row.
-    let _length_guard = SqliteLengthPreflightGuard::new(source);
+    let _length_guard = SqliteLengthPreflightGuard::new(source)?;
     let sql = source_backed_fallback_events_by_rowids_sql(schema, requests.len());
     let mut point = source.prepare(&sql)?;
     let mut source_rows = point.query(params_from_iter(

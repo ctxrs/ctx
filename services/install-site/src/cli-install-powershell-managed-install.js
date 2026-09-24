@@ -220,9 +220,10 @@ function Test-InstalledTargetIdentity {
     }
 }
 
-function Invoke-HostedInstallTransaction {
+function Invoke-HostedInstallTransaction([switch]$Migrate) {
+    $hostedAction = if ($Migrate) { "migrate" } else { "install" }
     $transaction = Invoke-ExecutableCaptured -Executable $downloadPath -Arguments @(
-        "upgrade", "--hosted-transaction", "install",
+        "upgrade", "--hosted-transaction", $hostedAction,
         "--install-path", $installPath,
         "--attempt-id", $installAttemptId,
         "--marker-source", $markerSourcePath,

@@ -30,6 +30,7 @@ use crate::{
 mod read_lease;
 
 pub(crate) use read_lease::{
+    acquire_candidate_generation_directory_read_authority,
     acquire_existing_generation_directory_read_authority, ensure_generation_read_lease_coordinator,
     try_generation_directory_reclaim_authority, try_generation_id_reclaim_authority,
     ExistingGenerationDirectoryReadAuthority,

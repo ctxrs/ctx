@@ -129,24 +129,30 @@ pub(super) fn execute_sqlite_structural_probe(
     let connection = snapshot.connection();
     let query_result = match connection {
         Ok(connection) => {
-            connection.progress_handler(
-                SQLITE_PROBE_PROGRESS_OPS,
-                Some(move || {
-                    progress_calls = progress_calls.saturating_add(1);
-                    let stop =
-                        progress_calls > limits.max_progress_calls || Instant::now() >= deadline;
-                    if stop {
-                        progress_exhausted.store(true, Ordering::Relaxed);
-                    }
-                    stop
-                }),
-            );
-            let result = match configure(connection, limits.deadline) {
+            let configured = connection
+                .progress_handler(
+                    SQLITE_PROBE_PROGRESS_OPS,
+                    Some(move || {
+                        progress_calls = progress_calls.saturating_add(1);
+                        let stop = progress_calls > limits.max_progress_calls
+                            || Instant::now() >= deadline;
+                        if stop {
+                            progress_exhausted.store(true, Ordering::Relaxed);
+                        }
+                        stop
+                    }),
+                )
+                .and_then(|()| configure(connection, limits.deadline));
+            let result = match configured {
                 Ok(()) => query(connection).map_err(SqliteProbePrimaryError::Query),
                 Err(error) => Err(SqliteProbePrimaryError::Configuration(error)),
             };
-            connection.progress_handler(0, None::<fn() -> bool>);
-            result
+            let cleared = connection.progress_handler(0, None::<fn() -> bool>);
+            result.and_then(|value| {
+                cleared
+                    .map(|()| value)
+                    .map_err(SqliteProbePrimaryError::Configuration)
+            })
         }
         Err(error) => Err(SqliteProbePrimaryError::Connection(error)),
     };
@@ -185,14 +191,14 @@ pub(super) fn configure_sqlite_probe(
     deadline: Duration,
 ) -> rusqlite::Result<()> {
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(i32::MAX);
-    connection.set_limit(SqliteLimit::SQLITE_LIMIT_LENGTH, value_limit);
-    connection.set_limit(SqliteLimit::SQLITE_LIMIT_SQL_LENGTH, 64 * 1024);
-    connection.set_limit(SqliteLimit::SQLITE_LIMIT_COLUMN, 256);
-    connection.set_limit(SqliteLimit::SQLITE_LIMIT_EXPR_DEPTH, 100);
-    connection.set_limit(SqliteLimit::SQLITE_LIMIT_COMPOUND_SELECT, 16);
-    connection.set_limit(SqliteLimit::SQLITE_LIMIT_VDBE_OP, 100_000);
-    connection.set_limit(SqliteLimit::SQLITE_LIMIT_ATTACHED, 0);
-    connection.set_limit(SqliteLimit::SQLITE_LIMIT_WORKER_THREADS, 0);
+    connection.set_limit(SqliteLimit::SQLITE_LIMIT_LENGTH, value_limit)?;
+    connection.set_limit(SqliteLimit::SQLITE_LIMIT_SQL_LENGTH, 64 * 1024)?;
+    connection.set_limit(SqliteLimit::SQLITE_LIMIT_COLUMN, 256)?;
+    connection.set_limit(SqliteLimit::SQLITE_LIMIT_EXPR_DEPTH, 100)?;
+    connection.set_limit(SqliteLimit::SQLITE_LIMIT_COMPOUND_SELECT, 16)?;
+    connection.set_limit(SqliteLimit::SQLITE_LIMIT_VDBE_OP, 100_000)?;
+    connection.set_limit(SqliteLimit::SQLITE_LIMIT_ATTACHED, 0)?;
+    connection.set_limit(SqliteLimit::SQLITE_LIMIT_WORKER_THREADS, 0)?;
     connection.busy_timeout(deadline)?;
     connection.pragma_update(None, "query_only", true)?;
     connection.pragma_update(None, "trusted_schema", false)

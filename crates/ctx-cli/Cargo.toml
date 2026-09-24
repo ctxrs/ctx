@@ -14,7 +14,7 @@ keywords = ["agent", "cli", "search"]
 [package.metadata.cargo-shear]
 # Integration tests import shared contract modules outside this package, which
 # cargo-shear does not follow. Cargo needs their test-only dependencies too.
-ignored = ["assert_cmd", "base64", "flate2", "predicates", "ring", "rusqlite", "tar"]
+ignored = ["base64", "flate2", "predicates", "ring", "rusqlite", "tar"]
 
 [[bin]]
 name = "ctx"
@@ -37,6 +37,8 @@ url.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
 fs2 = "0.4.3"
+ctx_graph_core.workspace = true
+sift.workspace = true
 ctx-agent-application = { path = "../ctx-agent-application" }
 ctx-agent-integrations = { path = "../ctx-agent-integrations" }
 ctx-app-config = { path = "../ctx-app-config" }
@@ -45,6 +47,8 @@ ctx-attribution = { path = "../ctx-attribution" }
 ctx-history-snapshot-reader = { path = "../ctx-history-snapshot-reader" }
 ctx-cli-presentation = { path = "../ctx-cli-presentation" }
 ctx-daemon-cli = { path = "../ctx-daemon-cli" }
+ctx-graph = { path = "../ctx-graph" }
+ctx-sift = { path = "../ctx-sift" }
 ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-client-observability = { path = "../ctx-client-observability" }
 ctx-companion-bridge = { path = "../ctx-companion-bridge" }

@@ -513,6 +513,20 @@ pub(super) fn write_state_phase_locked(
     Ok(true)
 }
 
+pub(super) fn finish_hosted_migration_locked(
+    lock: &UpgradeLock,
+    attempt: &UpgradeAttempt,
+) -> Result<()> {
+    let mut state = read_state_object(&lock.install_path);
+    if !state.is_current(attempt) {
+        return Err(anyhow!(
+            "hosted migration lost its upgrade attempt identity"
+        ));
+    }
+    state.terminal(attempt, "applied", Duration::ZERO, now_unix_s());
+    write_state_object_locked(lock, state)
+}
+
 pub(super) fn write_state_checked_locked(
     _data_root: &Path,
     lock: &UpgradeLock,
@@ -831,16 +845,24 @@ impl UpgradeLock {
 
     pub(super) fn acquire(_data_root: &Path) -> Result<Self> {
         let install_path = super::install::current_install_path()?;
-        let installation = InstallationLock::try_acquire(&install_path)?.ok_or_else(|| {
+        Self::acquire_for_installation(&install_path)
+    }
+
+    pub(super) fn acquire_for_installation(install_path: &Path) -> Result<Self> {
+        let installation = InstallationLock::try_acquire(install_path)?.ok_or_else(|| {
             anyhow!(
                 "ctx installation upgrade lock is held for {}",
                 install_path.display()
             )
         })?;
         Ok(Self {
-            install_path,
+            install_path: install_path.to_path_buf(),
             installation,
         })
+    }
+
+    pub(super) fn install_path(&self) -> &Path {
+        &self.install_path
     }
 
     pub(super) fn try_acquire() -> Result<Option<Self>> {

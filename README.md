@@ -1,23 +1,6 @@
-<img src="docs/assets/ctx-readme-banner.png" alt="You have months of coding agent history on your machine. Search it with ctx." width="100%">
+<img src="docs/assets/ctx-readme-banner.png" alt="Search your agent history. Blame code on the agent that wrote it. Map your codebase. Cut noisy tool output." width="100%">
 
-**ctx** is an open-source CLI for fast local search across your past coding agent sessions. You can search messages and tool calls across agents and sessions, then jump straight to the exact event or full transcript for any result.
-
-**`ctx blame`** connects a line, file, commit, or PR to the agent sessions that produced it, with citations to the original transcript and tool calls. It is included in the open-source CLI.
-
-Coding agents have git history, but their own session transcripts and tool call records remain sequestered away in verbose log files. Those log files are a treasure trove of useful data, but they aren't accessible in a legible format for agents.
-
-If you give your agents fast, easy access to search and retrieve these transcripts, your agents can:
-
-- surface decisions, constraints, and assumptions from earlier work
-- find investigations, solutions, and failed approaches already explored in previous sessions
-- audit previous sessions in detail
-- pick up where previous work left off, even across multiple threads
-
-That means less repeated agent work, lower token spend, and better task outcomes because each new session can use the history already on your machine.
-
-ctx also understands how parent sessions, subagents, and forks relate to one another, so agents can recover the whole chain of work no matter how aggressively you orchestrate.
-
-This is different from “agent memory,” which usually compacts what happened into facts or summaries that can become stale. ctx gives agents instant recall of the real record without a lossy memory step.
+You already have months of coding agent history on your machine. **ctx** lets you search it and blame code to the sessions that wrote it. `ctx graph` maps relationships across your codebase, and `ctx sift` cuts noisy tool output before your agent reads it. Search and blame work after setup; you choose which projects to index and whether to install a Sift hook.
 
 ## Install and set up ctx
 
@@ -36,23 +19,70 @@ or prompt your agent:
 Please install and set up ctx CLI (see github.com/ctxrs/ctx)
 ```
 
-### Building from source
+Building from source? See the [source-build instructions](docs/unmanaged-installs.md#source-builds).
 
-Use the [source-build instructions](docs/unmanaged-installs.md#source-builds)
-for the repository's Bazel build command and prerequisites. Native dependencies
-also need C/C++ build tools: `rusqlite` compiles bundled SQLite to read
-SQLite-based agent histories.
+## Search your agent history
 
-For native Windows builds using MSVC, ensure your Visual Studio installation
-includes **Desktop development with C++**, the MSVC x64/x86 tools, and a Windows
-SDK. If these are not already installed, use the standalone
-[Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
-Installing Rust alone does not provide these tools; installing a prebuilt ctx
-release does not require them.
+Coding agents have git history, but their own session transcripts and tool call records remain sequestered away in verbose log files. Those log files are a treasure trove of useful data, but they aren't accessible in a legible format for agents.
 
-Run the repository's shell scripts from Bash. See
-[Bazel's Windows setup guide](https://bazel.build/install/windows)
-for MSYS2 setup and troubleshooting if Bazel cannot find Bash or Visual C++.
+If you give your agents fast, easy access to search and retrieve these transcripts, your agents can:
+
+- surface decisions, constraints, and assumptions from earlier work
+- find investigations, solutions, and failed approaches already explored in previous sessions
+- audit previous sessions in detail
+- pick up where previous work left off, even across multiple threads
+
+That means less repeated agent work, lower token spend, and better task outcomes because each new session can use the history already on your machine.
+
+ctx also understands how parent sessions, subagents, and forks relate to one another, so agents can recover the whole chain of work no matter how aggressively you orchestrate.
+
+This is different from “agent memory,” which usually compacts what happened into facts or summaries that can become stale. ctx gives agents instant recall of the real record without a lossy memory step.
+
+Your past coding agent sessions already live on your machine, usually in JSONL files or SQLite databases under directories such as `~/.claude` and `~/.codex`.
+
+`ctx setup` discovers those sources and reads them without modifying them. It converts each provider’s format into consistent local records for sessions, messages, tool calls, relationships, and repository activity, then stores and indexes those records locally.
+
+ctx does not require hooks or any code running inside the agent process. Automatic indexing is on by default and keeps the index current as those history sources change. Each update is completed before it becomes visible, so commands never read a partially built index.
+
+Every session and event receives a stable ctx ID and retains its complete transcript content and source information. `ctx search` finds the relevant history, `ctx show` retrieves the exact event or full transcript, and `ctx locate` identifies where it came from. Semantic search and Blame use those same records.
+
+```bash
+# Index all of your existing local agent sessions
+ctx setup
+
+# Your agent can search prior work with normal language
+ctx search "failed migration"
+
+# Search sessions and events that touched a file
+ctx search --file crates/foo/src/lib.rs
+
+# Or search multiple terms
+ctx search --term "failed migration" --term rollback --term "cursor rename"
+
+# Results include matching sessions, snippets, and ctx IDs
+# evt_01h...  ses_01h...  codex  "migration expected the old cursor name" ...
+
+# Print the matching part of the old transcript
+ctx show event <ctx-event-id> --window 3
+
+# Or print a compact transcript of the original session
+ctx show session <ctx-session-id>
+```
+
+Search uses BM25 lexical matching by default. Give it likely terms—an error, file, command, or decision—and it ranks sessions containing those terms.
+
+### Semantic search
+
+Semantic search helps when related ideas use different wording. ctx computes embeddings locally and searches them directly, without a vector database to run. Enable it with:
+
+```bash
+ctx semantic enable
+ctx semantic status
+```
+
+Lexical search stays available while the local model builds. The built-in model needs no API key; an explicitly configured external semantic executor can send history and query text to its endpoint. See [retrieval backends](docs/search.md#retrieval-backends) for setup and privacy details. Transcript text is preserved rather than automatically redacted, so review copied output before sharing it outside your machine.
+
+For the full pipeline, see [How ctx works](https://ctx.rs/concepts/how-it-works). For a quick first run, see [Quickstart](https://ctx.rs/first-search).
 
 ## 50x more token-efficient than raw transcript search
 
@@ -60,7 +90,7 @@ By structuring agent history into sessions, events, metadata, and indexed fields
 
 <img src="docs/assets/ctx-token-efficiency-chart.png" alt="Token output per agent history search: ctx search 917 tokens, raw transcript search 45,734 tokens." width="100%">
 
-## Git blame for agent sessions
+## Blame code to the agent that wrote it
 
 `git blame` tells you which commit last changed a line. `ctx blame` tells you which agent session produced that commit, with exact citations back to the original transcript and recorded tool calls.
 
@@ -111,59 +141,109 @@ Like ctx indexing and search capabilities, blame runs locally, so your code and 
 
 [Learn how to use Blame](docs/blame.md), including supported inputs, evidence limits, and local indexing.
 
-## How it works
+## Map your codebase
 
-Your past coding agent sessions already live on your machine, usually in JSONL files or SQLite databases under directories such as `~/.claude` and `~/.codex`.
+Graphify started with a great idea and became popular fast. The problem is that its Python/NetworkX architecture does not scale well. It installs about 30 direct dependencies, and the CLI reloads the entire graph into memory for every query. On a large repo, that can make each search slow enough to drag down an agent’s entire task.
 
-`ctx setup` discovers those sources and reads them without modifying them. It converts each provider’s format into consistent local records for sessions, messages, tool calls, relationships, and repository activity, then stores and indexes those records locally.
+ctx graph is a rewrite in Rust. It keeps the graph indexed in SQLite, so searches query the database directly and updates only touch changed files. Static indexing and search run as one native binary with no Python environment, API key, model, or background service.
 
-ctx does not require hooks or any code running inside the agent process. Automatic indexing is on by default and keeps the index current as those history sources change. Each update is completed before it becomes visible, so commands never read a partially built index.
+If you aren’t familiar with Graphify, it’s like a local version of Sourcegraph: it builds a graph of your codebase and docs so an agent can ask who calls something, what depends on it, and what might break if it changes.
 
-Every session and event receives a stable ctx ID and retains its complete transcript content and source information. `ctx search` finds the relevant history, `ctx show` retrieves the exact event or full transcript, and `ctx locate` identifies where it came from. Semantic search and Blame use those same records.
+You might not need ctx graph or Graphify for a smaller project. Agents are surprisingly good at getting around a codebase using normal read and search tools. On a larger project, ctx graph gives them a much faster way to follow relationships across files instead of spending tokens repeatedly searching the repository.
 
-```bash
-# Index all of your existing local agent sessions
-ctx setup
+**If you train coding models, try giving ctx graph to the agents in your rollouts.**
 
-# Your agent can search prior work with normal language
-ctx search "failed migration"
+### Try it
 
-# Search sessions and events that touched a file
-ctx search --file crates/foo/src/lib.rs
-
-# Or search multiple terms
-ctx search --term "failed migration" --term rollback --term "cursor rename"
-
-# Results include matching sessions, snippets, and ctx IDs
-# evt_01h...  ses_01h...  codex  "migration expected the old cursor name" ...
-
-# Print the matching part of the old transcript
-ctx show event <ctx-event-id> --window 3
-
-# Or print a compact transcript of the original session
-ctx show session <ctx-session-id>
-```
-
-Search uses BM25 lexical matching by default. Give it likely terms—an error, file, command, or decision—and it ranks sessions containing those terms.
-
-### Semantic search
-
-Semantic search helps when related ideas use different wording. ctx computes embeddings locally and searches them directly, without a vector database to run. Enable it with:
+From any project:
 
 ```bash
-ctx semantic enable
-ctx semantic status
+ctx graph index .
+ctx graph stats
+ctx graph search authenticate
 ```
 
-Automatic indexing is the default, so enablement starts or recovers the daemon that acquires the local model and builds the semantic projection. Add `--wait` to wait for readiness. If you selected manual indexing, plain enablement records the opt-in without changing modes; run `ctx index mode auto` for automatic catch-up or use an explicit semantic search with `--refresh wait`. Lexical search remains available while embeddings build; hybrid search uses lexical and semantic evidence automatically when coverage is ready. `ctx semantic disable` turns the feature off without deleting downloaded assets.
+Replace `authenticate` with a symbol from your project, then copy its exact ID into an impact query. That shows the symbol, the code that depends on it, and the relationship between them:
 
-ctx does not send your prompts, transcripts, or indexed history to a cloud service, call model APIs, require API keys, or write into your source repositories. Transcript text is preserved rather than automatically redacted, so review copied output before sharing it outside your machine.
+```text
+$ ctx graph impact 'python:src/auth.py:authenticate@64'
+Generation 1 (indexed snapshot)
+python:src/auth.py:authenticate@64  function  authenticate  src/auth.py:4
+python:src/auth.py:login@136         function  login         src/auth.py:7
+python:src/auth.py:login@136 --calls--> python:src/auth.py:authenticate@64
+```
 
-For the full pipeline, see [How ctx works](https://ctx.rs/concepts/how-it-works). For a quick first run, see [Quickstart](https://ctx.rs/first-search).
+ctx graph saves the graph at `.graf/index.db`. After changing code, update only what changed:
 
-## Why is ctx so fast?
+```bash
+ctx graph update
+```
 
-ctx is written in Rust, but that's not the main reason why it's fast. Instead of ingesting your history into a local relational database like SQLite, ctx scans it with parallel workers and writes searchable records directly to [Tantivy](https://github.com/quickwit-oss/tantivy). That removes an entire database ingest step while still supporting structured filtering and complete record retrieval.
+Use `--json` for structured output and an exact node ID when a name is ambiguous. The [usage guide](docs/unified-context.md) covers callers, callees, paths, filters, reports, exports, multiple projects, and supported inputs.
+
+## Why ctx graph is better than Graphify
+
+ctx graph is Graphify, but rebuilt properly in Rust: **1000x faster search, 89x faster updates, and one native binary.**
+
+<img src="docs/assets/ctx-graph-vscode-performance.svg" alt="On the full VS Code repository, ctx graph searched in 13 milliseconds instead of 13.26 seconds and updated an unchanged graph in 880 milliseconds instead of 77.97 seconds." width="100%">
+
+It is also stricter about correctness. Updates become visible as one complete generation, so a failed extraction cannot publish half a graph. When two symbols could be the answer, ctx graph returns the ambiguity and the source evidence instead of guessing.
+
+ctx graph is an independent implementation, not a fork or a drop-in replacement for Graphify's Python API. The chart uses the complete 19,036-file VS Code repository on an M1 Mac mini. Cold indexing was effectively tied, while ctx graph produced 2.4x as many nodes and 1.7x as many edges with 31% less peak memory. See the [benchmark method, results, and tradeoffs](docs/unified-context.md).
+
+### Migrate from Graphify
+
+Existing `.graf/index.db` databases work with `ctx graph`; no conversion is required.
+
+Use `ctx graph --help` for the full command set.
+
+### Use ctx graph with an agent
+
+Use `ctx integrations install skill` and `ctx integrations install mcp --agent codex`.
+
+Optional project graph tool hooks use `ctx graph install --platform gemini --project PATH` (or `claude` or `codebuddy`); remove them with `ctx graph uninstall` and the same selections.
+
+## Cut noisy tool output
+
+`ctx sift` cuts noisy tool output before it reaches your coding agent. It leaves the original commands untouched and spends fewer tokens on repeated paths, logs, and formatting while keeping useful details visible.
+
+Ordinary compaction runs locally. If you enable original retention, `ctx recall` can recover the complete captured output. The optional Jev selector is off by default and sends eligible passages to an external service only when you enable it.
+
+### Try it
+
+Run commands through Sift:
+
+```sh
+ctx sift -- git status
+ctx sift -- cargo test
+```
+
+To have a supported agent use Sift automatically, run `ctx integrations install sift --agent claude-code`. You can also sift a saved result:
+
+```sh
+ctx sift build.log
+```
+
+Short output, live progress, and binary data pass through. When compaction doesn't save tokens, the original output wins.
+
+## Why Sift instead of RTK
+
+ctx favors broad, conservative compaction over a large collection of
+command-specific summaries. That gives it consistent behavior on arbitrary tool
+output and makes generic compaction reversible. It also has automatic agent
+setup, local savings reports, optional original-output recovery, and a
+one-command migration for recognized RTK integrations.
+
+In the [v0.4.0 release benchmark](benchmarks/results/2026-09-21-release-v0.4.0/README.md),
+ctx was faster than RTK 0.49 on all ten of our sample workloads and stayed within
+1.35 ms of running the command directly. Across workloads collected from our own real usage,
+ctx reduced tool call output by 43%.
+
+See [how compaction and agent hooks work](docs/unified-context.md#compact-output-when-requested) for the available views, recovery limits, and setup options.
+
+## Why ctx search is so fast
+
+ctx is written in Rust, but that's not the main reason history search is fast. Instead of ingesting your history into a local relational database like SQLite, ctx scans it with parallel workers and writes searchable records directly to [Tantivy](https://github.com/quickwit-oss/tantivy). That removes an entire database ingest step while still supporting structured filtering and complete record retrieval.
 
 Tantivy builds the index in parallel. It creates a compact map from each term to the records containing it and searches memory-mapped segments without loading your entire history into memory. The same index stores the complete record for every result, so `ctx search`, `ctx show`, and `ctx locate` can read it without a second database or reopening and reparsing the original agent logs.
 
@@ -171,64 +251,9 @@ In our benchmark, this was 16x faster than ctx's previous optimized SQLite imple
 
 <img src="docs/assets/ctx-cold-indexing-chart.png" alt="Cold indexing time: ctx with Tantivy, 9.65 seconds; previous ctx SQLite pipeline, 155.09 seconds. Lower is better." width="100%">
 
-## How ctx differs from agent memory and codebase intelligence
-
-| Category | Starts from | Answers |
-| --- | --- | --- |
-| Agent memory ([Mem0](https://mem0.ai), [Zep](https://www.getzep.com/)) | Extracted facts, summaries, conversation-derived memories, or graph nodes | “What should the agent remember?” |
-| Codebase intelligence ([Graphify](https://github.com/Graphify-Labs/graphify), [Sourcegraph](https://sourcegraph.com/)) | The current repository's code, symbols, documents, and relationships | “What is in this codebase, and how does it fit together?” |
-| Coding-agent history and provenance ([ctx](https://ctx.rs)) | Original sessions, messages, tool calls, and local Git history | “What actually happened, and which session produced this code?” |
-
-ctx gives coding agents exact recall of prior work. They can search the original history, retrieve the cited transcript or tool call, and use `ctx blame` to map a line, file, commit, or PR back to the session that produced it.
-
-An agent might use all three in one investigation: memory for a durable rule, codebase intelligence to find the relevant subsystem, and ctx to recover the historical work that explains the change.
-
-Read more about [agent memory](https://ctx.rs/comparisons/agent-memory), [codebase graphs](https://ctx.rs/comparisons/codebase-graphs), and [grep or log search](https://ctx.rs/comparisons/grep-log-search).
-
 ## Supported agent histories
 
-| Agent harness | Support |
-| --- | --- |
-| Claude Code | Supported |
-| Codex | Supported |
-| Grok Build | Supported |
-| DeepSeek Harness | Supported |
-| Cursor | Supported |
-| Pi | Supported |
-| GitHub Copilot CLI | Supported |
-| OpenCode | Supported |
-| Gemini CLI / Antigravity | Supported |
-| Factory AI Droid | Supported |
-| OpenClaw | Supported |
-| Hermes Agent | Supported |
-| AstrBot | Supported |
-| NanoClaw | Supported |
-| Shelley | Supported |
-| Auggie / Augment | Supported |
-| Cline / Roo Code | Supported |
-| CodeBuddy | Supported |
-| Continue | Supported |
-| Crush | Supported |
-| Deep Agents | Supported |
-| Devin | Supported |
-| Firebender | Supported |
-| ForgeCode | Supported |
-| Goose | Supported |
-| Junie | Supported |
-| Kilo Code | Supported |
-| Kimi Code CLI | Supported |
-| Kiro CLI | Supported |
-| Lingma | Supported |
-| MiMo Code | Supported |
-| Mistral Vibe | Supported |
-| Mux | Supported |
-| OpenHands | Supported |
-| Qoder | Supported |
-| Qwen Code | Supported |
-| Rovo Dev | Supported |
-| Tabnine CLI | Supported |
-| Warp | Supported |
-| Zed | Supported |
+ctx supports Claude Code, Codex, Cursor, Pi, Gemini CLI, and many more. See the [current provider list](docs/provider-support.md).
 
 ## Explore the docs
 

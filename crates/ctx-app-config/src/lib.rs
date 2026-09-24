@@ -17,6 +17,7 @@ use ctx_history_platform::platform_security::{
 use ctx_history_source_discovery::provider_paths_equivalent;
 
 mod durable_write;
+mod loading;
 mod mutation;
 mod provider_roots;
 mod removed_cloud_mode;
@@ -388,37 +389,6 @@ impl AppConfig {
 
     pub const fn automatic_source_discovery_enabled(&self) -> bool {
         self.sources.automatic
-    }
-
-    pub fn load(data_root: &Path) -> Result<Self> {
-        let deprecated_controls = DeprecatedControls::detect();
-        Self::load_with_deprecated_controls(data_root, &deprecated_controls)
-    }
-
-    pub fn load_with_deprecated_controls(
-        data_root: &Path,
-        deprecated_controls: &DeprecatedControls,
-    ) -> Result<Self> {
-        let mut config = Self::load_persisted(data_root)?;
-        config.apply_env(deprecated_controls)?;
-        Ok(config)
-    }
-
-    fn load_persisted(data_root: &Path) -> Result<Self> {
-        observe_app_config_load();
-        let mut config = Self::default();
-        let path = data_root.join(CONFIG_FILE);
-        if let Some(text) = mutation::read_config_text_migrating_retired_controls(&path)? {
-            let parsed =
-                parse_toml_subset(&text).with_context(|| format!("parse {}", path.display()))?;
-            config
-                .apply_values(&parsed)
-                .with_context(|| format!("load {}", path.display()))?;
-            config
-                .validate_provider_root_data_root(data_root)
-                .with_context(|| format!("load {}", path.display()))?;
-        }
-        Ok(config)
     }
 
     fn apply_values(&mut self, values: &BTreeMap<String, ConfigValue>) -> Result<()> {

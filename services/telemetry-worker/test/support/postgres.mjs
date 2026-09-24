@@ -1,7 +1,6 @@
 // Synthetic local schema and isolated PostgreSQL helpers; no production data.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requirePostgres } from "./postgres-test-prerequisite.mjs";
@@ -135,29 +134,34 @@ alter function ctx.telemetry_ingest_health_snapshot(text) owner to ctx_migration
 `;
 
 export function startPostgres() {
-  const root = mkdtempSync(path.join(tmpdir(), "ctx-telemetry-history-"));
+  // Unix socket paths are bounded independently of filesystem paths. Bazel's
+  // TMPDIR can exceed that bound; each cluster still owns a private directory.
+  const root = mkdtempSync("/tmp/ctx-telemetry-history-");
   const data = path.join(root, "data");
   const socket = path.join(root, "socket");
   const log = path.join(root, "postgres.log");
-  mkdirSync(socket);
-  execFileSync(path.join(postgresBin, "initdb"), [
-    "-D", data, "-A", "trust", "-U", "postgres", "--no-locale", "--encoding=UTF8",
-  ], { stdio: "pipe" });
-  execFileSync(path.join(postgresBin, "pg_ctl"), [
-    "-D", data, "-l", log, "-o", `-F -k ${socket} -h ''`, "-w", "start",
-  ], { stdio: "pipe" });
-  return {
-    socket,
-    cleanup() {
-      try {
-        execFileSync(path.join(postgresBin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"], {
-          stdio: "pipe",
-        });
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
+  const cleanup = () => {
+    try {
+      execFileSync(path.join(postgresBin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"], {
+        stdio: "pipe",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   };
+  try {
+    mkdirSync(socket);
+    execFileSync(path.join(postgresBin, "initdb"), [
+      "-D", data, "-A", "trust", "-U", "postgres", "--no-locale", "--encoding=UTF8",
+    ], { stdio: "pipe" });
+    execFileSync(path.join(postgresBin, "pg_ctl"), [
+      "-D", data, "-l", log, "-o", `-F -k ${socket} -h ''`, "-w", "start",
+    ], { stdio: "pipe" });
+  } catch (error) {
+    try { cleanup(); } catch { /* Preserve the startup failure. */ }
+    throw error;
+  }
+  return { socket, cleanup };
 }
 
 export function sql(database, statement) {

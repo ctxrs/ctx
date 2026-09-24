@@ -272,8 +272,8 @@ fn read_only_certification_rejects_restored_metadata_byte_mutation() {
         verify_physical_integrity_read_only(fixture.root(), &fixture.slot, &fixture.index),
         Err(IndexError::ChecksumMismatch)
     ));
-    assert_eq!(crate::checksum_walks(), 0);
-    assert_eq!(crate::hashed_artifact_bytes(), 0);
+    assert_eq!(crate::checksum_walks(), 1);
+    assert!(crate::hashed_artifact_bytes() > 0);
 }
 
 #[cfg(unix)]
@@ -327,6 +327,58 @@ fn read_only_certification_rejects_unretained_alias_in_rebuilt_certification() {
     ));
     assert_eq!(crate::checksum_walks(), 0);
     assert_eq!(crate::hashed_artifact_bytes(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_only_active_snapshot_rehashes_during_candidate_hardlinking() {
+    let fixture = read_only_certification_fixture();
+    let candidate = generation(fixture.root(), 'e');
+    let candidate_artifact = candidate.join(&fixture.relative_artifact_path);
+    fs::create_dir_all(candidate_artifact.parent().unwrap()).unwrap();
+    fs::hard_link(fixture.artifact_path(), &candidate_artifact).unwrap();
+
+    crate::reset_physical_verification_activity();
+    assert!(matches!(
+        verify_physical_integrity_read_only(fixture.root(), &fixture.slot, &fixture.index),
+        Err(IndexError::ChecksumMismatch)
+    ));
+    assert_eq!(crate::checksum_walks(), 0);
+    let _writer = crate::retention::acquire_candidate_generation_directory_read_authority(
+        fixture.root(),
+        candidate.file_name().unwrap().to_str().unwrap(),
+    )
+    .unwrap();
+
+    crate::reset_physical_verification_activity();
+    verify_physical_integrity_read_only(fixture.root(), &fixture.slot, &fixture.index).unwrap();
+    assert_eq!(crate::checksum_walks(), 1);
+    assert!(crate::hashed_artifact_bytes() > 0);
+
+    mutate_same_length_and_restore_metadata(&candidate_artifact);
+    assert!(matches!(
+        verify_physical_integrity_read_only(fixture.root(), &fixture.slot, &fixture.index),
+        Err(IndexError::ChecksumMismatch)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn read_only_active_snapshot_rejects_writable_artifact_without_hashing() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = read_only_certification_fixture();
+    let artifact_path = fixture.artifact_path();
+    let mut permissions = fs::metadata(&artifact_path).unwrap().permissions();
+    permissions.set_mode(permissions.mode() | 0o200);
+    fs::set_permissions(artifact_path, permissions).unwrap();
+
+    crate::reset_physical_verification_activity();
+    assert!(matches!(
+        verify_physical_integrity_read_only(fixture.root(), &fixture.slot, &fixture.index),
+        Err(IndexError::ChecksumMismatch)
+    ));
+    assert_eq!(crate::checksum_walks(), 0);
 }
 
 #[cfg(unix)]

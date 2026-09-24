@@ -899,12 +899,12 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
         let connection = sqlite_snapshot.connection()?;
         let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
             .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
-        connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
         connection
-            .busy_timeout(std::time::Duration::from_secs(5))
+            .set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit)
+            .and_then(|_| connection.busy_timeout(std::time::Duration::from_secs(5)))
             .map_err(|source| {
                 sqlite_snapshot.diagnose_provider_query_error(
-                    "setting the private OpenCode SQLite busy timeout",
+                    "configuring the private OpenCode SQLite value limit and busy timeout",
                     source,
                     SqliteFailurePhase::SourceValidation,
                 )

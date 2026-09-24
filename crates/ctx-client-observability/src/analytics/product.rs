@@ -23,6 +23,7 @@ pub enum IntegrationTarget {
     Skills,
     SlashCommands,
     Plugin,
+    OutputHook,
 }
 
 impl IntegrationTarget {
@@ -32,6 +33,7 @@ impl IntegrationTarget {
             Self::Skills => "skills",
             Self::SlashCommands => "slash_commands",
             Self::Plugin => "plugin",
+            Self::OutputHook => "output_hook",
         }
     }
 }

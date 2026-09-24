@@ -206,12 +206,17 @@ pub(super) fn create_authenticated_candidate_generation(
     }
 
     let directory_name = format!("generation-{}", Uuid::now_v7().simple());
+    let alias_authority = crate::retention::acquire_candidate_generation_directory_read_authority(
+        root,
+        &directory_name,
+    )?;
     let destination_name = PathBuf::from(&directory_name);
     create_directory_at(&generations.file, &destination_name)?;
     let destination_path = generations_path.join(&directory_name);
     let destination = BoundDirectory::open_at(&generations.file, &destination_name)?;
     validate_child_binding(&generations.file, &destination_name, destination.identity)?;
     let guard = CandidateGuard {
+        _alias_authority: alias_authority,
         root_path,
         root: root_directory,
         generations_name,

@@ -32,7 +32,7 @@ impl PathContext {
         let xdg_config_home =
             non_empty_env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
         let mut env_overrides = BTreeMap::new();
-        for key in ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] {
+        for key in ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME"] {
             if let Some(path) = non_empty_env_path(key) {
                 env_overrides.insert(key.to_owned(), path);
             }
@@ -97,6 +97,10 @@ impl PathContext {
     }
 
     pub fn agent_detected(&self, agent: SkillAgentArg) -> bool {
+        if agent == SkillAgentArg::GitHubCopilot && self.env_overrides.contains_key("COPILOT_HOME")
+        {
+            return true;
+        }
         if agent == SkillAgentArg::Codex
             && !self.env_overrides.contains_key("CODEX_HOME")
             && Path::new("/etc/codex").exists()

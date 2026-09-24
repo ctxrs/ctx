@@ -12,6 +12,7 @@ mkdir -p \
   "${fixture}/contracts/stable-defaults" \
   "${fixture}/crates/ctx-app-config/src" \
   "${fixture}/crates/ctx-cli/src" \
+  "${fixture}/crates/ctx-cli/tests" \
   "${fixture}/crates/ctx-client-observability/src/analytics" \
   "${fixture}/crates/ctx-upgrade-engine/tests/contracts" \
   "${fixture}/crates/ctx-upgrade-engine/src/upgrade" \
@@ -28,6 +29,8 @@ cp "${repo_root}/crates/ctx-app-config/src/deprecated_controls.rs" \
 cp "${repo_root}/crates/ctx-client-observability/src/analytics/operation.rs" \
   "${fixture}/crates/ctx-client-observability/src/analytics/"
 cp "${repo_root}/crates/ctx-app-config/src/tests.rs" "${fixture}/crates/ctx-app-config/src/"
+cp "${repo_root}/crates/ctx-app-config/src/loading_tests.rs" "${fixture}/crates/ctx-app-config/src/"
+cp "${repo_root}/crates/ctx-cli/tests/unified_context.rs" "${fixture}/crates/ctx-cli/tests/"
 cp "${repo_root}/crates/ctx-cli/src/process_environment.rs" "${fixture}/crates/ctx-cli/src/"
 mkdir -p "${fixture}/crates/ctx-daemon-cli/tests/contracts"
 cp "${repo_root}/crates/ctx-daemon-cli/tests/contracts/daemon_config_reload.rs" \
@@ -188,6 +191,12 @@ path.write_text(f'const RETIRED: &str = "{leaf}";\n')
 PY
 }
 
+copy_migration_fixture() {
+  local relative="$1"
+  local case_root="$2"
+  cp "${case_root}/crates/ctx-app-config/src/loading_tests.rs" "${case_root}/${relative}"
+}
+
 expect_fail inventory-default \
   'analytics delivery released default differs from empty-config runtime' \
   change_inventory_default
@@ -219,5 +228,14 @@ retired_fake_ip_control='upgrade.allow_''rfc2544_fake_ip'
 expect_fail uncontained-section-scoped-retired-control \
   "retired control ${retired_fake_ip_control}" \
   add_uncontained_section_scoped_retired_control
+
+for relative in \
+  crates/ctx-app-config/src/loading.rs \
+  crates/ctx-cli/src/unified_context.rs \
+  crates/ctx-cli/tests/unlisted_migration.rs; do
+  expect_fail "uncontained-${relative##*/}" \
+    "${relative}: retired control ${retired_fake_ip_control}" \
+    copy_migration_fixture "${relative}"
+done
 
 printf 'public control surface checker tests passed\n'

@@ -11,7 +11,7 @@ use ctx_history_platform::platform_security::{
     restrict_private_file_handle, verify_private_directory, verify_private_file,
     verify_private_file_handle,
 };
-use rusqlite::{serialize::OwnedData, Connection, DatabaseName, OpenFlags};
+use rusqlite::{serialize::OwnedData, Connection, OpenFlags, MAIN_DB};
 
 use super::{verify_supported_schema, UsageStoreError, MAX_DATABASE_BYTES, PAGE_SIZE_BYTES};
 
@@ -343,7 +343,7 @@ pub(super) fn deserialize_read_only(image: Vec<u8>) -> Result<Connection, UsageS
     // The detached image must be privately writable long enough to apply
     // in-memory schema migrations. The source family is never opened by this
     // connection, and the report path enables query_only before exposure.
-    conn.deserialize(DatabaseName::Main, data, false)?;
+    conn.deserialize(MAIN_DB, data, false)?;
     verify_supported_schema(&conn)?;
     Ok(conn)
 }

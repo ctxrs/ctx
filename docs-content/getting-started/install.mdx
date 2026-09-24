@@ -40,12 +40,12 @@ updates shell startup files on Unix or the user PATH on Windows unless you pass
 installer; a child installer cannot change its parent shell's environment.
 See [Troubleshooting](/troubleshooting) if another installation is selected.
 
-Use `--no-setup` on Unix or `-NoSetup` on Windows for install-only CI,
-packaging, or review flows. Install-only mode skips both the skill step and
-history indexing unless you pass a skill target explicitly:
+Use `--no-setup` on Unix or `-NoSetup` on Windows to skip history setup while
+still installing the bundled skill. For binary-only CI, packaging, or review
+flows, also pass `--no-skill` or `-NoSkill`:
 
 ```bash
-curl -fsSL https://ctx.rs/install | sh -s -- --no-setup
+curl -fsSL https://ctx.rs/install | sh -s -- --no-setup --no-skill
 ```
 
 To keep setup but opt out of daemon autostart for that run, use

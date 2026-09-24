@@ -326,31 +326,32 @@ pub(in crate::sqlite_source) fn execute_schema(
     let table = table.to_owned();
     // Execute only the native table/index declaration, never a trigger, view,
     // attached database, PRAGMA or unrelated schema operation from input SQL.
-    target.authorizer(Some(move |context: AuthContext<'_>| {
-        let allowed = matches!(context.action, AuthAction::Function { .. })
-            || context.database_name == Some("main")
-                && match context.action {
-                    AuthAction::CreateTable { table_name } => table_name == table,
-                    AuthAction::CreateIndex { table_name, .. } => table_name == table,
-                    AuthAction::Insert { table_name } | AuthAction::Update { table_name, .. } => {
-                        table_name == "sqlite_master"
-                    }
-                    AuthAction::Read { table_name, .. } => {
-                        table_name == table || table_name == "sqlite_master"
-                    }
-                    AuthAction::Reindex { .. } => true,
-                    _ => false,
-                };
-        if allowed {
-            Authorization::Allow
-        } else {
-            Authorization::Deny
-        }
-    }));
+    target
+        .authorizer(Some(move |context: AuthContext<'_>| {
+            let allowed = matches!(context.action, AuthAction::Function { .. })
+                || context.database_name == Some("main")
+                    && match context.action {
+                        AuthAction::CreateTable { table_name } => table_name == table,
+                        AuthAction::CreateIndex { table_name, .. } => table_name == table,
+                        AuthAction::Insert { table_name }
+                        | AuthAction::Update { table_name, .. } => table_name == "sqlite_master",
+                        AuthAction::Read { table_name, .. } => {
+                            table_name == table || table_name == "sqlite_master"
+                        }
+                        AuthAction::Reindex { .. } => true,
+                        _ => false,
+                    };
+            if allowed {
+                Authorization::Allow
+            } else {
+                Authorization::Deny
+            }
+        }))
+        .map_err(private_error)?;
     let result = target.execute(sql, []);
-    target.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    let cleared = target.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
     result
-        .map(|_| ())
+        .and(cleared)
         .map_err(|error| SqliteSourceAccessError::SnapshotUnavailable {
             reason: format!("selected provider table/index schema cannot be reproduced: {error}"),
         })

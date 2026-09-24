@@ -35,6 +35,7 @@ use ctx_app_config as config;
 #[derive(Debug, Clone)]
 pub(crate) struct LocalToolBackend {
     data_root: PathBuf,
+    graph_db: Result<Option<PathBuf>, String>,
 }
 
 fn adapt_tool_search_request(
@@ -77,7 +78,15 @@ fn adapt_tool_search_request(
 
 impl LocalToolBackend {
     pub(crate) fn new(data_root: PathBuf) -> Self {
-        Self { data_root }
+        Self {
+            data_root,
+            graph_db: Ok(None),
+        }
+    }
+
+    pub(crate) fn with_graph_db(mut self, graph_db: Result<Option<PathBuf>, String>) -> Self {
+        self.graph_db = graph_db;
+        self
     }
 
     fn status(&self) -> Result<Value, ToolBackendError> {
@@ -85,11 +94,16 @@ impl LocalToolBackend {
             config::AppConfig::load(&self.data_root).map_err(classify_application_error)?;
         let storage = local_usage_storage_authority(&self.data_root);
         let control = usage_control_snapshot(config.local_usage.enabled);
-        let value = crate::commands::status::status_read_model_authorized(
+        let components = match &self.graph_db {
+            Ok(path) => crate::unified_health::UnifiedHealth::inspect(path.as_deref()),
+            Err(_) => crate::unified_health::UnifiedHealth::unavailable(),
+        };
+        let value = crate::commands::status::status_read_model_authorized_with_components(
             &self.data_root,
             &config,
             &storage,
             &control,
+            Some(&components),
         )
         .map_err(classify_application_error)?
         .report;
@@ -445,6 +459,19 @@ impl SourceCatalogPort for LocalToolBackend {
 }
 
 impl ToolBackend for LocalToolBackend {
+    fn execute_unified(
+        &self,
+        operation: super::UnifiedToolOperation,
+    ) -> Result<ToolOutcome, ToolExecutionError> {
+        super::unified::execute(
+            self.graph_db
+                .as_ref()
+                .map(|path| path.as_deref())
+                .map_err(String::as_str),
+            operation,
+        )
+    }
+
     fn execute(&self, operation: ToolOperation) -> Result<ToolOutcome, ToolExecutionError> {
         invoke_mcp_tool_call(operation, self, self, self)
     }
@@ -656,7 +683,7 @@ mod tests {
             panic!("expected search command")
         };
         let cli_request = ctx_history_read_application::SearchRequest::from(
-            ctx_history_cli::SearchRequest::from(crate::commands::search::adapt(args)),
+            ctx_history_cli::SearchRequest::from(crate::commands::search::adapt(args.history)),
         );
         let mcp_request = adapt_tool_search_request(ToolSearchRequest {
             query: "adapter parity".to_owned(),

@@ -750,7 +750,7 @@ pub(crate) fn managed_candidate_in(
 
 #[cfg(unix)]
 pub(crate) fn ensure_managed_test_binary_is_bounded(target: &Path) {
-    const MAX_MANAGED_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+    const MAX_MANAGED_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 
     if fs::metadata(target).unwrap().len() > MAX_MANAGED_BINARY_BYTES {
         let stripped = std::process::Command::new("strip")

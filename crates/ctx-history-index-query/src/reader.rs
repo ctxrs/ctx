@@ -442,9 +442,9 @@ impl VerifiedIndex {
 
     /// Opens exactly the generation held by a process-scoped read lease using
     /// only an existing publication-time physical certification and bounded
-    /// metadata validation. It never hashes the full generation and never
-    /// installs, refreshes, or recovers durable index state; unavailable or
-    /// stale certification fails closed.
+    /// metadata validation. If a writer changes hard-link metadata, it hashes
+    /// against the published digest. It never installs, refreshes, or recovers
+    /// durable index state; unavailable or stale certification fails closed.
     #[doc(hidden)]
     pub fn open_generation_read_lease(
         root: impl AsRef<Path>,

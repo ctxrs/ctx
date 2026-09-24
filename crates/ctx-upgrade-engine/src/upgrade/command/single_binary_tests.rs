@@ -49,8 +49,8 @@ impl ReleaseTransport for Transport {
         assert_eq!(endpoint, self.url, "must use the ordinary executable slot");
         assert_eq!(
             max,
-            128 * 1024 * 1024,
-            "retain the incoming executable bound"
+            256 * 1024 * 1024,
+            "use the current executable download bound"
         );
         self.log.lock().unwrap().push(endpoint.to_owned());
         destination.write_all(&self.bytes)?;
@@ -357,5 +357,186 @@ fn single_binary_probe() -> Result<()> {
     }
     assert!(!f.root.join("libexec/ctx-pro").exists());
     assert!(!f.root.join("share/ctx/managed-pair-state.json").exists());
+    Ok(())
+}
+
+struct MigrationDaemon {
+    install: PathBuf,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+struct MigrationLease {
+    install: PathBuf,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl DaemonUpgradeLease for MigrationLease {
+    fn wait_for_installation_quiescence(&self) -> Result<()> {
+        Ok(())
+    }
+    fn replacement_restart(&self) -> Option<crate::DaemonRestart<'_>> {
+        None
+    }
+    fn resume_with(self, executable: &Path) -> Result<()> {
+        assert_eq!(executable, self.install);
+        assert!(InstallationLock::try_acquire(executable)?.is_none());
+        let state: Value = serde_json::from_slice(&fs::read(
+            executable.with_file_name(".ctx.upgrade-state.json"),
+        )?)?;
+        assert!(matches!(
+            state["status"].as_str(),
+            Some("applied" | "error")
+        ));
+        self.calls.lock().unwrap().push("resume");
+        Ok(())
+    }
+    fn transfer_to_replacement_helper(self, _: u32) -> Result<()> {
+        unreachable!()
+    }
+    fn release_for_current_format_reexec(self) -> Result<()> {
+        unreachable!()
+    }
+}
+
+impl DaemonUpgradePort for MigrationDaemon {
+    type Lease = MigrationLease;
+    fn begin(&self, _: &Path, _: &str) -> Result<Self::Lease> {
+        unreachable!()
+    }
+    fn begin_for_installation(&self, _: &Path, _: &str, install: &Path) -> Result<Self::Lease> {
+        assert_eq!(install, self.install);
+        assert!(InstallationLock::try_acquire(install)?.is_none());
+        let state: Value = serde_json::from_slice(&fs::read(
+            install.with_file_name(".ctx.upgrade-state.json"),
+        )?)?;
+        assert_eq!(state["status"], "quiescing");
+        self.calls.lock().unwrap().push("begin");
+        Ok(MigrationLease {
+            install: self.install.clone(),
+            calls: self.calls.clone(),
+        })
+    }
+    fn begin_current(&self, _: &Path, _: &str, _: &str, _: Option<u64>) -> Result<Self::Lease> {
+        unreachable!()
+    }
+    fn mark_replacement_helper_handoff(&self, _: &Path, _: &str, _: u32) -> Result<()> {
+        unreachable!()
+    }
+    fn complete_replacement_handoff(
+        &self,
+        _: &Path,
+        _: &Path,
+        _: &str,
+        _: Option<crate::DaemonRestart<'_>>,
+    ) -> Result<()> {
+        unreachable!()
+    }
+    fn finish_replacement_handoff(&self, _: &Path, _: &str) -> Result<()> {
+        unreachable!()
+    }
+}
+
+#[test]
+fn hosted_migration_quiesces_installed_image_and_keeps_prior_on_bad_digest() -> Result<()> {
+    for (bad_digest, fault_after_binary) in [(true, false), (false, false), (false, true)] {
+        let temp = tempfile::tempdir()?;
+        let install = temp.path().join("install/bin/ctx");
+        let data = temp.path().join("data");
+        create_private_directory_all(install.parent().unwrap())?;
+        create_private_directory_all(&data)?;
+        fs::write(&install, CORE)?;
+        fs::set_permissions(&install, fs::Permissions::from_mode(0o700))?;
+        let prior_marker = json!({"schema_version":1,"manager":"ctx-hosted-installer",
+            "install_path":install,"platform":platform_key()?,"channel":"stable",
+            "version":"1.6.3","sha256":sha256_hex(CORE)});
+        fs::write(
+            install_marker_path(&install),
+            serde_json::to_vec(&prior_marker)?,
+        )?;
+        restrict_private_file(&install_marker_path(&install))?;
+        let source = fs::canonicalize(std::env::current_exe()?)?;
+        let digest = sha256_hex(&fs::read(&source)?);
+        let candidate_marker = temp.path().join("candidate-marker.json");
+        fs::write(
+            &candidate_marker,
+            serde_json::to_vec(&json!({
+                "schema_version":1,"manager":"ctx-hosted-installer","install_path":install,
+                "platform":platform_key()?,"channel":"stable","version":"1.7.0",
+                "sha256":digest,
+            }))?,
+        )?;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let daemon = MigrationDaemon {
+            install: install.clone(),
+            calls: calls.clone(),
+        };
+        let transport = Transport {
+            url: String::new(),
+            bytes: Vec::new(),
+            log: Arc::new(Mutex::new(Vec::new())),
+        };
+        let engine = UpgradeEngine::new(
+            ProductBuildIdentity::new("1.7.0"),
+            &transport,
+            &TEST_RELEASE_PROCESS,
+            &TEST_SEMANTIC_LAYOUT,
+            &daemon,
+        );
+        let args = || crate::HostedTransactionArgs {
+            action: crate::HostedTransactionAction::Install,
+            install_path: install.clone(),
+            attempt_id: Some("ia_12345678".into()),
+            marker_source: Some(candidate_marker.clone()),
+            ownership_source: None,
+            binary_sha256: Some(if bad_digest {
+                "0".repeat(64)
+            } else {
+                digest.clone()
+            }),
+        };
+        if fault_after_binary {
+            crate::upgrade::install::set_hosted_install_fault_for_test(Some("binary_replaced"));
+        }
+        let result = engine.migrate_hosted_install(&data, args());
+        if bad_digest {
+            assert_eq!(*calls.lock().unwrap(), ["begin", "resume"]);
+            assert!(result.is_err());
+            assert_eq!(fs::read(&install)?, CORE);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&fs::read(install_marker_path(&install))?)?,
+                prior_marker
+            );
+        } else if fault_after_binary {
+            assert!(result.is_err());
+            assert_eq!(*calls.lock().unwrap(), ["begin"]);
+            assert_eq!(sha256_hex(&fs::read(&install)?), digest);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&fs::read(install_marker_path(&install))?)?,
+                prior_marker
+            );
+            let state: Value = serde_json::from_slice(&fs::read(
+                install.with_file_name(".ctx.upgrade-state.json"),
+            )?)?;
+            assert_eq!(state["status"], "quiescing");
+            assert!(install
+                .with_file_name(".ctx.hosted-install-transaction.json")
+                .exists());
+            engine.migrate_hosted_install(&data, args())?;
+            assert_eq!(*calls.lock().unwrap(), ["begin", "begin", "resume"]);
+            assert!(!install
+                .with_file_name(".ctx.hosted-install-transaction.json")
+                .exists());
+            assert_eq!(sha256_hex(&fs::read(&install)?), digest);
+            let marker: Value = serde_json::from_slice(&fs::read(install_marker_path(&install))?)?;
+            assert_eq!(marker["sha256"], digest);
+        } else {
+            assert_eq!(*calls.lock().unwrap(), ["begin", "resume"]);
+            result?;
+            assert_eq!(sha256_hex(&fs::read(&install)?), digest);
+            let marker: Value = serde_json::from_slice(&fs::read(install_marker_path(&install))?)?;
+            assert_eq!(marker["version"], "1.7.0");
+            assert_eq!(marker["sha256"], digest);
+        }
+    }
     Ok(())
 }

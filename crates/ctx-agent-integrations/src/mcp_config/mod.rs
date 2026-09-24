@@ -2,7 +2,7 @@ use std::{fs, io, path::Path};
 
 use anyhow::{anyhow, Context, Result};
 
-mod format;
+pub(crate) mod format;
 mod registry;
 
 pub use format::{remove, server_command, status, upsert, ConfigKind, ConfigStatus, ServerCommand};

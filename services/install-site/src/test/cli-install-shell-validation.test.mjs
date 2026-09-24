@@ -163,7 +163,7 @@ test("rendered CLI installer default-off performs zero semantic provisioning", (
     semanticRoot,
     setupArgsPath,
   } = runRenderedCliInstaller({
-    args: ["--no-setup", "--no-man"],
+    args: ["--no-setup", "--no-skill", "--no-man"],
     semanticConfig: false,
   });
   try {
@@ -713,12 +713,25 @@ test("rendered CLI installer rejects metadata channel mismatch", () => {
   }
 });
 
-test("rendered CLI installer can skip setup", () => {
+test("rendered CLI installer skips history but installs the skill with --no-setup", () => {
   const { result, cleanup, setupArgsPath } = runRenderedCliInstaller({ args: ["--no-setup"] });
   try {
     assert.equal(result.status, 0, result.stderr);
     assert.doesNotMatch(result.stderr, /skill|Setup skipped/);
-    assert.match(readFileSync(setupArgsPath, "utf8"), /^docs\nman\n--out\n.*\/generated-man\n$/u);
+    assert.match(readFileSync(setupArgsPath, "utf8"), /^docs\nman\n--out\n.*\/generated-man\nintegrations\ninstall\nskills\n--format=json\n$/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("rendered CLI installer treats CTX_INSTALL_NO_SETUP the same way", () => {
+  const { result, cleanup, setupArgsPath } = runRenderedCliInstaller({
+    args: ["--no-man"],
+    env: { CTX_INSTALL_NO_SETUP: "1" },
+  });
+  try {
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(setupArgsPath, "utf8"), "integrations\ninstall\nskills\n--format=json\n");
   } finally {
     cleanup();
   }
@@ -1202,7 +1215,7 @@ test("rendered CLI installer routes CTX_INSTALL_NO_DAEMON exactly to setup", () 
 
 test("rendered CLI installer can skip generated man pages", () => {
   const { result, cleanup, setupArgsPath } = runRenderedCliInstaller({
-    args: ["--no-setup", "--no-man"],
+    args: ["--no-setup", "--no-man", "--no-skill"],
   });
   try {
     assert.equal(result.status, 0, result.stderr);

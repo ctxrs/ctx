@@ -144,6 +144,49 @@ fn event_queries_is_embedded_with_stable_search_tags() {
 }
 
 #[test]
+fn unified_context_is_searchable_and_available_as_an_embedded_topic() {
+    let (mut ui, stdout, stderr) = test_ui();
+    search_docs(
+        "unified-context",
+        1,
+        true,
+        &mut DocsTelemetry::default(),
+        &mut ui,
+    )
+    .unwrap();
+    let results: Value = serde_json::from_str(stdout.text().trim()).unwrap();
+    assert_eq!(results["results"][0]["id"], "unified-context");
+    assert!(stderr.text().is_empty());
+
+    let (mut ui, stdout, stderr) = test_ui();
+    show_doc(
+        DocsShowArgs {
+            id: "unified-context".to_owned(),
+            format: DocsFormat::Json,
+            out: None,
+        },
+        &mut DocsTelemetry::default(),
+        &mut ui,
+    )
+    .unwrap();
+    let topic: Value = serde_json::from_str(stdout.text().trim()).unwrap();
+    assert_eq!(topic["id"], "unified-context");
+    assert_eq!(topic["source_path"], "docs/unified-context.md");
+    let body = topic["body"].as_str().unwrap();
+    for command in [
+        "ctx search",
+        "ctx blame",
+        "ctx graph",
+        "ctx run",
+        "ctx sift restore",
+    ] {
+        assert!(body.contains(command), "missing command: {command}");
+    }
+    assert!(body.contains("Graph and output commands work without"));
+    assert!(stderr.text().is_empty());
+}
+
+#[test]
 fn stats_json_docs_track_schema_three_and_core_sqlite_five() {
     let topic = TOPICS
         .iter()

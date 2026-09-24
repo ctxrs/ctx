@@ -1,0 +1,25 @@
+ctx-sift-codec contains the unmodified Sift codec and tokenizer library.
+
+Public source: https://github.com/ctxrs/sift
+Revision: 4d987c2038882d720acf704b321dd3f62f2a6f78
+Upstream version: 0.4.0
+License: MIT (the original license text is preserved in LICENSE).
+
+Selected sources, preserved byte-for-byte:
+  src/lib.rs
+  src/json_codec.rs
+  src/json_length.rs
+  src/text_codec.rs
+  src/text_lines.rs
+  src/text_refs.rs
+  src/text_symbols.rs
+  src/tokenizer.rs
+  src/tokenizer_data.rs
+  build.rs
+  tests/tokenizer.rs
+
+The package manifest and build integration are maintained by ctx. The public
+library API, codec formats, tokenizer, and selected tests are unchanged.
+
+NOTICE-tokenizer.md preserves the complete upstream THIRD_PARTY_TOKENIZER.md
+verbatim, including adapted-source, archive, and vocabulary attribution.

@@ -7,7 +7,7 @@ pub(super) fn scan_conversations(
     BTreeMap<String, WarpHierarchyNode>,
     Vec<WarpConversationEmission>,
 )> {
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     let mut statement = prepare_conversation_candidates(conn)?;
     let limit = conversation_hydration_limit()?;
     let mut rows = statement.query(rusqlite::params![limit, 0])?;

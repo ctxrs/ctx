@@ -92,6 +92,9 @@ fn local_command_edits_require_force_and_unrelated_files_survive() {
     fs::create_dir_all(&target.base_dir).unwrap();
     fs::write(target.command_path(), "prompt = 'local'\n").unwrap();
     fs::write(target.base_dir.join("keep.txt"), "keep").unwrap();
+    for filename in ["graf.toml", "sift.toml"] {
+        fs::write(target.base_dir.join(filename), "prompt = 'user managed'\n").unwrap();
+    }
 
     let skipped = execute_install(request.clone(), &context).unwrap();
     assert!(!skipped.results[0].success);
@@ -107,6 +110,12 @@ fn local_command_edits_require_force_and_unrelated_files_survive() {
         fs::read_to_string(target.base_dir.join("keep.txt")).unwrap(),
         "keep"
     );
+    for filename in ["graf.toml", "sift.toml"] {
+        assert_eq!(
+            fs::read_to_string(target.base_dir.join(filename)).unwrap(),
+            "prompt = 'user managed'\n"
+        );
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -198,9 +207,18 @@ fn generated_command_bytes_match_the_public_contract() {
     assert_eq!(
         opencode_command_body(),
         format!(
-            "---\ndescription: Search agent history or trace code with ctx\nargument-hint: [question, topic, file, line, commit, or PR]\n---\n\n{COMMAND_INSTRUCTIONS}"
+            "---\ndescription: Search history, inspect code relationships, or compact requested output with ctx\nargument-hint: [question, symbol, file, commit, PR, or output to compact]\n---\n\n{COMMAND_INSTRUCTIONS}"
         )
     );
+    for guidance in [COMMAND_INSTRUCTIONS, crate::skill::BUNDLED_SKILL_BODY] {
+        let normalized = guidance.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains("user requests output compaction"));
+        assert!(
+            normalized.contains("run ordinary commands directly")
+                || normalized.contains("run those commands directly")
+        );
+        assert!(!normalized.contains("when command execution is authorized"));
+    }
     assert!(gemini_command_body().contains("User request: {{args}}"));
     assert!(qwen_command_body().ends_with(
         COMMAND_INSTRUCTIONS

@@ -87,6 +87,7 @@ load_release_phase_metadata
 final_version="$version"
 final_checksum="$checksum"
 bridge_required=0
+pending_hosted_migration=0
 stable_bridge=${stagingDogfood ? 0 : 1}
 [ "$channel" = "stable" ] || stable_bridge=0
 if [ "$stable_bridge" = "1" ]; then
@@ -106,10 +107,14 @@ if [ -e "$install_path" ] || [ -L "$install_path" ] ||
   if [ "$explicit_metadata" = "1" ] && [ "${stagingDogfood ? 1 : 0}" != "1" ]; then
     fail "managed reinstall cannot honor an explicit metadata target; use the default installer feed"
   fi
+  if [ -e "$bin_dir/.ctx.hosted-install-transaction.json" ]; then
+    pending_hosted_migration=1
+  fi
   # An intact old image still selects B while its owner resumes a pending B.
   # A partially published image is classified after the existing recovery call.
-  if [ ! -e "$bin_dir/.ctx.upgrade-install-transaction.json" ] ||
-     (actual_checksum=; validate_existing_managed_install >/dev/null 2>&1); then
+  if [ "$pending_hosted_migration" != "1" ] &&
+     { [ ! -e "$bin_dir/.ctx.upgrade-install-transaction.json" ] ||
+       (actual_checksum=; validate_existing_managed_install >/dev/null 2>&1); }; then
     actual_checksum="$checksum"
     validate_existing_managed_install
     if [ "$stable_bridge" = "1" ]; then

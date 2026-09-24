@@ -44,9 +44,9 @@ catch-up remains disabled unless semantic search is explicitly enabled. The
 skill installer opens an agent picker when interactive;
 otherwise it installs the universal `~/.agents/skills` copy plus detected
 agent-specific folders for tools that need them. Use `sh -s -- --no-setup` on
-Unix, or `-NoSetup` on Windows, for install-only CI or
-packaging flows. Install-only mode also skips skill setup unless you explicitly
-pass a skill option.
+Unix, or `-NoSetup` on Windows, to skip history setup while installing the
+binary and skill. Add `--no-skill` or `-NoSkill` for binary-only CI or packaging
+flows.
 
 To keep installer setup but opt out of setup daemon autostart, use
 `sh -s -- --no-daemon` on Unix, `-NoDaemon` on Windows, or set

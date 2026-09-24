@@ -111,6 +111,15 @@ const MAN_PAGE_COMPATIBILITY_ALIASES: &[(&str, &str)] = &[
 
 const TOPICS: &[DocTopic] = &[
     DocTopic {
+        id: "unified-context",
+        title: "History, Graphs and Command Output",
+        audience: "human-agent",
+        summary: "Choose history search, code graph navigation, or command output compaction.",
+        tags: &["graph", "output", "run", "compact", "scope"],
+        source_path: "docs/unified-context.md",
+        body: include_str!("../../../docs/unified-context.md"),
+    },
+    DocTopic {
         id: "blame",
         title: "Agent Blame",
         audience: "human-agent",

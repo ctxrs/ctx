@@ -157,9 +157,6 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
     }
 
     $runSkill = -not $noSkillRequested
-    if (-not $runSetup -and -not $explicitSkillRequest) {
-        $runSkill = $false
-    }
     $modifyPath = -not $NoModifyPath -and $env:CTX_INSTALL_NO_MODIFY_PATH -ne "1"
     if ($DryRun) {
         Write-Host "Would install ctx $version."
@@ -250,6 +247,7 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
     }
 
     $managedReinstall = $false
+    $pendingHostedMigration = Test-Path -LiteralPath (Join-Path $BinDir ".ctx.exe.hosted-install-transaction.json") -PathType Leaf
     $legacyManagedReinstall = $false
     $installGuard = $null
     $binaryDestinationGuard = $null
@@ -271,16 +269,23 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
         $binaryDestinationGuard.AssertUnchanged()
         $markerDestinationGuard.AssertUnchanged()
         $installGuard.AssertUnchanged()
-        $existingManagedInstall = Read-ExistingManagedInstall
-        $managedReinstall = $null -ne $existingManagedInstall
-        if ($managedReinstall -and $channel -ceq "stable" -and
+        if ($pendingHostedMigration) {
+            if ((Get-ExistingInstallPairState) -cne "managed") {
+                Fail "interrupted hosted migration has no managed install pair"
+            }
+            $managedReinstall = $true
+        } else {
+            $existingManagedInstall = Read-ExistingManagedInstall
+            $managedReinstall = $null -ne $existingManagedInstall
+        }
+        if ($managedReinstall -and -not $pendingHostedMigration -and $channel -ceq "stable" -and
             (Compare-ReleaseVersion $version $existingManagedInstall.version) -lt 0) {
             Fail "refusing to downgrade the managed ctx installation"
         }
-        if ($managedReinstall -and $existingManagedInstall.version -ceq "0.25.0" -and $existingManagedInstall.sha256.ToLowerInvariant() -cne "32aa550cc5c56d4d2989d0f929bbc1e634d8b730219feb8e4a4ba770b02a9867") {
+        if ($managedReinstall -and -not $pendingHostedMigration -and $existingManagedInstall.version -ceq "0.25.0" -and $existingManagedInstall.sha256.ToLowerInvariant() -cne "32aa550cc5c56d4d2989d0f929bbc1e634d8b730219feb8e4a4ba770b02a9867") {
             Fail "managed ctx v0.25 executable is not the immutable released Windows artifact"
         }
-        $legacyManagedReinstall = $managedReinstall -and (
+        $legacyManagedReinstall = $managedReinstall -and -not $pendingHostedMigration -and (
             $existingManagedInstall.version -ceq "0.25.0" -or
             ($releasePhase -ceq "bridge" -and
                 (Compare-ReleaseVersion $existingManagedInstall.version "0.11.0") -ge 0 -and
@@ -298,7 +303,9 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
             $installGuard.Dispose()
         }
     }
-    if ($managedReinstall) {
+    if ($pendingHostedMigration) {
+        Invoke-HostedInstallTransaction -Migrate
+    } elseif ($managedReinstall) {
         if ($existingManagedInstall.version -ceq "0.25.0" -and $managedPair -and -not $releasedPairInstall) {
             # The immutable 0.25 Windows upgrader locks its runtime ZIP against
             # its own extractor. Its pinned identity was checked above; recover
@@ -307,6 +314,12 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
             if (-not (Test-InstalledTargetIdentity)) {
                 Fail "ctx 0.25 recovery did not publish the signed managed identity"
             }
+        } elseif ($releasePhase -ceq "final" -and -not $managedPair -and
+                  (Compare-ReleaseVersion $existingManagedInstall.version "1.6.3") -le 0 -and
+                  (Get-Item -LiteralPath $downloadPath).Length -gt 128MB) {
+            # The released updater cannot fetch this candidate. Its authenticated
+            # installer download uses the candidate's daemon-safe migration.
+            Invoke-HostedInstallTransaction -Migrate
         } else {
             Invoke-ManagedCoreUpgrade
             if ($releasedPairInstall) {

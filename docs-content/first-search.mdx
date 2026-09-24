@@ -17,10 +17,10 @@ The installer installs the standalone CLI, installs the bundled agent-history sk
 
 The install script downloads release metadata and the ctx binary, then verifies release metadata and SHA-256 checksums before installing artifacts. Setup and import read local provider history; search, show, locate, and transcript output use the committed local Core for transcript content.
 
-If you need install-only behavior for packaging or CI, pass `--no-setup` to the installer. It skips both the skill step and history indexing unless you pass a skill target explicitly:
+If you need to skip history setup for packaging or CI, pass `--no-setup` to the installer. The skill still installs; add `--no-skill` for a binary-only install:
 
 ```bash
-curl -fsSL https://ctx.rs/install | sh -s -- --no-setup
+curl -fsSL https://ctx.rs/install | sh -s -- --no-setup --no-skill
 ```
 
 Run setup yourself when you are ready to index local history:

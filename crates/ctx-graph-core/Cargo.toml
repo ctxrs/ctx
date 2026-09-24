@@ -1,0 +1,46 @@
+[package]
+name = "ctx-graph-core"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Local graph core for the ctx CLI"
+license = "Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["code-graph", "code-search", "mcp", "knowledge-graph"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "ctx_graph_core"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+network_partitions = { git = "https://github.com/microsoft/graspologic-native", rev = "773181488b4e5b81925e302b972b294fd51f61a4", default-features = false }
+rand = "0.10"
+blake3 = "1"
+clap = { version = "4.6", features = ["derive"] }
+ignore = "0.4.33"
+globset = "0.4"
+jsonc-parser = { version = "0.29", features = ["serde"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+toml_edit = "0.23"
+tree-sitter = "0.27"
+tree-sitter-rust = "0.24"
+tree-sitter-go = "0.25"
+tree-sitter-swift = "0.7.3"
+tree-sitter-bash = "0.25.1"
+serde_yaml_ng = "0.10"
+quick-xml = "0.41"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+ctx_graph_types = { package = "ctx-graph-types", path = "../ctx-graph-types" }
+ctx_graph_ingest = { package = "ctx-graph-ingest", path = "../ctx-graph-ingest" }
+ctx_graph_python = { package = "ctx-graph-python", path = "../ctx-graph-python" }
+ctx_graph_languages = { package = "ctx-graph-languages", path = "../ctx-graph-languages" }
+ctx_graph_storage = { package = "ctx-graph-storage", path = "../ctx-graph-storage" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

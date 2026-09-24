@@ -35,6 +35,15 @@ fn read_config_text_migrating_retired_controls_lock_held(path: &Path) -> Result<
     Ok(Some(updated))
 }
 
+pub(super) fn read_config_text_read_only(path: &Path) -> Result<Option<String>> {
+    let Some(text) = durable_write::read_config_text_read_only(path)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        remove_retired_upgrade_fake_ip_key(path, &text)?.unwrap_or(text),
+    ))
+}
+
 fn remove_retired_upgrade_fake_ip_key(path: &Path, text: &str) -> Result<Option<String>> {
     if !text.contains(
         RETIRED_UPGRADE_FAKE_IP_CONTROL

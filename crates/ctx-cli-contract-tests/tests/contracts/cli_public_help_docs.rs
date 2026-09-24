@@ -991,7 +991,7 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
         .clone();
     let man = String::from_utf8(man).unwrap();
     assert!(man.contains(".TH ctx"));
-    assert!(man.contains("Search local agent history"));
+    assert!(man.contains("Search agent history, navigate code, and compact command output"));
 
     let stats_man = ctx(&temp)
         .args(["docs", "man", "--print", "ctx-stats"])

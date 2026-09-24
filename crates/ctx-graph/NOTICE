@@ -1,0 +1,21 @@
+ctx-graph
+
+This command adapter derives from the public Graf project:
+https://github.com/ctxrs/graf
+Revision: b7d179d950710981383814183601024537d9a440
+License: Apache-2.0 (see the workspace LICENSE).
+
+Selected adapter sources: src/main.rs, src/commands.rs, src/extraction.rs,
+src/connect.rs, src/mcp.rs, src/switch.rs, src/switch_config.rs,
+src/switch_files.rs, and graph hook portions of src/agent_setup.rs.
+Selected tests derive from the tests in those files and tests/cli.rs;
+the authored legacy SQLite fixture is tests/fixtures/native-format1.sql.
+
+Modifications: Rust library entry points, ctx graph command namespace,
+concern-based module separation, ctx-owned explicit hook receipts,
+and shared ctx skill/MCP installation ownership. Existing Graf graph
+models, storage and engine implementations are used through the pinned
+public dependency rather than copied into this crate.
+
+Graf's embedded viewer/report/Python assets and its dependencies retain
+their upstream licenses and applicable notices in their original sources.

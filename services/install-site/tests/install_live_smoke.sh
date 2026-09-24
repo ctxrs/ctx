@@ -303,7 +303,7 @@ SH
   trap cleanup_lifecycle_fixture EXIT
 
   if ! env -i "${isolated_env[@]}" CTX_DATA_ROOT="$canonical_root" \
-      sh "$installer" --no-setup --no-man --no-modify-path --no-pro-trial \
+      sh "$installer" --no-setup --no-skill --no-man --no-modify-path --no-pro-trial \
       >"$fixture/install-first.out" 2>"$fixture/install-first.err"; then
     echo "error: isolated first install/setup failed" >&2
     cat "$fixture/install-first.err" >&2
@@ -364,7 +364,7 @@ SH
   digest_before="$(sha256sum "$installed" | awk '{ print $1 }')"
 
   if ! env -i "${isolated_env[@]}" CTX_DATA_ROOT="$canonical_root" \
-      sh "$installer" --no-setup --no-man --no-modify-path --no-pro-trial \
+      sh "$installer" --no-setup --no-skill --no-man --no-modify-path --no-pro-trial \
       >"$fixture/install-rerun.out" 2>"$fixture/install-rerun.err"; then
     echo "error: isolated managed rerun failed" >&2
     cat "$fixture/install-rerun.err" >&2

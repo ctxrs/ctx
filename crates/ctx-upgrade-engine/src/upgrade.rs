@@ -21,6 +21,10 @@ mod state;
 mod version;
 mod version_probe;
 
+/// Current executable budget shared by downloads and managed marker validation.
+/// Released clients keep their own limits; this does not change legacy admission.
+pub(crate) const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
+
 pub use command::{PreparedAutomaticUpgrade, UpgradeOutcome};
 pub use diagnostics::{
     managed_install_executable, upgrade_diagnostics, ManagedInstallDiagnostic, UpgradeDiagnostics,
@@ -151,6 +155,15 @@ pub trait DaemonUpgradePort: Send + Sync {
     type Lease: DaemonUpgradeLease;
 
     fn begin(&self, data_root: &Path, attempt_id: &str) -> Result<Self::Lease>;
+
+    fn begin_for_installation(
+        &self,
+        data_root: &Path,
+        attempt_id: &str,
+        _install_path: &Path,
+    ) -> Result<Self::Lease> {
+        self.begin(data_root, attempt_id)
+    }
 
     fn begin_current(
         &self,

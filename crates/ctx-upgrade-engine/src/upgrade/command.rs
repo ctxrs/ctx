@@ -53,6 +53,7 @@ use super::{
 use super::{is_valid_upgrade_attempt_id, ReleaseProcessPort};
 
 mod daemon;
+mod hosted_migration;
 pub use daemon::PreparedAutomaticUpgrade;
 use daemon::{finish_automatic_upgrade, prepare_automatic_upgrade};
 

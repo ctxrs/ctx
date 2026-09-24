@@ -57,12 +57,12 @@ impl KiroSqliteDatabase {
             let connection = snapshot.connection()?;
             let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
                 .map_err(|_| CaptureError::SystemInvariant("Kiro SQLite value limit is invalid"))?;
-            connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
             connection
-                .busy_timeout(Duration::from_secs(5))
+                .set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit)
+                .and_then(|_| connection.busy_timeout(Duration::from_secs(5)))
                 .map_err(|source| {
                     snapshot.diagnose_provider_query_error(
-                        "setting the private Kiro SQLite busy timeout",
+                        "configuring the private Kiro SQLite value limit and busy timeout",
                         source,
                         SqliteFailurePhase::SourceValidation,
                     )

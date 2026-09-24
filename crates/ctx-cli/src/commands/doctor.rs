@@ -7,20 +7,37 @@ use crate::analytics::{count_bucket, DoctorTelemetry};
 use crate::output::print_json;
 use crate::semantic::source_epoch_status_report;
 use crate::ui::Ui;
+use crate::unified_health::UnifiedHealth;
 use crate::DoctorArgs;
 use ctx_app_config::AppConfig;
 
 const SOURCE_DISCOVERY_FINDING: &str =
     "provider source discovery is incomplete; run `ctx sources --all` for details";
 
-pub(crate) fn run_doctor(
+pub(crate) fn run_doctor_with_components(
     args: DoctorArgs,
     data_root: PathBuf,
     telemetry: &mut DoctorTelemetry,
+    components: Option<&UnifiedHealth>,
     ui: &mut Ui,
 ) -> Result<()> {
     let json_output = args.format.is_json();
-    let model = doctor_read_model(&data_root)?;
+    let mut model = match doctor_read_model(&data_root) {
+        Ok(model) => model,
+        Err(error) => {
+            return match components {
+                Some(components) => {
+                    telemetry.healthy = Some(false);
+                    telemetry.finding_count = Some(count_bucket(1));
+                    crate::unified_health::history_health_failure(1, json_output, components, ui)
+                }
+                None => Err(error),
+            };
+        }
+    };
+    if let Some(components) = components {
+        components.append_json(&mut model.facts)?;
+    }
     let findings = model.facts["findings"]
         .as_array()
         .into_iter()
@@ -58,9 +75,35 @@ pub(crate) fn run_doctor(
             &mut document,
             source_report,
         );
+        if let Some(components) = components {
+            components.append_human(ui.stdout_context(), &mut document);
+        }
         ui.write_stdout(&document)?;
     }
     Ok(())
+}
+
+/// Used when configuration failed before the ordinary doctor command could run.
+pub(crate) fn malformed_config_failure_with_components(
+    json_output: bool,
+    components: Option<&UnifiedHealth>,
+    ui: &mut Ui,
+) -> Result<()> {
+    let message = "History configuration could not be read.";
+    let report = json!({
+        "schema_version": 1,
+        "ok": false,
+        "findings": [message],
+        "error": {"code": "history_config_unavailable", "message": message},
+        "read_only": true,
+    });
+    let document = ctx_cli_presentation::commands::render_doctor_human(
+        ui.stderr_context(),
+        &[message.to_owned()],
+        None,
+        None,
+    );
+    crate::unified_health::emit_history_failure(json_output, report, document, components, ui)
 }
 
 fn human_refresh_failure(
@@ -164,7 +207,73 @@ fn doctor_read_model(data_root: &std::path::Path) -> Result<DoctorReadModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::JsonOutputFormat;
+    use crate::ui::{RenderContext, StreamKind, TestContext};
     use ctx_cli_presentation::commands::DoctorSearchAvailability;
+
+    #[test]
+    fn malformed_history_reports_independent_components_and_never_healthy() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join(ctx_app_config::CONFIG_FILE);
+        let invalid = "invalid history config fixture 85e3c";
+        std::fs::write(&config_path, invalid).unwrap();
+        for before_dispatch in [false, true] {
+            for format in [JsonOutputFormat::Text, JsonOutputFormat::Json] {
+                let stdout = tempfile::NamedTempFile::new().unwrap();
+                let stderr = tempfile::NamedTempFile::new().unwrap();
+                let mut ui = Ui::with_writers(
+                    stdout.reopen().unwrap(),
+                    RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
+                    stderr.reopen().unwrap(),
+                    RenderContext::for_test(TestContext::pipe(StreamKind::Stderr)),
+                );
+                let health = UnifiedHealth::inspect(None);
+                let mut telemetry = DoctorTelemetry::default();
+                let result = if before_dispatch {
+                    malformed_config_failure_with_components(
+                        format.is_json(),
+                        Some(&health),
+                        &mut ui,
+                    )
+                } else {
+                    run_doctor_with_components(
+                        DoctorArgs { format },
+                        root.path().to_path_buf(),
+                        &mut telemetry,
+                        Some(&health),
+                        &mut ui,
+                    )
+                };
+                assert!(result
+                    .unwrap_err()
+                    .is::<crate::dispatch::RenderedCliError>());
+                if !before_dispatch {
+                    assert_eq!(telemetry.healthy, Some(false));
+                }
+                ui.flush().unwrap();
+                assert!(std::fs::read(stdout.path()).unwrap().is_empty());
+                let rendered = std::fs::read_to_string(stderr.path()).unwrap();
+                assert!(!rendered.contains(invalid));
+                if format.is_json() {
+                    let report: Value = serde_json::from_str(&rendered).unwrap();
+                    assert_eq!(report["schema_version"], 1);
+                    assert_eq!(report["ok"], false);
+                    assert_eq!(report["history"]["status"], "unavailable");
+                    assert_eq!(report["graph"]["status"], "not_indexed");
+                    assert_eq!(report["output"]["status"], "available");
+                    assert!(!report["findings"].as_array().unwrap().is_empty());
+                } else {
+                    assert!(rendered.contains("History"));
+                    assert!(rendered.contains("unavailable"));
+                    assert!(rendered.contains("Graph"));
+                    assert!(rendered.contains("Command output"));
+                    assert!(!rendered.contains("No problems found"));
+                }
+                assert_eq!(std::fs::read_to_string(&config_path).unwrap(), invalid);
+                assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+            }
+        }
+    }
 
     #[test]
     fn human_refresh_failure_distinguishes_retained_and_cold_search() {

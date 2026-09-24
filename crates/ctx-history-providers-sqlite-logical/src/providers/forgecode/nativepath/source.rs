@@ -335,7 +335,7 @@ fn forgecode_logical_fingerprint(
     );
     let limit = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| CaptureError::SystemInvariant("ForgeCode value bound exceeds i64"))?;
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     let mut statement = conn.prepare(&sql)?;
     let mut rows = statement.query([limit])?;
     let mut digest = Sha256::new();
@@ -591,7 +591,7 @@ fn with_length_preflight<T>(
     conn: &Connection,
     query: impl FnOnce() -> rusqlite::Result<T>,
 ) -> Result<T> {
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     query().map_err(CaptureError::from)
 }
 

@@ -438,10 +438,12 @@ fn oversized_node_and_tool_state_values_are_rejected_under_the_production_limit(
             [&oversized],
         )
         .unwrap();
-    node_conn.set_limit(
-        Limit::SQLITE_LIMIT_LENGTH,
-        crate::provider::sqlite::MAX_PROVIDER_SQLITE_VALUE_BYTES as i32,
-    );
+    node_conn
+        .set_limit(
+            Limit::SQLITE_LIMIT_LENGTH,
+            crate::provider::sqlite::MAX_PROVIDER_SQLITE_VALUE_BYTES as i32,
+        )
+        .unwrap();
     let node_scan = scan(&node_conn);
     assert_eq!(node_scan.records, baseline.records);
     assert_eq!(
@@ -457,10 +459,12 @@ fn oversized_node_and_tool_state_values_are_rejected_under_the_production_limit(
             [&oversized],
         )
         .unwrap();
-    tool_conn.set_limit(
-        Limit::SQLITE_LIMIT_LENGTH,
-        crate::provider::sqlite::MAX_PROVIDER_SQLITE_VALUE_BYTES as i32,
-    );
+    tool_conn
+        .set_limit(
+            Limit::SQLITE_LIMIT_LENGTH,
+            crate::provider::sqlite::MAX_PROVIDER_SQLITE_VALUE_BYTES as i32,
+        )
+        .unwrap();
     let tool_scan = scan(&tool_conn);
     assert_eq!(
         tool_scan.counts.rejected_records,

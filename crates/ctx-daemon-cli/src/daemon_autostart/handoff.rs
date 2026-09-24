@@ -376,6 +376,18 @@ pub fn begin_daemon_upgrade_handoff(
     begin_daemon_upgrade_handoff_with(input)
 }
 
+/// Installer candidates run from a temporary path, while the daemon still
+/// belongs to the currently installed executable.
+pub fn begin_daemon_upgrade_handoff_for_installation(
+    data_root: &Path,
+    upgrade_attempt_id: &str,
+    install_path: &Path,
+) -> Result<DaemonUpgradeHandoff> {
+    let input =
+        normalize_daemon_upgrade_handoff_input(data_root, upgrade_attempt_id, install_path)?;
+    begin_daemon_upgrade_handoff_with(input)
+}
+
 fn begin_daemon_upgrade_handoff_with(
     input: DaemonUpgradeHandoffInput,
 ) -> Result<DaemonUpgradeHandoff> {

@@ -23,11 +23,18 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::{bail, Result};
 
+#[cfg(test)]
+pub(in crate::upgrade) use hosted_transaction::set_hosted_install_fault_for_test;
 pub use hosted_transaction::{
     ensure_hosted_transaction_inactive_under_installation_lock,
     hosted_uninstall_is_active_for_executable as installation_hosted_uninstall_is_active_for_executable,
     installation_hosted_uninstall_is_active, run_hosted_uninstall_after_parent_exit,
     HOSTED_UNINSTALL_POST_EXIT_READY,
+};
+pub(in crate::upgrade) use hosted_transaction::{
+    hosted_install_journal_exists,
+    run_under_upgrade_lock as run_hosted_transaction_under_upgrade_lock,
+    validated_hosted_pair_digest,
 };
 pub use hosted_transaction::{
     run as run_hosted_transaction, HostedTransactionAction, HostedTransactionArgs,

@@ -19,6 +19,8 @@ use {
 };
 
 pub(crate) mod text;
+#[cfg(test)]
+mod unified_tests;
 
 use crate::{
     analytics::PublicEventV1, operation_descriptor::observed_mcp_product_operation,
@@ -42,25 +44,20 @@ enum McpCommand {
 }
 
 #[derive(Debug, Args)]
-struct McpServeArgs {}
+struct McpServeArgs {
+    /// Graph snapshot for read-only tools; defaults to the nearest ancestor's .graf/index.db.
+    #[arg(long, value_name = "PATH")]
+    graph_db: Option<PathBuf>,
+}
 
 pub(crate) fn run(args: McpArgs, data_root: PathBuf) -> Result<()> {
     match args.command {
-        McpCommand::Serve(_) => serve_stdio(data_root),
+        McpCommand::Serve(args) => serve_stdio(data_root, args.graph_db),
     }
 }
 
-fn serve_stdio(data_root: PathBuf) -> Result<()> {
-    let daemon_config = config::AppConfig::load(&data_root)?;
-    if daemon_config.automatic_indexing_enabled()
-        && crate::semantic::daemon_autostart_suppression_reason().is_none()
-    {
-        let _ = crate::semantic::autostart_daemon_and_wait(
-            &data_root,
-            &daemon_config,
-            crate::DaemonTriggerCommandArg::Search,
-        );
-    }
+fn serve_stdio(data_root: PathBuf, graph_db: Option<PathBuf>) -> Result<()> {
+    let graph_db = graph_database_at_startup(graph_db);
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdin = stdin.lock();
@@ -72,7 +69,7 @@ fn serve_stdio(data_root: PathBuf) -> Result<()> {
         move || control.snapshot(),
     );
     let mut usage = LocalUsagePort { recorder };
-    let backend = LocalToolBackend::new(data_root.clone());
+    let backend = LocalToolBackend::new(data_root.clone()).with_graph_db(graph_db);
     let telemetry = product_telemetry(data_root);
     serve_mcp_stdio(
         &mut stdin,
@@ -87,6 +84,15 @@ fn serve_stdio(data_root: PathBuf) -> Result<()> {
         telemetry,
     )
     .map_err(|failure| failure.into_error())
+}
+
+fn graph_database_at_startup(explicit: Option<PathBuf>) -> Result<Option<PathBuf>, String> {
+    ctx_graph::optional_database(explicit.as_deref())
+        .and_then(|path| match path {
+            Some(path) if !path.is_absolute() => Ok(Some(std::env::current_dir()?.join(path))),
+            path => Ok(path),
+        })
+        .map_err(|error| format!("{error:#}"))
 }
 
 struct LocalUsagePort {

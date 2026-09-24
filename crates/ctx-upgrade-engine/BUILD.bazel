@@ -122,7 +122,7 @@ ctx_rust_test(
 ctx_binary_contract_test(
     name = "upgrade_tests",
     src = "tests/contracts/upgrade.rs",
-    binary = "//crates/ctx-cli:ctx_upgrade_test_harness",
+    binary = "//crates/ctx-cli:ctx_managed_upgrade_test_binary",
     cargo_manifest_dir = "crates/ctx-upgrade-engine",
     support_deps = crate_deps([
         "base64",

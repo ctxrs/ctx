@@ -260,7 +260,7 @@ pub(super) fn with_astrbot_length_preflight<T>(
     // SQLITE_LIMIT_LENGTH can reject even integer-only octet_length inspection of an oversized
     // stored value. AstrBot candidate/setup queries return only rowids, order keys, and byte
     // counts, so lift the limit only around metadata preflight and restore it before row reads.
-    let _guard = SqliteLengthPreflightGuard::new(conn);
+    let _guard = SqliteLengthPreflightGuard::new(conn)?;
     query().map_err(CaptureError::from)
 }
 

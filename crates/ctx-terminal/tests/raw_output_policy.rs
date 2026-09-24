@@ -33,10 +33,6 @@ const DIRECT_OUTPUT_BOUNDARIES: &[(&str, &[(&str, usize)])] = &[
     ),
     ("crates/ctx-cli/src/analytics.rs", &[("eprintln!", 1)]),
     (
-        "crates/ctx-cli/src/commands/status/usage.rs",
-        &[("eprintln!", 3)],
-    ),
-    (
         "crates/ctx-cli/src/dispatch.rs",
         &[("eprintln!", 2), ("stdout()", 1), ("stderr()", 1)],
     ),

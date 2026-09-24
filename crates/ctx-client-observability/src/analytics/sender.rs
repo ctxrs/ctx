@@ -511,7 +511,9 @@ fn insert_client_operation_properties(
             insert_optional_count(properties, "finding_count_bucket", value.finding_count);
             insert_optional_bool(properties, "healthy", value.healthy);
         }
-        CliOperation::Stats
+        CliOperation::Graph
+        | CliOperation::Output
+        | CliOperation::Stats
         | CliOperation::McpServe
         | CliOperation::DaemonRun
         | CliOperation::DaemonStatus

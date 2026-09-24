@@ -73,6 +73,7 @@ HISTORY_LOADS = {
     "//tools/bazel:ctx_rust.bzl": {"ctx_rust_test"},
 }
 FINAL_LOADS = {
+    "//tools/bazel:binary_contracts.bzl": {"ctx_optimized_test_binary"},
     "@crates//:defs.bzl": {"aliases", "all_crate_deps", "crate_deps", "crate_edition"},
     "@rules_rust//cargo:defs.bzl": {"cargo_toml_env_vars"},
     "//:rust_sources.bzl": {"RUST_PROD_SRC_EXCLUDES"},
@@ -535,7 +536,21 @@ def _validate_final_build(path: Path) -> None:
     package = "ctx-cli"
     tokens = _tokenize(path.read_text(encoding="utf-8"), package)
     _validate_loads(tokens, package, FINAL_LOADS, {"CTX_CLI_DEPS", "CTX_CLI_TEST_DEPS", "CTX_CLI_QUALIFICATION_DEPS"})
-    _validate_call_surface(tokens, package, {"aliases", "all_crate_deps", "cargo_toml_env_vars", "crate_deps", "crate_edition", "ctx_cli_integration_test", "ctx_cli_test_data", "ctx_rust_binary", "ctx_rust_test", "dict", "exports_files", "filegroup", "glob", "load", "package", "select", "test_suite"})
+    _validate_call_surface(tokens, package, {"aliases", "all_crate_deps", "cargo_toml_env_vars", "crate_deps", "crate_edition", "ctx_cli_integration_test", "ctx_cli_test_data", "ctx_optimized_test_binary", "ctx_rust_binary", "ctx_rust_test", "dict", "exports_files", "filegroup", "glob", "load", "package", "select", "test_suite"})
+    wrappers = {
+        "ctx_managed_test_binary": ":ctx",
+        "ctx_managed_upgrade_test_binary": ":ctx_upgrade_test_harness",
+    }
+    for call in _calls(tokens, "ctx_optimized_test_binary", package):
+        name = _rule_name(call, package, "ctx_optimized_test_binary")
+        binary = wrappers.pop(name, None)
+        if binary is None or _named(call, package) != {
+            "name": [Token("string", name)],
+            "binary": [Token("string", binary)],
+        }:
+            raise BoundaryError(f"{package} Bazel optimized test binary declaration drifted")
+    if wrappers:
+        raise BoundaryError(f"{package} Bazel optimized test binary inventory drifted")
     expected_labels = {
         "CTX_CLI_DEPS": (HISTORY_LABEL, 2),
         "CTX_CLI_TEST_DEPS": (HISTORY_TEST_SUPPORT_LABEL, 2),

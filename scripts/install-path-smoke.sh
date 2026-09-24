@@ -40,6 +40,9 @@ grep -F '$setupArgs += "--no-daemon"' "${repo_root}/scripts/install.ps1" >/dev/n
 grep -F '& $installPath @setupArgs' "${repo_root}/scripts/install.ps1" >/dev/null
 grep -F '$skillArgs = @("integrations", "install", "skill")' \
   "${repo_root}/scripts/install.ps1" >/dev/null
+grep -F '$runSkill = -not $noSkillRequested' "${repo_root}/scripts/install.ps1" >/dev/null
+! grep -F 'if (-not $runSetup -and -not $explicitSkillRequest)' \
+  "${repo_root}/scripts/install.ps1" >/dev/null
 grep -F 'CTX_RELEASE_MANAGED_PAIR_ENVELOPE_' \
   "${repo_root}/scripts/dev-install-from-metadata.sh" >/dev/null
 grep -F 'CTX_RELEASE_MANAGED_PAIR_CORE_OBJECT_' \
@@ -107,6 +110,9 @@ if [ "${1:-}" = "setup" ]; then
     printf '%s\n' "$@" > "${CTX_FAKE_SETUP_ARGS_LOG}"
   fi
   exit "${CTX_FAKE_SETUP_EXIT:-0}"
+fi
+if [ "${1:-}" = "integrations" ] && [ -n "${CTX_FAKE_SKILL_ARGS_LOG:-}" ]; then
+  printf '%s\n' "$@" > "${CTX_FAKE_SKILL_ARGS_LOG}"
 fi
 if [ "${1:-}" = "pro" ] && [ "${2:-}" = "--help" ]; then
   exit 0
@@ -305,7 +311,7 @@ cp "${metadata}" "${metadata_runtime_missing_version}"
   printf 'CTX_RELEASE_ONNXRUNTIME_SHA256_linux_x64=%s\n' "${runtime_checksum}"
 } >> "${metadata_runtime_missing_version}"
 if bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
-  --metadata "${metadata_runtime_missing_version}" --platform linux-x64 --dry-run --no-setup \
+  --metadata "${metadata_runtime_missing_version}" --platform linux-x64 --dry-run --no-setup --no-skill \
   > "${tmp_dir}/runtime-missing-version.out" 2>&1; then
   printf 'runtime metadata without a version unexpectedly passed\n' >&2
   exit 1
@@ -316,7 +322,7 @@ metadata_runtime_wrong_version="${tmp_dir}/metadata-runtime-wrong-version.env"
 cp "${metadata_runtime_missing_version}" "${metadata_runtime_wrong_version}"
 printf 'CTX_RELEASE_ONNXRUNTIME_VERSION=1.26.0\n' >> "${metadata_runtime_wrong_version}"
 if bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
-  --metadata "${metadata_runtime_wrong_version}" --platform linux-x64 --dry-run --no-setup \
+  --metadata "${metadata_runtime_wrong_version}" --platform linux-x64 --dry-run --no-setup --no-skill \
   > "${tmp_dir}/runtime-wrong-version.out" 2>&1; then
   printf 'unsupported runtime metadata version unexpectedly passed\n' >&2
   exit 1
@@ -328,7 +334,7 @@ cp "${metadata_runtime_missing_version}" "${metadata_runtime}"
 printf 'CTX_RELEASE_ONNXRUNTIME_VERSION=1.27.0\n' >> "${metadata_runtime}"
 CURL_CA_BUNDLE="${tmp_dir}/cert.pem" HOME="${tmp_dir}/home-runtime-dry-run" \
   bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
-  --metadata "${metadata_runtime}" --platform linux-x64 --dry-run --no-setup \
+  --metadata "${metadata_runtime}" --platform linux-x64 --dry-run --no-setup --no-skill \
   > "${tmp_dir}/runtime-dry-run.out"
 grep -F 'onnxruntime: ' "${tmp_dir}/runtime-dry-run.out" | grep -F '/onnxruntime/1.27.0/linux-x64' >/dev/null
 
@@ -385,6 +391,28 @@ fi
 base_env=(CURL_CA_BUNDLE="${tmp_dir}/cert.pem" CTX_INSTALL_NO_MAN=1 CTX_INSTALL_NO_DAEMON=0)
 installer=(bash "${repo_root}/scripts/dev-install-from-metadata.sh" --metadata "${metadata}" --platform linux-x64)
 
+home_skill_only="${tmp_dir}/home-skill-only"
+skill_only_log="${tmp_dir}/skill-only-args.txt"
+setup_skipped_log="${tmp_dir}/setup-skipped-args.txt"
+mkdir -p "${home_skill_only}"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" \
+  HOME="${home_skill_only}" SHELL="/bin/bash" \
+  CTX_FAKE_SKILL_ARGS_LOG="${skill_only_log}" CTX_FAKE_SETUP_ARGS_LOG="${setup_skipped_log}" \
+  "${installer[@]}" --no-setup --no-modify-path > "${tmp_dir}/skill-only.out"
+test "$(cat "${skill_only_log}")" = $'integrations\ninstall\nskill'
+test ! -e "${setup_skipped_log}"
+
+home_skill_env="${tmp_dir}/home-skill-env"
+skill_env_log="${tmp_dir}/skill-env-args.txt"
+setup_env_skipped_log="${tmp_dir}/setup-env-skipped-args.txt"
+mkdir -p "${home_skill_env}"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" \
+  HOME="${home_skill_env}" SHELL="/bin/bash" CTX_INSTALL_NO_SETUP=1 \
+  CTX_FAKE_SKILL_ARGS_LOG="${skill_env_log}" CTX_FAKE_SETUP_ARGS_LOG="${setup_env_skipped_log}" \
+  "${installer[@]}" --no-modify-path > "${tmp_dir}/skill-env.out"
+test "$(cat "${skill_env_log}")" = $'integrations\ninstall\nskill'
+test ! -e "${setup_env_skipped_log}"
+
 home_daemon_default="${tmp_dir}/home-daemon-default"
 daemon_default_log="${tmp_dir}/daemon-default-args.txt"
 mkdir -p "${home_daemon_default}"
@@ -418,7 +446,7 @@ test "$(cat "${no_daemon_env_log}")" = $'setup\n--progress\nnone\n--no-daemon'
 
 home_dry_run="${tmp_dir}/home-dry-run"
 mkdir -p "${home_dry_run}"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_dry_run}" SHELL="/bin/bash" "${installer[@]}" --dry-run --no-setup > "${tmp_dir}/dry-run.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_dry_run}" SHELL="/bin/bash" "${installer[@]}" --dry-run --no-setup --no-skill > "${tmp_dir}/dry-run.out"
 grep -F 'Dry run: would install ctx 1.5.0 (linux-x64)' "${tmp_dir}/dry-run.out" >/dev/null
 ! grep -F 'Installing ctx 1.5.0 (linux-x64)' "${tmp_dir}/dry-run.out" >/dev/null
 ! grep -F 'Installed ctx binary.' "${tmp_dir}/dry-run.out" >/dev/null
@@ -426,27 +454,27 @@ grep -F 'Dry run: would install ctx 1.5.0 (linux-x64)' "${tmp_dir}/dry-run.out" 
 installer_aarch64=(bash "${repo_root}/scripts/dev-install-from-metadata.sh" --metadata "${metadata}" --platform linux-aarch64)
 home_dry_run_aarch64="${tmp_dir}/home-dry-run-aarch64"
 mkdir -p "${home_dry_run_aarch64}"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_dry_run_aarch64}" SHELL="/bin/bash" "${installer_aarch64[@]}" --dry-run --no-setup > "${tmp_dir}/dry-run-aarch64.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_dry_run_aarch64}" SHELL="/bin/bash" "${installer_aarch64[@]}" --dry-run --no-setup --no-skill > "${tmp_dir}/dry-run-aarch64.out"
 grep -F 'Dry run: would install ctx 1.5.0 (linux-aarch64)' "${tmp_dir}/dry-run-aarch64.out" >/dev/null
 ! grep -F 'Installing ctx 1.5.0 (linux-aarch64)' "${tmp_dir}/dry-run-aarch64.out" >/dev/null
 ! grep -F 'Installed ctx binary.' "${tmp_dir}/dry-run-aarch64.out" >/dev/null
 
 home_idem="${tmp_dir}/home-idem"
 mkdir -p "${home_idem}"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_idem}" SHELL="/bin/bash" "${installer[@]}" --no-setup > "${tmp_dir}/idem-1.out"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_idem}" SHELL="/bin/bash" "${installer[@]}" --no-setup > "${tmp_dir}/idem-2.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_idem}" SHELL="/bin/bash" "${installer[@]}" --no-setup --no-skill > "${tmp_dir}/idem-1.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_idem}" SHELL="/bin/bash" "${installer[@]}" --no-setup --no-skill > "${tmp_dir}/idem-2.out"
 test "$(grep -c 'ctx installer PATH setup' "${home_idem}/.bashrc")" = 1
 grep -F 'Found existing PATH setup' "${tmp_dir}/idem-2.out" >/dev/null
 
 home_on_path="${tmp_dir}/home-on-path"
 mkdir -p "${home_on_path}"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="${home_on_path}/.local/bin:/usr/bin:/bin" HOME="${home_on_path}" SHELL="/bin/bash" "${installer[@]}" --no-setup > "${tmp_dir}/on-path.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="${home_on_path}/.local/bin:/usr/bin:/bin" HOME="${home_on_path}" SHELL="/bin/bash" "${installer[@]}" --no-setup --no-skill > "${tmp_dir}/on-path.out"
 test ! -e "${home_on_path}/.bashrc"
 
 home_env_bin="${tmp_dir}/home-env-bin"
 env_bin="${tmp_dir}/ctx-env-bin"
 mkdir -p "${home_env_bin}"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_env_bin}" SHELL="/bin/bash" CTX_BIN_DIR="${env_bin}" "${installer[@]}" --no-setup > "${tmp_dir}/env-bin.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_env_bin}" SHELL="/bin/bash" CTX_BIN_DIR="${env_bin}" "${installer[@]}" --no-setup --no-skill > "${tmp_dir}/env-bin.out"
 test -x "${env_bin}/ctx"
 grep -F "${env_bin}" "${home_env_bin}/.bashrc" >/dev/null
 
@@ -454,7 +482,7 @@ home_bin_override="${tmp_dir}/home-bin-override"
 env_override_bin="${tmp_dir}/ctx-env-override-bin"
 flag_override_bin="${tmp_dir}/ctx-flag-override-bin"
 mkdir -p "${home_bin_override}"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_bin_override}" SHELL="/bin/bash" CTX_BIN_DIR="${env_override_bin}" "${installer[@]}" --bin-dir "${flag_override_bin}" --no-setup > "${tmp_dir}/bin-override.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_bin_override}" SHELL="/bin/bash" CTX_BIN_DIR="${env_override_bin}" "${installer[@]}" --bin-dir "${flag_override_bin}" --no-setup --no-skill > "${tmp_dir}/bin-override.out"
 test ! -e "${env_override_bin}/ctx"
 test -x "${flag_override_bin}/ctx"
 grep -F "${flag_override_bin}" "${home_bin_override}/.bashrc" >/dev/null
@@ -470,7 +498,7 @@ mkdir -p "${home_marker_change}"
   printf '  *) export PATH="%s:${PATH}" ;;\n' "${old_marker_bin}"
   printf 'esac\n'
 } > "${home_marker_change}/.bashrc"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_marker_change}" SHELL="/bin/bash" "${installer[@]}" --bin-dir "${new_marker_bin}" --no-setup > "${tmp_dir}/marker-change.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_marker_change}" SHELL="/bin/bash" "${installer[@]}" --bin-dir "${new_marker_bin}" --no-setup --no-skill > "${tmp_dir}/marker-change.out"
 grep -F "${new_marker_bin}" "${home_marker_change}/.bashrc" >/dev/null
 PATH="/usr/bin:/bin" HOME="${home_marker_change}" bash -c 'source "$HOME/.bashrc"; command -v ctx' >/dev/null
 
@@ -478,13 +506,13 @@ home_comment_path="${tmp_dir}/home-comment-path"
 comment_path_bin="${tmp_dir}/comment-path-bin"
 mkdir -p "${home_comment_path}"
 printf '# PATH may include %s later\n' "${comment_path_bin}" > "${home_comment_path}/.bashrc"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_comment_path}" SHELL="/bin/bash" "${installer[@]}" --bin-dir "${comment_path_bin}" --no-setup > "${tmp_dir}/comment-path.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_comment_path}" SHELL="/bin/bash" "${installer[@]}" --bin-dir "${comment_path_bin}" --no-setup --no-skill > "${tmp_dir}/comment-path.out"
 test "$(grep -c 'ctx installer PATH setup' "${home_comment_path}/.bashrc")" = 1
 PATH="/usr/bin:/bin" HOME="${home_comment_path}" bash -c 'source "$HOME/.bashrc"; command -v ctx' >/dev/null
 
 home_env_no="${tmp_dir}/home-env-no"
 mkdir -p "${home_env_no}"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_env_no}" SHELL="/bin/bash" CTX_INSTALL_NO_MODIFY_PATH=1 "${installer[@]}" --no-setup > "${tmp_dir}/env-no.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_env_no}" SHELL="/bin/bash" CTX_INSTALL_NO_MODIFY_PATH=1 "${installer[@]}" --no-setup --no-skill > "${tmp_dir}/env-no.out"
 test ! -e "${home_env_no}/.bashrc"
 grep -F 'shell startup file update skipped' "${tmp_dir}/env-no.out" >/dev/null
 
@@ -492,7 +520,7 @@ home_flag_no="${tmp_dir}/home-flag-no"
 github_path_no="${tmp_dir}/github-path-no"
 mkdir -p "${home_flag_no}"
 : > "${github_path_no}"
-env -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_flag_no}" SHELL="/bin/bash" GITHUB_PATH="${github_path_no}" "${installer[@]}" --no-setup --no-modify-path > "${tmp_dir}/flag-no.out"
+env -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_flag_no}" SHELL="/bin/bash" GITHUB_PATH="${github_path_no}" "${installer[@]}" --no-setup --no-skill --no-modify-path > "${tmp_dir}/flag-no.out"
 test ! -e "${home_flag_no}/.bashrc"
 test ! -s "${github_path_no}"
 grep -F 'shell startup file update skipped' "${tmp_dir}/flag-no.out" >/dev/null
@@ -501,26 +529,26 @@ home_gha="${tmp_dir}/home-gha"
 github_path="${tmp_dir}/github-path"
 mkdir -p "${home_gha}"
 : > "${github_path}"
-env -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_gha}" SHELL="/bin/bash" GITHUB_PATH="${github_path}" "${installer[@]}" --no-setup > "${tmp_dir}/gha.out"
+env -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_gha}" SHELL="/bin/bash" GITHUB_PATH="${github_path}" "${installer[@]}" --no-setup --no-skill > "${tmp_dir}/gha.out"
 grep -F "${home_gha}/.local/bin" "${github_path}" >/dev/null
 test ! -e "${home_gha}/.bashrc"
 
 home_ci="${tmp_dir}/home-ci"
 mkdir -p "${home_ci}"
-env -u GITHUB_PATH "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_ci}" SHELL="/bin/bash" CI=true "${installer[@]}" --no-setup > "${tmp_dir}/ci.out"
+env -u GITHUB_PATH "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_ci}" SHELL="/bin/bash" CI=true "${installer[@]}" --no-setup --no-skill > "${tmp_dir}/ci.out"
 test ! -e "${home_ci}/.bashrc"
 grep -F 'CI detected' "${tmp_dir}/ci.out" >/dev/null
 
 home_shell_empty="${tmp_dir}/home-shell-empty"
 mkdir -p "${home_shell_empty}"
-env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_shell_empty}" SHELL="" "${installer[@]}" --no-setup > "${tmp_dir}/shell-empty.out"
+env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_shell_empty}" SHELL="" "${installer[@]}" --no-setup --no-skill > "${tmp_dir}/shell-empty.out"
 grep -F 'ctx installer PATH setup' "${home_shell_empty}/.profile" >/dev/null
 
 if command -v zsh >/dev/null 2>&1; then
   home_zsh="${tmp_dir}/home-zsh"
   mkdir -p "${home_zsh}"
   zsh_bin="$(command -v zsh)"
-  env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_zsh}" SHELL="${zsh_bin}" "${installer[@]}" --no-setup > "${tmp_dir}/zsh.out"
+  env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_zsh}" SHELL="${zsh_bin}" "${installer[@]}" --no-setup --no-skill > "${tmp_dir}/zsh.out"
   grep -F 'ctx installer PATH setup' "${home_zsh}/.zshrc" >/dev/null
   PATH="/usr/bin:/bin" HOME="${home_zsh}" "${zsh_bin}" -c 'source "$HOME/.zshrc"; command -v ctx' >/dev/null
 else
@@ -531,7 +559,7 @@ if command -v fish >/dev/null 2>&1; then
   home_fish="${tmp_dir}/home-fish"
   mkdir -p "${home_fish}"
   fish_bin="$(command -v fish)"
-  env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_fish}" SHELL="${fish_bin}" "${installer[@]}" --no-setup > "${tmp_dir}/fish.out"
+  env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_fish}" SHELL="${fish_bin}" "${installer[@]}" --no-setup --no-skill > "${tmp_dir}/fish.out"
   grep -F 'ctx installer PATH setup' "${home_fish}/.config/fish/config.fish" >/dev/null
   env PATH="/usr/bin:/bin" HOME="${home_fish}" "${fish_bin}" -c 'source "$HOME/.config/fish/config.fish"; command -q ctx'
 else

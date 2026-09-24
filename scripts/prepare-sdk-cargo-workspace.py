@@ -63,6 +63,7 @@ def remove_unavailable_optional_dependencies(manifest: Path, available: set[str]
         sections.append(current)
 
     retained_sections: list[list[str]] = []
+    retained_dependencies: set[str] = set()
     dropped: set[str] = set()
     dependency_section = re.compile(r"^\[(?:dependencies|target\..*\.dependencies)\.([^]]+)\]$")
     dev_dependency_section = re.compile(
@@ -84,8 +85,12 @@ def remove_unavailable_optional_dependencies(manifest: Path, available: set[str]
         if dependency and dependency not in available and (optional or target_specific):
             dropped.add(dependency)
             continue
+        if dependency:
+            retained_dependencies.add(dependency)
         retained_sections.append(section)
 
+    # A removed dev dependency may share a name with a retained normal/target dependency.
+    dropped.difference_update(retained_dependencies)
     retained: list[str] = []
     for section in retained_sections:
         if section and section[0].strip() == "[features]" and dropped:

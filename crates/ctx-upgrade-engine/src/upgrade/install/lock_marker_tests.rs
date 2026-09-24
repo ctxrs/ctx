@@ -102,6 +102,90 @@ fn absent_and_corrupt_managed_markers_have_distinct_classifications() -> Result<
     Ok(())
 }
 
+#[test]
+fn managed_marker_accepts_current_executables_above_128_mib_only_with_the_correct_hash(
+) -> Result<()> {
+    use sha2::{Digest as _, Sha256};
+    use std::io::Read as _;
+
+    let fixture = tempdir()?;
+    let executable = executable_copy(fixture.path(), b"synthetic executable")?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&executable)?
+        .set_len(128 * 1024 * 1024 + 1)?;
+    // Independently hash the sparse fixture without allocating another binary-sized Vec.
+    let mut file = fs::File::open(&executable)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    let mut marker = json!({
+        "manager": "ctx-hosted-installer",
+        "install_path": executable,
+        "platform": "test-platform",
+        "channel": "stable",
+        "version": "1.0.0",
+        "sha256": digest,
+    });
+    let marker_path = install_marker_path(&executable);
+    fs::write(&marker_path, serde_json::to_vec(&marker)?)?;
+    let observed = classify_install_marker_at(&executable, "test-platform");
+    let ManagedInstallMarker::Valid(valid) = observed else {
+        panic!("expected a valid large executable marker, got {observed:?}");
+    };
+    assert_eq!(valid.sha256, digest);
+
+    marker["sha256"] = json!("0".repeat(64));
+    fs::write(&marker_path, serde_json::to_vec(&marker)?)?;
+    let observed = classify_install_marker_at(&executable, "test-platform");
+    let ManagedInstallMarker::Invalid { reason } = observed else {
+        panic!("expected the wrong digest to fail, got {observed:?}");
+    };
+    assert!(
+        reason.contains("ctx install marker hash mismatch"),
+        "{reason}"
+    );
+    Ok(())
+}
+
+#[test]
+fn managed_marker_rejects_executables_above_256_mib_before_hashing() -> Result<()> {
+    let fixture = tempdir()?;
+    let executable = executable_copy(fixture.path(), b"synthetic executable")?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&executable)?
+        .set_len(256 * 1024 * 1024 + 1)?;
+    fs::write(
+        install_marker_path(&executable),
+        serde_json::to_vec(&json!({
+            "manager": "ctx-hosted-installer",
+            "install_path": executable,
+            "platform": "test-platform",
+            "channel": "stable",
+            "version": "1.0.0",
+            "sha256": "0".repeat(64),
+        }))?,
+    )?;
+    let observed = classify_install_marker_at(&executable, "test-platform");
+    let ManagedInstallMarker::Invalid { reason } = observed else {
+        panic!("expected the oversized executable to fail, got {observed:?}");
+    };
+    assert!(
+        reason.contains("managed ctx executable exceeds 268435456 bytes"),
+        "{reason}"
+    );
+    assert!(!reason.contains("hash mismatch"), "{reason}");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn unmanaged_classification_requires_a_plainly_absent_marker() -> Result<()> {

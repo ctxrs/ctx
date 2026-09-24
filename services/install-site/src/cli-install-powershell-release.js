@@ -81,7 +81,10 @@ export function renderCliInstallPowerShellReleasePreparation() {
         }
         $pendingPath = Join-Path $BinDir ".ctx.upgrade-install-transaction.json"
         $priorInstall = $null
-        if (Test-Path -LiteralPath $pendingPath) {
+        $pendingHostedPath = Join-Path $BinDir ".ctx.exe.hosted-install-transaction.json"
+        if (Test-Path -LiteralPath $pendingHostedPath -PathType Leaf) {
+            # The signed candidate validates and finishes this durable journal.
+        } elseif (Test-Path -LiteralPath $pendingPath) {
             # An intact old image still selects B. Partial publication is
             # classified after the existing recovery owner has run.
             try { $priorInstall = Read-ExistingManagedInstall } catch { }

@@ -371,6 +371,13 @@ fn prepare_uninstall_waits_for_indexing_control_before_disabling_and_cleanup() {
         "ia_indexing_control_uninstall_race",
     ]);
     assert_eq!(successful_json(fence)["daemon_admission_fenced"], true);
+    if enable.try_wait().unwrap().is_some() {
+        let output = enable.wait_with_output().unwrap();
+        panic!(
+            "indexing-control fixture exited before the uninstall waiter started: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     let mut teardown = isolated_command(&install, temp.path());
     teardown
@@ -382,10 +389,15 @@ fn prepare_uninstall_waits_for_indexing_control_before_disabling_and_cleanup() {
         .stderr(Stdio::piped());
     let mut teardown = teardown.spawn().expect("start prepare-uninstall waiter");
     thread::sleep(Duration::from_millis(250));
-    assert!(
-        teardown.try_wait().unwrap().is_none(),
-        "prepare-uninstall bypassed indexing-control ownership"
-    );
+    if teardown.try_wait().unwrap().is_some() {
+        let output = teardown.wait_with_output().unwrap();
+        fs::remove_file(&gate).unwrap();
+        let _ = enable.wait_with_output();
+        panic!(
+            "prepare-uninstall bypassed indexing-control ownership: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let in_flight_config = fs::read_to_string(requested_root.join("config.toml")).unwrap();
     assert!(
         in_flight_config.contains("mode = \"auto\""),

@@ -12,7 +12,7 @@ use lifecycle_helpers::*;
 fn install_managed_test_marker(binary: &std::path::Path) {
     use sha2::{Digest as _, Sha256};
 
-    const MAX_MANAGED_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+    const MAX_MANAGED_BINARY_BYTES: u64 = 256 * 1024 * 1024;
     if fs::metadata(binary).unwrap().len() > MAX_MANAGED_BINARY_BYTES {
         let stripped = std::process::Command::new("strip")
             .arg(binary)

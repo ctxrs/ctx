@@ -57,10 +57,11 @@ run_managed_core_upgrade() {
 }
 
 publish_fresh_or_legacy_binary() {
+  hosted_action="\${1:-install}"
   chmod 0700 "$artifact_path" || fail "could not prepare the verified ctx candidate"
   hosted_transaction_output="$tmp_dir/hosted-install-transaction.json"
   if ! "$artifact_path" upgrade \
-    --hosted-transaction install \
+    --hosted-transaction "$hosted_action" \
     --install-path "$install_path" \
     --attempt-id "$install_attempt_id" \
     --marker-source "$marker_tmp_path" \

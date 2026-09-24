@@ -84,7 +84,7 @@ content instead of pasting raw JSON or large transcript excerpts.
 
 ## Deterministic Use
 
-Treat ctx output as retrieved source material. Do not state that ctx inferred a
+Treat Sift output as retrieved source material. Do not state that ctx inferred a
 decision unless the cited text explicitly says so. If you synthesize a conclusion
 from multiple retrieved snippets, say that the conclusion is your synthesis and
 cite the snippets that support it.

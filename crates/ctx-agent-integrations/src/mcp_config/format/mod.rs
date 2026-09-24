@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use super::{SERVER_ARGS, SERVER_COMMAND};
 
-mod json;
+pub(crate) mod json;
 mod toml;
 mod yaml;
 

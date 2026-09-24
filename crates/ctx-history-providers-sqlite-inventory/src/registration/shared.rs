@@ -271,12 +271,12 @@ impl RetainedSqliteInventoryLeaf {
             let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(|_| {
                 sqlite_inventory_internal("SQLite provider value limit does not fit i32")
             })?;
-            connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
             connection
-                .busy_timeout(Duration::from_secs(5))
+                .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit)
+                .and_then(|_| connection.busy_timeout(Duration::from_secs(5)))
                 .map_err(|source| {
                     sqlite_source_route_error(snapshot.diagnose_provider_query_error(
-                        "setting the private SQLite provider busy timeout",
+                        "configuring the private SQLite provider value limit and busy timeout",
                         source,
                         crate::provider_sources::SqliteFailurePhase::SourceValidation,
                     ))

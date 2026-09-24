@@ -12,8 +12,8 @@ use ctx_client_observability::analytics::PublicEventV1;
 use ctx_daemon_cli::{DaemonConfig, DaemonMode, DaemonRuntimeConfig};
 
 pub(crate) use ctx_daemon_cli::{
-    begin_daemon_upgrade_handoff, complete_replacement_daemon_handoff,
-    coordinate_import_source_backed_refresh_with_progress,
+    begin_daemon_upgrade_handoff, begin_daemon_upgrade_handoff_for_installation,
+    complete_replacement_daemon_handoff, coordinate_import_source_backed_refresh_with_progress,
     coordinate_setup_source_backed_refresh_with_progress, daemon_autostart_suppression_reason,
     finish_replacement_daemon_handoff, mark_replacement_helper_handoff,
     published_explicit_source_relocation_authority, semantic_managed_model_snapshot_dir,

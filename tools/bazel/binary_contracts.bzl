@@ -13,6 +13,47 @@ CTX_BINARY_CONTRACT_RUSTC_FLAGS = [
     "--check-cfg=cfg(test)",
 ]
 
+_EXTRA_RUSTC_FLAGS = "@rules_rust//rust/settings:extra_rustc_flags"
+
+def _optimized_fixture_transition_impl(settings, _attr):
+    # Optimize the entire executable closure while retaining the fastbuild
+    # harness's debug-only synchronization seams, including those in libraries.
+    return {
+        "//command_line_option:compilation_mode": "opt",
+        _EXTRA_RUSTC_FLAGS: settings[_EXTRA_RUSTC_FLAGS] + ["-Cdebug-assertions=yes"],
+    }
+
+_optimized_fixture_transition = transition(
+    implementation = _optimized_fixture_transition_impl,
+    inputs = [_EXTRA_RUSTC_FLAGS],
+    outputs = ["//command_line_option:compilation_mode", _EXTRA_RUSTC_FLAGS],
+)
+
+def _optimized_test_binary_impl(ctx):
+    binary = ctx.attr.binary[0][DefaultInfo]
+    return [DefaultInfo(
+        files = depset([binary.files_to_run.executable]),
+        runfiles = binary.default_runfiles,
+    )]
+
+_optimized_test_binary = rule(
+    implementation = _optimized_test_binary_impl,
+    attrs = {
+        "binary": attr.label(
+            cfg = _optimized_fixture_transition,
+            executable = True,
+            mandatory = True,
+        ),
+        "_allowlist_function_transition": attr.label(
+            default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
+        ),
+    },
+)
+
+def ctx_optimized_test_binary(name, binary):
+    """Exposes a complete optimized executable only as test runfiles data."""
+    _optimized_test_binary(name = name, binary = binary, testonly = True)
+
 def ctx_binary_contract_test(
         name,
         src,

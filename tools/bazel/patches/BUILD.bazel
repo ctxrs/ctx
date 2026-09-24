@@ -3,8 +3,10 @@ exports_files(
     [
         "libgit2-sys-bazel-headers.patch",
         "libssh2-sys-disable-zlib.patch",
+        "network-partitions-license.patch",
         "notify-fsevents-stop.patch",
         "ort-freebsd-release-env-order.patch",
+        "serde-json-runtime-features.patch",
         "rules-rust-freebsd-host.patch",
         "rules-rust-windows-cargo-runfiles.patch",
         "rules-rust-windows-gnu-dlltool-path.patch",
