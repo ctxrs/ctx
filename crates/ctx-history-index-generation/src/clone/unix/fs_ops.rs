@@ -123,6 +123,7 @@ pub(super) fn create_directory_at(parent: &File, path: &Path) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn hard_link_at(source: &File, path: &Path, destination: &File) -> io::Result<()> {
     let path = path_cstring(path)?;
     // SAFETY: both descriptors and both NUL-terminated path pointers stay

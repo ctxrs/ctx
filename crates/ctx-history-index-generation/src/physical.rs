@@ -82,10 +82,6 @@ pub struct CandidatePhysicalProof {
 }
 
 impl CandidatePhysicalProof {
-    pub fn clear(&mut self) {
-        self.files.clear();
-    }
-
     pub(crate) fn insert(&mut self, file: PhysicalFileDigest) {
         self.files.insert(file.artifact.path.clone(), file);
     }

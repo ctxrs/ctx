@@ -266,7 +266,7 @@ fn inactive_generation_reclamation_revalidates_retained_identity_before_deletion
     let displaced = temp.path().join("retained-reclamation-candidate");
     fs::create_dir(&orphan).unwrap();
     fs::write(orphan.join("original-sentinel"), b"retained object").unwrap();
-    let orphan_for_hook = orphan.clone();
+    let orphan_for_hook = fs::canonicalize(&orphan).unwrap();
     let displaced_for_hook = displaced.clone();
     let mut replaced = false;
     let hook = ReclamationTestHookGuard::set(move |stage, path| {
