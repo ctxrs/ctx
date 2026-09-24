@@ -77,6 +77,7 @@ impl PublicationSink {
         &mut self,
         sources: &BTreeMap<String, CoreSourceState>,
         page: super::super::super::staging::StagedPage,
+        index_rollover: bool,
     ) -> Result<(), SegmentMaterializerError> {
         let source = page.event_source;
         if !page.index_records.is_empty()
@@ -103,6 +104,9 @@ impl PublicationSink {
             }
             self.charge_flat_work(retained_bytes, 0)?;
             self.flat_tombstones.push(tombstone);
+        }
+        if index_rollover {
+            self.flush_index()?;
         }
         if !page.index_records.is_empty() {
             self.push_index_page(&source, page.index_records, page.index_lineage)?;

@@ -212,6 +212,12 @@ fn raw_helper_and_path_details_never_cross_protocol_errors() {
 
 #[test]
 fn segment_failures_preserve_stable_protocol_classes_without_diagnostics() {
+    let detailed: AdapterError =
+        SegmentMaterializerError::BoundDetail("private source /home/private".into()).into();
+    assert!(matches!(detailed, AdapterError::MaterializerBounds));
+    let detailed = protocol_error(&detailed);
+    assert_eq!(detailed.class, ErrorClass::Bounds);
+    assert!(!detailed.message.contains("/home/private"));
     for (error, expected) in [
         (AdapterError::MaterializerBounds, ErrorClass::Bounds),
         (AdapterError::MaterializerBusy, ErrorClass::NotMaterialized),

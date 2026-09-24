@@ -248,6 +248,22 @@ pub(super) fn apply_event_pages(
     let projections = prepare_page_projections(preparer, prepared_pages)?
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
+    let oversized = projections
+        .iter()
+        .filter_map(|projection| {
+            let mut omitted = projection.projected.omissions.iter().filter(|omission| {
+                omission.reason
+                    == crate::graph::segment::ProjectionOmissionReason::OversizedFlatRecord
+            });
+            omitted.next().map(|first| {
+                (
+                    first.source_id.clone(),
+                    first.fact_id.clone(),
+                    1 + omitted.count(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
     for projection in &projections {
         record_projection_metrics(&mut store.metrics, projection.metrics);
     }
@@ -289,6 +305,12 @@ pub(super) fn apply_event_pages(
     }
     super::lifecycle::support::stage_direct_pages(direct, &mut next, staged)?;
     *candidate = next;
+    for (source_id, fact_id, count) in oversized {
+        eprintln!(
+            "warning: Blame omitted {count} oversized fact(s) from source {source_id} (first fact {fact_id}); Flat record limit is {} bytes",
+            crate::graph::segment::MAX_FLAT_RECORD_PAYLOAD_BYTES
+        );
+    }
     Ok(())
 }
 
@@ -504,7 +526,12 @@ fn push_current(
     state.session_ref = lineage
         .retain(state.key(), indexed_lineage(record, disposition))
         .map_err(|error| match error {
-            crate::graph::segment::EventIndexError::Bound(_) => SegmentMaterializerError::Bounds,
+            crate::graph::segment::EventIndexError::Bound(bound) => {
+                SegmentMaterializerError::BoundDetail(format!(
+                    "event index {bound} for source {}",
+                    state.source_storage_key
+                ))
+            }
             crate::graph::segment::EventIndexError::Conflict => SegmentMaterializerError::Conflict,
             _ => SegmentMaterializerError::Corrupt("Core event lineage is invalid"),
         })?

@@ -388,6 +388,71 @@ fn unsupported_and_repositoryless_facts_are_explicit_omissions() {
 }
 
 #[test]
+fn oversized_flat_fact_does_not_discard_neighboring_attribution() {
+    let records = records(2);
+    let oversized = fact(
+        &records[0],
+        super::super::GIT_COMMIT_PRODUCED,
+        ResourceRef::in_repository(ResourceKind::Commit, COMMIT, REPOSITORY),
+        (0..127)
+            .map(|index| (format!("detail_{index:03}"), "\"".repeat(4_096)))
+            .collect(),
+    );
+    let oversized_id = oversized.fact_id.clone();
+    let ordinary = commit_fact(&records[1]);
+    let prepared = batch(&records, vec![vec![oversized], vec![ordinary]]);
+    let oversized_projection = project_fact(
+        &prepared.source,
+        &prepared.units[0],
+        &prepared.units[0].facts[0],
+        FactFamily::new(super::super::GIT_COMMIT_PRODUCED).unwrap(),
+        REPOSITORY,
+        &event_owner(
+            &prepared.core_generation_id,
+            &prepared.source,
+            &prepared.units[0],
+        )
+        .unwrap()
+        .unwrap(),
+        &collect_stable_entities(prepared.units.iter()).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        super::super::FlatSegmentWriter::record_work(&oversized_projection),
+        Err(super::super::FlatSegmentError::Bound("record bytes"))
+    ));
+    let units = prepared.units.iter().collect::<Vec<_>>();
+    let page = prepare_core_page_projection(&prepared.core_generation_id, &prepared.source, &units)
+        .expect("one oversized fact must not fail the page");
+
+    assert_eq!(page.projected.records.len(), 1);
+    assert_eq!(
+        page.projected.records[0].event_owner.event_id,
+        records[1].event_id.to_string()
+    );
+    assert_eq!(page.record_evidence.len(), 1);
+    super::super::FlatSegmentWriter::record_work(&page.projected.records[0])
+        .expect("surviving attribution can be written");
+    assert_eq!(page.metrics.record_serializations, 1);
+    assert_eq!(page.projected.omissions.len(), 1);
+    let omission = &page.projected.omissions[0];
+    assert_eq!(
+        omission.reason,
+        ProjectionOmissionReason::OversizedFlatRecord
+    );
+    assert_eq!(
+        omission.source_id,
+        core_source_storage_id(&prepared.source.source)
+    );
+    assert_eq!(omission.event_id, records[0].event_id.to_string());
+    assert_eq!(omission.fact_id, oversized_id);
+    assert_eq!(
+        page.record_evidence,
+        projected_core_record_evidence(&page.projected.records).unwrap()
+    );
+}
+
+#[test]
 fn origin_defaults_conservatively_and_only_typed_attributes_raise_authority() {
     let records = records(1);
     let unspecified = commit_fact(&records[0]);

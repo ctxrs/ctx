@@ -336,16 +336,29 @@ impl CoreProjectionPreparer {
             &self.inner.credits,
             &mut output_budget,
             |job| {
-                let unit = self.prepare_validated_record(
-                    job.core_generation_id,
-                    job.source,
-                    job.record,
-                    job.record_sha256,
-                    &job.repository,
-                )?;
-                let encoding = prepared_unit_encoding(&unit.origin_event_id, &unit)?;
-                validate_prepared_unit_hard_max(encoding)?;
-                Ok(SizedPreparedCoreUnit { unit, encoding })
+                (|| {
+                    let unit = self.prepare_validated_record(
+                        job.core_generation_id,
+                        job.source,
+                        job.record,
+                        job.record_sha256,
+                        &job.repository,
+                    )?;
+                    let encoding = prepared_unit_encoding(&unit.origin_event_id, &unit)?;
+                    validate_prepared_unit_hard_max(encoding)?;
+                    Ok(SizedPreparedCoreUnit { unit, encoding })
+                })()
+                .map_err(|mut error: ProtocolError| {
+                    if error.class == ErrorClass::Bounds {
+                        error.message = format!(
+                            "{} (source {}, event {})",
+                            error.message,
+                            core_source_storage_id(&job.source.source),
+                            job.record.event_id
+                        );
+                    }
+                    error
+                })
             },
             |job, sized, budget| {
                 let accumulated = accumulated_pages
