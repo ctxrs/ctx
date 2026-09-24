@@ -110,7 +110,8 @@ describe("scheduled permanent telemetry history", () => {
           if (deletedCount === undefined) throw new Error("unexpected cleanup query");
           return [{ deleted_count: deletedCount }] as unknown as T[];
         }
-        return [{ materialized_count: "12", ...WINDOW }] as unknown as T[];
+        if (sql.includes("AS today")) return [{ today: "2026-07-23" }] as unknown as T[];
+        return [{ materialized_count: "12" }] as unknown as T[];
       },
       async transaction() {
         throw new Error("unexpected transaction");
@@ -122,17 +123,21 @@ describe("scheduled permanent telemetry history", () => {
     const materializedCount = await database.materializeProductTelemetryHistory();
 
     expect(deletedCount).toBe("259");
-    expect(materializedCount).toEqual({ materialized_count: "12", ...WINDOW });
-    expect(calls).toHaveLength(4);
+    expect(materializedCount).toEqual({ materialized_count: "108", ...WINDOW });
+    expect(calls).toHaveLength(13);
     for (const call of calls.slice(0, 3)) {
       expect(call.params).toEqual([]);
       expect(call.sql).toMatch(/delete_expired_telemetry_event_collision_receipts/u);
       expect(call.sql).toMatch(/interval '9 days'/u);
       expect(call.sql).toMatch(/128/u);
     }
-    expect(calls[3].sql).toMatch(/ctx\.materialize_product_telemetry_history/u);
     expect(calls[3].sql).toMatch(/statement_timestamp\(\) AT TIME ZONE 'utc'/u);
-    expect(calls[3].sql).not.toMatch(/delete_expired_raw_product_telemetry/u);
+    for (let index = 4; index < 13; index += 1) {
+      expect(calls[index].sql).toMatch(/ctx\.materialize_product_telemetry_history/u);
+      expect(calls[index].sql).not.toMatch(/delete_expired_raw_product_telemetry/u);
+    }
+    expect(calls[4].sql).toMatch(/date '2026-07-14'/u);
+    expect(calls[12].sql).toMatch(/date '2026-07-22'/u);
   });
 
   test("caps receipt cleanup after eight full batches", async () => {
@@ -162,18 +167,33 @@ describe("scheduled permanent telemetry history", () => {
 
   test.each([
     { result: [] },
-    { result: [{ materialized_count: "-1", ...WINDOW }] },
-    { result: [{ materialized_count: "2", first_received_date: "secret-canary", last_received_date: "2026-07-22" }] },
-    { result: [{ materialized_count: "2", ...WINDOW }, { materialized_count: "3", ...WINDOW }] },
-  ])("rejects malformed window receipts %j", async ({ result }) => {
+    { result: [{ materialized_count: "-1" }] },
+    { result: [{ materialized_count: "01" }] },
+    { result: [{ materialized_count: "2" }, { materialized_count: "3" }] },
+  ])("rejects malformed daily receipts %j", async ({ result }) => {
     const client = {
-      query: vi.fn(async () => result),
+      query: vi.fn(async (sql: string) => sql.includes("AS today")
+        ? [{ today: "2026-07-23" }] : result),
       transaction: vi.fn(),
     } as unknown as NeonQueryClient;
     const database = new NeonTelemetryMaintenanceDatabase(client);
     await expect(database.materializeProductTelemetryHistory())
       .rejects.toThrow("invalid_telemetry_materialization_result");
   });
+
+  test.each([
+    { result: [] },
+    { result: [{ today: "2026-02-30" }] },
+    { result: [{ today: "2026-07-23" }, { today: "2026-07-23" }] },
+  ])(
+    "rejects malformed UTC anchors %j",
+    async ({ result }) => {
+      const client = { query: vi.fn(async () => result), transaction: vi.fn() } as unknown as NeonQueryClient;
+      await expect(new NeonTelemetryMaintenanceDatabase(client).materializeProductTelemetryHistory())
+        .rejects.toThrow("invalid_telemetry_materialization_result");
+      expect(client.query).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 function workerHarness(options: {

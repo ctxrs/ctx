@@ -383,34 +383,44 @@ export class NeonTelemetryMaintenanceDatabase implements TelemetryMaintenanceDat
 
   async materializeProductTelemetryHistory(): Promise<TelemetryHistoryMaterialization> {
     // Four days in the primary Queue plus four in its DLQ, then the next daily
-    // Cron. Older gaps require explicit backfill with the same idempotent SQL.
-    // One statement keeps a stable UTC anchor and commits the window atomically.
-    const rows = await this.sql.query<TelemetryHistoryMaterialization>(`
-      WITH days AS (
-        SELECT (statement_timestamp() AT TIME ZONE 'utc')::date - age AS received_date
-        FROM generate_series(1, 9) AS ages(age)
-      )
-      SELECT sum(ctx.materialize_product_telemetry_history(received_date))::text
-          AS materialized_count,
-        min(received_date)::text AS first_received_date,
-        max(received_date)::text AS last_received_date
-      FROM days
+    // Cron. Keep the UTC anchor fixed, but commit one day per database request:
+    // the entire nine-day scan exceeds the serverless request deadline on a
+    // large receipt table. Completed days survive a retry; older gaps need
+    // explicit backfill.
+    const anchorRows = await this.sql.query<{ today: string }>(`
+      SELECT (statement_timestamp() AT TIME ZONE 'utc')::date::text AS today
     `);
-    const result = rows[0];
+    const today = anchorRows[0]?.today;
+    const anchor = typeof today === "string" ? Date.parse(`${today}T00:00:00Z`) : NaN;
     if (
-      rows.length !== 1
-      || !result
-      || typeof result.materialized_count !== "string"
-      || !/^(?:0|[1-9]\d*)$/u.test(result.materialized_count)
-      || !/^\d{4}-\d{2}-\d{2}$/u.test(result.first_received_date)
-      || !/^\d{4}-\d{2}-\d{2}$/u.test(result.last_received_date)
+      anchorRows.length !== 1 || !/^\d{4}-\d{2}-\d{2}$/u.test(today ?? "")
+      || !Number.isFinite(anchor)
+      || new Date(anchor).toISOString().slice(0, 10) !== today
     ) {
       throw new Error("invalid_telemetry_materialization_result");
     }
+    let total = 0n;
+    let firstReceivedDate = "";
+    let lastReceivedDate = "";
+    for (let age = 9; age >= 1; age -= 1) {
+      const receivedDate = new Date(anchor - age * 86_400_000).toISOString().slice(0, 10);
+      const rows = await this.sql.query<{ materialized_count: string }>(`
+        SELECT ctx.materialize_product_telemetry_history(
+          date '${receivedDate}'
+        )::text AS materialized_count
+      `);
+      const count = rows[0]?.materialized_count;
+      if (rows.length !== 1 || typeof count !== "string" || !/^(?:0|[1-9]\d*)$/u.test(count)) {
+        throw new Error("invalid_telemetry_materialization_result");
+      }
+      total += BigInt(count);
+      if (age === 9) firstReceivedDate = receivedDate;
+      if (age === 1) lastReceivedDate = receivedDate;
+    }
     return {
-      materialized_count: result.materialized_count,
-      first_received_date: result.first_received_date,
-      last_received_date: result.last_received_date,
+      materialized_count: total.toString(),
+      first_received_date: firstReceivedDate,
+      last_received_date: lastReceivedDate,
     };
   }
 }
