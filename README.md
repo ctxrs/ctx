@@ -237,8 +237,7 @@ Unlike RTK, it leaves the original commands untouched for safety, and allows ret
     restored. Git and test views retain the details needed to act on failures.
 * **Stay close to native speed.** ctx is one native binary with no language
     runtime, daemon, or background service.
-* **Run locally by default.** Ordinary compaction makes no network calls and
-    ctx has no telemetry.
+* **Run locally by default.** Ordinary compaction makes no network calls.
 * **See the result.** Optional original retention lets you recover complete captured output with
     `ctx recall`.
 
