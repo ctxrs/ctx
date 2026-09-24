@@ -311,17 +311,20 @@ Load command 9
      name /System/Library/Frameworks/Security.framework/Versions/A/Security (offset 24)
 Load command 10
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libSystem.B.dylib (offset 24)
+     name /System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration (offset 24)
 Load command 11
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libc++.1.dylib (offset 24)
+     name /usr/lib/libSystem.B.dylib (offset 24)
 Load command 12
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libcharset.1.dylib (offset 24)
+     name /usr/lib/libc++.1.dylib (offset 24)
 Load command 13
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libiconv.2.dylib (offset 24)
+     name /usr/lib/libcharset.1.dylib (offset 24)
 Load command 14
+      cmd LC_LOAD_DYLIB
+     name /usr/lib/libiconv.2.dylib (offset 24)
+Load command 15
       cmd LC_LOAD_DYLIB
      name /usr/lib/libobjc.A.dylib (offset 24)
 EOF
@@ -591,6 +594,10 @@ missing_mac_core_services="${tmp}/missing-mac-core-services.txt"
 sed '/CoreServices.framework\/Versions\/A\/CoreServices/d' "${mac_objdump}" > "${missing_mac_core_services}"
 expect_fail mac_missing_core_services_framework run_check macos-arm64 "${mac_arm_readobj}" "${missing_mac_core_services}"
 expect_fail mac_x64_missing_core_services_framework run_check macos-x64 "${mac_x64_readobj}" "${missing_mac_core_services}"
+missing_mac_system_configuration="${tmp}/missing-mac-system-configuration.txt"
+sed '/SystemConfiguration.framework\/Versions\/A\/SystemConfiguration/d' "${mac_objdump}" > "${missing_mac_system_configuration}"
+expect_fail mac_missing_system_configuration_framework run_check macos-arm64 "${mac_arm_readobj}" "${missing_mac_system_configuration}"
+expect_fail mac_x64_missing_system_configuration_framework run_check macos-x64 "${mac_x64_readobj}" "${missing_mac_system_configuration}"
 injected_mac_dylib="${tmp}/injected-mac-dylib.txt"
 sed '/name \/usr\/lib\/libobjc.A.dylib/a\
 Load command 14\
