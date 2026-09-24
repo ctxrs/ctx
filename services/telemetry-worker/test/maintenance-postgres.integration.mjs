@@ -31,6 +31,12 @@ test("telemetry maintenance catch-up repairs delayed persistence and skipped day
     `);
     sqlFileAs(database, "0046_telemetry_history_received_at_ranges.sql", "ctx_migration");
     sqlFileAs(database, "0051_telemetry_history_serialization.sql", "ctx_migration");
+    assert.throws(() => sqlFileAs(database, "0052_telemetry_history_sort_memory.sql", "neondb_owner"),
+      /requires ctx_migration and the reviewed materializer/u);
+    sqlFileAs(database, "0052_telemetry_history_sort_memory.sql", "ctx_migration");
+    sqlFileAs(database, "0052_telemetry_history_sort_memory.sql", "ctx_migration");
+    assert.match(scalar(database, `select array_to_string(proconfig, ',') from pg_proc
+      where oid = 'ctx.materialize_product_telemetry_history(date)'::regprocedure`), /work_mem=64MB/u);
     assert.throws(() => sqlFileAs(database, "0050_installer_history_date_indexes.sql", "neondb_owner"),
       /require ctx_migration and the daily materializer/u);
     sqlFileAs(database, "0050_installer_history_date_indexes.sql", "ctx_migration");
@@ -86,16 +92,22 @@ test("telemetry maintenance catch-up repairs delayed persistence and skipped day
     assert.deepEqual(dailyCounts(), expected);
     await countedMaintenance.materializeProductTelemetryHistory();
     assert.deepEqual(dailyCounts(), expected);
-    assert.equal(queries, 2, "one bounded SQL statement per schedule");
+    assert.equal(queries, 20, "one UTC anchor and nine bounded daily requests per schedule");
     assert.equal(scalar(database, "select count(*) from ctx.telemetry_event"), "7");
 
-    // A failure partway through recomputation must preserve every prior day.
+    // A failed day keeps its prior aggregate; earlier completed days commit.
     sql(database, `
       insert into ctx.telemetry_event (
         event_id, occurred_at, received_at, event_name, schema_version, plane,
         analytics_environment, traffic_class, properties
       ) values ('later-2', statement_timestamp(),
         (date '${currentDay}' - 2)::timestamp at time zone 'utc',
+        'operation_completed', 1, 'product', 'staging', 'synthetic', '{"operation":"search"}');
+      insert into ctx.telemetry_event (
+        event_id, occurred_at, received_at, event_name, schema_version, plane,
+        analytics_environment, traffic_class, properties
+      ) values ('later-9', statement_timestamp(),
+        (date '${currentDay}' - 9)::timestamp at time zone 'utc',
         'operation_completed', 1, 'product', 'staging', 'synthetic', '{"operation":"search"}');
       create function ctx.fail_window_for_test() returns trigger language plpgsql as $$
       begin
@@ -108,10 +120,12 @@ test("telemetry maintenance catch-up repairs delayed persistence and skipped day
         for each row execute function ctx.fail_window_for_test();
     `);
     await assert.rejects(countedMaintenance.materializeProductTelemetryHistory(), /injected_materialization_failure/u);
-    assert.deepEqual(dailyCounts(), expected);
+    assert.deepEqual(dailyCounts(), [...expected.slice(0, -1), "9|2"],
+      "completed older days remain committed");
     sql(database, "drop trigger fail_window_for_test on ctx.telemetry_diagnostic_daily");
     await countedMaintenance.materializeProductTelemetryHistory();
     expected[1] = "2|2";
+    expected[4] = "9|2";
     assert.deepEqual(dailyCounts(), expected);
 
     // The existing routine remains the explicit repair for older receipt dates.
@@ -145,16 +159,10 @@ test("telemetry maintenance catch-up repairs delayed persistence and skipped day
       group by source_family order by source_family
     `), ["blame|4608", "installer|4608", "telemetry|4608"]);
 
-    // Exact one-day scheduler SQL from base a65db969; same daily function/indexes.
-    const oneDay = `SELECT ctx.materialize_product_telemetry_history(
-      ((clock_timestamp() AT TIME ZONE 'utc')::date - 1)
-    )::text AS materialized_count`;
-    // Both warm-ups and observations roll back: matched raw and aggregate state.
-    explainMaterialization(database, oneDay, 1);
-    explainMaterialization(database, adapterStatement, 9);
-    for (const [label, statement, days] of [["one-day", oneDay, 1], ["nine-day", adapterStatement, 9]]) {
-      t.diagnostic(JSON.stringify({ label, rawCounts, ...explainMaterialization(database, statement, days) }));
-    }
+    // The adapter's exact single-day statement is profiled without publishing
+    // observations; a multi-day HTTP request is no longer issued.
+    t.diagnostic(JSON.stringify({ label: "scheduled-day", rawCounts,
+      ...explainMaterialization(database, adapterStatement, 1) }));
     assert.deepEqual(rows(database, `
       select source_family || '|' || sum(event_count) from ctx.telemetry_diagnostic_daily
       group by source_family order by source_family

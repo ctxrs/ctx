@@ -117,7 +117,10 @@ const TELEMETRY_REQUIRED_WORKER_SECRETS = [
   "TELEMETRY_RETENTION_DATABASE_URL",
 ];
 
-const TELEMETRY_REQUIRED_CRONS = ["17 3 * * *"];
+const TELEMETRY_REQUIRED_CRONS = {
+  staging: ["17 4 * * *"],
+  prod: ["17 3 * * *"],
+};
 const TELEMETRY_REQUIRED_RATE_LIMITERS = ["TELEMETRY_RATE_LIMITER"];
 const TELEMETRY_REQUIRED_QUEUES = {
   staging: {
@@ -571,8 +574,10 @@ function buildWranglerReadiness(
     const queueProducers = environmentConfig?.queues?.producers || [];
     const queueConsumers = environmentConfig?.queues?.consumers || [];
     const requiredQueue = requiredQueues[environment];
+    const environmentCrons = Array.isArray(requiredCrons)
+      ? requiredCrons : (requiredCrons[environment] || []);
     const missingVars = requiredWorkerVars.filter((name) => !(name in vars)).sort();
-    const missingCrons = requiredCrons.filter((cron) => !crons.includes(cron)).sort();
+    const missingCrons = environmentCrons.filter((cron) => !crons.includes(cron)).sort();
     const missingRateLimiters = requiredRateLimiters
       .filter((name) => !rateLimiters.includes(name)).sort();
     const missingQueueProducers = requiredQueue && !queueProducers.some(
@@ -613,7 +618,7 @@ function buildWranglerReadiness(
       present_ratelimits: [...rateLimiters].sort(),
       present_queue_producers: queueProducers,
       present_queue_consumers: queueConsumers,
-      required_crons: [...requiredCrons].sort(),
+      required_crons: [...environmentCrons].sort(),
       required_vars: [...requiredWorkerVars].sort(),
       required_ratelimits: [...requiredRateLimiters].sort(),
       required_queue: requiredQueue || null,

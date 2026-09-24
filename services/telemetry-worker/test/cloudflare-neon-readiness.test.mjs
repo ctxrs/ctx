@@ -34,7 +34,7 @@ describe("cloudflare neon readiness script", () => {
     expect(wrangler.name).toBe("ctx-telemetry-staging");
     expect(wrangler.vars.TELEMETRY_ANALYTICS_ENVIRONMENT).toBe("staging");
     expect(wrangler.vars.TELEMETRY_CLOUDFLARE_ACCOUNT_ID).toMatch(/^[0-9a-f]{32}$/u);
-    expect(wrangler.triggers.crons).toEqual(["17 3 * * *"]);
+    expect(wrangler.triggers.crons).toEqual(["17 4 * * *"]);
     expect(wrangler.ratelimits).toContainEqual({
       name: "TELEMETRY_RATE_LIMITER",
       namespace_id: "2201",
@@ -59,7 +59,7 @@ describe("cloudflare neon readiness script", () => {
     expect(wrangler.env.staging).toMatchObject({
       name: "ctx-telemetry-staging",
       vars: { TELEMETRY_ANALYTICS_ENVIRONMENT: "staging" },
-      triggers: { crons: ["17 3 * * *"] },
+      triggers: { crons: ["17 4 * * *"] },
     });
     expect(wrangler.env.staging.ratelimits).toContainEqual(
       expect.objectContaining({ name: "TELEMETRY_RATE_LIMITER", namespace_id: "2201" }),
@@ -222,6 +222,9 @@ describe("cloudflare neon readiness script", () => {
     expect(serialized).not.toContain("test-read");
     expect(serialized).not.toContain("identity-hmac-secret");
     expect(report.failures).toEqual([]);
+    expect(report.wrangler.environments).toContainEqual(
+      expect.objectContaining({ name: "staging", required_crons: ["17 4 * * *"] }),
+    );
     expect(report.wrangler.environments).toContainEqual(
       expect.objectContaining({
         missing_queue_consumers: [],
