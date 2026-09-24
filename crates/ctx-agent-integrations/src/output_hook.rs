@@ -5,8 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, bail, ensure, Context as _, Result};
-use serde_json::{json, Value};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use serde_json::{Value, json};
 
 use crate::{
     filesystem::atomic_update,
@@ -81,6 +81,7 @@ impl Context {
 pub enum State {
     Missing,
     Current,
+    Legacy,
     SiftConflict,
     Conflict,
     Unsupported,
@@ -119,6 +120,10 @@ fn document(path: &Path) -> Result<Option<Value>> {
 }
 
 fn expected(agent: Agent, executable: &Path) -> Result<Value> {
+    expected_route(agent, executable, "sift")
+}
+
+fn expected_route(agent: Agent, executable: &Path, route: &str) -> Result<Value> {
     ensure!(
         executable.is_absolute(),
         "ctx hook executable must be absolute"
@@ -129,19 +134,21 @@ fn expected(agent: Agent, executable: &Path) -> Result<Value> {
     if agent == Agent::Copilot {
         return Ok(
             json!({"type":"command", "matcher":"bash|powershell", "exec":path,
-            "args":["sift","hook","copilot"], "timeoutSec":10}),
+            "args":[route,"hook","copilot"], "timeoutSec":10}),
         );
     }
     let command = if cfg!(windows) {
         format!(
-            "& '{}' sift hook {}",
+            "& '{}' {} hook {}",
             path.replace('\'', "''"),
+            route,
             agent.name()
         )
     } else {
         format!(
-            "'{}' sift hook {}",
+            "'{}' {} hook {}",
             path.replace('\'', "'\\''"),
+            route,
             agent.name()
         )
     };
@@ -254,6 +261,14 @@ fn count_invocations(value: &Value, name: &str, agent: Agent) -> usize {
 }
 
 fn owned_entry(entry: &Value, agent: Agent) -> bool {
+    owned_entry_route(entry, agent, "sift") || owned_entry_route(entry, agent, "output")
+}
+
+fn owned_legacy_entry(entry: &Value, agent: Agent) -> bool {
+    owned_entry_route(entry, agent, "output")
+}
+
+fn owned_entry_route(entry: &Value, agent: Agent, route: &str) -> bool {
     let path = (|| {
         if agent == Agent::Copilot {
             return Some(PathBuf::from(entry.get("exec")?.as_str()?));
@@ -286,14 +301,18 @@ fn owned_entry(entry: &Value, agent: Agent) -> bool {
             ))
         }
     })();
-    path.is_some_and(|path| expected(agent, &path).is_ok_and(|desired| desired == *entry))
+    path.is_some_and(|path| {
+        expected_route(agent, &path, route).is_ok_and(|desired| desired == *entry)
+    })
 }
 
 fn copilot_hook_sources(context: &Context) -> Result<Vec<PathBuf>> {
-    let mut sources = vec![context
-        .paths
-        .env_or_home_child("COPILOT_HOME", ".copilot")
-        .join("settings.json")];
+    let mut sources = vec![
+        context
+            .paths
+            .env_or_home_child("COPILOT_HOME", ".copilot")
+            .join("settings.json"),
+    ];
     for root in [
         context
             .paths
@@ -381,12 +400,23 @@ fn local_state(agent: Agent, value: Option<&Value>, desired: &Value) -> Result<S
     let current = hook_entries(value, agent.event())?
         .map(|entries| entries.iter().filter(|entry| *entry == desired).count())
         .unwrap_or(0);
+    let legacy = hook_entries(value, agent.event())?
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| owned_legacy_entry(entry, agent))
+                .count()
+        })
+        .unwrap_or(0);
     let total = value
         .get("hooks")
         .map(|hooks| count_invocations(hooks, "ctx", agent))
         .unwrap_or(0);
     if current == 1 && total == 1 {
         return Ok(State::Current);
+    }
+    if legacy == 1 && total == 1 {
+        return Ok(State::Legacy);
     }
     if current > 1 || total > 0 {
         return Ok(State::Conflict);
@@ -423,10 +453,18 @@ pub fn install(agent: Agent, project: bool, context: &Context) -> Result<State> 
     let state = status(agent, project, context)?;
     match state {
         State::Current => return Ok(state),
-        State::Unsupported => bail!("{} Sift hook is unsupported here: {}", agent.name(), agent.limitation()),
-        State::SiftConflict => bail!("standalone Sift hook detected; remove it explicitly before installing the ctx Sift hook"),
-        State::Conflict => bail!("existing ctx Sift hook differs; inspect it manually before installing"),
-        State::Missing => {}
+        State::Legacy | State::Missing => {}
+        State::Unsupported => bail!(
+            "{} Sift hook is unsupported here: {}",
+            agent.name(),
+            agent.limitation()
+        ),
+        State::SiftConflict => bail!(
+            "standalone Sift hook detected; remove it explicitly before installing the ctx Sift hook"
+        ),
+        State::Conflict => {
+            bail!("existing ctx Sift hook differs; inspect it manually before installing")
+        }
     }
     let target = path(agent, project, context);
     let desired = expected(agent, &context.executable)?;
@@ -441,8 +479,9 @@ pub fn install(agent: Agent, project: bool, context: &Context) -> Result<State> 
                 .is_some_and(|hooks| contains_invocation(hooks, "sift", agent)),
             "standalone Sift hook appeared during installation; no changes made"
         );
+        let prior = local_state(agent, Some(&value), &desired)?;
         ensure!(
-            local_state(agent, Some(&value), &desired)? == State::Missing,
+            matches!(prior, State::Missing | State::Legacy),
             "hook config changed; retry after inspecting it"
         );
         if agent == Agent::Copilot {
@@ -455,7 +494,16 @@ pub fn install(agent: Agent, project: bool, context: &Context) -> Result<State> 
             );
             root.insert("version".into(), json!(1));
         }
-        hook_entries_mut(&mut value, agent.event())?.push(desired);
+        let entries = hook_entries_mut(&mut value, agent.event())?;
+        if prior == State::Legacy {
+            let old = entries
+                .iter_mut()
+                .find(|entry| owned_legacy_entry(entry, agent))
+                .context("legacy ctx hook changed; retry")?;
+            *old = desired;
+        } else {
+            entries.push(desired);
+        }
         Ok(json::render(&value)?.into_bytes())
     })?;
     Ok(State::Current)

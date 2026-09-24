@@ -158,7 +158,7 @@ impl Sandbox {
     fn compact(&self, text: &str) -> Value {
         let request = json!({"version": 1, "text": text});
         json_output(self.output(
-            &["compact", "--protocol=json-v1"],
+            &["sift", "compact", "--protocol=json-v1"],
             format!("{request}\n").as_bytes(),
         ))
     }
@@ -167,7 +167,7 @@ impl Sandbox {
         assert_eq!(representation["version"], 1);
         let encoding = representation["encoding"].as_str().unwrap();
         let text = representation["text"].as_str().unwrap();
-        let restored = self.output(&["restore", "--encoding", encoding], text.as_bytes());
+        let restored = self.output(&["sift", "restore", "--encoding", encoding], text.as_bytes());
         assert_success(&restored);
         assert_eq!(restored.stdout, expected);
     }
@@ -541,11 +541,11 @@ fn docs_help_and_explicit_skill_status_survive_malformed_history() {
             vec!["docs", "--help"],
             vec!["integrations", "--help"],
             vec!["integrations", "status", "skill", "--help"],
-            vec!["run", "--help"],
-            vec!["compact", "--help"],
-            vec!["restore", "--help"],
-            vec!["recall", "--help"],
-            vec!["output", "--help"],
+            vec!["sift", "run", "--help"],
+            vec!["sift", "compact", "--help"],
+            vec!["sift", "restore", "--help"],
+            vec!["sift", "recall", "--help"],
+            vec!["sift", "--help"],
         ] {
             let output = sandbox.output(&args, b"");
             assert_success(&output);
@@ -574,6 +574,16 @@ fn docs_help_and_explicit_skill_status_survive_malformed_history() {
         );
         sandbox.assert_no_connection();
     }
+}
+
+#[test]
+fn output_commands_have_one_public_entry_point() {
+    let sandbox = Sandbox::new();
+    for command in ["run", "compact", "restore", "recall", "output"] {
+        assert_failure(&sandbox.output(&[command, "--help"], b""));
+    }
+    assert_success(&sandbox.output(&["sift", "--help"], b""));
+    sandbox.assert_no_connection();
 }
 
 #[test]
@@ -1007,7 +1017,7 @@ fn root_options_preserve_the_separator_before_a_dash_prefixed_output_file() {
             let compact = sandbox
                 .command()
                 .args(&prefix)
-                .args(["compact", "--", file])
+                .args(["sift", "compact", "--", file])
                 .output()
                 .unwrap();
             assert_success(&compact);
@@ -1015,7 +1025,7 @@ fn root_options_preserve_the_separator_before_a_dash_prefixed_output_file() {
             let restored = sandbox
                 .command()
                 .args(&prefix)
-                .args(["restore", "--encoding=raw", "--", file])
+                .args(["sift", "restore", "--encoding=raw", "--", file])
                 .output()
                 .unwrap();
             assert_success(&restored);
@@ -1076,7 +1086,7 @@ fn compact_protocol_and_restore_preserve_complete_text_and_plain_output() {
         compacted["output_tokens"].as_u64().unwrap() < compacted["input_tokens"].as_u64().unwrap()
     );
     sandbox.assert_restored(&compacted, original.as_bytes());
-    let plain = sandbox.output(&["compact"], original.as_bytes());
+    let plain = sandbox.output(&["sift", "compact"], original.as_bytes());
     assert_success(&plain);
     assert_eq!(plain.stdout, compacted["text"].as_str().unwrap().as_bytes());
     let short = sandbox.compact("end");
@@ -1092,25 +1102,25 @@ fn documented_sift_framing_restores_without_reinterpreting_raw_bytes() {
     let sandbox = Sandbox::new();
     let framed = format!("{RUNS_HEADER}[[3,\"item\\r\\n\"],[1,\"tail\"]]");
     let restored = sandbox.output(
-        &["restore", "--encoding", "text-runs-v1"],
+        &["sift", "restore", "--encoding", "text-runs-v1"],
         framed.as_bytes(),
     );
     assert_success(&restored);
     assert_eq!(restored.stdout, b"item\r\nitem\r\nitem\r\ntail");
     for bytes in [framed.as_bytes(), &b"\0\xff\x80\r\ntail"[..]] {
-        let raw = sandbox.output(&["restore", "--encoding=raw", "-"], bytes);
+        let raw = sandbox.output(&["sift", "restore", "--encoding=raw", "-"], bytes);
         assert_success(&raw);
         assert_eq!(raw.stdout, bytes);
     }
     let binary = b"\0\xff\x80\r\ntail";
     sandbox.write("repo/-binary input", binary);
-    let compacted = sandbox.output(&["compact", "--", "-binary input"], b"");
+    let compacted = sandbox.output(&["sift", "compact", "--", "-binary input"], b"");
     assert_success(&compacted);
     assert_eq!(compacted.stdout, binary);
     for args in [
-        vec!["restore"],
-        vec!["restore", "--encoding=unknown"],
-        vec!["restore", "--encoding=text-runs-v1"],
+        vec!["sift", "restore"],
+        vec!["sift", "restore", "--encoding=unknown"],
+        vec!["sift", "restore", "--encoding=text-runs-v1"],
     ] {
         assert_failure(&sandbox.output(&args, b"not a frame"));
     }
@@ -1132,7 +1142,7 @@ fn compact_jsonl_rejects_bad_requests_and_continues_with_the_next_line() {
         json!({"version": 1, "text": "bad field", "unexpected": true}),
         json!({"version": 1, "text": "next request"})
     );
-    let output = sandbox.output(&["compact", "--protocol=json-v1"], input.as_bytes());
+    let output = sandbox.output(&["sift", "compact", "--protocol=json-v1"], input.as_bytes());
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stderr.is_empty());
     let text = String::from_utf8(output.stdout).unwrap();
@@ -1155,14 +1165,14 @@ fn compact_jsonl_rejects_bad_requests_and_continues_with_the_next_line() {
 fn output_auxiliary_selection_and_unknown_command_keep_their_boundaries() {
     let sandbox = Sandbox::new();
     let selected = sandbox.output(
-        &["output", "read", "--from", "2", "--lines", "1"],
+        &["sift", "read", "--from", "2", "--lines", "1"],
         b"one\r\ntwo\r\nthree",
     );
     assert_success(&selected);
     assert_eq!(selected.stdout, b"two\r\n");
     let selected = sandbox.output(
         &[
-            "output",
+            "sift",
             "json",
             "--pointer",
             "/rows",
@@ -1174,8 +1184,8 @@ fn output_auxiliary_selection_and_unknown_command_keep_their_boundaries() {
         br#"{"rows":[{"n":17,"other":false},{"n":29}]}"#,
     );
     assert_eq!(json_output(selected), json!([{"n": 17}]));
-    assert_failure(&sandbox.output(&["output", "read", "--from", "0"], b"one"));
-    assert_failure(&sandbox.output(&["output", "unknown-output-command"], b""));
+    assert_failure(&sandbox.output(&["sift", "read", "--from", "0"], b"one"));
+    assert_failure(&sandbox.output(&["sift", "unknown-output-command"], b""));
     sandbox.assert_no_connection();
 }
 
@@ -1185,7 +1195,7 @@ fn run_preserves_argv_stdin_environment_streams_status_and_single_execution() {
     let sandbox = Sandbox::new();
     for separator in [false, true] {
         let mut command = sandbox.command();
-        command.args(["--quiet", "run", "--raw"]);
+        command.args(["--quiet", "sift", "run", "--raw"]);
         if separator {
             command.arg("--");
         }
@@ -1223,7 +1233,7 @@ fn run_preserves_argv_stdin_environment_streams_status_and_single_execution() {
         let output = sandbox
             .command()
             .env("CTX_ACCEPTANCE_VALUE", "literal value")
-            .args(["run", flag, "--", "/bin/sh", "child with spaces.sh"])
+            .args(["sift", "run", flag, "--", "/bin/sh", "child with spaces.sh"])
             .args(arguments)
             .write_stdin(input)
             .output()
@@ -1259,7 +1269,7 @@ fn capture_compacts_both_streams_and_opt_in_recall_returns_the_originals_once() 
     sandbox.write("repo/emit.sh", "printf 'invoked\\n' >> invocations\ni=0\nwhile [ \"$i\" -lt 180 ]; do\n  printf 'output checkpoint complete\\r\\n'\n  printf 'error checkpoint retained\\r\\n' >&2\n  i=$((i + 1))\ndone\nexit 23\n");
     let stdout = "output checkpoint complete\r\n".repeat(180);
     let stderr = "error checkpoint retained\r\n".repeat(180);
-    let output = sandbox.output(&["run", "--capture", "--", "/bin/sh", "emit.sh"], b"");
+    let output = sandbox.output(&["sift", "run", "--capture", "--", "/bin/sh", "emit.sh"], b"");
     assert_eq!(output.status.code(), Some(23));
     // Independently expand the documented run grammar instead of asking the
     // same codec to decide whether its own emitted representation is correct.
@@ -1276,11 +1286,11 @@ fn capture_compacts_both_streams_and_opt_in_recall_returns_the_originals_once() 
             .map(|(count, text)| text.repeat(*count))
             .collect::<String>();
         assert_eq!(&expanded, expected);
-        let restored = sandbox.output(&["restore", "--encoding=text-runs-v1"], stream);
+        let restored = sandbox.output(&["sift", "restore", "--encoding=text-runs-v1"], stream);
         assert_success(&restored);
         assert_eq!(restored.stdout, expected.as_bytes());
     }
-    let listing = sandbox.output(&["recall", "--list"], b"");
+    let listing = sandbox.output(&["sift", "recall", "--list"], b"");
     assert_success(&listing);
     let listing = String::from_utf8(listing.stdout).unwrap();
     let entries = listing.lines().collect::<Vec<_>>();
@@ -1290,16 +1300,16 @@ fn capture_compacts_both_streams_and_opt_in_recall_returns_the_originals_once() 
         "one capture should yield one retained pair"
     );
     let id = entries[0].split('\t').next().unwrap();
-    let recalled = sandbox.output(&["recall", id], b"");
+    let recalled = sandbox.output(&["sift", "recall", id], b"");
     assert_success(&recalled);
     assert_eq!(recalled.stdout, stdout.as_bytes());
-    let recalled = sandbox.output(&["recall", id, "--stderr"], b"");
+    let recalled = sandbox.output(&["sift", "recall", id, "--stderr"], b"");
     assert_success(&recalled);
     assert_eq!(recalled.stdout, stderr.as_bytes());
-    let selected = sandbox.output(&["recall", id, "--from", "2", "--lines", "1"], b"");
+    let selected = sandbox.output(&["sift", "recall", id, "--from", "2", "--lines", "1"], b"");
     assert_success(&selected);
     assert_eq!(selected.stdout, b"output checkpoint complete\r\n");
-    assert_failure(&sandbox.output(&["recall", "00000000000000000000000000000000"], b""));
+    assert_failure(&sandbox.output(&["sift", "recall", "00000000000000000000000000000000"], b""));
     assert_eq!(
         fs::read(sandbox.repo().join("invocations")).unwrap(),
         b"invoked\n"
@@ -1313,6 +1323,7 @@ fn run_default_raw_missing_program_and_signal_status_are_preserved() {
     let sandbox = Sandbox::new();
     for args in [
         vec![
+            "sift",
             "run",
             "--",
             "/bin/sh",
@@ -1320,6 +1331,7 @@ fn run_default_raw_missing_program_and_signal_status_are_preserved() {
             "printf tiny; printf err >&2; exit 7",
         ],
         vec![
+            "sift",
             "run",
             "--raw",
             "--",
@@ -1330,6 +1342,7 @@ fn run_default_raw_missing_program_and_signal_status_are_preserved() {
         vec![
             "--color",
             "never",
+            "sift",
             "run",
             "--raw",
             "--",
@@ -1347,7 +1360,7 @@ fn run_default_raw_missing_program_and_signal_status_are_preserved() {
     // stderr independently. These bytes would take another path under capture.
     let raw = sandbox.output(
         &[
-            "run", "--raw", "--capture", "--", "/bin/sh", "-c",
+            "sift", "run", "--raw", "--capture", "--", "/bin/sh", "-c",
             "i=0; while [ \"$i\" -lt 100 ]; do printf 'raw repeated row\\r\\n'; i=$((i + 1)); done; printf '\\377\\000end' >&2",
         ],
         b"",
@@ -1355,20 +1368,20 @@ fn run_default_raw_missing_program_and_signal_status_are_preserved() {
     assert!(raw.status.success());
     assert_eq!(raw.stdout, "raw repeated row\r\n".repeat(100).as_bytes());
     assert_eq!(raw.stderr, b"\xff\0end");
-    let missing = sandbox.output(&["run", "--", "ctx-synthetic-missing-executable"], b"");
+    let missing = sandbox.output(&["sift", "run", "--", "ctx-synthetic-missing-executable"], b"");
     assert_failure(&missing);
     assert_eq!(missing.status.code(), Some(127));
-    let denied = sandbox.output(&["run", "--", "."], b"");
+    let denied = sandbox.output(&["sift", "run", "--", "."], b"");
     assert_failure(&denied);
     assert_eq!(denied.status.code(), Some(126));
-    assert_failure(&sandbox.output(&["run", "--"], b""));
+    assert_failure(&sandbox.output(&["sift", "run", "--"], b""));
     let signal = sandbox.output(
-        &["run", "--raw", "--", "/bin/sh", "-c", "kill -TERM $$"],
+        &["sift", "run", "--raw", "--", "/bin/sh", "-c", "kill -TERM $$"],
         b"",
     );
     assert_eq!(signal.status.code(), Some(143));
     assert!(signal.stdout.is_empty());
-    let originals = sandbox.output(&["recall", "--list"], b"");
+    let originals = sandbox.output(&["sift", "recall", "--list"], b"");
     assert_success(&originals);
     assert!(originals.stdout.is_empty(), "retention must default off");
     sandbox.assert_no_connection();
@@ -1410,16 +1423,16 @@ fn graph_and_output_bypass_missing_or_malformed_history_without_setup_mutations(
         for flag in ["--raw", "--capture"] {
             let output = sandbox
                 .command()
-                .args(["run", flag, "--"])
+                .args(["sift", "run", flag, "--"])
                 .arg(&sandbox.binary)
-                .args(["restore", "--encoding=raw"])
+                .args(["sift", "restore", "--encoding=raw"])
                 .write_stdin(b"through child\0\xff\r\n")
                 .output()
                 .unwrap();
             assert_success(&output);
             assert_eq!(output.stdout, b"through child\0\xff\r\n");
         }
-        let original = sandbox.output(&["recall", "--list"], b"");
+        let original = sandbox.output(&["sift", "recall", "--list"], b"");
         assert_success(&original);
         assert!(original.stdout.is_empty());
         assert_eq!(

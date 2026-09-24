@@ -26,6 +26,11 @@ fn output_hook_preserves_already_wrapped_output_without_duplicate_accounting() {
         .to_string()
     };
     for command in [
+        "ctx sift -- cat fixture",
+        "ctx sift --raw -- cat fixture",
+        "ctx sift --capture --raw -- cat fixture",
+        "ctx sift cat fixture",
+        "ctx sift run --raw -- cat fixture",
         "ctx run --raw -- cat fixture",
         "ctx run -- cat fixture",
         "ctx --color never run -- cat --raw",
@@ -100,10 +105,10 @@ fn explicit_output_hook_registration_invokes_the_existing_runtime() {
         .unwrap();
     assert!(replacement.len() < stdout.len());
     let mut raw_request = request;
-    raw_request["tool_input"]["command"] = json!("ctx run --raw -- cargo test");
+    raw_request["tool_input"]["command"] = json!("ctx sift run --raw -- cargo test");
     assert_eq!(
         json_output(sandbox.output(
-            &["output", "hook", "claude"],
+            &["sift", "hook", "claude"],
             raw_request.to_string().as_bytes()
         )),
         json!({})
@@ -124,4 +129,73 @@ fn explicit_output_hook_registration_invokes_the_existing_runtime() {
     assert_eq!(after["permissions"], config["permissions"]);
     assert_eq!(after["hooks"]["PostToolUse"], json!([]));
     sandbox.assert_no_connection();
+}
+
+#[test]
+fn legacy_output_hook_can_be_reinstalled_or_removed_after_the_top_level_route_is_removed() {
+    let sandbox = Sandbox::new();
+    let target = sandbox.repo().join(".claude/settings.json");
+    let install = sandbox.json(&[
+        "integrations",
+        "install",
+        "sift",
+        "--agent",
+        "claude-code",
+        "--project",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(install["results"][0]["status"], "installed");
+    let mut config: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+    let command = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .replace(" sift hook ", " output hook ");
+    config["hooks"]["PostToolUse"][0]["hooks"][0]["command"] = json!(command);
+    fs::write(&target, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    let status = sandbox.json(&[
+        "integrations",
+        "status",
+        "sift",
+        "--agent",
+        "claude-code",
+        "--project",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(status["results"][0]["status"], "outdated");
+    let reinstall = sandbox.json(&[
+        "integrations",
+        "install",
+        "sift",
+        "--agent",
+        "claude-code",
+        "--project",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(reinstall["results"][0]["status"], "installed");
+    let upgraded: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+    assert!(
+        upgraded["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(" sift hook claude")
+    );
+
+    fs::write(&target, serde_json::to_vec(&config).unwrap()).unwrap();
+    let remove = sandbox.json(&[
+        "integrations",
+        "remove",
+        "sift",
+        "--agent",
+        "claude-code",
+        "--project",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(remove["results"][0]["status"], "absent");
+    let remaining: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+    assert_eq!(remaining["hooks"]["PostToolUse"], json!([]));
 }

@@ -88,6 +88,8 @@ fn literal_output_wrappers_skip_entire_completion() {
                 .is_some()
         );
         for command in [
+            "ctx sift -- cat file",
+            "ctx sift run --raw -- cat file",
             "sift proxy cat file",
             "sift run cat file",
             "sift run --capture -- cat file",

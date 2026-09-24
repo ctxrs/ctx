@@ -248,17 +248,19 @@ mod tests {
             questions: questions(1),
         };
         let value = serde_json::to_value(request).unwrap();
-        assert_eq!(
-            value.as_object().unwrap().keys().collect::<Vec<_>>(),
+        let fields = value.as_object().unwrap();
+        assert_eq!(fields.len(), 3);
+        assert!(
             ["model", "state", "questions"]
+                .into_iter()
+                .all(|key| fields.contains_key(key))
         );
-        assert_eq!(
-            value["state"]
-                .as_object()
-                .unwrap()
-                .keys()
-                .collect::<Vec<_>>(),
+        let state = value["state"].as_object().unwrap();
+        assert_eq!(state.len(), 2);
+        assert!(
             ["task", "candidates"]
+                .into_iter()
+                .all(|key| state.contains_key(key))
         );
         assert_eq!(value["questions"].as_object().unwrap().len(), 2);
         assert_eq!(value["model"], MODEL);

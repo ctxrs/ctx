@@ -13,7 +13,7 @@ _CONTRACT_SUPPORT_DEPS = [
     "@crates//:libc",
     "@crates//:predicates",
     "@crates//:rusqlite",
-    "@crates//:serde_json-1.0.150",
+    "@crates//:serde_json-1.0.151",
     "@crates//:tempfile",
     "@crates//:windows-sys",
 ]

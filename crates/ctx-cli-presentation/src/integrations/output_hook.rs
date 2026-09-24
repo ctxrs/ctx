@@ -1,13 +1,13 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Args;
 use ctx_agent_integrations::{
     output_hook::{self, Agent, Context, State},
-    skill::{detected_agents, SkillAgentArg},
+    skill::{SkillAgentArg, detected_agents},
 };
 use serde_json::json;
 
 use crate::{
-    analytics::{count_bucket, IntegrationScope, IntegrationTelemetry, TargetSelection},
+    analytics::{IntegrationScope, IntegrationTelemetry, TargetSelection, count_bucket},
     output::JsonOutputFormat,
     ui::Ui,
 };
@@ -134,6 +134,7 @@ pub(crate) fn run(
         let (status, detail) = match result {
             Ok(State::Missing) => ("absent", String::new()),
             Ok(State::Current) => ("installed", agent.limitation().to_owned()),
+            Ok(State::Legacy) => ("outdated", "legacy ctx output hook; reinstall with ctx integrations install sift".to_owned()),
             Ok(State::SiftConflict) => ("conflict", "standalone Sift hook detected; remove it explicitly before installing the ctx Sift hook".to_owned()),
             Ok(State::Conflict) => ("conflict", "ctx Sift hook differs; inspect manually".to_owned()),
             Ok(State::Unsupported) => ("unsupported", agent.limitation().to_owned()),
@@ -245,9 +246,10 @@ mod tests {
             project: true,
             format: JsonOutputFormat::Text,
         };
-        assert!(args
-            .select_supported(&context, |agent| agent != Agent::Codex)
-            .is_err());
+        assert!(
+            args.select_supported(&context, |agent| agent != Agent::Codex)
+                .is_err()
+        );
         assert!(!context.paths.cwd.join(".claude/settings.json").exists());
         args.agent.clear();
         args.all_agents = true;

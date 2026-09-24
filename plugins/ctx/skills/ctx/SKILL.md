@@ -16,8 +16,8 @@ relationships with the graph. ctx retrieves evidence; you perform the analysis.
   `ctx blame commit <sha>`; PR targets are also supported.
 - Code relationships or potential impact: `ctx graph search <symbol>`,
   `ctx graph callers <symbol>`, or `ctx graph impact <symbol>`.
-- Requested or explicitly opted-in output compaction: `ctx run -- PROGRAM
-  ARG...` for a command, or `ctx compact <file>` for existing output.
+- Requested or explicitly opted-in output compaction: `ctx sift -- PROGRAM
+  ARG...` for a command, or `ctx sift compact <file>` for existing output.
 
 These commands are built into the installed ctx executable. Graph and output
 commands do not require history setup. Only history search and blame need
@@ -82,14 +82,14 @@ and truncation limits; potential impact is not proof of runtime behavior.
 each scope's availability and completeness. The default remains history;
 `--content-scope outputs` filters historical tool outputs, not new command runs.
 
-Use `ctx run` or `ctx compact` only when the user requests output compaction or
+Use `ctx sift` or `ctx sift compact` only when the user requests output compaction or
 an existing explicit project or user instruction opts into it. Permission to
 execute a command, or installation of ctx, does not opt ordinary commands in;
-run those commands directly. When opted in, `ctx run` executes argv once and
+run those commands directly. When opted in, `ctx sift` executes argv once and
 preserves stdin, stream separation and exit status. Pass an explicit shell only
 when shell syntax is intended. Compact
 presentations may omit passing test rows; use raw output when exact bytes matter.
-Use `ctx restore --encoding <encoding> <file>` only for a representation with
+Use `ctx sift restore --encoding <encoding> <file>` only for a representation with
 that reversible encoding. Consult `ctx docs show unified-context` for streaming,
 capture and retained-original behavior. Do not rerun a command just to recover
 output if it could repeat side effects.

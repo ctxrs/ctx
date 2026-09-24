@@ -42,13 +42,20 @@ struct Counts {
 
 fn reported_cost(raw: Option<Box<serde_json::value::RawValue>>) -> Result<Option<Number>> {
     raw.map(|raw| {
-        // Check the JSON token itself, including with serde's arbitrary_precision feature.
+        // Check the original token before Number can round an underflow to zero.
         ensure!(
             raw.get()
                 .starts_with(|c: char| c.is_ascii_digit() || c == '-'),
             "totalCost must be a JSON number or null"
         );
-        serde_json::from_str(raw.get()).context("invalid totalCost number")
+        let number: Number = serde_json::from_str(raw.get()).context("invalid totalCost number")?;
+        let mantissa = raw.get().split(['e', 'E']).next().unwrap();
+        ensure!(
+            number.as_f64() != Some(0.0)
+                || !mantissa.contains(['1', '2', '3', '4', '5', '6', '7', '8', '9']),
+            "totalCost is below the supported numeric range"
+        );
+        Ok(number)
     })
     .transpose()
 }
@@ -74,14 +81,6 @@ impl Counts {
                 ensure!(
                     cost.is_finite() && cost >= 0.0,
                     "totalCost must be finite and nonnegative"
-                );
-                // Do not silently validate a nonzero decimal as zero after underflow.
-                let decimal = number.to_string();
-                let mantissa = decimal.split(['e', 'E']).next().unwrap();
-                ensure!(
-                    cost != 0.0
-                        || !mantissa.contains(['1', '2', '3', '4', '5', '6', '7', '8', '9']),
-                    "totalCost is below the supported numeric range"
                 );
                 Ok(cost)
             })

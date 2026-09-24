@@ -18,21 +18,6 @@ pub(crate) struct EngineArgs {
 pub(crate) enum UnifiedCommand {
     /// Index and navigate code and document relationships.
     Graph(Box<ctx_graph::GraphArgs>),
-    /// Run a command with compact output.
-    #[command(disable_help_flag = true, disable_help_subcommand = true)]
-    Run(EngineArgs),
-    /// Compact text or JSON using fewer tokens.
-    #[command(disable_help_flag = true, disable_help_subcommand = true)]
-    Compact(EngineArgs),
-    /// Restore an explicitly encoded compact representation.
-    #[command(disable_help_flag = true, disable_help_subcommand = true)]
-    Restore(EngineArgs),
-    /// Retrieve original captured command output.
-    #[command(disable_help_flag = true, disable_help_subcommand = true)]
-    Recall(EngineArgs),
-    /// Configure output handling, inspect savings, or manage command hooks.
-    #[command(disable_help_flag = true, disable_help_subcommand = true)]
-    Output(EngineArgs),
     /// Sift command output before it reaches an agent.
     #[command(disable_help_flag = true, disable_help_subcommand = true)]
     Sift(EngineArgs),
@@ -44,7 +29,7 @@ impl UnifiedCommand {
     }
 
     pub(crate) fn run(self) -> i32 {
-        let (name, args) = match self {
+        let args = match self {
             Self::Graph(args) => {
                 return match ctx_graph::run_parsed(*args) {
                     Ok(()) => 0,
@@ -59,16 +44,11 @@ impl UnifiedCommand {
                     }
                 };
             }
-            Self::Run(args) => ("run", args),
-            Self::Compact(args) => ("compact", args),
-            Self::Restore(args) => ("restore", args),
-            Self::Recall(args) => ("recall", args),
-            Self::Output(args) => ("output", args),
-            Self::Sift(args) => ("sift", args),
+            Self::Sift(args) => args,
         };
         let original = std::env::args_os().collect::<Vec<_>>();
-        let arguments = preserved_output_arguments(&original, name).unwrap_or(args.arguments);
-        run_engine(name, &arguments)
+        let arguments = preserved_output_arguments(&original, "sift").unwrap_or(args.arguments);
+        run_sift(&arguments)
     }
 }
 
@@ -107,9 +87,7 @@ fn root_option_width(argument: &OsStr) -> Option<usize> {
     }
 }
 
-const COMMANDS: &[&str] = &[
-    "graph", "run", "compact", "restore", "recall", "output", "sift",
-];
+const COMMANDS: &[&str] = &["graph", "sift"];
 
 /// The common command path avoids parsing the history CLI and touching its state.
 /// Root options still use the normal parser and the same engine dispatcher.
@@ -147,11 +125,7 @@ fn run_engine(name: &str, arguments: &[OsString]) -> i32 {
     if name == "graph" {
         return ctx_graph::run(arguments.iter().cloned());
     }
-    if name == "sift" {
-        return run_sift(arguments);
-    }
-    let prefix = (!matches!(name, "output" | "sift")).then(|| OsString::from(name));
-    ctx_sift::run(prefix.into_iter().chain(arguments.iter().cloned()))
+    run_sift(arguments)
 }
 
 fn run_sift(arguments: &[OsString]) -> i32 {
@@ -212,7 +186,7 @@ mod tests {
     #[test]
     fn root_controls_preserve_the_engine_separator_and_child_arguments() {
         assert_eq!(
-            tail(&["ctx", "--quiet", "compact", "--", "--help"], "compact"),
+            tail(&["ctx", "--quiet", "sift", "--", "--help"], "sift"),
             ["--", "--help"]
         );
         assert_eq!(
@@ -220,9 +194,9 @@ mod tests {
                 &[
                     "ctx",
                     "--data-root",
-                    "run",
+                    "sift",
                     "--color=never",
-                    "run",
+                    "sift",
                     "--raw",
                     "--",
                     "echo",
@@ -230,18 +204,20 @@ mod tests {
                     "always",
                     "--quiet"
                 ],
-                "run"
+                "sift"
             ),
             ["--raw", "--", "echo", "--color", "always", "--quiet"]
         );
         assert_eq!(
-            tail(&["ctx", "compact", "--quiet", "--", "-input"], "compact"),
+            tail(&["ctx", "sift", "--quiet", "--", "-input"], "sift"),
             ["--", "-input"]
         );
         assert_eq!(
             tail(
-                &["ctx", "--quiet", "run", "--raw", "echo", "--color", "always", "--quiet"],
-                "run"
+                &[
+                    "ctx", "--quiet", "sift", "--raw", "echo", "--color", "always", "--quiet"
+                ],
+                "sift"
             ),
             ["--raw", "echo", "--color", "always", "--quiet"]
         );
