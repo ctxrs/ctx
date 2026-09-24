@@ -18,7 +18,8 @@ pub fn publish_managed_pair_integration_generation_under_installation_lock(
     integration_source: &Path,
 ) -> Result<(PathBuf, String)> {
     filesystem::validate_absolute_root(install_root, "managed-pair install root")?;
-    let layout = Layout::open(install_root, false)?;
+    // A core-only managed install has no companion layout yet.
+    let layout = Layout::open(install_root, true)?;
     let source = filesystem::external_entry(integration_source, "managed integration ownership")?;
     let observed = filesystem::read_regular(
         &source,

@@ -366,6 +366,44 @@ fn integration_reconciliation_crash_retries_and_uninstalls_from_one_marker_autho
             .starts_with("ctx.install-integrations.")));
 }
 
+#[test]
+fn integration_reconciliation_upgrades_a_core_only_install_without_companion_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+    let install = bin.join("ctx");
+    let core = b"ctx 2.0.1";
+    fs::write(&install, core).unwrap();
+    fs::set_permissions(&install, fs::Permissions::from_mode(0o700)).unwrap();
+    let marker_path = install_marker_path(&install);
+    fs::write(&marker_path, marker(&install, &sha256_hex(core))).unwrap();
+    ctx_history_platform::platform_security::restrict_private_file(&marker_path).unwrap();
+    let source = temp.path().join("integrations");
+    fs::write(&source, NEW_OWNERSHIP).unwrap();
+    assert!(!temp.path().join("libexec").exists());
+    assert!(!temp.path().join("share/ctx").exists());
+
+    let installation = InstallationLock::try_acquire(&install).unwrap().unwrap();
+    super::super::marker::reconcile_managed_pair_integration_under_installation_lock(
+        temp.path(),
+        &source,
+    )
+    .unwrap();
+    drop(installation);
+
+    let published: Value = serde_json::from_slice(&fs::read(marker_path).unwrap()).unwrap();
+    assert_eq!(published["integrations_sha256"], sha256_hex(NEW_OWNERSHIP));
+    assert_eq!(
+        fs::read(published["integrations_path"].as_str().unwrap()).unwrap(),
+        NEW_OWNERSHIP
+    );
+    assert_eq!(fs::read(&install).unwrap(), core);
+    assert!(temp.path().join("libexec").is_dir());
+    assert!(temp.path().join("share/ctx").is_dir());
+}
+
 fn ordinary_upgrade_plan(install: &Path, next_core: &[u8]) -> UpgradePlan {
     let artifact_sha256 = sha256_hex(next_core);
     UpgradePlan {
