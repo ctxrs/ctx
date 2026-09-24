@@ -1,4 +1,4 @@
-import { compareReleaseVersions } from "./release-version.cjs";
+import { compareReleaseVersions, isReleaseVersion } from "./release-version.cjs";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -14,7 +14,6 @@ const MATRIX_PATH = path.resolve(
   import.meta.dirname,
   "../../contracts/release-targets-v1.json",
 );
-const STABLE_VERSION = /^v(1\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$/u;
 const BASE_URL_PREFIX = "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/stable";
 const TARGETS = Object.freeze([
   Object.freeze({ id: "linux-arm64", metadata: "linux_aarch64", coreAlias: "ctx-linux-aarch64" }),
@@ -118,10 +117,10 @@ export function loadHostedManagedPairPublication(publicationPath) {
   );
   exactKeys(publication, PUBLICATION_KEYS, "managed-pair publication");
   const matrix = loadTargetMatrix(MATRIX_PATH);
-  const versionMatch = typeof publication.release_name === "string"
-    ? STABLE_VERSION.exec(publication.release_name)
-    : null;
-  const version = versionMatch?.[1];
+  const version = typeof publication.release_name === "string"
+    && publication.release_name.startsWith("v")
+    && isReleaseVersion(publication.release_name.slice(1))
+    ? publication.release_name.slice(1) : null;
   if (publication.contract !== "ctx-managed-pair-publication"
       || publication.schema_version !== 1
       || publication.channel !== "stable"
@@ -134,7 +133,7 @@ export function loadHostedManagedPairPublication(publicationPath) {
       || publication.component_objects.length !== TARGETS.length * 2
       || !Array.isArray(publication.target_manifest_objects)
       || publication.target_manifest_objects.length !== TARGETS.length) {
-    fail("managed-pair publication is not an exact stable 1.x authority");
+    fail("managed-pair publication is not an exact stable release authority");
   }
   assertCurrentReleaseVersion(version);
   const releaseSet = readStableFile(
@@ -150,7 +149,7 @@ export function loadHostedManagedPairPublication(publicationPath) {
   if (releaseSetPayload.contract !== "ctx-managed-pair-release-set"
       || releaseSetPayload.release_name !== publication.release_name
       || releaseSetPayload.rollback_generation !== publication.rollback_generation) {
-    fail("managed-pair release set differs from the selected stable 1.x release");
+    fail("managed-pair release set differs from the selected stable release");
   }
 
   let publicCommit;
