@@ -2,7 +2,7 @@ import childProcess from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CORE_CAPABILITY_PROTOCOL_FINGERPRINT, MAX_AGGREGATE_COMPONENT_BYTES,
+  CORE_CAPABILITY_PROTOCOL_FINGERPRINT, MAX_AGGREGATE_COMPONENT_BYTES, MAX_COMPONENT_BYTES,
   TARGET_IDS, COMPONENT_KINDS, canonicalJsonBytes, contractError, hashStableFile,
   readStableRegularFile, parseJsonStrict, sha256,
 } from "./managed-pair-release-contract.mjs";
@@ -10,7 +10,7 @@ import {
 import { compareReleaseVersions } from "./release-version.cjs";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const MAX_INCOMING_BINARY_BYTES = 128 * 1024 * 1024;
+const MAX_INCOMING_BINARY_BYTES = MAX_COMPONENT_BYTES;
 const SOURCE_NAMES = Object.freeze({ "linux-arm64": "ctx-linux-aarch64", "linux-x64": "ctx",
   "macos-arm64": "ctx-macos-arm64", "macos-x64": "ctx-macos-x64", "windows-x64": "ctx.exe" });
 

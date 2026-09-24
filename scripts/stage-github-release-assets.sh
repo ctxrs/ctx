@@ -263,8 +263,8 @@ stage_asset() {
     python3 - "${source_path}" <<'BOUND'
 from pathlib import Path
 import sys
-if not 0 < Path(sys.argv[1]).stat().st_size <= 128 * 1024 * 1024:
-    raise SystemExit("unified executable exceeds the stock 128 MiB download bound")
+if not 0 < Path(sys.argv[1]).stat().st_size <= 256 * 1024 * 1024:
+    raise SystemExit("unified executable exceeds the 256 MiB download bound")
 BOUND
   fi
   require_regular_input "${source_sha_path}" "public artifact checksum"
