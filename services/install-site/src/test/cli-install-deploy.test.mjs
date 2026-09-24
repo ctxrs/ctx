@@ -203,6 +203,39 @@ test("approved release input requires signed pair identities for every platform"
   }
 });
 
+test("published current-feed evidence requires exact tag and readback, without factory claims", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-current-installer-feed-"));
+  const file = path.join(directory, "release.json");
+  const evidence = releaseEvidence();
+  evidence.kind = "public-cli-current-installer-feed";
+  evidence.public_source.remote_main_checked = false;
+  evidence.public_source.release_tag_checked = true;
+  evidence.public_source.release_tag = `v${version}`;
+  evidence.current_feed_asset_sha256s = { sha256: digest };
+  evidence.validation = { construction: "not_run", publication_readback: "passed" };
+  try {
+    fs.writeFileSync(file, JSON.stringify(evidence));
+    assert.equal(approvedRelease(file).version, version);
+    evidence.public_source.release_tag_checked = false;
+    fs.writeFileSync(file, JSON.stringify(evidence));
+    assert.throws(() => approvedRelease(file), /passed approved/);
+    evidence.public_source.release_tag_checked = true;
+    evidence.validation.publication_readback = "not_run";
+    fs.writeFileSync(file, JSON.stringify(evidence));
+    assert.throws(() => approvedRelease(file), /passed approved/);
+    evidence.validation.publication_readback = "passed";
+    evidence.validation.construction = "passed";
+    fs.writeFileSync(file, JSON.stringify(evidence));
+    assert.throws(() => approvedRelease(file), /passed approved/);
+    evidence.validation.construction = "not_run";
+    evidence.candidate_manifests = {};
+    fs.writeFileSync(file, JSON.stringify(evidence));
+    assert.throws(() => approvedRelease(file), /passed approved/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("actual retained candidate rejects script and release evidence mutations", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-prepared-installer-"));
   try {

@@ -685,7 +685,7 @@ run_contract() {
     CTX_TEST_REAL_GIT="$real_git" \
     CTX_PUBLIC_RELEASE_VERSION="$expected_version" \
     CTX_PUBLIC_RELEASE_SOURCE_COMMIT="$expected_commit" \
-    CTX_PUBLIC_RELEASE_CANDIDATE_MANIFEST="$candidate_authority" \
+    CTX_PUBLIC_RELEASE_CANDIDATE_MANIFEST="${CTX_TEST_CANDIDATE_MANIFEST:-$candidate_authority}" \
     CTX_PUBLIC_RELEASE_SHA256SUMS="${CTX_TEST_RELEASE_SUMS:-$candidate_manifest}" \
     CTX_PUBLIC_RELEASE_STABLE_METADATA_URL="$stable_metadata_url" \
     CTX_PUBLIC_RELEASE_VERSIONED_METADATA_URL="$versioned_metadata_url" \
@@ -836,6 +836,28 @@ write_metadata
 run_contract
 test -s "$evidence"
 git -C "$repo" tag -a v1.5.0 -m 'fixture current release' "$source_commit"
+run_contract_with_tag
+CTX_PUBLIC_RELEASE_CURRENT_INSTALLER_FEED=1 \
+  CTX_TEST_CANDIDATE_MANIFEST="$tmp/absent-authority" \
+  CTX_TEST_PUBLIC_RELEASE_TAG=v1.5.0 run_contract
+node - "$evidence" <<'NODE'
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const evidence = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+assert.equal(evidence.kind, "public-cli-current-installer-feed");
+assert.equal(evidence.public_source.release_tag_checked, true);
+assert.equal(evidence.validation.construction, "not_run");
+assert.equal(evidence.validation.publication_readback, "passed");
+assert.equal(evidence.candidate_manifests, undefined);
+assert.match(evidence.current_feed_asset_sha256s.sha256, /^[0-9a-f]{64}$/);
+assert.equal(evidence.github_release_sha256s, undefined);
+NODE
+CTX_PUBLIC_RELEASE_CURRENT_INSTALLER_FEED=1 \
+  CTX_TEST_CANDIDATE_MANIFEST="$tmp/absent-authority" \
+  expect_failure_contains current-installer-tag-required \
+    "requires the exact annotated release tag" run_contract
+CTX_TEST_CANDIDATE_MANIFEST="$tmp/absent-authority" \
+  expect_failure missing-construction-handoff run_contract_with_tag
 run_contract_with_tag
 node - "$evidence" <<'NODE'
 const assert = require("node:assert/strict");

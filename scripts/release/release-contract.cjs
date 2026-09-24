@@ -907,13 +907,15 @@ async function main() {
   }
   compareStableAndVersioned(stable, versioned);
   const frozenBridge = channel === "stable" ? await assertFrozenBridgePromotion(version) : null;
+  const currentInstallerFeed = env("CTX_PUBLIC_RELEASE_CURRENT_INSTALLER_FEED") === "1";
+  if (currentInstallerFeed && !releaseTag.checked) fail("current installer feed evidence requires the exact annotated release tag");
   const candidateManifestHandoff = env("CTX_PUBLIC_RELEASE_CANDIDATE_MANIFEST");
-  if (!candidateManifestHandoff) {
+  if (!currentInstallerFeed && !candidateManifestHandoff) {
     fail(
       "set CTX_PUBLIC_RELEASE_CANDIDATE_MANIFEST to the staged candidate manifest authority handoff",
     );
   }
-  const candidateManifestDigests = verifyCandidateManifestHandoff({
+  const candidateManifestDigests = currentInstallerFeed ? null : verifyCandidateManifestHandoff({
     values: stable.values,
     label: "signed stable",
     handoffDir: candidateManifestHandoff,
@@ -931,7 +933,7 @@ async function main() {
 
   const evidence = {
     schema_version: 1,
-    kind: "public-cli-release-contract",
+    kind: currentInstallerFeed ? "public-cli-current-installer-feed" : "public-cli-release-contract",
     status: "passed",
     checked_at: new Date().toISOString(),
     release: {
@@ -969,19 +971,19 @@ async function main() {
         signature_verified: true,
       },
     },
-    candidate_manifests: {
+    candidate_manifests: currentInstallerFeed ? undefined : {
       core_github_handoff_sha256:
         stable.values[CORE_GITHUB_HANDOFF_METADATA_KEY],
       digests: candidateManifestDigests,
       public_manifest_authority_commit: PUBLIC_MANIFEST_AUTHORITY_COMMIT,
       windows_public_verifier: "scripts/release-sbom.py verify-release",
     },
-    github_release_sha256s: {
+    [currentInstallerFeed ? "current_feed_asset_sha256s" : "github_release_sha256s"]: {
       sha256: releaseSums.sha256,
     },
     hosted_matrix: artifacts,
     validation: {
-      construction: JSON.parse(fs.readFileSync(path.join(candidateManifestHandoff, "release-validation.json"), "utf8")),
+      construction: currentInstallerFeed ? "not_run" : JSON.parse(fs.readFileSync(path.join(candidateManifestHandoff, "release-validation.json"), "utf8")),
       publication_readback: "passed",
       installer_native_execution: "not_run",
       stock_1_4_upgrade: "not_run",

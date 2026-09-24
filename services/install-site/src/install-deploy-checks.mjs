@@ -27,10 +27,11 @@ export function readReport(file) {
 
 export function approvedRelease(file) {
   const evidence = readReport(file);
+  const currentInstallerFeed = evidence?.kind === "public-cli-current-installer-feed";
   const mainChecked = evidence?.public_source?.remote_main_checked === true;
   const tagChecked = evidence?.public_source?.release_tag_checked === true
     && evidence.public_source.release_tag === `v${evidence.release?.version}`;
-  if (evidence?.schema_version !== 1 || evidence.kind !== "public-cli-release-contract"
+  if (evidence?.schema_version !== 1 || (!currentInstallerFeed && evidence.kind !== "public-cli-release-contract")
       || evidence.status !== "passed" || evidence.release?.channel !== "stable"
       || !VERSION.test(evidence.release.version ?? "")
       || !/^[0-9a-f]{40}$/u.test(evidence.release.source_commit ?? "")
@@ -40,7 +41,11 @@ export function approvedRelease(file) {
       || evidence.metadata?.stable?.signature_verified !== true
       || evidence.metadata?.versioned?.signature_verified !== true
       || !SHA256.test(evidence.metadata.stable.sha256 ?? "")
-      || !SHA256.test(evidence.metadata.versioned.sha256 ?? "")) {
+      || !SHA256.test(evidence.metadata.versioned.sha256 ?? "")
+      || (currentInstallerFeed && (!tagChecked || evidence.candidate_manifests !== undefined
+        || evidence.validation?.construction !== "not_run"
+        || evidence.validation?.publication_readback !== "passed"
+        || !SHA256.test(evidence.current_feed_asset_sha256s?.sha256 ?? "")))) {
     throw new Error("a passed approved public release-contract result is required");
   }
   const pairs = evidence.metadata.managed_pair;
