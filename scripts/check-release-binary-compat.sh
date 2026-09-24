@@ -493,7 +493,8 @@ check_macos() {
   # Core ML support, the locked platform TLS verifier, and the persistent
   # daemon's FSEvents watcher are compiled into both macOS artifacts.
   # CoreServices.framework and Security.framework are their exact native API
-  # dependencies. The C++ runtime is retained when a native linker records it,
+  # dependencies. The graph resolver also uses SystemConfiguration.framework
+  # for system DNS settings. The C++ runtime is retained when a native linker records it,
   # but Zig can correctly omit that unused load command after linking the same
   # static esaxx object. Keep every other system-library entry exact so an
   # accidental third-party dylib still fails.
@@ -507,6 +508,7 @@ check_macos() {
 /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO
 /System/Library/Frameworks/Metal.framework/Versions/A/Metal
 /System/Library/Frameworks/Security.framework/Versions/A/Security
+/System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration
 /usr/lib/libSystem.B.dylib
 /usr/lib/libcharset.1.dylib
 /usr/lib/libiconv.2.dylib
