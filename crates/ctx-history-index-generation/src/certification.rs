@@ -356,9 +356,8 @@ pub fn active_generation_storage_metadata(
 /// metadata transition invalidates the inherited SHA authority because a
 /// later link/unlink can mask an intervening same-size, restored-mtime write.
 /// Missing, malformed, or otherwise unsupported certification fails closed.
-/// A previous generation whose artifact metadata changed while its certified
-/// successor was published is checked against its full expected digest;
-/// all other stale certifications fail closed without hashing artifact bodies.
+/// Active candidate-link changes and previous-slot publication changes are
+/// checked against the full digest; other stale certifications fail closed.
 pub fn verify_physical_integrity_read_only(
     root: &Path,
     slot: &GenerationSlot,
@@ -414,13 +413,26 @@ pub fn verify_physical_integrity_read_only(
             alias_authority.directories(),
         )?;
         if current != expected.artifact {
-            verify_certified_previous_after_publication(
-                root,
-                slot,
-                index,
-                &generation_path,
-                &current_pointer,
-            )?;
+            if current_pointer.active() == slot {
+                if !expected.artifact.same_payload_identity_changed(&current) {
+                    return Err(IndexError::ChecksumMismatch);
+                }
+                // Candidate links change metadata; rehash against the pointer digest.
+                crate::verify_physical_integrity(
+                    index,
+                    &generation_path,
+                    Some(&current_pointer),
+                    slot.physical_integrity_digest(),
+                )?;
+            } else {
+                verify_certified_previous_after_publication(
+                    root,
+                    slot,
+                    index,
+                    &generation_path,
+                    &current_pointer,
+                )?;
+            }
             alias_authority.validate(root, &pointer_fence)?;
             return Ok(());
         }

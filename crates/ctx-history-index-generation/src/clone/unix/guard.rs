@@ -1,6 +1,12 @@
 use std::path::PathBuf;
 
-use crate::Result;
+use crate::{
+    retention::{
+        acquire_candidate_generation_directory_read_authority,
+        ExistingGenerationDirectoryReadAuthority,
+    },
+    Result,
+};
 
 use super::{
     clone_checkpoint, discard_bound_directory, validate_child_binding, validate_path_binding,
@@ -9,6 +15,7 @@ use super::{
 use crate::INDEX_GENERATIONS_DIRECTORY;
 
 pub(in crate::clone) struct CandidateGuard {
+    pub(super) _alias_authority: ExistingGenerationDirectoryReadAuthority,
     pub(super) root_path: PathBuf,
     pub(super) root: BoundDirectory,
     pub(super) generations_name: PathBuf,
@@ -33,7 +40,14 @@ impl CandidateGuard {
         validate_path_binding(&generations_path, generations.identity)?;
         let destination = BoundDirectory::open_at(&generations.file, destination_name)?;
         validate_child_binding(&generations.file, destination_name, destination.identity)?;
+        let _alias_authority = acquire_candidate_generation_directory_read_authority(
+            root_path,
+            destination_name
+                .to_str()
+                .ok_or(crate::GenerationError::InvalidActiveGenerationPointer)?,
+        )?;
         Ok(Self {
+            _alias_authority,
             root_path: root_path.to_path_buf(),
             root,
             generations_name,

@@ -250,6 +250,23 @@ pub(crate) fn acquire_existing_generation_directory_read_authority(
     }))
 }
 
+/// Marks an in-progress writer candidate as a managed alias until its
+/// activation fence is dropped. Readers can then distinguish its hard links
+/// from unowned links without trusting arbitrary generation directories.
+pub(crate) fn acquire_candidate_generation_directory_read_authority(
+    root: &Path,
+    directory: &str,
+) -> Result<ExistingGenerationDirectoryReadAuthority> {
+    if !GenerationSlot::names_are_valid(&"0".repeat(64), directory) {
+        return Err(IndexError::InvalidActiveGenerationPointer);
+    }
+    let root = GenerationReadRoot::open_index_root(root)?;
+    let coordinator = coordinator(&root, true)?;
+    let guard = RangeLeaseGuard::try_shared(coordinator, directory_keys(directory))?
+        .ok_or(IndexError::ConcurrentGenerationChange)?;
+    Ok(ExistingGenerationDirectoryReadAuthority { _guard: guard })
+}
+
 #[derive(Debug)]
 pub(crate) struct ExistingGenerationDirectoryReadAuthority {
     _guard: RangeLeaseGuard,
