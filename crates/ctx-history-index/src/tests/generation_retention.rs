@@ -194,7 +194,7 @@ fn durable_release_stays_successful_when_best_effort_directory_gc_fails() {
     publish(temp.path(), &source, 4, "fault fourth");
 
     let root = temp.path().to_path_buf();
-    let injected_directory = first_directory.clone();
+    let injected_directory = fs::canonicalize(&first_directory).unwrap();
     let reached_after_release = Arc::new(AtomicBool::new(false));
     let reached_after_release_for_hook = Arc::clone(&reached_after_release);
     let hook = ReclamationTestHookGuard::set(move |stage, path| {

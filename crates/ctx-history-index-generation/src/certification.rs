@@ -984,6 +984,7 @@ use install::{install_certification, install_certification_sidecar, Certificatio
 pub use pointer_fence::ActiveGenerationPointerFence;
 #[cfg(windows)]
 pub(crate) use pointer_fence::ValidatedPredecessorPointer;
+pub use reclaim::reclaim_candidate_with_certifications;
 pub(crate) use reclaim::reclaim_with_pointer_certifications;
 
 #[cfg(any(test, feature = "test-support"))]
