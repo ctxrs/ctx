@@ -74,12 +74,12 @@ test("constructor rejects missing targets, foreign hashes, source and coverage",
   }
 });
 
-test("old downloader limit rejects a sparse 128MiB+1 candidate before hashing", () => {
+test("current downloader limit rejects a sparse 256MiB+1 candidate before hashing", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-unified-release-test-"));
   try {
     const artifact = path.join(root, "oversize");
     const descriptor = fs.openSync(artifact, "wx");
-    fs.ftruncateSync(descriptor, 128 * 1024 * 1024 + 1); fs.closeSync(descriptor);
+    fs.ftruncateSync(descriptor, 256 * 1024 * 1024 + 1); fs.closeSync(descriptor);
     const value = fixtureInputs();
     value.artifacts.get("windows-x64").path = artifact;
     assert.throws(() => projectUnifiedReleaseInputs(value), /size|bound/);

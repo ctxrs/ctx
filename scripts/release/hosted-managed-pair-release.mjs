@@ -207,7 +207,7 @@ export function loadHostedManagedPairPublication(publicationPath) {
     if (compareReleaseVersions(version, "1.5.0") >= 0) {
       const { core, companion } = payload.components;
       if (core.sha256 !== companion.sha256 || core.size_bytes !== companion.size_bytes
-          || core.size_bytes > 128 * 1024 * 1024
+          || core.size_bytes > 256 * 1024 * 1024
           || core.build_identity.source_revision !== companion.build_identity.source_revision
           || core.build_identity.build_fingerprint !== companion.build_identity.build_fingerprint) {
         fail("unified legacy projection must bind one bounded public executable per platform");

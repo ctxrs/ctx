@@ -29,7 +29,7 @@ def verify(artifact: Path, output: Path):
             stream.write(body)
     if jar.is_symlink() or not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest() != jsign["sha256"]:
         raise ValueError("Jsign cache differs from public pin")
-    if artifact.is_symlink() or not artifact.is_file() or not 0 < artifact.stat().st_size <= 128 * 1024 * 1024:
+    if artifact.is_symlink() or not artifact.is_file() or not 0 < artifact.stat().st_size <= 256 * 1024 * 1024:
         raise ValueError("Windows release artifact exceeds incoming download bounds")
     if output.exists() or output.is_symlink():
         raise ValueError("signature verification output already exists")

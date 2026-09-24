@@ -14,7 +14,8 @@ export const TARGET_IDS = Object.freeze([
 ]);
 export const COMPONENT_KINDS = Object.freeze(["core", "companion"]);
 export const MAX_COMPONENT_BYTES = 256 * 1024 * 1024;
-export const MAX_AGGREGATE_COMPONENT_BYTES = 1024 * 1024 * 1024;
+export const MAX_AGGREGATE_COMPONENT_BYTES =
+  TARGET_IDS.length * COMPONENT_KINDS.length * MAX_COMPONENT_BYTES;
 export const MAX_MANIFEST_BYTES = 1024 * 1024;
 export const MAX_SIGNATURE_BYTES = 1024;
 export const MIN_RSA_MODULUS_BITS = 2048;
