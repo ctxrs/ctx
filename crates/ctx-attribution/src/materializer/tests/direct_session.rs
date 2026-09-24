@@ -181,6 +181,185 @@ fn aggregate_split_preserves_cross_event_fact_and_following_page() -> TestResult
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn bounded_event_omission_survives_reopen_and_clears_on_tombstone() -> TestResult {
+    use crate::graph::segment_graph::SegmentGraph;
+    use crate::query::{BlameFactFamily, BlameGraph};
+
+    let directory = tempfile::tempdir()?;
+    let repository = directory.path().join("repository");
+    std::fs::create_dir_all(repository.join("src"))?;
+    super::native_shell::git(&repository, &["init", "-q"])?;
+    super::native_shell::git(&repository, &["config", "user.name", "ctx fixture"])?;
+    super::native_shell::git(
+        &repository,
+        &["config", "user.email", "fixture@example.invalid"],
+    )?;
+    std::fs::write(repository.join("src/witness.rs"), "// witness\n")?;
+    super::native_shell::git(&repository, &["add", "."])?;
+    super::native_shell::git(&repository, &["commit", "-qm", "fixture"])?;
+    let oid = super::native_shell::git(&repository, &["rev-parse", "HEAD"])?;
+    for index in 0..8 {
+        std::fs::write(
+            repository.join(format!("src/extra-{index}.rs")),
+            "// extra\n",
+        )?;
+    }
+    let template = super::optional_root::record(&repository, &oid)?;
+    let mut records = [indexed_record(&template, 0)?, indexed_record(&template, 1)?];
+    for (index, record) in records.iter_mut().enumerate() {
+        record.content.activity.as_mut().unwrap().provider_call_id =
+            Some(TypedKey::utf8(format!("omission-call-{index}"))?);
+    }
+    for index in 0..8 {
+        records[0].content.activity.as_mut().unwrap().facts.push(
+            crate::protocol::ProviderDeclaredFact {
+                kind: crate::protocol::LiteralFactKind::File,
+                value: format!("src/extra-{index}.rs"),
+            },
+        );
+    }
+    for record in &records {
+        record.validate_contract()?;
+    }
+    let source = source_state(&template, 0x68);
+    let preparer =
+        protocol(crate::core_materialization::CoreProjectionPreparer::with_parallelism(1))?;
+    let large = protocol(preparer.prepare_record(&"a".repeat(64), &source, &records[0]))?;
+    let retained = protocol(preparer.prepare_record(&"a".repeat(64), &source, &records[1]))?;
+    let large_bytes = serde_json::to_vec(&large)?.len();
+    let retained_bytes = serde_json::to_vec(&retained)?.len();
+    assert!(
+        large_bytes > retained_bytes + 1_024,
+        "large {large_bytes} bytes/{} facts, retained {retained_bytes} bytes/{} facts",
+        large.facts.len(),
+        retained.facts.len()
+    );
+    let limit = (large_bytes + retained_bytes) / 2;
+    assert!(limit < crate::core_materialization::MAX_CORE_PREPARED_UNIT_BYTES);
+
+    let mut first_source = source_state(&template, 0x68);
+    first_source.event_count = 2;
+    let first = head(0x68, std::slice::from_ref(&first_source))?;
+    let root = directory.path().join("graph");
+    let mut materializer = SegmentMaterializer::open(&root)?;
+    let mut session = match materializer.start_core_generation(first.clone())? {
+        CoreGenerationStart::Started(session) => session,
+        CoreGenerationStart::Current(_) => panic!("fresh generation"),
+    };
+    let reconciliations = session.reconcile_source_page(protocol(CoreSourceDeltaPage::new(
+        "0".repeat(64),
+        first.core_generation_id.clone(),
+        0,
+        true,
+        vec![CoreSourceDelta::Present(first_source.clone())],
+    ))?)?;
+    session.set_prepared_unit_limit_for_test(limit);
+    session.ingest_event_pages(vec![CoreEventDeltaPage {
+        materialization_id: "0".repeat(64),
+        core_generation_id: first.core_generation_id.clone(),
+        reconciliation: reconciliations[0].clone(),
+        page_index: 0,
+        terminal: true,
+        deltas: records.iter().cloned().map(CoreEventDelta::Added).collect(),
+    }])?;
+    session.activate()?;
+    drop(materializer);
+
+    let mut reopened = SegmentMaterializer::open(&root)?;
+    let status = reopened.projection_status(&StatusRequest {
+        requested_core_generation_id: Some(first.core_generation_id),
+    })?;
+    assert_eq!(status.currentness, CoreProjectionCurrentness::Current);
+    assert_eq!(
+        status.materialized_coverage,
+        crate::protocol::MaterializedCoverage::Partial
+    );
+    assert_eq!(status.coverage.bounded_omission_events, 1);
+    assert!(status.availability.commit_blame);
+    let graph = SegmentGraph::from_pinned(
+        crate::graph::segment::FlatStore::new(&root)
+            .open_active(SegmentGraph::flat_open_policy())?,
+        None,
+    );
+    let commits = (&graph).resolve_commits(std::slice::from_ref(&oid), None, 10)?;
+    assert_eq!(commits.len(), 1);
+    let facts = (&graph).blame_facts_page(&commits[0].1.id, BlameFactFamily::Commit, None, 10)?;
+    assert!(facts.items.iter().any(|(fact, _)| {
+        fact.citations
+            .iter()
+            .any(|citation| citation.0.event_id == records[1].event_id)
+    }));
+    assert!(!facts.items.iter().any(|(fact, _)| {
+        fact.citations
+            .iter()
+            .any(|citation| citation.0.event_id == records[0].event_id)
+    }));
+    drop(graph);
+
+    let mut next_source = first_source;
+    next_source.event_count = 1;
+    next_source.core_record_accumulator = hex::encode([0x69; 32]);
+    let next = head(0x69, std::slice::from_ref(&next_source))?;
+    let mut update = match reopened.start_core_generation(next.clone())? {
+        CoreGenerationStart::Started(session) => session,
+        CoreGenerationStart::Current(_) => panic!("next generation"),
+    };
+    let reconciliations = update.reconcile_source_page(protocol(CoreSourceDeltaPage::new(
+        "0".repeat(64),
+        next.core_generation_id.clone(),
+        0,
+        true,
+        vec![CoreSourceDelta::Present(next_source)],
+    ))?)?;
+    let (states, terminal) = update.event_states(&reconciliations[0], None)?;
+    assert!(terminal);
+    let omitted = states
+        .iter()
+        .find(|state| state.event_id == records[0].event_id)
+        .unwrap();
+    update.ingest_event_pages(vec![CoreEventDeltaPage {
+        materialization_id: "0".repeat(64),
+        core_generation_id: next.core_generation_id.clone(),
+        reconciliation: reconciliations[0].clone(),
+        page_index: 0,
+        terminal: true,
+        deltas: vec![CoreEventDelta::Tombstoned(
+            crate::protocol::CoreEventTombstone {
+                event_id: records[0].event_id,
+                prior_core_record_sha256: omitted.core_record_sha256.clone(),
+            },
+        )],
+    }])?;
+    update.activate()?;
+    drop(reopened);
+    let mut reopened = SegmentMaterializer::open(&root)?;
+    let status = reopened.projection_status(&StatusRequest {
+        requested_core_generation_id: Some(next.core_generation_id),
+    })?;
+    assert_eq!(
+        status.materialized_coverage,
+        crate::protocol::MaterializedCoverage::Complete
+    );
+    assert_eq!(status.coverage.bounded_omission_events, 0);
+    assert!(status.availability.commit_blame);
+    let graph = SegmentGraph::from_pinned(
+        crate::graph::segment::FlatStore::new(&root)
+            .open_active(SegmentGraph::flat_open_policy())?,
+        None,
+    );
+    let commits = (&graph).resolve_commits(std::slice::from_ref(&oid), None, 10)?;
+    assert_eq!(commits.len(), 1);
+    let facts = (&graph).blame_facts_page(&commits[0].1.id, BlameFactFamily::Commit, None, 10)?;
+    assert!(facts.items.iter().any(|(fact, _)| {
+        fact.citations
+            .iter()
+            .any(|citation| citation.0.event_id == records[1].event_id)
+    }));
+    Ok(())
+}
+
 #[test]
 fn multi_page_batch_publishes_and_reopens_every_event_in_order() -> TestResult {
     let directory = tempfile::tempdir()?;

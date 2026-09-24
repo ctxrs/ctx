@@ -101,6 +101,11 @@ impl CoreMaterializationSession<'_> {
         self.preparer.set_output_limit_for_test(limit);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_prepared_unit_limit_for_test(&mut self, limit: usize) {
+        self.preparer.set_unit_limit_for_test(limit);
+    }
+
     pub(crate) fn start_progress(&mut self, total_sources: u32) {
         if let Some(lock) = self.materializer.writer_lease.as_mut() {
             lock.update_progress(

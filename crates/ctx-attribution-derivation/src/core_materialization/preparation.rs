@@ -4,6 +4,10 @@ use super::prepared_page::{
 };
 use super::*;
 
+#[path = "preparation/encoding.rs"]
+mod encoding;
+pub(super) use encoding::canonical_encoded_len;
+
 /// Reusable, thread-safe preparation of typed Core facts used by the shipping
 /// serving projection.
 ///
@@ -15,6 +19,8 @@ pub struct CoreProjectionPreparer {
     repository: Arc<Mutex<RepositoryPreparationState>>,
     #[cfg(any(test, feature = "test-support"))]
     output_limit_for_test: Option<usize>,
+    #[cfg(any(test, feature = "test-support"))]
+    unit_limit_for_test: Option<usize>,
 }
 
 pub(super) struct CoreProjectionPreparerInner {
@@ -100,6 +106,8 @@ impl CoreProjectionPreparer {
                 repository: Arc::new(Mutex::new(RepositoryPreparationState::default())),
                 #[cfg(any(test, feature = "test-support"))]
                 output_limit_for_test: None,
+                #[cfg(any(test, feature = "test-support"))]
+                unit_limit_for_test: None,
             })
             .map_err(Clone::clone)
     }
@@ -112,12 +120,27 @@ impl CoreProjectionPreparer {
             repository: Arc::new(Mutex::new(RepositoryPreparationState::default())),
             #[cfg(any(test, feature = "test-support"))]
             output_limit_for_test: None,
+            #[cfg(any(test, feature = "test-support"))]
+            unit_limit_for_test: None,
         })
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_output_limit_for_test(&mut self, limit: usize) {
         self.output_limit_for_test = Some(limit);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_unit_limit_for_test(&mut self, limit: usize) {
+        self.unit_limit_for_test = Some(limit);
+    }
+
+    fn unit_limit(&self) -> usize {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(limit) = self.unit_limit_for_test {
+            return limit;
+        }
+        MAX_CORE_PREPARED_UNIT_BYTES
     }
 
     fn output_limit(&self) -> usize {
@@ -395,7 +418,8 @@ impl CoreProjectionPreparer {
         }
         for (source_id, event_id) in omitted_bound_events {
             eprintln!(
-                "warning: Blame omitted event {event_id} from source {source_id}; prepared unit exceeded {MAX_CORE_PREPARED_UNIT_BYTES} bytes"
+                "warning: Blame omitted event {event_id} from source {source_id}; prepared unit exceeded {} bytes",
+                self.unit_limit()
             );
         }
         Ok(prepared_pages)
@@ -467,7 +491,7 @@ impl CoreProjectionPreparer {
                         job.record_sha256,
                         &job.repository,
                     )?;
-                    bounded_prepared_unit(unit)
+                    bounded_prepared_unit(unit, self.unit_limit())
                 })()
                 .map_err(|mut error: ProtocolError| {
                     if error.class == ErrorClass::Bounds {
@@ -530,9 +554,10 @@ fn omit_prepared_unit(mut unit: PreparedCoreUnit) -> Result<SizedPreparedCoreUni
 
 pub(super) fn bounded_prepared_unit(
     unit: PreparedCoreUnit,
+    limit: usize,
 ) -> Result<(SizedPreparedCoreUnit, bool), ProtocolError> {
     let encoding = prepared_unit_encoding(&unit.origin_event_id, &unit)?;
-    let omitted = encoding.entry_len_with_separator > MAX_CORE_PREPARED_UNIT_BYTES;
+    let omitted = encoding.entry_len_with_separator > limit;
     if omitted {
         return Ok((omit_prepared_unit(unit)?, true));
     }
@@ -673,19 +698,6 @@ impl Drop for CorePreparationPermit<'_> {
             self.credits.ready.notify_one();
         }
     }
-}
-
-#[cfg(test)]
-pub(super) fn ordered_parallel_map<T, U>(
-    pool: &rayon::ThreadPool,
-    items: &[T],
-    operation: impl Fn(&T) -> U + Send + Sync,
-) -> Vec<U>
-where
-    T: Sync,
-    U: Send,
-{
-    pool.install(|| items.par_iter().map(operation).collect())
 }
 
 pub fn ordered_parallel_map_owned<T, U>(
@@ -875,52 +887,6 @@ where
     Ok(())
 }
 
-#[cfg(test)]
-pub(super) fn collect_prepared_units(
-    prepared: Vec<Result<Option<PreparedCoreUnit>, ProtocolError>>,
-) -> Result<BTreeMap<String, PreparedCoreUnit>, ProtocolError> {
-    let mut units = BTreeMap::new();
-    for result in prepared {
-        let Some(unit) = result? else {
-            continue;
-        };
-        if units.insert(unit.origin_event_id.clone(), unit).is_some() {
-            return Err(ProtocolError::new(
-                ErrorClass::Sequence,
-                "Core event delta page contains duplicate prepared events",
-            ));
-        }
-    }
-    Ok(units)
-}
-
-#[cfg(test)]
-pub(super) fn collect_prepared_page_units(
-    page_count: usize,
-    prepared: impl IntoIterator<Item = (usize, Result<PreparedCoreUnit, ProtocolError>)>,
-) -> Result<Vec<BTreeMap<String, PreparedCoreUnit>>, ProtocolError> {
-    let mut page_units = vec![BTreeMap::new(); page_count];
-    let mut retained_bytes = 0_usize;
-    for (page_slot, result) in prepared {
-        let unit = result?;
-        retained_bytes =
-            checked_prepared_output_bytes(retained_bytes, canonical_encoded_len(&unit)?)?;
-        let units = page_units.get_mut(page_slot).ok_or_else(|| {
-            ProtocolError::new(
-                ErrorClass::Internal,
-                "Core event delta preparation page slot is invalid",
-            )
-        })?;
-        if units.insert(unit.origin_event_id.clone(), unit).is_some() {
-            return Err(ProtocolError::new(
-                ErrorClass::Sequence,
-                "Core event delta page batch contains duplicate prepared events",
-            ));
-        }
-    }
-    Ok(page_units)
-}
-
 pub(super) fn prepared_unit_encoding(
     key: &str,
     unit: &PreparedCoreUnit,
@@ -1001,36 +967,6 @@ fn checked_prepared_output_bytes_with_limit(
         return Err(prepared_output_bound_error());
     }
     Ok(total)
-}
-
-#[derive(Default)]
-struct EncodedLengthWriter {
-    bytes: usize,
-}
-
-impl Write for EncodedLengthWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.bytes = self
-            .bytes
-            .checked_add(bytes.len())
-            .ok_or_else(|| io::Error::other("encoded length overflowed"))?;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn canonical_encoded_len(value: &impl Serialize) -> Result<usize, ProtocolError> {
-    let mut writer = EncodedLengthWriter::default();
-    serde_json::to_writer(&mut writer, value).map_err(|_| {
-        ProtocolError::new(
-            ErrorClass::Internal,
-            "Core prepared event delta page encoding failed",
-        )
-    })?;
-    Ok(writer.bytes)
 }
 
 pub(super) fn prepared_page_base_encoded_len(
