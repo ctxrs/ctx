@@ -8,6 +8,20 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.0.1
+
+Released: 2026-09-24
+
+### Fixed
+
+- Upgrades from a core-only ctx installation now create the managed integration directories before recording ownership, so the upgrade completes without a reconciliation warning.
+
+### Commits and PRs
+
+- Source commit: [ad18ec3f](https://github.com/ctxrs/ctx/commit/ad18ec3f71a5f8c1f796c9226e307974223a0b9b).
+- Full diff: [v2.0.0...v2.0.1](https://github.com/ctxrs/ctx/compare/v2.0.0...v2.0.1).
+- [#1055](https://github.com/ctxrs/ctx/pull/1055) — fix reconciliation on core-only upgrades.
+
 ## 2.0.0
 
 Released: 2026-09-24
