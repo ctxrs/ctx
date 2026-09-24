@@ -220,6 +220,7 @@ pub fn coverage_from(value: &CoreProjectionCoverage) -> SegmentCoreCoverage {
         file_evidence_events: value.file_evidence_events,
         exact_commit_evidence_events: value.exact_commit_evidence_events,
         exact_pull_request_evidence_events: value.exact_pull_request_evidence_events,
+        bounded_omission_events: value.bounded_omission_events,
     }
 }
 
@@ -246,6 +247,7 @@ pub fn add_coverage(
             left.exact_pull_request_evidence_events,
             right.exact_pull_request_evidence_events,
         )?,
+        bounded_omission_events: add(left.bounded_omission_events, right.bounded_omission_events)?,
     })
 }
 
@@ -274,6 +276,10 @@ pub fn subtract_coverage(
         exact_pull_request_evidence_events: subtract(
             left.exact_pull_request_evidence_events,
             right.exact_pull_request_evidence_events,
+        )?,
+        bounded_omission_events: subtract(
+            left.bounded_omission_events,
+            right.bounded_omission_events,
         )?,
     })
 }

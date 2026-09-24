@@ -58,6 +58,8 @@ pub enum SegmentMaterializerError {
     Corrupt(&'static str),
     #[error("segment materializer exceeded a hard bound")]
     Bounds,
+    #[error("segment materializer bound exceeded: {0}")]
+    BoundDetail(String),
     #[error("segment materializer requires a complete projection rebuild")]
     RebuildRequired,
     #[error("segment materializer compare-and-swap failed")]
@@ -100,7 +102,7 @@ impl From<SegmentStoreError> for SegmentMaterializerError {
 impl From<FlatSegmentError> for SegmentMaterializerError {
     fn from(error: FlatSegmentError) -> Self {
         match error {
-            FlatSegmentError::Bound(_) => Self::Bounds,
+            FlatSegmentError::Bound(bound) => Self::BoundDetail(format!("Flat {bound}")),
             other => Self::Flat(other),
         }
     }
@@ -108,7 +110,10 @@ impl From<FlatSegmentError> for SegmentMaterializerError {
 
 impl From<EventIndexError> for SegmentMaterializerError {
     fn from(error: EventIndexError) -> Self {
-        Self::EventIndex(error)
+        match error {
+            EventIndexError::Bound(bound) => Self::BoundDetail(format!("event index {bound}")),
+            other => Self::EventIndex(other),
+        }
     }
 }
 

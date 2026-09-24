@@ -248,6 +248,7 @@ pub(super) fn validate_coverage_bound(
         coverage.file_evidence_events,
         coverage.exact_commit_evidence_events,
         coverage.exact_pull_request_evidence_events,
+        coverage.bounded_omission_events,
     ]
     .into_iter()
     .any(|count| count > maximum)

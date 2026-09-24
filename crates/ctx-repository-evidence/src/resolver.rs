@@ -16,7 +16,7 @@ const MAX_NEGATIVE_CERTIFICATION_CACHE_ENTRIES: usize = 64;
 const MAX_SOURCE_UNSAFE_CACHE_ENTRIES: usize = 64;
 const MAX_EVENT_TIME_CERTIFICATION_ENTRIES: usize = 256;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RepositoryEvidenceResolver {
     pub(super) certifier: GitCertifier,
     positive_cache: Vec<CachedPositiveCertificate>,

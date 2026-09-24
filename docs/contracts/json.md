@@ -190,7 +190,7 @@ and advisory indexing observations:
 | `requested_core_generation_id` | Current Core generation requested for the observation, or null. |
 | `receipt` | Canonical completed Core materialization receipt, or null. |
 | `materialized_coverage` | `not_materialized`, `partial`, `complete`, `empty`, or `abstained`. |
-| `coverage` | Six repository evidence counts listed below. |
+| `coverage` | Six repository evidence counts and a bounded-omission count, listed below. |
 | `local_repository_access` | Whether the projection has available local repository access. |
 | `availability` | Booleans `file_blame`, `commit_blame`, and `pull_request_blame`. |
 | `diagnostic` | Canonical Blame diagnostic for noncurrent state; omitted when absent. |
@@ -211,7 +211,10 @@ Disabled indexing can coexist with an already-running pass or retained results.
 The six coverage fields are `repository_candidate_events`,
 `logical_binding_events`, `certified_live_root_access_events`,
 `file_evidence_events`, `exact_commit_evidence_events`, and
-`exact_pull_request_evidence_events`.
+`exact_pull_request_evidence_events`. `bounded_omission_events` counts events
+whose prepared facts or Flat records exceeded a size limit. A current receipt
+with such omissions reports `materialized_coverage: "partial"`; retained Blame
+facts remain queryable according to `availability`.
 
 `currentness: "current"` with `materialized_coverage: "empty"` or `"abstained"`
 is terminal and has no import/rebuild instruction. Availability may still be

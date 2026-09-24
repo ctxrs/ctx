@@ -46,6 +46,7 @@ pub enum ProjectionError {
 pub enum ProjectionOmissionReason {
     IneligibleProducerAuthority,
     MissingRepository,
+    OversizedFlatRecord,
     UnsupportedFactFamily,
 }
 
@@ -119,7 +120,7 @@ impl PreparedCorePageProjection {
 pub fn project_core_batch(
     prepared: &PreparedCoreProjectionBatch,
 ) -> Result<ProjectedCoreBatch, ProjectionError> {
-    let (projected, _) = project_core_units(
+    let (projected, _, _) = project_core_units(
         &prepared.core_generation_id,
         &prepared.source,
         prepared.units.iter(),
@@ -134,16 +135,16 @@ pub fn prepare_core_page_projection(
     source: &crate::protocol::CoreSourceState,
     units: &[&PreparedCoreUnit],
 ) -> Result<PreparedCorePageProjection, ProjectionError> {
-    let (projected, metrics) =
+    let (projected, record_evidence, metrics) =
         project_core_units(core_generation_id, source, units.iter().copied())?;
-    finalize_page_projection(projected, metrics)
+    finalize_page_projection(projected, record_evidence, metrics)
 }
 
 fn finalize_page_projection(
     projected: ProjectedCoreBatch,
+    record_evidence: Vec<ProjectedCoreRecordEvidence>,
     mut metrics: CorePageProjectionMetrics,
 ) -> Result<PreparedCorePageProjection, ProjectionError> {
-    let record_evidence = projected_core_record_evidence(&projected.records)?;
     metrics.record_serializations =
         u64::try_from(record_evidence.len()).map_err(|_| ProjectionError::FlatRecordBounds)?;
     metrics.record_serialized_bytes =
@@ -171,7 +172,14 @@ fn project_core_units<'a>(
     core_generation_id: &str,
     source: &crate::protocol::CoreSourceState,
     units: impl Clone + Iterator<Item = &'a PreparedCoreUnit>,
-) -> Result<(ProjectedCoreBatch, CorePageProjectionMetrics), ProjectionError> {
+) -> Result<
+    (
+        ProjectedCoreBatch,
+        Vec<ProjectedCoreRecordEvidence>,
+        CorePageProjectionMetrics,
+    ),
+    ProjectionError,
+> {
     source
         .validate()
         .map_err(|_| ProjectionError::Invalid("source state"))?;
@@ -182,6 +190,7 @@ fn project_core_units<'a>(
     let source_id = core_source_storage_id(&source.source);
     let stable_entities = collect_stable_entities(units.clone())?;
     let mut projected = ProjectedCoreBatch::default();
+    let mut records = Vec::new();
     let mut owner_keys = BTreeSet::new();
     let mut metrics = CorePageProjectionMetrics {
         page_traversals: 1,
@@ -234,7 +243,7 @@ fn project_core_units<'a>(
                 ));
                 continue;
             };
-            projected.records.push(project_fact(
+            let record = project_fact(
                 source,
                 unit,
                 fact,
@@ -242,12 +251,22 @@ fn project_core_units<'a>(
                 &repository_id,
                 &owner,
                 &stable_entities,
-            )?);
+            )?;
+            match projected_record_evidence(&record) {
+                Ok(evidence) => records.push((record, evidence)),
+                Err(ProjectionError::FlatRecordBounds) => projected.omissions.push(omission(
+                    &source_id,
+                    unit,
+                    fact,
+                    ProjectionOmissionReason::OversizedFlatRecord,
+                )),
+                Err(error) => return Err(error),
+            }
         }
         projected.owners.push(owner);
     }
 
-    projected.records.sort_by(|left, right| {
+    records.sort_by(|(left, _), (right, _)| {
         (
             left.event_owner.event_sequence,
             left.event_owner.event_id.as_str(),
@@ -261,9 +280,11 @@ fn project_core_units<'a>(
                 &right.citations,
             ))
     });
+    let (sorted_records, record_evidence) = records.into_iter().unzip();
+    projected.records = sorted_records;
     projected.owners.sort();
     projected.omissions.sort();
-    Ok((projected, metrics))
+    Ok((projected, record_evidence, metrics))
 }
 
 /// Converts persisted event ownership into a replacement/deletion tombstone.

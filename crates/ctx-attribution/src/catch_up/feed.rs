@@ -246,7 +246,10 @@ pub(crate) fn stable_core_error_code(error: &anyhow::Error) -> Option<&'static s
         Some(crate::materializer::SegmentMaterializerError::RebuildRequired) => {
             return Some("needs_rebuild");
         }
-        Some(crate::materializer::SegmentMaterializerError::Bounds) => return Some("bounds"),
+        Some(
+            crate::materializer::SegmentMaterializerError::Bounds
+            | crate::materializer::SegmentMaterializerError::BoundDetail(_),
+        ) => return Some("bounds"),
         Some(crate::materializer::SegmentMaterializerError::Cancelled) => return Some("cancelled"),
         _ => {}
     }

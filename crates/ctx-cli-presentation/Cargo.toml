@@ -28,4 +28,5 @@ ctx-upgrade-engine = { path = "../ctx-upgrade-engine" }
 
 [dev-dependencies]
 tempfile.workspace = true
+ctx-client-observability = { path = "../ctx-client-observability", features = ["test-support"] }
 ctx-upgrade-engine = { path = "../ctx-upgrade-engine", features = ["test-support"] }

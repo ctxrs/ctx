@@ -44,10 +44,23 @@ pub(super) fn active_flat_layers_require_rebuild(
 
 pub(super) fn protocol_error(error: crate::protocol::ProtocolError) -> SegmentMaterializerError {
     if error.class == ErrorClass::Bounds {
-        SegmentMaterializerError::Bounds
+        SegmentMaterializerError::BoundDetail(error.message)
     } else {
         SegmentMaterializerError::Conflict
     }
+}
+
+#[cfg(test)]
+#[test]
+fn prepared_core_bound_keeps_its_reason() {
+    let error = protocol_error(crate::protocol::ProtocolError::new(
+        ErrorClass::Bounds,
+        "Core prepared unit exceeds its worst-case byte credit (source core_source_abc)",
+    ));
+    assert_eq!(
+        error.to_string(),
+        "segment materializer bound exceeded: Core prepared unit exceeds its worst-case byte credit (source core_source_abc)"
+    );
 }
 
 pub(crate) fn stage_direct_pages(
@@ -375,6 +388,7 @@ pub(super) fn protocol_coverage(value: &SegmentCoreCoverage) -> CoreProjectionCo
         file_evidence_events: value.file_evidence_events,
         exact_commit_evidence_events: value.exact_commit_evidence_events,
         exact_pull_request_evidence_events: value.exact_pull_request_evidence_events,
+        bounded_omission_events: value.bounded_omission_events,
     }
 }
 

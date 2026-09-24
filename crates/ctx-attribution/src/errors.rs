@@ -38,7 +38,9 @@ impl From<SegmentMaterializerError> for AdapterError {
     fn from(error: SegmentMaterializerError) -> Self {
         match error {
             SegmentMaterializerError::Busy => Self::MaterializerBusy,
-            SegmentMaterializerError::Bounds => Self::MaterializerBounds,
+            SegmentMaterializerError::Bounds | SegmentMaterializerError::BoundDetail(_) => {
+                Self::MaterializerBounds
+            }
             SegmentMaterializerError::RebuildRequired => Self::RebuildRequired,
             SegmentMaterializerError::Graph(SegmentGraphError::Unavailable) => {
                 Self::MaterializationRequired

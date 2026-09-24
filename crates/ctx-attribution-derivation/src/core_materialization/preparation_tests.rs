@@ -5,9 +5,9 @@ use std::sync::{
 use std::time::Duration;
 
 use super::preparation::{
-    PreparedOutputBudget, checked_prepared_output_bytes, collect_prepared_page_units,
-    collect_prepared_units, configured_core_preparation_workers,
-    ordered_parallel_for_each_with_budget, ordered_parallel_map, ordered_parallel_map_owned,
+    PreparedOutputBudget, bounded_prepared_unit, canonical_encoded_len,
+    checked_prepared_output_bytes, configured_core_preparation_workers,
+    ordered_parallel_for_each_with_budget, ordered_parallel_map_owned,
 };
 use super::*;
 
@@ -22,6 +22,68 @@ fn unit(origin_event_id: &str) -> PreparedCoreUnit {
         evidence: None,
         coverage: CoreProjectionCoverage::default(),
     }
+}
+
+#[test]
+fn oversized_prepared_event_is_omitted_without_losing_its_index_slot() {
+    use crate::envelope::{Confidence, Fact, FactState, ResourceRef};
+    use crate::protocol::ResourceKind;
+
+    let source = crate::protocol::SourceKey::derive(
+        "test",
+        "test",
+        "test",
+        1,
+        crate::protocol::SourceAnchor::CatalogLineage([0x44; 32]),
+    )
+    .expect("source identity");
+    let event: crate::protocol::StableEntityId = serde_json::from_value(serde_json::json!({
+        "contract_version": crate::protocol::IDENTITY_VERSION,
+        "entity_kind": crate::protocol::StableEntityKind::Event,
+        "digest": vec![0x11; 32],
+        "source_digest": source.identity().digest(),
+        "source_descriptor_digest": source.exact_descriptor_digest(),
+        "uuid": "11111111-1111-8111-9111-111111111111",
+    }))
+    .expect("event identity");
+    event.validate_contract().expect("valid event identity");
+    let mut large = unit(&event.to_string());
+    large.stable_entities.push(event);
+    large.coverage.exact_commit_evidence_events = 1;
+    large.facts = (0..2_200)
+        .map(|index| {
+            Fact::create(
+                "file.touched",
+                ResourceRef::new(ResourceKind::File, format!("file-{index}")),
+                "observed_in_core",
+                None,
+                None,
+                Confidence::Verified,
+                FactState::Asserted,
+                "test",
+                "1",
+                "session-1",
+                None,
+                Vec::new(),
+                BTreeMap::from([("detail".to_owned(), "x".repeat(4_096))]),
+            )
+        })
+        .collect();
+    let (sized, omitted) =
+        bounded_prepared_unit(large, MAX_CORE_PREPARED_UNIT_BYTES).expect("bounded omission");
+    assert!(omitted);
+    assert_eq!(sized.unit.origin_event_id, event.to_string());
+    assert!(sized.unit.facts.is_empty());
+    assert_eq!(sized.unit.stable_entities, vec![event]);
+    assert!(sized.unit.evidence.is_none());
+    assert_eq!(sized.unit.coverage.bounded_omission_events, 1);
+    assert_eq!(sized.unit.coverage.logical_binding_events, 0);
+    assert!(sized.encoding.entry_len_with_separator <= MAX_CORE_PREPARED_UNIT_BYTES);
+
+    let (normal, omitted) = bounded_prepared_unit(unit("event-2"), MAX_CORE_PREPARED_UNIT_BYTES)
+        .expect("ordinary event");
+    assert!(!omitted);
+    assert_eq!(normal.unit.origin_event_id, "event-2");
 }
 
 #[test]
@@ -474,4 +536,63 @@ fn batch_errors_and_duplicates_follow_flattened_page_delta_order() -> Result<(),
     assert_eq!(error_before_later_duplicate.class, ErrorClass::Internal);
     assert_eq!(error_before_later_duplicate.message, "first failure");
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn ordered_parallel_map<T, U>(
+    pool: &rayon::ThreadPool,
+    items: &[T],
+    operation: impl Fn(&T) -> U + Send + Sync,
+) -> Vec<U>
+where
+    T: Sync,
+    U: Send,
+{
+    pool.install(|| items.par_iter().map(operation).collect())
+}
+
+#[cfg(test)]
+pub(super) fn collect_prepared_units(
+    prepared: Vec<Result<Option<PreparedCoreUnit>, ProtocolError>>,
+) -> Result<BTreeMap<String, PreparedCoreUnit>, ProtocolError> {
+    let mut units = BTreeMap::new();
+    for result in prepared {
+        let Some(unit) = result? else {
+            continue;
+        };
+        if units.insert(unit.origin_event_id.clone(), unit).is_some() {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Core event delta page contains duplicate prepared events",
+            ));
+        }
+    }
+    Ok(units)
+}
+
+#[cfg(test)]
+pub(super) fn collect_prepared_page_units(
+    page_count: usize,
+    prepared: impl IntoIterator<Item = (usize, Result<PreparedCoreUnit, ProtocolError>)>,
+) -> Result<Vec<BTreeMap<String, PreparedCoreUnit>>, ProtocolError> {
+    let mut page_units = vec![BTreeMap::new(); page_count];
+    let mut retained_bytes = 0_usize;
+    for (page_slot, result) in prepared {
+        let unit = result?;
+        retained_bytes =
+            checked_prepared_output_bytes(retained_bytes, canonical_encoded_len(&unit)?)?;
+        let units = page_units.get_mut(page_slot).ok_or_else(|| {
+            ProtocolError::new(
+                ErrorClass::Internal,
+                "Core event delta preparation page slot is invalid",
+            )
+        })?;
+        if units.insert(unit.origin_event_id.clone(), unit).is_some() {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Core event delta page batch contains duplicate prepared events",
+            ));
+        }
+    }
+    Ok(page_units)
 }

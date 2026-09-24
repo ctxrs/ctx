@@ -26,7 +26,7 @@ use crate::protocol::{
     CoreEventDelta, CoreEventDeltaPage, CoreEventDeltaPageApplied, CoreEventState,
     CoreGenerationHead, CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
     CoreProjectionCurrentness, CoreSourceDelta, CoreSourceDeltaPage, CoreSourceReconciliation,
-    CoreSourceRemoval, MaterializedCoverage,
+    CoreSourceRemoval, ErrorClass, MaterializedCoverage, ProtocolError,
 };
 
 use super::model::{
@@ -65,8 +65,16 @@ pub struct CoreMaterializationSession<'a> {
     removed_sources: u32,
     event_delta_pages: u32,
     event_mutations: u64,
+    incoming_page_cursor: Option<IncomingPageCursor>,
     preparer: crate::core_materialization::CoreProjectionPreparer,
     completed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct IncomingPageCursor {
+    source_index: u32,
+    next_original_index: u32,
+    added_pages: u32,
 }
 
 #[derive(serde::Serialize)]
@@ -88,6 +96,16 @@ struct FinishGenerationIntegrity<'a> {
 }
 
 impl CoreMaterializationSession<'_> {
+    #[cfg(test)]
+    pub(crate) fn set_prepared_output_limit_for_test(&mut self, limit: usize) {
+        self.preparer.set_output_limit_for_test(limit);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_prepared_unit_limit_for_test(&mut self, limit: usize) {
+        self.preparer.set_unit_limit_for_test(limit);
+    }
+
     pub(crate) fn start_progress(&mut self, total_sources: u32) {
         if let Some(lock) = self.materializer.writer_lease.as_mut() {
             lock.update_progress(
@@ -179,14 +197,18 @@ impl CoreMaterializationSession<'_> {
         &mut self,
         mut pages: Vec<CoreEventDeltaPage>,
     ) -> Result<(), SegmentMaterializerError> {
+        if pages.is_empty() || pages.len() > crate::protocol::MAX_CORE_EVENT_DELTA_PAGES {
+            return Err(protocol_error(ProtocolError::new(
+                ErrorClass::Bounds,
+                "Core event delta batch must contain between one and sixteen pages",
+            )));
+        }
         for page in &mut pages {
             page.materialization_id.clone_from(&self.materialization_id);
             page.core_generation_id
                 .clone_from(&self.head.core_generation_id);
         }
         let completed_sources = pages.iter().filter(|page| page.terminal).count() as u32;
-        let page_count =
-            u32::try_from(pages.len()).map_err(|_| SegmentMaterializerError::Bounds)?;
         let mutations = pages.iter().try_fold(0_u64, |total, page| {
             total
                 .checked_add(
@@ -195,29 +217,59 @@ impl CoreMaterializationSession<'_> {
                 )
                 .ok_or(SegmentMaterializerError::Bounds)
         })?;
-        let prepared = self
-            .preparer
-            .prepare_event_delta_pages(pages)
-            .map_err(protocol_error)?;
-        let result = super::staging::apply_event_pages(
-            self.materializer,
-            self.candidate
-                .as_mut()
-                .ok_or(SegmentMaterializerError::Conflict)?,
-            self.direct_candidate
-                .as_mut()
-                .ok_or(SegmentMaterializerError::Conflict)?,
-            &self.reconciliation_cursor,
-            &self.preparer,
-            &prepared,
-            crate::core_materialization::CORE_MATERIALIZER_REVISION,
-        );
-        if let Err(error) = result {
-            if let Some(direct) = self.direct_candidate.take() {
-                self.materializer.rollback_cleanup_failed = direct.abort().is_err();
+        let result = pages.into_iter().try_fold(0_u32, |total, mut page| {
+            let source_index = page.reconciliation.materialize_index;
+            let added_pages = match self.incoming_page_cursor {
+                Some(cursor) if cursor.source_index == source_index => {
+                    if page.page_index != cursor.next_original_index {
+                        return Err(protocol_error(ProtocolError::new(
+                            ErrorClass::Sequence,
+                            "Core event delta page index is not in source order",
+                        )));
+                    }
+                    cursor.added_pages
+                }
+                Some(cursor) if source_index <= cursor.source_index => {
+                    return Err(protocol_error(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "Core event delta source is not in source order",
+                    )));
+                }
+                _ if page.page_index == 0 => 0,
+                _ => {
+                    return Err(protocol_error(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "Core event delta source must begin at page zero",
+                    )));
+                }
+            };
+            let original_index = page.page_index;
+            page.page_index = original_index
+                .checked_add(added_pages)
+                .ok_or(SegmentMaterializerError::Bounds)?;
+            let staged = self.ingest_split_page(page)?;
+            self.incoming_page_cursor = Some(IncomingPageCursor {
+                source_index,
+                next_original_index: original_index
+                    .checked_add(1)
+                    .ok_or(SegmentMaterializerError::Bounds)?,
+                added_pages: added_pages
+                    .checked_add(staged - 1)
+                    .ok_or(SegmentMaterializerError::Bounds)?,
+            });
+            total
+                .checked_add(staged)
+                .ok_or(SegmentMaterializerError::Bounds)
+        });
+        let page_count = match result {
+            Ok(count) => count,
+            Err(error) => {
+                if let Some(direct) = self.direct_candidate.take() {
+                    self.materializer.rollback_cleanup_failed = direct.abort().is_err();
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         self.event_delta_pages = self
             .event_delta_pages
             .checked_add(page_count)
@@ -241,6 +293,58 @@ impl CoreMaterializationSession<'_> {
             );
         }
         Ok(())
+    }
+
+    fn ingest_split_page(
+        &mut self,
+        page: CoreEventDeltaPage,
+    ) -> Result<u32, SegmentMaterializerError> {
+        let first_index = page.page_index;
+        let mut staged = 0_u32;
+        let mut pending = vec![page];
+        while let Some(mut page) = pending.pop() {
+            page.page_index = first_index
+                .checked_add(staged)
+                .ok_or(SegmentMaterializerError::Bounds)?;
+            match self.preparer.prepare_event_delta_page_recoverable(page) {
+                Ok(prepared) => {
+                    super::staging::apply_event_pages(
+                        self.materializer,
+                        self.candidate
+                            .as_mut()
+                            .ok_or(SegmentMaterializerError::Conflict)?,
+                        self.direct_candidate
+                            .as_mut()
+                            .ok_or(SegmentMaterializerError::Conflict)?,
+                        &self.reconciliation_cursor,
+                        &self.preparer,
+                        &[prepared],
+                        crate::core_materialization::CORE_MATERIALIZER_REVISION,
+                    )?;
+                    staged = staged
+                        .checked_add(1)
+                        .ok_or(SegmentMaterializerError::Bounds)?;
+                }
+                Err((error, Some(mut page)))
+                    if error.class == ErrorClass::Bounds && page.deltas.len() > 1 =>
+                {
+                    let right_deltas = page.deltas.split_off(page.deltas.len() / 2);
+                    let right = CoreEventDeltaPage {
+                        materialization_id: page.materialization_id.clone(),
+                        core_generation_id: page.core_generation_id.clone(),
+                        reconciliation: page.reconciliation.clone(),
+                        page_index: page.page_index,
+                        terminal: page.terminal,
+                        deltas: right_deltas,
+                    };
+                    page.terminal = false;
+                    pending.push(right);
+                    pending.push(*page);
+                }
+                Err((error, _)) => return Err(protocol_error(error)),
+            }
+        }
+        Ok(staged)
     }
 
     pub fn activate(self) -> Result<CoreMaterializationReceipt, SegmentMaterializerError> {
@@ -672,6 +776,9 @@ fn projection_status(
         CoreProjectionCurrentness::Current if active.event_count == 0 => {
             MaterializedCoverage::Empty
         }
+        CoreProjectionCurrentness::Current if coverage.bounded_omission_events > 0 => {
+            MaterializedCoverage::Partial
+        }
         CoreProjectionCurrentness::Current if coverage.logical_binding_events == 0 => {
             MaterializedCoverage::Abstained
         }
@@ -697,7 +804,11 @@ fn projection_availability(
     coverage: &SegmentCoreCoverage,
 ) -> (bool, CoreProjectionAvailability) {
     let blame_ready = currentness == CoreProjectionCurrentness::Current
-        && materialized_coverage == MaterializedCoverage::Complete;
+        && matches!(
+            materialized_coverage,
+            MaterializedCoverage::Complete | MaterializedCoverage::Partial
+        )
+        && coverage.logical_binding_events > 0;
     let local_repository_access = blame_ready && coverage.certified_live_root_access_events > 0;
     (
         local_repository_access,
@@ -852,6 +963,7 @@ impl SegmentMaterializer {
             removed_sources: 0,
             event_delta_pages: 0,
             event_mutations: 0,
+            incoming_page_cursor: None,
             preparer,
             completed: false,
         }))

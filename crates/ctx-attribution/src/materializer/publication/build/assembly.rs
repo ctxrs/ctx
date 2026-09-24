@@ -89,9 +89,21 @@ impl DirectCandidate {
                 candidate,
                 std::slice::from_ref(&page),
             )?;
+            let index_rollovers = plan
+                .event_index_segments
+                .checked_sub(candidate.publication_reference_plan.event_index_segments)
+                .ok_or(SegmentMaterializerError::Corrupt(
+                    "event index publication plan moved backward",
+                ))?;
+            if index_rollovers > 1 {
+                return Err(SegmentMaterializerError::Corrupt(
+                    "one event page requires multiple index rollovers",
+                ));
+            }
             let publication_semantics_sha256 =
                 page.advance_publication_semantics(&candidate.publication_semantics_sha256)?;
-            self.sink.push_staged(&self.source_states, page)?;
+            self.sink
+                .push_staged(&self.source_states, page, index_rollovers == 1)?;
             candidate.publication_reference_plan = plan;
             candidate.publication_semantics_sha256 = publication_semantics_sha256;
         }
