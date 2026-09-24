@@ -218,6 +218,8 @@ ctx_cli_contract_test(
     name = "setup_sources_import_tests",
     src = "tests/contracts/setup_sources_import.rs",
     binary = "//crates/ctx-cli:ctx_managed_test_binary",
+    # Each case still exercises daemon/client concurrency; run cases independently.
+    extra_env = {"RUST_TEST_THREADS": "1"},
     deps = [
         "//crates/ctx-attribution:lib",
         "//crates/ctx-history-index:lib",
