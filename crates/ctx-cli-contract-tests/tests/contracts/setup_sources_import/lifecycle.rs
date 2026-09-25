@@ -206,11 +206,9 @@ fn setup_semantic_allows_manual_indexing_without_starting_a_daemon() {
     assert_eq!(status["daemon"]["enabled"], true, "{status:#}");
     assert_eq!(status["semantic"]["enabled"], true, "{status:#}");
     assert!(!data_root(&explicit_opt_out).join("search").exists());
-    assert!(
-        !data_root(&explicit_opt_out)
-            .join("relational.sqlite")
-            .exists()
-    );
+    assert!(!data_root(&explicit_opt_out)
+        .join("relational.sqlite")
+        .exists());
     assert!(!data_root(&explicit_opt_out).join("catalogs").exists());
     assert_no_daemon_autostart_mutation(&explicit_opt_out);
 }
@@ -648,11 +646,9 @@ fn semantic_enable_auto_starts_the_existing_daemon_acquisition_path() {
         status["daemon"]["jobs"]["semantic_index"]["semantic_enabled"], true,
         "{status:#}"
     );
-    assert!(
-        fs::read_to_string(data_root(&temp).join("config.toml"))
-            .unwrap()
-            .contains("[search]\nsemantic = true\n")
-    );
+    assert!(fs::read_to_string(data_root(&temp).join("config.toml"))
+        .unwrap()
+        .contains("[search]\nsemantic = true\n"));
 
     let waited = json_output(ctx(&temp).args(["semantic", "enable", "--wait", "--format=json"]));
     assert_eq!(waited["status"], "ready", "{waited:#}");
@@ -1221,14 +1217,12 @@ fn empty_catalog_default_background_oracle_is_status_sensitive() {
         );
     }
     assert!(validate_empty_catalog_refresh_request(&request("unknown", Value::Null)).is_err());
-    assert!(
-        validate_empty_catalog_refresh_request(&json!({
-            "status": "running",
-            "source_count": 1,
-            "receipt": null,
-        }))
-        .is_err()
-    );
+    assert!(validate_empty_catalog_refresh_request(&json!({
+        "status": "running",
+        "source_count": 1,
+        "receipt": null,
+    }))
+    .is_err());
 }
 
 #[test]

@@ -135,7 +135,10 @@ alter function ctx.telemetry_ingest_health_snapshot(text) owner to ctx_migration
 `;
 
 export function startPostgres() {
-  const root = mkdtempSync(path.join(process.env.TEST_TMPDIR ?? tmpdir(), "ctx-telemetry-history-"));
+  const configuredTmp = process.env.TEST_TMPDIR ?? tmpdir();
+  const socketCandidate = path.join(configuredTmp, "ctx-telemetry-history-XXXXXX", "socket");
+  const rootBase = socketCandidate.length < 100 ? configuredTmp : "/tmp";
+  const root = mkdtempSync(path.join(rootBase, "ctx-telemetry-history-"));
   const data = path.join(root, "data");
   const socket = path.join(root, "socket");
   const log = path.join(root, "postgres.log");
