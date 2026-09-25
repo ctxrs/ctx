@@ -32,7 +32,7 @@ use ctx_managed_pair_engine::{
     VerifiedManagedPairIdentity,
 };
 
-const RELEASE_ARTIFACT_MAX_BYTES: u64 = 128 * 1024 * 1024;
+const RELEASE_ARTIFACT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(super) enum ForegroundManagedPairRecovery {
     None,

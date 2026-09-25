@@ -212,6 +212,34 @@ fn valid_marker_uses_the_canonical_executable_path() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
+fn managed_marker_accepts_a_binary_larger_than_the_old_upgrade_limit() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = tempdir()?;
+    let executable = fixture.path().join("ctx");
+    fs::File::create(&executable)?.set_len(129 * 1024 * 1024)?;
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+    let marker = json!({
+        "manager": "ctx-hosted-installer",
+        "install_path": executable.display().to_string(),
+        "platform": "test-platform",
+        "channel": "stable",
+        "version": "2.0.2",
+        "sha256": super::current_binary_sha_at(&executable)?,
+    });
+    let marker_path = install_marker_path(&executable);
+    fs::write(&marker_path, serde_json::to_vec(&marker)?)?;
+    fs::set_permissions(&marker_path, fs::Permissions::from_mode(0o600))?;
+
+    assert!(matches!(
+        classify_install_marker_at(&executable, "test-platform"),
+        ManagedInstallMarker::Valid(_)
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn upgraded_marker_preserves_validated_owned_extensions() -> Result<()> {
     let fixture = tempdir()?;
     let install_path = fixture.path().join("ctx");
