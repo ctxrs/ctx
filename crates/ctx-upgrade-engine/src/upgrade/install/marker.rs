@@ -22,7 +22,7 @@ use super::path_identity::managed_install_path_identity_matches;
 const MIN_INSTALL_ATTEMPT_ID_BODY_BYTES: usize = 8;
 const MAX_INSTALL_ATTEMPT_ID_BODY_BYTES: usize = 128;
 pub(in crate::upgrade) const MAX_INSTALL_MARKER_BYTES: u64 = 64 * 1024;
-const MAX_MANAGED_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_MANAGED_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 const TEST_HARNESS_UPGRADE_TARGET_ENV: &str = "CTX_UPGRADE_TEST_TARGET";
 
 #[derive(Debug, Clone)]
