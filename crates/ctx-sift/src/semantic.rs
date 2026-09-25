@@ -127,7 +127,7 @@ impl Selection {
 
     pub fn render(&self, text: &str, proposal: &Proposal, original_id: &str) -> String {
         let mut output = format!(
-        "Sift semantic selection: INCOMPLETE\nOmitted passage IDs: {}\nFull output: ctx sift recall {original_id}\n\n",
+            "Sift semantic selection: INCOMPLETE\nOmitted passage IDs: {}\nFull output: ctx sift recall {original_id}\n\n",
             proposal.omitted.join(", ")
         );
         for (position, index) in proposal.kept.iter().enumerate() {

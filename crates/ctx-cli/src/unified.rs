@@ -214,9 +214,7 @@ mod tests {
         );
         assert_eq!(
             tail(
-                &[
-                    "ctx", "--quiet", "sift", "--raw", "echo", "--color", "always", "--quiet"
-                ],
+                &["ctx", "--quiet", "sift", "--raw", "echo", "--color", "always", "--quiet"],
                 "sift"
             ),
             ["--raw", "echo", "--color", "always", "--quiet"]

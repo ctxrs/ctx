@@ -1,13 +1,13 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use clap::Args;
 use ctx_agent_integrations::{
     output_hook::{self, Agent, Context, State},
-    skill::{SkillAgentArg, detected_agents},
+    skill::{detected_agents, SkillAgentArg},
 };
 use serde_json::json;
 
 use crate::{
-    analytics::{IntegrationScope, IntegrationTelemetry, TargetSelection, count_bucket},
+    analytics::{count_bucket, IntegrationScope, IntegrationTelemetry, TargetSelection},
     output::JsonOutputFormat,
     ui::Ui,
 };
@@ -246,10 +246,9 @@ mod tests {
             project: true,
             format: JsonOutputFormat::Text,
         };
-        assert!(
-            args.select_supported(&context, |agent| agent != Agent::Codex)
-                .is_err()
-        );
+        assert!(args
+            .select_supported(&context, |agent| agent != Agent::Codex)
+            .is_err());
         assert!(!context.paths.cwd.join(".claude/settings.json").exists());
         args.agent.clear();
         args.all_agents = true;
