@@ -273,11 +273,9 @@ fn setup_autostart_records_spawn_failure_status() {
     assert_eq!(status["daemon"]["reason"], "spawn_failed");
     assert_eq!(status["daemon"]["start_mode"], "auto");
     assert_eq!(status["daemon"]["trigger_command"], "setup");
-    assert!(
-        status["daemon"]["last_error"]
-            .as_str()
-            .is_some_and(|error| !error.is_empty())
-    );
+    assert!(status["daemon"]["last_error"]
+        .as_str()
+        .is_some_and(|error| !error.is_empty()));
 }
 
 #[test]
