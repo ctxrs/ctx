@@ -4,6 +4,208 @@ use std::{
     process::{Child, Command as StdCommand, Stdio},
 };
 
+#[cfg(target_os = "linux")]
+pub(super) struct FakeSystemdDaemon {
+    pid_file: std::path::PathBuf,
+    data_root: std::path::PathBuf,
+    executable: std::path::PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for FakeSystemdDaemon {
+    fn drop(&mut self) {
+        let Some(pid) = fs::read_to_string(&self.pid_file)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok())
+        else {
+            return;
+        };
+        let Some(lock) = fs::read(self.data_root.join("daemon/daemon.lock"))
+            .ok()
+            .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        else {
+            return;
+        };
+        let recorded_binary = lock.get("binary").and_then(Value::as_str).map(Path::new);
+        let process_binary = fs::read_link(format!("/proc/{pid}/exe")).ok();
+        if lock.get("pid").and_then(Value::as_u64) != Some(u64::from(pid))
+            || lock.get("data_root").and_then(Value::as_str) != self.data_root.to_str()
+            || recorded_binary.and_then(|path| fs::canonicalize(path).ok())
+                != fs::canonicalize(&self.executable).ok()
+            || process_binary.and_then(|path| fs::canonicalize(path).ok())
+                != fs::canonicalize(&self.executable).ok()
+        {
+            return;
+        }
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn fake_operational_systemd_user_manager(
+    temp: &TempDir,
+    binary: &std::path::Path,
+    managed_root: &std::path::Path,
+    clean_exit_before_manager_restart: bool,
+) -> (std::path::PathBuf, FakeSystemdDaemon) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let manager_bin = temp.path().join("fake-systemd-bin");
+    fs::create_dir(&manager_bin).unwrap();
+    let systemctl = manager_bin.join("systemctl");
+    let pid_file = temp.path().join("fake-systemd-main.pid");
+    let enabled_file = temp.path().join("fake-systemd-enabled");
+    let stdout_file = temp.path().join("fake-systemd-daemon.stdout");
+    let stderr_file = temp.path().join("fake-systemd-daemon.stderr");
+    let unit_file = temp.path().join(".config/systemd/user/ctx.service");
+    fs::write(
+        &systemctl,
+        format!(
+            r#"#!/bin/sh
+pid_file='{pid_file}'
+enabled_file='{enabled_file}'
+unit_file='{unit_file}'
+environment_file='{managed_root}/daemon/supervisor-environment.json'
+clean_exit_before_manager_restart='{clean_exit_before_manager_restart}'
+case "$*" in
+  "--user show --property=Version --value")
+    printf '255\n'
+    exit 0
+    ;;
+  "--user daemon-reload")
+    exit 0
+    ;;
+  "--user enable ctx.service")
+    : > "$enabled_file"
+    exit 0
+    ;;
+  "--user start ctx.service")
+    if [ -f '{managed_root}/daemon/daemon.lock' ]; then
+      lock_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' '{managed_root}/daemon/daemon.lock' | sed -n '1p')
+      if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+        i=0
+        while [ "$i" -lt 200 ]; do
+          if [ -S '{managed_root}/daemon/source-refresh.sock' ]; then exit 0; fi
+          if ! kill -0 "$lock_pid" 2>/dev/null; then break; fi
+          i=$((i + 1))
+          sleep 0.05
+        done
+        exit 0
+      fi
+      rm -f '{managed_root}/daemon/daemon.lock'
+    fi
+    nohup setsid /usr/bin/env -i "CTX_INTERNAL_SUPERVISOR_ENVIRONMENT_FILE=$environment_file" '{binary}' --data-root '{managed_root}' daemon run --format=json </dev/null >'{stdout_file}' 2>'{stderr_file}' &
+    printf '%s\n' "$!" > "$pid_file"
+    i=0
+    while [ "$i" -lt 100 ]; do
+      if [ -S '{managed_root}/daemon/source-refresh.sock' ] && [ -f '{managed_root}/daemon/daemon.lock' ]; then break; fi
+      i=$((i + 1))
+      sleep 0.05
+    done
+    exit 0
+    ;;
+  "--user restart ctx.service")
+    current_pid="$(sed -n '1p' "$pid_file")"
+    if [ -f '{managed_root}/daemon/daemon.lock' ]; then
+      lock_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' '{managed_root}/daemon/daemon.lock' | sed -n '1p')
+      if [ -n "$lock_pid" ]; then current_pid="$lock_pid"; fi
+    fi
+    if [ -n "$current_pid" ]; then kill "$current_pid" 2>/dev/null || true; fi
+    rm -f "$pid_file"
+    i=0
+    while [ "$i" -lt 100 ] && [ -f '{managed_root}/daemon/daemon.lock' ]; do
+      i=$((i + 1))
+      sleep 0.05
+    done
+    if [ "$clean_exit_before_manager_restart" = 1 ]; then
+      if grep -Fxq 'Restart=always' "$unit_file"; then
+        sleep 0.1
+        nohup setsid /usr/bin/env -i "CTX_INTERNAL_SUPERVISOR_ENVIRONMENT_FILE=$environment_file" '{binary}' --data-root '{managed_root}' daemon run --format=json </dev/null >'{stdout_file}' 2>'{stderr_file}' &
+        printf '%s\n' "$!" > "$pid_file"
+        i=0
+        while [ "$i" -lt 100 ]; do
+          if [ -S '{managed_root}/daemon/source-refresh.sock' ] && [ -f '{managed_root}/daemon/daemon.lock' ]; then break; fi
+          i=$((i + 1))
+          sleep 0.05
+        done
+      fi
+      exit 0
+    fi
+    nohup setsid /usr/bin/env -i "CTX_INTERNAL_SUPERVISOR_ENVIRONMENT_FILE=$environment_file" '{binary}' --data-root '{managed_root}' daemon run --format=json </dev/null >'{stdout_file}' 2>'{stderr_file}' &
+    printf '%s\n' "$!" > "$pid_file"
+    i=0
+    while [ "$i" -lt 100 ]; do
+      if [ -S '{managed_root}/daemon/source-refresh.sock' ] && [ -f '{managed_root}/daemon/daemon.lock' ]; then break; fi
+      i=$((i + 1))
+      sleep 0.05
+    done
+    exit 0
+    ;;
+  "--user is-enabled ctx.service")
+    if [ -f "$enabled_file" ]; then printf 'enabled\n'; exit 0; fi
+    exit 1
+    ;;
+  "--user is-active ctx.service")
+    if [ -f '{managed_root}/daemon/daemon.lock' ]; then
+      lock_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' '{managed_root}/daemon/daemon.lock' | sed -n '1p')
+      if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+        printf 'active\n'
+        exit 0
+      fi
+    fi
+    exit 1
+    ;;
+  "--user show ctx.service --property=MainPID --value")
+    i=0
+    while [ "$i" -lt 100 ]; do
+      if [ -f '{managed_root}/daemon/daemon.lock' ]; then
+      lock_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' '{managed_root}/daemon/daemon.lock' | sed -n '1p')
+        if [ -n "$lock_pid" ]; then printf '%s\n' "$lock_pid"; exit 0; fi
+      fi
+      i=$((i + 1))
+      sleep 0.05
+    done
+    exit 1
+    ;;
+  "--user disable --now ctx.service")
+    current_pid="$(sed -n '1p' "$pid_file")"
+    if [ -f '{managed_root}/daemon/daemon.lock' ]; then
+      lock_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' '{managed_root}/daemon/daemon.lock' | sed -n '1p')
+      if [ -n "$lock_pid" ]; then current_pid="$lock_pid"; fi
+    fi
+    if [ -n "$current_pid" ]; then kill "$current_pid" 2>/dev/null || true; fi
+    rm -f "$pid_file" "$enabled_file"
+    exit 0
+    ;;
+esac
+printf 'unexpected fake systemctl invocation: %s\n' "$*" >&2
+exit 2
+"#,
+            pid_file = pid_file.display(),
+            enabled_file = enabled_file.display(),
+            unit_file = unit_file.display(),
+            clean_exit_before_manager_restart =
+                if clean_exit_before_manager_restart { 1 } else { 0 },
+            binary = binary.display(),
+            managed_root = managed_root.display(),
+            stdout_file = stdout_file.display(),
+            stderr_file = stderr_file.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+    (
+        manager_bin,
+        FakeSystemdDaemon {
+            pid_file: pid_file.clone(),
+            data_root: managed_root.to_path_buf(),
+            executable: binary.to_path_buf(),
+        },
+    )
+}
+
 pub(super) struct SourceRefreshDaemon {
     child: Option<Child>,
 }
