@@ -57,148 +57,6 @@ fn install_managed_test_marker(binary: &std::path::Path) {
     .unwrap();
 }
 
-#[cfg(target_os = "linux")]
-struct FakeSystemdDaemon {
-    pid_file: std::path::PathBuf,
-    data_root: std::path::PathBuf,
-    executable: std::path::PathBuf,
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for FakeSystemdDaemon {
-    fn drop(&mut self) {
-        let Some(pid) = fs::read_to_string(&self.pid_file)
-            .ok()
-            .and_then(|pid| pid.trim().parse::<u32>().ok())
-        else {
-            return;
-        };
-        let Some(lock) = fs::read(self.data_root.join("daemon/daemon.lock"))
-            .ok()
-            .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
-        else {
-            return;
-        };
-        let recorded_binary = lock.get("binary").and_then(Value::as_str).map(Path::new);
-        let process_binary = fs::read_link(format!("/proc/{pid}/exe")).ok();
-        if lock.get("pid").and_then(Value::as_u64) != Some(u64::from(pid))
-            || lock.get("data_root").and_then(Value::as_str) != self.data_root.to_str()
-            || recorded_binary.and_then(|path| fs::canonicalize(path).ok())
-                != fs::canonicalize(&self.executable).ok()
-            || process_binary.and_then(|path| fs::canonicalize(path).ok())
-                != fs::canonicalize(&self.executable).ok()
-        {
-            return;
-        }
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn fake_operational_systemd_user_manager(
-    temp: &TempDir,
-    binary: &std::path::Path,
-    managed_root: &std::path::Path,
-    clean_exit_before_manager_restart: bool,
-) -> (std::path::PathBuf, FakeSystemdDaemon) {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let manager_bin = temp.path().join("fake-systemd-bin");
-    fs::create_dir(&manager_bin).unwrap();
-    let systemctl = manager_bin.join("systemctl");
-    let pid_file = temp.path().join("fake-systemd-main.pid");
-    let enabled_file = temp.path().join("fake-systemd-enabled");
-    let stdout_file = temp.path().join("fake-systemd-daemon.stdout");
-    let stderr_file = temp.path().join("fake-systemd-daemon.stderr");
-    let unit_file = temp.path().join(".config/systemd/user/ctx.service");
-    fs::write(
-        &systemctl,
-        format!(
-            r#"#!/bin/sh
-pid_file='{pid_file}'
-enabled_file='{enabled_file}'
-unit_file='{unit_file}'
-clean_exit_before_manager_restart='{clean_exit_before_manager_restart}'
-case "$*" in
-  "--user show --property=Version --value")
-    printf '255\n'
-    exit 0
-    ;;
-  "--user daemon-reload")
-    exit 0
-    ;;
-  "--user enable ctx.service")
-    : > "$enabled_file"
-    exit 0
-    ;;
-  "--user start ctx.service")
-    if [ -s "$pid_file" ] && kill -0 "$(sed -n '1p' "$pid_file")" 2>/dev/null; then
-      exit 0
-    fi
-    if [ "$clean_exit_before_manager_restart" = 1 ]; then
-      rm -f "$pid_file"
-      if grep -Fxq 'Restart=always' "$unit_file"; then
-        (
-          sleep 0.1
-          '{binary}' --data-root '{managed_root}' daemon run --format=json >'{stdout_file}' 2>'{stderr_file}' &
-          printf '%s\n' "$!" > "$pid_file"
-        ) &
-      fi
-      exit 0
-    fi
-    '{binary}' --data-root '{managed_root}' daemon run --format=json >'{stdout_file}' 2>'{stderr_file}' &
-    printf '%s\n' "$!" > "$pid_file"
-    exit 0
-    ;;
-  "--user is-enabled ctx.service")
-    if [ -f "$enabled_file" ]; then printf 'enabled\n'; exit 0; fi
-    exit 1
-    ;;
-  "--user is-active ctx.service")
-    if [ -s "$pid_file" ] && kill -0 "$(sed -n '1p' "$pid_file")" 2>/dev/null; then
-      printf 'active\n'
-      exit 0
-    fi
-    exit 1
-    ;;
-  "--user show ctx.service --property=MainPID --value")
-    sed -n '1p' "$pid_file"
-    exit 0
-    ;;
-  "--user disable --now ctx.service")
-    if [ -s "$pid_file" ]; then kill "$(sed -n '1p' "$pid_file")" 2>/dev/null || true; fi
-    rm -f "$pid_file" "$enabled_file"
-    exit 0
-    ;;
-esac
-printf 'unexpected fake systemctl invocation: %s\n' "$*" >&2
-exit 2
-"#,
-            pid_file = pid_file.display(),
-            enabled_file = enabled_file.display(),
-            unit_file = unit_file.display(),
-            clean_exit_before_manager_restart =
-                if clean_exit_before_manager_restart { 1 } else { 0 },
-            binary = binary.display(),
-            managed_root = managed_root.display(),
-            stdout_file = stdout_file.display(),
-            stderr_file = stderr_file.display(),
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
-    (
-        manager_bin,
-        FakeSystemdDaemon {
-            pid_file: pid_file.clone(),
-            data_root: managed_root.to_path_buf(),
-            executable: binary.to_path_buf(),
-        },
-    )
-}
-
 #[test]
 fn setup_does_not_migrate_legacy_shim_directory() {
     let temp = daemon_test_root();
@@ -348,9 +206,11 @@ fn setup_semantic_allows_manual_indexing_without_starting_a_daemon() {
     assert_eq!(status["daemon"]["enabled"], true, "{status:#}");
     assert_eq!(status["semantic"]["enabled"], true, "{status:#}");
     assert!(!data_root(&explicit_opt_out).join("search").exists());
-    assert!(!data_root(&explicit_opt_out)
-        .join("relational.sqlite")
-        .exists());
+    assert!(
+        !data_root(&explicit_opt_out)
+            .join("relational.sqlite")
+            .exists()
+    );
     assert!(!data_root(&explicit_opt_out).join("catalogs").exists());
     assert_no_daemon_autostart_mutation(&explicit_opt_out);
 }
@@ -788,9 +648,11 @@ fn semantic_enable_auto_starts_the_existing_daemon_acquisition_path() {
         status["daemon"]["jobs"]["semantic_index"]["semantic_enabled"], true,
         "{status:#}"
     );
-    assert!(fs::read_to_string(data_root(&temp).join("config.toml"))
-        .unwrap()
-        .contains("[search]\nsemantic = true\n"));
+    assert!(
+        fs::read_to_string(data_root(&temp).join("config.toml"))
+            .unwrap()
+            .contains("[search]\nsemantic = true\n")
+    );
 
     let waited = json_output(ctx(&temp).args(["semantic", "enable", "--wait", "--format=json"]));
     assert_eq!(waited["status"], "ready", "{waited:#}");
@@ -1304,6 +1166,36 @@ fn assert_empty_catalog_default_background_setup(setup: &Value) {
     }
 }
 
+fn assert_empty_catalog_recovered_setup(setup: &Value) {
+    assert!(
+        matches!(
+            setup["lexical"]["status"].as_str(),
+            Some("ready" | "pending")
+        ),
+        "{setup:#}"
+    );
+    if setup["lexical"]["status"] == "ready" {
+        assert_eq!(setup["lexical"]["certified_sources"], 0, "{setup:#}");
+        assert_eq!(setup["lexical"]["indexed_documents"], 0, "{setup:#}");
+    }
+    match setup["refresh"]["status"].as_str() {
+        Some("ready") => {
+            assert_eq!(setup["mode"], "ready", "{setup:#}");
+            if let Err(error) = validate_empty_catalog_setup_mode(setup) {
+                panic!("{error}: {setup:#}");
+            }
+        }
+        Some("pending") => {
+            assert_eq!(setup["mode"], "pending", "{setup:#}");
+            assert_eq!(
+                setup["refresh"]["reason"], "core_refresh_pending",
+                "{setup:#}"
+            );
+        }
+        _ => panic!("recovered empty-catalog setup must be ready or pending: {setup:#}"),
+    }
+}
+
 #[test]
 fn empty_catalog_default_background_oracle_is_status_sensitive() {
     let request = |status: &str, receipt: Value| json!({ "status": status, "source_count": 0, "receipt": receipt });
@@ -1329,12 +1221,14 @@ fn empty_catalog_default_background_oracle_is_status_sensitive() {
         );
     }
     assert!(validate_empty_catalog_refresh_request(&request("unknown", Value::Null)).is_err());
-    assert!(validate_empty_catalog_refresh_request(&json!({
-        "status": "running",
-        "source_count": 1,
-        "receipt": null,
-    }))
-    .is_err());
+    assert!(
+        validate_empty_catalog_refresh_request(&json!({
+            "status": "running",
+            "source_count": 1,
+            "receipt": null,
+        }))
+        .is_err()
+    );
 }
 
 #[test]

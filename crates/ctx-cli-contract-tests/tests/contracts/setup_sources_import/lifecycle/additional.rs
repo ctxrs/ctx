@@ -107,7 +107,7 @@ fn operational_systemd_installer_style_setup_verifies_an_empty_noop_core() {
         setup["daemon"]["supervisor"]["status"], "installed",
         "{setup:#}"
     );
-    assert_empty_catalog_default_background_setup(&setup);
+    assert_empty_catalog_recovered_setup(&setup);
 
     let mut ordinary_status = ctx_from_binary(&temp, &binary);
     ordinary_status
@@ -183,7 +183,7 @@ fn hosted_setup_recovers_when_the_new_systemd_service_first_exits_cleanly() {
         setup["daemon"]["supervisor"]["status"], "installed",
         "{setup:#}"
     );
-    assert_empty_catalog_default_background_setup(&setup);
+    assert_empty_catalog_recovered_setup(&setup);
 }
 
 #[cfg(target_os = "linux")]
@@ -224,7 +224,7 @@ fn unavailable_systemd_installer_style_setup_starts_a_persistent_fallback() {
         setup["daemon"]["supervisor"]["status"], "manager_unavailable",
         "{setup:#}"
     );
-    assert_empty_catalog_default_background_setup(&setup);
+    assert_empty_catalog_recovered_setup(&setup);
 
     let mut human_command = ctx_from_binary(&temp, &binary);
     human_command
@@ -273,9 +273,11 @@ fn setup_autostart_records_spawn_failure_status() {
     assert_eq!(status["daemon"]["reason"], "spawn_failed");
     assert_eq!(status["daemon"]["start_mode"], "auto");
     assert_eq!(status["daemon"]["trigger_command"], "setup");
-    assert!(status["daemon"]["last_error"]
-        .as_str()
-        .is_some_and(|error| !error.is_empty()));
+    assert!(
+        status["daemon"]["last_error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty())
+    );
 }
 
 #[test]
