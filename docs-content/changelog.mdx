@@ -8,6 +8,29 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.0.2
+
+Released: 2026-09-25
+
+### Changed
+
+- `ctx sift` is the single command for output filtering and recall. Use `ctx sift recall` for retained output; the older root `ctx run`, `ctx compact`, `ctx restore`, `ctx recall`, and `ctx output` aliases are removed.
+
+### Fixed
+
+- Upgrades from a core-only ctx installation now complete without an integration ownership reconciliation warning.
+- Large imports keep queryable Blame facts from unaffected events and report bounded omissions instead of losing the whole page.
+- Index cleanup preserves certification when it discards unchanged candidates.
+
+### Commits and PRs
+
+- Source commit: [cff9cadb](https://github.com/ctxrs/ctx/commit/cff9cadbd0e86d25f21e0e835f261fef94ee5937).
+- Full diff: [v2.0.0...v2.0.2](https://github.com/ctxrs/ctx/compare/v2.0.0...v2.0.2). The earlier v2.0.1 tag remained a prerelease.
+- [#1055](https://github.com/ctxrs/ctx/pull/1055) — repair core-only upgrades.
+- [#1056](https://github.com/ctxrs/ctx/pull/1056) — retain index certification.
+- [#1059](https://github.com/ctxrs/ctx/pull/1059) — make `ctx sift` the sole output CLI.
+- [#1060](https://github.com/ctxrs/ctx/pull/1060) — retain Blame facts on large imports.
+
 ## 2.0.0
 
 Released: 2026-09-24
