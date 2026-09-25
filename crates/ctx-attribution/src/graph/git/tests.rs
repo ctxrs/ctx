@@ -684,3 +684,12 @@ fn bounded_stdout_is_drained_concurrently_without_pipe_deadlock()
     assert!(started.elapsed() < Duration::from_secs(5));
     Ok(())
 }
+
+#[cfg(test)]
+#[test]
+fn missing_authorized_git_is_runtime_unavailable() {
+    assert!(matches!(
+        required_git_executable(None),
+        Err(QueryError::GitUnavailable)
+    ));
+}
