@@ -51,17 +51,8 @@ pub(super) fn protocol_error(error: crate::protocol::ProtocolError) -> SegmentMa
 }
 
 #[cfg(test)]
-#[test]
-fn prepared_core_bound_keeps_its_reason() {
-    let error = protocol_error(crate::protocol::ProtocolError::new(
-        ErrorClass::Bounds,
-        "Core prepared unit exceeds its worst-case byte credit (source core_source_abc)",
-    ));
-    assert_eq!(
-        error.to_string(),
-        "segment materializer bound exceeded: Core prepared unit exceeds its worst-case byte credit (source core_source_abc)"
-    );
-}
+#[path = "support_tests.rs"]
+mod tests;
 
 pub(crate) fn stage_direct_pages(
     direct: &mut super::super::publication::DirectCandidate,

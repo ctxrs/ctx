@@ -422,22 +422,6 @@ fn index_page_requires_flush(
             || source_out_of_order)
 }
 
-#[cfg(test)]
-#[test]
-fn event_index_rolls_before_its_byte_cap_even_when_record_count_is_low() {
-    let max = MAX_PUBLICATION_EVENT_INDEX_OPEN_BYTES as u64;
-    assert!(!index_page_requires_flush(
-        1,
-        1,
-        max - 500,
-        Some(500),
-        false
-    ));
-    assert!(index_page_requires_flush(1, 1, max - 500, Some(501), false));
-    assert!(!index_page_requires_flush(0, 1, 0, Some(501), false));
-    assert!(index_page_requires_flush(1, 1, 0, Some(501), true));
-}
-
 pub(super) fn plan_direct_pages(
     candidate: &SegmentCandidateControl,
     pages: &[StagedPage],

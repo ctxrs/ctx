@@ -80,3 +80,19 @@ fn manifest_preflight_boundary_is_exactly_four_thousand_ninety_six() {
     );
     assert!(!over_limit.fits_manifest().unwrap());
 }
+
+#[cfg(test)]
+#[test]
+fn event_index_rolls_before_its_byte_cap_even_when_record_count_is_low() {
+    let max = MAX_PUBLICATION_EVENT_INDEX_OPEN_BYTES as u64;
+    assert!(!index_page_requires_flush(
+        1,
+        1,
+        max - 500,
+        Some(500),
+        false
+    ));
+    assert!(index_page_requires_flush(1, 1, max - 500, Some(501), false));
+    assert!(!index_page_requires_flush(0, 1, 0, Some(501), false));
+    assert!(index_page_requires_flush(1, 1, 0, Some(501), true));
+}
