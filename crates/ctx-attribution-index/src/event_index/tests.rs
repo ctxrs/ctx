@@ -16,6 +16,16 @@ const TEST_GENERATION: [u8; 32] = [0x67; 32];
 const TEST_CHUNK_BYTES: u32 = 16 * 1024;
 
 #[test]
+fn bounded_omission_uses_spare_coverage_bit_and_old_bytes_remain_readable() {
+    let mut coverage = SegmentCoreCoverage::default();
+    assert_eq!(pack_coverage(&coverage).unwrap(), 0);
+    coverage.bounded_omission_events = 1;
+    assert_eq!(pack_coverage(&coverage).unwrap(), 0b0100_0000);
+    assert_eq!(unpack_coverage(0b0100_0000).unwrap(), coverage);
+    assert!(unpack_coverage(0b1000_0000).is_err());
+}
+
+#[test]
 fn synthetic_corpus_metadata_bounds_are_allocation_free() {
     assert_eq!(MAX_EVENT_INDEX_ENTRIES, 4_194_304);
     assert_eq!(MAX_EVENT_INDEX_SOURCES, MAX_CORE_SOURCE_STATES);
@@ -865,6 +875,7 @@ fn test_state(
             file_evidence_events: u64::from(event_number & 8 != 0),
             exact_commit_evidence_events: u64::from(event_number & 16 != 0),
             exact_pull_request_evidence_events: u64::from(event_number & 32 != 0),
+            bounded_omission_events: u64::from(event_number & 64 != 0),
         },
     })
 }

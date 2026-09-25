@@ -853,18 +853,35 @@ impl GenerationWriter {
         let Some(directory) = self.candidate_directory_name.take() else {
             return Ok(());
         };
-        if let Some(proof) = self.candidate_physical_proof.as_mut() {
-            proof.clear();
-        }
-        self.candidate_physical_proof = None;
         let activation_fence =
             self.candidate_activation_fence
                 .take()
                 .ok_or(IndexError::WriterInvariant(
                     "candidate generation is missing its activation fence",
                 ))?;
-        activation_fence.validate_binding()?;
-        fs::remove_dir_all(self.root.join(INDEX_GENERATIONS_DIRECTORY).join(directory))?;
+        let candidate_path = self.root.join(INDEX_GENERATIONS_DIRECTORY).join(&directory);
+        let remove = || {
+            activation_fence.validate_binding()?;
+            fs::remove_dir_all(&candidate_path)
+                .map_err(ctx_history_index_generation::GenerationError::from)
+        };
+        if let (Some(pointer), Some(base), Some(proof)) = (
+            self.active_pointer.as_ref(),
+            self.base_publication.as_ref(),
+            self.candidate_physical_proof.as_ref(),
+        ) {
+            ctx_history_index_generation::reclaim_candidate_with_certifications(
+                &self.root,
+                pointer,
+                base.searcher().index(),
+                &directory,
+                proof,
+                remove,
+            )?;
+        } else {
+            remove()?;
+        }
+        self.candidate_physical_proof = None;
         sync_directory(&self.root.join(INDEX_GENERATIONS_DIRECTORY))?;
         Ok(())
     }

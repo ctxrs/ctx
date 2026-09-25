@@ -88,6 +88,7 @@ fn rollover_record(source: &EventIndexSource, tag: u8) -> IndexedCoreEventState 
             file_evidence_events: 0,
             exact_commit_evidence_events: 0,
             exact_pull_request_evidence_events: 0,
+            bounded_omission_events: 0,
         },
     }
 }

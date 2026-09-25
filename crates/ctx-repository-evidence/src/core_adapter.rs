@@ -55,11 +55,11 @@ struct PendingInvocation {
 /// coexist in this unresolved window become ambiguous. A later record cannot
 /// retroactively revoke a join already projected by this streaming adapter;
 /// source-wide uniqueness, when required, must be established upstream.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CoreRepositoryEvidenceAdapter {
     resolver: RepositoryEvidenceResolver,
-    pending: BTreeMap<String, Option<PendingInvocation>>,
-    pending_results: BTreeMap<String, Option<PendingResult>>,
+    pending: BTreeMap<String, Option<std::sync::Arc<PendingInvocation>>>,
+    pending_results: BTreeMap<String, Option<std::sync::Arc<PendingResult>>>,
 }
 
 impl CoreRepositoryEvidenceAdapter {
@@ -114,7 +114,7 @@ impl CoreRepositoryEvidenceAdapter {
                 None => {
                     let duplicate = match self.pending.entry(call_id.clone()) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(Some(pending));
+                            entry.insert(Some(std::sync::Arc::new(pending)));
                             false
                         }
                         std::collections::btree_map::Entry::Occupied(mut entry) => {
@@ -158,7 +158,7 @@ impl CoreRepositoryEvidenceAdapter {
                 None => {
                     let duplicate = match self.pending_results.entry(call_id) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(Some(result));
+                            entry.insert(Some(std::sync::Arc::new(result)));
                             false
                         }
                         std::collections::btree_map::Entry::Occupied(mut entry) => {

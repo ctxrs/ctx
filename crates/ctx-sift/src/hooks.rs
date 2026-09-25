@@ -70,19 +70,25 @@ fn wrapper_mode(argv: &[OsString]) -> Option<bool> {
     };
     let program = argv.first()?.to_str()?;
     let program = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    let command = match program {
-        "sift" | "sift.exe" => &argv[1..],
+    let (command, ctx_sift) = match program {
+        "sift" | "sift.exe" => (&argv[1..], false),
         "ctx" | "ctx.exe" => ctx_sift_command(&argv[1..])?,
         _ => return None,
     };
-    if !command
-        .first()
-        .is_some_and(|word| word == "run" || word == "proxy")
-    {
-        return None;
+    let first = command.first()?.to_str()?;
+    if first == "--" {
+        return (ctx_sift && command.len() > 1).then_some(false);
     }
-    let mut raw = command[0] == "proxy";
-    let mut remaining = &command[1..];
+    let (mut raw, mut remaining) = match first {
+        "run" | "proxy" => (first == "proxy", &command[1..]),
+        "--raw" | "--capture" if ctx_sift => (false, command),
+        "hook" | "filter" | "read" | "json" | "summary" | "err" | "test" | "gain" | "config"
+        | "semantic" | "discover" | "ccusage" | "rewrite" | "compact" | "restore" | "recall"
+        | "--help" | "-h" | "--version" => return None,
+        flag if flag.starts_with('-') => return None,
+        _ if ctx_sift => return Some(false),
+        _ => return None,
+    };
     while remaining
         .first()
         .is_some_and(|word| word == "--raw" || word == "--capture")
@@ -108,12 +114,13 @@ fn wrapper_mode(argv: &[OsString]) -> Option<bool> {
 }
 
 /// Consume only known root options, stopping before any output/child arguments.
-fn ctx_sift_command(mut args: &[OsString]) -> Option<&[OsString]> {
+fn ctx_sift_command(mut args: &[OsString]) -> Option<(&[OsString], bool)> {
     loop {
         let word = args.first()?.to_str()?;
         let consumed = match word {
-            "run" => return Some(args),
-            "output" => return Some(&args[1..]),
+            "run" => return Some((args, false)),
+            "sift" => return Some((&args[1..], true)),
+            "output" => return Some((&args[1..], false)),
             "--quiet" => 1,
             "--color" if matches!(args.get(1)?.to_str()?, "auto" | "always" | "never") => 2,
             "--color=auto" | "--color=always" | "--color=never" => 1,

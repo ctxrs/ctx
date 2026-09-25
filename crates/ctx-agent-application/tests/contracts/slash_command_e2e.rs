@@ -745,8 +745,8 @@ fn assert_ctx_prompt(rendered: &str, query: &str) {
         "ctx search",
         "ctx blame",
         "ctx graph search",
-        "ctx run",
-        "ctx compact",
+        "ctx sift --",
+        "ctx sift compact",
     ] {
         assert!(
             rendered.contains(operation),

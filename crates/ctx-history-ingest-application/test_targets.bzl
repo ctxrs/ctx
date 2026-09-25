@@ -11,7 +11,7 @@ _CONTRACT_SUPPORT_SRCS = [
 _CONTRACT_SUPPORT_DEPS = [
     "@crates//:assert_cmd",
     "@crates//:predicates",
-    "@crates//:serde_json-1.0.150",
+    "@crates//:serde_json-1.0.151",
     "@crates//:tempfile",
     "@crates//:uuid",
     "@crates//:zstd",

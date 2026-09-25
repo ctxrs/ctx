@@ -8,6 +8,7 @@ fn coverage(live_roots: u64, files: u64, commits: u64) -> SegmentCoreCoverage {
         file_evidence_events: files,
         exact_commit_evidence_events: commits,
         exact_pull_request_evidence_events: 1,
+        bounded_omission_events: 0,
     }
 }
 
@@ -23,6 +24,20 @@ fn current_complete_durable_evidence_enables_repository_and_file_blame() {
     assert!(availability.file_blame);
     assert!(availability.commit_blame);
     assert!(availability.pull_request_blame);
+}
+
+#[test]
+fn current_partial_omission_keeps_retained_blame_available() {
+    let mut retained = coverage(1, 1, 1);
+    retained.bounded_omission_events = 1;
+    let (local_repository_access, availability) = projection_availability(
+        CoreProjectionCurrentness::Current,
+        MaterializedCoverage::Partial,
+        &retained,
+    );
+    assert!(local_repository_access);
+    assert!(availability.file_blame);
+    assert!(availability.commit_blame);
 }
 
 #[test]

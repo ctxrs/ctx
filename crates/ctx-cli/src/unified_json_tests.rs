@@ -3,7 +3,7 @@
 
 #[test]
 fn history_json_preserves_released_value_bytes() {
-    // Frozen serde_json 1.0.150 default-parser behavior: sorted object keys,
+    // Frozen serde_json 1.0.151 default-parser behavior: sorted object keys,
     // f64 decimals/exponents, and floating negative zero. 10^20 exceeds u64
     // but is exactly representable as f64; its published formatter emits 1e+20.
     // Expected bytes must not be regenerated with the currently linked parser.

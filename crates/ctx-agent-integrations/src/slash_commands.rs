@@ -33,7 +33,7 @@ User request: $ARGUMENTS
 Choose `ctx search` for history and `ctx blame` for code provenance. Inspect cited
 events or sessions before making claims. Use `ctx graph search` or
 `ctx graph impact` for code relationships; graph evidence is not proof of agent authorship.
-Use `ctx run -- PROGRAM ARG...` or `ctx compact FILE` only when the user requests
+Use `ctx sift -- PROGRAM ARG...` or `ctx sift compact FILE` only when the user requests
 output compaction or an existing explicit project or user instruction opts in.
 Permission to execute a command alone is not compaction consent; run ordinary
 commands directly. Graph and output need no history setup.

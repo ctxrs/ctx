@@ -127,7 +127,7 @@ impl Selection {
 
     pub fn render(&self, text: &str, proposal: &Proposal, original_id: &str) -> String {
         let mut output = format!(
-            "Sift semantic selection: INCOMPLETE\nOmitted passage IDs: {}\nFull output: ctx recall {original_id}\n\n",
+        "Sift semantic selection: INCOMPLETE\nOmitted passage IDs: {}\nFull output: ctx sift recall {original_id}\n\n",
             proposal.omitted.join(", ")
         );
         for (position, index) in proposal.kept.iter().enumerate() {
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(proposal.omitted, ["c"]);
         let frame = selection.render(&text, &proposal, "abc-123");
         assert!(frame.contains("INCOMPLETE"));
-        assert!(frame.contains("ctx recall abc-123"));
+        assert!(frame.contains("ctx sift recall abc-123"));
         assert!(frame.find(&"a".repeat(400)).unwrap() < frame.find('β').unwrap());
     }
 

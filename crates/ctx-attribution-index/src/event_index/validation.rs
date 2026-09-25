@@ -80,6 +80,7 @@ pub fn pack_coverage(coverage: &SegmentCoreCoverage) -> Result<u8, EventIndexErr
         coverage.file_evidence_events,
         coverage.exact_commit_evidence_events,
         coverage.exact_pull_request_evidence_events,
+        coverage.bounded_omission_events,
     ];
     if counts.into_iter().any(|count| count > 1) {
         return Err(EventIndexError::Invalid("per-event coverage"));
@@ -104,6 +105,7 @@ pub fn unpack_coverage(packed: u8) -> Result<SegmentCoreCoverage, EventIndexErro
         file_evidence_events: bit(3),
         exact_commit_evidence_events: bit(4),
         exact_pull_request_evidence_events: bit(5),
+        bounded_omission_events: bit(6),
     })
 }
 

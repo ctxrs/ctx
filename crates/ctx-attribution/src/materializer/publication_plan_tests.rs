@@ -2,35 +2,21 @@ use super::*;
 
 #[test]
 fn event_index_preflight_preserves_staged_page_boundaries() {
-    let mut exact = SegmentPublicationReferencePlan {
-        event_index_open_records: u32::try_from(MAX_PUBLICATION_TOMBSTONES - 2).unwrap(),
-        event_index_open_accounted_bytes: 1,
-        event_index_open_source_id: Some("source-a".to_owned()),
-        ..Default::default()
-    };
-    exact
-        .prepare_index_page(2)
-        .expect("an exactly fitting page stays open");
-    assert_eq!(exact.event_index_segments, 0);
-    assert_eq!(
-        exact.event_index_open_records,
-        u32::try_from(MAX_PUBLICATION_TOMBSTONES - 2).unwrap()
-    );
-
-    let mut rollover = SegmentPublicationReferencePlan {
-        event_index_open_records: u32::try_from(MAX_PUBLICATION_TOMBSTONES - 1).unwrap(),
-        event_index_open_accounted_bytes: 1,
-        event_index_open_source_id: Some("source-a".to_owned()),
-        ..Default::default()
-    };
-    rollover
-        .prepare_index_page(2)
-        .expect("an overflowing page rolls over atomically");
-    assert_eq!(rollover.event_index_segments, 1);
-    assert_eq!(rollover.event_index_open_records, 0);
-    assert_eq!(rollover.event_index_open_tombstones, 0);
-    assert_eq!(rollover.event_index_open_accounted_bytes, 0);
-    assert_eq!(rollover.event_index_open_source_id, None);
+    let at_limit = u32::try_from(MAX_PUBLICATION_TOMBSTONES).unwrap();
+    assert!(!index_page_requires_flush(
+        at_limit - 2,
+        2,
+        1,
+        Some(1),
+        false
+    ));
+    assert!(index_page_requires_flush(
+        at_limit - 1,
+        2,
+        1,
+        Some(1),
+        false
+    ));
 }
 
 #[test]
@@ -93,4 +79,20 @@ fn manifest_preflight_boundary_is_exactly_four_thousand_ninety_six() {
         MAX_MANIFEST_SEGMENTS + 1
     );
     assert!(!over_limit.fits_manifest().unwrap());
+}
+
+#[cfg(test)]
+#[test]
+fn event_index_rolls_before_its_byte_cap_even_when_record_count_is_low() {
+    let max = MAX_PUBLICATION_EVENT_INDEX_OPEN_BYTES as u64;
+    assert!(!index_page_requires_flush(
+        1,
+        1,
+        max - 500,
+        Some(500),
+        false
+    ));
+    assert!(index_page_requires_flush(1, 1, max - 500, Some(501), false));
+    assert!(!index_page_requires_flush(0, 1, 0, Some(501), false));
+    assert!(index_page_requires_flush(1, 1, 0, Some(501), true));
 }

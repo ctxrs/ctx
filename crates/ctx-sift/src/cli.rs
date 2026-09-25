@@ -12,12 +12,11 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 const HELP: &str = "ctx sift — token-counted command output and recovery
 
 Usage:
-  ctx run [--raw|--capture] -- COMMAND [ARG...]
-  ctx compact [FILE|-]
-  ctx compact --protocol=json-v1|session-v1|session-v2
-  ctx restore --encoding ENCODING [FILE|-]
-  ctx recall --list | ID [--stderr] [--from N] [--lines N] [--grep TEXT]
-  ctx sift run|compact|restore|recall ...
+  ctx sift run [--raw|--capture] -- COMMAND [ARG...]
+  ctx sift compact [FILE|-]
+  ctx sift compact --protocol=json-v1|session-v1|session-v2
+  ctx sift restore --encoding ENCODING [FILE|-]
+  ctx sift recall --list | ID [--stderr] [--from N] [--lines N] [--grep TEXT]
   ctx sift proxy [--] COMMAND [ARG...]
   ctx sift filter [--capture]
   ctx sift read [FILE|-] [--from N] [--lines N] [--grep TEXT]

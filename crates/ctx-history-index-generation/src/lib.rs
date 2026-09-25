@@ -24,10 +24,11 @@ pub use certification::{acquire_terminal_publication_guard, TerminalPublicationG
 pub use certification::{
     active_generation_storage_metadata, cache_recertified_physical_integrity,
     certify_activated_generation, certify_candidate_physical_integrity,
-    reclaim_unreferenced_certifications, scrub_and_certify_physical_integrity,
-    verify_candidate_physical_integrity_read_only, verify_certified_physical_integrity,
-    verify_or_certify_physical_integrity, verify_physical_integrity_read_only,
-    ActiveGenerationPointerFence, ActiveGenerationStorageMetadata, CertifiedPhysicalIntegrity,
+    reclaim_candidate_with_certifications, reclaim_unreferenced_certifications,
+    scrub_and_certify_physical_integrity, verify_candidate_physical_integrity_read_only,
+    verify_certified_physical_integrity, verify_or_certify_physical_integrity,
+    verify_physical_integrity_read_only, ActiveGenerationPointerFence,
+    ActiveGenerationStorageMetadata, CertifiedPhysicalIntegrity,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use certification::{

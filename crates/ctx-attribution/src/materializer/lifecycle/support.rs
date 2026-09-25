@@ -44,11 +44,15 @@ pub(super) fn active_flat_layers_require_rebuild(
 
 pub(super) fn protocol_error(error: crate::protocol::ProtocolError) -> SegmentMaterializerError {
     if error.class == ErrorClass::Bounds {
-        SegmentMaterializerError::Bounds
+        SegmentMaterializerError::BoundDetail(error.message)
     } else {
         SegmentMaterializerError::Conflict
     }
 }
+
+#[cfg(test)]
+#[path = "support_tests.rs"]
+mod tests;
 
 pub(crate) fn stage_direct_pages(
     direct: &mut super::super::publication::DirectCandidate,
@@ -375,6 +379,7 @@ pub(super) fn protocol_coverage(value: &SegmentCoreCoverage) -> CoreProjectionCo
         file_evidence_events: value.file_evidence_events,
         exact_commit_evidence_events: value.exact_commit_evidence_events,
         exact_pull_request_evidence_events: value.exact_pull_request_evidence_events,
+        bounded_omission_events: value.bounded_omission_events,
     }
 }
 

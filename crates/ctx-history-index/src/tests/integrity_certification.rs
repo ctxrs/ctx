@@ -164,6 +164,91 @@ fn repeated_open_and_exact_noop_read_zero_artifact_bodies() {
     assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn identical_replacement_preserves_certification_when_discarding_shared_files() {
+    for corrupt_shared_artifact in [false, true] {
+        let (temp, source, initial) = published_fixture("identical-replacement.jsonl");
+        let active_path = active_generation_path(temp.path());
+        let store_path = active_store_path(temp.path());
+        let meta_bytes = fs::metadata(active_path.join("meta.json")).unwrap().len();
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer
+            .add_core_record(document(&source, 1, "certified generation body"))
+            .unwrap();
+        writer
+            .certify_source(appendable_certificate(&source, 1, 1, 10))
+            .unwrap();
+
+        // Exercise shared-inode cleanup even where the native clone uses reflinks.
+        // Prime the ordinary candidate proof before measuring the no-op commit.
+        let candidate = temp
+            .path()
+            .join(INDEX_GENERATIONS_DIRECTORY)
+            .join(writer.candidate_directory_name.as_ref().unwrap());
+        for entry in fs::read_dir(&active_path).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') || name == "meta.json" {
+                continue;
+            }
+            let candidate_file = candidate.join(&name);
+            assert!(candidate_file.is_file());
+            fs::remove_file(&candidate_file).unwrap();
+            fs::hard_link(entry.path(), candidate_file).unwrap();
+        }
+        crate::publication::prime_candidate_physical_proof(
+            &writer.index,
+            &candidate,
+            writer.active_pointer.as_ref(),
+            writer.candidate_physical_proof.as_mut().unwrap(),
+        )
+        .unwrap();
+        crate::publication::reset_verification_activity();
+        let outcome = writer.commit(|_| {
+            if corrupt_shared_artifact {
+                let mut bytes = fs::read(&store_path).unwrap();
+                bytes[0] ^= 0x5a;
+                with_temporarily_writable(&store_path, || {
+                    overwrite_same_size_and_restore_mtime(&store_path, &bytes)
+                })
+                .unwrap();
+            }
+            true
+        });
+        if corrupt_shared_artifact {
+            assert!(matches!(
+                outcome,
+                Err(IndexError::ActiveGenerationNeedsRebuild { .. })
+            ));
+            assert_eq!(
+                load_active_generation_pointer(temp.path())
+                    .unwrap()
+                    .unwrap()
+                    .active()
+                    .generation_id(),
+                initial.generation_id
+            );
+            continue;
+        }
+        let reused = outcome.unwrap();
+
+        assert_eq!(reused.generation_id, initial.generation_id);
+        assert!(!candidate.exists());
+        assert_eq!(
+            VerifiedIndex::open_pinned(temp.path())
+                .unwrap()
+                .document_count(),
+            1
+        );
+        assert_eq!(crate::publication::hashed_artifact_bytes(), meta_bytes);
+    }
+}
+
 #[test]
 fn explicit_scrub_forces_one_full_hash_and_refreshes_reusable_authority() {
     let (temp, _, _) = published_fixture("explicit-integrity-scrub.jsonl");

@@ -415,12 +415,3 @@ fn is_object_id(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
-
-#[cfg(test)]
-#[test]
-fn missing_authorized_git_is_runtime_unavailable() {
-    assert!(matches!(
-        required_git_executable(None),
-        Err(QueryError::GitUnavailable)
-    ));
-}

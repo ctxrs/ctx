@@ -77,7 +77,7 @@ impl PublicationReferenceShape {
 
 trait SegmentPublicationReferencePlanExt {
     fn plan_page(&mut self, page: &StagedPage) -> Result<(), SegmentMaterializerError>;
-    fn prepare_index_page(&mut self, page_records: usize) -> Result<(), SegmentMaterializerError>;
+    fn prepare_index_page(&mut self, page: &StagedPage) -> Result<(), SegmentMaterializerError>;
     fn flat_requires_flush(
         &self,
         retained_bytes: usize,
@@ -134,7 +134,7 @@ impl SegmentPublicationReferencePlanExt for SegmentPublicationReferencePlan {
                 .ok_or(SegmentMaterializerError::Bounds)?;
             self.charge_flat(retained, 0)?;
         }
-        self.prepare_index_page(page.index_records.len())?;
+        self.prepare_index_page(page)?;
         self.charge_index(
             page.index_lineage
                 .sessions
@@ -172,21 +172,83 @@ impl SegmentPublicationReferencePlanExt for SegmentPublicationReferencePlan {
         Ok(())
     }
 
-    fn prepare_index_page(&mut self, page_records: usize) -> Result<(), SegmentMaterializerError> {
-        if page_records > MAX_PUBLICATION_TOMBSTONES {
+    fn prepare_index_page(&mut self, page: &StagedPage) -> Result<(), SegmentMaterializerError> {
+        let page_items = page
+            .index_records
+            .len()
+            .checked_add(page.index_tombstones.len())
+            .ok_or(SegmentMaterializerError::Bounds)?;
+        if page_items == 0 {
+            return Ok(());
+        }
+        if page_items > MAX_PUBLICATION_TOMBSTONES {
             return Err(SegmentMaterializerError::Bounds);
+        }
+        let source = &page.event_source;
+        let source_bytes = EventIndexWriter::publication_source_accounted_bytes(source)?;
+        let mut page_bytes = page
+            .index_lineage
+            .sessions
+            .len()
+            .checked_mul(EventIndexWriter::publication_session_accounted_bytes())
+            .and_then(|bytes| {
+                page.index_lineage
+                    .copied_origins
+                    .len()
+                    .checked_mul(EventIndexWriter::publication_copied_origin_accounted_bytes())
+                    .and_then(|copied| bytes.checked_add(copied))
+            })
+            .ok_or(SegmentMaterializerError::Bounds)?;
+        for record in &page.index_records {
+            page_bytes = page_bytes
+                .checked_add(EventIndexWriter::publication_record_accounted_bytes(
+                    record,
+                )?)
+                .ok_or(SegmentMaterializerError::Bounds)?;
+        }
+        for tombstone in &page.index_tombstones {
+            page_bytes = page_bytes
+                .checked_add(EventIndexWriter::publication_tombstone_accounted_bytes(
+                    tombstone,
+                )?)
+                .ok_or(SegmentMaterializerError::Bounds)?;
+        }
+        let standalone_bytes = page_bytes
+            .checked_add(source_bytes)
+            .ok_or(SegmentMaterializerError::Bounds)?;
+        if standalone_bytes > MAX_PUBLICATION_EVENT_INDEX_OPEN_BYTES {
+            return Err(SegmentMaterializerError::BoundDetail(format!(
+                "event index page bytes for source {} exceed {}",
+                source.storage_key, MAX_PUBLICATION_EVENT_INDEX_OPEN_BYTES
+            )));
         }
         let open_items = self
             .event_index_open_records
             .checked_add(self.event_index_open_tombstones)
             .ok_or(SegmentMaterializerError::Bounds)?;
-        let page_records =
-            u32::try_from(page_records).map_err(|_| SegmentMaterializerError::Bounds)?;
-        if open_items != 0
-            && open_items
-                .checked_add(page_records)
-                .is_none_or(|items| items > MAX_PUBLICATION_TOMBSTONES as u32)
-        {
+        let page_items = u32::try_from(page_items).map_err(|_| SegmentMaterializerError::Bounds)?;
+        let source_changed =
+            self.event_index_open_source_id.as_deref() != Some(source.storage_key.as_str());
+        let incoming_bytes = u64::try_from(page_bytes).ok().and_then(|bytes| {
+            if source_changed {
+                u64::try_from(source_bytes)
+                    .ok()
+                    .and_then(|source| bytes.checked_add(source))
+            } else {
+                Some(bytes)
+            }
+        });
+        let source_out_of_order = self
+            .event_index_open_source_id
+            .as_deref()
+            .is_some_and(|prior| prior > source.storage_key.as_str());
+        if index_page_requires_flush(
+            open_items,
+            page_items,
+            self.event_index_open_accounted_bytes,
+            incoming_bytes,
+            source_out_of_order,
+        ) {
             self.flush_index()?;
         }
         Ok(())
@@ -341,6 +403,23 @@ impl SegmentPublicationReferencePlanExt for SegmentPublicationReferencePlan {
             source: source.max(1),
         })
     }
+}
+
+fn index_page_requires_flush(
+    open_items: u32,
+    page_items: u32,
+    open_bytes: u64,
+    incoming_bytes: Option<u64>,
+    source_out_of_order: bool,
+) -> bool {
+    open_items != 0
+        && (open_items
+            .checked_add(page_items)
+            .is_none_or(|items| items > MAX_PUBLICATION_TOMBSTONES as u32)
+            || incoming_bytes
+                .and_then(|incoming| open_bytes.checked_add(incoming))
+                .is_none_or(|bytes| bytes > MAX_PUBLICATION_EVENT_INDEX_OPEN_BYTES as u64)
+            || source_out_of_order)
 }
 
 pub(super) fn plan_direct_pages(

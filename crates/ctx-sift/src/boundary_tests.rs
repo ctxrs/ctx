@@ -44,6 +44,9 @@ fn namespace_rejects_other_ctx_commands_and_has_no_install_lifecycle() {
 #[test]
 fn raw_detection_matches_only_output_invocations() {
     for command in [
+        "ctx sift run --raw -- git status",
+        "ctx sift --raw -- git status",
+        "ctx sift --capture --raw -- git status",
         "ctx run --raw -- git status",
         "ctx output run --capture --raw -- git status",
         "ctx --color never run --raw -- cat file",
@@ -66,6 +69,10 @@ fn raw_detection_matches_only_output_invocations() {
         );
     }
     for command in [
+        "ctx sift -- git status",
+        "ctx sift run -- git status",
+        "ctx sift -- tool --raw",
+        "ctx sift run -- tool --raw",
         "ctx graph run --raw cat",
         "ctx search --raw cat",
         "ctx output graph --raw cat",

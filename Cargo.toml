@@ -96,7 +96,7 @@ ignored-paths = [
 ]
 
 [workspace.package]
-version = "2.0.1"
+version = "2.0.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/ctxrs/ctx"
@@ -140,8 +140,7 @@ rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint", "functi
 quick-xml = { version = "0.41.0", default-features = false }
 same-file = "1.0.6"
 serde = { version = "1.0", features = ["derive", "rc"] }
-# Keep persisted history and Graf JSON semantics separate from the output codec.
-serde_json = { version = "=1.0.150", features = ["raw_value"] }
+serde_json = { version = "=1.0.151", features = ["raw_value"] }
 serde_yaml = { version = "0.9", default-features = false }
 semver = "1.0"
 sha2 = "0.10"

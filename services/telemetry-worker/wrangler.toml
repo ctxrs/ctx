@@ -25,7 +25,7 @@ max_concurrency = 4
 dead_letter_queue = "ctx-telemetry-ingest-staging-dlq"
 
 [triggers]
-crons = ["17 3 * * *"]
+crons = ["17 4 * * *"]
 
 [env.staging]
 name = "ctx-telemetry-staging"
@@ -65,7 +65,7 @@ max_concurrency = 4
 dead_letter_queue = "ctx-telemetry-ingest-staging-dlq"
 
 [env.staging.triggers]
-crons = ["17 3 * * *"]
+crons = ["17 4 * * *"]
 
 [env.prod]
 name = "ctx-telemetry"

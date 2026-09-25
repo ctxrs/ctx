@@ -75,7 +75,7 @@ does not invalidate evidence returned by the other. Scores from the two
 engines are not a common ranking scale.
 
 `--content-scope all|transcript|calls|outputs` remains a history-event filter.
-Its `outputs` value refers to historical tool outputs, not new `ctx run`
+Its `outputs` value refers to historical tool outputs, not new `ctx sift`
 invocations. `--workspace` and `--file` filter stored history metadata, not the
 current filesystem. `--term` retains OR semantics in history scope and is
 rejected in graph and all scopes. History-only filters belong to history scope;
@@ -125,7 +125,7 @@ compacted result.
 
 Command-specific presentations may abbreviate Git status or omit passing test
 rows. Those presentations differ from reversible compaction. Use raw output
-when exact bytes matter. `ctx recall --list` and `ctx recall ID` inspect
+when exact bytes matter. `ctx sift recall --list` and `ctx sift recall ID` inspect
 originals only when retention was enabled and a complete capture was saved;
 streamed output is not a recoverable transcript. Use `ctx sift --help` for
 output settings and available integration controls.
