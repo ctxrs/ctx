@@ -177,12 +177,10 @@ fn legacy_output_hook_can_be_reinstalled_or_removed_after_the_top_level_route_is
     ]);
     assert_eq!(reinstall["results"][0]["status"], "installed");
     let upgraded: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
-    assert!(
-        upgraded["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains(" sift hook claude")
-    );
+    assert!(upgraded["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains(" sift hook claude"));
 
     fs::write(&target, serde_json::to_vec(&config).unwrap()).unwrap();
     let remove = sandbox.json(&[
