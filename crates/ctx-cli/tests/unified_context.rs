@@ -167,7 +167,10 @@ impl Sandbox {
         assert_eq!(representation["version"], 1);
         let encoding = representation["encoding"].as_str().unwrap();
         let text = representation["text"].as_str().unwrap();
-        let restored = self.output(&["sift", "restore", "--encoding", encoding], text.as_bytes());
+        let restored = self.output(
+            &["sift", "restore", "--encoding", encoding],
+            text.as_bytes(),
+        );
         assert_success(&restored);
         assert_eq!(restored.stdout, expected);
     }
@@ -1269,7 +1272,10 @@ fn capture_compacts_both_streams_and_opt_in_recall_returns_the_originals_once() 
     sandbox.write("repo/emit.sh", "printf 'invoked\\n' >> invocations\ni=0\nwhile [ \"$i\" -lt 180 ]; do\n  printf 'output checkpoint complete\\r\\n'\n  printf 'error checkpoint retained\\r\\n' >&2\n  i=$((i + 1))\ndone\nexit 23\n");
     let stdout = "output checkpoint complete\r\n".repeat(180);
     let stderr = "error checkpoint retained\r\n".repeat(180);
-    let output = sandbox.output(&["sift", "run", "--capture", "--", "/bin/sh", "emit.sh"], b"");
+    let output = sandbox.output(
+        &["sift", "run", "--capture", "--", "/bin/sh", "emit.sh"],
+        b"",
+    );
     assert_eq!(output.status.code(), Some(23));
     // Independently expand the documented run grammar instead of asking the
     // same codec to decide whether its own emitted representation is correct.
@@ -1368,7 +1374,10 @@ fn run_default_raw_missing_program_and_signal_status_are_preserved() {
     assert!(raw.status.success());
     assert_eq!(raw.stdout, "raw repeated row\r\n".repeat(100).as_bytes());
     assert_eq!(raw.stderr, b"\xff\0end");
-    let missing = sandbox.output(&["sift", "run", "--", "ctx-synthetic-missing-executable"], b"");
+    let missing = sandbox.output(
+        &["sift", "run", "--", "ctx-synthetic-missing-executable"],
+        b"",
+    );
     assert_failure(&missing);
     assert_eq!(missing.status.code(), Some(127));
     let denied = sandbox.output(&["sift", "run", "--", "."], b"");
@@ -1376,7 +1385,15 @@ fn run_default_raw_missing_program_and_signal_status_are_preserved() {
     assert_eq!(denied.status.code(), Some(126));
     assert_failure(&sandbox.output(&["sift", "run", "--"], b""));
     let signal = sandbox.output(
-        &["sift", "run", "--raw", "--", "/bin/sh", "-c", "kill -TERM $$"],
+        &[
+            "sift",
+            "run",
+            "--raw",
+            "--",
+            "/bin/sh",
+            "-c",
+            "kill -TERM $$",
+        ],
         b"",
     );
     assert_eq!(signal.status.code(), Some(143));

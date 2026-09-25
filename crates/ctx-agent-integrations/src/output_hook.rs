@@ -5,8 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
-use serde_json::{Value, json};
+use anyhow::{anyhow, bail, ensure, Context as _, Result};
+use serde_json::{json, Value};
 
 use crate::{
     filesystem::atomic_update,
@@ -307,12 +307,10 @@ fn owned_entry_route(entry: &Value, agent: Agent, route: &str) -> bool {
 }
 
 fn copilot_hook_sources(context: &Context) -> Result<Vec<PathBuf>> {
-    let mut sources = vec![
-        context
-            .paths
-            .env_or_home_child("COPILOT_HOME", ".copilot")
-            .join("settings.json"),
-    ];
+    let mut sources = vec![context
+        .paths
+        .env_or_home_child("COPILOT_HOME", ".copilot")
+        .join("settings.json")];
     for root in [
         context
             .paths
