@@ -8,19 +8,30 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
-## 2.0.1
+## 2.0.2
 
 Released: 2026-09-24
 
+### Changed
+
+- `ctx sift` is the single command for output filtering and recall. Use `ctx sift recall` for retained output; the older root `ctx run`, `ctx compact`, `ctx restore`, `ctx recall`, and `ctx output` aliases are removed.
+
 ### Fixed
 
-- Upgrades from a core-only ctx installation now create the managed integration directories before recording ownership, so the upgrade completes without a reconciliation warning.
+- Upgrades from a core-only ctx installation now complete without an integration ownership reconciliation warning.
+- Large imports keep queryable Blame facts from unaffected events and report bounded omissions instead of losing the whole page.
+- Index cleanup preserves certification when it discards unchanged candidates.
+- Daily telemetry summaries remain correct as receipt history grows.
 
 ### Commits and PRs
 
-- Source commit: [ad18ec3f](https://github.com/ctxrs/ctx/commit/ad18ec3f71a5f8c1f796c9226e307974223a0b9b).
-- Full diff: [v2.0.0...v2.0.1](https://github.com/ctxrs/ctx/compare/v2.0.0...v2.0.1).
-- [#1055](https://github.com/ctxrs/ctx/pull/1055) — fix reconciliation on core-only upgrades.
+- Source commit: [c6f672fa](https://github.com/ctxrs/ctx/commit/c6f672fae568dd8f85afd45b25f19ade2b3ca726).
+- Full diff: [v2.0.0...v2.0.2](https://github.com/ctxrs/ctx/compare/v2.0.0...v2.0.2). The earlier v2.0.1 tag remained a prerelease.
+- [#1055](https://github.com/ctxrs/ctx/pull/1055) — repair core-only upgrades.
+- [#1056](https://github.com/ctxrs/ctx/pull/1056) — retain index certification.
+- [#1058](https://github.com/ctxrs/ctx/pull/1058) — repair daily telemetry summaries.
+- [#1059](https://github.com/ctxrs/ctx/pull/1059) — make `ctx sift` the sole output CLI.
+- [#1060](https://github.com/ctxrs/ctx/pull/1060) — retain Blame facts on large imports.
 
 ## 2.0.0
 
