@@ -58,14 +58,9 @@ fn writer_open_reclaims_unreferenced_and_quarantined_manifests() {
     assert!(manifest_path(temp.path(), &receipt.generation_id).exists());
 }
 
-#[cfg(unix)]
-#[test]
-fn writer_open_repairs_legacy_flat_delta_ancestor_before_materialization() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let temp = tempdir().unwrap();
+fn pinned_flat_delta_for_privacy_test(root: &Path) -> (VerifiedIndex, VerifiedIndex) {
     let source = source("legacy-flat-delta-ancestor.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+    let mut initial = GenerationWriter::open(root, WriterOptions::default())
         .unwrap()
         .into_writer()
         .unwrap();
@@ -75,9 +70,9 @@ fn writer_open_repairs_legacy_flat_delta_ancestor_before_materialization() {
         .unwrap();
     initial.certify_source(certificate(&source, 1, 1)).unwrap();
     let base = initial.commit(|_| true).unwrap();
-    let pinned_base = VerifiedIndex::open(temp.path()).unwrap();
+    let pinned_base = VerifiedIndex::open(root).unwrap();
 
-    let mut successor = GenerationWriter::open(temp.path(), WriterOptions::default())
+    let mut successor = GenerationWriter::open(root, WriterOptions::default())
         .unwrap()
         .into_writer()
         .unwrap();
@@ -89,12 +84,70 @@ fn writer_open_repairs_legacy_flat_delta_ancestor_before_materialization() {
         .certify_source(certificate(&source, 2, 1))
         .unwrap();
     let delta = successor.commit(|_| true).unwrap();
-    let delta_bytes = fs::read(manifest_path(temp.path(), &delta.generation_id)).unwrap();
+    let delta_bytes = fs::read(manifest_path(root, &delta.generation_id)).unwrap();
     let delta_json: serde_json::Value = serde_json::from_slice(&delta_bytes).unwrap();
     assert_eq!(delta_json["storage_format"], "ctx-manifest-flat-delta-v1");
     assert_eq!(delta_json["base_generation_id"], base.generation_id);
+    (pinned_base, VerifiedIndex::open(root).unwrap())
+}
 
-    let base_manifest = manifest_path(temp.path(), &base.generation_id);
+#[test]
+fn private_flat_delta_manifest_is_reused_across_refresh_and_writer_open() {
+    let temp = tempdir().unwrap();
+    let (_base, delta) = pinned_flat_delta_for_privacy_test(temp.path());
+    let snapshot = delta.into_generation_snapshot();
+    let descriptor = manifest_path(temp.path(), snapshot.generation_id());
+    let descriptor_bytes = fs::read(&descriptor).unwrap();
+
+    // Refresh retains metadata across its second privacy pass and writer open.
+    // Keep the Arc alive so both unconditional evictions are observable.
+    for _ in 0..2 {
+        ensure_generation_control_state_private(temp.path()).unwrap();
+        let reopened = VerifiedIndex::open(temp.path())
+            .unwrap()
+            .into_generation_snapshot();
+        assert!(Arc::ptr_eq(
+            snapshot.test_shared_manifest(),
+            reopened.test_shared_manifest()
+        ));
+        let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        assert!(std::ptr::eq(
+            snapshot.manifest(),
+            writer.base_manifest().unwrap()
+        ));
+        assert_eq!(writer.base_generation_id(), Some(snapshot.generation_id()));
+    }
+    assert_eq!(fs::read(&descriptor).unwrap(), descriptor_bytes);
+
+    // Reusing the materialization must still authenticate the named descriptor.
+    let mut corrupt = descriptor_bytes;
+    corrupt.push(b' ');
+    fs::write(&descriptor, corrupt).unwrap();
+    ensure_generation_control_state_private(temp.path()).unwrap();
+    assert!(matches!(
+        VerifiedIndex::open(temp.path()),
+        Err(IndexError::ManifestDigestMismatch { .. })
+    ));
+    assert!(matches!(
+        GenerationWriter::open(temp.path(), WriterOptions::default()),
+        Err(IndexError::ManifestDigestMismatch { .. })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn writer_open_repairs_legacy_flat_delta_ancestor_before_materialization() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempdir().unwrap();
+    let (pinned_base, pinned_delta) = pinned_flat_delta_for_privacy_test(temp.path());
+    let base_manifest = manifest_path(temp.path(), pinned_base.generation_id());
+    let delta_manifest = manifest_path(temp.path(), pinned_delta.generation_id());
+    let base_bytes = fs::read(&base_manifest).unwrap();
+    let delta_bytes = fs::read(&delta_manifest).unwrap();
     fs::set_permissions(&base_manifest, fs::Permissions::from_mode(0o664)).unwrap();
     let reopened = GenerationWriter::open(temp.path(), WriterOptions::default())
         .unwrap()
@@ -107,9 +160,18 @@ fn writer_open_repairs_legacy_flat_delta_ancestor_before_materialization() {
     );
     assert_eq!(
         reopened.base_generation_id(),
-        Some(delta.generation_id.as_str())
+        Some(pinned_delta.generation_id())
     );
-    assert_eq!(pinned_base.generation_id(), base.generation_id);
+    assert!(!std::ptr::eq(
+        pinned_delta.manifest(),
+        reopened.base_manifest().unwrap()
+    ));
+    assert_eq!(
+        serde_json::to_vec(reopened.base_manifest().unwrap()).unwrap(),
+        serde_json::to_vec(pinned_delta.manifest()).unwrap()
+    );
+    assert_eq!(fs::read(&base_manifest).unwrap(), base_bytes);
+    assert_eq!(fs::read(&delta_manifest).unwrap(), delta_bytes);
 }
 
 #[cfg(unix)]
@@ -136,13 +198,30 @@ fn permission_repair_through_noncanonical_root_evicts_canonical_cache_entry() {
     let receipt = initial.commit(|_| true).unwrap();
     let pinned = VerifiedIndex::open(&root).unwrap();
 
+    ensure_generation_control_state_private(&root).unwrap();
+    let unchanged = VerifiedIndex::open(&root).unwrap();
+    assert!(Arc::ptr_eq(
+        pinned.test_shared_manifest(),
+        unchanged.test_shared_manifest()
+    ));
+
     let manifest = manifest_path(&root, &receipt.generation_id);
+    let manifest_bytes = fs::read(&manifest).unwrap();
     fs::set_permissions(&manifest, fs::Permissions::from_mode(0o664)).unwrap();
     ensure_generation_control_state_private(&root).unwrap();
 
     let reopened = VerifiedIndex::open(&root).unwrap();
     assert_eq!(reopened.generation_id(), receipt.generation_id);
     assert_eq!(pinned.generation_id(), receipt.generation_id);
+    assert!(!Arc::ptr_eq(
+        pinned.test_shared_manifest(),
+        reopened.test_shared_manifest()
+    ));
+    assert_eq!(
+        serde_json::to_vec(reopened.manifest()).unwrap(),
+        serde_json::to_vec(pinned.manifest()).unwrap()
+    );
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
     assert_eq!(
         fs::metadata(&manifest).unwrap().permissions().mode() & 0o777,
         0o600

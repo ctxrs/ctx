@@ -56,7 +56,7 @@ pub(in crate::source_index) fn search_existing_generation_with_compact_projectio
     request: &SourceSearchRequest,
     index: VerifiedIndex,
     data_root: &Path,
-) -> Result<(Value, Value, VerifiedIndex)> {
+) -> Result<(Value, Value, String)> {
     let policy = ctx_history_read_application::SearchPolicy {
         default_backend: request.backend.unwrap_or(SearchBackend::Lexical),
         semantic: SemanticAvailability::Available,
@@ -80,9 +80,9 @@ pub(in crate::source_index) fn search_existing_generation_with_compact_projectio
         &mut observation,
     )
     .map_err(SourceSearchFailure::into_anyhow)?;
-    let compact = application.project_read_model(&value)?;
-    let (_, index) = application.into_parts();
-    Ok((value, compact, index))
+    let generation_id = application.index().generation_id().to_owned();
+    let compact = application.project_read_model_after_query(&value)?;
+    Ok((value, compact, generation_id))
 }
 
 pub(in crate::source_index) fn collect_search_hits_with_backend(
@@ -121,6 +121,9 @@ pub(super) fn collect_search_hits_with_port<P: HistorySemanticPort>(
                 VerifiedIndex::open_pinned(index_root(data_root))?
             }
             ctx_history_read_application::RetainedPeerRead::IfAvailable => {
+                VerifiedIndex::open_pinned_with_retained_peer(index_root(data_root))?
+            }
+            ctx_history_read_application::RetainedPeerRead::Deferred => {
                 VerifiedIndex::open_pinned_with_retained_peer(index_root(data_root))?
             }
         };

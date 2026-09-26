@@ -5,7 +5,11 @@ use ctx_history_index_query::VerifiedIndex;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{CompactRefMap, CompactRefNamespace, CompactRefResolver, MAX_COMPACT_REF_HEX_LEN};
+use crate::selector::{
+    CompactRefMap, CompactRefNamespace, CompactRefResolver, PreparedCompactRefCurrent,
+    PreparedCompactRefResolver,
+};
+use crate::MAX_COMPACT_REF_HEX_LEN;
 
 #[derive(Clone, Copy)]
 enum IdKind {
@@ -59,30 +63,89 @@ impl<'index> CompactPresentationProjection<'index> {
     }
 
     pub fn project(&self, value: &Value) -> Result<Value> {
-        let mut rendered_ids = RenderedIds::default();
-        collect_rendered_ids(value, None, &mut rendered_ids);
-        for (ids, namespace) in [
-            (&mut rendered_ids.events, CompactRefNamespace::Event),
-            (&mut rendered_ids.sessions, CompactRefNamespace::Session),
-        ] {
-            for id in &ids.preserved {
+        project_with_resolver(
+            value,
+            |namespace, id| self.resolver.contains_exact(namespace, id),
+            |ids| {
+                self.resolver.compact_refs(
+                    ids.events.rendered.iter().copied(),
+                    ids.sessions.rendered.iter().copied(),
+                )
+            },
+        )
+    }
+}
+
+/// Collect the bounded active-generation probes needed by a deferred compact
+/// projection while its searcher is still available.
+pub(crate) fn prepare_deferred_current(
+    current: &VerifiedIndex,
+    value: &Value,
+) -> Result<PreparedCompactRefCurrent> {
+    let mut rendered_ids = RenderedIds::default();
+    collect_rendered_ids(value, None, &mut rendered_ids);
+    PreparedCompactRefCurrent::from_ids(
+        current,
+        rendered_ids
+            .events
+            .rendered
+            .iter()
+            .chain(rendered_ids.events.optional.iter())
+            .copied(),
+        rendered_ids
+            .sessions
+            .rendered
+            .iter()
+            .chain(rendered_ids.sessions.optional.iter())
+            .copied(),
+    )
+}
+
+/// Projects compact IDs after the active searcher has been released and the
+/// retained peer, if any, has been opened.
+pub(crate) fn project_deferred(
+    value: &Value,
+    current: PreparedCompactRefCurrent,
+    retained_peer: Option<&VerifiedIndex>,
+) -> Result<Value> {
+    let resolver = PreparedCompactRefResolver::new(current, retained_peer);
+    project_with_resolver(
+        value,
+        |namespace, id| resolver.contains_exact(namespace, id),
+        |ids| {
+            resolver.compact_refs(
+                ids.events.rendered.iter().copied(),
+                ids.sessions.rendered.iter().copied(),
+            )
+        },
+    )
+}
+
+fn project_with_resolver(
+    value: &Value,
+    contains_exact: impl Fn(CompactRefNamespace, Uuid) -> Result<bool>,
+    compact_refs: impl Fn(&RenderedIds) -> Result<CompactRefMap>,
+) -> Result<Value> {
+    let mut rendered_ids = RenderedIds::default();
+    collect_rendered_ids(value, None, &mut rendered_ids);
+    for (ids, namespace) in [
+        (&mut rendered_ids.events, CompactRefNamespace::Event),
+        (&mut rendered_ids.sessions, CompactRefNamespace::Session),
+    ] {
+        for id in &ids.preserved {
+            ids.rendered.remove(id);
+        }
+        for id in &ids.optional {
+            if !contains_exact(namespace, *id)? {
                 ids.rendered.remove(id);
-            }
-            for id in &ids.optional {
-                if !self.resolver.contains_exact(namespace, *id)? {
-                    ids.rendered.remove(id);
-                    ids.preserved.insert(*id);
-                }
+                ids.preserved.insert(*id);
             }
         }
-        let references = self.resolver.compact_refs(
-            rendered_ids.events.rendered.iter().copied(),
-            rendered_ids.sessions.rendered.iter().copied(),
-        )?;
-        let mut projected = value.clone();
-        project_rendered_ids(&mut projected, None, &references, &rendered_ids)?;
-        Ok(projected)
     }
+    let references = compact_refs(&rendered_ids)?;
+    let mut projected = value.clone();
+    project_rendered_ids(&mut projected, None, &references, &rendered_ids)?;
+    Ok(projected)
 }
 
 pub fn reference_needs_retained_peer(reference: &str) -> bool {

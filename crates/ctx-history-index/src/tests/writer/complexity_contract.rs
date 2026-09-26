@@ -276,6 +276,90 @@ fn exact_noop_work_is_zero_for_n_and_2n_retained_documents() {
 }
 
 #[test]
+fn retained_source_replay_lookup_work_is_subquadratic() {
+    let mut measurements = Vec::new();
+    for source_count in [128_usize, 256] {
+        let root = tempdir().unwrap();
+        let sources = (0..source_count)
+            .map(|index| source(&format!("retained-lookup-{index}.jsonl")))
+            .collect::<Vec<_>>();
+        let mut initial = GenerationWriter::open(root.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        for (index, source) in sources.iter().enumerate() {
+            initial.begin_source(source.clone()).unwrap();
+            initial
+                .add_core_record(document(source, index as u64 + 1, "retained lookup body"))
+                .unwrap();
+            initial.certify_source(certificate(source, 1, 1)).unwrap();
+        }
+        let initial = initial.commit(|_| true).unwrap();
+
+        crate::publication::reset_verification_activity();
+        let mut replay = GenerationWriter::open(root.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        let constructions = Arc::clone(&replay.index_writer_constructions);
+        let changed_descriptor = SourceKey::derive(
+            sources[0].provider(),
+            "changed-source-format",
+            "session",
+            1,
+            sources[0].anchor().clone(),
+        )
+        .unwrap();
+        assert_eq!(changed_descriptor.identity(), sources[0].identity());
+        for rejected in [changed_descriptor, source("absent-retained-source.jsonl")] {
+            assert!(matches!(
+                replay.retain_source(certificate(&rejected, 1, 1)),
+                Err(IndexError::SourceNotAppendable(_))
+            ));
+        }
+        let inventory = complete_inventory(&sources[0], 1, sources.clone());
+        replay
+            .certify_complete_inventory(inventory.clone())
+            .unwrap();
+        crate::staging::RETAINED_SOURCE_LOOKUP_PROBES.with(|probes| probes.set(0));
+        for source in &sources {
+            replay.retain_source(certificate(source, 1, 1)).unwrap();
+        }
+        let probes = crate::staging::RETAINED_SOURCE_LOOKUP_PROBES.with(std::cell::Cell::get);
+        assert!(
+            probes >= source_count,
+            "every retained source must be checked"
+        );
+        assert!(
+            probes <= source_count * (source_count.ilog2() as usize + 2),
+            "retaining {source_count} sources made {probes} base-certificate comparisons"
+        );
+        measurements.push(probes);
+        let mut revalidated_sources = 0;
+        let receipt = replay
+            .commit_with_complete_inventory_revalidation(
+                |target| {
+                    assert!(matches!(target, RevalidationTarget::Source(_)));
+                    revalidated_sources += 1;
+                    true
+                },
+                |current| current == &inventory,
+            )
+            .unwrap();
+        assert_eq!(revalidated_sources, source_count);
+        assert_eq!(receipt.generation_id, initial.generation_id);
+        assert_eq!(receipt.manifest().sources, initial.manifest().sources);
+        assert_eq!(constructions.load(Ordering::SeqCst), 0);
+        assert_eq!(crate::publication::verification_activity(), (0, 0));
+        assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
+        eprintln!(
+            "retained sources={source_count}, lookup probes={probes}, artifact bytes hashed=0"
+        );
+    }
+    assert!(measurements[1] < measurements[0] * 3);
+}
+
+#[test]
 fn one_record_append_verification_work_tracks_live_segment_topology() {
     let (n, n_base_segments) = measure_one_record_append(RETAINED_N);
     let (two_n, two_n_base_segments) = measure_one_record_append(RETAINED_2N);

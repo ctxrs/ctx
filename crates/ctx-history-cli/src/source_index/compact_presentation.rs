@@ -13,6 +13,7 @@ pub(super) fn generation_read(
     let retained_peer = match request.retained_peer {
         RetainedPeerRead::Omit => None,
         RetainedPeerRead::IfAvailable => open_retained_peer(&mut index)?,
+        RetainedPeerRead::Deferred => None,
     };
     Ok(GenerationRead::new(index, retained_peer))
 }
@@ -25,13 +26,13 @@ pub(crate) fn open_generation_read(
     let index = match &request.target {
         GenerationReadTarget::Active => match request.retained_peer {
             RetainedPeerRead::Omit => super::shared::open_index(data_root)?,
-            RetainedPeerRead::IfAvailable => {
+            RetainedPeerRead::IfAvailable | RetainedPeerRead::Deferred => {
                 super::shared::open_index_with_retained_peer(data_root)?
             }
         },
         GenerationReadTarget::Exact(generation_id) => match request.retained_peer {
             RetainedPeerRead::Omit => VerifiedIndex::open_pinned_generation(&root, generation_id)?,
-            RetainedPeerRead::IfAvailable => {
+            RetainedPeerRead::IfAvailable | RetainedPeerRead::Deferred => {
                 VerifiedIndex::open_pinned_generation_with_retained_peer(&root, generation_id)?
             }
         },

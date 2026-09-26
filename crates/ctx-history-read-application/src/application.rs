@@ -156,8 +156,10 @@ pub fn retained_peer_read_for_search(
             .exclude_sessions
             .iter()
             .any(|selector| reference_needs_retained_peer(selector));
-    if compact_projection || compact_selector {
+    if compact_selector {
         RetainedPeerRead::IfAvailable
+    } else if compact_projection {
+        RetainedPeerRead::Deferred
     } else {
         RetainedPeerRead::Omit
     }
@@ -234,9 +236,30 @@ impl SearchApplicationResult {
         })
     }
 
-    pub fn project_read_model(&self, value: &Value) -> Result<Value> {
+    pub fn project_read_model(&mut self, value: &Value) -> Result<Value> {
+        self.generation.materialize_deferred_peer()?;
         CompactPresentationProjection::new(self.generation.index(), self.generation.retained_peer())
             .project(value)
+    }
+
+    /// Projects compact references after the query has completed, releasing
+    /// the active searcher before opening a deferred retained peer.
+    pub fn project_read_model_after_query(self, value: &Value) -> Result<Value> {
+        if self.generation.is_deferred_without_peer() {
+            let current = crate::compact_presentation::prepare_deferred_current(
+                self.generation.index(),
+                value,
+            )?;
+            drop(self.query);
+            let retained_peer = self.generation.into_deferred_peer_for_projection()?;
+            return crate::compact_presentation::project_deferred(
+                value,
+                current,
+                retained_peer.as_ref(),
+            );
+        }
+        let mut this = self;
+        this.project_read_model(value)
     }
 
     pub fn into_parts(self) -> (SearchQueryResult, VerifiedIndex) {

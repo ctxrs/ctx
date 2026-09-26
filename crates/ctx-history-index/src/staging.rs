@@ -1,6 +1,11 @@
 use super::*;
 use std::collections::HashMap;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RETAINED_SOURCE_LOOKUP_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone)]
 pub(super) struct PendingSource {
     pub(super) source: SourceKey,
@@ -40,17 +45,28 @@ impl GenerationWriter {
         if self.pending.contains_key(&token) {
             return Err(IndexError::DuplicateSource(source.identity().to_string()));
         }
-        let base =
-            self.base_publication
-                .as_ref()
-                .map(PinnedPublication::manifest)
-                .and_then(|manifest| {
-                    manifest.sources.iter().find(|candidate| {
+        let base = self
+            .base_publication
+            .as_ref()
+            .map(PinnedPublication::manifest)
+            .and_then(|manifest| {
+                // The pinned manifest is canonical and sorted by source identity.
+                // Looking up every retained source linearly makes a replay quadratic.
+                manifest
+                    .sources
+                    .binary_search_by_key(&source.identity().digest(), |candidate| {
+                        #[cfg(test)]
+                        RETAINED_SOURCE_LOOKUP_PROBES.with(|probes| probes.set(probes.get() + 1));
+                        candidate.observation().source().identity().digest()
+                    })
+                    .ok()
+                    .and_then(|index| manifest.sources.get(index))
+                    .filter(|candidate| {
                         candidate.observation().source().exact_descriptor_eq(source)
                     })
-                })
-                .cloned()
-                .ok_or_else(|| IndexError::SourceNotAppendable(source.identity().to_string()))?;
+            })
+            .cloned()
+            .ok_or_else(|| IndexError::SourceNotAppendable(source.identity().to_string()))?;
         if !retained_core_records_match(&base, &certificate) {
             return Err(IndexError::SourceCertificateMismatch);
         }

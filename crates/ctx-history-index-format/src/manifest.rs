@@ -35,6 +35,13 @@ type ManifestCacheKey = (PathBuf, String);
 static MANIFEST_CACHE: OnceLock<Mutex<BTreeMap<ManifestCacheKey, ManifestCacheEntry>>> =
     OnceLock::new();
 
+fn manifest_cache_root(root: &Path) -> PathBuf {
+    // Reader leases can name this directory through /proc/self/fd/<n>. Share
+    // the writer's key without using the normalized path for authenticated I/O.
+    // A cache-key normalization failure must not invalidate an opened capability.
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+}
+
 /// Drops process-local manifest identity snapshots after a synchronized,
 /// metadata-only permission repair. Live publications retain their immutable
 /// materialization; subsequent opens authenticate the repaired files anew.
@@ -43,10 +50,11 @@ pub fn clear_manifest_cache_for_root(root: &Path) -> Result<()> {
     let Some(cache) = MANIFEST_CACHE.get() else {
         return Ok(());
     };
+    let root = manifest_cache_root(root);
     cache
         .lock()
         .map_err(|_| IndexError::NonCanonicalManifest)?
-        .retain(|(cached_root, _), _| cached_root != root);
+        .retain(|(cached_root, _), _| cached_root != &root);
     Ok(())
 }
 
@@ -192,17 +200,17 @@ fn load_materialized_manifest(
     if depth > 128 {
         return Err(IndexError::NonCanonicalManifest);
     }
-    let key = (root.to_path_buf(), generation_id.to_owned());
+    let key = (manifest_cache_root(root), generation_id.to_owned());
     // Recursive bases are content-addressed immutable snapshots already
     // authenticated in this process. Top-level opens still authenticate their
     // named descriptor before reusing an in-memory materialization.
     if depth != 0 {
-        if let Some(manifest) = cached_manifest(&key)? {
+        if let Some(manifest) = cached_manifest(root, &key)? {
             return Ok(manifest);
         }
     }
     let bytes = load_manifest_bytes(root, generation_id)?;
-    if let Some(manifest) = cached_manifest(&key)? {
+    if let Some(manifest) = cached_manifest(root, &key)? {
         return Ok(manifest);
     }
     let manifest = if bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX) {
@@ -254,7 +262,7 @@ fn load_materialized_manifest(
     Ok(manifest)
 }
 
-fn cached_manifest(key: &ManifestCacheKey) -> Result<Option<Arc<GenerationManifest>>> {
+fn cached_manifest(root: &Path, key: &ManifestCacheKey) -> Result<Option<Arc<GenerationManifest>>> {
     let entry = MANIFEST_CACHE
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
@@ -267,7 +275,7 @@ fn cached_manifest(key: &ManifestCacheKey) -> Result<Option<Arc<GenerationManife
     let Some(manifest) = entry.manifest.upgrade() else {
         return Ok(None);
     };
-    if capture_manifest_identity(&key.0, &key.1)? != entry.identity {
+    if capture_manifest_identity(root, &key.1)? != entry.identity {
         return Err(IndexError::NonCanonicalManifest);
     }
     Ok(Some(manifest))
@@ -666,7 +674,7 @@ fn accumulated_manifest_changes(
 
 pub fn write_prepared_manifest(root: &Path, manifest: &PreparedManifest) -> Result<()> {
     write_manifest_bytes(root, &manifest.generation_id, &manifest.bytes)?;
-    let key = (root.to_path_buf(), manifest.generation_id.clone());
+    let key = (manifest_cache_root(root), manifest.generation_id.clone());
     let mut cache = MANIFEST_CACHE
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
