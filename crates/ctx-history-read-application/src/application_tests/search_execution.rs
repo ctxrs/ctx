@@ -77,7 +77,7 @@ fn search_application_pins_once_opens_semantics_once_and_requests_peer_lazily() 
     let mut generation = RecordingGenerationPort::new(index);
     let semantic = CountingSemanticPort(AtomicUsize::new(0));
 
-    let result = execute_search(
+    let mut result = execute_search(
         SearchApplicationRequest {
             plan,
             generation_target: GenerationReadTarget::Active,
@@ -165,7 +165,7 @@ fn search_application_pins_once_opens_semantics_once_and_requests_peer_lazily() 
     assert_eq!(compact_generation.calls.get(), 1);
     assert_eq!(
         compact_generation.retained_peer.get(),
-        Some(RetainedPeerRead::IfAvailable)
+        Some(RetainedPeerRead::Deferred)
     );
     assert_eq!(compact.query().collection.result_window.hits.len(), 3);
 }

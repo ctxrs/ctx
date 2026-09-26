@@ -23,9 +23,11 @@ pub use ctx_history_index_generation::{
 /// Repairs legacy generation control permissions before a mutating refresh
 /// captures immutable file identities.
 pub fn ensure_generation_control_state_private(root: &std::path::Path) -> Result<()> {
-    let canonical_root =
+    let (canonical_root, repaired) =
         ctx_history_index_generation::ensure_generation_control_state_private(root)?;
-    ctx_history_index_format::clear_manifest_cache_for_root(&canonical_root)?;
+    if repaired {
+        ctx_history_index_format::clear_manifest_cache_for_root(&canonical_root)?;
+    }
     Ok(())
 }
 

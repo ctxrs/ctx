@@ -121,7 +121,7 @@ fn mcp_search_inner<P: HistorySemanticPort>(
     observation.zero_result = Some(collection.result_window.hits.is_empty());
     observation.has_indexed_content_after = Some(application.index().document_count() > 0);
     observation.failure_phase = Some(SearchFailurePhase::ResultProjection);
-    let compact_value = match application.project_read_model(&value) {
+    let compact_value = match application.project_read_model_after_query(&value) {
         Ok(value) => value,
         Err(error) => return Err(SourceSearchFailure::from(error)),
     };

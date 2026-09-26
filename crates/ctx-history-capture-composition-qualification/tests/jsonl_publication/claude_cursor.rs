@@ -1193,3 +1193,6 @@ fn cold_bad_claude_leaf_does_not_block_sibling_or_cursor_provider() {
         &["good Cursor provider"],
     );
 }
+
+#[path = "active_file_race.rs"]
+mod active_file_race;

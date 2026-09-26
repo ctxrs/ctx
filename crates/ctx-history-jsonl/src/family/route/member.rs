@@ -136,6 +136,7 @@ pub struct JsonlFamilyPendingLeaf {
     pub(super) observation: JsonlFileObservation,
     pub(super) proof: TypedKey,
     pub(super) source: Option<SourceKey>,
+    pub(super) frozen_prefix_sha256: Option<[u8; 32]>,
 }
 
 impl JsonlFamilyPendingLeaf {
@@ -152,6 +153,7 @@ impl JsonlFamilyPendingLeaf {
             observation,
             proof,
             source,
+            frozen_prefix_sha256: None,
         }
     }
 
@@ -161,6 +163,11 @@ impl JsonlFamilyPendingLeaf {
 
     pub fn source(&self) -> Option<&SourceKey> {
         self.source.as_ref()
+    }
+
+    /// Retains provider discovery evidence when an accepted leaf becomes pending.
+    pub fn binding(&self) -> &TypedKey {
+        &self.proof
     }
 }
 

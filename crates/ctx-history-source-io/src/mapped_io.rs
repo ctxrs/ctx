@@ -383,6 +383,10 @@ where
         self.0.entries(maximum).map_err(Into::into)
     }
 
+    pub fn entries_snapshot(&self, maximum: usize) -> Result<Vec<OsString>, E> {
+        self.0.entries_snapshot(maximum).map_err(Into::into)
+    }
+
     pub fn visit_entries(
         &self,
         maximum: usize,
@@ -393,6 +397,10 @@ where
 
     pub fn open_child(&self, name: &OsStr) -> Result<MappedOpenedProviderSourcePath<E>, E> {
         self.0.open_child(name).map(Into::into).map_err(Into::into)
+    }
+
+    pub fn revalidate_same_object(&self) -> Result<(), E> {
+        self.0.revalidate_same_object().map_err(Into::into)
     }
 
     pub fn revalidate(&self) -> Result<(), E> {

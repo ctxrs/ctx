@@ -80,10 +80,12 @@ impl GenerationWriter {
             acquire_generation_writer_lock_with_retry(&directory, &generation_writer_lock)?;
         reclaim_abandoned_atomic_writes(&root)?;
         reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
-        ctx_history_index_generation::ensure_generation_control_files_private_with_writer_lock_held(
+        let repaired = ctx_history_index_generation::ensure_generation_control_files_private_with_writer_lock_held(
             &root,
         )?;
-        ctx_history_index_format::clear_manifest_cache_for_root(&root)?;
+        if repaired {
+            ctx_history_index_format::clear_manifest_cache_for_root(&root)?;
+        }
 
         let (active_authority, mut pointer_requires_rebuild, incompatible_active_present) =
             match load_active_publication_authority(&root) {

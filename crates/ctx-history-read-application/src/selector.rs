@@ -8,6 +8,9 @@ use ctx_history_core::CaptureProvider;
 use ctx_history_index_query::{CoreEventRecord, SessionRecord, VerifiedIndex};
 use uuid::Uuid;
 
+mod prepared;
+pub(crate) use prepared::{PreparedCompactRefCurrent, PreparedCompactRefResolver};
+
 pub const MIN_COMPACT_REF_HEX_LEN: usize = 8;
 pub const MAX_COMPACT_REF_HEX_LEN: usize = 32;
 

@@ -4,9 +4,9 @@ use ctx_history_core::{CertifiedSource, SourceKey};
 use sha2::{Digest, Sha256};
 
 use super::super::{
-    authenticate_frozen_prefix, authenticate_frozen_prefix_sha256, observe_opened_file,
-    observe_opened_file_allow_append, revalidate_frozen_prefix, revalidate_frozen_prefix_sha256,
-    JsonlFileObservation,
+    authenticate_frozen_prefix, authenticate_frozen_prefix_sha256,
+    observe_opened_file_allow_append, observe_opened_file_leaf, revalidate_frozen_prefix,
+    revalidate_frozen_prefix_sha256, JsonlFileObservation,
 };
 use super::super::{
     JsonlFamilyError, JsonlFamilyRuntime, JsonlResult, JsonlRuntimeError, OpenedProviderSourceFile,
@@ -617,6 +617,30 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
         Self::exact_opened_path(source_path, authority, authority_path, &opened)
     }
 
+    /// Authenticates a previously read bounded prefix without granting source
+    /// or inventory authority. Used by pending leaves and selection evidence.
+    pub fn frozen_prefix_path(
+        source_path: PathBuf,
+        authority: Arc<ProviderSourceRoot<E>>,
+        authority_path: PathBuf,
+        admitted: JsonlFileObservation,
+        prefix_sha256: [u8; 32],
+    ) -> JsonlResult<Self, E> {
+        let proof = Self::FrozenPrefix {
+            binding: None,
+            source_path,
+            authority_path,
+            authority,
+            prefix_length: admitted.length(),
+            admitted,
+            prefix_sha256,
+            hash_kind: JsonlFamilyTerminalPrefixHash::Sha256,
+            force_authentication: false,
+        };
+        proof.revalidate_dependency()?;
+        Ok(proof)
+    }
+
     /// Binds an exact terminal proof only when the reopened member is still
     /// the observation admitted by discovery. Rejected members need this
     /// constructor because they have no scan certificate to carry that fence.
@@ -627,7 +651,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
         admitted: &JsonlFileObservation,
     ) -> JsonlResult<Self, E> {
         let opened = authority.open_file(&authority_path)?;
-        let current = observe_opened_file(&source_path, &opened)?;
+        let current = observe_opened_file_leaf(&source_path, &opened)?;
         if &current != admitted {
             return Err(E::source_changed());
         }
@@ -647,7 +671,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
         authority_path: PathBuf,
         opened: &OpenedProviderSourceFile<E>,
     ) -> JsonlResult<Self, E> {
-        let observation = observe_opened_file(&source_path, opened)?;
+        let observation = observe_opened_file_leaf(&source_path, opened)?;
         opened.revalidate_leaf()?;
         Ok(Self::ExactFile {
             binding: None,
@@ -832,7 +856,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
                 observation,
             } => {
                 let opened = authority.open_file(authority_path)?;
-                let current = observe_opened_file(source_path, &opened)?;
+                let current = observe_opened_file_leaf(source_path, &opened)?;
                 if current != *observation {
                     return Err(E::source_changed());
                 }

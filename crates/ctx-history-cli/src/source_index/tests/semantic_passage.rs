@@ -162,7 +162,7 @@ fn passage_output(
     requested: SourceSearchRequest,
     query_dimension: usize,
 ) -> (Value, String) {
-    let result = passage_application(data_root, requested, query_dimension, false).unwrap();
+    let mut result = passage_application(data_root, requested, query_dimension, false).unwrap();
     let commands = result
         .query()
         .collection

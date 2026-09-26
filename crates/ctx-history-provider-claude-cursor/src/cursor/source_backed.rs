@@ -19,9 +19,9 @@ use std::{
 };
 
 #[cfg(test)]
-use super::parser::project_cursor_jsonl_record;
+use super::{discover_cursor_transcripts, parser::project_cursor_jsonl_record};
 use super::{
-    discover_cursor_transcripts,
+    layout::discover_frozen_cursor_transcripts,
     parser::{
         project_cursor_jsonl_record_with_rejection, CursorJsonlRecordOutcome, CursorRejectionKind,
     },
@@ -58,6 +58,7 @@ const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 
 mod binding;
 mod duplicates;
+mod membership;
 
 use binding::*;
 use duplicates::*;
@@ -178,6 +179,18 @@ where
         JsonlOversizedRecordPolicy::RejectRecord
     }
 
+    fn inventory_mode(&self) -> ctx_history_jsonl::JsonlFamilyInventoryMode {
+        ctx_history_jsonl::JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions
+    }
+
+    fn observe_terminal_membership(
+        &self,
+        root: &Path,
+        opening: &ProviderJsonlInventory,
+    ) -> Result<ctx_history_provider_runtime::ProviderJsonlMembershipObservation> {
+        membership::observe(self.source_anchor_scope, root, opening)
+    }
+
     fn discover(&self, root: &Path) -> Result<ProviderJsonlInventory> {
         match fs::symlink_metadata(root) {
             Ok(_) => {}
@@ -186,7 +199,7 @@ where
             }
             Err(error) => return Err(error.into()),
         }
-        let inventory = discover_cursor_transcripts(root);
+        let inventory = discover_frozen_cursor_transcripts(root);
         if !inventory.completed {
             return Err(CaptureError::InvalidProviderTranscriptPath {
                 path: root.to_path_buf(),
@@ -220,21 +233,30 @@ where
         let mut exact_dependencies = Vec::new();
         for (native_session_id, mut routes) in native_sessions {
             routes.sort_by(|left, right| left.path().cmp(right.path()));
-            let route_proofs = routes
-                .iter()
-                .map(|route| {
-                    JsonlFamilyTerminalProof::exact_path(
-                        route.path().to_path_buf(),
-                        Arc::clone(&authority),
-                        route.authority_relative_path().to_path_buf(),
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
             let duplicate_selection = (routes.len() > 1)
                 .then(|| select_cursor_transcript(&routes))
                 .transpose()?;
-            for proof in &route_proofs {
-                proof.revalidate_dependency()?;
+            let mut route_proofs = Vec::new();
+            if let Some(selection) = &duplicate_selection {
+                for (index, route) in routes.iter().enumerate() {
+                    let proof = if index == selection.selected_index {
+                        JsonlFamilyTerminalProof::frozen_prefix_path(
+                            route.path().to_path_buf(),
+                            Arc::clone(&authority),
+                            route.authority_relative_path().to_path_buf(),
+                            selection.selected_observation.clone(),
+                            selection.selected_physical_sha256,
+                        )?
+                    } else {
+                        JsonlFamilyTerminalProof::exact_admitted_path(
+                            route.path().to_path_buf(),
+                            Arc::clone(&authority),
+                            route.authority_relative_path().to_path_buf(),
+                            &selection.route_observations[index],
+                        )?
+                    };
+                    route_proofs.push(proof);
+                }
             }
             let source = source_key_scoped(&native_session_id, self.source_anchor_scope)?;
             let selected_index = duplicate_selection
@@ -277,10 +299,9 @@ where
             let selected = routes.remove(selected_index);
             exact_dependencies.extend(route_proofs.into_iter().enumerate().filter_map(
                 |(index, proof)| {
-                    (index != selected_index
-                        && duplicate_selection
-                            .as_ref()
-                            .is_none_or(|selection| !selection.divergent_indices.contains(&index)))
+                    (duplicate_selection
+                        .as_ref()
+                        .is_none_or(|selection| !selection.divergent_indices.contains(&index)))
                     .then_some(proof)
                 },
             ));
@@ -290,13 +311,27 @@ where
                 selected_route_sha256: cursor_route_sha256(selected.path()),
                 alias_route_sha256,
             };
-            let leaf = ProviderJsonlLeaf::observe(
+            let opened = authority.open_file(selected.authority_relative_path())?;
+            let current = ctx_history_provider_runtime::observe_opened_file_allow_append(
+                selected.path(),
+                &opened,
+            )?;
+            let observation = duplicate_selection
+                .as_ref()
+                .map_or(current.clone(), |selection| {
+                    selection.selected_observation.clone()
+                });
+            if !observation.admits_frozen_prefix_in(&current) {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+            let leaf = ProviderJsonlLeaf::bind_frozen_observed(
                 source,
                 selected.path().to_path_buf(),
                 Arc::clone(&authority),
                 selected.authority_relative_path().to_path_buf(),
                 TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?,
-            )?;
+                observation,
+            );
             leaves.push(authenticate_selected_cursor_leaf(
                 leaf,
                 duplicate_selection

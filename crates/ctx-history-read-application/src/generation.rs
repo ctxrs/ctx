@@ -13,6 +13,9 @@ pub enum GenerationReadTarget {
 pub enum RetainedPeerRead {
     Omit,
     IfAvailable,
+    /// Retain the peer lease, but open its search reader only when the caller
+    /// needs compact references after the active query completes.
+    Deferred,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +96,7 @@ pub enum GenerationReadError<PortError> {
 pub(crate) struct PinnedGenerationRead {
     index: VerifiedIndex,
     retained_peer: Option<VerifiedIndex>,
+    deferred_peer: bool,
     target: GenerationReadTarget,
 }
 
@@ -125,6 +129,7 @@ impl PinnedGenerationRead {
         Ok(Self {
             index,
             retained_peer,
+            deferred_peer: request.retained_peer == RetainedPeerRead::Deferred,
             target: request.target,
         })
     }
@@ -135,6 +140,27 @@ impl PinnedGenerationRead {
 
     pub(crate) const fn retained_peer(&self) -> Option<&VerifiedIndex> {
         self.retained_peer.as_ref()
+    }
+
+    pub(crate) fn materialize_deferred_peer(&mut self) -> anyhow::Result<()> {
+        if self.deferred_peer && self.retained_peer.is_none() {
+            self.retained_peer = self.index.take_retained_generation_peer_for_reader()?;
+            self.deferred_peer = false;
+        }
+        Ok(())
+    }
+
+    pub(crate) const fn is_deferred_without_peer(&self) -> bool {
+        self.deferred_peer && self.retained_peer.is_none()
+    }
+
+    pub(crate) fn into_deferred_peer_for_projection(self) -> anyhow::Result<Option<VerifiedIndex>> {
+        if !self.deferred_peer || self.retained_peer.is_some() {
+            return Ok(self.retained_peer);
+        }
+        self.index
+            .into_retained_generation_peer_for_reader()
+            .map_err(Into::into)
     }
 
     pub(crate) fn receipt(&self) -> GenerationReadReceipt<'_> {

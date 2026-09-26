@@ -518,6 +518,36 @@ impl VerifiedIndex {
         else {
             return Ok(None);
         };
+        Self::open_retained_peer_lease(lease).map(Some)
+    }
+
+    /// Releases the active reader before opening its already-pinned peer.
+    /// Compact output needs only bounded ID-prefix results from the active
+    /// generation, so its searcher and manifest need not overlap the peer's.
+    #[doc(hidden)]
+    pub fn into_retained_generation_peer_for_reader(self) -> Result<Option<Self>> {
+        let Self {
+            searcher,
+            manifest,
+            generation_id,
+            semantic_eligibility_postings,
+            _reader_leases,
+        } = self;
+        let (peer, target) = match _reader_leases {
+            Some(ReaderLeaseBundle { target, peer }) => (peer, Some(target)),
+            None => (None, None),
+        };
+        drop_generation_backed_resources_before_target_lease(
+            searcher,
+            semantic_eligibility_postings,
+            None::<GenerationReadLease>,
+            target,
+        );
+        drop((manifest, generation_id));
+        peer.map(Self::open_retained_peer_lease).transpose()
+    }
+
+    fn open_retained_peer_lease(lease: GenerationReadLease) -> Result<Self> {
         let (mut peer, recertified) = lease
             .with_root_access(|root| {
                 Self::open_generation_read_lease_with_verification(
@@ -540,7 +570,7 @@ impl VerifiedIndex {
             target: lease,
             peer: None,
         });
-        Ok(Some(peer))
+        Ok(peer)
     }
 
     #[cfg(any(test, feature = "test-support"))]

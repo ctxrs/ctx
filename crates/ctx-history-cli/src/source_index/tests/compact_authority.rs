@@ -206,14 +206,14 @@ fn compact_search_keeps_original_refresh_pair_across_pointer_rotation() {
         pinned_generation
     );
 
-    let (full, compact, index) = search_existing_generation_with_compact_projection(
+    let (full, compact, generation_id) = search_existing_generation_with_compact_projection(
         &request,
         refresh.pin.into_index(),
         temp.path(),
     )
     .unwrap();
 
-    assert_eq!(index.generation_id(), pinned_generation);
+    assert_eq!(generation_id, pinned_generation);
     assert_eq!(full["results"].as_array().unwrap().len(), 1);
     assert_eq!(
         full["results"][0]["ctx_event_id"],
@@ -289,5 +289,32 @@ fn search_compact_filters_require_peer_even_with_full_id_output() {
             full["results"][0]["citations"][0]["ctx_session_id"],
             active.event.session_id.to_string()
         );
+    }
+}
+
+#[test]
+fn compact_search_projects_without_a_retained_generation() {
+    let temp = tempdir().unwrap();
+    write_test_generation(temp.path());
+    let mut request = request(RefreshArg::Off);
+    request.query = TEST_QUERY.to_owned();
+    let index = VerifiedIndex::open_pinned_with_retained_peer(index_root(temp.path())).unwrap();
+    let (full, compact, _) =
+        search_existing_generation_with_compact_projection(&request, index, temp.path()).unwrap();
+    assert!(!full["results"].as_array().unwrap().is_empty());
+    for (full, compact) in full["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(compact["results"].as_array().unwrap())
+    {
+        for field in ["ctx_event_id", "ctx_session_id"] {
+            let id = uuid::Uuid::parse_str(full[field].as_str().unwrap()).unwrap();
+            assert!(id
+                .simple()
+                .to_string()
+                .starts_with(compact[field].as_str().unwrap()));
+            assert!(compact[field].as_str().unwrap().len() >= 8);
+        }
     }
 }

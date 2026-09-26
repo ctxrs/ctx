@@ -85,6 +85,55 @@ fn retained_generation_peer_is_limited_to_the_current_pointer_pair() {
 }
 
 #[test]
+fn deferred_peer_releases_active_manifest_and_lease_but_keeps_original_peer() {
+    let temp = tempdir().unwrap();
+    let source = source("deferred-reader.jsonl");
+    let first = publish(temp.path(), &source, 1, "first retained needle");
+    let first_only = VerifiedIndex::open_pinned_with_retained_peer(temp.path()).unwrap();
+    assert!(first_only
+        .into_retained_generation_peer_for_reader()
+        .unwrap()
+        .is_none());
+
+    let second = publish(temp.path(), &source, 2, "second active needle");
+    let active = VerifiedIndex::open_pinned_with_retained_peer(temp.path()).unwrap();
+    let active_manifest = Arc::downgrade(active.test_shared_manifest());
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let second_path = crate::publication::slot_path(temp.path(), pointer.active());
+    let first_path = crate::publication::slot_path(temp.path(), pointer.previous().unwrap());
+    publish(temp.path(), &source, 3, "third rotation");
+    publish(temp.path(), &source, 4, "fourth rotation");
+    assert!(second_path.exists());
+    assert!(first_path.exists());
+    assert_eq!(active.generation_id(), second.generation_id);
+    // Publication receipts share the cached manifest too. Release that owner
+    // so the weak reference below measures the consuming reader's lifetime.
+    drop(second);
+
+    let peer = active
+        .into_retained_generation_peer_for_reader()
+        .unwrap()
+        .unwrap();
+    assert!(active_manifest.upgrade().is_none());
+    assert_eq!(peer.generation_id(), first.generation_id);
+    assert_eq!(peer.count_term("retained").unwrap(), 1);
+    publish(temp.path(), &source, 5, "fifth rotation");
+    assert!(
+        !second_path.exists(),
+        "consuming projection must release the active lease"
+    );
+    assert!(
+        first_path.exists(),
+        "the original peer stays pinned across pointer rotations"
+    );
+    drop(peer);
+    publish(temp.path(), &source, 6, "sixth rotation");
+    assert!(!first_path.exists());
+}
+
+#[test]
 fn one_durable_lease_retains_an_exact_old_generation_without_changing_peer_slots() {
     let temp = tempdir().unwrap();
     let source = source("generation-retention-lease.jsonl");

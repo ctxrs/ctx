@@ -1,6 +1,8 @@
 use super::*;
 
+mod first_record;
 mod paths;
+pub(super) use first_record::classify_incomplete_first_records;
 
 pub(super) fn default_base_source_path<R: JsonlFamilyRuntime>(
     _adapter: &(impl JsonlFamilyAdapter<Runtime = R> + ?Sized),
@@ -37,7 +39,21 @@ fn disposition_terminal_proof<R: JsonlFamilyRuntime>(
     source_path: &Path,
     authority_path: &Path,
     observation: &JsonlFileObservation,
+    frozen_prefix_sha256: Option<[u8; 32]>,
 ) -> JsonlResult<JsonlFamilyTerminalProof<JsonlRuntimeError<R>>, JsonlRuntimeError<R>> {
+    if let Some(digest) = frozen_prefix_sha256 {
+        return JsonlFamilyTerminalProof::frozen_prefix_path(
+            source_path.to_path_buf(),
+            Arc::clone(exact_member_authority(
+                &opening.authorities,
+                source_path,
+                authority_path,
+            )?),
+            authority_path.to_path_buf(),
+            observation.clone(),
+            digest,
+        );
+    }
     JsonlFamilyTerminalProof::exact_admitted_path(
         source_path.to_path_buf(),
         Arc::clone(exact_member_authority(
@@ -63,9 +79,12 @@ pub fn jsonl_family_driver<R: JsonlFamilyRuntime>(
     let revalidation_resident = Arc::clone(&resident);
     let revalidation_adapter = Arc::clone(&adapter);
     let revalidation_root = root.clone();
+    let publication_adapter = Arc::clone(&adapter);
+    let publication_root = root.clone();
     let terminal_adapter = adapter;
     let terminal_root = root;
     let inventory_resident = Arc::clone(&resident);
+    let publication_resident = Arc::clone(&resident);
 
     super::super::JsonlRuntimeDriver::<R>::new_fallible(
         move |sink| capture(&*scan_adapter, &scan_root, &scan_resident, sink),
@@ -100,6 +119,30 @@ pub fn jsonl_family_driver<R: JsonlFamilyRuntime>(
         },
     )
     .with_parallel_leaf_workers()
+    .with_publication_revalidation(move || {
+        let Ok(resident) = publication_resident.lock() else {
+            return false;
+        };
+        // Complete inventories have their own terminal fence. Partial routes
+        // still depend on exact alias/disposition proofs even without one.
+        if resident.certified_inventory.is_some() {
+            return true;
+        }
+        let opening = resident.opening_inventory.clone();
+        drop(resident);
+        opening.as_ref().is_none_or(|opening| {
+            opening
+                .exact_dependencies
+                .iter()
+                .all(|dependency| dependency.revalidate_dependency().is_ok())
+                && (publication_adapter.inventory_mode()
+                    != JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions
+                    || (opening.revalidate_root_same_object().is_ok()
+                        && publication_adapter
+                            .observe_terminal_membership(&publication_root, opening)
+                            .is_ok()))
+        })
+    })
     .with_fallible_complete_inventory_revalidation(move |expected| {
         match revalidate_complete_inventory(
             terminal_adapter.as_ref(),
@@ -402,6 +445,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
                         leaf.source_path.as_path(),
                         leaf.authority_path.as_path(),
                         observation,
+                        None,
                     )
                 })
             }
@@ -409,12 +453,21 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
                 leaf.source_path.as_path(),
                 leaf.authority_path.as_path(),
                 &leaf.observation,
+                leaf.frozen_prefix_sha256,
             )),
             JsonlFamilyInventoryMember::Accepted { .. } => None,
         })
-        .map(|(source_path, authority_path, observation)| {
-            disposition_terminal_proof::<R>(&opening, source_path, authority_path, observation)
-        })
+        .map(
+            |(source_path, authority_path, observation, frozen_prefix_sha256)| {
+                disposition_terminal_proof::<R>(
+                    &opening,
+                    source_path,
+                    authority_path,
+                    observation,
+                    frozen_prefix_sha256,
+                )
+            },
+        )
         .collect::<JsonlResult<Vec<_>, _>>()
         .map_err(|error| route_scan(adapter, error))?;
     for quarantined in &scan_result.quarantined {
@@ -497,7 +550,11 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         || route_local_pending_count != 0
         || !scan_result.quarantined.is_empty();
     if partial_inventory && !bases.is_empty() {
-        for dependency in &disposition_dependencies {
+        for dependency in opening
+            .exact_dependencies
+            .iter()
+            .chain(&disposition_dependencies)
+        {
             dependency
                 .revalidate_dependency()
                 .map_err(|error| route_scan(adapter, error))?;
@@ -505,8 +562,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         // A non-accepted physical member makes absence unprovable. Publish
         // trustworthy accepted peers as a partial route update and carry every
         // unstaged base member until a later clean inventory can certify
-        // deletion. This is the same retained-generation safety contract used
-        // by bounded exact-member refreshes.
+        // deletion. No complete-inventory authority is granted by this path.
         sink.retain_unstaged_base_route_sources()
             .map_err(route_internal)?;
         let mut resident = resident
@@ -519,7 +575,8 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         resident.absent_sources.clear();
         resident.opening_membership = None;
         resident.certified_inventory = None;
-        resident.opening_inventory = None;
+        resident.opening_inventory =
+            Some(opening.with_appended_exact_dependencies(disposition_dependencies));
         return Ok(());
     }
 
@@ -577,172 +634,6 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     resident.certified_inventory = Some(inventory);
     resident.opening_inventory = Some(opening);
     Ok(())
-}
-
-/// Applies the shared physical JSONL contract before any provider semantic
-/// classification. A nonempty first record without its framing terminator is
-/// pending/incomplete; zero-byte files and complete malformed records retain
-/// their existing provider semantics.
-pub(super) fn classify_incomplete_first_records<R: JsonlFamilyRuntime>(
-    adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
-    opening: &mut JsonlFamilyInventory<JsonlRuntimeError<R>>,
-) -> JsonlResult<(), JsonlRuntimeError<R>> {
-    if opening.root_missing {
-        return Ok(());
-    }
-    let mut changed = false;
-    let mut classified = Vec::with_capacity(opening.members.len());
-    for member in std::mem::take(&mut opening.members) {
-        match member {
-            JsonlFamilyInventoryMember::Accepted { identity, leaf }
-                if !leaf.whole_record
-                    && first_record_is_incomplete(
-                        &leaf.source_path,
-                        &leaf.authority,
-                        &leaf.authority_path,
-                        &leaf.observation,
-                        FirstRecordProbe {
-                            encoding: adapter.physical_encoding(&leaf),
-                            framing: adapter.record_framing(),
-                            freeze_observation_at_scan: leaf.frozen_scan_observation().is_some(),
-                            admitted_length: leaf.admitted_length(),
-                        },
-                    )? =>
-            {
-                changed = true;
-                classified.push(JsonlFamilyInventoryMember::Pending {
-                    identity,
-                    leaf: JsonlFamilyPendingLeaf::bind_observed(
-                        leaf.source_path,
-                        leaf.authority_path,
-                        leaf.observation,
-                        leaf.binding,
-                        Some(leaf.source),
-                    ),
-                });
-            }
-            JsonlFamilyInventoryMember::Quarantined { identity, leaf } => {
-                // Provider classification wins once a member owns a diagnosed
-                // source failure; a framing probe must not erase that outcome.
-                let incomplete = if leaf.logical_source_failure.is_some() {
-                    false
-                } else if let Some(observation) = &leaf.observation {
-                    let authority = exact_member_authority(
-                        &opening.authorities,
-                        &leaf.source_path,
-                        &leaf.authority_path,
-                    )?;
-                    first_record_is_incomplete(
-                        &leaf.source_path,
-                        authority,
-                        &leaf.authority_path,
-                        observation,
-                        FirstRecordProbe {
-                            encoding: leaf.physical_encoding,
-                            framing: adapter.record_framing(),
-                            freeze_observation_at_scan: false,
-                            admitted_length: observation.length(),
-                        },
-                    )?
-                } else {
-                    false
-                };
-                if incomplete {
-                    changed = true;
-                    classified.push(JsonlFamilyInventoryMember::Pending {
-                        identity,
-                        leaf: JsonlFamilyPendingLeaf::bind_observed(
-                            leaf.source_path,
-                            leaf.authority_path,
-                            leaf.observation
-                                .expect("incomplete quarantined leaf has an admitted observation"),
-                            leaf.proof,
-                            leaf.quarantined_source,
-                        ),
-                    });
-                } else {
-                    classified.push(JsonlFamilyInventoryMember::Quarantined { identity, leaf });
-                }
-            }
-            member => classified.push(member),
-        }
-    }
-    opening.members = classified;
-    if changed {
-        opening.rebuild_observation()?;
-    }
-    Ok(())
-}
-
-struct FirstRecordProbe {
-    encoding: JsonlPhysicalEncoding,
-    framing: JsonlRecordFraming,
-    freeze_observation_at_scan: bool,
-    admitted_length: u64,
-}
-
-fn first_record_is_incomplete<E: JsonlFamilyError>(
-    source_path: &Path,
-    authority: &Arc<ProviderSourceRoot<E>>,
-    authority_path: &Path,
-    expected: &JsonlFileObservation,
-    probe: FirstRecordProbe,
-) -> JsonlResult<bool, E> {
-    let FirstRecordProbe {
-        encoding,
-        framing,
-        freeze_observation_at_scan,
-        admitted_length,
-    } = probe;
-    let opened = authority.open_file(authority_path)?;
-    let current = if freeze_observation_at_scan {
-        observe_opened_file_allow_append(source_path, &opened)?
-    } else {
-        observe_opened_file(source_path, &opened)?
-    };
-    // Frozen-scan leaves already bind publication to the discovery-time
-    // observation. Classify their first record inside that bound while later
-    // scan and terminal proofs authenticate the prefix; newly appended bytes
-    // belong to the next refresh. Exact leaves retain exact preflight behavior.
-    if (freeze_observation_at_scan && !expected.admits_frozen_prefix_in(&current))
-        || (!freeze_observation_at_scan && expected != &current)
-    {
-        return Err(E::source_changed());
-    }
-    let observation = expected;
-    if admitted_length > observation.length() {
-        return Err(E::source_changed());
-    }
-    if admitted_length == 0 {
-        opened.revalidate_same_object()?;
-        return Ok(false);
-    }
-    let mut file = opened.reopen_same_object()?;
-    if encoding == JsonlPhysicalEncoding::RawJsonl && admitted_length >= 4 {
-        let mut magic = [0_u8; 4];
-        file.read_exact(&mut magic)?;
-        file.seek(SeekFrom::Start(0))?;
-        if magic == [0x28, 0xb5, 0x2f, 0xfd] {
-            // A quarantined member does not necessarily have a provider leaf
-            // from which to ask for encoding. Never reinterpret an ordinary
-            // Zstandard stream as an unfinished raw JSONL record.
-            opened.revalidate_same_object()?;
-            return Ok(false);
-        }
-    }
-    let mut stream = JsonlPhysicalStream::open_with_encoding(
-        file,
-        admitted_length,
-        0,
-        0,
-        encoding,
-        framing,
-        JsonlPhysicalDigest::complete(JsonlResumableSha256::new()),
-        E::source_changed,
-    )?;
-    let incomplete = stream.next_record()?.is_none_or(|record| !record.complete);
-    opened.revalidate_same_object()?;
-    Ok(incomplete)
 }
 
 fn bind_prior_disposition_sources<R: JsonlFamilyRuntime>(

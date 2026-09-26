@@ -10,7 +10,9 @@ use tantivy::directory::Directory as _;
 use tantivy::directory::Lock;
 use uuid::Uuid;
 
-use ctx_history_platform::platform_security::{ensure_private_directory, ensure_private_file};
+use ctx_history_platform::platform_security::{
+    ensure_private_directory, ensure_private_file, verify_private_file,
+};
 
 use crate::retention::{
     ensure_generation_read_lease_coordinator, try_generation_id_reclaim_authority,
@@ -23,8 +25,9 @@ use crate::{
 
 /// Repairs legacy generation control files before any reader captures their
 /// immutable identities. The writer lock serializes this metadata-only repair
-/// with publication.
-pub fn ensure_generation_control_state_private(root: &Path) -> Result<PathBuf> {
+/// with publication. Returns the canonical root and whether any control file
+/// required repair, so callers can invalidate cached manifest identities.
+pub fn ensure_generation_control_state_private(root: &Path) -> Result<(PathBuf, bool)> {
     ensure_private_directory(root)?;
     let directory = DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
     let root = directory.root_path().to_path_buf();
@@ -34,20 +37,21 @@ pub fn ensure_generation_control_state_private(root: &Path) -> Result<PathBuf> {
         is_blocking: false,
     };
     let _guard = crate::lock::acquire_generation_writer_lock_with_retry(&directory, &lock)?;
-    ensure_generation_control_files_private_with_writer_lock_held(&root)?;
-    Ok(root)
+    let repaired = ensure_generation_control_files_private_with_writer_lock_held(&root)?;
+    Ok((root, repaired))
 }
 
 /// Repairs every generation control file while the caller holds the writer
 /// lock. This includes flat-delta ancestors that are not named by the active
-/// pointer or retention lease directly.
+/// pointer or retention lease directly. Returns whether any control file
+/// required repair; already-private files keep their immutable identities.
 #[doc(hidden)]
-pub fn ensure_generation_control_files_private_with_writer_lock_held(root: &Path) -> Result<()> {
+pub fn ensure_generation_control_files_private_with_writer_lock_held(root: &Path) -> Result<bool> {
     ensure_private_directory(root)?;
     let manifest_directory = root.join(MANIFEST_DIRECTORY);
     ensure_private_directory(&manifest_directory)?;
     ensure_private_directory(&root.join(INDEX_GENERATIONS_DIRECTORY))?;
-    ensure_optional_private_file(&root.join(ACTIVE_GENERATION_POINTER_FILE))?;
+    let mut repaired = ensure_optional_private_file(&root.join(ACTIVE_GENERATION_POINTER_FILE))?;
     for entry in fs::read_dir(&manifest_directory)? {
         let entry = entry?;
         let file_name = entry.file_name();
@@ -58,18 +62,25 @@ pub fn ensure_generation_control_files_private_with_writer_lock_held(root: &Path
         if !is_manifest {
             continue;
         }
-        ensure_private_file(&entry.path())?;
+        repaired |= repair_private_control_file(&entry.path())?;
     }
-    Ok(())
+    Ok(repaired)
 }
 
-fn ensure_optional_private_file(path: &Path) -> Result<()> {
+fn repair_private_control_file(path: &Path) -> Result<bool> {
+    // The platform verifier uses no-follow handles and the same owner/mode/ACL
+    // policy as ensure_private_file. Reuse it instead of tracking new identities.
+    if verify_private_file(path).is_ok() {
+        return Ok(false);
+    }
+    ensure_private_file(path)?;
+    Ok(true)
+}
+
+fn ensure_optional_private_file(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
-        Ok(_) => {
-            ensure_private_file(path)?;
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => repair_private_control_file(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }
 }

@@ -433,7 +433,7 @@ fn run_search_inner<P: HistorySemanticPort>(
                 refresh.pin,
                 SEMANTIC_GENERATION_WAIT_TIMEOUT,
             )?,
-            RetainedPeerRead::IfAvailable => {
+            RetainedPeerRead::IfAvailable | RetainedPeerRead::Deferred => {
                 wait_for_daemon_semantic_generation_with_retained_peer(
                     &data_root,
                     refresh.pin,
@@ -488,7 +488,7 @@ fn run_search_inner<P: HistorySemanticPort>(
     observation.failure_phase = Some(SearchFailurePhase::ResultProjection);
     let render_started = Instant::now();
     let compact_value = match compact_projection
-        .then(|| application.project_read_model(&value))
+        .then(|| application.project_read_model_after_query(&value))
         .transpose()
     {
         Ok(value) => value,
@@ -758,7 +758,7 @@ pub(super) fn refresh_for_search(
             data_root,
             coordinate_source_backed_refresh,
         ),
-        RetainedPeerRead::IfAvailable => refresh_for_search_with(
+        RetainedPeerRead::IfAvailable | RetainedPeerRead::Deferred => refresh_for_search_with(
             request,
             refresh,
             data_root,

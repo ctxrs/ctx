@@ -93,7 +93,12 @@ pub(super) fn read_directory_entries(
     let remaining = limits
         .max_metadata_entries
         .saturating_sub(inventory.stats.entries_visited);
-    let reader = match directory.entries(remaining.saturating_add(1)) {
+    let entries = if inventory.frozen {
+        directory.entries_snapshot(remaining.saturating_add(1))
+    } else {
+        directory.entries(remaining.saturating_add(1))
+    };
+    let reader = match entries {
         Ok(entries) => entries,
         Err(CaptureError::InvalidProviderTranscriptPath { .. }) => {
             inventory.reject(
@@ -225,7 +230,12 @@ pub(super) fn revalidate_directory(
     goal: CursorScanGoal,
     inventory: &mut CursorRootInventory,
 ) {
-    if let Err(error) = directory.revalidate() {
+    let revalidation = if inventory.frozen {
+        directory.revalidate_same_object()
+    } else {
+        directory.revalidate()
+    };
+    if let Err(error) = revalidation {
         inventory.reject(
             path.to_path_buf(),
             CursorDiscoveryIssueKind::Io,
@@ -241,4 +251,27 @@ pub(super) fn revalidate_directory(
 pub(super) fn scan_should_stop(goal: CursorScanGoal, inventory: &CursorRootInventory) -> bool {
     inventory.has_issue_kind(CursorDiscoveryIssueKind::LimitExceeded)
         || (goal == CursorScanGoal::FirstTranscript && inventory.has_transcripts())
+}
+
+pub(super) fn cursor_catalog_token(
+    source_file: &OpenedProviderSourceFile,
+    authority: &ProviderSourceRoot,
+    authority_relative_path: &Path,
+    explicit_file: bool,
+    frozen: bool,
+) -> ctx_history_provider_runtime::Result<[u8; 32]> {
+    let token = source_file.ordinary_file_token();
+    if frozen {
+        source_file.revalidate_same_object()?;
+        return Ok(token);
+    }
+    source_file.revalidate_leaf()?;
+    if explicit_file {
+        let reopened = authority.open_file(authority_relative_path)?;
+        if reopened.ordinary_file_token() != token {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        reopened.revalidate_leaf()?;
+    }
+    Ok(token)
 }

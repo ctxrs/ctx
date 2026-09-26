@@ -18,8 +18,8 @@ use std::os::windows::fs::OpenOptionsExt as _;
 use fs4::fs_std::FileExt as _;
 use tantivy::directory::{
     error::{DeleteError, LockError, OpenDirectoryError, OpenReadError, OpenWriteError},
-    Directory, DirectoryLock, FileHandle, FileSlice, Lock, MmapDirectory, WatchCallback,
-    WatchHandle, WritePtr,
+    Directory, DirectoryLock, FileHandle, FileSlice, Lock, MmapDirectory, OwnedBytes,
+    WatchCallback, WatchHandle, WritePtr,
 };
 use tantivy::HasLen;
 use uuid::Uuid;
@@ -414,57 +414,42 @@ fn private_lock_file_options() -> OpenOptions {
 
 #[derive(Debug)]
 struct AnchoredFileHandle {
-    file: File,
-    len: usize,
+    bytes: OwnedBytes,
 }
 
 impl AnchoredFileHandle {
     fn new(file: File) -> io::Result<Self> {
         let len = usize::try_from(file.metadata()?.len())
             .map_err(|_| io::Error::other("anchored generation file is too large"))?;
-        Ok(Self { file, len })
+        let bytes = if len == 0 {
+            OwnedBytes::empty()
+        } else {
+            // SAFETY: Published generation files are immutable, and the reader
+            // retains its generation lease. This is the same file-immutability
+            // contract as MmapDirectory. Map the already-opened capability,
+            // never its pathname; the mapping survives closing this File.
+            let mapping = unsafe { memmap2::MmapOptions::new().len(len).map(&file)? };
+            OwnedBytes::new(mapping)
+        };
+        Ok(Self { bytes })
     }
 }
 
 impl HasLen for AnchoredFileHandle {
     fn len(&self) -> usize {
-        self.len
+        self.bytes.len()
     }
 }
 
 impl FileHandle for AnchoredFileHandle {
-    fn read_bytes(
-        &self,
-        range: std::ops::Range<usize>,
-    ) -> io::Result<tantivy::directory::OwnedBytes> {
-        if range.start > range.end || range.end > self.len {
+    fn read_bytes(&self, range: std::ops::Range<usize>) -> io::Result<OwnedBytes> {
+        if range.start > range.end || range.end > self.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "anchored generation read is outside the file",
             ));
         }
-        let mut bytes = vec![0_u8; range.len()];
-        #[cfg(unix)]
-        std::os::unix::fs::FileExt::read_exact_at(&self.file, &mut bytes, range.start as u64)?;
-        #[cfg(windows)]
-        {
-            let mut read = 0_usize;
-            while read < bytes.len() {
-                let count = std::os::windows::fs::FileExt::seek_read(
-                    &self.file,
-                    &mut bytes[read..],
-                    (range.start + read) as u64,
-                )?;
-                if count == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "anchored generation read",
-                    ));
-                }
-                read += count;
-            }
-        }
-        Ok(tantivy::directory::OwnedBytes::new(bytes))
+        Ok(self.bytes.slice(range))
     }
 }
 
@@ -745,6 +730,9 @@ fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
 fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
     windows_replace::WindowsAtomicReplacement::prepare(source, target)?.replace()
 }
+
+#[cfg(test)]
+mod anchored_file_tests;
 
 #[cfg(test)]
 mod publication_probe_tests;
