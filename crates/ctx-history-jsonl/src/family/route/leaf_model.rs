@@ -365,7 +365,11 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
 
     pub(super) fn open_for_scan(&self) -> JsonlResult<(Self, Arc<OpenedProviderSourceFile<E>>), E> {
         let opened = self.authority.open_file(&self.authority_path)?;
-        let current = observe_opened_file(&self.source_path, &opened)?;
+        let current = if self.freeze_observation_at_scan {
+            observe_opened_file_allow_append(&self.source_path, &opened)?
+        } else {
+            observe_opened_file(&self.source_path, &opened)?
+        };
         if self
             .logical_eof
             .is_some_and(|logical_eof| logical_eof > current.length())

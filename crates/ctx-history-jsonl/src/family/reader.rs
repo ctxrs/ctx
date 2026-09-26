@@ -29,8 +29,11 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             &current_metadata,
         )?;
         let mut file = source_file.reopen_same_object()?;
-        if observe_metadata::<E>(identity.source_path(), &file, &file.metadata()?)?
-            != current_observation
+        let reopened = observe_metadata::<E>(identity.source_path(), &file, &file.metadata()?)?;
+        if reopened != current_observation
+            && !(frozen_observation.is_some()
+                && reopened.length() > current_observation.length()
+                && current_observation.admits_frozen_prefix_in(&reopened))
         {
             return Err(E::source_changed());
         }

@@ -34,7 +34,11 @@ pub(super) fn validate_binding(
 }
 
 pub(super) fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<CursorBinding> {
-    let TypedKey::Bytes(bytes) = leaf.binding() else {
+    decode_binding_proof(leaf.binding())
+}
+
+pub(super) fn decode_binding_proof(proof: &TypedKey) -> Result<CursorBinding> {
+    let TypedKey::Bytes(bytes) = proof else {
         return Err(contract("Cursor family binding is malformed"));
     };
     Ok(serde_json::from_slice(bytes)?)

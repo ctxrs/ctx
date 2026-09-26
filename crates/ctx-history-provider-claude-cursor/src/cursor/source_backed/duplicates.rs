@@ -5,8 +5,9 @@ use std::{
 };
 
 use ctx_history_provider_runtime::{
-    observe_opened_file, read_bounded_record_unhashed, source_io::OpenedProviderSourceFile,
-    CaptureError, JsonlFileObservation, JsonlRecordFraming, Result,
+    observe_opened_file_allow_append, read_bounded_record, source_io::OpenedProviderSourceFile,
+    CaptureError, JsonlFamilyTerminalProof, JsonlFileObservation, JsonlRecordFraming,
+    JsonlResumableSha256, Result,
 };
 use ctx_history_source_io::MAX_PROVIDER_JSONL_LINE_BYTES;
 use sha2::Digest;
@@ -22,6 +23,7 @@ use super::CURSOR_SIGNATURE_RECORDS;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CursorTranscriptSummary {
     observation: JsonlFileObservation,
+    physical_sha256: [u8; 32],
     signature: [u8; 32],
     event_count: u64,
     latest_occurred_at_unix_ms: Option<i64>,
@@ -31,6 +33,7 @@ struct CursorTranscriptSummary {
 pub(super) struct CursorTranscriptSelection {
     pub(super) selected_index: usize,
     pub(super) selected_observation: JsonlFileObservation,
+    pub(super) selected_physical_sha256: [u8; 32],
     pub(super) route_observations: Vec<JsonlFileObservation>,
     pub(super) selected_signature: [u8; 32],
     pub(super) divergent_indices: BTreeSet<usize>,
@@ -75,7 +78,7 @@ pub(super) fn select_cursor_transcript(
         .map(|(_, summary)| summary.event_count)
         .collect::<BTreeSet<_>>();
     let selected_prefixes =
-        cursor_transcript_prefix_signatures(&routes[selected_index], &prefix_lengths)?;
+        cursor_transcript_prefix_signatures(&routes[selected_index], selected, &prefix_lengths)?;
     let divergent_indices = summaries
         .iter()
         .enumerate()
@@ -91,6 +94,7 @@ pub(super) fn select_cursor_transcript(
     Ok(CursorTranscriptSelection {
         selected_index,
         selected_observation: selected.observation.clone(),
+        selected_physical_sha256: selected.physical_sha256,
         route_observations: summaries
             .iter()
             .map(|summary| summary.observation.clone())
@@ -104,12 +108,12 @@ fn cursor_transcript_summary(transcript: &CursorTranscriptPath) -> Result<Cursor
     let source = transcript
         .authority()
         .open_file(transcript.authority_relative_path())?;
-    let observation = observe_opened_file(transcript.path(), &source)?;
+    let observation = observe_opened_file_allow_append(transcript.path(), &source)?;
     let mut digest = sha2::Sha256::new();
     digest.update(b"ctx.cursor.logical-transcript.v1\0");
     let mut event_count = 0_u64;
     let mut latest_occurred_at_unix_ms = None;
-    visit_cursor_events(&source, |event| {
+    let physical_sha256 = visit_cursor_events(&source, observation.length(), |event| {
         #[cfg(any(test, feature = "test-support"))]
         CURSOR_SIGNATURE_RECORDS.set(CURSOR_SIGNATURE_RECORDS.get().saturating_add(1));
         digest.update(event_count.to_be_bytes());
@@ -128,11 +132,16 @@ fn cursor_transcript_summary(transcript: &CursorTranscriptPath) -> Result<Cursor
             ))?;
         Ok(())
     })?;
-    if observe_opened_file(transcript.path(), &source)? != observation {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
+    JsonlFamilyTerminalProof::frozen_prefix_path(
+        transcript.path().to_path_buf(),
+        std::sync::Arc::new(transcript.authority().clone()),
+        transcript.authority_relative_path().to_path_buf(),
+        observation.clone(),
+        physical_sha256,
+    )?;
     Ok(CursorTranscriptSummary {
         observation,
+        physical_sha256,
         signature: finish_cursor_transcript_signature(digest, event_count),
         event_count,
         latest_occurred_at_unix_ms,
@@ -141,6 +150,7 @@ fn cursor_transcript_summary(transcript: &CursorTranscriptPath) -> Result<Cursor
 
 fn cursor_transcript_prefix_signatures(
     transcript: &CursorTranscriptPath,
+    expected: &CursorTranscriptSummary,
     prefix_lengths: &BTreeSet<u64>,
 ) -> Result<BTreeMap<u64, [u8; 32]>> {
     if prefix_lengths.is_empty() {
@@ -156,7 +166,7 @@ fn cursor_transcript_prefix_signatures(
     if prefix_lengths.contains(&0) {
         signatures.insert(0, finish_cursor_transcript_signature(digest.clone(), 0));
     }
-    visit_cursor_events(&source, |event| {
+    let physical_sha256 = visit_cursor_events(&source, expected.observation.length(), |event| {
         digest.update(event_count.to_be_bytes());
         digest.update(event.provider_event_hash);
         event_count = event_count
@@ -172,6 +182,9 @@ fn cursor_transcript_prefix_signatures(
         }
         Ok(())
     })?;
+    if physical_sha256 != expected.physical_sha256 {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
     Ok(signatures)
 }
 
@@ -189,18 +202,22 @@ pub(super) fn cursor_route_sha256(path: &Path) -> [u8; 32] {
 
 fn visit_cursor_events(
     source: &OpenedProviderSourceFile,
+    frozen_len: u64,
     mut visit: impl FnMut(CursorNativeEvent) -> Result<()>,
-) -> Result<()> {
-    let mut reader = BufReader::new(source.file().try_clone()?);
+) -> Result<[u8; 32]> {
+    let mut reader = BufReader::new(source.reopen_same_object()?);
+    let mut full_hasher = JsonlResumableSha256::new();
+    let mut complete_hasher = JsonlResumableSha256::new();
     let mut line = Vec::new();
     let mut physical_ordinal = 0_u64;
     let mut offset = 0_u64;
-    let frozen_len = source.len();
     let mut timestamps = CursorTimestampState::default();
     while offset < frozen_len {
-        let record = read_bounded_record_unhashed(
+        let record = read_bounded_record(
             &mut reader,
             &mut line,
+            &mut full_hasher,
+            &mut complete_hasher,
             frozen_len.saturating_sub(offset),
             JsonlRecordFraming::ordinary(),
             || CaptureError::SourceChangedDuringCapture,
@@ -243,6 +260,6 @@ fn visit_cursor_events(
             break;
         }
     }
-    source.revalidate_leaf()?;
-    Ok(())
+    source.revalidate_same_object()?;
+    Ok(full_hasher.digest())
 }

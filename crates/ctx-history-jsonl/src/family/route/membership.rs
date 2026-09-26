@@ -53,11 +53,24 @@ impl<E: JsonlFamilyError> JsonlFamilyMembershipObservation<E> {
     }
 
     pub fn observe_authorities(opening: &JsonlFamilyInventory<E>) -> JsonlResult<Self, E> {
+        Self::observe_authorities_with_snapshots(opening, false)
+    }
+
+    /// Observes individually bounded directory snapshots. Providers must bind
+    /// new native identities and reject new aliases before admitting additions.
+    pub fn observe_frozen_authorities(opening: &JsonlFamilyInventory<E>) -> JsonlResult<Self, E> {
+        Self::observe_authorities_with_snapshots(opening, true)
+    }
+
+    fn observe_authorities_with_snapshots(
+        opening: &JsonlFamilyInventory<E>,
+        frozen: bool,
+    ) -> JsonlResult<Self, E> {
         let mut state = JsonlFamilyMembershipState::default();
         let unobserved_routes = unobserved_membership_routes(opening)?;
         for authority in &opening.authorities {
             let directory = authority.directory()?;
-            observe_membership_directory(&directory, 0, &mut state, &unobserved_routes)?;
+            observe_membership_directory(&directory, 0, &mut state, &unobserved_routes, frozen)?;
             authority.revalidate_same_object()?;
         }
         Self::from_routes(state.routes, opening)
@@ -227,6 +240,7 @@ fn observe_membership_directory<E: JsonlFamilyError>(
     depth: usize,
     state: &mut JsonlFamilyMembershipState<E>,
     unobserved_routes: &UnobservedMembershipRoutes,
+    frozen: bool,
 ) -> JsonlResult<(), E> {
     if depth > PROVIDER_JSONL_INVENTORY_MAX_DEPTH {
         return Err(E::invalid_payload(
@@ -248,7 +262,11 @@ fn observe_membership_directory<E: JsonlFamilyError>(
                 "JSONL membership entry count exceeds the provider inventory bound".to_owned(),
             )
         })?;
-    let children = directory.entries(remaining)?;
+    let children = if frozen {
+        directory.entries_snapshot(remaining)?
+    } else {
+        directory.entries(remaining)?
+    };
     state.entries = state
         .entries
         .checked_add(children.len())
@@ -300,6 +318,7 @@ fn observe_membership_directory<E: JsonlFamilyError>(
                     depth.saturating_add(1),
                     state,
                     unobserved_routes,
+                    frozen,
                 )?;
             }
             OpenedProviderSourcePath::File(opened)
@@ -340,7 +359,9 @@ fn observe_membership_directory<E: JsonlFamilyError>(
     // inventories additionally compare the root's full admission stamp before
     // and after this walk. Descendant directories were opened by this walk and
     // can therefore use an exact enumeration fence.
-    if depth > 0 {
+    if frozen {
+        directory.revalidate_same_object()?;
+    } else if depth > 0 {
         directory.revalidate()?;
     }
     Ok(())

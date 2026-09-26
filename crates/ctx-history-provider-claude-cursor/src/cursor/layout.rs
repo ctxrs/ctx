@@ -66,6 +66,7 @@ impl Default for CursorInventoryLimits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CursorScanGoal {
     CompleteInventory,
+    FrozenOpeningInventory,
     FirstTranscript,
 }
 
@@ -202,6 +203,7 @@ pub struct CursorRootInventory {
     pub(crate) stats: CursorDiscoveryStats,
     authority: Option<ProviderSourceRoot>,
     issue_kinds: BTreeSet<CursorDiscoveryIssueKind>,
+    frozen: bool,
 }
 
 impl CursorRootInventory {
@@ -227,6 +229,7 @@ impl CursorRootInventory {
             stats: CursorDiscoveryStats::default(),
             authority: None,
             issue_kinds: BTreeSet::new(),
+            frozen: false,
         }
     }
 
@@ -267,6 +270,7 @@ impl CursorRootInventory {
 
     pub(crate) fn revalidate(&self) -> ctx_history_provider_runtime::Result<()> {
         match self.authority.as_ref() {
+            Some(root) if self.frozen => root.revalidate_same_object(),
             Some(root) => root.revalidate(),
             None => Err(CaptureError::InvalidProviderTranscriptPath {
                 path: self.input.clone(),
@@ -320,6 +324,14 @@ pub fn discover_cursor_transcripts(input: &Path) -> CursorRootInventory {
     discover_cursor_transcripts_with_limits(input, CursorInventoryLimits::default())
 }
 
+pub(super) fn discover_frozen_cursor_transcripts(input: &Path) -> CursorRootInventory {
+    scan_cursor_transcripts(
+        input,
+        CursorInventoryLimits::default(),
+        CursorScanGoal::FrozenOpeningInventory,
+    )
+}
+
 pub(super) fn discover_cursor_transcripts_with_limits(
     input: &Path,
     limits: CursorInventoryLimits,
@@ -333,6 +345,7 @@ fn scan_cursor_transcripts(
     goal: CursorScanGoal,
 ) -> CursorRootInventory {
     let mut inventory = CursorRootInventory::new(input);
+    inventory.frozen = goal == CursorScanGoal::FrozenOpeningInventory;
     if !admit_metadata_entry(input, limits, &mut inventory) {
         return inventory;
     }
@@ -920,6 +933,7 @@ fn inspect_file(
         &authority,
         &authority_relative_path,
         explicit_file,
+        inventory.frozen,
     ) {
         Ok(token) => token,
         Err(error) => {
@@ -958,22 +972,4 @@ fn inspect_file(
             false,
         ),
     }
-}
-
-fn cursor_catalog_token(
-    source_file: &OpenedProviderSourceFile,
-    authority: &ProviderSourceRoot,
-    authority_relative_path: &Path,
-    explicit_file: bool,
-) -> ctx_history_provider_runtime::Result<[u8; 32]> {
-    let token = source_file.ordinary_file_token();
-    source_file.revalidate_leaf()?;
-    if explicit_file {
-        let reopened = authority.open_file(authority_relative_path)?;
-        if reopened.ordinary_file_token() != token {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        reopened.revalidate_leaf()?;
-    }
-    Ok(token)
 }

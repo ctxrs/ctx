@@ -186,7 +186,9 @@ pub use revalidation::{
     set_after_jsonl_semantic_preflight_hook, set_after_second_jsonl_prefix_hash_hook,
     track_jsonl_prefix_hash_bytes, JsonlPrefixHashBytesGuard,
 };
-pub use revalidation::{observe_opened_file, observe_opened_file_allow_append};
+pub use revalidation::{
+    observe_opened_file, observe_opened_file_allow_append, observe_opened_file_leaf,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use route::{
     checkpoint_admitted_revision_for_test, set_before_jsonl_terminal_physical_revalidation_hook,

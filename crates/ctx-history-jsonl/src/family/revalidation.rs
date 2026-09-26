@@ -268,6 +268,20 @@ pub fn observe_opened_file_allow_append<E: JsonlFamilyError>(
     Ok(observation)
 }
 
+/// Exact file contents/metadata under a retained root whose children may
+/// change. Inventory owners separately prove directory membership.
+pub fn observe_opened_file_leaf<E: JsonlFamilyError>(
+    source_path: &Path,
+    opened: &OpenedProviderSourceFile<E>,
+) -> JsonlResult<JsonlFileObservation, E> {
+    opened.revalidate_same_object()?;
+    opened.revalidate_leaf()?;
+    let observation = observe_metadata::<E>(source_path, opened.file(), opened.metadata())?;
+    opened.revalidate_leaf()?;
+    opened.revalidate_same_object()?;
+    Ok(observation)
+}
+
 pub fn revalidate_frozen_prefix<E: JsonlFamilyError>(
     source_path: &Path,
     source_file: &OpenedProviderSourceFile<E>,
