@@ -1078,56 +1078,105 @@ fn import_custom_history_jsonl_format_imports_valid_rows_and_reports_rejections(
 fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
     let temp = tempdir();
     let _daemon = start_full_source_refresh_daemon(&temp);
+    let initial = wait_for_initial_source_refresh(&temp);
+    let initial_generation = initial["lexical"]["generation_id"]
+        .as_str()
+        .expect("initial empty generation");
     let fixture = temp.path().join("structural-manifest.jsonl");
     let fixture_arg = fixture.to_str().unwrap();
 
-    let cases: [(&str, &[u8], &str, &str); 4] = [
+    let cases: [(&str, &[u8], &str, &str, &str); 4] = [
         (
             "missing",
             b"",
             "missing manifest record for ctx-history-jsonl-v2",
             "invalid capture payload",
+            "malformed_source",
         ),
         (
             "released-v1",
             b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n",
             "unsupported custom history schema version `ctx-history-jsonl-v1`",
             "unsupported provider schema",
+            "unsupported_schema",
         ),
         (
             "unsupported",
             b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v999\"}\n",
             "unsupported custom history schema version `ctx-history-jsonl-v999`",
             "unsupported provider schema",
+            "unsupported_schema",
         ),
         (
             "duplicate",
             b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}\n{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}\n",
             "duplicate manifest record at line 2",
             "invalid capture payload",
+            "malformed_source",
         ),
     ];
-    for (name, bytes, failure_kind, cli_classification) in cases {
+    for (name, bytes, failure_kind, cli_classification, outcome_code) in cases {
         fs::write(&fixture, bytes).unwrap();
-        let stderr = failure_stderr(ctx(&temp).args([
-            "import",
-            "--input-format",
-            "ctx-history-jsonl-v2",
-            "--path",
-            fixture_arg,
-            "--no-daemon",
-            "--format=json",
-            "--progress",
-            "none",
-        ]));
+        let output = ctx(&temp)
+            .args([
+                "import",
+                "--input-format",
+                "ctx-history-jsonl-v2",
+                "--path",
+                fixture_arg,
+                "--no-daemon",
+                "--format=json",
+                "--progress",
+                "json",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        assert!(output.stdout.is_empty(), "{name}: {output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains(failure_kind), "{name}: {stderr}");
         assert!(stderr.contains(cli_classification), "{name}: {stderr}");
+
+        // Global status may describe a later periodic refresh. The command's
+        // progress is validated against its own admitted request identity.
+        let events = stderr
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| event["type"] == "ctx_progress" && event["operation"] == "import")
+            .collect::<Vec<_>>();
+        let terminal = events
+            .iter()
+            .filter(|event| event["done"] == true)
+            .collect::<Vec<_>>();
+        assert_eq!(terminal.len(), 1, "{name}: {stderr}");
+        let terminal = terminal[0];
+        let request_id = terminal["request_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .expect("terminal import request identity");
+        assert_ne!(terminal["request_id"], initial["refresh"]["request_id"]);
+        assert_eq!(
+            terminal["logical_request_id"], request_id,
+            "{name}: {stderr}"
+        );
+        assert_eq!(terminal["logical_phase"], "terminal", "{name}: {stderr}");
+        assert_eq!(terminal["request_state"], "failed", "{name}: {stderr}");
+        assert_eq!(terminal["phase"], "failed", "{name}: {stderr}");
+        assert_eq!(
+            terminal["structured_outcome"]["code"], outcome_code,
+            "{name}: {stderr}"
+        );
+        for event in events
+            .iter()
+            .filter(|event| event["request_id"].is_string())
+        {
+            assert_eq!(event["request_id"], request_id, "{name}: {stderr}");
+        }
+
         let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-        assert!(
-            matches!(
-                status["refresh"]["status"].as_str(),
-                Some("pending" | "unavailable")
-            ),
+        assert_eq!(
+            status["lexical"]["generation_id"], initial_generation,
             "{name}: {status:#}"
         );
         assert!(
@@ -1178,6 +1227,23 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
         recovered["totals"]["current_rejected_records"], 1,
         "{recovered:#}"
     );
+    let recovered_generation = published_generation(&recovered);
+    assert_ne!(recovered_generation, initial_generation);
+    wait_for_core_generation(&temp, &recovered_generation);
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "structural manifest recovery oracle",
+        "--provider",
+        "custom",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(
+        search["retrieval"]["generation_id"], recovered_generation,
+        "{search:#}"
+    );
+    assert_eq!(search["results"].as_array().unwrap().len(), 1, "{search:#}");
 }
 
 fn write_valid_explicit_custom_source(path: &Path, text: &str) {
