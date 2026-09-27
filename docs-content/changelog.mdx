@@ -8,6 +8,21 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.0.3
+
+Released: 2026-09-27
+
+### Fixed
+
+- Search uses less memory by avoiding full copies of index dictionaries and releasing query readers before formatting compact references.
+- Active Claude and Cursor transcripts can grow during refresh without blocking other sessions from updating. Incomplete trailing records are picked up on the next refresh.
+- Refresh avoids repeated manifest reloads and uses faster lookups for unchanged sources.
+
+### Commits and PRs
+
+- [#1070](https://github.com/ctxrs/ctx/pull/1070) — reduce search memory and keep active transcript refresh moving.
+- Full diff: [v2.0.2...v2.0.3](https://github.com/ctxrs/ctx/compare/v2.0.2...v2.0.3).
+
 ## 2.0.2
 
 Released: 2026-09-25
