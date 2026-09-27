@@ -7,7 +7,7 @@ import {
   readStableRegularFile, parseJsonStrict, sha256,
 } from "./managed-pair-release-contract.mjs";
 
-import { compareReleaseVersions } from "./release-version.cjs";
+import { compareReleaseVersions, readCargoVersion } from "./release-version.cjs";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const MAX_INCOMING_BINARY_BYTES = MAX_COMPONENT_BYTES;
@@ -67,22 +67,26 @@ export function projectUnifiedReleaseInputs({ candidate, matrix, sourceCommit, a
   });
 }
 
-export function loadUnifiedReleaseInputs({ factoryDir, handoffDir, handoffDigest, candidate, matrix }) {
+export function loadUnifiedReleaseInputs({ factoryDir, handoffDir, handoffDigest, candidate, matrix, publicRepo = ROOT }) {
   const root = path.resolve(factoryDir);
   const handoff = path.resolve(handoffDir);
-  const sourceCommit = childProcess.execFileSync("git", ["-C", ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  if (childProcess.execFileSync("git", ["-C", ROOT, "status", "--porcelain=v1", "--untracked-files=all"],
+  const sourceRepo = path.resolve(publicRepo);
+  const sourceCommit = childProcess.execFileSync("git", ["-C", sourceRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  if (childProcess.execFileSync("git", ["-C", sourceRepo, "status", "--porcelain=v1", "--untracked-files=all"],
     { encoding: "utf8" }).trim() !== "") contractError("public release source checkout is dirty");
+  const sourceVersion = readCargoVersion(sourceRepo);
+  // The candidate owns source identity; this executor owns admission and validators.
   const run = (script, args) => childProcess.execFileSync("python3", ["-I", "-B",
     path.join(ROOT, "scripts", script), ...args], { encoding: "utf8" }).trim();
-  run("release/released-source-continuity.py", ["--public-repo", ROOT, "--source-commit", sourceCommit]);
+  run("release/released-source-continuity.py", ["--public-repo", sourceRepo, "--source-commit", sourceCommit]);
   run("release/seal-linux-factory-candidate.py", ["--verify", "--candidate-dir", root, "--source-commit", sourceCommit]);
   const observed = run("release-sbom.py", ["verify-release", "--handoff-dir", handoff,
     "--expected-handoff-sha256", handoffDigest]);
   if (observed !== handoffDigest) contractError("public handoff authority differs from expected digest");
   const factoryBytes = readStableRegularFile(path.join(root, "ctx-release-factory.json"), "public factory", 16 * 1024 * 1024);
   const factory = parseJsonStrict(factoryBytes, "public factory");
-  if (factory.source_commit !== sourceCommit || `v${factory.version}` !== candidate.release_name
+  if (factory.source_commit !== sourceCommit || factory.version !== sourceVersion
+      || `v${factory.version}` !== candidate.release_name
       || compareReleaseVersions(factory.version, "1.5.0") < 0) {
     contractError("projection requires an exact unified 1.5-or-newer public factory");
   }
