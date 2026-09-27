@@ -2,7 +2,7 @@
 """Opt-in Unix smoke of the published stable updater; no builds or feed writes.
 
 From the repository root (Python 3, curl and OpenSSL required):
-  python3 scripts/release/upgrade-walk.py 1.6.3 1.6.4 2.0.4 --timeout 240
+  python3 scripts/release/upgrade-walk.py 1.6.3 1.6.5 2.0.5 --timeout 240
 Supply the exact intended sequence, including 1.6.3, for the feed under test.
 The example is an expectation, not a claim that the live feed supports it.
 The installer runs ONCE with signed versioned 1.6.3 metadata. Thereafter only

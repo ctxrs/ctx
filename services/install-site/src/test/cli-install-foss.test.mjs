@@ -121,7 +121,7 @@ test(`PowerShell 1.5 metadata preparation and ${pendingRecovery ?? "fresh"} reco
     writeFileSync(path.join(source, "metadata.env"), metadata);
     writeFileSync(path.join(source, "metadata.sig"), signed.signatureBase64);
     writeFileSync(path.join(source, "core"), core);
-    const feed = "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env";
+    const feed = "https://cli.ctx.rs/functions/v3/releases/stable/ctx-release-metadata.env";
     writeFileSync(path.join(source, "routes.json"), JSON.stringify([
       { uri: feed, file: "metadata.env" }, { uri: feed + ".sig", file: "metadata.sig" },
       { uri: base + "/ctx.exe", file: "core" },

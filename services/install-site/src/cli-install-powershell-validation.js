@@ -233,13 +233,14 @@ try {
 
 $functionsBase = if ([string]::IsNullOrWhiteSpace($env:CTX_UPGRADE_FUNCTIONS_BASE)) { "${normalizedBase}" } else { $env:CTX_UPGRADE_FUNCTIONS_BASE.TrimEnd("/") }
 $channel = if ([string]::IsNullOrWhiteSpace($env:CTX_UPGRADE_CHANNEL)) { "${normalizedChannel}" } else { $env:CTX_UPGRADE_CHANNEL }
-if ($channel -cne "stable" -and $functionsBase -ceq "https://cli.ctx.rs/functions/v2" -and
+if ($channel -cne "stable" -and
+    $functionsBase -cin @("https://cli.ctx.rs/functions/v2", "https://cli.ctx.rs/functions/v3") -and
     [string]::IsNullOrWhiteSpace($env:CTX_UPGRADE_FUNCTIONS_BASE)) {
     $functionsBase = "https://cli.ctx.rs/functions/v1"
 }
 # Release selection changes only the default stable feed. Telemetry remains v1;
 # an injected transport base retains its existing endpoint and HTTPS gate.
-$installTelemetryBase = if ($functionsBase -ceq "https://cli.ctx.rs/functions/v2") {
+$installTelemetryBase = if ($functionsBase -cin @("https://cli.ctx.rs/functions/v2", "https://cli.ctx.rs/functions/v3")) {
     "https://cli.ctx.rs/functions/v1"
 } else { $functionsBase }
 $installAttemptId = "${normalizedInstallAttemptId}"

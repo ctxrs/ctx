@@ -27,7 +27,7 @@ export interface Env {
 }
 
 type Route =
-  | { kind: "release"; channel: string; tail: string; objectKey: string; feed: "original" | "current" }
+  | { kind: "release"; channel: string; tail: string; objectKey: string; feed: "original" | "current" | "v3" }
   | { kind: "download"; channel: string; version: string; filename: string; objectKey: string }
   | { kind: "providerMatrix"; channel: string; tail: string; objectKey: string }
   | { kind: "storage"; objectKey: string };
@@ -83,10 +83,12 @@ async function serveCurrentReleaseMetadata(
   env: Env,
   origin: string | null,
 ): Promise<Response> {
-  const pointerKey = `releases/${route.channel}/${route.feed === "current" ? "current-v2.json" : CURRENT_RELEASE_POINTER}`;
+  const pointerName = route.feed === "v3" ? "current-v3.json"
+    : route.feed === "current" ? "current-v2.json" : CURRENT_RELEASE_POINTER;
+  const pointerKey = `releases/${route.channel}/${pointerName}`;
   const pointerObject = await env.RELEASES_BUCKET.get(pointerKey);
   if (pointerObject == null) {
-    if (route.feed === "current") {
+    if (route.feed !== "original") {
       return jsonError(404, "not_found", "current release feed is not initialized", origin);
     }
     return serveObjectFromR2(
@@ -104,6 +106,13 @@ async function serveCurrentReleaseMetadata(
     throw new Error("current release pointer is invalid");
   }
   const pointer = parseCurrentReleasePointer(await pointerObject.text(), route.channel);
+  if (route.feed === "v3") {
+    const [major, minor, patch] = pointer.version.split(/[.-]/u).map(Number);
+    if (major < 2 || (major === 2 && minor === 0
+        && (patch < 5 || (patch === 5 && pointer.version.includes("-"))))) {
+      throw new Error("v3 stable release must be 2.0.5 or newer");
+    }
+  }
   const selected = route.tail.endsWith(".sig")
     ? pointer.signature_object
     : pointer.metadata_object;
@@ -117,6 +126,7 @@ async function serveCurrentReleaseMetadata(
 }
 
 function parseCurrentReleasePointer(body: string, channel: string): {
+  readonly version: string;
   readonly metadata_object: string;
   readonly signature_object: string;
 } {
@@ -160,6 +170,7 @@ function parseCurrentReleasePointer(body: string, channel: string): {
     throw new Error("current release pointer selects an invalid object");
   }
   return {
+    version: pointer.version,
     metadata_object: metadataObject,
     signature_object: signatureObject,
   };
@@ -169,7 +180,8 @@ function parseRoute(pathname: string): Route | null {
   const segments = safePathSegments(pathname);
   if (segments == null) return null;
 
-  if (pathMatchesPrefix(segments, ["functions", "v2"])) {
+  if (pathMatchesPrefix(segments, ["functions", "v2"])
+      || pathMatchesPrefix(segments, ["functions", "v3"])) {
     const [, , resource, channel, tail] = segments;
     if (segments.length !== 5 || resource !== "releases" || channel !== "stable"
         || (tail !== "ctx-release-metadata.env" && tail !== "ctx-release-metadata.env.sig")) {
@@ -180,7 +192,7 @@ function parseRoute(pathname: string): Route | null {
       channel,
       tail,
       objectKey: `releases/${channel}/${tail}`,
-      feed: "current",
+      feed: segments[1] === "v3" ? "v3" : "current",
     };
   }
 

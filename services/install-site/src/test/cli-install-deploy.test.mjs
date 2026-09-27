@@ -441,8 +441,16 @@ test("current-feed signature/hash check accepts an exact signed fixture and reje
     const i = line.indexOf("="); return [line.slice(0, i), line.slice(i + 1)];
   }));
   const release = { version: fields.CTX_RELEASE_VERSION, source_commit: fields.CTX_RELEASE_SOURCE_COMMIT, metadata_sha256: sha256(metadata) };
-  const fetcher = async (url) => new Response(url.endsWith(".sig") ? signature : metadata);
+  const urls = [];
+  const fetcher = async (url) => {
+    urls.push(url);
+    return new Response(url.endsWith(".sig") ? signature : metadata);
+  };
   assert.equal((await verifyCurrentFeed(release, fetcher)).signature_verified, true);
+  assert.deepEqual(urls, [
+    "https://cli.ctx.rs/functions/v3/releases/stable/ctx-release-metadata.env",
+    "https://cli.ctx.rs/functions/v3/releases/stable/ctx-release-metadata.env.sig",
+  ]);
   await assert.rejects(verifyCurrentFeed({ ...release, metadata_sha256: "0".repeat(64) }, fetcher), /differs/);
   await assert.rejects(verifyCurrentFeed({ ...release, version: "1.5.0" }, fetcher), /differs/);
   await assert.rejects(verifyCurrentFeed(release, async () => new Response("tampered")), /differs/);

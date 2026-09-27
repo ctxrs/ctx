@@ -53,6 +53,26 @@ try {
       }
     } finally { fs.writeFileSync(handoffPath, originalHandoff); }
   }
+  // Promotion errors reject before any source/runtime work needs credentials.
+  const prepare = ["prepare", ...common, "--metadata-out", path.join(root, "invalid-promotion"),
+    "--published-at", "2026-09-05T00:00:00.000Z"];
+  for (const options of [
+    ["--promotion", "unknown"],
+    ["--promotion", "bridge"],
+    ["--promotion", "bridge", "--expected-legacy-sha256", "a".repeat(64)],
+    ["--promotion", "stage"],
+    ["--expected-legacy-sha256", "a".repeat(64)],
+  ]) {
+    await assert.rejects(run([...prepare, ...options], environment, fetch));
+    assert.equal(credentials.length, 0);
+    assert.equal(fs.existsSync(path.join(root, "invalid-promotion")), false);
+  }
+  const { HOSTED_MANAGED_PAIR_TARGETS } = hosted;
+  loaded.version = "1.6.5";
+  for (const { id } of HOSTED_MANAGED_PAIR_TARGETS) loaded.targets.get(id).core.artifact.body = { length: 128 * 1024 * 1024 };
+  loaded.targets.get(HOSTED_MANAGED_PAIR_TARGETS.at(-1).id).core.artifact.body.length += 1;
+  await assert.rejects(run([...prepare, "--promotion", "stage"], environment, fetch), /download limit/u);
+  assert.equal(credentials.length, 0);
   loaded.version = "1.3.2";
   await assert.rejects(run(["prepare", ...common, "--metadata-out", path.join(root, "bridge-output"),
     "--published-at", "2026-09-05T00:00:00.000Z"], environment, fetch), /use retained B source/u);

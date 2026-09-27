@@ -9,7 +9,7 @@ import { renderCliInstallShellRendering } from "./cli-install-shell-rendering.js
 import { CLI_INSTALL_SHELL_VALIDATION } from "./cli-install-shell-validation.js";
 import { renderCliInstallShellWorkflow } from "./cli-install-shell-workflow.js";
 
-const DEFAULT_RELEASE_FUNCTIONS_BASE = "https://cli.ctx.rs/functions/v2";
+const DEFAULT_RELEASE_FUNCTIONS_BASE = "https://cli.ctx.rs/functions/v3";
 const DEFAULT_INSTALL_TELEMETRY_ENDPOINT =
   "https://cli.ctx.rs/functions/v1/install-attempt";
 const DEFAULT_CHANNEL = "stable";

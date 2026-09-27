@@ -90,7 +90,7 @@ test("rendered CLI installer directs FreeBSD hosts to the source build", () => {
 test("rendered CLI installer defaults to cli.ctx.rs release metadata", () => {
   const body = renderCliInstallScript();
   assert.ok(body.includes(
-    'release_functions_base="${CTX_UPGRADE_FUNCTIONS_BASE:-https://cli.ctx.rs/functions/v2}"',
+    'release_functions_base="${CTX_UPGRADE_FUNCTIONS_BASE:-https://cli.ctx.rs/functions/v3}"',
   ));
   assert.ok(body.includes(
     'install_telemetry_endpoint="https://cli.ctx.rs/functions/v1/install-attempt"',
