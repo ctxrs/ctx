@@ -87,7 +87,7 @@ pub(super) fn metadata_url(channel: &str) -> String {
         return url;
     }
     let base_url = if channel == "stable" {
-        "https://cli.ctx.rs/functions/v2"
+        "https://cli.ctx.rs/functions/v3"
     } else {
         RELEASE_METADATA_BASE_URL
     };
@@ -625,17 +625,17 @@ CTX_RELEASE_SHA256_linux_x64={}
 
     #[cfg(not(ctx_release_qualification))]
     #[test]
-    fn production_authority_ignores_mixed_ambient_substitution() {
+    fn production_authority_uses_v3_stable_and_v1_nonstable_despite_ambient_substitution() {
         let _guard = ReleaseEnvGuard::hostile();
         let metadata = metadata_url("stable");
 
         assert_eq!(
             metadata,
-            "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env"
+            "https://cli.ctx.rs/functions/v3/releases/stable/ctx-release-metadata.env"
         );
         assert_eq!(
             metadata_signature_url(&metadata),
-            "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env.sig"
+            "https://cli.ctx.rs/functions/v3/releases/stable/ctx-release-metadata.env.sig"
         );
         let staging_metadata = metadata_url("staging");
         assert_eq!(

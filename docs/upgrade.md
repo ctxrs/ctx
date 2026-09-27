@@ -125,7 +125,7 @@ policy, artifact SHA-256, the current managed install marker, and the staged
 binary's `ctx --version` output before replacing the installed binary.
 
 The production binary reads stable release metadata from
-`https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env`.
+`https://cli.ctx.rs/functions/v3/releases/stable/ctx-release-metadata.env`.
 Staging retains
 `https://cli.ctx.rs/functions/v1/releases/staging/ctx-release-metadata.env`.
 The binary derives the detached signature URL from that metadata URL, verifies
