@@ -51,6 +51,7 @@ function parseArgs(argv) {
     "--candidate-manifest-handoff",
     "--candidate-handoff-sha256",
     "--target-matrix",
+    "--public-ctx-repo",
   ]);
   if (argv.length % 2 !== 0) contractError("arguments must be --name value pairs");
   const result = new Map([["preflightOnly", preflightOnly]]);
@@ -110,6 +111,7 @@ export function generateManagedPairRelease({
   candidatePath,
   outputDir,
   privateKey,
+  publicRepo,
   factoryDir,
   handoffDir,
   handoffDigest,
@@ -118,6 +120,7 @@ export function generateManagedPairRelease({
 }) {
   const prepared = prepareManagedPairRelease({
     authority,
+    publicRepo,
     candidatePath,
     outputDir,
     factoryDir,
@@ -131,6 +134,7 @@ export function generateManagedPairRelease({
 
 export function prepareManagedPairRelease({
   authority,
+  publicRepo,
   candidatePath,
   outputDir,
   factoryDir,
@@ -151,7 +155,7 @@ export function prepareManagedPairRelease({
     candidate.target_matrix_sha256,
     inputAuthority,
   );
-  const inputs = loadUnifiedReleaseInputs({ factoryDir, handoffDir, handoffDigest, candidate, matrix });
+  const inputs = loadUnifiedReleaseInputs({ factoryDir, handoffDir, handoffDigest, candidate, matrix, publicRepo });
   const outputPreflight = validateOutputPath(outputDir);
   return Object.freeze({ authority, candidate, inputAuthority, inputs, matrix, outputPreflight });
 }
@@ -306,6 +310,7 @@ async function main() {
     handoffDir: args.get("--candidate-manifest-handoff"),
     handoffDigest: args.get("--candidate-handoff-sha256"),
     targetMatrixPath: args.get("--target-matrix"),
+    publicRepo: args.get("--public-ctx-repo"),
   });
   if (args.get("preflightOnly")) {
     process.stdout.write(`${JSON.stringify({ status: "prepared", source_commit: prepared.inputs.acceptedPair.public_source_commit,

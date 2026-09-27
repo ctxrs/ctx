@@ -50,17 +50,28 @@ def stable_tips(repo, minimum):
         raise ValueError("published stable release tags are missing or not annotated")
     for ref, tip in peeled.items():
         # Resolve the remote object itself; stale local tags cannot hide a fix.
+        if git(repo, "cat-file", "-t", tags[ref]).stdout.strip() != b"tag":
+            raise ValueError(f"published release is not annotated: {ref}")
         actual = git(repo, "rev-parse", "--verify", f"{tags[ref]}^{{commit}}").stdout.decode().strip()
         if actual != tip:
             raise ValueError(f"published tag identity differs: {ref}")
-    return peeled
+    return tags, peeled
 
 
-def check_continuity(repo, commit, tips, policy):
+def check_continuity(repo, commit, tips, policy, tag_objects=None):
     if not COMMIT.fullmatch(commit):
         raise ValueError("candidate source must be an exact commit")
-    if set(policy) != {"minimum_release", "required_patches", "dispositions"}:
+    fields = {"minimum_release", "required_patches", "dispositions"}
+    if set(policy) not in (fields, fields | {"maintenance_bridge"}):
         raise ValueError("release continuity policy has unexpected fields")
+    bridge = policy.get("maintenance_bridge")
+    if "maintenance_bridge" in policy and (
+            not isinstance(bridge, dict)
+            or set(bridge) != {"version", "candidate", "base", "base_tag", "base_tag_object"}
+            or bridge["version"] != "1.6.5" or bridge["base_tag"] != "refs/tags/v1.6.4"
+            or any(not isinstance(bridge[key], str) or not COMMIT.fullmatch(bridge[key])
+                   for key in ("candidate", "base", "base_tag_object"))):
+        raise ValueError("invalid exact maintenance bridge admission")
     exceptions = policy["dispositions"]
     required = policy["required_patches"]
     if (not isinstance(exceptions, dict) or not isinstance(required, list)
@@ -73,11 +84,29 @@ def check_continuity(repo, commit, tips, policy):
     if not re.fullmatch(r"\d+\.\d+\.\d+", version_text):
         raise ValueError("release continuity requires a stable candidate version")
     version = tuple(map(int, version_text.split(".")))
+    admitted = bridge is not None and commit == bridge["candidate"]
+    if admitted:
+        if version_text != bridge["version"]:
+            raise ValueError("maintenance bridge version differs from admission")
+        if (tag_objects is None or tag_objects.get(bridge["base_tag"]) != bridge["base_tag_object"]
+                or tips.get(bridge["base_tag"]) != bridge["base"]):
+            raise ValueError("maintenance bridge requires the exact published annotated base tag")
+        if git(repo, "merge-base", "--is-ancestor", bridge["base"], commit, check=False).returncode:
+            raise ValueError("maintenance bridge base must be an ancestor")
+        bridge_tip = tips.get("refs/tags/v1.6.5")
+        if bridge_tip is not None and bridge_tip != commit:
+            raise ValueError("published maintenance bridge differs from admitted candidate")
     missing = set(required)
+    excluded = {}
     for ref, tip in tips.items():
         match = TAG.fullmatch(ref)
-        if match is None or not COMMIT.fullmatch(tip):
+        if match is None or match[4] or not COMMIT.fullmatch(tip):
             raise ValueError("published release input is invalid")
+        # stable_tips authenticates every advertised tag before this exception.
+        # Only the pinned bridge may omit 2.x branches; required patches remain.
+        if admitted and int(match[1]) == 2:
+            excluded[ref] = tip
+            continue
         if tuple(map(int, match.groups()[:3])) > version:
             raise ValueError(f"candidate is older than published release {ref}")
         missing.update(git(repo, "rev-list", f"{commit}..{tip}").stdout.decode().splitlines())
@@ -102,8 +131,11 @@ def check_continuity(repo, commit, tips, policy):
                 failures.append(f"{released} {subject}")
     if failures:
         raise ValueError("released changes are absent without a reviewed disposition:\n" + "\n".join(failures))
-    return {"candidate": commit, "version": version_text, "published_releases": tips,
-            "non_ancestor_or_required_changes": results}
+    receipt = {"candidate": commit, "version": version_text, "published_releases": tips,
+               "non_ancestor_or_required_changes": results}
+    if admitted:
+        receipt.update(bridge_admission=bridge, excluded_published_releases=excluded)
+    return receipt
 
 
 def main():
@@ -121,8 +153,8 @@ def main():
         raise ValueError("release continuity requires the clean exact public candidate checkout")
     policy = json.loads(POLICY.read_bytes())
     minimum = tuple(map(int, policy["minimum_release"].split(".")))
-    tips = stable_tips(args.public_repo, minimum)
-    print(json.dumps(check_continuity(args.public_repo, commit, tips, policy), indent=2))
+    tag_objects, tips = stable_tips(args.public_repo, minimum)
+    print(json.dumps(check_continuity(args.public_repo, commit, tips, policy, tag_objects), indent=2))
 
 
 if __name__ == "__main__":

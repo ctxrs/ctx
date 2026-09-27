@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { SIGNING_KEY_ENVIRONMENT_VARIABLES, SECRET_STORE_AUTH_ENVIRONMENT_VARIABLES } from "../release-signing-boundary.mjs";
@@ -29,6 +30,141 @@ async function exitsBeforeReadingKey(args, env) {
     // Leave stdin open and empty: deterministic validation must finish first.
   });
 }
+
+function twoCheckoutFixture(t) {
+  const { scratch, env } = fixture(t);
+  Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull,
+    TEST_VALIDATOR_CALLS: path.join(scratch, "validator-calls.jsonl") });
+  const executor = path.join(scratch, "executor");
+  const candidateRepo = path.join(scratch, "candidate-source");
+  const factory = path.join(scratch, "factory");
+  const handoff = path.join(scratch, "handoff");
+  const write = (file, bytes) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes);
+  };
+  const git = (repo, ...args) => {
+    const result = spawnSync("git", ["-C", repo, ...args], { env, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
+  };
+  const commit = (repo) => {
+    git(repo, "add", ".");
+    git(repo, "-c", "user.name=Release fixture", "-c", "user.email=release@example.invalid",
+      "-c", "commit.gpgsign=false", "commit", "-m", "authored release fixture");
+    return git(repo, "rev-parse", "HEAD");
+  };
+  const validators = ["scripts/release/released-source-continuity.py",
+    "scripts/release/seal-linux-factory-candidate.py", "scripts/release-sbom.py"];
+  for (const [repo, version] of [[executor, "2.0.5"], [candidateRepo, "1.6.5"]]) {
+    write(path.join(repo, "Cargo.toml"), `[workspace.package]\nversion = "${version}"\n`);
+    write(path.join(repo, "crates/ctx-cli/Cargo.toml"), '[package]\nname = "ctx"\nversion.workspace = true\n');
+    git(repo, "init", "-b", "main");
+  }
+  for (const name of ["release-manifest.mjs", "unified-release-inputs.mjs", "managed-pair-release-contract.mjs",
+    "managed-pair-release-io.mjs", "release-authority.mjs", "release-signing-boundary.mjs",
+    "release-version.cjs", "frozen-cli-bridge.cjs"]) {
+    const relative = path.join("scripts/release", name);
+    write(path.join(executor, relative), fs.readFileSync(path.join(root, relative)));
+  }
+  for (const name of ["ctx-managed-pair-release-authority-v1.json", "release-targets-v1.json", "release-version-v1.json"]) {
+    write(path.join(executor, "contracts", name), fs.readFileSync(path.join(root, "contracts", name)));
+  }
+  // Substitute only validators to isolate checkout ownership. These tiny files
+  // are not qualified release artifacts; real continuity has offline Git tests.
+  for (const relative of validators) {
+    write(path.join(candidateRepo, relative), 'raise SystemExit("candidate-owned validator must not execute")\n');
+    write(path.join(executor, relative), `import json, os, sys
+from pathlib import Path
+with open(os.environ["TEST_VALIDATOR_CALLS"], "a") as output:
+    output.write(json.dumps([str(Path(__file__).resolve()), *sys.argv[1:]]) + "\\n")
+if Path(__file__).name == "released-source-continuity.py" and os.environ.get("TEST_REJECT_GATE"):
+    raise SystemExit("executor-owned continuity rejected fixture")
+if Path(__file__).name == "release-sbom.py":
+    print(sys.argv[sys.argv.index("--expected-handoff-sha256") + 1])
+`);
+  }
+  const executorCommit = commit(executor);
+  let sourceCommit = commit(candidateRepo);
+  const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const matrixPath = path.join(executor, "contracts/release-targets-v1.json");
+  const candidatePath = path.join(scratch, "candidate.json");
+  const outputDir = path.join(scratch, "output");
+  const inputs = (overrides = {}) => {
+    const files = [];
+    for (const name of ["ctx-linux-aarch64", "ctx", "ctx-macos-arm64", "ctx-macos-x64", "ctx.exe"]) {
+      for (const [file, bytes] of [[name, `authored ${name} executable fixture`], [`${name}.candidate.json`, "{}"]]) {
+        write(path.join(factory, file), bytes);
+        files.push({ file, sha256: digest(bytes), size_bytes: Buffer.byteLength(bytes) });
+      }
+    }
+    const factoryBytes = JSON.stringify({ source_commit: overrides.factorySource ?? sourceCommit,
+      version: overrides.factoryVersion ?? "1.6.5", files });
+    write(path.join(factory, "ctx-release-factory.json"), factoryBytes);
+    const validation = JSON.stringify({ validation_policy: "native-receipts-required-v1" });
+    write(path.join(handoff, "release-validation.json"), validation);
+    const authority = JSON.stringify({ source_commit: overrides.handoffSource ?? sourceCommit,
+      factory_manifest: { sha256: digest(factoryBytes) }, validation: { sha256: digest(validation) } });
+    write(path.join(handoff, "ctx-core-github-handoff.json"), authority);
+    write(candidatePath, JSON.stringify({ contract: "ctx-managed-pair-release-candidate", schema_version: 1,
+      channel: "stable", release_name: overrides.releaseName ?? "v1.6.5", rollback_generation: 27,
+      target_matrix_sha256: digest(fs.readFileSync(matrixPath)) }));
+    return [path.join(executor, "scripts/release/release-manifest.mjs"), "--candidate", candidatePath,
+      "--output-dir", outputDir, "--factory-dir", factory, "--candidate-manifest-handoff", handoff,
+      "--candidate-handoff-sha256", digest(authority), "--target-matrix", matrixPath];
+  };
+  return { env, executor, executorCommit, candidateRepo, sourceCommit, outputDir, inputs, validators,
+    calls: () => fs.readFileSync(env.TEST_VALIDATOR_CALLS, "utf8").trim().split("\n").map((line) => JSON.parse(line)),
+    changeSourceVersion: () => {
+      write(path.join(candidateRepo, "Cargo.toml"), '[workspace.package]\nversion = "1.6.6"\n');
+      sourceCommit = commit(candidateRepo);
+    },
+  };
+}
+
+test("explicit candidate checkout owns identity while executor owns all validators", (t) => {
+  const f = twoCheckoutFixture(t);
+  const args = [...f.inputs(), "--public-ctx-repo", f.candidateRepo, "--preflight-only"];
+  const result = spawnSync(process.env.JS_BINARY__NODE_BINARY || process.execPath, args, { env: f.env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const receipt = JSON.parse(result.stdout);
+  assert.equal(receipt.status, "prepared"); assert.equal(receipt.source_commit, f.sourceCommit);
+  assert.notEqual(receipt.source_commit, f.executorCommit);
+  assert.equal(receipt.targets, 5); assert.equal(receipt.components, 10);
+  const calls = f.calls();
+  assert.deepEqual(calls.map((call) => call[0]), f.validators.map((relative) => path.join(f.executor, relative)));
+  assert.deepEqual(calls[0].slice(1), ["--public-repo", f.candidateRepo, "--source-commit", f.sourceCommit]);
+  assert.equal(calls[1].at(-1), f.sourceCommit);
+  assert.equal(fs.existsSync(f.outputDir), false);
+});
+
+test("executor gate and candidate evidence mismatches reject before signing key stdin", async (t) => {
+  const f = twoCheckoutFixture(t);
+  const explicit = ["--public-ctx-repo", f.candidateRepo];
+  const gate = await exitsBeforeReadingKey([...f.inputs(), ...explicit], { ...f.env, TEST_REJECT_GATE: "1" });
+  assert.notEqual(gate.status, 0); assert.match(gate.stderr, /executor-owned continuity rejected fixture/);
+  assert.equal(f.calls().length, 1);
+  for (const [overrides, message] of [
+    [{ factorySource: f.executorCommit }, /exact unified/],
+    [{ handoffSource: f.executorCommit }, /factory and staged public handoff differ/],
+    [{ factoryVersion: "2.0.5", releaseName: "v2.0.5" }, /exact unified/],
+    [{ releaseName: "v1.6.6" }, /exact unified/],
+  ]) {
+    const failed = await exitsBeforeReadingKey([...f.inputs(overrides), ...explicit], f.env);
+    assert.notEqual(failed.status, 0); assert.match(failed.stderr, message);
+  }
+  // Omitted option retains the executor checkout as the default source.
+  const defaulted = await exitsBeforeReadingKey(f.inputs(), f.env);
+  assert.notEqual(defaulted.status, 0); assert.match(defaulted.stderr, /exact unified/);
+  const lastGate = f.calls().filter((call) => call[0].endsWith("released-source-continuity.py")).at(-1);
+  assert.deepEqual(lastGate.slice(1), ["--public-repo", f.executor, "--source-commit", f.executorCommit]);
+  fs.writeFileSync(path.join(f.candidateRepo, "untracked"), "dirty candidate");
+  const dirty = await exitsBeforeReadingKey([...f.inputs(), ...explicit], f.env);
+  assert.notEqual(dirty.status, 0); assert.match(dirty.stderr, /public release source checkout is dirty/);
+  fs.unlinkSync(path.join(f.candidateRepo, "untracked"));
+  f.changeSourceVersion();
+  const version = await exitsBeforeReadingKey([...f.inputs(), ...explicit], f.env);
+  assert.notEqual(version.status, 0); assert.match(version.stderr, /exact unified/);
+  assert.equal(fs.existsSync(f.outputDir), false);
+});
 
 test("actual public signer rejects malformed input and inherited authority before key stdin", async (t) => {
   const { scratch, env } = fixture(t);
