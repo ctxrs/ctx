@@ -186,7 +186,7 @@ export function isUnifiedVersion(version) {
 // This observation is of the CURRENT public feed, independent of the proposed
 // installer source identity and the separate, unpublished 1.5 fixture evidence.
 export async function verifyCurrentFeed(release, fetcher = fetch) {
-  const url = "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env";
+  const url = "https://cli.ctx.rs/functions/v3/releases/stable/ctx-release-metadata.env";
   async function get(suffix, limit) {
     const response = await fetcher(url + suffix, { redirect: "error", signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new Error(`current signed feed returned HTTP ${response.status}`);

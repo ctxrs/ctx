@@ -246,7 +246,8 @@ release_functions_base="\${CTX_UPGRADE_FUNCTIONS_BASE:-${normalizedReleaseFuncti
 install_telemetry_endpoint="${normalizedInstallTelemetryEndpoint}"
 channel="\${CTX_UPGRADE_CHANNEL:-${normalizedChannel}}"
 if [ "$channel" != "stable" ] &&
-   [ "$release_functions_base" = "https://cli.ctx.rs/functions/v2" ] &&
+   { [ "$release_functions_base" = "https://cli.ctx.rs/functions/v3" ] ||
+     [ "$release_functions_base" = "https://cli.ctx.rs/functions/v2" ]; } &&
    [ -z "\${CTX_UPGRADE_FUNCTIONS_BASE:-}" ]; then
   release_functions_base="https://cli.ctx.rs/functions/v1"
 fi

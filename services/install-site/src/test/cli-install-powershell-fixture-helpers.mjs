@@ -159,7 +159,7 @@ ${plainExceptionCapture(`$tempRoot = $WorkRoot
 $BinDir = Join-Path $WorkRoot 'installation/bin'
 $installPath = Join-Path $BinDir 'ctx.exe'; $markerPath = "$installPath.install.json"
 $channel = 'stable'; $semanticEnabled = $false
-$Metadata = 'https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env'
+$Metadata = 'https://cli.ctx.rs/functions/v3/releases/stable/ctx-release-metadata.env'
 $metadataSignature = "$Metadata.sig"; $explicitMetadata = $false
 ${preparation}
 ${download}

@@ -3,7 +3,35 @@ import {
   tmpdir, writeFileSync,
 } from "./cli-install-test-helpers.mjs";
 import { CLI_INSTALL_SHELL_VERSION_COMPARE } from "../cli-install-bridge.js";
+import { renderCliInstallScript } from "../cli-install-script.js";
+import { renderCliInstallPowerShellScript } from "../cli-install-powershell-script.js";
 import { invalidReleaseVersions, powerShellBridgeFixture, releaseVersionVectors } from "./cli-install-bridge-test-helpers.mjs";
+
+test("Unix installer selects v3 stable, retains v1 nonstable and preserves explicit transports", () => {
+  for (const [channel, override, expectedBase] of [
+    ["", "", "https://cli.ctx.rs/functions/v3"],
+    ["staging", "", "https://cli.ctx.rs/functions/v1"],
+    ["dogfood-test", "", "https://cli.ctx.rs/functions/v1"],
+    ["stable", "https://cli.ctx.rs/functions/v2", "https://cli.ctx.rs/functions/v2"],
+    ["staging", "https://test.invalid/custom", "https://test.invalid/custom"],
+  ]) {
+    const body = renderCliInstallScript();
+    const selection = body.slice(body.indexOf('release_functions_base="'), body.indexOf('bin_dir="'));
+    const result = spawnSync("sh", ["-c", `${selection}\nprintf '%s\\n' "$metadata_url" "$metadata_signature_url" "$install_telemetry_endpoint"`], {
+      encoding: "utf8",
+      env: { CTX_UPGRADE_CHANNEL: channel, CTX_UPGRADE_FUNCTIONS_BASE: override },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const url = `${expectedBase}/releases/${channel || "stable"}/ctx-release-metadata.env`;
+    assert.deepEqual(result.stdout.trim().split("\n"), [url, `${url}.sig`, "https://cli.ctx.rs/functions/v1/install-attempt"]);
+  }
+});
+
+test("rendered PowerShell default points to v3 without changing telemetry v1", () => {
+  const body = renderCliInstallPowerShellScript();
+  assert.match(body, /\$functionsBase = [^\n]+\{ "https:\/\/cli\.ctx\.rs\/functions\/v3" \}/);
+  assert.match(body, /\$installTelemetryBase = if [^\n]+\n    "https:\/\/cli\.ctx\.rs\/functions\/v1"/);
+});
 
 test("POSIX release ordering rejects malformed versions and preserves SemVer precedence", () => {
   const commands = releaseVersionVectors.map(([a, b]) => `compare_release_versions '${a}' '${b}'`);

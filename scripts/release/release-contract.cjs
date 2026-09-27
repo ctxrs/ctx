@@ -845,7 +845,7 @@ async function verifyLiveArtifacts(values, expectedVersion) {
 }
 
 function defaultStableMetadataUrl(functionsBase, channel) {
-  const base = channel === "stable" ? functionsBase.replace(/\/v1$/u, "/v2") : functionsBase;
+  const base = channel === "stable" ? functionsBase.replace(/\/v1$/u, "/v3") : functionsBase;
   return `${base}/releases/${channel}/ctx-release-metadata.env`;
 }
 

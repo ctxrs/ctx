@@ -46,16 +46,29 @@ try {
   let shellAttempt = 0;
   const publisherEnvironment = { ...environment };
   delete publisherEnvironment.CTX_CLI_METADATA_SIGNING_PRIVATE_KEY_PEM;
-  const publisher = () => childProcess.spawnSync("bash", [path.join(repo, "scripts/release/publish-hosted-managed-pair-stable.sh"),
+  const publisher = (extra = []) => childProcess.spawnSync("bash", [path.join(repo, "scripts/release/publish-hosted-managed-pair-stable.sh"),
     "--publication", publication, "--runtime-handoff", handoffPath,
     "--public-ctx-repo", path.join(root, "public"), "--semantic-artifact-dir", path.join(root, "semantic"),
     "--candidate-manifest-handoff", path.join(root, "candidates"), "--candidate-handoff-sha256", "a".repeat(64),
-    "--published-at", "2026-09-05T00:00:00.000Z", "--work-dir", path.join(root, `publish-${shellAttempt++}`)],
+    "--published-at", "2026-09-05T00:00:00.000Z", "--work-dir", path.join(root, `publish-${shellAttempt++}`), ...extra],
     { env: publisherEnvironment, encoding: "utf8" });
   const shellControl = publisher();
   assert.equal(shellControl.status, 73, `${shellControl.stdout}\n${shellControl.stderr}`);
   assert.match(shellControl.stderr, /TEST_SECRET_LOOKUP_SENTINEL/u);
   assert.equal(fs.readFileSync(secretMarker, "utf8"), "secret-use\n"); fs.unlinkSync(secretMarker);
+  for (const extra of [
+    ["--promotion", "invalid"],
+    ["--promotion", "bridge"],
+    ["--promotion", "bridge", "--expected-legacy-sha256", "a".repeat(64)],
+    ["--promotion", "stage"],
+    ["--expected-legacy-sha256", "a".repeat(64)],
+  ]) {
+    const rejected = publisher(extra);
+    assert.notEqual(rejected.status, 0);
+    assert.ok(!rejected.stderr.includes("TEST_SECRET_LOOKUP_SENTINEL"), rejected.stderr);
+    assert.equal(fs.existsSync(secretMarker), false);
+    assert.equal(fs.existsSync(marker), false);
+  }
   const completeMetadata = fs.readFileSync(metadataPath);
   fs.writeFileSync(metadataPath, completeMetadata.toString().replace(/^CTX_RELEASE_(?:ONNXRUNTIME|MANAGED_PAIR)_.*\n/gmu, ""));
   for (const legacy of [false, true]) {
@@ -65,7 +78,7 @@ try {
     assert.equal(fs.existsSync(marker), false);
   }
   fs.writeFileSync(metadataPath, completeMetadata);
-  fs.writeFileSync(metadataPath, completeMetadata.toString().replace("CTX_RELEASE_VERSION=1.3.3", "CTX_RELEASE_VERSION=1.3.2"));
+  fs.writeFileSync(metadataPath, completeMetadata.toString().replace("CTX_RELEASE_VERSION=2.0.5", "CTX_RELEASE_VERSION=1.3.2"));
   const bridge = signer();
   assert.equal(bridge.status, 1, `${bridge.stdout}\n${bridge.stderr}`);
   assert.equal(fs.existsSync(marker), false);

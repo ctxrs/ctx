@@ -633,7 +633,7 @@ test(
         metadataPublicKeyModulusBase64Url: signed.publicKeyModulusBase64Url,
         metadataPublicKeyExponentBase64Url: signed.publicKeyExponentBase64Url,
       }));
-      const feed = "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env";
+      const feed = "https://cli.ctx.rs/functions/v3/releases/stable/ctx-release-metadata.env";
       const routes = [
         { uri: feed, file: "metadata.env" }, { uri: feed + ".sig", file: "metadata.sig" },
         { uri: loaded.baseUrl + "/ctx.exe.gz", file: "core.gz" },

@@ -40,8 +40,11 @@ if ($parseErrors.Count -ne 0) { throw ($parseErrors | Out-String) }
 ${releaseVersionVectors.map(([a,b,n]) => `Assert-Equal (Compare-ReleaseVersion '${a}' '${b}') ${n}`).join("\n")}
 ${invalidReleaseVersions.map((v) => `$rejected = $false; try { $null = Compare-ReleaseVersion '${v}' '1.3.2' } catch { $rejected = $true }; Assert-Equal $rejected $true`).join("\n")}
 foreach ($route in @(
-    @('', '', 'https://cli.ctx.rs/functions/v2', 'https://cli.ctx.rs/functions/v1', $false),
+    @('', '', 'https://cli.ctx.rs/functions/v3', 'https://cli.ctx.rs/functions/v1', $false),
     @('staging', '', 'https://cli.ctx.rs/functions/v1', 'https://cli.ctx.rs/functions/v1', $false),
+    @('dogfood-test', '', 'https://cli.ctx.rs/functions/v1', 'https://cli.ctx.rs/functions/v1', $false),
+    @('stable', 'https://cli.ctx.rs/functions/v2', 'https://cli.ctx.rs/functions/v2', 'https://cli.ctx.rs/functions/v1', $true),
+    @('stable', 'https://cli.ctx.rs/functions/v3', 'https://cli.ctx.rs/functions/v3', 'https://cli.ctx.rs/functions/v1', $true),
     @('stable', 'https://test.invalid/custom', 'https://test.invalid/custom', 'https://test.invalid/custom', $true),
     @('stable', 'http://test.invalid/custom', 'http://test.invalid/custom', 'http://test.invalid/custom', $true)
 )) {

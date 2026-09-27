@@ -5,12 +5,14 @@ import wrangler from "../wrangler.toml?raw";
 const PRODUCTION_REDIRECT = "https://api.ctx.rs/storage/v1/object/public/releases";
 
 describe("release API deployment configuration", () => {
-  test("deploys the additive v2 route on ctx hosts without migrating ADE routes", () => {
+  test("deploys additive v2 and v3 routes on ctx hosts without migrating ADE routes", () => {
     for (const host of ["cli.ctx.rs", "api.ctx.rs"]) {
       expect(wrangler).toContain(`pattern = "${host}/functions/v2/releases/*"`);
+      expect(wrangler).toContain(`pattern = "${host}/functions/v3/releases/*"`);
       expect(wrangler).toContain(`pattern = "${host}/functions/v1/releases/*"`);
     }
     expect(wrangler).not.toContain("api.ade.ctx.rs/functions/v2/");
+    expect(wrangler).not.toContain("api.ade.ctx.rs/functions/v3/");
   });
 
   test("pins the live artifact redirect in the named production environment", () => {

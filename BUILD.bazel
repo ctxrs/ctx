@@ -1244,6 +1244,21 @@ py_test(
 )
 
 py_test(
+    name = "upgrade_walk_tests",
+    srcs = [
+        "scripts/release/upgrade-walk.py",
+        "scripts/tests/upgrade-walk-test.py",
+    ],
+    data = [
+        "tests/fixtures/custom-history-jsonl/basic.jsonl",
+        "//services/install-site:src/cli-install-script.js",
+    ],
+    main = "scripts/tests/upgrade-walk-test.py",
+    tags = ["release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+py_test(
     name = "macos_llvm_authority_tests",
     srcs = [
         "scripts/release/macos_llvm_authority.py",

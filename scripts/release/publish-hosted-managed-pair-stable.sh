@@ -13,6 +13,8 @@ public_ctx_repo="${CTX_PUBLIC_CTX_REPO:-$root}"
 work_dir=""
 published_at=""
 preflight_only=0
+promotion=current
+expected_legacy_sha256=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --publication) shift; publication="${1:-}" ;;
@@ -23,6 +25,8 @@ while [[ $# -gt 0 ]]; do
     --public-ctx-repo) shift; public_ctx_repo="${1:-}" ;;
     --work-dir) shift; work_dir="${1:-}" ;;
     --published-at) shift; published_at="${1:-}" ;;
+    --promotion) shift; promotion="${1:-}" ;;
+    --expected-legacy-sha256) shift; expected_legacy_sha256="${1:-}" ;;
     --preflight-only) preflight_only=1 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -48,6 +52,7 @@ prepare_args=(
   --public-ctx-repo "$public_ctx_repo"
   --metadata-out "$metadata"
   --published-at "$published_at"
+  --promotion "$promotion"
 )
 prepare_args+=(
   --runtime-handoff "$runtime_handoff"
@@ -55,6 +60,9 @@ prepare_args+=(
   --semantic-artifact-dir "$semantic_artifact_dir"
   --candidate-manifest-handoff "$candidate_manifest_handoff"
 )
+if [[ -n "$expected_legacy_sha256" ]]; then
+  prepare_args+=(--expected-legacy-sha256 "$expected_legacy_sha256")
+fi
 "${prepare_args[@]}"
 
 if [[ "$preflight_only" == 1 ]]; then
@@ -99,6 +107,7 @@ publish_args=(
   --metadata "$metadata"
   --signature "$signature"
   --evidence-out "$evidence"
+  --promotion "$promotion"
 )
 publish_args+=(
   --runtime-handoff "$runtime_handoff"
@@ -106,6 +115,9 @@ publish_args+=(
   --semantic-artifact-dir "$semantic_artifact_dir"
   --candidate-manifest-handoff "$candidate_manifest_handoff"
 )
+if [[ -n "$expected_legacy_sha256" ]]; then
+  publish_args+=(--expected-legacy-sha256 "$expected_legacy_sha256")
+fi
 env -i PATH="$PATH" HOME="$HOME" \
   CTX_RELEASE_R2_ACCESS_KEY_ID="$r2_access" \
   CTX_RELEASE_R2_SECRET_ACCESS_KEY="$r2_secret" \

@@ -33,7 +33,7 @@ export function materializeReleaseTestSources(entryUrl) {
 }
 
 export const SOURCE_COMMIT = "a".repeat(40);
-export const RELEASE_NAME = "v1.3.3";
+export const RELEASE_NAME = "v2.0.5";
 export const RUNTIME_TRANSPORTS = [
   ["linux_x64", "ctx-onnxruntime-linux-x64.tar.gz", "ctx-onnxruntime-linux-x64.tar.zst"],
   ["linux_aarch64", "ctx-onnxruntime-linux-aarch64.tar.gz", "ctx-onnxruntime-linux-aarch64.tar.zst"],
@@ -102,10 +102,10 @@ export function syntheticLoaded(sourceCommit = SOURCE_COMMIT) {
     });
   }
   return {
-    baseUrl: "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/stable/1.3.3",
+    baseUrl: "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/stable/2.0.5",
     publicCommit: sourceCommit,
     publication: { release_name: RELEASE_NAME },
     targets,
-    version: "1.3.3",
+    version: "2.0.5",
   };
 }

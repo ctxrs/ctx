@@ -2,70 +2,110 @@ import { describe, expect, test } from "vitest";
 
 import worker, { type Env, type ReleaseBucket, type ReleaseGetOptions, type ReleaseObject, type ReleaseRange } from "../src/worker";
 
+const pointer = (version: string) => fakeJson({
+  channel: "stable", contract: "ctx-cli-release-pointer", schema_version: 1, version,
+  metadata_object: `releases/stable/${version}/ctx-release-metadata.env`, metadata_sha256: "a".repeat(64),
+  signature_object: `releases/stable/${version}/ctx-release-metadata.env.sig`, signature_sha256: "b".repeat(64),
+});
+
 describe("release api worker", () => {
-  test("v2 selects current metadata while original aliases retain the bridge", async () => {
-    const pointer = (version: string) => fakeJson({
-      channel: "stable", contract: "ctx-cli-release-pointer", schema_version: 1, version,
-      metadata_object: `releases/stable/${version}/ctx-release-metadata.env`, metadata_sha256: "a".repeat(64),
-      signature_object: `releases/stable/${version}/ctx-release-metadata.env.sig`, signature_sha256: "b".repeat(64),
-    });
+  test("v3 selects its own pointer while v1 and v2 retain their releases", async () => {
     const objects = {
       "releases/stable/current.json": pointer("1.3.2"),
       "releases/stable/current-v2.json": pointer("1.3.3"),
+      "releases/stable/current-v3.json": pointer("2.0.5"),
       "releases/stable/1.3.2/ctx-release-metadata.env": "bridge",
       "releases/stable/1.3.2/ctx-release-metadata.env.sig": "bridge-signature",
       "releases/stable/1.3.3/ctx-release-metadata.env": "current",
       "releases/stable/1.3.3/ctx-release-metadata.env.sig": "current-signature",
+      "releases/stable/2.0.5/ctx-release-metadata.env": "new-stable",
+      "releases/stable/2.0.5/ctx-release-metadata.env.sig": "new-stable-signature",
     };
-    for (const [prefix, expected] of [["functions/v1/", "bridge"], ["", "bridge"], ["functions/v2/", "current"]]) {
+    for (const [prefix, expected, pointerName, version] of [
+      ["functions/v1/", "bridge", "current.json", "1.3.2"],
+      ["", "bridge", "current.json", "1.3.2"],
+      ["functions/v2/", "current", "current-v2.json", "1.3.3"],
+      ["functions/v3/", "new-stable", "current-v3.json", "2.0.5"],
+    ]) {
       for (const suffix of ["", ".sig"]) {
-        const bucket = new FakeReleaseBucket(objects);
-        const response = await worker.fetch(new Request(
-          `https://cli.ctx.rs/${prefix}releases/stable/ctx-release-metadata.env${suffix}`,
-        ), testEnv(bucket));
-        expect(response.status).toBe(200);
-        expect(await response.text()).toBe(`${expected}${suffix ? "-signature" : ""}`);
-        expect(bucket.getCalls[0]).toBe(`releases/stable/${prefix === "functions/v2/" ? "current-v2.json" : "current.json"}`);
+        for (const method of ["GET", "HEAD"]) {
+          const bucket = new FakeReleaseBucket(objects);
+          const response = await worker.fetch(new Request(
+            `https://cli.ctx.rs/${prefix}releases/stable/ctx-release-metadata.env${suffix}`,
+            { method },
+          ), testEnv(bucket));
+          expect(response.status).toBe(200);
+          expect(response.headers.get("cache-control")).toBe("no-store");
+          expect(await response.text()).toBe(method === "HEAD" ? "" : `${expected}${suffix ? "-signature" : ""}`);
+          expect(bucket.getCalls[0]).toBe(`releases/stable/${pointerName}`);
+          expect(bucket.headCalls).toEqual(method === "HEAD"
+            ? [`releases/stable/${version}/ctx-release-metadata.env${suffix}`] : []);
+        }
       }
     }
-    const bucket = new FakeReleaseBucket(objects);
-    const head = await worker.fetch(new Request(
-      "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env", { method: "HEAD" },
-    ), testEnv(bucket));
-    expect(head.status).toBe(200);
-    expect(await head.text()).toBe("");
-    expect(bucket.headCalls).toEqual(["releases/stable/1.3.3/ctx-release-metadata.env"]);
   });
 
-  test("v2 never falls back to the original pointer or direct metadata", async () => {
-    for (const broken of [undefined, "not-json", fakeJson({ channel: "staging" })]) {
-      const bucket = new FakeReleaseBucket({
-        "releases/stable/ctx-release-metadata.env": "old-direct",
-        ...(broken === undefined ? {} : { "releases/stable/current-v2.json": broken }),
-      });
-      const response = await worker.fetch(new Request(
-        "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env",
+  for (const feed of ["v2", "v3"]) {
+    test(`${feed} never falls back to another pointer or direct metadata`, async () => {
+      for (const broken of [undefined, "not-json", fakeJson({ channel: "staging" })]) {
+        for (const method of ["GET", "HEAD"]) {
+          for (const suffix of ["", ".sig"]) {
+            const bucket = new FakeReleaseBucket({
+              "releases/stable/current.json": pointer("1.3.2"),
+              [`releases/stable/current-${feed === "v3" ? "v2" : "v3"}.json`]: pointer("2.0.5"),
+              "releases/stable/ctx-release-metadata.env": "old-direct",
+              "releases/stable/ctx-release-metadata.env.sig": "old-direct-signature",
+              ...(broken === undefined ? {} : { [`releases/stable/current-${feed}.json`]: broken }),
+            });
+            const response = await worker.fetch(new Request(
+              `https://cli.ctx.rs/functions/${feed}/releases/stable/ctx-release-metadata.env${suffix}`, { method },
+            ), testEnv(bucket));
+            expect(response.status).toBe(broken === undefined ? 404 : 500);
+            expect(bucket.getCalls).toEqual([`releases/stable/current-${feed}.json`]);
+            expect(bucket.headCalls).toEqual([]);
+          }
+        }
+      }
+    });
+
+    test(`${feed} is limited to stable metadata; staging and immutable routes remain v1`, async () => {
+      const bucket = new FakeReleaseBucket({ "releases/staging/ctx-release-metadata.env": "staging" });
+      for (const path of [
+        "releases/staging/ctx-release-metadata.env", "releases/dogfood-test/ctx-release-metadata.env",
+        "releases/stable/1.3.2/ctx-release-metadata.env", "releases/stable/current.json",
+        "releases/stable/current-v2.json", "releases/stable/current-v3.json", "releases/stable/latest.json",
+        "releases/stable/ctx-release-metadata.env/extra", "releases/stable/ctx-release-metadata.env.sig/extra",
+        "download/stable/1.3.2/ctx", "provider-matrix/stable/latest.json",
+      ]) {
+        const response = await worker.fetch(new Request(`https://cli.ctx.rs/functions/${feed}/${path}`), testEnv(bucket));
+        expect(response.status).toBe(404);
+      }
+      expect(bucket.getCalls).toEqual([]);
+      const staging = await worker.fetch(new Request(
+        "https://cli.ctx.rs/functions/v1/releases/staging/ctx-release-metadata.env",
       ), testEnv(bucket));
-      expect(response.status).toBe(broken === undefined ? 404 : 500);
-      expect(bucket.getCalls).toEqual(["releases/stable/current-v2.json"]);
-    }
-  });
+      expect(await staging.text()).toBe("staging");
+    });
+  }
 
-  test("v2 is limited to stable metadata; existing staging and immutable routes remain v1", async () => {
-    const bucket = new FakeReleaseBucket({ "releases/staging/ctx-release-metadata.env": "staging" });
-    for (const path of [
-      "releases/staging/ctx-release-metadata.env", "releases/dogfood-test/ctx-release-metadata.env",
-      "releases/stable/1.3.2/ctx-release-metadata.env", "releases/stable/current.json",
-      "download/stable/1.3.2/ctx", "provider-matrix/stable/latest.json",
-    ]) {
-      const response = await worker.fetch(new Request(`https://cli.ctx.rs/functions/v2/${path}`), testEnv(bucket));
-      expect(response.status).toBe(404);
+  test("v3 cannot serve a release older than 2.0.5", async () => {
+    for (const [version, allowed] of [
+      ["1.6.5", false], ["2.0.4", false], ["2.0.5-rc.1", false],
+      ["2.0.5", true], ["2.0.6", true], ["2.1.0", true], ["3.0.0", true],
+    ] as const) {
+      for (const suffix of ["", ".sig"]) {
+        const object = `releases/stable/${version}/ctx-release-metadata.env${suffix}`;
+        const bucket = new FakeReleaseBucket({
+          "releases/stable/current-v3.json": pointer(version), [object]: "signed-object",
+        });
+        const response = await worker.fetch(new Request(
+          `https://cli.ctx.rs/functions/v3/releases/stable/ctx-release-metadata.env${suffix}`,
+        ), testEnv(bucket));
+        expect(response.status).toBe(allowed ? 200 : 500);
+        expect(bucket.getCalls).toEqual(allowed
+          ? ["releases/stable/current-v3.json", object] : ["releases/stable/current-v3.json"]);
+      }
     }
-    expect(bucket.getCalls).toEqual([]);
-    const staging = await worker.fetch(new Request(
-      "https://cli.ctx.rs/functions/v1/releases/staging/ctx-release-metadata.env",
-    ), testEnv(bucket));
-    expect(await staging.text()).toBe("staging");
   });
 
   test("serves release manifests from R2 with compatibility cache headers", async () => {

@@ -34,6 +34,10 @@ import {
 } from "./verify-runtime-transport-handoff.mjs";
 
 const STABLE_BUCKET = "ctx-releases-prod";
+const CURRENT_POINTER = "releases/stable/current-v3.json";
+const LEGACY_POINTER = "releases/stable/current-v2.json";
+const BRIDGE_VERSION = "1.6.5";
+const TRANSITION_VERSION = "2.0.5";
 const R2_AUTHORITY = Object.freeze({
   accessKeyEnv: "CTX_RELEASE_R2_ACCESS_KEY_ID",
   bucket: STABLE_BUCKET,
@@ -64,8 +68,19 @@ export function parseArgs(argv) {
     "--runtime-handoff",
     "--semantic-artifact-dir",
   ];
-  if (args.size !== required.length || required.some((name) => !args.has(name))) {
+  const optional = ["--promotion", "--expected-legacy-sha256"];
+  if ([...args.keys()].some((name) => !required.includes(name) && !optional.includes(name))
+      || required.some((name) => !args.has(name))) {
     fail(`${command} requires the exact complete release handoff arguments`);
+  }
+  {
+    const promotion = args.get("--promotion") ?? "current";
+    if (!["current", "transition", "stage", "bridge"].includes(promotion)) fail("invalid promotion mode");
+    const expected = args.get("--expected-legacy-sha256");
+    if ((promotion === "bridge" && !/^[0-9a-f]{64}$/u.test(expected ?? ""))
+        || (promotion !== "bridge" && expected !== undefined)) {
+      fail("bridge promotion requires the expected legacy pointer SHA-256 only");
+    }
   }
   return { args, command };
 }
@@ -120,6 +135,11 @@ function writeExclusive(file, body, mode) {
 
 export function strictSignature(file, metadata) {
   const body = readStableFile(file, "metadata signature", 16 * 1024);
+  verifySignature(body, metadata);
+  return body;
+}
+
+function verifySignature(body, metadata) {
   const text = body.toString("utf8");
   if (!/^[A-Za-z0-9+/]+={0,2}\n$/u.test(text)) fail("metadata signature is not canonical base64");
   const signature = Buffer.from(text.trim(), "base64");
@@ -216,14 +236,28 @@ function pointerVersion(body) {
 
 export async function promoteCurrentPointer(request, loaded, body) {
   assertCurrentReleaseVersion(loaded.version);
-  if (pointerVersion(body) !== loaded.version) fail("current pointer differs from the selected release");
-  await assertFrozenBridgePromotion(loaded.version);
-  const key = "releases/stable/current-v2.json";
+  if (compareStableVersions(loaded.version, TRANSITION_VERSION) < 0) {
+    fail("current feed requires a release that uses the v3 feed");
+  }
+  return promotePointer(request, loaded.version, body, CURRENT_POINTER, true);
+}
+
+async function promotePointer(request, version, body, key, initialize = false) {
+  if (pointerVersion(body) !== version) fail("current pointer differs from the selected release");
+  await assertFrozenBridgePromotion(version);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const current = await getR2Object(request, STABLE_BUCKET, key, 16 * 1024);
-    if (current == null) fail("current stable feed has not been initialized by retained B source");
+    if (current == null) {
+      if (!initialize) fail("legacy stable feed has not been initialized");
+      return putImmutableR2Object(request, STABLE_BUCKET, {
+        key, body, contentType: "application/json; charset=utf-8",
+      });
+    }
+    if (key === LEGACY_POINTER && !["2.0.4", TRANSITION_VERSION].includes(pointerVersion(current.body))) {
+      fail("legacy feed is not in the 2.0.4 to 2.0.5 transition");
+    }
     if (current.body.equals(body)) return "existing-identical";
-    if (compareStableVersions(pointerVersion(current.body), loaded.version) >= 0) {
+    if (compareStableVersions(pointerVersion(current.body), version) >= 0) {
       fail("stable pointer cannot be replaced by this release");
     }
     const currentEtag = strongConditionalEtag(current.etag);
@@ -244,6 +278,84 @@ export async function promoteCurrentPointer(request, loaded, body) {
     return "promoted";
   }
   fail("stable pointer changed concurrently too many times");
+}
+
+export function validatePromotion(loaded, promotion) {
+  if (promotion === "current" || promotion === "transition") {
+    if (compareStableVersions(loaded.version, TRANSITION_VERSION) < 0) {
+      fail("current feed requires a release that uses the v3 feed");
+    }
+    if (promotion === "transition" && loaded.version !== TRANSITION_VERSION) {
+      fail("transition promotion is only for 2.0.5");
+    }
+  } else if (promotion === "bridge" || promotion === "stage") {
+    if (loaded.version !== BRIDGE_VERSION) fail("bridge staging/promotion is only for 1.6.5");
+    for (const target of HOSTED_MANAGED_PAIR_TARGETS) {
+      const bytes = loaded.targets.get(target.id)?.core.artifact.body.length;
+      if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > 128 * 1024 * 1024) {
+        fail(`bridge executable must fit the 1.6.3 download limit: ${target.id}`);
+      }
+    }
+  } else fail("invalid promotion mode");
+}
+
+// v2 cannot distinguish pre-bridge clients from 2.x clients. Mirror only the
+// transition release, then perform one explicitly reviewed replacement by 1.6.5.
+export async function promoteTransitionPointer(request, loaded, body) {
+  validatePromotion(loaded, "transition");
+  const legacy = await getR2Object(request, STABLE_BUCKET, LEGACY_POINTER, 16 * 1024);
+  if (legacy == null || !["2.0.4", TRANSITION_VERSION].includes(pointerVersion(legacy.body))) {
+    fail("legacy feed is not in the 2.0.4 to 2.0.5 transition");
+  }
+  const state = await promoteCurrentPointer(request, loaded, body);
+  const legacyState = await promotePointer(request, loaded.version, body, LEGACY_POINTER);
+  return { current: state, legacy: legacyState };
+}
+
+async function verifyCurrentDestination(request) {
+  const current = await getR2Object(request, STABLE_BUCKET, CURRENT_POINTER, 16 * 1024);
+  if (current == null || compareStableVersions(pointerVersion(current.body), TRANSITION_VERSION) < 0) {
+    fail("bridge requires the v3 destination to be published first");
+  }
+  const pointer = JSON.parse(current.body.toString("utf8"));
+  const metadata = await getR2Object(request, STABLE_BUCKET, pointer.metadata_object, 128 * 1024);
+  const signature = await getR2Object(request, STABLE_BUCKET, pointer.signature_object, 16 * 1024);
+  if (metadata == null || signature == null
+      || sha256(metadata.body) !== pointer.metadata_sha256
+      || sha256(signature.body) !== pointer.signature_sha256) {
+    fail("v3 destination metadata does not match its pointer");
+  }
+  verifySignature(signature.body, metadata.body);
+  const values = candidateManifestContract.parseEnvMetadata(metadata.body, "v3 destination");
+  if (values.CTX_RELEASE_VERSION !== pointer.version || values.CTX_RELEASE_CHANNEL !== "stable") {
+    fail("v3 destination metadata version/channel does not match its pointer");
+  }
+}
+
+export async function cutOverLegacyPointer(request, loaded, body, expectedSha256) {
+  validatePromotion(loaded, "bridge");
+  if (pointerVersion(body) !== BRIDGE_VERSION || !/^[0-9a-f]{64}$/u.test(expectedSha256 ?? "")) {
+    fail("bridge requires its exact pointer and the expected legacy SHA-256");
+  }
+  await assertFrozenBridgePromotion(loaded.version);
+  await verifyCurrentDestination(request);
+  const current = await getR2Object(request, STABLE_BUCKET, LEGACY_POINTER, 16 * 1024);
+  if (current?.body.equals(body)) return "existing-identical";
+  if (current == null || sha256(current.body) !== expectedSha256
+      || pointerVersion(current.body) !== TRANSITION_VERSION) {
+    fail("legacy pointer changed or has not completed the 2.0.5 transition");
+  }
+  const response = await request("PUT", STABLE_BUCKET, LEGACY_POINTER, body, {
+    "content-length": String(body.length),
+    "content-type": "application/json; charset=utf-8",
+    "x-amz-meta-sha256": sha256(body),
+    "if-match": strongConditionalEtag(current.etag),
+  });
+  await response.arrayBuffer();
+  if (![200, 201, 204].includes(response.status)) fail(`bridge pointer PUT failed: ${response.status}`);
+  const stored = await getR2Object(request, STABLE_BUCKET, LEGACY_POINTER, body.length + 1);
+  if (stored == null || !stored.body.equals(body)) fail("bridge pointer readback failed");
+  return "promoted";
 }
 
 export function strongConditionalEtag(value) {
@@ -286,6 +398,8 @@ export async function run(argv, environment = process.env, fetchImplementation =
   const { args, command } = parseArgs(argv);
   const loaded = loadHostedManagedPairPublication(args.get("--publication"));
   assertCurrentReleaseVersion(loaded.version);
+  const promotion = args.get("--promotion") ?? "current";
+  validatePromotion(loaded, promotion);
   const runtimeHandoff = loadRuntimeTransportHandoff(args.get("--runtime-handoff"), loaded);
   verifyRuntimeTransportHandoff(args.get("--public-ctx-repo"), runtimeHandoff);
   const semanticExtension = renderHostedSemanticMetadataExtension(
@@ -341,7 +455,12 @@ export async function run(argv, environment = process.env, fetchImplementation =
   for (const object of immutableMetadataObjects(loaded, metadata, signature)) {
     await publishObject(object);
   }
-  const pointerState = await promoteCurrentPointer(request, loaded, pointer);
+  let pointerState = "staged";
+  if (promotion === "current") pointerState = await promoteCurrentPointer(request, loaded, pointer);
+  if (promotion === "transition") pointerState = await promoteTransitionPointer(request, loaded, pointer);
+  if (promotion === "bridge") pointerState = await cutOverLegacyPointer(
+    request, loaded, pointer, args.get("--expected-legacy-sha256"),
+  );
   const frozenBridge = await assertFrozenBridgePromotion(loaded.version);
   const evidence = {
     channel: "stable",
@@ -350,7 +469,9 @@ export async function run(argv, environment = process.env, fetchImplementation =
     objects: objectEvidence,
     pointer_sha256: sha256(pointer),
     pointer_state: pointerState,
-    current_pointer_key: "releases/stable/current-v2.json",
+    promotion,
+    current_pointer_key: promotion === "stage" ? null
+      : promotion === "bridge" ? LEGACY_POINTER : CURRENT_POINTER,
     frozen_bridge: frozenBridge,
     private_commit: loaded.privateCommit,
     public_commit: loaded.publicCommit,

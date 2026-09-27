@@ -37,11 +37,13 @@ routes = [
   { pattern = "api.ctx.rs/functions/v1/provider-matrix/*", zone_name = "ctx.rs" },
   { pattern = "api.ctx.rs/functions/v1/releases/*", zone_name = "ctx.rs" },
   { pattern = "api.ctx.rs/functions/v2/releases/*", zone_name = "ctx.rs" },
+  { pattern = "api.ctx.rs/functions/v3/releases/*", zone_name = "ctx.rs" },
   { pattern = "api.ctx.rs/storage/v1/object/public/releases/*", zone_name = "ctx.rs" },
   { pattern = "cli.ctx.rs/functions/v1/download/*", zone_name = "ctx.rs" },
   { pattern = "cli.ctx.rs/functions/v1/provider-matrix/*", zone_name = "ctx.rs" },
   { pattern = "cli.ctx.rs/functions/v1/releases/*", zone_name = "ctx.rs" },
   { pattern = "cli.ctx.rs/functions/v2/releases/*", zone_name = "ctx.rs" },
+  { pattern = "cli.ctx.rs/functions/v3/releases/*", zone_name = "ctx.rs" },
   { pattern = "cli.ctx.rs/storage/v1/object/public/releases/*", zone_name = "ctx.rs" },
 ]
 

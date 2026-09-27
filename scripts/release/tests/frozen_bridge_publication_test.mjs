@@ -24,7 +24,7 @@ test("post-B construction rejects B and a failed frozen readback prevents storag
   await assert.rejects(assertFrozenBridgePromotion("1.4.0"), /frozen bridge readback failed: HTTP 503/u);
   let reads = 0;
   const request = () => { reads += 1; throw new Error("unexpected storage"); };
-  await assert.rejects(promoteCurrentPointer(request, { version: "1.4.0" }, pointer("1.4.0")), /frozen bridge readback failed: HTTP 503/u);
+  await assert.rejects(promoteCurrentPointer(request, { version: "2.0.5" }, pointer("2.0.5")), /frozen bridge readback failed: HTTP 503/u);
   assert.equal(reads, 0);
 });
 
