@@ -362,11 +362,14 @@ mod tests {
     fn expected_unix_volume_bytes(file: &File, metadata: &std::fs::Metadata) -> Vec<u8> {
         #[cfg(target_os = "macos")]
         {
-            let _ = metadata;
+            use std::os::unix::fs::MetadataExt;
+
             crate::io::boot_stable_volume_uuid(file)
                 .unwrap()
-                .expect("APFS test volumes report a volume UUID")
-                .to_vec()
+                .map_or_else(
+                    || metadata.dev().to_le_bytes().to_vec(),
+                    |uuid| uuid.to_vec(),
+                )
         }
         #[cfg(not(target_os = "macos"))]
         {

@@ -647,120 +647,21 @@ pub(super) enum RetainedFileIdentityVersion {
 }
 
 #[cfg(unix)]
+#[path = "root_handle/unix_identity.rs"]
+mod unix_identity;
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+pub(crate) use unix_identity::boot_stable_volume_uuid;
+
+#[cfg(unix)]
 fn retained_file_identity(
-    _path: &Path,
+    path: &Path,
     file: &File,
     metadata: &Metadata,
     version: RetainedFileIdentityVersion,
 ) -> Result<Option<([u8; 32], [u8; 32])>> {
-    use std::os::unix::fs::MetadataExt;
-
-    let mut stable = Sha256::new();
-    let mut change = Sha256::new();
-    match version {
-        RetainedFileIdentityVersion::SharedJsonlV1 => {
-            stable.update(b"ctx-jsonl-retained-file-identity-v1\0unix-stable\0");
-            change.update(b"ctx-jsonl-retained-file-identity-v1\0unix-change\0");
-        }
-        RetainedFileIdentityVersion::OrdinaryFileV2 => {
-            stable.update(b"ctx-ordinary-file-observation-v2\0unix-stable\0");
-            change.update(b"ctx-ordinary-file-observation-v2\0unix-change\0");
-        }
-    }
-    let device = metadata.dev().to_le_bytes();
-    #[cfg(target_os = "macos")]
-    let volume_uuid = boot_stable_volume_uuid(file)?;
-    #[cfg(target_os = "macos")]
-    let volume: &[u8] = volume_uuid.as_ref().map_or(&device[..], |uuid| &uuid[..]);
-    #[cfg(not(target_os = "macos"))]
-    let volume: &[u8] = {
-        let _ = file;
-        &device
-    };
-    stable.update(volume);
-    stable.update(metadata.ino().to_le_bytes());
-    if version == RetainedFileIdentityVersion::OrdinaryFileV2 {
-        stable.update(metadata.mode().to_le_bytes());
-        change.update(volume);
-        change.update(metadata.ino().to_le_bytes());
-    }
-    change.update(metadata.ctime().to_le_bytes());
-    change.update(metadata.ctime_nsec().to_le_bytes());
-    Ok(Some((stable.finalize().into(), change.finalize().into())))
-}
-
-/// macOS assigns `st_dev` when a volume is mounted, so one APFS volume can
-/// report a different device after a reboot and a later mount can reuse the
-/// number. The volume UUID is stable across boots and still distinguishes
-/// volumes mounted at the same path. Only a volume that does not report a
-/// UUID keeps `st_dev`; any other failure is returned so a transient error
-/// cannot switch the token between the two forms.
-#[cfg(target_os = "macos")]
-pub(crate) fn boot_stable_volume_uuid(file: &File) -> std::io::Result<Option<[u8; 16]>> {
-    use std::os::fd::AsRawFd;
-
-    #[repr(C, packed(4))]
-    struct VolumeUuidReply {
-        length: u32,
-        fsid: [i32; 2],
-        uuid: [u8; 16],
-    }
-
-    let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
-    // SAFETY: `file` owns an open descriptor and `filesystem` is writable
-    // storage for exactly one `statfs`.
-    if unsafe { libc::fstatfs(file.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: fstatfs returned success, so it initialized the structure.
-    let filesystem = unsafe { filesystem.assume_init() };
-    // SAFETY: `fsid_t` is a C struct of exactly two `i32` values.
-    let file_fsid: [i32; 2] = unsafe { std::mem::transmute(filesystem.f_fsid) };
-    let mut request = libc::attrlist {
-        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
-        reserved: 0,
-        commonattr: libc::ATTR_CMN_FSID,
-        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_UUID,
-        dirattr: 0,
-        fileattr: 0,
-        forkattr: 0,
-    };
-    let mut reply = VolumeUuidReply {
-        length: 0,
-        fsid: [0; 2],
-        uuid: [0; 16],
-    };
-    // Volume attributes are only available through the mount point path.
-    // Returning that root's fsid with the UUID binds the answer to the
-    // volume that holds `file`, even if the path is remounted in between.
-    // SAFETY: `f_mntonname` is the NUL-terminated mount path of the volume
-    // holding `file`; request and reply buffers outlive the call.
-    let status = unsafe {
-        libc::getattrlist(
-            filesystem.f_mntonname.as_ptr(),
-            (&raw mut request).cast(),
-            (&raw mut reply).cast(),
-            std::mem::size_of::<VolumeUuidReply>(),
-            libc::FSOPT_NOFOLLOW,
-        )
-    };
-    if status != 0 {
-        let error = std::io::Error::last_os_error();
-        return match error.raw_os_error() {
-            Some(libc::EINVAL | libc::ENOTSUP) => Ok(None),
-            _ => Err(error),
-        };
-    }
-    let (length, root_fsid) = (reply.length, reply.fsid);
-    if length as usize != std::mem::size_of::<VolumeUuidReply>() {
-        return Ok(None);
-    }
-    if root_fsid != file_fsid {
-        return Err(std::io::Error::other(
-            "volume mount point changed while reading its UUID",
-        ));
-    }
-    Ok(Some(reply.uuid))
+    unix_identity::retained_file_identity(file, metadata, version)
+        .map(Some)
+        .map_err(|error| map_open_error(path, error.into()))
 }
 
 #[cfg(not(unix))]
