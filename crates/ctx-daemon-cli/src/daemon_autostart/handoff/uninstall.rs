@@ -15,7 +15,12 @@ pub fn prepare_daemon_uninstall(data_root: &Path) -> Result<Value> {
         ctx_history_platform::managed_data_root().context("resolve canonical ctx data root")?;
     let mut roots = BTreeSet::from([data_root.to_path_buf(), canonical_root.clone()]);
     let lifecycle_controls = lock_discovered_installation_roots(&mut roots)?;
-    disable_installation_roots(&roots)?;
+    // Current hosted uninstallers fence new daemon ownership durably before
+    // teardown. Keep user indexing policy intact for the next installation.
+    // Released callers without that fence still need the legacy disable.
+    if !ctx_upgrade_engine::installation_hosted_uninstall_is_active()? {
+        disable_installation_roots(&roots)?;
+    }
     if cfg!(debug_assertions) && env::var_os(DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_ENV).is_some() {
         process::exit(89);
     }

@@ -1,6 +1,5 @@
 //! Publication metadata and bounded in-process materializer state.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +14,7 @@ use crate::graph::segment_state::{
     SegmentCoreCoverage, SegmentPublicationMutation,
 };
 use crate::graph::{GRAPH_EVIDENCE_FINGERPRINT, GRAPH_SEMANTICS_FINGERPRINT};
-use crate::protocol::{CoreEventDelta, CoreSourceState, StableEntityId};
+use crate::protocol::{CoreEventDelta, StableEntityId};
 
 pub const MATERIALIZER_SOURCE_ROLE: u32 = 0x4d_53_52_43;
 const OBSOLETE_DERIVED_ROLE: u32 = 0x4d_52_50_4c;
@@ -91,35 +90,7 @@ pub const fn manifest_identities() -> ManifestIdentitySet {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Source deltas carry the existing Core state by value; boxing every upsert would add an allocation to materialization."
-)]
-pub enum SourceMutation {
-    Upsert {
-        state: CoreSourceState,
-        materializer_revision: String,
-    },
-    Removed {
-        source_id: String,
-    },
-}
-
-impl SourceMutation {
-    pub fn source_id(&self) -> String {
-        match self {
-            Self::Upsert { state, .. } => source_storage_id(&state.source),
-            Self::Removed { source_id } => source_id.clone(),
-        }
-    }
-}
+pub use ctx_attribution_index::materialization::source_inventory::{ActiveSource, SourceMutation};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,7 +112,7 @@ impl SourceStateSegment {
         self.completed.validate()?;
         let mut prior = None;
         for mutation in &self.mutations {
-            validate_source_mutation(mutation)?;
+            mutation.validate().map_err(|_| CoreStoreError::Backend)?;
             let source_id = mutation.source_id();
             if prior
                 .as_deref()
@@ -153,12 +124,6 @@ impl SourceStateSegment {
         }
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActiveSource {
-    pub state: CoreSourceState,
-    pub materializer_revision: String,
 }
 
 #[derive(Default)]
@@ -312,41 +277,6 @@ pub fn active_receipt_identity(
     )
 }
 
-pub fn source_map_from_mutations(
-    segments: impl IntoIterator<Item = SourceMutation>,
-) -> Result<BTreeMap<String, ActiveSource>, CoreStoreError> {
-    let mut sources = BTreeMap::new();
-    let mut seen = BTreeSet::new();
-    for mutation in segments {
-        let source_id = mutation.source_id();
-        if !seen.insert(source_id.clone()) {
-            continue;
-        }
-        if seen.len() > MAX_METADATA_SEGMENT_ENTRIES {
-            return Err(CoreStoreError::Bounds);
-        }
-        match mutation {
-            SourceMutation::Upsert {
-                state,
-                materializer_revision,
-            } => {
-                sources.insert(
-                    source_id,
-                    ActiveSource {
-                        state,
-                        materializer_revision,
-                    },
-                );
-                if sources.len() > crate::protocol::MAX_CORE_SOURCE_STATES {
-                    return Err(CoreStoreError::Bounds);
-                }
-            }
-            SourceMutation::Removed { .. } => {}
-        }
-    }
-    Ok(sources)
-}
-
 pub fn mutation_identities(
     page: &[CoreEventDelta],
     mutations: &[SegmentPublicationMutation],
@@ -355,45 +285,6 @@ pub fn mutation_identities(
         return Err(CoreStoreError::Backend);
     }
     Ok(page.iter().map(CoreEventDelta::event_id).collect())
-}
-
-fn validate_source_mutation(mutation: &SourceMutation) -> Result<(), CoreStoreError> {
-    match mutation {
-        SourceMutation::Upsert {
-            state,
-            materializer_revision,
-        } => {
-            state.validate().map_err(|_| CoreStoreError::Backend)?;
-            validate_source_id(&source_storage_id(&state.source))?;
-            if state.event_count > crate::graph::segment_state::MAX_SEGMENT_CORE_EVENTS as u64
-                || materializer_revision.is_empty()
-                || materializer_revision.len()
-                    > crate::protocol::MAX_CORE_MATERIALIZER_REVISION_BYTES
-                || materializer_revision.chars().any(char::is_control)
-            {
-                return Err(CoreStoreError::Backend);
-            }
-        }
-        SourceMutation::Removed { source_id } => validate_source_id(source_id)?,
-    }
-    Ok(())
-}
-
-fn validate_source_id(value: &str) -> Result<(), CoreStoreError> {
-    let digest = value
-        .strip_prefix("core_source_")
-        .ok_or(CoreStoreError::Backend)?;
-    if !is_lower_sha256(digest) {
-        return Err(CoreStoreError::Backend);
-    }
-    Ok(())
-}
-
-fn is_lower_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn bounded_json(value: &impl Serialize, maximum: usize) -> Result<Vec<u8>, CoreStoreError> {

@@ -1,6 +1,6 @@
 module(
     name = "ctx_search",
-    version = "2.0.5",
+    version = "2.1.0",
 )
 
 bazel_dep(name = "rules_rust", version = "0.71.3")

@@ -1,3 +1,4 @@
+import { UNINSTALL_SHELL_INDEXING_PREFERENCE } from "./cli-uninstall-indexing-preference.js";
 import {
   generateInstallAttemptId,
   normalizeEmbeddedInstallAttemptId,
@@ -179,6 +180,9 @@ marker_path="\${CTX_UNINSTALL_MARKER_PATH:-$install_path.install.json}"
 man_dir="\${CTX_MAN_DIR:-\${HOME:-}/.local/share/man/man1}"
 data_dir="\${CTX_DATA_ROOT:-$home_dir/.ctx}"
 daemon_teardown_output=
+indexing_restore_roots=
+indexing_roots=
+indexing_save=
 
 install_stage_delivery_enabled=1
 report_install_stage() {
@@ -203,6 +207,8 @@ report_install_stage "uninstall" "started"
 report_uninstall_failure() {
   status="$?"
   trap - EXIT
+  if [ -n "$indexing_save" ]; then rm -f "$indexing_save"; fi
+  if [ -n "$indexing_roots" ]; then rm -f "$indexing_roots"; fi
   if [ -n "$daemon_teardown_output" ]; then
     rm -f "$daemon_teardown_output"
   fi
@@ -829,12 +835,14 @@ installed_cli_predates_managed_lifecycle() {
   return 1
 }
 
+${UNINSTALL_SHELL_INDEXING_PREFERENCE}
 prepare_core_daemon_uninstall() {
   if installed_cli_predates_managed_lifecycle; then
     log "Installed ctx $installed_cli_version_value predates the persistent Core daemon; no Core daemon teardown is required."
     return 0
   fi
 
+  capture_legacy_indexing_preferences
   daemon_teardown_output="$(mktemp "\${TMPDIR:-/tmp}/ctx-daemon-uninstall.XXXXXX")" ||
     fail "could not create a Core daemon teardown verification file"
   if "$install_path" --data-root "$data_dir" daemon disable \
@@ -842,10 +850,12 @@ prepare_core_daemon_uninstall() {
     :
   else
     daemon_status="$?"
+    restore_legacy_indexing_preferences
     rm -f "$daemon_teardown_output"
     daemon_teardown_output=
     fail "Core daemon teardown failed with status $daemon_status; ctx remains installed"
   fi
+  restore_legacy_indexing_preferences
   daemon_result_size="$(path_size_bytes "$daemon_teardown_output")" ||
     fail "could not determine Core daemon teardown result size"
   if [ "$daemon_result_size" -lt 2 ] || [ "$daemon_result_size" -gt 65536 ]; then

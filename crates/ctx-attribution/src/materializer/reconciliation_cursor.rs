@@ -5,16 +5,12 @@ use std::io::Write;
 use sha2::{Digest as _, Sha256};
 
 use crate::graph::segment_state::SegmentCandidateControl;
-use crate::protocol::{CoreSourceDelta, CoreSourceReconciliation, MAX_CORE_SOURCE_STATES};
+use crate::protocol::{CoreSourceDelta, CoreSourceReconciliation};
 
 use super::SegmentMaterializerError;
 use super::model::CandidateState;
 
 pub(super) const RECONCILIATION_CURSOR_ENTRY_BYTES: usize = 64;
-pub(super) const MAX_RECONCILIATION_CURSOR_ENTRIES: usize = 2 * MAX_CORE_SOURCE_STATES;
-pub(super) const MAX_RECONCILIATION_CURSOR_BYTES: usize =
-    MAX_RECONCILIATION_CURSOR_ENTRIES * RECONCILIATION_CURSOR_ENTRY_BYTES;
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ReconciliationEntry {
@@ -41,25 +37,25 @@ pub(super) struct PreparedCursorAppend {
 #[derive(Debug)]
 pub(super) struct ReconciliationCursor {
     owner: CursorOwner,
-    entries: Vec<ReconciliationEntry>,
+    entries: super::runtime_file::RuntimeFile,
+    entry_count: usize,
     entry_limit: usize,
 }
 
 impl ReconciliationCursor {
     pub(super) fn empty_for(
+        root: &std::path::Path,
         state: &CandidateState,
         active_source_count: usize,
     ) -> Result<Self, SegmentMaterializerError> {
         let candidate = &state.control;
         let owner = CursorOwner::from_candidate(candidate);
         let entry_limit = entry_limit(candidate, active_source_count)?;
-        let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(entry_limit)
-            .map_err(|_| SegmentMaterializerError::Bounds)?;
+        let entries = super::runtime_file::RuntimeFile::new(root)?;
         Ok(Self {
             owner,
             entries,
+            entry_count: 0,
             entry_limit,
         })
     }
@@ -76,11 +72,10 @@ impl ReconciliationCursor {
         reconciliations: &[CoreSourceReconciliation],
     ) -> Result<PreparedCursorAppend, SegmentMaterializerError> {
         let next_len = self
-            .entries
-            .len()
+            .entry_count
             .checked_add(reconciliations.len())
             .ok_or(SegmentMaterializerError::Bounds)?;
-        if next_len > self.entry_limit || next_len > MAX_RECONCILIATION_CURSOR_ENTRIES {
+        if next_len > self.entry_limit {
             return Err(SegmentMaterializerError::Bounds);
         }
         let mut entries = Vec::new();
@@ -89,8 +84,7 @@ impl ReconciliationCursor {
             .map_err(|_| SegmentMaterializerError::Bounds)?;
         for (ordinal, reconciliation) in reconciliations.iter().enumerate() {
             let expected_index = self
-                .entries
-                .len()
+                .entry_count
                 .checked_add(ordinal)
                 .and_then(|index| u32::try_from(index).ok())
                 .ok_or(SegmentMaterializerError::Bounds)?;
@@ -103,7 +97,7 @@ impl ReconciliationCursor {
             entries.push(entry);
         }
         Ok(PreparedCursorAppend {
-            expected_entry_count: self.entries.len(),
+            expected_entry_count: self.entry_count,
             entries,
         })
     }
@@ -112,15 +106,26 @@ impl ReconciliationCursor {
         &mut self,
         prepared: PreparedCursorAppend,
     ) -> Result<(), SegmentMaterializerError> {
-        if self.entries.len() != prepared.expected_entry_count
-            || self.entries.len().saturating_add(prepared.entries.len()) > self.entry_limit
-            || self.entries.capacity() < self.entries.len().saturating_add(prepared.entries.len())
+        if self.entry_count != prepared.expected_entry_count
+            || self.entry_count.saturating_add(prepared.entries.len()) > self.entry_limit
         {
             return Err(SegmentMaterializerError::Corrupt(
                 "source reconciliation cursor reservation changed",
             ));
         }
-        self.entries.extend(prepared.entries);
+        let mut bytes =
+            Vec::with_capacity(prepared.entries.len() * RECONCILIATION_CURSOR_ENTRY_BYTES);
+        for entry in prepared.entries {
+            bytes.extend_from_slice(&entry.source_identity_sha256);
+            bytes.extend_from_slice(&entry.delta_sha256);
+        }
+        let offset = self.entries.append(&bytes)?;
+        if offset != cursor_payload_bytes(self.entry_count)? as u64 {
+            return Err(SegmentMaterializerError::Corrupt(
+                "runtime cursor length changed",
+            ));
+        }
+        self.entry_count += bytes.len() / RECONCILIATION_CURSOR_ENTRY_BYTES;
         Ok(())
     }
 
@@ -131,14 +136,9 @@ impl ReconciliationCursor {
     ) -> Result<(), SegmentMaterializerError> {
         let index =
             usize::try_from(materialize_index).map_err(|_| SegmentMaterializerError::Bounds)?;
-        let expected = self
-            .entries
-            .get(index)
-            .ok_or(SegmentMaterializerError::Corrupt(
-                "current source reconciliation is absent from the runtime cursor",
-            ))?;
+        let expected = self.entry(index)?;
         let requested = reconciliation_entry(&reconciliation.delta)?;
-        if *expected != requested {
+        if expected != requested {
             return Err(SegmentMaterializerError::Conflict);
         }
         Ok(())
@@ -151,18 +151,34 @@ impl ReconciliationCursor {
         let requested = reconciliation_entry(&reconciliation.delta)?;
         let index = usize::try_from(reconciliation.materialize_index)
             .map_err(|_| SegmentMaterializerError::Bounds)?;
-        if self.entries.get(index) != Some(&requested) {
+        if self.entry(index)? != requested {
             return Err(SegmentMaterializerError::Conflict);
         }
         Ok(())
     }
 
     pub(super) const fn entry_count(&self) -> usize {
-        self.entries.len()
+        self.entry_count
     }
 
     pub(super) fn reserved_bytes(&self) -> Result<usize, SegmentMaterializerError> {
-        cursor_payload_bytes(self.entry_limit)
+        Ok(0)
+    }
+    fn entry(&self, index: usize) -> Result<ReconciliationEntry, SegmentMaterializerError> {
+        if index >= self.entry_count {
+            return Err(SegmentMaterializerError::Conflict);
+        }
+        let mut bytes = [0; RECONCILIATION_CURSOR_ENTRY_BYTES];
+        self.entries
+            .read_at(cursor_payload_bytes(index)? as u64, &mut bytes)?;
+        Ok(ReconciliationEntry {
+            source_identity_sha256: bytes[..32]
+                .try_into()
+                .map_err(|_| SegmentMaterializerError::Encoding)?,
+            delta_sha256: bytes[32..]
+                .try_into()
+                .map_err(|_| SegmentMaterializerError::Encoding)?,
+        })
     }
 }
 
@@ -197,11 +213,9 @@ fn bounded_entry_limit(
     changed_sources: u32,
     removed_sources: u32,
 ) -> Result<usize, SegmentMaterializerError> {
-    if candidate_source_count > MAX_CORE_SOURCE_STATES
-        || active_source_count > MAX_CORE_SOURCE_STATES
-        || usize::try_from(changed_sources)
-            .ok()
-            .is_none_or(|changed| changed > candidate_source_count)
+    if usize::try_from(changed_sources)
+        .ok()
+        .is_none_or(|changed| changed > candidate_source_count)
         || usize::try_from(removed_sources)
             .ok()
             .is_none_or(|removed| removed > active_source_count)
@@ -211,9 +225,6 @@ fn bounded_entry_limit(
     let limit = candidate_source_count
         .checked_add(active_source_count)
         .ok_or(SegmentMaterializerError::Bounds)?;
-    if limit > MAX_RECONCILIATION_CURSOR_ENTRIES {
-        return Err(SegmentMaterializerError::Bounds);
-    }
     let _ = cursor_payload_bytes(limit)?;
     Ok(limit)
 }
@@ -222,9 +233,6 @@ fn cursor_payload_bytes(entry_count: usize) -> Result<usize, SegmentMaterializer
     let bytes = entry_count
         .checked_mul(RECONCILIATION_CURSOR_ENTRY_BYTES)
         .ok_or(SegmentMaterializerError::Bounds)?;
-    if bytes > MAX_RECONCILIATION_CURSOR_BYTES {
-        return Err(SegmentMaterializerError::Bounds);
-    }
     Ok(bytes)
 }
 

@@ -217,6 +217,29 @@ fn is_derivative_refresh_finding(finding: &str) -> bool {
     .contains(&finding)
 }
 
+/// A retained failure describes the previous job, never the current job's health.
+pub fn append_previous_refresh_failure(
+    context: &RenderContext,
+    document: &mut Document,
+    report: &Value,
+) {
+    let Some(detail) = report
+        .pointer("/refresh/last_failure/last_error")
+        .and_then(Value::as_str)
+        .filter(|detail| !detail.is_empty())
+    else {
+        return;
+    };
+    document.push_blank();
+    document.append(section(
+        "Previous refresh failure",
+        fields(
+            context,
+            &[Field::new("Detail", &bounded_terminal_detail(detail))],
+        ),
+    ));
+}
+
 pub(super) fn bounded_terminal_detail(detail: &str) -> String {
     let escaped = Span::text(detail).content().to_owned();
     if escaped.len() <= MAX_REFRESH_ERROR_BYTES {
@@ -303,6 +326,29 @@ mod ui_tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn previous_failure_does_not_change_doctor_findings_or_current_progress() {
+        let report = json!({"refresh": {"status": "pending", "reason": "core_refresh_pending",
+            "last_failure": {"last_error": "free space on the index volume and retry"}}});
+        let findings = vec!["refresh is pending (core_refresh_pending)".to_owned()];
+        let context = context(120);
+        let mut document = render_doctor_human(&context, &findings, None, None);
+        let before = document.render_plain();
+        append_previous_refresh_failure(&context, &mut document, &report);
+        let rendered = document.render_plain();
+        assert!(rendered.starts_with(&before));
+        assert!(rendered.contains("Previous refresh failure"));
+        assert!(rendered.contains("free space on the index volume and retry"));
+        assert!(!rendered.contains("History refresh failed"));
+        let before = rendered;
+        append_previous_refresh_failure(
+            &context,
+            &mut document,
+            &json!({"refresh": {"status": "ready"}}),
+        );
+        assert_eq!(document.render_plain(), before);
+    }
 
     #[test]
     fn doctor_does_not_call_semantic_startup_failure_preparation() {

@@ -386,8 +386,11 @@ impl CoreFeedSnapshot for CancellingSnapshot<'_> {
         <CoreSnapshot as CoreFeedSnapshot>::schema(self.inner)
     }
 
-    fn source_states(&self) -> Result<Vec<CoreSourceState>> {
-        <CoreSnapshot as CoreFeedSnapshot>::source_states(self.inner)
+    fn visit_source_pages(
+        &self,
+        visit: &mut dyn FnMut(Vec<CoreSourceState>, bool) -> Result<()>,
+    ) -> Result<()> {
+        <CoreSnapshot as CoreFeedSnapshot>::visit_source_pages(self.inner, visit)
     }
 
     fn record_page(
@@ -470,4 +473,142 @@ fn cancellation_before_start_and_between_pages_preserves_active_and_cleans_candi
     drop(cleanup_probe);
     let retried = sync(&fixture, &next_generation, &mut materializer);
     assert_eq!(retried.core_generation_id, next_generation);
+}
+
+#[path = "tests/large_inventory.rs"]
+mod large_inventory;
+
+#[test]
+fn native_source_page_terminal_flag_fits_exact_wire_boundary() {
+    let materialization = "1".repeat(64);
+    let generation = "2".repeat(64);
+    let make = |index: usize, padding: usize| {
+        CoreSourceDelta::Present(CoreSourceState {
+            source: source(&format!("{index:03}{}", "x".repeat(padding))),
+            core_record_accumulator: "a".repeat(64),
+            event_count: 0,
+        })
+    };
+    // 257 valid descriptors require two native inventory pages. Tune the first
+    // 256 to exactly the real 4 MiB nonterminal wire envelope, independently of
+    // the builder's byte counter.
+    let mut native = (0..256)
+        .map(|index| make(index, 15_000))
+        .collect::<Vec<_>>();
+    let wire_len = |deltas: &[CoreSourceDelta], terminal| {
+        serde_json::to_vec(&CoreSourceDeltaPage {
+            materialization_id: materialization.clone(),
+            core_generation_id: generation.clone(),
+            page_index: 0,
+            terminal,
+            deltas: deltas.to_vec(),
+        })
+        .unwrap()
+        .len()
+    };
+    let missing = MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES - wire_len(&native, false);
+    let per_item = missing / 256;
+    let remainder = missing % 256;
+    for (index, delta) in native.iter_mut().enumerate() {
+        *delta = make(index, 15_000 + per_item + usize::from(index < remainder));
+    }
+    // Source identities include decimal byte arrays, so changing a key also
+    // changes its JSON length slightly. Tune one supported key against serde's
+    // actual output, rather than reproducing the page builder's accounting.
+    let fixed = wire_len(&native[..255], false) + 1;
+    let tune = |target: usize| {
+        let mut deltas = native[..255].to_vec();
+        let overhead = serde_json::to_vec(&make(255, 0)).unwrap().len();
+        let estimate = target - fixed - overhead;
+        let final_delta = (estimate.saturating_sub(256)..estimate + 256)
+            .map(|padding| make(255, padding))
+            .find(|delta| fixed + serde_json::to_vec(delta).unwrap().len() == target)
+            .expect("supported key at exact JSON boundary");
+        deltas.push(final_delta);
+        deltas.sort_by_key(|delta| delta.source().identity().digest());
+        deltas
+    };
+    let native = tune(MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES);
+    assert_eq!(
+        wire_len(&native, false),
+        MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES
+    );
+    let pages = build_delta_pages_at(
+        &materialization,
+        &generation,
+        native.clone(),
+        MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
+        0,
+        false,
+    )
+    .unwrap();
+    assert_eq!(pages.len(), 1);
+    assert!(!pages[0].terminal);
+    assert_eq!(
+        serde_json::to_vec(&pages[0]).unwrap().len(),
+        MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES
+    );
+    pages[0].validate().unwrap();
+    let last = build_delta_pages_at(
+        &materialization,
+        &generation,
+        vec![make(256, 15_000)],
+        MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
+        1,
+        true,
+    )
+    .unwrap();
+    assert!(last[0].terminal);
+    assert_eq!(pages[0].deltas.len() + last[0].deltas.len(), 257);
+
+    // The prior bug fitted this as terminal then added a byte after fitting.
+    let tight = MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES - 1;
+    assert_eq!(wire_len(&native, true), tight);
+    let split = build_delta_pages_at(
+        &materialization,
+        &generation,
+        native.clone(),
+        tight,
+        0,
+        false,
+    )
+    .unwrap();
+    assert_eq!(split.len(), 2);
+    assert!(
+        split
+            .iter()
+            .all(|page| !page.terminal && serde_json::to_vec(page).unwrap().len() <= tight)
+    );
+    let over = tune(MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES + 1);
+    assert_eq!(wire_len(&over, true), MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES);
+    let mut oversized = pages[0].clone();
+    oversized.deltas = over.clone();
+    assert!(oversized.validate().is_err());
+    let repaired = build_delta_pages_at(
+        &materialization,
+        &generation,
+        over,
+        MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
+        0,
+        false,
+    )
+    .unwrap();
+    assert_eq!(repaired.len(), 2);
+    for page in repaired {
+        page.validate().unwrap();
+        assert!(!page.terminal);
+    }
+    let singleton = vec![make(0, 15_000)];
+    let singleton_bytes = wire_len(&singleton, false);
+    assert!(matches!(
+        build_delta_pages_at(
+            &materialization,
+            &generation,
+            singleton,
+            singleton_bytes - 1,
+            0,
+            false
+        ),
+        Err(CoreSourceDeltaPageBuildError::OversizedSingleton)
+    ));
 }

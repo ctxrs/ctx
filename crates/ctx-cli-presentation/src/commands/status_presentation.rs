@@ -213,6 +213,7 @@ pub fn render_status_human(
     document.push_blank();
     document.append(section("History", fields(context, &history_fields)));
 
+    super::append_previous_refresh_failure(context, &mut document, report);
     super::append_attribution(context, &mut document, report);
     let daemon = &report["daemon"];
     let daemon_status = if daemon.get("running").and_then(Value::as_bool) == Some(true) {
@@ -336,6 +337,22 @@ mod tests {
             "indexed_sessions": 2,
             "indexed_events": 1000,
         })
+    }
+
+    #[test]
+    fn pending_status_displays_previous_failure_without_changing_current_health() {
+        let mut report = status_report(true, "ready", "pending");
+        report["refresh"]["progress"] = json!({"completed_records": 42});
+        let context = context(120, ColorMode::Never);
+        let ordinary = render_report(&context, &report).render_plain();
+        report["refresh"]["last_failure"] = json!({"error_code": "resource_unavailable",
+            "last_error": "free space on the index volume and retry"});
+        let rendered = render_report(&context, &report).render_plain();
+        assert_eq!(rendered.lines().next(), ordinary.lines().next());
+        assert!(rendered.contains("42 records"));
+        assert!(rendered.contains("Previous refresh failure"));
+        assert!(rendered.contains("free space on the index volume and retry"));
+        assert!(!rendered.contains("History status: failed"));
     }
 
     fn usage_report() -> local_usage::UsageReport {

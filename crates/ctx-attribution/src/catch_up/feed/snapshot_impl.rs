@@ -19,15 +19,14 @@ impl CoreFeedSnapshot for CoreSnapshot {
         }
     }
 
-    fn source_states(&self) -> Result<Vec<CoreSourceState>> {
-        if self.source_count() > MAX_CORE_SOURCE_STATES {
-            bail!(
-                "bounds: Core snapshot has {} sources, exceeding the attribution bound {MAX_CORE_SOURCE_STATES}",
-                self.source_count()
-            );
-        }
+    fn visit_source_pages(
+        &self,
+        visit: &mut dyn FnMut(Vec<CoreSourceState>, bool) -> Result<()>,
+    ) -> Result<()> {
         let mut cursor = None;
-        let mut states = Vec::with_capacity(self.source_count());
+        let mut source_count = 0_usize;
+        let mut indexed_documents = 0_u64;
+        let mut prior = None;
         loop {
             let page = self
                 .source_manifest_page(cursor.as_ref(), MAX_SOURCE_MANIFEST_PAGE_ITEMS)
@@ -40,6 +39,7 @@ impl CoreFeedSnapshot for CoreSnapshot {
             {
                 bail!("bounds: Core source manifest page violated its item/progress bound");
             }
+            let mut states = Vec::with_capacity(page.items.len());
             for state in page.items {
                 let source_identity = hex::encode(state.source.identity().digest());
                 if state.aggregate.source_identity_digest() != source_identity {
@@ -47,15 +47,27 @@ impl CoreFeedSnapshot for CoreSnapshot {
                         "corrupt_core: source aggregate identity does not match its source descriptor"
                     );
                 }
+                let identity = state.source.identity().digest();
+                if prior.is_some_and(|prior| prior >= identity) {
+                    bail!("corrupt_core: Core sources are not strictly ordered by stable identity");
+                }
+                prior = Some(identity);
+                indexed_documents = indexed_documents
+                    .checked_add(state.aggregate.indexed_documents())
+                    .ok_or_else(|| anyhow!("bounds: Core source event count overflowed"))?;
                 states.push(CoreSourceState {
                     source: state.source,
                     core_record_accumulator: state.aggregate.core_record_accumulator().to_owned(),
                     event_count: state.aggregate.indexed_documents(),
                 });
-                if states.len() > MAX_CORE_SOURCE_STATES {
-                    bail!("bounds: Core source manifest exceeded the attribution source bound");
-                }
             }
+            source_count = source_count
+                .checked_add(states.len())
+                .ok_or_else(|| anyhow!("bounds: Core source count overflowed"))?;
+            if source_count > self.source_count() {
+                bail!("corrupt_core: Core source manifest exceeds pinned count");
+            }
+            visit(states, page.terminal)?;
             match (page.terminal, page.next_cursor) {
                 (true, None) => break,
                 (false, Some(next)) => {
@@ -71,19 +83,13 @@ impl CoreFeedSnapshot for CoreSnapshot {
                 _ => bail!("corrupt_core: Core source manifest terminal cursor is inconsistent"),
             }
         }
-        if states.len() != self.source_count() {
+        if source_count != self.source_count() {
             bail!("corrupt_core: Core source manifest count changed while pinned");
         }
-        validate_ordered_source_states(&states)?;
-        let indexed_documents = states.iter().try_fold(0_u64, |total, state| {
-            total
-                .checked_add(state.event_count)
-                .ok_or_else(|| anyhow!("bounds: Core source event count overflowed"))
-        })?;
         if indexed_documents != self.indexed_documents() {
             bail!("corrupt_core: Core source totals do not match snapshot metadata");
         }
-        Ok(states)
+        Ok(())
     }
 
     fn record_page(
@@ -128,6 +134,7 @@ impl CoreFeedSnapshot for CoreSnapshot {
     }
 }
 
+#[cfg(test)]
 pub(super) fn validate_ordered_source_states(states: &[CoreSourceState]) -> Result<()> {
     for pair in states.windows(2) {
         if pair[0].source.identity().digest() >= pair[1].source.identity().digest() {
@@ -156,8 +163,22 @@ impl CoreFeedSnapshot for VerifiedIndex {
         }
     }
 
-    fn source_states(&self) -> Result<Vec<CoreSourceState>> {
-        core_source_states(self.manifest())
+    fn visit_source_pages(
+        &self,
+        visit: &mut dyn FnMut(Vec<CoreSourceState>, bool) -> Result<()>,
+    ) -> Result<()> {
+        let states = core_source_states(self.manifest())?;
+        if states.is_empty() {
+            return visit(Vec::new(), true);
+        }
+        let len = states.len();
+        for (offset, page) in states.chunks(MAX_SOURCE_MANIFEST_PAGE_ITEMS).enumerate() {
+            visit(
+                page.to_vec(),
+                (offset + 1) * MAX_SOURCE_MANIFEST_PAGE_ITEMS >= len,
+            )?;
+        }
+        Ok(())
     }
 
     fn record_page(

@@ -42,6 +42,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 const TEMPORARY_FILE_PREFIX: &str = ".ctx-tantivy-atomic-";
 const TEMPORARY_FILE_ATTEMPTS: usize = 16;
 
+mod write_failure;
+use write_failure::WriteFailure;
+
 #[cfg(any(test, feature = "test-support"))]
 mod publication_failure_probe;
 
@@ -66,6 +69,7 @@ mod windows_replace;
 pub struct DurableMmapDirectory {
     inner: DurableDirectoryBackend,
     root_path: Arc<PathBuf>,
+    write_failure: WriteFailure,
 }
 
 #[derive(Clone)]
@@ -102,6 +106,7 @@ impl DurableMmapDirectory {
             return Ok(Self {
                 inner: DurableDirectoryBackend::Anchored(opened),
                 root_path: Arc::new(directory_path.to_path_buf()),
+                write_failure: WriteFailure::default(),
             });
         }
         let inner = DurableDirectoryBackend::Mmap(MmapDirectory::open(directory_path)?);
@@ -109,6 +114,7 @@ impl DurableMmapDirectory {
         Ok(Self {
             inner,
             root_path: Arc::new(root_path),
+            write_failure: WriteFailure::default(),
         })
     }
 
@@ -299,7 +305,7 @@ impl Directory for DurableMmapDirectory {
 
     fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
         match &self.inner {
-            DurableDirectoryBackend::Mmap(inner) => inner.open_write(path),
+            DurableDirectoryBackend::Mmap(inner) => self.write_failure.open_write(inner, path),
             DurableDirectoryBackend::Anchored(_) => Err(OpenWriteError::wrap_io_error(
                 read_only_directory_error(),
                 path.to_path_buf(),
@@ -308,6 +314,12 @@ impl Directory for DurableMmapDirectory {
     }
 
     fn atomic_read(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
+        // Background Tantivy merges discard their failure futures. Preserve
+        // the first write error through the final metadata read before ctx
+        // can verify or activate this candidate.
+        self.write_failure
+            .check()
+            .map_err(|error| OpenReadError::wrap_io_error(error, path.to_path_buf()))?;
         match &self.inner {
             DurableDirectoryBackend::Mmap(inner) => inner.atomic_read(path),
             DurableDirectoryBackend::Anchored(inner) => {
@@ -327,7 +339,11 @@ impl Directory for DurableMmapDirectory {
     }
 
     fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        self.atomic_write_with_outcome(path, data)?.into_io_result()
+        // Only a failed pre-publication write poisons the candidate. An
+        // already-visible metadata replacement still follows reconciliation.
+        self.atomic_write_with_outcome(path, data)
+            .inspect_err(|error| self.write_failure.record(error))?
+            .into_io_result()
     }
 
     fn sync_directory(&self) -> io::Result<()> {

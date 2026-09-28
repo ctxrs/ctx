@@ -9,7 +9,7 @@ pub fn validate_input_counts(
     let entry_count = record_count
         .checked_add(tombstone_count)
         .ok_or(EventIndexError::Bound("entry count"))?;
-    if source_count > MAX_EVENT_INDEX_SOURCES {
+    if u32::try_from(source_count).is_err() {
         return Err(EventIndexError::Bound("source count"));
     }
     if entry_count > MAX_EVENT_INDEX_ENTRIES {

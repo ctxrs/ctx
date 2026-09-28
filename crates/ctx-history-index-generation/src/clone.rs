@@ -40,6 +40,16 @@ const REPUBLISH_HEADROOM_RESERVE_BYTES: u64 = 16 * 1024 * 1024;
 const MANAGED_FILE: &str = ".managed.json";
 const TANTIVY_LOCK_FILES: [&str; 2] = [".tantivy-meta.lock", ".tantivy-writer.lock"];
 
+/// Admission reserves a writer buffer and control-file scratch, not a rewrite
+/// of every retained segment. Incremental writers share immutable segments;
+/// actual append/merge output can still exhaust the volume and must fail before
+/// candidate activation. This probe is not a reservation or a peak-space bound.
+fn writer_output_headroom(writer_memory_bytes: u64) -> Result<u64> {
+    writer_memory_bytes
+        .checked_add(REPUBLISH_HEADROOM_RESERVE_BYTES)
+        .ok_or(IndexError::CountOverflow)
+}
+
 /// Observe this candidate volume using the same platform probe as clone admission.
 pub(crate) fn candidate_available_bytes(root: &Path) -> Result<u64> {
     #[cfg(any(test, feature = "test-support"))]

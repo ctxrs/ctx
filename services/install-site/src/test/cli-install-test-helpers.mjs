@@ -381,10 +381,20 @@ if [ "$#" = "3" ] && [ "\${1-}" = "pro" ] &&
    [ "\${2-}" = "uninstall" ] && [ "\${3-}" = "--help" ]; then
   exit 0
 fi
+if [ "$#" = "5" ] && [ "\${1-}" = "--data-root" ] &&
+   [ "\${3-}" = "index" ] && [ "\${4-}" = "mode" ] && [ "\${5-}" = "--format=json" ]; then
+  exec "$CTX_FAKE_NODE" "$CTX_FAKE_LEGACY_INDEXING_FIXTURE" read "$2"
+fi
 if [ "$#" = "6" ] && [ "\${1-}" = "--data-root" ] &&
    [ "\${2-}" = "$CTX_DATA_ROOT" ] && [ "\${3-}" = "daemon" ] &&
    [ "\${4-}" = "disable" ] && [ "\${5-}" = "--prepare-uninstall" ] &&
    [ "\${6-}" = "--format=json" ]; then
+  if [ "\${CTX_FAKE_LEGACY_DISABLE_POLICY:-0}" = "1" ]; then
+    "$CTX_FAKE_NODE" "$CTX_FAKE_LEGACY_INDEXING_FIXTURE" disable "$CTX_DATA_ROOT"
+    if [ "$CTX_DATA_ROOT" != "$HOME/.ctx" ]; then
+      "$CTX_FAKE_NODE" "$CTX_FAKE_LEGACY_INDEXING_FIXTURE" disable "$HOME/.ctx"
+    fi
+  fi
   json_requested_root="$(printf '%s' "$CTX_DATA_ROOT" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')"
   json_canonical_root="$(printf '%s' "$HOME/.ctx" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')"
   if [ "$CTX_DATA_ROOT" = "$HOME/.ctx" ]; then
@@ -814,6 +824,7 @@ EOF
     printf '  "refresh_pending": false\\n'
     printf '}\\n'
   fi
+  if [ -n "\${CTX_FAKE_SETUP_STDERR:-}" ]; then printf '%s\\n' "$CTX_FAKE_SETUP_STDERR" >&2; fi
   exit "\${CTX_FAKE_SETUP_STATUS:-0}"
 fi
 if [ "\${1-}" = "pro" ]; then
@@ -992,6 +1003,7 @@ esac
     CTX_FAKE_SUPERVISOR_ENV_LOG: supervisorEnvPath,
     CTX_FAKE_CTX_COMMAND_LOG: commandLogPath,
     CTX_FAKE_NODE: process.execPath,
+    CTX_FAKE_LEGACY_INDEXING_FIXTURE: fileURLToPath(new URL("./legacy-indexing-teardown-fixture.cjs", import.meta.url)),
     CTX_FAKE_HOSTED_SETUP_ENV_LOG: hostedSetupEnvPath,
     CTX_FAKE_RUNTIME_REPAIR_LOG: runtimeRepairLogPath,
     CTX_FAKE_NO_DAEMON_SETUP: noDaemonSetupPath,
@@ -1086,6 +1098,7 @@ esac
 }
 
 function runHostedUninstallForInstallerFixture(fixture, args = ["--keep-data"]) {
+  const marker = JSON.parse(readFileSync(path.join(fixture.installBin, "ctx.install.json"), "utf8"));
   const uninstallPath = path.join(fixture.sandbox, "uninstall.sh");
   writeFileSync(
     uninstallPath,
@@ -1103,6 +1116,7 @@ function runHostedUninstallForInstallerFixture(fixture, args = ["--keep-data"]) 
         "utf8",
       )).integrations_path ?? "",
       CTX_DATA_ROOT: fixture.dataRoot,
+      CTX_FAKE_LEGACY_DISABLE_POLICY: /^(1\.|2\.0\.)/.test(marker.version) ? "1" : "0",
     },
   });
 }

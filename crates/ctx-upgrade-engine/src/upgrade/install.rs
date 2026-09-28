@@ -44,7 +44,6 @@ pub use managed_man::{
     disable_current_man_pages, reconcile_current_man_pages, ManagedManBundle, ManagedManPage,
 };
 pub(in crate::upgrade) use marker::absent_install_marker_error;
-pub(in crate::upgrade) use marker::install_marker_path;
 pub(in crate::upgrade) use marker::installation_is_unmanaged_at;
 pub use marker::is_valid_install_attempt_id;
 #[cfg(unix)]
@@ -54,6 +53,7 @@ pub use marker::{
     current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
     invalid_install_marker_recovery_guidance, unmanaged_install_conversion_guidance, InstallMarker,
 };
+pub(in crate::upgrade) use marker::{install_marker_path, managed_install_receipt};
 pub use marker::{managed_install_marker_for_current_exe, ManagedInstallMarker};
 pub use path_identity::managed_install_path_identity_matches;
 pub(super) use transaction::ApplyResult;

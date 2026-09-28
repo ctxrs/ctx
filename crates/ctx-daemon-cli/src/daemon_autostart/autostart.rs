@@ -219,9 +219,10 @@ fn autostart_persistent_daemon_and_wait(
             ),
         }
             .map_err(|error| match error {
-                ctx_daemon_application::DaemonStartError::Suppressed(reason) => anyhow!(
-                    "ctx daemon start was suppressed ({reason}); retry after it clears or run `ctx setup --no-daemon`"
-                ),
+                ctx_daemon_application::DaemonStartError::Suppressed(reason) =>
+                    ctx_daemon_service::SourceBackedRefreshDaemonUnavailable::new(Some(format!(
+                        "ctx daemon start was suppressed ({reason}); retry after it clears or run `ctx setup --no-daemon`"
+                    ))).into(),
                 ctx_daemon_application::DaemonStartError::BinaryIdentity(error) => error,
                 ctx_daemon_application::DaemonStartError::Start(error)
                 | ctx_daemon_application::DaemonStartError::Ready(error)

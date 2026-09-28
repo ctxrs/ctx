@@ -26,6 +26,7 @@ use super::{
 };
 
 mod managed_pair;
+mod projection;
 mod replacement;
 #[cfg(windows)]
 pub(super) use managed_pair::validate_helper_file as validate_managed_pair_helper_file;
@@ -42,6 +43,9 @@ pub(super) use managed_pair::{
     recovery_hint as managed_pair_recovery_hint, recovery_locked as managed_pair_recovery_locked,
     try_acquire_recovery_lock as try_acquire_managed_pair_recovery_lock, ManagedPairRecovery,
 };
+pub use projection::read_state_json;
+#[cfg(test)]
+use projection::read_state_json_for_path;
 use replacement::applied_state_write_failure_injected;
 #[cfg(any(windows, test))]
 pub(super) use replacement::finish_manual_replacement_locked;
@@ -102,6 +106,8 @@ struct UpgradeState {
     attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     attempt_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    install_attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -232,6 +238,8 @@ pub(super) fn begin_automatic_attempt_locked(
         return Ok(None);
     }
     let attempt = state.begin("automatic");
+    state.install_attempt_id = super::install::managed_install_receipt(&lock.install_path)
+        .map(|receipt| receipt.install_attempt_id);
     write_state_object_locked(lock, state)?;
     Ok(Some(attempt))
 }
@@ -451,6 +459,8 @@ pub(super) fn begin_manual_attempt_locked(
 ) -> Result<UpgradeAttempt> {
     let mut state = read_state_object(&lock.install_path);
     let attempt = state.begin(source);
+    state.install_attempt_id = super::install::managed_install_receipt(&lock.install_path)
+        .map(|receipt| receipt.install_attempt_id);
     write_state_object_locked(lock, state)?;
     Ok(attempt)
 }
@@ -713,15 +723,6 @@ fn read_state_object_bounded(install_path: &Path) -> Option<UpgradeState> {
     serde_json::from_slice::<UpgradeState>(&bytes)
         .ok()
         .map(UpgradeState::valid_or_default)
-}
-
-pub fn read_state_json() -> Option<Value> {
-    let install_path = super::install::current_install_path().ok()?;
-    read_state_json_for_path(&install_path)
-}
-
-fn read_state_json_for_path(install_path: &Path) -> Option<Value> {
-    read_json_file(&state_path(install_path))
 }
 
 fn write_state_object_locked(lock: &UpgradeLock, state: UpgradeState) -> Result<()> {

@@ -593,3 +593,165 @@ fn manual_helper_completion_preserves_automatic_and_other_attempts() -> Result<(
     }
     Ok(())
 }
+
+fn reinstalled_test_installation() -> Result<(tempfile::TempDir, PathBuf)> {
+    let temp = tempfile::tempdir()?;
+    let install = temp.path().join("ctx");
+    let binary = b"authored executable identity";
+    fs::write(&install, binary)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&install, fs::Permissions::from_mode(0o700))?;
+    }
+    let marker = json!({
+        "schema_version": 1,
+        "manager": "ctx-hosted-installer",
+        "install_path": install,
+        "platform": super::super::platform_key()?,
+        "channel": "stable",
+        "version": "2.0.0",
+        "sha256": super::super::sha256_hex(binary),
+        "installed_at": "2026-09-01T12:00:00Z",
+        "install_attempt_id": "ia_reinstalled_current",
+    });
+    atomic_write_json(
+        &super::super::install::install_marker_path(&install),
+        &marker,
+    )?;
+    Ok((temp, install))
+}
+
+#[test]
+fn new_attempts_bind_install_receipt_and_recovery_preserves_binding_and_cadence() -> Result<()> {
+    for source in [
+        "automatic",
+        "manual_check",
+        "manual_apply",
+        "hosted_migration",
+    ] {
+        let (temp, install) = reinstalled_test_installation()?;
+        let installation = InstallationLock::try_acquire(&install)?.unwrap();
+        let lock = UpgradeLock::from_installation(install.clone(), installation);
+        let state = UpgradeState {
+            schema_version: STATE_SCHEMA_VERSION,
+            install_attempt_id: Some("ia_previous_install".to_owned()),
+            last_successful_check_unix_s: Some(70),
+            next_check_unix_s: Some(100),
+            next_retry_unix_s: Some(90),
+            consecutive_failures: 2,
+            ..UpgradeState::default()
+        };
+        atomic_write_json(&state_path(&install), &serde_json::to_value(state)?)?;
+        let attempt = if source == "automatic" {
+            begin_automatic_attempt_locked(&lock, Duration::from_secs(60))?.unwrap()
+        } else {
+            begin_manual_attempt_locked(temp.path(), &lock, source)?
+        };
+        for recovering in [false, true] {
+            if recovering {
+                begin_recovery_attempt_locked(&lock, attempt.id(), source)?;
+            }
+            let stored = read_state_object(&install);
+            assert_eq!(
+                stored.install_attempt_id.as_deref(),
+                Some("ia_reinstalled_current"),
+                "{source}"
+            );
+            assert_eq!(stored.last_successful_check_unix_s, Some(70));
+            assert_eq!(stored.next_check_unix_s, Some(100));
+            assert_eq!(stored.next_retry_unix_s, Some(90));
+            assert_eq!(stored.consecutive_failures, 2);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fresh_install_supersedes_only_older_failed_upgrade_status_without_mutation() -> Result<()> {
+    let (_temp, install) = reinstalled_test_installation()?;
+    for (status, finished, install_id, expected) in [
+        ("error", "2026-08-01T12:00:00Z", None, "never_checked"),
+        ("error", "2026-09-01T12:00:00Z", None, "error"),
+        ("error", "2026-09-02T12:00:00Z", None, "error"),
+        ("error", "invalid", None, "error"),
+        (
+            "error",
+            "2026-08-01T12:00:00Z",
+            Some("ia_reinstalled_current"),
+            "error",
+        ),
+        (
+            "error",
+            "2026-08-01T12:00:00Z",
+            Some("ia_previous_install"),
+            "never_checked",
+        ),
+        (
+            "error",
+            "2026-09-01T12:00:00Z",
+            Some("ia_previous_install"),
+            "error",
+        ),
+        (
+            "error",
+            "2026-09-01T12:00:01Z",
+            Some("ia_previous_install"),
+            "error",
+        ),
+        ("error", "invalid", Some("ia_previous_install"), "error"),
+        ("applying", "2026-08-01T12:00:00Z", None, "applying"),
+        ("scheduled", "2026-08-01T12:00:00Z", None, "scheduled"),
+        ("up_to_date", "2026-08-01T12:00:00Z", None, "up_to_date"),
+    ] {
+        let receipt = json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "status": status,
+            "last_attempt_finished_at": finished,
+            "install_attempt_id": install_id,
+            "error": "authored old download failure",
+        });
+        atomic_write_json(&state_path(&install), &receipt)?;
+        let before = fs::read(state_path(&install))?;
+        let observed = read_state_json_for_path(&install).unwrap();
+        assert_eq!(observed["status"], expected, "{status} {finished}");
+        if expected == "never_checked" {
+            assert!(observed.get("error").is_none());
+        }
+        assert_eq!(fs::read(state_path(&install))?, before);
+    }
+    Ok(())
+}
+
+#[test]
+fn finalization_failure_after_new_marker_remains_visible_with_the_old_attempt_binding() -> Result<()>
+{
+    let (temp, install) = reinstalled_test_installation()?;
+    let installation = InstallationLock::try_acquire(&install)?.unwrap();
+    let lock = UpgradeLock::from_installation(install.clone(), installation);
+    let attempt = begin_manual_attempt_locked(temp.path(), &lock, "hosted_migration")?;
+    let marker_path = super::super::install::install_marker_path(&install);
+    let mut marker: Value = serde_json::from_slice(&fs::read(&marker_path)?)?;
+    marker["install_attempt_id"] = json!("ia_after_hosted_migration");
+    marker["installed_at"] = json!(utc_now());
+    atomic_write_json(&marker_path, &marker)?;
+    // Exercise the production error writer after marker publication, as when
+    // journal unlink succeeds but syncing the install directory then fails.
+    assert!(write_state_error_locked(
+        temp.path(),
+        &lock,
+        &attempt,
+        "failed",
+        "sync install directory after journal removal: I/O error"
+    )?);
+    let before = fs::read(state_path(&install))?;
+    let report = read_state_json_for_path(&install).unwrap();
+    assert_eq!(report["status"], "error");
+    assert_eq!(report["install_attempt_id"], "ia_reinstalled_current");
+    assert_eq!(
+        report["error"],
+        "sync install directory after journal removal: I/O error"
+    );
+    assert_eq!(fs::read(state_path(&install))?, before);
+    Ok(())
+}

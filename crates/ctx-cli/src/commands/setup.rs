@@ -56,7 +56,7 @@ pub(crate) fn run_setup(
     } else {
         None
     };
-    let refresh_request = {
+    let (refresh_request, refresh_error) = {
         let mut progress = setup_progress_reporter(ui, args.progress, json_output, quiet);
         request_source_refresh(
             &data_root,
@@ -73,7 +73,7 @@ pub(crate) fn run_setup(
     // Observe the final owner without re-entering supervisor/startup mutation,
     // then replace only the daemon report so unrelated source fields retain
     // their original admission boundary.
-    if daemon_autostart_requested {
+    if daemon_autostart_requested && refresh_error.is_none() {
         let (observed_source, observed_handoff) = observe_setup_output_daemon(&data_root, config)?;
         source.report["daemon"] = observed_source.report["daemon"].clone();
         daemon_handoff = Some(observed_handoff);
@@ -85,11 +85,15 @@ pub(crate) fn run_setup(
     let refresh_health_status = source.report["refresh"]["status"]
         .as_str()
         .unwrap_or("unavailable");
-    let mode = setup_mode(
-        lexical_status,
-        refresh_request["status"].as_str().unwrap_or("unavailable"),
-        refresh_health_status,
-    );
+    let mode = if refresh_error.is_some() {
+        "unavailable"
+    } else {
+        setup_mode(
+            lexical_status,
+            refresh_request["status"].as_str().unwrap_or("unavailable"),
+            refresh_health_status,
+        )
+    };
     telemetry.mode = Some(if mode == "ready" {
         SetupMode::Ready
     } else {
@@ -138,6 +142,9 @@ pub(crate) fn run_setup(
             },
         );
         ui.write_stdout(&document)?;
+    }
+    if let Some(error) = refresh_error {
+        return Err(error.context("History refresh failed"));
     }
     Ok(())
 }
@@ -240,18 +247,21 @@ fn request_source_refresh(
     defer_fresh_empty_wait: bool,
     daemon_unavailable_reason: Option<&str>,
     progress: &mut ProgressReporter<'_>,
-) -> Result<Value> {
+) -> Result<(Value, Option<anyhow::Error>)> {
     if no_daemon || (!daemon_enabled && !wait) {
-        return Ok(json!({
-            "status": "unavailable",
-            "reason": if no_daemon {
-                "explicit_opt_out"
-            } else {
-                "daemon_disabled"
-            },
-            "mode": if wait { "wait" } else { "background" },
-            "daemon_available": false,
-        }));
+        return Ok((
+            json!({
+                "status": "unavailable",
+                "reason": if no_daemon {
+                    "explicit_opt_out"
+                } else {
+                    "daemon_disabled"
+                },
+                "mode": if wait { "wait" } else { "background" },
+                "daemon_available": false,
+            }),
+            None,
+        ));
     }
     let mode = if wait {
         SourceBackedRefreshMode::Wait
@@ -305,16 +315,19 @@ fn request_source_refresh(
                 .receipt
                 .as_ref()
                 .map(|receipt| receipt.to_json());
-            Ok(json!({
-                "status": observation.status,
-                "reason": Value::Null,
-                "mode": if effective_wait { "wait" } else { "background" },
-                "request_id": observation.request_id,
-                "daemon_available": observation.daemon_available,
-                "source_count": observation.source_count,
-                "published_generation": observation.pin.generation_id(),
-                "receipt": receipt,
-            }))
+            Ok((
+                json!({
+                    "status": observation.status,
+                    "reason": Value::Null,
+                    "mode": if effective_wait { "wait" } else { "background" },
+                    "request_id": observation.request_id,
+                    "daemon_available": observation.daemon_available,
+                    "source_count": observation.source_count,
+                    "published_generation": observation.pin.generation_id(),
+                    "receipt": receipt,
+                }),
+                None,
+            ))
         }
         Err(error) => {
             if ctx_daemon_cli::finite_worker_interrupted(&error) {
@@ -326,11 +339,10 @@ fn request_source_refresh(
             {
                 return Err(error);
             }
-            Ok(refresh_request_failure(
-                &error,
-                effective_wait,
-                daemon_unavailable_reason,
-            ))
+            let report = refresh_request_failure(&error, effective_wait, daemon_unavailable_reason);
+            let failed = report["reason"] == "refresh_failed"
+                || (effective_wait && report["status"] != "pending");
+            Ok((report, failed.then_some(error)))
         }
     }
 }

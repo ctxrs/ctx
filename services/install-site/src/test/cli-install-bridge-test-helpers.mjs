@@ -21,8 +21,12 @@ export function powerShellBridgeFixture() {
     return value;
   };
   const selection = body.slice(body.indexOf("$functionsBase ="), body.indexOf("function Read-Metadata"));
-  const legacySelection = body.slice(body.indexOf("        $legacyManagedReinstall = $managedReinstall -and ("), body.indexOf("    } finally {", body.indexOf("        $legacyManagedReinstall = $managedReinstall -and (")));
-  const dispatch = body.slice(body.indexOf("    if ($managedReinstall) {"), body.indexOf('    Send-InstallStage -Stage "binary_install"'));
+  const legacyStart = body.indexOf("        $legacyManagedReinstall =");
+  if (legacyStart < 0) throw new Error("missing rendered legacy owner selection");
+  const legacySelection = body.slice(legacyStart, body.indexOf("    } finally {", legacyStart));
+  const dispatchStart = body.indexOf("    if ($pendingHostedMigration) {\n        Invoke-HostedInstallTransaction -Migrate");
+  if (dispatchStart < 0) throw new Error("missing rendered managed install dispatch");
+  const dispatch = body.slice(dispatchStart, body.indexOf('    Send-InstallStage -Stage "binary_install"'));
   return `Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 function Fail([string]$Message) { throw $Message }
@@ -62,6 +66,7 @@ foreach ($route in @(
     else { Assert-Equal $script:telemetryUri '' }
 }
 $channel = 'stable'; $version = '1.3.2'; $installPath = 'C:\\fixture\\bin\\ctx.exe'
+$pendingHostedMigration = $false
 foreach ($prior in @('0.11.0', '0.16.0', '0.17.0', '0.24.0', '0.25.0', '0.26.0', '1.2.2', '1.3.2')) {
     $existingManagedInstall = [pscustomobject]@{version=$prior}; $managedReinstall = $true; $releasePhase = 'bridge'
     ${legacySelection}
@@ -83,6 +88,8 @@ foreach ($prior in @('0.11.0', '0.16.0', '0.17.0', '0.24.0', '0.25.0', '0.26.0',
     Assert-Equal $legacyManagedReinstall ($prior -ceq '0.25.0')
 }
 $markerSourcePath = 'candidate-marker'; $managedReinstall = $true
+$downloadPath = 'small signed candidate'
+function Get-Item { param($LiteralPath) Assert-Equal $LiteralPath $downloadPath; return [pscustomobject]@{Length=1} }
 function Invoke-ManagedPairApply { param($MarkerSource, $Required) Assert-Equal $Required $true; $script:dispatch = 'candidate'; return $true }
 function Invoke-ManagedCoreUpgrade { $script:dispatch = 'installed' }
 function Invoke-ReleasedManagedPairInstall { $script:dispatch += '+released' }

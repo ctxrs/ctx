@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 
+use super::super::super::source_inventory::SourceInventory;
 use crate::graph::segment::{
     CompactIndexedCoreEventState, EventIndexSource, EventLineageAccumulator, FlatSegmentWriter,
     IndexedCoreEventTombstone, SegmentRef, SegmentStore,
 };
-use crate::protocol::CoreSourceState;
 
 use super::super::super::SegmentMaterializerError;
 use super::super::super::model::{
@@ -75,15 +75,15 @@ impl PublicationSink {
 
     pub(super) fn push_staged(
         &mut self,
-        sources: &BTreeMap<String, CoreSourceState>,
+        sources: &SourceInventory,
         page: super::super::super::staging::StagedPage,
         index_rollover: bool,
     ) -> Result<(), SegmentMaterializerError> {
         let source = page.event_source;
         if !page.index_records.is_empty()
             && sources
-                .get(&source.storage_key)
-                .is_none_or(|state| !state.source.exact_descriptor_eq(&source.source))
+                .get(&source.storage_key)?
+                .is_none_or(|state| !state.state.source.exact_descriptor_eq(&source.source))
         {
             return Err(SegmentMaterializerError::Corrupt(
                 "staged publication source is not current",

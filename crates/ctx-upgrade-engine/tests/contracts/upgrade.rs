@@ -1101,19 +1101,19 @@ fn runtime_extraction_does_not_require_external_python() {
 fn upgrade_status_text_output_shows_error_details() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
+    let marker: Value =
+        serde_json::from_slice(&fs::read(install_marker_path(&release.target)).unwrap()).unwrap();
 
     let state = json!({
         "schema_version": 1,
         "status": "error",
-        "checked_at": "2026-07-10T12:00:00Z",
+        "checked_at": marker["installed_at"],
+        "install_attempt_id": marker["install_attempt_id"],
         "last_checked_unix_s": 1778500000,
         "error": "download artifact: connection refused",
     });
-    fs::write(
-        scheduler_state_path(&release.target),
-        serde_json::to_vec_pretty(&state).unwrap(),
-    )
-    .unwrap();
+    let state_bytes = serde_json::to_vec_pretty(&state).unwrap();
+    fs::write(scheduler_state_path(&release.target), &state_bytes).unwrap();
 
     let stdout = {
         let mut command = ctx(&temp);
@@ -1136,6 +1136,10 @@ fn upgrade_status_text_output_shows_error_details() {
     assert!(
         stdout.contains("download artifact: connection refused"),
         "error details should appear in text output: {stdout}"
+    );
+    assert_eq!(
+        fs::read(scheduler_state_path(&release.target)).unwrap(),
+        state_bytes
     );
 }
 

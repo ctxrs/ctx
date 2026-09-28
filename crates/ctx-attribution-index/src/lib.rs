@@ -6,6 +6,7 @@ mod filesystem;
 pub mod flat;
 mod identity;
 pub mod manifest;
+pub mod materialization;
 pub mod model;
 pub mod pinned_generation;
 pub mod projection_commitment;

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -301,11 +302,29 @@ fi
 if [ "$#" -eq 3 ] && [ "$1" = "pro" ] && [ "$2" = "uninstall" ] && [ "$3" = "--help" ]; then
   exit "$CTX_TEST_PRO_CAPABILITY_STATUS"
 fi
+if [ "$#" -eq 5 ] && [ "$1" = "--data-root" ] && [ "$3" = "index" ] && [ "$4" = "mode" ]; then
+  "$CTX_TEST_NODE" "$CTX_TEST_LEGACY_INDEXING_FIXTURE" read "$2"
+  exit 0
+fi
 if [ "$#" -eq 6 ] && [ "$1" = "--data-root" ] &&
    [ "$2" = "$CTX_DATA_ROOT" ] && [ "$3" = "daemon" ] &&
    [ "$4" = "disable" ] && [ "$5" = "--prepare-uninstall" ] &&
    [ "$6" = "--format=json" ]; then
   printf '%s\\n' daemon >> "$CTX_TEST_LIFECYCLE_LOG"
+  if [ "\${CTX_TEST_LEGACY_DISABLE_POLICY:-0}" = "1" ]; then
+    "$CTX_TEST_NODE" "$CTX_TEST_LEGACY_INDEXING_FIXTURE" disable "$CTX_DATA_ROOT"
+    if [ -n "\${CTX_TEST_LEGACY_EXTRA_ROOT:-}" ]; then
+      "$CTX_TEST_NODE" "$CTX_TEST_LEGACY_INDEXING_FIXTURE" disable "$CTX_TEST_LEGACY_EXTRA_ROOT"
+    fi
+    if [ "\${CTX_TEST_LEGACY_INTERRUPT:-}" = "kill" ]; then
+      kill -KILL "$PPID"
+      exit 99
+    fi
+    if [ "\${CTX_TEST_LEGACY_INTERRUPT:-}" = "restore" ]; then
+      mv "$CTX_DATA_ROOT/config.toml" "$CTX_DATA_ROOT/config.before-restore"
+      mkdir "$CTX_DATA_ROOT/config.toml"
+    fi
+  fi
   if [ "$CTX_TEST_DAEMON_STATUS" != "0" ]; then
     exit "$CTX_TEST_DAEMON_STATUS"
   fi
@@ -415,6 +434,7 @@ exit "$CTX_TEST_NATIVE_STATUS"
     CTX_UNINSTALL_MARKER_PATH: markerPath,
     CTX_MAN_DIR: path.dirname(manPath),
     CTX_DATA_ROOT: dataDir,
+    CTX_TEST_LEGACY_INDEXING_FIXTURE: fileURLToPath(new URL("./legacy-indexing-teardown-fixture.cjs", import.meta.url)),
     ...env,
   };
   const execute = (nextArgs = args, envOverrides = {}) =>

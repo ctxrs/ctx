@@ -1479,3 +1479,5 @@ fn terminal_history_is_trimmed_independently_from_inflight_capacity() {
     );
     assert!(coordinator.has_pending_request());
 }
+
+mod resource_retry;

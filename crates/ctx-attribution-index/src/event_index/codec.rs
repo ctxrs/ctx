@@ -115,7 +115,14 @@ pub fn read_sources(
 ) -> Result<Vec<EventIndexSource>, EventIndexError> {
     let expected_count =
         usize::try_from(expected_count).map_err(|_| EventIndexError::Corrupt("source count"))?;
-    let mut sources = Vec::with_capacity(expected_count);
+    // Each frame needs a length word and a nonempty JSON payload. Check the
+    // authenticated section length before allowing a count to drive allocation.
+    if expected_count as u64 > layout.sources_bytes / 5 {
+        return Err(EventIndexError::Corrupt(
+            "source count exceeds section length",
+        ));
+    }
+    let mut sources = Vec::new();
     let mut cursor = 0_u64;
     for _ in 0..expected_count {
         let length_end = cursor
@@ -149,6 +156,11 @@ pub fn read_sources(
             .checked_add(cursor)
             .ok_or(EventIndexError::Corrupt("source payload offset"))?;
         let encoded = file.read_range(payload_offset, length)?;
+        #[cfg(any(test, feature = "test-support"))]
+        READER_WORK.with(|work| {
+            let (opens, decodes) = work.get();
+            work.set((opens, decodes + 1));
+        });
         let source = serde_json::from_slice::<EventIndexSource>(encoded.as_slice())
             .map_err(|_| EventIndexError::Corrupt("source encoding"))?;
         source
@@ -163,6 +175,9 @@ pub fn read_sources(
         {
             return Err(EventIndexError::Corrupt("source ordering or duplicate"));
         }
+        sources
+            .try_reserve(1)
+            .map_err(|_| EventIndexError::Bound("source allocation"))?;
         sources.push(source);
         cursor = payload_end;
     }
@@ -179,6 +194,8 @@ pub fn read_record_at(
     lineage_tables: &EventLineageTables,
     offset: u64,
 ) -> Result<IndexedCoreEventState, EventIndexError> {
+    #[cfg(any(test, feature = "test-support"))]
+    EVENT_ROW_DECODES.with(|count| count.set(count.get() + 1));
     validate_fixed_offset(offset, RECORD_BYTES, layout.records_bytes, "record offset")?;
     let absolute = layout
         .records_offset
@@ -237,6 +254,8 @@ pub fn read_tombstone_at(
     sources: &[EventIndexSource],
     offset: u64,
 ) -> Result<IndexedCoreEventTombstone, EventIndexError> {
+    #[cfg(any(test, feature = "test-support"))]
+    EVENT_ROW_DECODES.with(|count| count.set(count.get() + 1));
     validate_fixed_offset(
         offset,
         TOMBSTONE_BYTES,
@@ -749,7 +768,7 @@ impl Header {
             .map_err(|_| EventIndexError::Corrupt("session count"))?;
         let copied_origin_count = usize::try_from(self.copied_origin_count)
             .map_err(|_| EventIndexError::Corrupt("copied origin count"))?;
-        if source_count > MAX_EVENT_INDEX_SOURCES
+        if u64::from(self.source_count) > self.sources_bytes / 5
             || record_count
                 .checked_add(tombstone_count)
                 .is_none_or(|count| count > MAX_EVENT_INDEX_ENTRIES || count != index_count)

@@ -111,6 +111,25 @@ fn read_install_marker_at(path: &Path) -> Result<Option<InstallMarker>> {
     parse_install_marker(path, &marker_path, &bytes).map(|(marker, _)| Some(marker))
 }
 
+/// Installation identity and time are local evidence, never a release check.
+pub(in crate::upgrade) fn managed_install_receipt(path: &Path) -> Option<ActiveInstallAttribution> {
+    let marker_path = install_marker_path(path);
+    let bytes = read_install_marker_bytes(&marker_path).ok()??;
+    let (marker, value) = parse_install_marker(path, &marker_path, &bytes).ok()?;
+    verify_install_marker(&marker, platform_key().ok()?).ok()?;
+    let install_attempt_id = value.get("install_attempt_id")?.as_str()?;
+    if !is_valid_install_attempt_id(install_attempt_id) {
+        return None;
+    }
+    let installed_at = chrono::DateTime::parse_from_rfc3339(value.get("installed_at")?.as_str()?)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    Some(ActiveInstallAttribution {
+        install_attempt_id: install_attempt_id.to_owned(),
+        installed_at,
+    })
+}
+
 fn parse_install_marker(
     path: &Path,
     marker_path: &Path,

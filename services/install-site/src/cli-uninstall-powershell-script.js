@@ -1,3 +1,4 @@
+import { UNINSTALL_POWERSHELL_INDEXING_PREFERENCE } from "./cli-uninstall-indexing-preference.js";
 import { CLI_INSTALL_POWERSHELL_PATH_IDENTITY } from "./cli-install-powershell-managed-install.js";
 import { CLI_INSTALL_POWERSHELL_PATH_TYPES } from "./cli-install-powershell-platform.js";
 import {
@@ -308,7 +309,8 @@ function Assert-CoreDaemonTeardownResult([object]$Result) {
     }
 }
 
-function Invoke-CoreDaemonTeardown([object]$Version) {
+${UNINSTALL_POWERSHELL_INDEXING_PREFERENCE}
+function Invoke-CoreDaemonTeardown([object]$Version, [object]$Transaction) {
     if ($Version.major -eq 0 -and $Version.minor -le 25) {
         if (-not $Json) {
             Write-Host "Installed ctx $($Version.text) predates the persistent Core daemon; no Core daemon teardown is required."
@@ -323,9 +325,13 @@ function Invoke-CoreDaemonTeardown([object]$Version) {
         "--prepare-uninstall",
         "--format=json"
     )
-    $output = & $InstallPath @arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Fail "Core daemon teardown failed with status $LASTEXITCODE; ctx remains installed"
+    $preferences = Get-LegacyIndexingPreferences -Version $Version -Transaction $Transaction
+    try {
+        $output = & $InstallPath @arguments 2>&1
+        $teardownStatus = $LASTEXITCODE
+    } finally { Restore-LegacyIndexingPreferences -Preference $preferences }
+    if ($teardownStatus -ne 0) {
+        Fail "Core daemon teardown failed with status $teardownStatus; ctx remains installed"
     }
     $jsonResult = ($output | Out-String)
     if ([string]::IsNullOrWhiteSpace($jsonResult) -or $jsonResult.Length -gt 64KB) {
@@ -622,14 +628,15 @@ try {
         Fail "uninstall requires an explicit data choice: -DeleteData or -KeepData"
     }
     $legacyUninstall = $version.major -eq 0 -and $version.minor -le 25
+    $prepared = $null
     if (-not $legacyUninstall) {
-        $null = Invoke-HostedUninstallTransaction \
+        $prepared = Invoke-HostedUninstallTransaction \
             -Executable $InstallPath \
             -Action "uninstall-prepare" \
             -ExpectedStatus "prepared" \
             -IncludeAttempt
     }
-    Invoke-CoreDaemonTeardown -Version $version
+    Invoke-CoreDaemonTeardown -Version $version -Transaction $prepared
     $marker = Read-ManagedMarker
     $proData = Invoke-ProLifecycle -Version $version
     $marker = Read-ManagedMarker

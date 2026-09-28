@@ -12,7 +12,7 @@ pub(super) use active::event_index_reader_open_count;
 #[allow(unused_imports)]
 pub(super) use active::{
     ActiveControlSnapshot, ActiveGeneration, ObservedEvent, active_event_page, load_active,
-    load_active_control, load_active_for_materializer, lookup_event_metadata,
+    load_active_control, load_active_for_materializer, lookup_event_metadata, prepare_event_proofs,
 };
 pub(super) use build::DirectCandidate;
 #[allow(unused_imports)]

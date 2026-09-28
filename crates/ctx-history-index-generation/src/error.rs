@@ -4,7 +4,7 @@ pub type Result<T> = std::result::Result<T, GenerationError>;
 
 /// Tantivy retains several I/O errors in fields instead of its source chain.
 /// Both generation and query errors use this one resource-diagnostic adapter.
-pub fn tantivy_file_limit_hint(error: &tantivy::TantivyError) -> String {
+pub fn tantivy_io_error(error: &tantivy::TantivyError) -> Option<&std::io::Error> {
     use tantivy::directory::error::{OpenDirectoryError, OpenReadError, OpenWriteError};
     use tantivy::TantivyError;
     let source = match error {
@@ -21,9 +21,13 @@ pub fn tantivy_file_limit_hint(error: &tantivy::TantivyError) -> String {
         | TantivyError::OpenDirectoryError(OpenDirectoryError::FailedToCreateTempDir(source)) => {
             source
         }
-        _ => return String::new(),
+        _ => return None,
     };
-    ctx_history_platform::open_file_limit_hint(source)
+    Some(source)
+}
+
+pub fn tantivy_file_limit_hint(error: &tantivy::TantivyError) -> String {
+    tantivy_io_error(error).map_or_else(String::new, ctx_history_platform::open_file_limit_hint)
 }
 
 #[derive(Debug, Error)]
@@ -73,7 +77,7 @@ pub enum GenerationError {
     CurrentRepublishFileLimit { actual: usize, maximum: usize },
     #[error("current-generation republish exceeds byte limit: {actual} > {maximum}")]
     CurrentRepublishByteLimit { actual: u64, maximum: u64 },
-    #[error("current-generation republish has insufficient headroom: required {required}, available {available}")]
+    #[error("current-generation republish has insufficient headroom: required {required}, available {available}; free space on the index volume and retry")]
     CurrentRepublishInsufficientHeadroom { required: u64, available: u64 },
     #[error("count overflow")]
     CountOverflow,

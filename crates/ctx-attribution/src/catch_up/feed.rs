@@ -15,7 +15,7 @@ use crate::protocol::{
     CoreGenerationHead, CoreMaterializationReceipt, CoreSourceDelta, CoreSourceDeltaPage,
     CoreSourceReconciliation, CoreSourceState, MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
     MAX_CORE_EVENT_DELTA_PAGE_ITEMS, MAX_CORE_EVENT_DELTA_PAGES, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
-    MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_STATES,
+    MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
 };
 use anyhow::{Result, anyhow, bail};
 use ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES;
@@ -80,7 +80,19 @@ struct CoreFeedSchema {
 trait CoreFeedSnapshot: Sync {
     fn generation_id(&self) -> &str;
     fn schema(&self) -> CoreFeedSchema;
-    fn source_states(&self) -> Result<Vec<CoreSourceState>>;
+    fn visit_source_pages(
+        &self,
+        visit: &mut dyn FnMut(Vec<CoreSourceState>, bool) -> Result<()>,
+    ) -> Result<()>;
+    #[cfg(test)]
+    fn source_states(&self) -> Result<Vec<CoreSourceState>> {
+        let mut states = Vec::new();
+        self.visit_source_pages(&mut |page, _| {
+            states.extend(page);
+            Ok(())
+        })?;
+        Ok(states)
+    }
     fn record_page(
         &self,
         source: &ctx_history_core::SourceKey,
@@ -89,6 +101,9 @@ trait CoreFeedSnapshot: Sync {
         budget: SnapshotPageBudget,
     ) -> Result<CoreFeedRecordPage>;
 }
+
+#[path = "feed/reconciliation_spool.rs"]
+mod reconciliation_spool;
 
 #[path = "feed/snapshot_impl.rs"]
 mod snapshot_impl;
@@ -148,8 +163,21 @@ fn sync_core_feed_attempt_with_launch(
     let options = selection.execution_options();
     let credits = Arc::new(EncodedPageCredits::new(CORE_PREFETCH_ENCODED_BYTE_BUDGET));
     let instrumentation = Arc::new(CorePrefetchInstrumentation::default());
-    let sources = index.source_states()?;
-    let head = core_generation_head(index, &sources)?;
+    let mut inventory = ctx_attribution_model::CoreSourceSnapshotBuilder::default();
+    index.visit_source_pages(&mut |page, _| {
+        ensure_materialization_active(data_root, cancelled)?;
+        for state in page {
+            inventory
+                .push(&state)
+                .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+        }
+        Ok(())
+    })?;
+    let head = core_generation_head_from_snapshot(
+        &index.schema(),
+        index.generation_id(),
+        inventory.finish(),
+    )?;
     if head.core_generation_id != index.generation_id() {
         bail!(
             "core_generation_mismatch: generation head {} does not match pinned Core {}",
@@ -164,61 +192,49 @@ fn sync_core_feed_attempt_with_launch(
     };
     let materialization_id = session.materialization_id().to_owned();
 
-    let maximum_reconciliations = sources
-        .len()
-        .checked_add(MAX_CORE_SOURCE_STATES)
-        .ok_or_else(|| anyhow!("invalid_response: source reconciliation bound overflowed"))?;
-    let deltas = core_snapshot_deltas(&sources);
-    let delta_pages = build_delta_pages(&materialization_id, index.generation_id(), deltas)?;
-    let mut next_materialize_index = 0_u32;
-    let mut reconciled_source_ids = BTreeSet::new();
-    let mut reconcile_sources = Vec::new();
-    for page in delta_pages {
+    let mut reconciliations =
+        reconciliation_spool::ReconciliationSpool::new(session.runtime_file()?);
+    let mut next_page = 0_u32;
+    index.visit_source_pages(&mut |sources, terminal| {
         ensure_materialization_active(data_root, cancelled)?;
-        for reconciliation in session.reconcile_source_page(page)? {
-            if reconciliation.materialize_index != next_materialize_index {
-                bail!("invalid_response: Core reconciliation indices are not contiguous");
-            }
-            next_materialize_index = next_materialize_index
+        let pages = build_delta_pages_at(
+            &materialization_id,
+            index.generation_id(),
+            core_snapshot_deltas(&sources),
+            MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
+            next_page,
+            terminal,
+        )?;
+        for page in pages {
+            page.validate()
+                .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+            session.reconcile_source_page_with(page, &mut |items| reconciliations.append(items))?;
+            next_page = next_page
                 .checked_add(1)
-                .ok_or_else(|| anyhow!("invalid_response: Core reconciliation index overflowed"))?;
-            let source_id = reconciliation.delta.source().identity().digest();
-            if !reconciled_source_ids.insert(source_id) {
-                bail!("invalid_response: Core reconciliations repeat a stable source identity");
-            }
-            let current_source = sources
-                .binary_search_by_key(&source_id, |state| state.source.identity().digest())
-                .ok()
-                .map(|index| &sources[index]);
-            match &reconciliation.delta {
-                CoreSourceDelta::Present(state) if current_source != Some(state) => {
-                    bail!("invalid_response: Core reconciliation carries a stale current source");
-                }
-                CoreSourceDelta::Removed(_) if current_source.is_some() => {
-                    bail!("invalid_response: Core reconciliation removes a current source");
-                }
-                _ => {}
-            }
-            if reconcile_sources.len() >= maximum_reconciliations {
-                bail!("invalid_response: Core reconciliations exceed source bounds");
-            }
-            reconcile_sources.push(reconciliation);
+                .ok_or_else(|| anyhow!("bounds: source page index overflowed"))?;
         }
+        Ok(())
+    })?;
+    session.prepare_prior_event_proofs(cancelled)?;
+    session.start_progress(reconciliations.count());
+    while let Some(batch) = reconciliations.next_batch()? {
+        // A bounded set of source lanes shares the existing encoded-page credits.
+        // Previous workers have joined and released every credit before this reset.
+        credits.reset_ordered_demand()?;
+        reconcile_ordered_source_events(
+            index,
+            &mut session,
+            &materialization_id,
+            batch,
+            data_root,
+            cancelled,
+            OrderedReconciliationOptions {
+                prefetch_parallelism: options.prefetch_parallelism,
+            },
+            &credits,
+            &instrumentation,
+        )?;
     }
-    session.start_progress(u32::try_from(reconcile_sources.len())?);
-    reconcile_ordered_source_events(
-        index,
-        &mut session,
-        &materialization_id,
-        reconcile_sources,
-        data_root,
-        cancelled,
-        OrderedReconciliationOptions {
-            prefetch_parallelism: options.prefetch_parallelism,
-        },
-        &credits,
-        &instrumentation,
-    )?;
 
     let (encoded_credit_final_bytes, _) = credits.snapshot()?;
     if encoded_credit_final_bytes != 0 {

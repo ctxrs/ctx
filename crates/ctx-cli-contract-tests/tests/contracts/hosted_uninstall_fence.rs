@@ -30,6 +30,30 @@ fn sha256(path: &Path) -> String {
     format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
 }
 
+fn write_managed_install_marker(install: &Path, attempt_id: &str) -> PathBuf {
+    let marker = install.with_file_name(format!(
+        "{}.install.json",
+        install.file_name().unwrap().to_string_lossy()
+    ));
+    fs::write(
+        &marker,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "manager": "ctx-hosted-installer",
+            "install_attempt_id": attempt_id,
+            "install_path": install,
+            "platform": platform_key(),
+            "channel": "stable",
+            "version": "1.0.0",
+            "sha256": sha256(install),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    marker
+}
+
 fn installation_registration_root(home: &Path, binary: &Path) -> PathBuf {
     let canonical = fs::canonicalize(binary).unwrap();
     let namespace = format!("{:x}", Sha256::digest(canonical.as_os_str().as_bytes()));
@@ -233,26 +257,7 @@ fn supervisor_waiter_rechecks_uninstall_fence_after_installation_lock() {
     let (supervisor_probe_bin, supervisor_probe_log) =
         install_supervisor_command_probe(temp.path());
     let install = copied_ctx_binary(&temp);
-    let marker = install.with_file_name(format!(
-        "{}.install.json",
-        install.file_name().unwrap().to_string_lossy()
-    ));
-    fs::write(
-        &marker,
-        serde_json::to_vec_pretty(&json!({
-            "schema_version": 1,
-            "manager": "ctx-hosted-installer",
-            "install_attempt_id": "ia_supervisor_lock_recheck",
-            "install_path": install,
-            "platform": platform_key(),
-            "channel": "stable",
-            "version": "1.0.0",
-            "sha256": sha256(&install),
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    write_managed_install_marker(&install, "ia_supervisor_lock_recheck");
 
     let canonical_root = temp.path().join("canonical-root");
     let daemon_root = canonical_root.join("daemon");
@@ -316,26 +321,7 @@ fn prepare_uninstall_waits_for_indexing_control_before_disabling_and_cleanup() {
     let temp = tempdir();
     let supervisor_stub_bin = install_supervisor_command_stub(temp.path());
     let install = copied_ctx_binary(&temp);
-    let marker = install.with_file_name(format!(
-        "{}.install.json",
-        install.file_name().unwrap().to_string_lossy()
-    ));
-    fs::write(
-        &marker,
-        serde_json::to_vec_pretty(&json!({
-            "schema_version": 1,
-            "manager": "ctx-hosted-installer",
-            "install_attempt_id": "ia_indexing_control_uninstall_race",
-            "install_path": install,
-            "platform": platform_key(),
-            "channel": "stable",
-            "version": "1.0.0",
-            "sha256": sha256(&install),
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    write_managed_install_marker(&install, "ia_indexing_control_uninstall_race");
 
     let requested_root = temp.path().join("requested-indexing-race-root");
     let mut initial = isolated_command(&install, temp.path());
@@ -444,26 +430,7 @@ fn prepare_uninstall_discovers_and_quiesces_a_finite_custom_root_worker() {
     let temp = tempdir();
     let supervisor_stub_bin = install_supervisor_command_stub(temp.path());
     let install = copied_ctx_binary(&temp);
-    let marker = install.with_file_name(format!(
-        "{}.install.json",
-        install.file_name().unwrap().to_string_lossy()
-    ));
-    fs::write(
-        &marker,
-        serde_json::to_vec_pretty(&json!({
-            "schema_version": 1,
-            "manager": "ctx-hosted-installer",
-            "install_attempt_id": "ia_finite_worker_uninstall",
-            "install_path": install,
-            "platform": platform_key(),
-            "channel": "stable",
-            "version": "1.0.0",
-            "sha256": sha256(&install),
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    write_managed_install_marker(&install, "ia_finite_worker_uninstall");
 
     let custom_root = temp.path().join("finite-custom-root");
     let mut finite = isolated_command(&install, temp.path());
@@ -554,26 +521,7 @@ fn fresh_custom_root_daemon_cannot_enter_after_all_root_proof_before_helper_comm
         install_supervisor_command_probe(temp.path());
     let supervisor_stub_bin = install_supervisor_command_stub(temp.path());
     let install = copied_ctx_binary(&temp);
-    let marker = install.with_file_name(format!(
-        "{}.install.json",
-        install.file_name().unwrap().to_string_lossy()
-    ));
-    fs::write(
-        &marker,
-        serde_json::to_vec_pretty(&json!({
-            "schema_version": 1,
-            "manager": "ctx-hosted-installer",
-            "install_attempt_id": "ia_hosted_uninstall_fence",
-            "install_path": install,
-            "platform": platform_key(),
-            "channel": "stable",
-            "version": "1.0.0",
-            "sha256": sha256(&install),
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    let marker = write_managed_install_marker(&install, "ia_hosted_uninstall_fence");
 
     let mut prepare = isolated_command(&install, temp.path());
     prepare.args([
@@ -676,4 +624,50 @@ fn fresh_custom_root_daemon_cannot_enter_after_all_root_proof_before_helper_comm
         &supervisor_probe_log,
         supervisor_receipt.as_deref(),
     );
+}
+
+#[test]
+fn fenced_uninstall_preserves_default_automatic_and_explicit_manual_preferences() {
+    for original in [
+        None,
+        Some("[indexing]\nmode = \"auto\"\n"),
+        Some("[indexing]\nmode = \"manual\"\n"),
+    ] {
+        let temp = tempdir();
+        let stub = install_supervisor_command_stub(temp.path());
+        let install = copied_ctx_binary(&temp);
+        write_managed_install_marker(&install, "ia_preserved_indexing");
+        let root = temp.path().join("canonical-root");
+        fs::create_dir_all(&root).unwrap();
+        if let Some(config) = original {
+            fs::write(root.join("config.toml"), config).unwrap();
+        }
+        let mut prepare = isolated_command(&install, temp.path());
+        prepare
+            .args([
+                "upgrade",
+                "--hosted-transaction",
+                "uninstall-prepare",
+                "--install-path",
+            ])
+            .arg(&install)
+            .args(["--attempt-id", "ia_preserved_indexing"]);
+        assert_eq!(successful_json(prepare)["daemon_admission_fenced"], true);
+        for _ in 0..2 {
+            let mut teardown = isolated_command(&install, temp.path());
+            teardown.env("PATH", &stub).args([
+                "daemon",
+                "disable",
+                "--prepare-uninstall",
+                "--format=json",
+            ]);
+            let proof = successful_json(teardown);
+            assert_eq!(proof["installation_quiescent"], true, "{proof:#}");
+            assert_eq!(proof["coordination_state_removed"], true, "{proof:#}");
+            assert_eq!(
+                fs::read_to_string(root.join("config.toml")).ok().as_deref(),
+                original
+            );
+        }
+    }
 }

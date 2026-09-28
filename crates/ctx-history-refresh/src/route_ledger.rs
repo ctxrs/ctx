@@ -425,12 +425,31 @@ impl DirtySourceRoutes {
         admission: &DirtySourceRouteAdmission,
         now_ms: u64,
     ) -> Option<u64> {
+        self.record_retryable_failure(admission, now_ms, false)
+    }
+
+    /// New source bytes do not repair disk/memory pressure. Keep the ordinary
+    /// retry deadline and failure count even when events arrive during capture.
+    pub(super) fn resource_failure(
+        &mut self,
+        admission: &DirtySourceRouteAdmission,
+        now_ms: u64,
+    ) -> Option<u64> {
+        self.record_retryable_failure(admission, now_ms, true)
+    }
+
+    fn record_retryable_failure(
+        &mut self,
+        admission: &DirtySourceRouteAdmission,
+        now_ms: u64,
+        resource_unavailable: bool,
+    ) -> Option<u64> {
         let state = self.dirty.get_mut(&admission.route)?;
         if !admission_matches(state, admission) {
             return None;
         }
         state.in_flight = None;
-        if state.dirty_revision != admission.dirty_revision {
+        if !resource_unavailable && state.dirty_revision != admission.dirty_revision {
             state.reset_retry();
             return Some(0);
         }
@@ -489,7 +508,8 @@ impl DirtySourceRoutes {
             state.dirty_order = new_order.unwrap_or(state.dirty_order);
             state.first_event_at_ms = observed_at_ms;
             state.last_event_at_ms = observed_at_ms;
-            state.reset_retry();
+            // Completion owns retry classification. A new source event can
+            // repair a source failure, but cannot repair resource pressure.
         } else {
             state.last_event_at_ms = observed_at_ms;
         }
@@ -566,6 +586,7 @@ fn admission_matches(state: &DirtyRouteState, admission: &DirtySourceRouteAdmiss
 
 #[cfg(test)]
 mod tests {
+    mod resource_retry;
     use super::*;
 
     fn route(byte: u8) -> SourceRouteIdentity {

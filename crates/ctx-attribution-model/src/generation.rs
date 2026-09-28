@@ -4,17 +4,16 @@ use ctx_history_core::{
 };
 use serde::{Deserialize, Serialize};
 mod receipt;
+mod source_snapshot;
 mod validation;
 pub use receipt::{CoreMaterializationReceipt, CoreMaterializationReceiptIdentity};
+pub use source_snapshot::{CoreSourceSnapshot, CoreSourceSnapshotBuilder};
 pub use validation::{
     CoreRecordDigests, core_record_digests, core_record_digests_from_encoded,
     core_record_leaf_sha256, core_record_sha256, core_source_snapshot_sha256,
 };
-use validation::{
-    invalid_contract, validate_encoded_bound, validate_sha256, validate_source_states,
-};
+use validation::{invalid_contract, validate_encoded_bound, validate_sha256};
 pub const CORE_MATERIALIZATION_CONTRACT_VERSION: u16 = 3;
-pub const MAX_CORE_SOURCE_STATES: usize = 16_384;
 pub const MAX_CORE_CONTROL_WIRE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_CORE_MATERIALIZER_REVISION_BYTES: usize = 256;
 
@@ -70,14 +69,29 @@ impl CoreGenerationHead {
         policy_schema_hash: impl Into<String>,
         sources: &[CoreSourceState],
     ) -> Result<Self, ProtocolError> {
-        validate_source_states(sources)?;
-        let source_count = u32::try_from(sources.len())
-            .map_err(|_| ProtocolError::new(ErrorClass::Bounds, "Core source count overflowed"))?;
-        let event_count = sources.iter().try_fold(0_u64, |total, source| {
-            total.checked_add(source.event_count).ok_or_else(|| {
-                ProtocolError::new(ErrorClass::Bounds, "Core event count overflowed")
-            })
-        })?;
+        Self::from_source_snapshot(
+            core_generation_id,
+            generation_manifest_version,
+            identity_version,
+            core_record_contract_fingerprint,
+            lexical_schema_version,
+            lexical_analyzer_version,
+            policy_schema_hash,
+            CoreSourceSnapshot::from_sources(sources.iter())?,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_source_snapshot(
+        core_generation_id: impl Into<String>,
+        generation_manifest_version: u32,
+        identity_version: u16,
+        core_record_contract_fingerprint: impl Into<String>,
+        lexical_schema_version: u32,
+        lexical_analyzer_version: u32,
+        policy_schema_hash: impl Into<String>,
+        sources: CoreSourceSnapshot,
+    ) -> Result<Self, ProtocolError> {
         let head = Self {
             contract_version: CORE_MATERIALIZATION_CONTRACT_VERSION,
             core_generation_id: core_generation_id.into(),
@@ -91,9 +105,9 @@ impl CoreGenerationHead {
             lexical_schema_version,
             lexical_analyzer_version,
             policy_schema_hash: policy_schema_hash.into(),
-            source_snapshot_sha256: core_source_snapshot_sha256(sources)?,
-            source_count,
-            event_count,
+            source_snapshot_sha256: sources.sha256,
+            source_count: sources.source_count,
+            event_count: sources.event_count,
         };
         head.validate()?;
         Ok(head)
@@ -117,13 +131,10 @@ impl CoreGenerationHead {
             || self.normalization_revision == 0
             || self.content_policy_revision == 0
             || self.repository_contract_revision == 0
-            || usize::try_from(self.source_count)
-                .ok()
-                .is_none_or(|count| count > MAX_CORE_SOURCE_STATES)
         {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
-                "Core generation head revisions or source count are invalid",
+                "Core generation head revisions are invalid",
             ));
         }
         validate_encoded_bound(
@@ -134,16 +145,17 @@ impl CoreGenerationHead {
     }
 
     pub fn validate_sources(&self, sources: &[CoreSourceState]) -> Result<(), ProtocolError> {
+        self.validate_source_snapshot(CoreSourceSnapshot::from_sources(sources.iter())?)
+    }
+
+    pub fn validate_source_snapshot(
+        &self,
+        sources: CoreSourceSnapshot,
+    ) -> Result<(), ProtocolError> {
         self.validate()?;
-        validate_source_states(sources)?;
-        let event_count = sources.iter().try_fold(0_u64, |total, source| {
-            total.checked_add(source.event_count).ok_or_else(|| {
-                ProtocolError::new(ErrorClass::Bounds, "Core event count overflowed")
-            })
-        })?;
-        if usize::try_from(self.source_count).ok() != Some(sources.len())
-            || self.event_count != event_count
-            || self.source_snapshot_sha256 != core_source_snapshot_sha256(sources)?
+        if self.source_count != sources.source_count
+            || self.event_count != sources.event_count
+            || self.source_snapshot_sha256 != sources.sha256
         {
             return Err(ProtocolError::new(
                 ErrorClass::InvalidRequest,

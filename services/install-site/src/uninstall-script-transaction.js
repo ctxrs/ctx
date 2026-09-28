@@ -98,6 +98,8 @@ prepare_hosted_uninstall_transaction() {
     fail "ctx could not prepare its crash-recoverable hosted uninstall transaction"
   fi
   validate_hosted_uninstall_transaction_receipt "$hosted_transaction_output" prepared
+  hosted_uninstall_attempt_id="$(json_string_field "$hosted_transaction_output" attempt_id)" ||
+    fail "ctx returned no hosted uninstall attempt identity"
   rm -f "$hosted_transaction_output"
 }
 

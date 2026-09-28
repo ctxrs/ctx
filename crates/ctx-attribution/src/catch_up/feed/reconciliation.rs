@@ -21,6 +21,7 @@ pub(super) fn core_source_states(manifest: &GenerationManifest) -> Result<Vec<Co
     Ok(states)
 }
 
+#[cfg(test)]
 pub(super) fn core_generation_head(
     index: &dyn CoreFeedSnapshot,
     sources: &[CoreSourceState],
@@ -29,12 +30,26 @@ pub(super) fn core_generation_head(
     core_generation_head_from_schema(&schema, index.generation_id(), sources)
 }
 
+#[cfg(test)]
 pub(super) fn core_generation_head_from_schema(
     schema: &CoreFeedSchema,
     generation_id: &str,
     sources: &[CoreSourceState],
 ) -> Result<CoreGenerationHead> {
-    let mut head = CoreGenerationHead::new(
+    core_generation_head_from_snapshot(
+        schema,
+        generation_id,
+        ctx_attribution_model::CoreSourceSnapshot::from_sources(sources.iter())
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))?,
+    )
+}
+
+pub(super) fn core_generation_head_from_snapshot(
+    schema: &CoreFeedSchema,
+    generation_id: &str,
+    sources: ctx_attribution_model::CoreSourceSnapshot,
+) -> Result<CoreGenerationHead> {
+    let mut head = CoreGenerationHead::from_source_snapshot(
         generation_id,
         schema.generation_manifest_version,
         schema.identity_version,
@@ -75,33 +90,45 @@ pub(super) enum CoreSourceDeltaPageBuildError {
     InvalidPage(String),
 }
 
-pub(super) fn build_delta_pages(
-    materialization_id: &str,
-    generation_id: &str,
-    deltas: Vec<CoreSourceDelta>,
-) -> Result<Vec<CoreSourceDeltaPage>, CoreSourceDeltaPageBuildError> {
-    build_delta_pages_with_wire_bound(
-        materialization_id,
-        generation_id,
-        deltas,
-        MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
-    )
-}
-
+#[cfg(test)]
 pub(super) fn build_delta_pages_with_wire_bound(
     materialization_id: &str,
     generation_id: &str,
     deltas: Vec<CoreSourceDelta>,
     maximum_wire_bytes: usize,
 ) -> Result<Vec<CoreSourceDeltaPage>, CoreSourceDeltaPageBuildError> {
+    build_delta_pages_at(
+        materialization_id,
+        generation_id,
+        deltas,
+        maximum_wire_bytes,
+        0,
+        true,
+    )
+}
+
+pub(super) fn build_delta_pages_at(
+    materialization_id: &str,
+    generation_id: &str,
+    deltas: Vec<CoreSourceDelta>,
+    maximum_wire_bytes: usize,
+    first_page_index: u32,
+    final_terminal: bool,
+) -> Result<Vec<CoreSourceDeltaPage>, CoreSourceDeltaPageBuildError> {
     if deltas.is_empty() {
-        return CoreSourceDeltaPage::new(materialization_id, generation_id, 0, true, Vec::new())
-            .map(|page| vec![page])
-            .map_err(|error| CoreSourceDeltaPageBuildError::InvalidPage(error.message));
+        return CoreSourceDeltaPage::new(
+            materialization_id,
+            generation_id,
+            first_page_index,
+            final_terminal,
+            Vec::new(),
+        )
+        .map(|page| vec![page])
+        .map_err(|error| CoreSourceDeltaPageBuildError::InvalidPage(error.message));
     }
 
     let mut pages = Vec::new();
-    let mut page_index = 0_u32;
+    let mut page_index = first_page_index;
     let mut current = Vec::with_capacity(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS);
     let mut encoded_delta_items_bytes = 0_usize;
     let mut empty_nonterminal_wire_bytes =
@@ -112,7 +139,7 @@ pub(super) fn build_delta_pages_with_wire_bound(
     // encoded delta and the intervening commas. Charge every delta once, but
     // rebuild the tiny envelope whenever page_index or terminal changes.
     while let Some(delta) = remaining.next() {
-        let terminal = remaining.peek().is_none();
+        let terminal = final_terminal && remaining.peek().is_none();
         let encoded_delta_bytes = encoded_reconciliation_json_len(&delta)?;
         let candidate_delta_items_bytes = encoded_delta_items_bytes
             .checked_add(usize::from(!current.is_empty()))
@@ -180,7 +207,7 @@ pub(super) fn build_delta_pages_with_wire_bound(
         materialization_id,
         generation_id,
         page_index,
-        true,
+        final_terminal,
         current,
     )?);
     Ok(pages)

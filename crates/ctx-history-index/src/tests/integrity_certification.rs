@@ -918,15 +918,8 @@ fn copy_fallback_rechecks_corpus_and_writer_headroom_before_copying() {
     let (temp, source, baseline) = published_fixture("copy-admission-recheck.jsonl");
     let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
     let generation = active_generation_path(temp.path());
-    let logical_bytes = fs::read_dir(&generation)
-        .unwrap()
-        .map(|entry| entry.unwrap())
-        .filter(|entry| entry.file_type().unwrap().is_file())
-        .map(|entry| entry.metadata().unwrap().len())
-        .sum::<u64>();
-    let writer_output_headroom = logical_bytes
-        .saturating_add(WriterOptions::default().memory_bytes as u64)
-        .saturating_add(16 * 1024 * 1024);
+    let writer_output_headroom =
+        (WriterOptions::default().memory_bytes as u64).saturating_add(16 * 1024 * 1024);
     let rechecked_available_bytes = writer_output_headroom
         .saturating_add(fs::metadata(generation.join("meta.json")).unwrap().len());
     let guard = CloneTestHookGuard::set(
@@ -955,13 +948,7 @@ fn copy_fallback_rechecks_corpus_and_writer_headroom_before_copying() {
             required
         } if available == rechecked_available_bytes && required > available
     ));
-    assert!(
-        metrics.required_headroom
-            >= metrics
-                .logical_bytes
-                .saturating_mul(2)
-                .saturating_add(WriterOptions::default().memory_bytes as u64)
-    );
+    assert!(metrics.required_headroom < metrics.logical_bytes + writer_output_headroom);
     assert_eq!(
         fs::read(temp.path().join("active-generation.json")).unwrap(),
         pointer_before
@@ -1001,12 +988,9 @@ fn portable_copy_rechecks_corpus_and_writer_headroom_before_copying() {
             required
         } if required > metrics.logical_bytes
     ));
-    assert!(
-        metrics.required_headroom
-            >= metrics
-                .logical_bytes
-                .saturating_mul(2)
-                .saturating_add(WriterOptions::default().memory_bytes as u64)
+    assert_eq!(
+        metrics.required_headroom,
+        metrics.logical_bytes + WriterOptions::default().memory_bytes as u64 + 16 * 1024 * 1024
     );
     assert_eq!(
         fs::read(temp.path().join("active-generation.json")).unwrap(),
@@ -1453,3 +1437,5 @@ fn assert_certification_is_bounded(path: &Path) {
         value["artifacts"].as_array().unwrap().len() <= crate::publication::MAX_CERTIFIED_ARTIFACTS
     );
 }
+
+mod headroom;

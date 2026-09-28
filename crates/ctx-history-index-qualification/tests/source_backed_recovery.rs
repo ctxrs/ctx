@@ -30,6 +30,8 @@ use ctx_history_index::{
 use tantivy::{store::Compressor, Index};
 use tempfile::{tempdir, TempDir};
 
+mod merge_failure;
+
 const CHILD_MODE_ENV: &str = "CTX_SOURCE_RECOVERY_CHILD_MODE";
 const CHILD_ROOT_ENV: &str = "CTX_SOURCE_RECOVERY_ROOT";
 const CHILD_MARKER_ENV: &str = "CTX_SOURCE_RECOVERY_MARKER";
@@ -68,8 +70,15 @@ fn subprocess_generation_worker() {
             let receipt = staged_replacement(&root).commit(|_| true).unwrap();
             write_child_result(&receipt.generation_id);
         }
-        "commit_expect_error" => {
+        "commit_expect_error" | "commit_expect_storage_full" => {
             let error = staged_replacement(&root).commit(|_| true).unwrap_err();
+            if mode == "commit_expect_storage_full" {
+                assert_eq!(
+                    error.io_error().map(std::io::Error::kind),
+                    Some(std::io::ErrorKind::StorageFull),
+                    "{error:?}"
+                );
+            }
             write_child_result(&format!("{error:?}\n{error}"));
         }
         "open_expect_lock_error" => {
@@ -600,7 +609,12 @@ fn injected_enospc_and_write_sync_failures_preserve_previous_generation() {
 
     for case in cases {
         let fixture = RecoveryFixture::new();
-        let output = fixture.run_fault_child(&shim, "commit_expect_error", case);
+        let mode = if case.error == Some("ENOSPC") {
+            "commit_expect_storage_full"
+        } else {
+            "commit_expect_error"
+        };
+        let output = fixture.run_fault_child(&shim, mode, case);
         assert!(
             output.status.success(),
             "fault child failed unexpectedly for {case:?}:\nstdout:\n{}\nstderr:\n{}",
@@ -616,6 +630,8 @@ fn injected_enospc_and_write_sync_failures_preserve_previous_generation() {
             "candidate",
         );
     }
+
+    merge_failure::enospc_preserves_current_and_allows_retry(&shim);
 }
 
 #[test]

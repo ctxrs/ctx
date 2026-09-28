@@ -76,7 +76,7 @@ pub struct SourceBackedRefreshDaemonUnavailable {
 }
 
 impl SourceBackedRefreshDaemonUnavailable {
-    fn new(detail: Option<String>) -> Self {
+    pub fn new(detail: Option<String>) -> Self {
         Self { detail }
     }
 }

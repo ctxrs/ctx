@@ -26,7 +26,7 @@ use crate::protocol::{
     CoreEventDelta, CoreEventDeltaPage, CoreEventDeltaPageApplied, CoreEventState,
     CoreGenerationHead, CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
     CoreProjectionCurrentness, CoreSourceDelta, CoreSourceDeltaPage, CoreSourceReconciliation,
-    CoreSourceRemoval, ErrorClass, MaterializedCoverage, ProtocolError,
+    ErrorClass, MaterializedCoverage, ProtocolError,
 };
 
 use super::model::{
@@ -130,13 +130,35 @@ impl CoreMaterializationSession<'_> {
     /// deletions discovered after Core's terminal source page.
     pub fn reconcile_source_page(
         &mut self,
-        mut page: CoreSourceDeltaPage,
+        page: CoreSourceDeltaPage,
     ) -> Result<Vec<CoreSourceReconciliation>, SegmentMaterializerError> {
+        let mut reconciliations = Vec::new();
+        self.reconcile_source_page_with(page, &mut |items| {
+            reconciliations.extend_from_slice(items);
+            Ok(())
+        })?;
+        Ok(reconciliations)
+    }
+
+    pub(crate) fn runtime_file(
+        &self,
+    ) -> Result<super::runtime_file::RuntimeFile, SegmentMaterializerError> {
+        Ok(super::runtime_file::RuntimeFile::new(
+            &self.materializer.root,
+        )?)
+    }
+
+    pub(crate) fn reconcile_source_page_with(
+        &mut self,
+        mut page: CoreSourceDeltaPage,
+        consume: &mut dyn FnMut(
+            &[CoreSourceReconciliation],
+        ) -> Result<(), SegmentMaterializerError>,
+    ) -> Result<(), SegmentMaterializerError> {
         page.materialization_id.clone_from(&self.materialization_id);
         page.core_generation_id
             .clone_from(&self.head.core_generation_id);
         let mut acknowledgement_page_index = 0;
-        let mut reconciliations = Vec::new();
         loop {
             let (page_reconciliations, acknowledgement_terminal, changed, removed) =
                 Self::reconcile_source_page_inner(
@@ -160,13 +182,13 @@ impl CoreMaterializationSession<'_> {
                 .removed_sources
                 .checked_add(removed)
                 .ok_or(SegmentMaterializerError::Bounds)?;
-            reconciliations.extend(page_reconciliations);
+            consume(&page_reconciliations)?;
             if acknowledgement_terminal {
                 self.source_delta_pages = self
                     .source_delta_pages
                     .checked_add(1)
                     .ok_or(SegmentMaterializerError::Bounds)?;
-                return Ok(reconciliations);
+                return Ok(());
             }
             acknowledgement_page_index = acknowledgement_page_index
                 .checked_add(1)
@@ -179,6 +201,7 @@ impl CoreMaterializationSession<'_> {
         reconciliation: &CoreSourceReconciliation,
         after_event_id: Option<crate::protocol::StableEntityId>,
     ) -> Result<(Vec<CoreEventState>, bool), SegmentMaterializerError> {
+        self.prepare_prior_event_proofs(None)?;
         Self::read_event_states(
             self.materializer,
             self.candidate
@@ -217,6 +240,7 @@ impl CoreMaterializationSession<'_> {
                 )
                 .ok_or(SegmentMaterializerError::Bounds)
         })?;
+        self.prepare_prior_event_proofs(None)?;
         let result = pages.into_iter().try_fold(0_u32, |total, mut page| {
             let source_index = page.reconciliation.materialize_index;
             let added_pages = match self.incoming_page_cursor {
@@ -527,7 +551,10 @@ impl CoreMaterializationSession<'_> {
         let (states, terminal) = if store
             .active
             .as_ref()
-            .is_some_and(|active| active.sources.contains_key(&source_id))
+            .map(|active| active.sources.get(&source_id))
+            .transpose()?
+            .flatten()
+            .is_some()
         {
             let (states, _observed, terminal) = super::publication::active_event_page(
                 store
@@ -592,16 +619,19 @@ impl CoreMaterializationSession<'_> {
                     return Err(SegmentMaterializerError::Conflict);
                 }
             }
+            direct.observe_source_page(&page.deltas, materializer_revision)?;
+            if direct.source_count() as u64 > u64::from(candidate.head.source_count) {
+                return Err(SegmentMaterializerError::Bounds);
+            }
             for delta in &page.deltas {
                 let CoreSourceDelta::Present(state) = delta else {
                     return Err(SegmentMaterializerError::Conflict);
                 };
                 let source_id = source_storage_id(&state.source);
-                candidate.seen_source_ids.push(source_id.clone());
-                if candidate.seen_source_ids.len() > crate::protocol::MAX_CORE_SOURCE_STATES {
-                    return Err(SegmentMaterializerError::Bounds);
-                }
-                let existing = active_sources.and_then(|sources| sources.get(&source_id));
+                let existing = active_sources
+                    .map(|sources| sources.get(&source_id))
+                    .transpose()?
+                    .flatten();
                 let needs_change = existing.is_none_or(|active| {
                     !source_state_exact_eq(&active.state, state)
                         || active.materializer_revision != materializer_revision
@@ -626,32 +656,18 @@ impl CoreMaterializationSession<'_> {
                 .map(|delta| source_order_id(delta.source()))
                 .or_else(|| candidate.last_source_order_id.clone());
         }
-        let unseen_sources = active_sources
-            .into_iter()
-            .flat_map(|sources| sources.values())
-            .filter(|active| {
-                candidate
-                    .seen_source_ids
-                    .binary_search(&source_storage_id(&active.state.source))
-                    .is_err()
-            })
-            .collect::<Vec<_>>();
-        let already_removed = usize::try_from(candidate.removed_sources)
-            .map_err(|_| SegmentMaterializerError::Bounds)?;
         let remaining_items = crate::protocol::MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
             .checked_sub(reconciliations.len())
             .ok_or(SegmentMaterializerError::Bounds)?;
-        if page.terminal {
-            for active in unseen_sources
-                .iter()
-                .skip(already_removed)
-                .take(remaining_items)
-            {
+        let acknowledgement_terminal = if page.terminal {
+            if direct.source_count() as u64 != u64::from(candidate.head.source_count) {
+                return Err(SegmentMaterializerError::Conflict);
+            }
+            let (removals, terminal) = direct.removal_page(active_sources, remaining_items)?;
+            for removal in removals {
                 reconciliations.push(CoreSourceReconciliation {
                     materialize_index,
-                    delta: CoreSourceDelta::Removed(CoreSourceRemoval {
-                        source: active.state.source.clone(),
-                    }),
+                    delta: CoreSourceDelta::Removed(removal),
                 });
                 materialize_index = materialize_index
                     .checked_add(1)
@@ -660,13 +676,10 @@ impl CoreMaterializationSession<'_> {
                     .checked_add(1)
                     .ok_or(SegmentMaterializerError::Bounds)?;
             }
-        }
-        let acknowledgement_terminal = !page.terminal
-            || already_removed
-                .checked_add(
-                    usize::try_from(removed).map_err(|_| SegmentMaterializerError::Bounds)?,
-                )
-                .is_some_and(|count| count == unseen_sources.len());
+            terminal
+        } else {
+            true
+        };
         candidate.changed_sources = candidate
             .changed_sources
             .checked_add(changed)
@@ -688,7 +701,6 @@ impl CoreMaterializationSession<'_> {
                 .checked_add(1)
                 .ok_or(SegmentMaterializerError::Bounds)?;
         }
-        direct.apply_source_reconciliations(&reconciliations);
         let cursor_append = cursor.prepare_append(&reconciliations)?;
         cursor.commit_append(cursor_append)?;
         store.metrics.reconciliation_cursor_entry_count =
@@ -920,6 +932,7 @@ impl SegmentMaterializer {
         };
         self.force_next_rebuild = false;
         let reconciliation_cursor = super::reconciliation_cursor::ReconciliationCursor::empty_for(
+            &self.root,
             &candidate,
             self.active
                 .as_ref()

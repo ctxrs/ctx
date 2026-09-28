@@ -26,6 +26,18 @@ pub(in super::super) struct EncodedPageCredits {
 }
 
 impl EncodedPageCredits {
+    pub(in super::super) fn reset_ordered_demand(&self) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("internal: Core prefetch credit lock poisoned"))?;
+        if state.in_use != 0 || !state.oversize_waiters.is_empty() {
+            bail!("internal: Core prefetch batch retained page credits");
+        }
+        state.ordered_demand = None;
+        Ok(())
+    }
+
     pub(in super::super) fn new(capacity: usize) -> Self {
         Self {
             capacity,

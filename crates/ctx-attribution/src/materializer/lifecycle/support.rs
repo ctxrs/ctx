@@ -15,7 +15,7 @@ use super::super::model::{
 };
 use super::super::publication::ObservedEvent;
 use super::super::{SegmentMaterializer, SegmentMaterializerError};
-use super::MAX_INCREMENTAL_FLAT_LAYERS;
+use super::{CoreMaterializationSession, MAX_INCREMENTAL_FLAT_LAYERS};
 
 pub(super) const COMPACTION_TRIGGER: usize = MAX_MANIFEST_SEGMENTS / 2;
 
@@ -40,6 +40,45 @@ pub(super) fn active_flat_layers_require_rebuild(
         }
     }
     false
+}
+
+impl CoreMaterializationSession<'_> {
+    pub(crate) fn prepare_prior_event_proofs(
+        &mut self,
+        cancelled: Option<&(dyn Fn() -> bool + Sync)>,
+    ) -> Result<(), SegmentMaterializerError> {
+        if self.changed_sources == 0 && self.removed_sources == 0 {
+            return Ok(());
+        }
+        let candidate = self
+            .candidate
+            .as_ref()
+            .ok_or(SegmentMaterializerError::Conflict)?;
+        if !candidate.control.source_terminal {
+            return Err(SegmentMaterializerError::Conflict);
+        }
+        let next = &self
+            .direct_candidate
+            .as_ref()
+            .ok_or(SegmentMaterializerError::Conflict)?
+            .source_states;
+        if let Some(active) = self.materializer.active.as_mut() {
+            super::super::publication::prepare_event_proofs(
+                active,
+                &self.materializer.root,
+                &self.materialization_id,
+                &|prior, source| {
+                    if candidate.control.force_projection_rebuild {
+                        Ok(true)
+                    } else {
+                        next.changed_from(prior, &source.storage_key)
+                    }
+                },
+                cancelled,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn protocol_error(error: crate::protocol::ProtocolError) -> SegmentMaterializerError {
@@ -222,7 +261,9 @@ pub(super) fn ensure_current_frontier(
                 .active
                 .as_ref()
                 .filter(|active| !active.requires_clean_rebuild)
-                .and_then(|active| active.sources.get(&source_id))
+                .map(|active| active.sources.get(&source_id))
+                .transpose()?
+                .flatten()
                 .map_or(0, |active| active.state.event_count);
             frontier(&state, false, expected, prior_count)
         }
@@ -230,7 +271,9 @@ pub(super) fn ensure_current_frontier(
             let active = store
                 .active
                 .as_ref()
-                .and_then(|active| active.sources.get(&source_id))
+                .map(|active| active.sources.get(&source_id))
+                .transpose()?
+                .flatten()
                 .ok_or(SegmentMaterializerError::Conflict)?;
             if !active.state.source.exact_descriptor_eq(&removal.source) {
                 return Err(SegmentMaterializerError::Conflict);

@@ -7,6 +7,7 @@ mod progress;
 mod publication;
 mod publication_plan;
 mod reconciliation_cursor;
+pub(crate) use ctx_attribution_index::materialization::{runtime_file, source_inventory};
 mod staging;
 mod storage;
 #[cfg(test)]
@@ -133,4 +134,29 @@ impl From<crate::core_materialization::CoreStoreError> for SegmentMaterializerEr
 #[derive(Default)]
 pub(crate) struct StatusRequest {
     pub requested_core_generation_id: Option<String>,
+}
+
+impl From<ctx_attribution_index::materialization::MaterializationIndexError>
+    for SegmentMaterializerError
+{
+    fn from(error: ctx_attribution_index::materialization::MaterializationIndexError) -> Self {
+        use ctx_attribution_index::materialization::MaterializationIndexError as E;
+        match error {
+            E::Io {
+                operation,
+                path,
+                source,
+            } => Self::Io {
+                operation,
+                path,
+                source,
+            },
+            E::Cancelled => Self::Cancelled,
+            E::Bounds => Self::Bounds,
+            E::Conflict => Self::Conflict,
+            E::Corrupt(message) => Self::Corrupt(message),
+            E::Encoding => Self::Encoding,
+            E::EventIndex(error) => error.into(),
+        }
+    }
 }

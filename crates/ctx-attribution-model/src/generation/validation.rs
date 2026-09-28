@@ -4,12 +4,11 @@ use ctx_history_core::CoreRecord;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::{CoreSourceState, MAX_CORE_MATERIALIZER_REVISION_BYTES, MAX_CORE_SOURCE_STATES};
+use super::{CoreSourceState, MAX_CORE_MATERIALIZER_REVISION_BYTES};
 use crate::{ErrorClass, ProtocolError};
 
 pub fn core_source_snapshot_sha256(sources: &[CoreSourceState]) -> Result<String, ProtocolError> {
-    validate_source_states(sources)?;
-    canonical_sha256(sources, "Core source snapshot encoding failed")
+    Ok(super::CoreSourceSnapshot::from_sources(sources.iter())?.sha256)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,28 +60,6 @@ fn encode_core_record(record: &CoreRecord) -> Result<Vec<u8>, ProtocolError> {
 fn core_record_leaf_digest(record: &CoreRecord, encoded: &[u8]) -> Result<[u8; 32], ProtocolError> {
     ctx_history_core::core_record_leaf_digest(record.event_id, encoded)
         .map_err(|error| invalid_contract("Core record leaf", error))
-}
-
-pub(super) fn validate_source_states(sources: &[CoreSourceState]) -> Result<(), ProtocolError> {
-    if sources.len() > MAX_CORE_SOURCE_STATES {
-        return Err(ProtocolError::new(
-            ErrorClass::Bounds,
-            "Core source snapshot exceeds its source count bound",
-        ));
-    }
-    let mut prior = None;
-    for source in sources {
-        source.validate()?;
-        let current = source.source.identity().digest();
-        if prior.is_some_and(|prior| prior >= current) {
-            return Err(ProtocolError::new(
-                ErrorClass::Sequence,
-                "Core source snapshot must be strictly ordered by stable source identity",
-            ));
-        }
-        prior = Some(current);
-    }
-    Ok(())
 }
 
 pub(super) fn validate_identity(value: &str, label: &'static str) -> Result<(), ProtocolError> {
@@ -153,15 +130,6 @@ pub(crate) fn validate_encoded_bound<T: Serialize + ?Sized>(
 pub(crate) fn encoded_len<T: Serialize + ?Sized>(value: &T) -> Result<usize, ProtocolError> {
     compact_json_encoded_len(value)
         .map_err(|_| ProtocolError::new(ErrorClass::Internal, "protocol encoding failed"))
-}
-
-pub(super) fn canonical_sha256<T: Serialize + ?Sized>(
-    value: &T,
-    message: &'static str,
-) -> Result<String, ProtocolError> {
-    let encoded =
-        serde_json::to_vec(value).map_err(|_| ProtocolError::new(ErrorClass::Internal, message))?;
-    Ok(hex_sha256(Sha256::digest(encoded)))
 }
 
 pub(super) fn hex_sha256(digest: impl AsRef<[u8]>) -> String {

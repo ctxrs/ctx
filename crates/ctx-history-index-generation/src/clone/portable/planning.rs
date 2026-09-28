@@ -14,7 +14,7 @@ use crate::{
     active_index_files,
     clone::{
         admit_clone_resource, MANAGED_FILE, MAX_REPUBLISH_CLONE_BYTES, MAX_REPUBLISH_CLONE_FILES,
-        MAX_REPUBLISH_DIRECTORY_ENTRIES, REPUBLISH_HEADROOM_RESERVE_BYTES, TANTIVY_LOCK_FILES,
+        MAX_REPUBLISH_DIRECTORY_ENTRIES, TANTIVY_LOCK_FILES,
     },
     physical::{canonical_active_managed_bytes, managed_file_topology, MAX_MANAGED_METADATA_BYTES},
     GenerationError as IndexError, Result,
@@ -83,16 +83,9 @@ impl ValidatedClonePlan {
         &self.managed_bytes
     }
 
-    pub(super) fn writer_output_headroom(&self, writer_memory_bytes: u64) -> Result<u64> {
-        self.logical_bytes
-            .checked_add(writer_memory_bytes)
-            .and_then(|bytes| bytes.checked_add(REPUBLISH_HEADROOM_RESERVE_BYTES))
-            .ok_or(IndexError::CountOverflow)
-    }
-
     pub(super) fn full_copy_candidate_headroom(&self, writer_memory_bytes: u64) -> Result<u64> {
         self.logical_bytes
-            .checked_add(self.writer_output_headroom(writer_memory_bytes)?)
+            .checked_add(crate::clone::writer_output_headroom(writer_memory_bytes)?)
             .ok_or(IndexError::CountOverflow)
     }
 }

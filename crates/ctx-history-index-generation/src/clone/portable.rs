@@ -205,7 +205,7 @@ pub(super) fn create_authenticated_candidate_generation(
     let plan =
         planning::authenticated_clone_plan(&generations, source_name, &source, predecessor_index)?;
     let required_headroom = plan.full_copy_candidate_headroom(writer_memory_bytes)?;
-    let writer_output_headroom = plan.writer_output_headroom(writer_memory_bytes)?;
+    let writer_output_headroom = super::writer_output_headroom(writer_memory_bytes)?;
     let available = available_bytes(&generations, false)?;
     record_plan_metrics_with_required(&plan, available, required_headroom);
     if available < required_headroom {

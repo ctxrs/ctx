@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 static _Atomic int matched_calls;
+static _Atomic int interrupted_once;
 static _Atomic int seen_manifest_rename;
 static _Atomic int seen_generation_meta_rename;
 static _Atomic int seen_pointer_rename;
@@ -269,7 +270,9 @@ static bool should_trigger(const char *operation, const char *path, const char *
             occurrence = parsed;
         }
     }
-    return atomic_fetch_add(&matched_calls, 1) + 1 == occurrence;
+    int call = atomic_fetch_add(&matched_calls, 1) + 1;
+    return call == occurrence
+        || (call > occurrence && env_equals("CTX_RECOVERY_FAULT_ACTION", "interrupt_then_fail"));
 }
 
 static void write_marker(void) {
@@ -295,6 +298,9 @@ static void write_marker(void) {
 
 static int configured_errno(void) {
     const char *name = getenv("CTX_RECOVERY_FAULT_ERRNO");
+    if (name != NULL && strcmp(name, "EINTR") == 0) {
+        return EINTR;
+    }
     if (name != NULL && strcmp(name, "EIO") == 0) {
         return EIO;
     }
@@ -312,9 +318,11 @@ static bool perform_action(void) {
         syscall(SYS_tgkill, getpid(), syscall(SYS_gettid), SIGSTOP);
         return false;
     }
-    if (env_equals("CTX_RECOVERY_FAULT_ACTION", "fail")) {
+    bool interrupt_then_fail = env_equals("CTX_RECOVERY_FAULT_ACTION", "interrupt_then_fail");
+    if (env_equals("CTX_RECOVERY_FAULT_ACTION", "fail") || interrupt_then_fail) {
         write_marker();
-        errno = configured_errno();
+        errno = interrupt_then_fail && !atomic_exchange(&interrupted_once, 1)
+            ? EINTR : configured_errno();
         return true;
     }
     return false;

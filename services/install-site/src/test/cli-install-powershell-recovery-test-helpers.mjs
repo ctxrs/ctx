@@ -127,15 +127,13 @@ try {
         Assert-True ($rejected -and $script:identityReads -eq 0) "ordinary target guard weakened: $($mutation[0])"
         $rejectedCount += 1
     }
-    # Pretty JSON belongs only to the explicitly known released 1.3.1 owner.
+    # Ordinary CLI serializers emit pretty JSON across supported releases.
     foreach ($prior in @('1.3.1','1.3.2','1.3.3')) {
         $existingManagedInstall = [pscustomobject]@{version=$prior}
         Write-Receipt ($planned | ConvertFrom-Json | ConvertTo-Json)
         $script:identityReads=0; $script:identityWillMatch=$true; $script:matchAfter=1
-        $accepted=$true
-        try { Invoke-ManagedCoreUpgrade } catch { $accepted=$false }
-        Assert-True ($accepted -eq ($prior -ceq '1.3.1')) 'pretty JSON prior-owner boundary changed'
-        Assert-True ($script:identityReads -eq [int]$accepted) 'rejected pretty receipt reached identity wait'
+        Invoke-ManagedCoreUpgrade
+        Assert-True ($script:identityReads -eq 1) 'pretty receipt skipped final identity validation'
     }
     "PASS: 3 recovered schedules awaited identity; wrong identity timed out; 3 ordinary outcomes; $rejectedCount malformed receipts rejected before wait"
 } finally { Remove-Item -LiteralPath $tempRoot -Recurse -Force }

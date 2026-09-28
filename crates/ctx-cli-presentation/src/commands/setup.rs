@@ -46,6 +46,10 @@ pub fn render_setup_human(
     daemon: SetupDaemonState<'_>,
 ) -> Document {
     let refresh_status = refresh_request["status"].as_str().unwrap_or("unavailable");
+    let failed = refresh_request["reason"] == "refresh_failed"
+        || (refresh_request["mode"] == "wait"
+            && refresh_status == "unavailable"
+            && refresh_request["reason"] != "explicit_opt_out");
     let queued = mode == "pending"
         || matches!(
             refresh_status,
@@ -62,7 +66,17 @@ pub fn render_setup_human(
             format!("{cause}. Indexed history remains searchable.")
         }
     });
-    let (state, title, detail) = if partial_cause.is_some() {
+    let (state, title, detail) = if failed {
+        (
+            OutcomeState::Error,
+            "History refresh failed",
+            Some(if source["lexical"]["status"] == "ready" {
+                "Previously indexed history remains searchable. Run ctx doctor for details."
+            } else {
+                "Run ctx doctor for details, then retry ctx setup --wait."
+            }),
+        )
+    } else if partial_cause.is_some() {
         (
             OutcomeState::Warning,
             "History is searchable with exclusions",
@@ -118,7 +132,7 @@ pub fn render_setup_human(
     }
 
     super::append_attribution(context, &mut document, source);
-    let next_command = if partial_cause.is_some() {
+    let next_command = if failed || partial_cause.is_some() {
         "ctx doctor"
     } else if mode == "ready" {
         "ctx search \"test failure\""
@@ -234,6 +248,67 @@ mod tests {
                 persistent_supervisor_verified: true,
             },
         )
+    }
+
+    #[test]
+    fn failed_refresh_preserves_lexical_readiness_and_does_not_claim_deferral() {
+        for reason in [
+            "refresh_failed",
+            "daemon_unavailable",
+            "daemon_disabled",
+            "autostart_disabled",
+        ] {
+            let rendered = render_setup_human(
+                &context(80, ColorMode::Never),
+                Path::new("/tmp/ctx"),
+                "unavailable",
+                &ready_source(),
+                Some(&ready_health()),
+                &json!({"status": "unavailable", "mode": "wait", "reason": reason}),
+                SetupDaemonState {
+                    requested: false,
+                    reason: Some("daemon_disabled"),
+                    started: false,
+                    persistent_supervisor_verified: false,
+                },
+            )
+            .render_plain();
+            assert!(
+                rendered.starts_with("✗ History refresh failed"),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("Previously indexed history remains searchable"),
+                "{rendered}"
+            );
+            assert!(rendered.contains("ctx doctor"), "{rendered}");
+            assert!(!rendered.contains("no verified search index"), "{rendered}");
+            assert!(!rendered.contains("ctx index mode auto"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn explicit_opt_out_of_wait_keeps_previously_ready_history_successful() {
+        let rendered = render_setup_human(
+            &context(80, ColorMode::Never),
+            Path::new("/tmp/ctx"),
+            "ready",
+            &ready_source(),
+            Some(&ready_health()),
+            &json!({"status": "unavailable", "mode": "wait", "reason": "explicit_opt_out"}),
+            SetupDaemonState {
+                requested: false,
+                reason: Some("explicit_opt_out"),
+                started: false,
+                persistent_supervisor_verified: false,
+            },
+        )
+        .render_plain();
+        assert!(
+            rendered.starts_with("✓ History is ready to search"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("History refresh failed"), "{rendered}");
     }
 
     #[test]

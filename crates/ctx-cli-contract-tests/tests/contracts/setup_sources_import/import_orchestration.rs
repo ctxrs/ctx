@@ -1356,3 +1356,61 @@ fn persistent_daemon_startup_reconciles_absent_attribution_without_core_publicat
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn setup_wait_failure_preserves_searchable_history_and_can_recover() {
+    let temp = daemon_test_root();
+    let root = data_root(&temp);
+    fs::create_dir_all(&root).unwrap();
+    let config = "[indexing]\nmode = \"manual\"\n";
+    fs::write(root.join("config.toml"), config).unwrap();
+    write_codex_setup_session(&temp);
+    let ready =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress=none"]));
+    assert_eq!(ready["lexical"]["status"], "ready", "{ready:#}");
+    wait_for_daemon_status(&temp, "disabled", false, "setup");
+
+    // An authored invalid root exercises a real refresh failure without
+    // filling a filesystem or changing shared stores.
+    let overlap = root.join("overlapping-codex");
+    fs::create_dir_all(&overlap).unwrap();
+    let output = ctx(&temp)
+        .env("CODEX_HOME", &overlap)
+        .args(["setup", "--wait", "--format=json", "--progress=none"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let failed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(failed["mode"], "unavailable", "{failed:#}");
+    assert_eq!(
+        failed["refresh_request"]["reason"], "refresh_failed",
+        "{failed:#}"
+    );
+    assert_eq!(failed["lexical"]["status"], "ready", "{failed:#}");
+    assert_eq!(
+        failed["lexical"]["generation_id"],
+        ready["lexical"]["generation_id"]
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("overlaps or contains the ctx data root")
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("config.toml")).unwrap(),
+        config
+    );
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "setup should import",
+        "--refresh=off",
+        "--format=json",
+    ]));
+    assert!(!search["results"].as_array().unwrap().is_empty());
+    wait_for_daemon_status(&temp, "disabled", false, "setup");
+
+    fs::remove_dir(&overlap).unwrap();
+    let recovered =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress=none"]));
+    assert_eq!(recovered["lexical"]["status"], "ready", "{recovered:#}");
+    assert_ne!(recovered["refresh_request"]["reason"], "refresh_failed");
+}

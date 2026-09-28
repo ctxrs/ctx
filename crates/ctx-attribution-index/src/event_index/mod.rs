@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{MAX_SEGMENT_CORE_EVENTS, SegmentCoreCoverage};
-use ctx_attribution_model::{EventCopyProofKind, MAX_CORE_SOURCE_STATES, SessionRelationshipKind};
+use ctx_attribution_model::{EventCopyProofKind, SessionRelationshipKind};
 use ctx_history_core::{SourceAnchor, SourceKey, StableEntityId, StableEntityKind, TypedKey};
 
 use super::segment_file::{SegmentFile, SegmentFileError, SegmentWriter};
@@ -30,9 +30,8 @@ use validation::*;
 /// Domain-separates event-state index bytes from every other segment role.
 pub const EVENT_STATE_INDEX_ROLE: u32 = 0x45_56_49_58;
 
-/// These are input and on-disk format bounds, not suggested batch sizes. They make
-/// the writer's in-memory sort finite and keep an opened source dictionary small.
-pub const MAX_EVENT_INDEX_SOURCES: usize = MAX_CORE_SOURCE_STATES;
+/// Per-segment event and per-read page bounds, never corpus limits.
+/// Source dictionaries are bounded by their encoded section bytes.
 pub const MAX_EVENT_INDEX_PAGE_ITEMS: usize = 256;
 pub const MAX_EVENT_INDEX_ENTRIES: usize = MAX_SEGMENT_CORE_EVENTS;
 
@@ -624,6 +623,24 @@ fn typed_key_container_capacity(key: &TypedKey) -> Result<usize, EventIndexError
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static READER_WORK: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+    static EVENT_ROW_DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn event_index_event_decodes_for_test() -> u64 {
+    EVENT_ROW_DECODES.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn event_index_reader_work_for_test() -> (u64, u64) {
+    READER_WORK.with(std::cell::Cell::get)
+}
+
 pub struct EventIndexReader {
     file: SegmentFile,
     layout: Layout,
@@ -637,6 +654,11 @@ pub struct EventIndexReader {
 
 impl EventIndexReader {
     pub fn open(mut file: SegmentFile) -> Result<Self, EventIndexError> {
+        #[cfg(any(test, feature = "test-support"))]
+        READER_WORK.with(|work| {
+            let (opens, decodes) = work.get();
+            work.set((opens + 1, decodes));
+        });
         let plaintext_bytes = file.plaintext_len();
         if plaintext_bytes
             < u64::try_from(HEADER_BYTES).map_err(|_| EventIndexError::Corrupt("header length"))?

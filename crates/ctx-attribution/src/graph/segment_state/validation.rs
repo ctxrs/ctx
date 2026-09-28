@@ -44,8 +44,7 @@ impl SegmentCompletedControl {
         validate_contract_text(&self.semantics_contract)?;
         validate_contract_text(&self.evidence_contract)?;
         validate_contract_text(&self.core_record_contract)?;
-        validate_event_count_bound(self.event_count)?;
-        validate_coverage_bound(&self.coverage)?;
+        validate_coverage_for_event_count(&self.coverage, self.event_count)?;
         validate_lower_sha256(&self.publication_semantics_sha256)?;
         match (&self.receipt, &self.head) {
             (None, None) => {
@@ -240,7 +239,13 @@ fn validate_owner(owner: &SegmentEventOwner) -> Result<(), CoreStoreError> {
 pub(super) fn validate_coverage_bound(
     coverage: &SegmentCoreCoverage,
 ) -> Result<(), CoreStoreError> {
-    let maximum = MAX_SEGMENT_CORE_EVENTS as u64;
+    validate_coverage_for_event_count(coverage, MAX_SEGMENT_CORE_EVENTS as u64)
+}
+
+fn validate_coverage_for_event_count(
+    coverage: &SegmentCoreCoverage,
+    maximum: u64,
+) -> Result<(), CoreStoreError> {
     if [
         coverage.repository_candidate_events,
         coverage.logical_binding_events,
@@ -256,14 +261,6 @@ pub(super) fn validate_coverage_bound(
         return Err(CoreStoreError::Bounds);
     }
     Ok(())
-}
-
-pub(super) fn validate_event_count_bound(event_count: u64) -> Result<(), CoreStoreError> {
-    if event_count > MAX_SEGMENT_CORE_EVENTS as u64 {
-        Err(CoreStoreError::Bounds)
-    } else {
-        Ok(())
-    }
 }
 
 pub(super) fn validate_lower_sha256(value: &str) -> Result<(), CoreStoreError> {

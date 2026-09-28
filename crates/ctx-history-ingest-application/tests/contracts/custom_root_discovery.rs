@@ -485,8 +485,25 @@ fn current_kiro_blocks_unqualified_all_provider_publication_without_dispatching_
     fs::write(sessions.join("session-id.json"), b"{}").unwrap();
     fs::write(sessions.join("session-id.jsonl"), b"{}\n").unwrap();
 
-    let setup =
-        json_output(ctx(&temp).args(["setup", "--wait", "--progress", "none", "--format=json"]));
+    let setup = failure_json_output(ctx(&temp).args([
+        "setup",
+        "--wait",
+        "--progress",
+        "none",
+        "--format=json",
+    ]));
+    assert_eq!(setup["mode"], "unavailable", "{setup:#}");
+    assert_eq!(
+        setup["refresh_request"]["reason"], "refresh_failed",
+        "{setup:#}"
+    );
+    assert!(
+        setup["refresh_request"]["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("all_provider_terminal_coverage_unavailable"),
+        "{setup:#}"
+    );
     assert!(
         setup["import"].is_null() || setup["import"]["totals"]["imported_sources"] == 0,
         "{setup:#}"
