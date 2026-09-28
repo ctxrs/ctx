@@ -152,7 +152,7 @@ function Restore-LegacyIndexingPreferences([object]$Preference) {
         $temporary = $config + '.' + [Guid]::NewGuid().ToString('N')
         try {
             [IO.File]::WriteAllLines($temporary, $lines, [Text.UTF8Encoding]::new($false))
-            [IO.File]::Replace($temporary, $config, $null)
+            [IO.File]::Replace($temporary, $config, [System.Management.Automation.Language.NullString]::Value)
         } finally {
             if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) }
         }

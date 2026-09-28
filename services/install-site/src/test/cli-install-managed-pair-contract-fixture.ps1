@@ -6,6 +6,9 @@ function Fail([string]$Message) { throw $Message }
 function Write-SuccessReceiptWarnings($Warnings) {}
 $tempRoot = $WorkRoot
 $version = '1.3.2'
+$managedPair = $true
+# This fixture owns argv and receipts; native Windows fixtures own path ACLs.
+function Protect-ManagedPath([string]$Path, [switch]$Directory) {}
 $pairInstallRoot = 'root with spaces $literal'
 $downloadPath = 'candidate "quoted"'
 $pairEnvelopePath = 'signed envelope'

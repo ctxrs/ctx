@@ -601,17 +601,19 @@ test(
     const root = mkdtempSync(path.join(tmpdir(), "ctx-uninstall-ps-daemon-retry-"));
     try {
       const install = writeFakeManagedInstall(root);
+      const deleteData = process.platform === "win32";
+      const dataMode = deleteData ? "-DeleteData" : "-KeepData";
       const interrupted = runRenderedUninstaller(
         root,
         install,
-        ["-NonInteractive", "-Json", "-DeleteData"],
+        ["-NonInteractive", "-Json", dataMode],
         { CTX_UNINSTALL_FAKE_DAEMON_STATUS: "89" },
       );
       assert.notEqual(interrupted.status, 0);
       const retried = runRenderedUninstaller(
         root,
         install,
-        ["-NonInteractive", "-Json", "-DeleteData"],
+        ["-NonInteractive", "-Json", dataMode],
       );
       assert.equal(retried.status, 0, retried.stderr);
       assert.equal(existsSync(install.installPath), false);
@@ -627,7 +629,7 @@ test(
           transactionCall(install, "prepare"),
           installedCall(install, ["--data-root", install.dataRoot, "daemon", "disable", "--prepare-uninstall", "--format=json"]),
           installedCall(install, ["pro", "uninstall", "--help"]),
-          installedCall(install, ["--data-root", install.dataRoot, "pro", "uninstall", "--delete-data", "--json"]),
+          installedCall(install, ["--data-root", install.dataRoot, "pro", "uninstall", deleteData ? "--delete-data" : "--keep-data", "--json"]),
           transactionCall(install, "arm"),
           transactionCall(install, "commit"),
         ],
@@ -637,6 +639,26 @@ test(
     }
   },
 );
+
+test("Linux PowerShell refuses Windows deletion recovery before executing the helper", {
+  skip: powerShell && process.platform !== "win32" ? false : "Linux PowerShell control",
+}, () => {
+  const root = mkdtempSync(path.join(tmpdir(), "ctx-uninstall-ps-recovery-platform-"));
+  try {
+    const install = writeFakeManagedInstall(root);
+    const interrupted = runRenderedUninstaller(root, install, ["-NonInteractive", "-Json", "-KeepData"], {
+      CTX_UNINSTALL_FAKE_DAEMON_STATUS: "89",
+    });
+    assert.notEqual(interrupted.status, 0);
+    const before = invocationRows(install);
+    const rejected = runRenderedUninstaller(root, install, ["-NonInteractive", "-Json", "-DeleteData"]);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /cannot classify Windows recovery path ownership on this platform/);
+    assert.deepEqual(invocationRows(install), before);
+    assert.ok(existsSync(install.installPath));
+    assert.ok(existsSync(install.transactionPath));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test(
   "Windows hosted uninstaller accepts verified teardown with no running daemon",
