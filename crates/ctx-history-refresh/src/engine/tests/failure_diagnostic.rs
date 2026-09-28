@@ -1,6 +1,105 @@
 use super::*;
 
 #[test]
+fn active_successor_keeps_the_previous_disk_failure_across_restart_until_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = CoreRefreshEngine::new();
+    coordinator.enqueue(None);
+    let failure = coordinator
+        .run_next_with(
+            |_, _| {
+                Err(IndexError::CurrentRepublishInsufficientHeadroom {
+                    required: 1024,
+                    available: 512,
+                }
+                .into())
+            },
+            || Ok(None),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let next = coordinator.enqueue(None);
+    let next_id = request_id(&next);
+    let status = coordinator.status(&next_id).unwrap();
+    assert!(status.get("structured_outcome").is_none());
+    assert!(status.get("last_error").is_none());
+    assert_eq!(
+        status["last_failure"]["request_id"],
+        failure.job["request_id"]
+    );
+    assert_eq!(status["last_failure"]["error_code"], "resource_unavailable");
+    assert!(status["last_failure"]["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("free space"));
+    coordinator
+        .persist_job_status_for_test(temp.path(), &next_id)
+        .unwrap();
+    let restarted = CoreRefreshEngine::new();
+    assert!(restarted
+        .recover_interrupted_publication(temp.path())
+        .unwrap());
+    assert_eq!(
+        restarted.status(&next_id).unwrap()["last_failure"],
+        status["last_failure"]
+    );
+    restarted
+        .complete_pending_admission_for_test(temp.path(), &next_id, BTreeMap::new())
+        .unwrap();
+    let completion = restarted
+        .run_next_with(
+            |id, engine| {
+                assert_eq!(
+                    engine.status(id).unwrap()["last_failure"],
+                    status["last_failure"]
+                );
+                Ok(test_publication("generation-1"))
+            },
+            || Ok(Some("generation-1".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(!completion.failed, "{:#}", completion.job);
+    assert!(completion.job.get("last_failure").is_none());
+    let after = restarted.enqueue(Some("generation-1".to_owned()));
+    assert!(restarted
+        .status(&request_id(&after))
+        .unwrap()
+        .get("last_failure")
+        .is_none());
+}
+
+#[test]
+fn raw_disk_full_is_retryable_resource_pressure_not_an_internal_failure() {
+    for error in [
+        anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "synthetic volume full",
+        )),
+        IndexError::Tantivy(
+            std::io::Error::new(std::io::ErrorKind::StorageFull, "synthetic volume full").into(),
+        )
+        .into(),
+    ] {
+        let outcome = source_backed_refresh_failure_outcome(
+            &error,
+            &BTreeSet::new(),
+            &uuid::Uuid::nil().to_string(),
+        )
+        .unwrap();
+        assert_eq!(outcome.code(), RefreshOutcomeCode::ResourceUnavailable);
+        assert!(outcome.retryable());
+        assert!(!outcome.is_automatic_retry_eligible());
+        let diagnostic =
+            RefreshFailureDiagnostic::new(RefreshFailureStage::Execution, Some(&error));
+        assert_eq!(diagnostic.kind, RefreshFailureKind::Io);
+        assert_eq!(diagnostic.reason, Some(RefreshFailureReason::IoStorageFull));
+    }
+}
+
+#[test]
 fn failure_diagnostic_distinguishes_execution_probe_and_verification() {
     for (case, expected) in [
         ("execution", json!(["execution", "index"])),

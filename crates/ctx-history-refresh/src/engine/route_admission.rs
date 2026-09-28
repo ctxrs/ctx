@@ -252,7 +252,17 @@ impl CoreRefreshEngine {
                             .route_retry_intents
                             .insert(admission.route().clone(), intent.clone());
                     }
-                    state.dirty_routes.retryable_failure(&admission, now_ms);
+                    let resource_unavailable = attempt
+                        .as_ref()
+                        .and_then(|attempt| attempt.terminal_outcome.as_ref())
+                        .is_some_and(|outcome| {
+                            outcome.code() == RefreshOutcomeCode::ResourceUnavailable
+                        });
+                    if resource_unavailable {
+                        state.dirty_routes.resource_failure(&admission, now_ms);
+                    } else {
+                        state.dirty_routes.retryable_failure(&admission, now_ms);
+                    }
                     state
                         .routes_requiring_exhaustive_reconciliation
                         .insert(admission.route().clone());

@@ -427,9 +427,13 @@ impl GenerationWriter {
         let writer = self.writer.take().ok_or(IndexError::WriterInvariant(
             "candidate commit is missing its lazy writer",
         ))?;
-        writer
-            .wait_merging_threads()
-            .map_err(|error| observe_candidate_failure(&root, error.into()))?;
+        let worker_result = writer.wait_merging_threads();
+        if worker_result.is_err() {
+            // Tantivy replaces a failed indexing thread's cause with a join
+            // error. The directory retains the original output failure.
+            self.index.load_metas()?;
+        }
+        worker_result.map_err(|error| observe_candidate_failure(&root, error.into()))?;
         let (opstamp, reconciled_commit_error) = match commit_result {
             Ok(opstamp) => (opstamp, None),
             Err(error) => {

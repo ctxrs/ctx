@@ -19,8 +19,7 @@ use super::exact_copy::copy_and_hash_exact_authenticated_file;
 use super::{
     admit_clone_resource, record_candidate_clone_metrics, validate_single_component,
     CandidateActivationFence, CandidateCloneMetrics, MANAGED_FILE, MAX_REPUBLISH_CLONE_BYTES,
-    MAX_REPUBLISH_CLONE_FILES, MAX_REPUBLISH_DIRECTORY_ENTRIES, REPUBLISH_HEADROOM_RESERVE_BYTES,
-    TANTIVY_LOCK_FILES,
+    MAX_REPUBLISH_CLONE_FILES, MAX_REPUBLISH_DIRECTORY_ENTRIES, TANTIVY_LOCK_FILES,
 };
 use crate::{
     active_index_files,
@@ -116,22 +115,9 @@ struct ClonePlan {
 }
 
 impl ClonePlan {
-    fn writer_output_headroom(&self, writer_memory_bytes: u64) -> Result<u64> {
-        self.logical_bytes
-            .checked_add(writer_memory_bytes)
-            .and_then(|bytes| bytes.checked_add(REPUBLISH_HEADROOM_RESERVE_BYTES))
-            .ok_or(IndexError::CountOverflow)
-    }
-
     fn initial_candidate_headroom(&self, writer_memory_bytes: u64) -> Result<u64> {
         self.control_copy_bytes
-            .checked_add(self.writer_output_headroom(writer_memory_bytes)?)
-            .ok_or(IndexError::CountOverflow)
-    }
-
-    fn full_copy_candidate_headroom(&self, writer_memory_bytes: u64) -> Result<u64> {
-        self.logical_bytes
-            .checked_add(self.writer_output_headroom(writer_memory_bytes)?)
+            .checked_add(super::writer_output_headroom(writer_memory_bytes)?)
             .ok_or(IndexError::CountOverflow)
     }
 }
@@ -194,10 +180,9 @@ pub(super) fn create_authenticated_candidate_generation(
 
     let plan = authenticated_clone_plan(&source, predecessor_index)?;
     let required_headroom = plan.initial_candidate_headroom(writer_memory_bytes)?;
-    let full_copy_headroom = plan.full_copy_candidate_headroom(writer_memory_bytes)?;
-    let writer_output_headroom = plan.writer_output_headroom(writer_memory_bytes)?;
+    let writer_output_headroom = super::writer_output_headroom(writer_memory_bytes)?;
     let available = available_bytes(&generations.file, false)?;
-    record_plan_metrics_with_required(&plan, available, full_copy_headroom);
+    record_plan_metrics_with_required(&plan, available, required_headroom);
     if available < required_headroom {
         return Err(IndexError::CurrentRepublishInsufficientHeadroom {
             available,
@@ -444,7 +429,11 @@ fn clone_candidate_files(
     metrics: &mut CandidateCloneMetrics,
 ) -> Result<()> {
     let mut actual_copied_bytes = 0_u64;
+    let mut remaining_clone_bytes = plan.logical_bytes;
     for planned in &plan.files {
+        remaining_clone_bytes = remaining_clone_bytes
+            .checked_sub(planned.identity.bytes)
+            .ok_or(IndexError::CountOverflow)?;
         validate_child_binding(&generations.file, source_name, source.identity)?;
         clone_checkpoint(CloneStage::BeforeFile, &planned.path)?;
         validate_child_binding(&generations.file, source_name, source.identity)?;
@@ -575,8 +564,10 @@ fn clone_candidate_files(
         let admitted_copy_bytes = if planned.copy_required {
             source_before.identity.length()
         } else {
-            plan.logical_bytes
-                .checked_sub(actual_copied_bytes)
+            // Completed hardlinks/reflinks consume no copy scratch. Reserve
+            // only this file and the still-untransferred part of the plan.
+            remaining_clone_bytes
+                .checked_add(source_before.identity.length())
                 .ok_or(IndexError::CountOverflow)?
         };
         let required = admitted_copy_bytes

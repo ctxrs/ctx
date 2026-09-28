@@ -245,6 +245,7 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) terminal_outcome: Option<RefreshTerminalOutcome>,
     pub(super) last_error: Option<String>,
     pub(super) failure_diagnostic: Option<RefreshFailureDiagnostic>,
+    pub(super) last_failure: Option<RefreshFailureSummary>,
 }
 
 impl SourceBackedRefreshAttempt {
@@ -529,6 +530,7 @@ pub(super) fn projected_status_json(
 ) -> Option<Value> {
     let attempt = find_attempt(state, request_id)?;
     let mut status = apply_read_projection(attempt, attempt.to_json(), false);
+    apply_last_failure(state, attempt, &mut status);
     if state
         .pending_terminal_persistence
         .as_ref()
@@ -581,7 +583,38 @@ pub(super) fn projected_job_json(
     request_id: &str,
 ) -> Option<Value> {
     let attempt = find_attempt(state, request_id)?;
-    Some(apply_read_projection(attempt, attempt.job_json(), true))
+    let mut job = apply_read_projection(attempt, attempt.job_json(), true);
+    apply_last_failure(state, attempt, &mut job);
+    Some(job)
+}
+
+fn apply_last_failure(
+    state: &CoreRefreshEngineState,
+    attempt: &SourceBackedRefreshAttempt,
+    value: &mut Value,
+) {
+    if !attempt.state.is_active() {
+        return;
+    }
+    let previous = state
+        .attempts
+        .iter()
+        .take_while(|previous| previous.request_id != attempt.request_id)
+        .filter(|previous| previous.state.is_terminal())
+        .filter(|previous| {
+            state
+                .pending_terminal_persistence
+                .as_ref()
+                .is_none_or(|pending| pending.request_id != previous.request_id)
+        })
+        .last();
+    let summary = match previous {
+        Some(previous) => RefreshFailureSummary::from_attempt(previous),
+        None => attempt.last_failure.clone(),
+    };
+    if let Some(summary) = summary {
+        value["last_failure"] = summary.to_json();
+    }
 }
 
 fn apply_read_projection(

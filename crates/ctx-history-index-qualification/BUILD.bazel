@@ -18,6 +18,7 @@ ctx_rust_test(
     testonly = True,
     srcs = [
         "tests/manifest_failure.rs",
+        "tests/merge_failure.rs",
         "tests/source_backed_recovery.rs",
     ],
     crate_name = "ctx_history_index_qualification",

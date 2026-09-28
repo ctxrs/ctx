@@ -214,7 +214,25 @@ impl CaptureLifecycleSink for IndexCaptureLifecycle {
             }
             _ => ctx_history_capture_runtime::SourceBackedRouteErrorKind::Internal,
         };
-        ctx_history_capture_runtime::SourceBackedRouteError::new(kind, error.to_string())
+        let mut route =
+            ctx_history_capture_runtime::SourceBackedRouteError::from_error(kind, &error);
+        if let Some(error) = error.io_error() {
+            route.diagnostic = Some(
+                ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic::Io(error.kind()),
+            );
+        }
+        if matches!(
+            route.diagnostic,
+            Some(
+                ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic::Io(
+                    std::io::ErrorKind::StorageFull | std::io::ErrorKind::OutOfMemory
+                )
+            )
+        ) {
+            route.kind =
+                ctx_history_capture_runtime::SourceBackedRouteErrorKind::ResourceUnavailable;
+        }
+        route
     }
 
     fn open(

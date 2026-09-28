@@ -36,7 +36,7 @@ use durable_queue::{
     durable_job_json, install_recovered_successors, job_with_queued_successors,
     recover_queued_root, recover_queued_successors,
 };
-use failure_diagnostic::RefreshFailureDiagnostic;
+use failure_diagnostic::{RefreshFailureDiagnostic, RefreshFailureSummary};
 use generation_authority::CoreRefreshTerminalSuccess;
 pub use generation_authority::PinnedCorePublication;
 use progress_model::{status_progress_total_sources_known, SourceBackedRefreshState};

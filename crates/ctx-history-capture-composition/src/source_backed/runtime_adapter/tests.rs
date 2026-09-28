@@ -61,6 +61,33 @@ fn index_capture_lifecycle_classifies_low_headroom_as_resource_unavailable() {
 }
 
 #[test]
+fn storage_full_keeps_its_typed_resource_cause_through_capture() {
+    for index_error in [
+        IndexError::Io(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "synthetic full volume",
+        )),
+        IndexError::Tantivy(
+            std::io::Error::new(std::io::ErrorKind::StorageFull, "synthetic full volume").into(),
+        ),
+    ] {
+        let error = IndexCaptureLifecycle::route_error(index_error);
+        assert_eq!(
+            error.kind,
+            ctx_history_capture_runtime::SourceBackedRouteErrorKind::ResourceUnavailable
+        );
+        assert_eq!(
+            error.diagnostic,
+            Some(
+                ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic::Io(
+                    std::io::ErrorKind::StorageFull
+                )
+            )
+        );
+    }
+}
+
+#[test]
 fn index_preparation_delegates_exact_size_and_capacity_without_reencoding() {
     let temporary = crate::test_support_paths::tempdir().unwrap();
     let writer = GenerationWriter::open(

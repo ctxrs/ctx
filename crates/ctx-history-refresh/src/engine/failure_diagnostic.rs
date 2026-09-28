@@ -1,5 +1,55 @@
 use super::*;
 
+/// The last completed failure remains diagnostic while a successor is active.
+/// It never supplies that successor's outcome, admission, or retry authority.
+#[derive(Debug, Clone)]
+pub(super) struct RefreshFailureSummary {
+    request_id: String,
+    finished_at_ms: i64,
+    code: RefreshOutcomeCode,
+    error: String,
+    diagnostic: Option<RefreshFailureDiagnostic>,
+}
+
+impl RefreshFailureSummary {
+    pub(super) fn from_attempt(attempt: &SourceBackedRefreshAttempt) -> Option<Self> {
+        (attempt.state == SourceBackedRefreshState::Failed).then_some(())?;
+        Some(Self {
+            request_id: attempt.request_id.clone(),
+            finished_at_ms: attempt.finished_at_ms?,
+            code: attempt.terminal_outcome.as_ref()?.code(),
+            error: attempt.last_error.clone()?,
+            diagnostic: attempt.failure_diagnostic,
+        })
+    }
+
+    pub(super) fn from_job(job: &Value) -> Option<Self> {
+        let value = job.get("last_failure")?;
+        let request_id = value.get("request_id")?.as_str()?;
+        uuid::Uuid::parse_str(request_id).ok()?;
+        Some(Self {
+            request_id: request_id.to_owned(),
+            finished_at_ms: value.get("finished_at_ms")?.as_i64()?,
+            code: value.get("error_code")?.as_str()?.parse().ok()?,
+            error: value.get("last_error")?.as_str()?.to_owned(),
+            diagnostic: RefreshFailureDiagnostic::from_job(value),
+        })
+    }
+
+    pub(super) fn to_json(&self) -> Value {
+        compact_json(json!({
+            "request_id": self.request_id,
+            "finished_at_ms": self.finished_at_ms,
+            "error_code": self.code.as_str(),
+            "last_error": self.error,
+            "refresh_failure_stage": self.diagnostic.map(|value| value.stage.as_str()),
+            "refresh_failure_kind": self.diagnostic.map(|value| value.kind.as_str()),
+            "refresh_failure_reason": self.diagnostic.and_then(|value| value.reason).map(RefreshFailureReason::as_str),
+            "refresh_coverage_reason": self.diagnostic.and_then(|value| value.coverage_reason).map(ZeroSourcePublicationBlockReason::as_str),
+        }))
+    }
+}
+
 /// Content-free diagnostics; never authority for outcome or retry policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RefreshFailureDiagnostic {
@@ -12,7 +62,13 @@ pub(super) struct RefreshFailureDiagnostic {
 impl RefreshFailureDiagnostic {
     pub(super) fn new(stage: RefreshFailureStage, error: Option<&anyhow::Error>) -> Self {
         let kind = error.map_or(RefreshFailureKind::Unknown, |error| {
-            if error.chain().any(|cause| cause.is::<std::io::Error>()) {
+            if error.chain().any(|cause| {
+                cause.is::<std::io::Error>()
+                    || cause
+                        .downcast_ref::<IndexError>()
+                        .and_then(IndexError::io_error)
+                        .is_some()
+            }) {
                 RefreshFailureKind::Io
             } else if error.chain().any(|cause| {
                 cause.is::<IndexError>()
@@ -88,6 +144,9 @@ fn failure_reason(error: &anyhow::Error) -> Option<RefreshFailureReason> {
             }
         });
         if let Some(error) = index {
+            if let Some(error) = error.io_error() {
+                return RefreshFailureReason::from_io(error.kind());
+            }
             match error {
                 IndexError::IndexMemoryTooSmall { .. } => {
                     return Some(RefreshFailureReason::IndexMemoryLimit)

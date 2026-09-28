@@ -52,7 +52,7 @@ pub use durable_directory::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use durable_directory::{AtomicWriteStage, AtomicWriteTestHookGuard};
-pub use error::{tantivy_file_limit_hint, GenerationError, Result};
+pub use error::{tantivy_file_limit_hint, tantivy_io_error, GenerationError, Result};
 #[cfg(windows)]
 pub use generation::publish_active_generation_pointer_validated_predecessor_fence;
 pub use generation::{

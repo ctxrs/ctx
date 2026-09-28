@@ -131,7 +131,7 @@ pub enum IndexError {
     #[error("current publication republish exceeds the byte limit: {actual}/{maximum}")]
     CurrentRepublishByteLimit { actual: u64, maximum: u64 },
     #[error(
-        "current publication republish needs {required} bytes of headroom, but only {available} are available"
+        "current publication republish needs {required} bytes of headroom, but only {available} are available; free space on the index volume and retry"
     )]
     CurrentRepublishInsufficientHeadroom { required: u64, available: u64 },
     #[error(
@@ -516,6 +516,18 @@ pub enum IndexError {
     },
     #[error("manifest Core-record aggregate is invalid for source {0}")]
     CoreRecordAggregateMismatch(String),
+}
+
+impl IndexError {
+    /// Preserve typed I/O evidence even when Tantivy omits its source chain.
+    pub fn io_error(&self) -> Option<&std::io::Error> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Tantivy(error) => ctx_history_index_generation::tantivy_io_error(error),
+            Self::CandidateFailureWithLowSpace { cause, .. } => cause.io_error(),
+            _ => None,
+        }
+    }
 }
 
 impl From<ctx_history_index_generation::GenerationError> for IndexError {

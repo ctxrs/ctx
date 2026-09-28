@@ -369,6 +369,33 @@ pub(super) fn source_backed_refresh_failure_outcome(
         );
     }
 
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .or_else(|| {
+                cause
+                    .downcast_ref::<IndexError>()
+                    .and_then(IndexError::io_error)
+            })
+            .is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::StorageFull | std::io::ErrorKind::OutOfMemory
+                )
+            })
+    }) {
+        return RefreshTerminalOutcome::with_uniform_route_disposition(
+            RefreshOutcomeCode::ResourceUnavailable,
+            true,
+            attempted_routes.clone(),
+            physical_attempt_id.to_owned(),
+            None,
+            None,
+            Some(RefreshRetryAdvice::RetryRequest),
+            None,
+        );
+    }
+
     if let Some(index_error) = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<IndexError>())
@@ -675,6 +702,7 @@ pub(super) fn new_refresh_attempt(
         terminal_outcome: None,
         last_error: None,
         failure_diagnostic: None,
+        last_failure: None,
     }
 }
 
