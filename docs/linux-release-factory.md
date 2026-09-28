@@ -75,13 +75,16 @@ scripts/release/build-public-candidate-on-linux.sh \
 `--diagnostic-unsigned` constructs selected local diagnostics without signing
 credentials; it never emits a promotable completion. `--targets linux-x64` or
 another subset avoids SDK/signing requirements for unselected platforms. Use
-`--jobs` and `--build-parallelism` to bound compilation. Final executables must
-fit the 128 MiB limit of existing updaters.
+`--jobs` and `--build-parallelism` to bound compilation. The retained 1.6.5
+bridge fits older updaters' 128 MiB limit and moves them to the current feed
+before they download the larger unified executable.
 
 ## Construction, checks and packaging
 
-The public Buildkite artifact matrix first runs normal CI using
+Run normal CI on the build host using
 `scripts/buildkite-public-ci.sh --mode=ci`, then the single public factory.
+The CI script also runs directly on a prepared host; it does not require a
+Buildkite job.
 Normal CI emits `normal-ci.json` only after actual checks succeed for the source
 commit. The factory does not depend on a private product job or source pin.
 
@@ -111,7 +114,8 @@ are later operations with injected authority; immutable object verification
 precedes advancing the current release pointer. Legacy signed envelopes project
 the same unified executable into both historical filenames for incoming older
 updaters. Both source fields identify the same public commit. New installations
-and updates use one executable. The original v1/1.3.2 feed remains frozen.
+and updates use one executable. The original v1/1.3.2 feed remains frozen;
+v2 serves the small 1.6.5 bridge, and current releases use v3.
 
 To prepare the retained older-client projection, author the existing six-field
 `ctx-managed-pair-release-candidate` JSON with the release name, stable channel,
@@ -137,7 +141,7 @@ runtime transports against that publication. The
 `publish-hosted-managed-pair-stable.sh --preflight-only` route then validates the
 projection, runtime handoff, all nine Semantic archives and independently bound
 candidate handoff before preparing metadata. Its ordinary publishing route
-signs metadata and uploads/readbacks immutable objects before changing v2's
+signs metadata and uploads/readbacks immutable objects before changing v3's
 pointer. Credentials may be injected as the existing `CTX_RELEASE_R2_*` and
 metadata-key variables; the operational Infisical lookup is only a fallback
 at that later boundary. Neither service authentication nor signing keys are
