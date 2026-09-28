@@ -47,10 +47,10 @@ pub use query_lineage::{
 mod generation;
 pub use generation::{
     CORE_MATERIALIZATION_CONTRACT_VERSION, CoreGenerationHead, CoreMaterializationReceipt,
-    CoreMaterializationReceiptIdentity, CoreRecordDigests, CoreSourceState,
-    MAX_CORE_CONTROL_WIRE_BYTES, MAX_CORE_MATERIALIZER_REVISION_BYTES, MAX_CORE_SOURCE_STATES,
-    core_record_digests, core_record_digests_from_encoded, core_record_leaf_sha256,
-    core_record_sha256, core_source_snapshot_sha256,
+    CoreMaterializationReceiptIdentity, CoreRecordDigests, CoreSourceSnapshot,
+    CoreSourceSnapshotBuilder, CoreSourceState, MAX_CORE_CONTROL_WIRE_BYTES,
+    MAX_CORE_MATERIALIZER_REVISION_BYTES, core_record_digests, core_record_digests_from_encoded,
+    core_record_leaf_sha256, core_record_sha256, core_source_snapshot_sha256,
 };
 mod coverage;
 pub use coverage::{CoreProjectionCurrentness, MaterializedCoverage, RepositoryCoverage};

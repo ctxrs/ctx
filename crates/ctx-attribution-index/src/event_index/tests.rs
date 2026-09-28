@@ -28,16 +28,12 @@ fn bounded_omission_uses_spare_coverage_bit_and_old_bytes_remain_readable() {
 #[test]
 fn synthetic_corpus_metadata_bounds_are_allocation_free() {
     assert_eq!(MAX_EVENT_INDEX_ENTRIES, 4_194_304);
-    assert_eq!(MAX_EVENT_INDEX_SOURCES, MAX_CORE_SOURCE_STATES);
-    assert!(validate_input_counts(MAX_CORE_SOURCE_STATES, 2_000_000, 0).is_ok());
+    assert!(validate_input_counts(580_225, 2_000_000, 0).is_ok());
     assert!(matches!(
         validate_input_counts(0, MAX_EVENT_INDEX_ENTRIES + 1, 0),
         Err(EventIndexError::Bound("entry count"))
     ));
-    assert!(matches!(
-        validate_input_counts(MAX_CORE_SOURCE_STATES + 1, 0, 0),
-        Err(EventIndexError::Bound("source count"))
-    ));
+
     let measured_record_bytes = 2_000_000_u64 * RECORD_BYTES as u64;
     assert!(measured_record_bytes < MAX_RECORD_SECTION_BYTES);
     assert!(measured_record_bytes + MAX_SOURCE_SECTION_BYTES < MAX_SEGMENT_PLAINTEXT_BYTES);
@@ -490,17 +486,6 @@ fn cross_chunk_lookup_and_paging() -> Result<(), Box<dyn Error>> {
 fn writer_rejects_bounds_duplicates_and_wrong_role() -> Result<(), Box<dyn Error>> {
     let temp = TempDir::new()?;
     let source = test_source(7)?;
-    let bounded_path = temp.path().join("bounded.ctxs");
-    assert!(matches!(
-        EventIndexWriter::write(
-            segment_writer(&bounded_path)?,
-            vec![source.clone(); MAX_EVENT_INDEX_SOURCES + 1],
-            Vec::new(),
-            Vec::new(),
-        ),
-        Err(EventIndexError::Bound("source count"))
-    ));
-
     let duplicate = test_state(&source, 1, 1, 1)?;
     let duplicate_path = temp.path().join("duplicate.ctxs");
     assert!(matches!(
@@ -576,8 +561,7 @@ fn reader_rejects_semantic_corruption() -> Result<(), Box<dyn Error>> {
         (
             "count",
             Box::new(|bytes| {
-                bytes[12..16]
-                    .copy_from_slice(&((MAX_EVENT_INDEX_SOURCES as u32) + 1).to_le_bytes());
+                bytes[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
             }),
         ),
         (
@@ -967,4 +951,268 @@ fn copy_fixed_key(bytes: &mut [u8], start: usize, width: usize) {
     let key_bytes = 4 + EVENT_DIGEST_BYTES;
     let (through_first, after_first) = bytes.split_at_mut(start + width);
     after_first[..key_bytes].copy_from_slice(&through_first[start..start + key_bytes]);
+}
+
+#[test]
+fn source_dictionary_above_old_corpus_cap_roundtrips_exact_lookups() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let path = temp.path().join("many-sources.ctxs");
+    let sources = (0..20_003)
+        .map(|index| {
+            EventIndexSource::new(
+                SourceKey::derive(
+                    "inventory",
+                    "fixture",
+                    "v1",
+                    1,
+                    SourceAnchor::ProviderNative {
+                        namespace: "source".into(),
+                        key: TypedKey::U64(index),
+                    },
+                )
+                .unwrap(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let records = [0, 16_384, 20_002]
+        .into_iter()
+        .map(|index| test_state(&sources[index], 7, index as u64, 1))
+        .collect::<Result<Vec<_>, _>>()?;
+    let stats = write_index(&path, sources.clone(), records, Vec::new())?;
+    assert_eq!(stats.source_count, 20_003);
+    let mut reader = open_index(&path)?;
+    for index in [0, 16_384, 20_002] {
+        let page = reader.page(&sources[index], None, 1)?;
+        assert!(page.terminal);
+        assert!(
+            matches!(&page.entries[..], [EventIndexEntry::State { state, .. }] if state.event_sequence == index as u64)
+        );
+    }
+    assert!(reader.page(&sources[9], None, 1)?.entries.is_empty());
+    Ok(())
+}
+
+#[test]
+fn spilled_event_proofs_preserve_layers_shadows_conflicts_and_cancellation()
+-> Result<(), Box<dyn Error>> {
+    use crate::materialization::{MaterializationIndexError, event_proofs::EventProofs};
+    let temp = TempDir::new()?;
+    let source = test_source(0x42)?;
+    let old = test_state(&source, 1, 1, 0x21)?;
+    let changed = test_state(&source, 1, 1, 0x22)?;
+    let removed = test_state(&source, 2, 2, 0x23)?;
+    let replacement = test_state(&source, 1, 1, 0x24)?;
+    let contents = [
+        (vec![old.clone(), removed.clone()], vec![]),
+        (vec![changed.clone()], vec![]),
+        (
+            vec![replacement.clone()],
+            vec![test_tombstone(&source, 1)?, test_tombstone(&source, 2)?],
+        ),
+        (vec![], vec![test_tombstone(&source, 1)?]),
+    ];
+    let mut paths = Vec::new();
+    for (index, (records, tombstones)) in contents.into_iter().enumerate() {
+        let path = temp.path().join(format!("proof-{index}"));
+        write_index(&path, vec![source.clone()], records, tombstones)?;
+        paths.push(path);
+    }
+    let build = |layers: &[(usize, u64)]| -> Result<EventProofs, MaterializationIndexError> {
+        let mut proofs = EventProofs::new(temp.path())?;
+        let mut runs = Vec::new();
+        for &(index, layer) in layers {
+            runs.push((
+                layer,
+                proofs.append_index(&mut open_index(&paths[index])?, &|_| Ok(true), None)?,
+            ));
+        }
+        proofs.merge(temp.path(), &runs, None)
+    };
+    // Shadowed conflicting old rows must not conflict in the winning layer.
+    for layers in [vec![(0, 1), (1, 1), (2, 2)], vec![(2, 2), (1, 1), (0, 1)]] {
+        let proofs = build(&layers)?;
+        assert_eq!(
+            proofs.lookup(source.source.identity().digest(), old.event_id)?,
+            Some(replacement.clone())
+        );
+        assert_eq!(
+            proofs.lookup(source.source.identity().digest(), removed.event_id)?,
+            None
+        );
+        assert_eq!(
+            proofs.page(source.source.identity().digest(), None, 1)?,
+            (vec![replacement.clone()], true)
+        );
+        assert_eq!(
+            proofs.page(source.source.identity().digest(), Some(old.event_id), 1)?,
+            (vec![], true)
+        );
+    }
+    assert!(matches!(
+        build(&[(0, 1), (1, 1)]),
+        Err(MaterializationIndexError::Corrupt(
+            "same-layer event states conflict"
+        ))
+    ));
+    let proofs = build(&[(0, 1), (2, 2), (3, 3)])?;
+    assert_eq!(
+        proofs.page(source.source.identity().digest(), None, 1)?,
+        (vec![], true)
+    );
+    let mut proofs = EventProofs::new(temp.path())?;
+    assert!(matches!(
+        proofs.append_index(&mut open_index(&paths[0])?, &|_| Ok(true), Some(&|| true)),
+        Err(MaterializationIndexError::Cancelled)
+    ));
+    let range = proofs.append_index(&mut open_index(&paths[0])?, &|_| Ok(true), None)?;
+    assert!(matches!(
+        proofs.merge(temp.path(), &[(1, range)], Some(&|| true)),
+        Err(MaterializationIndexError::Cancelled)
+    ));
+    Ok(())
+}
+
+#[test]
+fn filtered_proofs_never_decode_or_write_unchanged_event_ranges() -> Result<(), Box<dyn Error>> {
+    use crate::materialization::{
+        event_proofs::{EventProofs, proof_writes_for_test},
+        source_inventory::{ActiveSource, SourceInventory},
+    };
+    use ctx_attribution_model::CoreSourceState;
+    let mut expected_proof_bytes = None;
+    for unchanged_events in [1_u64, 4096] {
+        let temp = TempDir::new()?;
+        let changed = test_source(100)?;
+        let selected = (1..=3)
+            .map(|number| test_state(&changed, number, number, 0x21))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut inventory = vec![ActiveSource {
+            state: CoreSourceState {
+                source: changed.source.clone(),
+                core_record_accumulator: "a".repeat(64),
+                event_count: 3,
+            },
+            materializer_revision: "test".into(),
+        }];
+        let mut paths = Vec::new();
+        for index in 0..6 {
+            let unchanged = test_source(index)?;
+            let mut records = selected.clone();
+            for number in 1..=unchanged_events {
+                let mut state = test_state(&unchanged, number, number, 0x22)?;
+                // The unchanged event set grows while source/session metadata
+                // stays constant. A full payload pass cannot hide as metadata.
+                state.lineage = test_lineage(&unchanged, 1)?;
+                records.push(state);
+            }
+            let path = temp.path().join(format!("filtered-{index}"));
+            write_index(
+                &path,
+                vec![changed.clone(), unchanged.clone()],
+                records,
+                vec![],
+            )?;
+            paths.push(path);
+            inventory.push(ActiveSource {
+                state: CoreSourceState {
+                    source: unchanged.source,
+                    core_record_accumulator: "b".repeat(64),
+                    event_count: unchanged_events,
+                },
+                materializer_revision: "test".into(),
+            });
+        }
+        inventory.sort_by_key(|source| source.state.source.identity().digest());
+        let mut prior = SourceInventory::new(temp.path())?;
+        let mut next = SourceInventory::new(temp.path())?;
+        for source in &inventory {
+            prior.push(source)?;
+            let mut source = source.clone();
+            if source.state.source.identity() == changed.source.identity() {
+                source.state.core_record_accumulator = "c".repeat(64);
+            }
+            next.push(&source)?;
+        }
+        let opens_before = event_index_reader_work_for_test();
+        let decodes_before = event_index_event_decodes_for_test();
+        let writes_before = proof_writes_for_test();
+        let mut proofs = EventProofs::new(temp.path())?;
+        let mut runs = Vec::new();
+        for path in &paths {
+            runs.push((
+                1,
+                proofs.append_index(
+                    &mut open_index(path)?,
+                    &|source| next.changed_from(&prior, &source.storage_key),
+                    None,
+                )?,
+            ));
+        }
+        let proofs = proofs.merge(temp.path(), &runs, None)?;
+        let opens_after = event_index_reader_work_for_test();
+        let writes_after = proof_writes_for_test();
+        assert_eq!(
+            (
+                opens_after.0 - opens_before.0,
+                opens_after.1 - opens_before.1
+            ),
+            (6, 12)
+        );
+        assert_eq!(
+            event_index_event_decodes_for_test() - decodes_before,
+            18,
+            "only three selected events in each of six indexes may decode"
+        );
+        assert_eq!(writes_after.0 - writes_before.0, 18);
+        let bytes = writes_after.1 - writes_before.1;
+        if let Some(expected) = expected_proof_bytes {
+            assert_eq!(
+                bytes, expected,
+                "growing unchanged event history must not grow proof bytes"
+            );
+        }
+        expected_proof_bytes = Some(bytes);
+        assert_eq!(
+            proofs.page(changed.source.identity().digest(), None, 3)?,
+            (selected.clone(), true)
+        );
+        for source in inventory
+            .iter()
+            .filter(|source| source.state.source.identity() != changed.source.identity())
+        {
+            assert_eq!(
+                proofs.page(source.state.source.identity().digest(), None, 3)?,
+                (vec![], true)
+            );
+        }
+        // Deleted-source selection uses the same filter, and the ordinary
+        // unchanged inventory selects no event payload at all.
+        let mut deleted = SourceInventory::new(temp.path())?;
+        for source in inventory
+            .iter()
+            .filter(|source| source.state.source.identity() != changed.source.identity())
+        {
+            deleted.push(source)?;
+        }
+        for (candidate, expected_rows) in [(&deleted, 18), (&prior, 0)] {
+            let before = (
+                event_index_event_decodes_for_test(),
+                proof_writes_for_test(),
+            );
+            let mut proofs = EventProofs::new(temp.path())?;
+            for path in &paths {
+                proofs.append_index(
+                    &mut open_index(path)?,
+                    &|source| candidate.changed_from(&prior, &source.storage_key),
+                    None,
+                )?;
+            }
+            assert_eq!(
+                event_index_event_decodes_for_test() - before.0,
+                expected_rows
+            );
+            assert_eq!(proof_writes_for_test().0 - before.1.0, expected_rows);
+        }
+    }
+    Ok(())
 }

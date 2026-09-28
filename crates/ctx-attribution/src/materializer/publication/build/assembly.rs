@@ -1,16 +1,17 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 
+use super::super::super::model::ActiveSource;
+use super::super::super::source_inventory::SourceInventory;
 use crate::graph::segment::{
     EventLineageTables, MANIFEST_SCHEMA_VERSION, ManifestCandidate, SegmentManifest, SegmentRef,
     SegmentStore, random_generation_id,
 };
 use crate::graph::segment_state::{SegmentCandidateControl, SegmentCompletedControl};
-use crate::protocol::{CoreMaterializationReceipt, CoreSourceDelta, CoreSourceState};
+use crate::protocol::{CoreMaterializationReceipt, CoreSourceDelta};
 
 use super::super::super::SegmentMaterializerError;
 use super::super::super::model::{
-    MATERIALIZER_SOURCE_ROLE, MAX_METADATA_SEGMENT_ENTRIES,
+    MATERIALIZER_SOURCE_ROLE, MAX_METADATA_SEGMENT_BYTES,
     MAX_PUBLICATION_FLAT_WRITER_ADDITIONAL_BYTES, MaterializerMetrics, SourceMutation,
     SourceStateSegment, is_obsolete_derived_role,
 };
@@ -25,7 +26,8 @@ use super::planning::publication_worker_limit;
 /// persisted and no segment becomes active before `finish`.
 pub(crate) struct DirectCandidate {
     sink: PublicationSink,
-    source_states: BTreeMap<String, CoreSourceState>,
+    pub(crate) source_states: SourceInventory,
+    next_removal_source: usize,
 }
 
 impl DirectCandidate {
@@ -54,26 +56,55 @@ impl DirectCandidate {
                 publication_worker_limit(root)?,
                 reference_limit,
             )?,
-            source_states: initial_source_states(candidate.force_projection_rebuild, active),
+            source_states: SourceInventory::new(root)?,
+            next_removal_source: 0,
         })
     }
 
-    pub(crate) fn apply_source_reconciliations(
+    pub(crate) fn observe_source_page(
         &mut self,
-        reconciliations: &[crate::protocol::CoreSourceReconciliation],
-    ) {
-        for reconciliation in reconciliations {
-            let source_id =
-                super::super::super::model::source_storage_id(reconciliation.delta.source());
-            match &reconciliation.delta {
-                CoreSourceDelta::Present(state) => {
-                    self.source_states.insert(source_id, state.clone());
-                }
-                CoreSourceDelta::Removed(_) => {
-                    self.source_states.remove(&source_id);
-                }
+        deltas: &[CoreSourceDelta],
+        revision: &str,
+    ) -> Result<(), SegmentMaterializerError> {
+        for delta in deltas {
+            let CoreSourceDelta::Present(state) = delta else {
+                return Err(SegmentMaterializerError::Conflict);
+            };
+            self.source_states.push(&ActiveSource {
+                state: state.clone(),
+                materializer_revision: revision.to_owned(),
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn source_count(&self) -> usize {
+        self.source_states.len()
+    }
+
+    pub(crate) fn removal_page(
+        &mut self,
+        active: Option<&SourceInventory>,
+        limit: usize,
+    ) -> Result<(Vec<crate::protocol::CoreSourceRemoval>, bool), SegmentMaterializerError> {
+        let Some(active) = active else {
+            return Ok((Vec::new(), true));
+        };
+        let mut removed = Vec::new();
+        while self.next_removal_source < active.len() && removed.len() < limit {
+            let source = active.at(self.next_removal_source)?;
+            self.next_removal_source += 1;
+            if self
+                .source_states
+                .get_identity(source.state.source.identity().digest())?
+                .is_none()
+            {
+                removed.push(crate::protocol::CoreSourceRemoval {
+                    source: source.state.source,
+                });
             }
         }
+        Ok((removed, self.next_removal_source == active.len()))
     }
 
     pub(crate) fn stage_pages(
@@ -126,17 +157,20 @@ impl DirectCandidate {
         cancelled: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<SegmentManifest, SegmentMaterializerError> {
         validate_candidate(candidate, &completed)?;
-        let shape = super::super::super::publication_plan::direct_reference_shape(
+        let mut shape = super::super::super::publication_plan::direct_reference_shape(
             candidate,
             &candidate.publication_reference_plan,
             active,
         )?;
+        shape.candidate.source = self
+            .source_states
+            .metadata_segment_count(source_payload_budget(&completed)?)?;
         if !shape.fits_manifest()? {
             return self
                 .sink
                 .finish_transaction(Err(SegmentMaterializerError::Bounds));
         }
-        let source_states = std::mem::take(&mut self.source_states);
+        let source_states = self.source_states;
         let result = finish_candidate(
             root,
             candidate,
@@ -176,25 +210,6 @@ fn validate_candidate(
     Ok(())
 }
 
-fn initial_source_states(
-    rebuild: bool,
-    active: Option<&ActiveGeneration>,
-) -> BTreeMap<String, CoreSourceState> {
-    if rebuild {
-        BTreeMap::new()
-    } else {
-        active
-            .map(|generation| {
-                generation
-                    .sources
-                    .iter()
-                    .map(|(key, source)| (key.clone(), source.state.clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn finish_candidate(
     root: &Path,
@@ -206,24 +221,16 @@ fn finish_candidate(
     metrics: &mut MaterializerMetrics,
     shape: PublicationReferenceShape,
     sink: &mut PublicationSink,
-    source_states: BTreeMap<String, crate::protocol::CoreSourceState>,
+    source_states: SourceInventory,
     cancelled: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> Result<SegmentManifest, SegmentMaterializerError> {
-    let states = source_states.values().cloned().collect::<Vec<_>>();
     candidate
         .head
-        .validate_sources(&states)
+        .validate_source_snapshot(source_states.snapshot())
         .map_err(|_| SegmentMaterializerError::Conflict)?;
     sink.seal()?;
     sink.wait_for_publication_jobs()?;
-    let source_snapshot = states
-        .into_iter()
-        .map(|state| SourceMutation::Upsert {
-            state,
-            materializer_revision: candidate.materializer_revision.clone(),
-        })
-        .collect();
-    write_source_segments(&completed, source_snapshot, sink)?;
+    write_source_segments(&completed, source_states, sink)?;
     let retained = if candidate.force_projection_rebuild {
         Vec::new()
     } else {
@@ -301,29 +308,48 @@ fn activate_manifest(
     store.publish_candidate(staged).map_err(Into::into)
 }
 
+fn source_payload_budget(
+    completed: &SegmentCompletedControl,
+) -> Result<usize, SegmentMaterializerError> {
+    let envelope = SourceStateSegment {
+        completed: completed.clone(),
+        mutations: Vec::new(),
+    }
+    .encode()?
+    .len();
+    MAX_METADATA_SEGMENT_BYTES
+        .checked_sub(envelope)
+        .ok_or(SegmentMaterializerError::Bounds)
+}
+
 fn write_source_segments(
     completed: &SegmentCompletedControl,
-    mutations: Vec<SourceMutation>,
+    sources: SourceInventory,
     sink: &mut PublicationSink,
 ) -> Result<(), SegmentMaterializerError> {
-    if mutations.is_empty() {
+    let maximum = source_payload_budget(completed)?;
+    let mut offset = 0_usize;
+    loop {
+        let end = sources.metadata_page_end(offset, maximum)?;
+        let mut mutations = Vec::new();
+        for ordinal in offset..end {
+            let source = sources.at(ordinal)?;
+            mutations.push(SourceMutation::Upsert {
+                state: source.state,
+                materializer_revision: source.materializer_revision,
+            });
+        }
         let segment = SourceStateSegment {
             completed: completed.clone(),
             mutations,
         };
         let _validated = segment.encode()?;
         sink.write_source_segment(&segment)?;
-        return Ok(());
+        offset = end;
+        if offset == sources.len() {
+            return Ok(());
+        }
     }
-    for chunk in mutations.chunks(MAX_METADATA_SEGMENT_ENTRIES) {
-        let segment = SourceStateSegment {
-            completed: completed.clone(),
-            mutations: chunk.to_vec(),
-        };
-        let _validated = segment.encode()?;
-        sink.write_source_segment(&segment)?;
-    }
-    Ok(())
 }
 
 fn ensure_required_roles(

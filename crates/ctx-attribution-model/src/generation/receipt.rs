@@ -1,5 +1,5 @@
 use super::validation::{validate_encoded_bound, validate_identity, validate_sha256};
-use super::{CoreGenerationHead, MAX_CORE_CONTROL_WIRE_BYTES, MAX_CORE_SOURCE_STATES};
+use super::{CoreGenerationHead, MAX_CORE_CONTROL_WIRE_BYTES};
 use crate::{ErrorClass, ProtocolError};
 use serde::{Deserialize, Serialize};
 
@@ -23,15 +23,6 @@ impl CoreMaterializationReceipt {
         )?;
         validate_sha256(&self.source_snapshot_sha256, "Core source snapshot")?;
         validate_identity(&self.materializer_revision, "Core materializer revision")?;
-        if usize::try_from(self.source_count)
-            .ok()
-            .is_none_or(|count| count > MAX_CORE_SOURCE_STATES)
-        {
-            return Err(ProtocolError::new(
-                ErrorClass::Bounds,
-                "Core materialization receipt exceeds its source count bound",
-            ));
-        }
         validate_encoded_bound(
             self,
             MAX_CORE_CONTROL_WIRE_BYTES,

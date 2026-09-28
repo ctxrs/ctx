@@ -44,17 +44,9 @@ fn entries_are_exactly_sixty_four_bytes_and_hash_the_complete_delta() {
 }
 
 #[test]
-fn payload_bound_is_exact_for_maximum_and_real_inventory() {
-    assert_eq!(MAX_RECONCILIATION_CURSOR_ENTRIES, 32_768);
-    assert_eq!(
-        cursor_payload_bytes(MAX_RECONCILIATION_CURSOR_ENTRIES).expect("maximum must fit"),
-        2 * 1024 * 1024
-    );
-    assert_eq!(
-        cursor_payload_bytes(6_084).expect("real inventory must fit"),
-        389_376
-    );
-    assert!(cursor_payload_bytes(MAX_RECONCILIATION_CURSOR_ENTRIES + 1).is_err());
+fn payload_accounting_tracks_actual_inventory_without_a_corpus_limit() {
+    assert_eq!(cursor_payload_bytes(580_225).unwrap(), 37_134_400);
+    assert!(cursor_payload_bytes(usize::MAX).is_err());
 }
 
 #[test]
@@ -65,8 +57,8 @@ fn changed_and_removed_counts_cannot_borrow_the_other_sides_limit() {
     );
     assert!(bounded_entry_limit(10, 100, 11, 0).is_err());
     assert!(bounded_entry_limit(100, 10, 0, 11).is_err());
-    assert!(bounded_entry_limit(MAX_CORE_SOURCE_STATES + 1, 0, 0, 0).is_err());
-    assert!(bounded_entry_limit(0, MAX_CORE_SOURCE_STATES + 1, 0, 0).is_err());
+    assert_eq!(bounded_entry_limit(580_225, 0, 0, 0).unwrap(), 580_225);
+    assert_eq!(bounded_entry_limit(0, 580_225, 0, 0).unwrap(), 580_225);
 }
 
 #[test]
@@ -77,13 +69,12 @@ fn exact_match_distinguishes_identity_and_full_delta_hash() {
         graph_generation: 1,
         materializer_revision: "revision".to_owned(),
     };
-    let mut entries = Vec::new();
-    entries
-        .try_reserve_exact(2)
-        .expect("cursor reservation must fit");
+    let temp = tempfile::tempdir().unwrap();
+    let entries = super::super::runtime_file::RuntimeFile::new(temp.path()).unwrap();
     let mut cursor = ReconciliationCursor {
         owner,
         entries,
+        entry_count: 0,
         entry_limit: 2,
     };
     let delta = present(1);

@@ -190,7 +190,9 @@ pub(crate) fn validate_event_delta(
         CoreSourceDelta::Removed(_) => store
             .active
             .as_ref()
-            .and_then(|active| active.sources.get(&source_id))
+            .map(|active| active.sources.get(&source_id))
+            .transpose()?
+            .flatten()
             .map(|source| source.state.clone())
             .ok_or(SegmentMaterializerError::Conflict)?,
     };

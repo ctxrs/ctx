@@ -14,5 +14,5 @@ pub struct SegmentCoreCoverage {
     pub bounded_omission_events: u64,
 }
 
-/// Existing bounded Core corpus ceiling encoded by the event-index format.
+/// Per-segment event row bound encoded by the event-index format.
 pub const MAX_SEGMENT_CORE_EVENTS: usize = 4_194_304;

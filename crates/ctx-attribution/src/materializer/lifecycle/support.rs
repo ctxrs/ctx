@@ -222,7 +222,9 @@ pub(super) fn ensure_current_frontier(
                 .active
                 .as_ref()
                 .filter(|active| !active.requires_clean_rebuild)
-                .and_then(|active| active.sources.get(&source_id))
+                .map(|active| active.sources.get(&source_id))
+                .transpose()?
+                .flatten()
                 .map_or(0, |active| active.state.event_count);
             frontier(&state, false, expected, prior_count)
         }
@@ -230,7 +232,9 @@ pub(super) fn ensure_current_frontier(
             let active = store
                 .active
                 .as_ref()
-                .and_then(|active| active.sources.get(&source_id))
+                .map(|active| active.sources.get(&source_id))
+                .transpose()?
+                .flatten()
                 .ok_or(SegmentMaterializerError::Conflict)?;
             if !active.state.source.exact_descriptor_eq(&removal.source) {
                 return Err(SegmentMaterializerError::Conflict);
