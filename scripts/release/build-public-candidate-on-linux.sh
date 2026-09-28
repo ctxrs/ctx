@@ -381,7 +381,7 @@ version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json
 
 build_target() {
   local target_id="$1" platform triple build_triple binary raw target_dir
-  local encoded_flags
+  local encoded_flags remap cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
   local CTX_PUBLIC_TARGET_PLATFORM CTX_PUBLIC_TARGET_TRIPLE CTX_PUBLIC_TARGET_BINARY
   local CTX_PUBLIC_TARGET_GLIBC_MAX
   local -a build_env notify_args=()
@@ -398,12 +398,18 @@ build_target() {
   raw="ctx"
   [[ "${target_id}" != "windows-x64" ]] || raw="ctx.exe"
   target_dir="${work_dir}/linux-release-factory/${target_id}"
-  encoded_flags=""
+  [[ "${cargo_home}" == /* ]] || cargo_home="${repo_root}/${cargo_home}"
+  # Cargo's encoded flags take precedence, including an explicitly empty value.
+  encoded_flags="$(python3 -c 'import os; print(os.environ.get("CARGO_ENCODED_RUSTFLAGS", "\x1f".join(os.environ.get("RUSTFLAGS", "").split())), end="")')"
+  # Rust source locations in panic messages survive release debug stripping.
+  for remap in "${repo_root}=/ctx/src" "${work_dir}=/ctx/build" "${cargo_home}=/ctx/cargo"; do
+    encoded_flags+="${encoded_flags:+$'\x1f'}--remap-path-prefix=${remap}"
+  done
   if [[ "${target_id}" == macos-* ]]; then
     # Leave deterministic load-command space for the Developer ID signature.
     # Without this, the x86_64 Mach-O can place __text immediately after the
     # existing commands, leaving rcodesign nowhere to add LC_CODE_SIGNATURE.
-    encoded_flags="-Clink-arg=-Wl,-headerpad,0x1000"
+    encoded_flags+=$'\x1f'"-Clink-arg=-Wl,-headerpad,0x1000"
     encoded_flags+=$'\x1f'"--remap-path-prefix=${notify_source}=/ctx/deps/notify-9.0.0-rc.4"
     notify_args=(--config "${stage_dir}/notify/config.toml")
   fi
@@ -411,13 +417,13 @@ build_target() {
     # Build locked lzma sources; the host library can exceed the target ABI.
     "LZMA_API_STATIC=1"
     "CARGO_TARGET_DIR=${target_dir}"
+    "CARGO_ENCODED_RUSTFLAGS=${encoded_flags}"
     "CTX_RELEASE_BUILD_SOURCE_COMMIT=${source_commit}"
     "CTX_RELEASE_BUILD_CARGO_LOCK_SHA256=${cargo_lock_sha256}"
     "CTX_RELEASE_BUILD_TARGET=${triple}"
   )
   if [[ "${target_id}" == macos-* ]]; then
     build_env+=("SDKROOT=${macos_sdk_root}" "MACOSX_DEPLOYMENT_TARGET=13.0")
-    build_env+=("CARGO_ENCODED_RUSTFLAGS=${encoded_flags}")
   fi
   env "${build_env[@]}" \
     "${cargo_zigbuild_bin}" zigbuild --manifest-path "${repo_root}/Cargo.toml" \
