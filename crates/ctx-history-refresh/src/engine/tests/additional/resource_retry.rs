@@ -38,7 +38,7 @@ fn disk_failure_does_not_retry_immediately_when_capture_observes_a_new_watch_eve
         .enqueue_next_dirty_route(&root, ledger_now_ms())
         .unwrap());
     assert_eq!(
-        VerifiedIndex::open_pinned(&source_backed_index_root(&root))
+        VerifiedIndex::open_pinned(source_backed_index_root(&root))
             .unwrap()
             .generation_id(),
         generation
