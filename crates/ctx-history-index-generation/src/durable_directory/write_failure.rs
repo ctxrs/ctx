@@ -8,7 +8,7 @@ use tantivy::directory::{
     error::OpenWriteError, AntiCallToken, Directory, MmapDirectory, TerminatingWrite, WritePtr,
 };
 
-/// One candidate's first output error, shared by its writer/merge threads.
+/// One candidate's first non-interrupted output error, shared by its writer/merge threads.
 /// Reopening a directory creates a fresh observation; no state is persisted.
 #[derive(Clone, Default)]
 pub(super) struct WriteFailure(Arc<Mutex<Option<io::Error>>>);
@@ -22,6 +22,11 @@ fn copy_error(error: &io::Error) -> io::Error {
 
 impl WriteFailure {
     pub(super) fn record(&self, error: &io::Error) {
+        // The enclosing writer can retry Interrupted and finish successfully.
+        // Keep it from poisoning the candidate or hiding a later real failure.
+        if error.kind() == io::ErrorKind::Interrupted {
+            return;
+        }
         let mut first = self
             .0
             .lock()

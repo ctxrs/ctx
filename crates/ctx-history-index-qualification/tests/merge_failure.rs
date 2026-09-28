@@ -42,11 +42,19 @@ pub(super) fn enospc_preserves_current_and_allows_retry(shim: &Path) {
     };
     let pinned = VerifiedIndex::open_pinned(&fixture.root).unwrap();
     let pointer = fs::read(fixture.root.join("active-generation.json")).unwrap();
-    for (operation, target) in [("write", "index_data"), ("rename", "generation_meta_final")] {
+    for (operation, target, action) in [
+        ("write", "index_data", "fail"),
+        ("rename", "generation_meta_final", "fail"),
+        ("write", "index_data", "interrupt_then_fail"),
+    ] {
+        eprintln!("merge fault: {operation} {target} {action}");
         let output = fixture.run_fault_child(
             shim,
             "commit_expect_storage_full",
-            FaultCase::fail(operation, target, "ENOSPC", Some("generation_meta_rename")),
+            FaultCase {
+                action,
+                ..FaultCase::fail(operation, target, "ENOSPC", Some("generation_meta_rename"))
+            },
         );
         assert!(output.status.success(), "merge fault child: {output:?}");
         assert!(
@@ -64,8 +72,23 @@ pub(super) fn enospc_preserves_current_and_allows_retry(shim: &Path) {
         );
         assert_reader_terms(&pinned, "previous", "candidate");
     }
-    let retry = staged_replacement(&fixture.root).commit(|_| true).unwrap();
-    assert_ne!(retry.generation_id, fixture.baseline.generation_id);
-    assert_generation(&fixture.root, &retry.generation_id, "candidate", "previous");
+    // The outer writer retries EINTR; it must not leave a retained failure
+    // that rejects a candidate whose merge eventually completed successfully.
+    eprintln!("merge fault: one-shot EINTR followed by successful publication");
+    let output = fixture.run_fault_child(
+        shim,
+        "commit",
+        FaultCase::fail(
+            "write",
+            "index_data",
+            "EINTR",
+            Some("generation_meta_rename"),
+        ),
+    );
+    assert!(output.status.success(), "EINTR retry child: {output:?}");
+    assert!(fixture.marker.is_file(), "EINTR injection was not reached");
+    let generation = fs::read_to_string(&fixture.result).unwrap();
+    assert_ne!(generation, fixture.baseline.generation_id);
+    assert_generation(&fixture.root, &generation, "candidate", "previous");
     assert_reader_terms(&pinned, "previous", "candidate");
 }
