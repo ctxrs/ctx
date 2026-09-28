@@ -148,43 +148,6 @@ impl CoreMaterializationSession<'_> {
         )?)
     }
 
-    pub(crate) fn prepare_prior_event_proofs(
-        &mut self,
-        cancelled: Option<&(dyn Fn() -> bool + Sync)>,
-    ) -> Result<(), SegmentMaterializerError> {
-        if self.changed_sources == 0 && self.removed_sources == 0 {
-            return Ok(());
-        }
-        let candidate = self
-            .candidate
-            .as_ref()
-            .ok_or(SegmentMaterializerError::Conflict)?;
-        if !candidate.control.source_terminal {
-            return Err(SegmentMaterializerError::Conflict);
-        }
-        let next = &self
-            .direct_candidate
-            .as_ref()
-            .ok_or(SegmentMaterializerError::Conflict)?
-            .source_states;
-        if let Some(active) = self.materializer.active.as_mut() {
-            super::publication::prepare_event_proofs(
-                active,
-                &self.materializer.root,
-                &self.materialization_id,
-                &|prior, source| {
-                    if candidate.control.force_projection_rebuild {
-                        Ok(true)
-                    } else {
-                        next.changed_from(prior, &source.storage_key)
-                    }
-                },
-                cancelled,
-            )?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn reconcile_source_page_with(
         &mut self,
         mut page: CoreSourceDeltaPage,
