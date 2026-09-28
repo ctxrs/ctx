@@ -10,6 +10,8 @@ use crate::error::ProviderJsonlInventoryLimit;
 use crate::{Result, SourceIoError, MAX_PROVIDER_JSONL_LINE_BYTES};
 
 mod root_handle;
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+pub(crate) use root_handle::boot_stable_volume_uuid;
 #[allow(
     unused_imports,
     reason = "provider adapters migrate to these capability types in follow-up slices"

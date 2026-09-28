@@ -312,6 +312,14 @@ fn directory_snapshot_rejects_mutation_during_enumeration_and_named_replacement(
     let child = root.join("child");
     fs::create_dir_all(&child).unwrap();
     fs::write(child.join("first"), b"first").unwrap();
+    // Creation and the callback can land in the same filesystem clock tick.
+    // Give the directory an older mtime so the mutation is observable without
+    // a timing-dependent sleep (Unix permits opening a directory as a File).
+    #[cfg(unix)]
+    fs::File::open(&child)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
     let authority = crate::ProviderSourceRoot::open(&root).unwrap();
     let directory = authority.open_directory(Path::new("child")).unwrap();
     let mut changed = false;

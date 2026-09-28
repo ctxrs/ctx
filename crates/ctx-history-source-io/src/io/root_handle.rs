@@ -647,36 +647,21 @@ pub(super) enum RetainedFileIdentityVersion {
 }
 
 #[cfg(unix)]
+#[path = "root_handle/unix_identity.rs"]
+mod unix_identity;
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+pub(crate) use unix_identity::boot_stable_volume_uuid;
+
+#[cfg(unix)]
 fn retained_file_identity(
-    _path: &Path,
-    _file: &File,
+    path: &Path,
+    file: &File,
     metadata: &Metadata,
     version: RetainedFileIdentityVersion,
 ) -> Result<Option<([u8; 32], [u8; 32])>> {
-    use std::os::unix::fs::MetadataExt;
-
-    let mut stable = Sha256::new();
-    let mut change = Sha256::new();
-    match version {
-        RetainedFileIdentityVersion::SharedJsonlV1 => {
-            stable.update(b"ctx-jsonl-retained-file-identity-v1\0unix-stable\0");
-            change.update(b"ctx-jsonl-retained-file-identity-v1\0unix-change\0");
-        }
-        RetainedFileIdentityVersion::OrdinaryFileV2 => {
-            stable.update(b"ctx-ordinary-file-observation-v2\0unix-stable\0");
-            change.update(b"ctx-ordinary-file-observation-v2\0unix-change\0");
-        }
-    }
-    stable.update(metadata.dev().to_le_bytes());
-    stable.update(metadata.ino().to_le_bytes());
-    if version == RetainedFileIdentityVersion::OrdinaryFileV2 {
-        stable.update(metadata.mode().to_le_bytes());
-        change.update(metadata.dev().to_le_bytes());
-        change.update(metadata.ino().to_le_bytes());
-    }
-    change.update(metadata.ctime().to_le_bytes());
-    change.update(metadata.ctime_nsec().to_le_bytes());
-    Ok(Some((stable.finalize().into(), change.finalize().into())))
+    unix_identity::retained_file_identity(file, metadata, version)
+        .map(Some)
+        .map_err(|error| map_open_error(path, error.into()))
 }
 
 #[cfg(not(unix))]
