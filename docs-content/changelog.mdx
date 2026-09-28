@@ -8,6 +8,30 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.1.0
+
+Released: 2026-09-28
+
+### Changed
+
+- Blame indexing supports histories with more than 16,384 sources. Large source inventories are processed in pages with temporary disk storage.
+
+### Fixed
+
+- Incremental history refresh calculates free-space requirements from the data it needs to write or copy, avoiding unnecessary full-index reservations.
+- Disk-full failures keep previously indexed history searchable and retain the failure reason while retries back off.
+- Installers distinguish a successful binary install from failed history setup. `ctx setup --wait` returns a nonzero status if the requested refresh fails.
+- Uninstalling and reinstalling preserves your automatic or manual indexing preference.
+- A verified new installation no longer reports upgrade errors from an older installation.
+- On macOS, retained history files keep stable identities across reboots.
+
+### Commits and PRs
+
+- Source commit: [add07879](https://github.com/ctxrs/ctx/commit/add078799081cedc979bb11e312489d2841f2258).
+- Full diff: [v2.0.5...add07879](https://github.com/ctxrs/ctx/compare/v2.0.5...add078799081cedc979bb11e312489d2841f2258).
+- [#1076](https://github.com/ctxrs/ctx/pull/1076) — scale Blame indexing and fix history refresh and setup.
+- [#1075](https://github.com/ctxrs/ctx/pull/1075) — keep macOS retained file identities stable across reboots.
+
 ## 2.0.5
 
 Released: 2026-09-27
