@@ -11,10 +11,11 @@ only agent-history storage; graph uses `ctx graph --db`, while output uses
 `CTX_OUTPUT_CONFIG_DIR` and `CTX_OUTPUT_STATE_DIR`. Keep the installed
 binary and live stores unchanged.
 
-Managed ctx 1.6.3 and earlier cannot download a unified executable above their
-original 128 MiB limit through `ctx upgrade`. The hosted installer includes a
-migration for that jump: it verifies the new download, coordinates replacement
-with the installed daemon, and preserves installation ownership. An interrupted
+Older managed installations first upgrade to the small 1.6.5 bridge, then to
+the current unified release on a subsequent upgrade check. The bridge fits
+older updaters' 128 MiB download limit. The hosted installer can also perform
+the migration directly: it verifies the download, coordinates replacement with
+the installed daemon, and preserves installation ownership. An interrupted
 replacement requires the same signed candidate to finish; it is not repaired by
 substituting a different release. A local source-build trial does not change an
 installed copy or publish this installer workflow.

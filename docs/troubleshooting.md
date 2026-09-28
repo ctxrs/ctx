@@ -40,10 +40,13 @@ the install directory. Rerun the same hosted installer after correcting the
 problem. Do not delete the data root or edit the managed marker to force a
 retry.
 
-If installation succeeded but setup failed, run `ctx setup`, then `ctx status`.
-An optional man-page or skill warning is separate from installation failure;
-follow the warning's repair command. If Blame indexing is pending, run
-`ctx import --all` or `ctx setup --wait` and retry.
+If the binary installed but history setup failed, it remains installed. Run
+`ctx doctor`, correct the reported problem, then retry `ctx setup --wait`.
+A failed requested refresh returns a nonzero exit status; previously indexed
+history can remain searchable. Intentional manual indexing or `--no-daemon`
+deferral is reported separately. An optional man-page or skill warning has its
+own repair command. If Blame indexing is pending, run `ctx import --all` or
+`ctx setup --wait` and retry.
 
 For an unmanaged executable or mismatched marker, follow the
 [upgrade recovery instructions](upgrade.md#fix-upgrade-diagnostics) before
