@@ -381,7 +381,7 @@ version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json
 
 build_target() {
   local target_id="$1" platform triple build_triple binary raw target_dir
-  local encoded_flags native_flag_assignments remap cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
+  local encoded_flags remap cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
   local CTX_PUBLIC_TARGET_PLATFORM CTX_PUBLIC_TARGET_TRIPLE CTX_PUBLIC_TARGET_BINARY
   local CTX_PUBLIC_TARGET_GLIBC_MAX
   local -a build_env notify_args=()
@@ -401,7 +401,7 @@ build_target() {
   [[ "${cargo_home}" == /* ]] || cargo_home="${repo_root}/${cargo_home}"
   # Cargo's encoded flags take precedence, including an explicitly empty value.
   encoded_flags="$(python3 -c 'import os; print(os.environ.get("CARGO_ENCODED_RUSTFLAGS", "\x1f".join(os.environ.get("RUSTFLAGS", "").split())), end="")')"
-  # Panic locations and native __FILE__ strings survive release debug stripping.
+  # Rust source locations in panic messages survive release debug stripping.
   for remap in "${repo_root}=/ctx/src" "${work_dir}=/ctx/build" "${cargo_home}=/ctx/cargo"; do
     encoded_flags+="${encoded_flags:+$'\x1f'}--remap-path-prefix=${remap}"
   done
@@ -418,7 +418,6 @@ build_target() {
     "LZMA_API_STATIC=1"
     "CARGO_TARGET_DIR=${target_dir}"
     "CARGO_ENCODED_RUSTFLAGS=${encoded_flags}"
-    "CC_SHELL_ESCAPED_FLAGS=1"
     "CTX_RELEASE_BUILD_SOURCE_COMMIT=${source_commit}"
     "CTX_RELEASE_BUILD_CARGO_LOCK_SHA256=${cargo_lock_sha256}"
     "CTX_RELEASE_BUILD_TARGET=${triple}"
@@ -426,27 +425,6 @@ build_target() {
   if [[ "${target_id}" == macos-* ]]; then
     build_env+=("SDKROOT=${macos_sdk_root}" "MACOSX_DEPLOYMENT_TARGET=13.0")
   fi
-  # cc's shell-escaped mode keeps paths with spaces in one compiler argument.
-  # Quote existing whitespace-split flags (including overrides) before enabling it.
-  native_flag_assignments="$(python3 - "${repo_root}=/ctx/src" "${work_dir}=/ctx/build" "${cargo_home}=/ctx/cargo" <<'PY'
-import os, re, shlex, sys
-maps = shlex.join("-ffile-prefix-map=" + item for item in sys.argv[1:])
-escaped = os.environ.get("CC_SHELL_ESCAPED_FLAGS", "") not in ("", "0", "no", "false")
-names = {"CFLAGS", "CXXFLAGS"} | {
-    name for name in os.environ if name.startswith(("CFLAGS_", "CXXFLAGS_"))
-    or name in ("HOST_CFLAGS", "HOST_CXXFLAGS", "TARGET_CFLAGS", "TARGET_CXXFLAGS")
-}
-for name in sorted(names):
-    value = os.environ.get(name, "")
-    if not escaped:
-        value = shlex.join(re.findall(r"[^\t\n\f\r ]+", value))
-    if name in ("CFLAGS", "CXXFLAGS"):
-        # End any inherited shell comment before appending compiler arguments.
-        value += "\n" + maps
-    print("build_env+=(" + shlex.quote(name + "=" + value) + ")")
-PY
-)"
-  eval "${native_flag_assignments}"
   env "${build_env[@]}" \
     "${cargo_zigbuild_bin}" zigbuild --manifest-path "${repo_root}/Cargo.toml" \
       "${notify_args[@]}" \

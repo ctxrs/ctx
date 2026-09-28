@@ -7,7 +7,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import shlex
 import stat
 import subprocess
 import sys
@@ -677,7 +676,7 @@ exit 23
         self.assertIn("-Clink-arg=-Wl,-headerpad,0x1000", build_body)
         self.assertIn('"CARGO_ENCODED_RUSTFLAGS=${encoded_flags}"', build_body)
 
-    def test_factory_remaps_source_dependency_and_build_paths_without_losing_flags(self) -> None:
+    def test_factory_remaps_rust_paths_without_losing_existing_flags(self) -> None:
         source = (ROOT / "scripts/release/build-public-candidate-on-linux.sh").read_text()
         start = source.index("build_target() {")
         build = source[start:source.index('\n  env "${build_env[@]}"', start)]
@@ -711,7 +710,6 @@ build_target "$2"
             ({"RUSTFLAGS": "--cfg ignored", "CARGO_ENCODED_RUSTFLAGS":
               '--cfg\x1ffixture="two words"'}, ["--cfg", 'fixture="two words"']),
             ({"RUSTFLAGS": "--cfg ignored", "CARGO_ENCODED_RUSTFLAGS": ""}, []),
-            ({"CC_SHELL_ESCAPED_FLAGS": "1"}, []),
             ({"CC_SHELL_ESCAPED_FLAGS": "1", "CFLAGS": "-O2 # release flags",
               "CXXFLAGS": "-fno-exceptions # release flags"}, []),
         ]
@@ -723,9 +721,8 @@ build_target "$2"
                         with self.subTest(target=target, cargo_home=cargo_home, flags=inherited):
                             env = {key: value for key, value in os.environ.items() if key not in (
                                 "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_HOME", "CC_SHELL_ESCAPED_FLAGS")}
-                            escaped = inherited.get("CC_SHELL_ESCAPED_FLAGS") == "1"
                             env.update(HOME=str(root / "home"),
-                                       CFLAGS="-DKEEP_C='two words' -O2" if escaped else '-DKEEP_C="1" -O2',
+                                       CFLAGS='-DKEEP_C="1" -O2',
                                        CXXFLAGS="-DKEEP_CXX=1 -fno-exceptions",
                                        TARGET_CFLAGS='-DTARGET="1"', CFLAGS_fixture_triple='-DTRIPLE="1"')
                             env.update(inherited)
@@ -746,19 +743,9 @@ build_target "$2"
                                 self.assertEqual(observed["SDKROOT"], str(root / "work/sdk"))
                                 self.assertEqual(observed["MACOSX_DEPLOYMENT_TARGET"], "13.0")
                             self.assertEqual(observed["CARGO_ENCODED_RUSTFLAGS"].split(separator), rust_flags)
-                            native_flags = ["-ffile-prefix-map=" + item for item in remaps]
-                            cflags = ["-O2"] if "CFLAGS" in inherited else [
-                                "-DKEEP_C=two words" if escaped else '-DKEEP_C="1"', "-O2"]
-                            cxxflags = ["-fno-exceptions"] if "CXXFLAGS" in inherited else [
-                                "-DKEEP_CXX=1", "-fno-exceptions"]
-                            # Rust shlex, used by cc, recognizes unquoted comments.
-                            self.assertEqual(shlex.split(observed["CFLAGS"], comments=True), cflags + native_flags)
-                            self.assertEqual(shlex.split(observed["CXXFLAGS"], comments=True), cxxflags + native_flags)
-                            self.assertEqual(shlex.split(observed["TARGET_CFLAGS"], comments=True),
-                                             ["-DTARGET=1" if escaped else '-DTARGET="1"'])
-                            self.assertEqual(shlex.split(observed["CFLAGS_fixture_triple"], comments=True),
-                                             ["-DTRIPLE=1" if escaped else '-DTRIPLE="1"'])
-                            self.assertEqual(observed["CC_SHELL_ESCAPED_FLAGS"], "1")
+                            for name in ("CFLAGS", "CXXFLAGS", "TARGET_CFLAGS",
+                                         "CFLAGS_fixture_triple", "CC_SHELL_ESCAPED_FLAGS"):
+                                self.assertEqual(observed[name], env.get(name))
                             self.assertEqual(observed["LZMA_API_STATIC"], "1")
 
     def test_native_linux_validator_requires_ubuntu_24(self) -> None:
