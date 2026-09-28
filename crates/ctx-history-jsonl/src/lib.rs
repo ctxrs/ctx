@@ -26,6 +26,9 @@ pub use terminal_authority::*;
 #[cfg(test)]
 mod test_support_paths {
     pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
-        tempfile::Builder::new().prefix("ctx-jsonl-").tempdir()
+        let root = std::fs::canonicalize(std::env::temp_dir())?;
+        tempfile::Builder::new()
+            .prefix("ctx-jsonl-")
+            .tempdir_in(root)
     }
 }

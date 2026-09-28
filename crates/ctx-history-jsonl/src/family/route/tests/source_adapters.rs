@@ -286,7 +286,7 @@ impl JsonlFamilyAdapter for ReplacementWithQuarantineTestAdapter {
 
 #[test]
 fn canonical_inventory_exposes_typed_physical_leaf_dispositions() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let accepted_path = temp.path().join("accepted.jsonl");
     let quarantined_path = temp.path().join("quarantined.jsonl");
     let pending_path = temp.path().join("pending.jsonl");
@@ -347,7 +347,7 @@ fn canonical_inventory_exposes_typed_physical_leaf_dispositions() {
 
 #[test]
 fn canonical_inventory_rejects_two_dispositions_for_one_physical_leaf() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("same.jsonl");
     fs::write(&path, TEST_RECORD).unwrap();
     let discovered = TestAdapter.discover(temp.path()).unwrap();
@@ -378,7 +378,7 @@ fn canonical_inventory_rejects_two_dispositions_for_one_physical_leaf() {
 
 #[test]
 fn diagnosed_quarantine_owner_is_not_reclassified_as_pending() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let owner_path = temp.path().join("owner.jsonl");
     let peer_path = temp.path().join("peer.jsonl");
     fs::write(&owner_path, b"{\"message\":\"incomplete\"").unwrap();
@@ -450,7 +450,7 @@ fn diagnosed_quarantine_owner_is_not_reclassified_as_pending() {
 fn unobserved_membership_uses_parent_enumeration_without_opening_the_leaf() {
     use std::os::unix::fs::PermissionsExt;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();
     let path = root.join("denied.jsonl");
@@ -501,7 +501,7 @@ fn unobserved_membership_uses_parent_enumeration_without_opening_the_leaf() {
 
 #[test]
 fn canonical_inventory_collapses_byte_identical_logical_source_aliases() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");
     let second_path = temp.path().join("second.jsonl");
     fs::write(&first_path, TEST_RECORD).unwrap();
@@ -555,7 +555,7 @@ fn canonical_inventory_collapses_byte_identical_logical_source_aliases() {
 
 #[test]
 fn canonical_inventory_preserves_unrelated_source_when_deduplicating() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");
     let second_path = temp.path().join("second.jsonl");
     let third_path = temp.path().join("third.jsonl");
@@ -607,7 +607,7 @@ fn canonical_inventory_preserves_unrelated_source_when_deduplicating() {
 
 #[test]
 fn canonical_inventory_requires_provider_resolution_for_divergent_duplicates() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");
     let second_path = temp.path().join("second.jsonl");
     let third_path = temp.path().join("third.jsonl");
@@ -649,7 +649,7 @@ fn canonical_inventory_requires_provider_resolution_for_divergent_duplicates() {
 
 #[test]
 fn canonical_inventory_rejects_duplicates_with_distinct_leaf_semantics() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");
     let second_path = temp.path().join("second.jsonl");
     fs::write(&first_path, TEST_RECORD).unwrap();
@@ -703,7 +703,7 @@ fn canonical_inventory_rejects_duplicates_with_distinct_leaf_semantics() {
 
 #[test]
 fn canonical_inventory_deduplication_is_deterministic_regardless_of_leaf_order() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");
     let second_path = temp.path().join("zzz.jsonl");
     fs::write(&first_path, TEST_RECORD).unwrap();
@@ -757,7 +757,7 @@ fn canonical_inventory_still_rejects_duplicate_physical_member_among_accepted_le
     // invariant from a duplicate logical source and must still fail. This avoids
     // the shared root-authority disposition checks so it is independent of host
     // path canonicalization.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("same.jsonl");
     fs::write(&path, TEST_RECORD).unwrap();
     let discovered = TestAdapter.discover(temp.path()).unwrap();
@@ -806,7 +806,7 @@ fn canonical_inventory_still_rejects_duplicate_physical_member_among_accepted_le
 
 #[test]
 fn nonzero_incomplete_first_record_is_pending_before_provider_projection() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("pending.jsonl"), br#"{"message":"unfinished""#).unwrap();

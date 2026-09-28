@@ -357,27 +357,32 @@ fn inventory_enforces_depth_entry_path_and_record_bounds() {
     ));
 }
 
-#[cfg(unix)]
+// APFS/HFS reject non-UTF-8 names before an inventory can observe them.
+// The path-identity tests exercise in-memory invalid names on every platform.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
-fn inventory_rejects_non_utf8_symlink_and_nonregular_components() {
-    use std::{
-        ffi::{CString, OsString},
-        os::unix::{ffi::OsStringExt, fs::symlink},
-    };
+fn inventory_rejects_non_utf8_components() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let non_utf_root = temp.path().join("non-utf");
-    fs::create_dir(&non_utf_root).unwrap();
     fs::write(
-        non_utf_root.join(OsString::from_vec(vec![b'f', 0xff, b'.', b'j'])),
+        temp.path()
+            .join(OsString::from_vec(vec![b'f', 0xff, b'.', b'j'])),
         b"x",
     )
     .unwrap();
     assert!(matches!(
-        EventFileInventory::open(&non_utf_root, limits(), classify),
+        EventFileInventory::open(temp.path(), limits(), classify),
         Err(EventFileInventoryError::InvalidPath { .. })
     ));
+}
 
+#[cfg(unix)]
+#[test]
+fn inventory_rejects_symlink_and_nonregular_components() {
+    use std::{ffi::CString, os::unix::fs::symlink};
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
     let target = temp.path().join("target.json");
     fs::write(&target, b"{}").unwrap();
     let exact_link = temp.path().join("conversation-link.json");
