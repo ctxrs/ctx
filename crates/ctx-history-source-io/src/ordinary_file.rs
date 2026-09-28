@@ -359,6 +359,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn expected_unix_volume_bytes(file: &File, metadata: &std::fs::Metadata) -> Vec<u8> {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = metadata;
+            crate::io::boot_stable_volume_uuid(file)
+                .unwrap()
+                .expect("APFS test volumes report a volume UUID")
+                .to_vec()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let _ = file;
+            metadata.dev().to_le_bytes().to_vec()
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn v2_observation_preserves_unix_stable_and_change_token_bytes() {
         use std::os::unix::fs::MetadataExt;
@@ -371,13 +390,14 @@ mod tests {
         let observation = observe_opened_ordinary_file_v2(&path, &file).unwrap();
 
         let mut stable = Sha256::new();
+        let volume = expected_unix_volume_bytes(&file, &metadata);
         stable.update(b"ctx-ordinary-file-observation-v2\0unix-stable\0");
-        stable.update(metadata.dev().to_le_bytes());
+        stable.update(&volume);
         stable.update(metadata.ino().to_le_bytes());
         stable.update(metadata.mode().to_le_bytes());
         let mut platform_change = Sha256::new();
         platform_change.update(b"ctx-ordinary-file-observation-v2\0unix-change\0");
-        platform_change.update(metadata.dev().to_le_bytes());
+        platform_change.update(&volume);
         platform_change.update(metadata.ino().to_le_bytes());
         platform_change.update(metadata.ctime().to_le_bytes());
         platform_change.update(metadata.ctime_nsec().to_le_bytes());
@@ -410,7 +430,7 @@ mod tests {
 
         let mut stable = Sha256::new();
         stable.update(b"ctx-jsonl-retained-file-identity-v1\0unix-stable\0");
-        stable.update(metadata.dev().to_le_bytes());
+        stable.update(expected_unix_volume_bytes(&file, &metadata));
         stable.update(metadata.ino().to_le_bytes());
         let mut change = Sha256::new();
         change.update(b"ctx-jsonl-retained-file-identity-v1\0unix-change\0");
