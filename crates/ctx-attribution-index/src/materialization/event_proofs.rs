@@ -296,7 +296,7 @@ impl EventProofs {
                 .map_err(|_| MaterializationIndexError::Encoding)?,
         ) as usize;
         // Runtime bytes are disposable, but corruption must not drive allocation.
-        let file_length = self.values.len()?;
+        let file_length = self.values.byte_len()?;
         if length > ctx_attribution_model::MAX_CORE_CONTROL_WIRE_BYTES
             || offset
                 .checked_add(length as u64)

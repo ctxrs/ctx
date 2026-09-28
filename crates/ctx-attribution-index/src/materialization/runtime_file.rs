@@ -57,7 +57,7 @@ impl RuntimeFile {
         })
     }
 
-    pub fn len(&self) -> Result<u64, MaterializationIndexError> {
+    pub fn byte_len(&self) -> Result<u64, MaterializationIndexError> {
         self.with_file(|file| Ok(file.metadata()?.len()))
     }
 

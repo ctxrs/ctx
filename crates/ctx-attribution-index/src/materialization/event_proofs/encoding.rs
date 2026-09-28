@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "EventIndexEntry")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Serde remote definition is never instantiated; it mirrors the existing by-value event enum"
+)]
 pub(super) enum Entry {
     State {
         #[serde(with = "State")]

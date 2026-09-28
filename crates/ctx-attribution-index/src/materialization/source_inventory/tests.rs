@@ -37,8 +37,8 @@ fn inventory_spills_100003_sources_with_exact_lookup_and_receipt_totals() {
         inventory.push(&source(*n)).unwrap();
     }
     assert_eq!(inventory.len(), 100_003);
-    assert_eq!(inventory.rows.len().unwrap(), 100_003 * 76);
-    assert!(inventory.values.len().unwrap() > 16 * 1024 * 1024);
+    assert_eq!(inventory.rows.byte_len().unwrap(), 100_003 * 76);
+    assert!(inventory.values.byte_len().unwrap() > 16 * 1024 * 1024);
     let head = CoreGenerationHead::from_source_snapshot(
         "a".repeat(64),
         1,

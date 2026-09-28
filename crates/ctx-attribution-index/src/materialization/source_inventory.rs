@@ -275,7 +275,7 @@ impl SourceInventory {
                 "source inventory frame length",
             ));
         }
-        let file_length = self.values.len()?;
+        let file_length = self.values.byte_len()?;
         if offset
             .checked_add(length as u64)
             .is_none_or(|end| end > file_length)

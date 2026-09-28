@@ -88,7 +88,7 @@ impl ReconciliationSpool {
         let end = payload
             .checked_add(length as u64)
             .ok_or(SegmentMaterializerError::Bounds)?;
-        if length > MAX_CORE_CONTROL_WIRE_BYTES || end > self.bytes || end > self.file.len()? {
+        if length > MAX_CORE_CONTROL_WIRE_BYTES || end > self.bytes || end > self.file.byte_len()? {
             return Err(SegmentMaterializerError::Corrupt(
                 "reconciliation spill frame length",
             ));

@@ -26,7 +26,7 @@ fn spill_io_rejects_truncation_and_drop_removes_private_directory() {
         );
     }
     spill.append(b"synthetic spill").unwrap();
-    assert_eq!(spill.len().unwrap(), 15);
+    assert_eq!(spill.byte_len().unwrap(), 15);
     assert!(spill.read_at(14, &mut [0; 2]).is_err());
     spill.file.lock().unwrap().set_len(0).unwrap();
     assert!(spill.read_at(0, &mut [0; 1]).is_err());
@@ -41,7 +41,7 @@ fn process_exit_spill_child() {
     };
     let spill = RuntimeFile::new(Path::new(&root)).unwrap();
     spill.append(&vec![0x42; 256 * 1024]).unwrap();
-    assert_eq!(spill.len().unwrap(), 256 * 1024);
+    assert_eq!(spill.byte_len().unwrap(), 256 * 1024);
     // Exercise native handle cleanup, deliberately skipping Rust Drop.
     std::process::exit(0);
 }
