@@ -676,6 +676,78 @@ exit 23
         self.assertIn("-Clink-arg=-Wl,-headerpad,0x1000", build_body)
         self.assertIn('"CARGO_ENCODED_RUSTFLAGS=${encoded_flags}"', build_body)
 
+    def test_factory_remaps_rust_paths_without_losing_existing_flags(self) -> None:
+        source = (ROOT / "scripts/release/build-public-candidate-on-linux.sh").read_text()
+        start = source.index("build_target() {")
+        build = source[start:source.index('\n  env "${build_env[@]}"', start)]
+        script = r'''set -euo pipefail
+repo_root="$1/source"
+work_dir="$1/work"
+stage_dir="$work_dir/stage"
+notify_source="$stage_dir/notify/source"
+macos_sdk_root="$work_dir/sdk"
+source_commit=1111111111111111111111111111111111111111
+cargo_lock_sha256=fixture-lock-digest
+python3() {
+  if [[ "$1" == "$repo_root/scripts/public-cli-release-targets.py" ]]; then
+    printf '%s\n' "CTX_PUBLIC_TARGET_PLATFORM=fixture-platform" \
+      "CTX_PUBLIC_TARGET_TRIPLE=fixture-triple" "CTX_PUBLIC_TARGET_BINARY=ctx" \
+      "CTX_PUBLIC_TARGET_GLIBC_MAX=2.28"
+  else
+    command python3 "$@"
+  fi
+}
+''' + build + '''
+  env "${build_env[@]}" python3 -c 'import json,os; print(json.dumps({k: os.environ.get(k) for k in ("CARGO_ENCODED_RUSTFLAGS", "CFLAGS", "CXXFLAGS", "TARGET_CFLAGS", "CFLAGS_fixture_triple", "CC_SHELL_ESCAPED_FLAGS", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "LZMA_API_STATIC")}))'
+}
+build_target "$2"
+'''
+        separator = "\x1f"
+        cases = [
+            ({}, []),
+            ({"RUSTFLAGS": "-C opt-level=2\t--cfg fixture\n-Cdebuginfo=1"},
+             ["-C", "opt-level=2", "--cfg", "fixture", "-Cdebuginfo=1"]),
+            ({"RUSTFLAGS": "--cfg ignored", "CARGO_ENCODED_RUSTFLAGS":
+              '--cfg\x1ffixture="two words"'}, ["--cfg", 'fixture="two words"']),
+            ({"RUSTFLAGS": "--cfg ignored", "CARGO_ENCODED_RUSTFLAGS": ""}, []),
+            ({"CC_SHELL_ESCAPED_FLAGS": "1", "CFLAGS": "-O2 # release flags",
+              "CXXFLAGS": "-fno-exceptions # release flags"}, []),
+        ]
+        with tempfile.TemporaryDirectory(prefix="ctx factory ") as directory:
+            root = Path(directory)
+            for target in ("linux-x64", "linux-arm64", "macos-arm64", "macos-x64", "windows-x64"):
+                for cargo_home in (None, str(root / "cargo-cache"), "relative-cargo"):
+                    for inherited, expected in cases:
+                        with self.subTest(target=target, cargo_home=cargo_home, flags=inherited):
+                            env = {key: value for key, value in os.environ.items() if key not in (
+                                "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_HOME", "CC_SHELL_ESCAPED_FLAGS")}
+                            env.update(HOME=str(root / "home"),
+                                       CFLAGS='-DKEEP_C="1" -O2',
+                                       CXXFLAGS="-DKEEP_CXX=1 -fno-exceptions",
+                                       TARGET_CFLAGS='-DTARGET="1"', CFLAGS_fixture_triple='-DTRIPLE="1"')
+                            env.update(inherited)
+                            if cargo_home is not None:
+                                env["CARGO_HOME"] = cargo_home
+                            result = subprocess.run(["bash", "-c", script, "fixture", directory, target],
+                                                    env=env, capture_output=True, text=True, timeout=10)
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            observed = json.loads(result.stdout)
+                            cargo = (root / "home/.cargo" if cargo_home is None else
+                                     root / "source" / cargo_home)
+                            remaps = [f"{root}/source=/ctx/src", f"{root}/work=/ctx/build",
+                                      f"{cargo}=/ctx/cargo"]
+                            rust_flags = expected + ["--remap-path-prefix=" + item for item in remaps]
+                            if target.startswith("macos-"):
+                                rust_flags += ["-Clink-arg=-Wl,-headerpad,0x1000",
+                                               f"--remap-path-prefix={root}/work/stage/notify/source=/ctx/deps/notify-9.0.0-rc.4"]
+                                self.assertEqual(observed["SDKROOT"], str(root / "work/sdk"))
+                                self.assertEqual(observed["MACOSX_DEPLOYMENT_TARGET"], "13.0")
+                            self.assertEqual(observed["CARGO_ENCODED_RUSTFLAGS"].split(separator), rust_flags)
+                            for name in ("CFLAGS", "CXXFLAGS", "TARGET_CFLAGS",
+                                         "CFLAGS_fixture_triple", "CC_SHELL_ESCAPED_FLAGS"):
+                                self.assertEqual(observed[name], env.get(name))
+                            self.assertEqual(observed["LZMA_API_STATIC"], "1")
+
     def test_native_linux_validator_requires_ubuntu_24(self) -> None:
         source = (
             ROOT / "scripts" / "validate-public-cli-factory-artifact.sh"
