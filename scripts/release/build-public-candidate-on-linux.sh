@@ -441,7 +441,8 @@ for name in sorted(names):
     if not escaped:
         value = shlex.join(re.findall(r"[^\t\n\f\r ]+", value))
     if name in ("CFLAGS", "CXXFLAGS"):
-        value += " " + maps
+        # End any inherited shell comment before appending compiler arguments.
+        value += "\n" + maps
     print("build_env+=(" + shlex.quote(name + "=" + value) + ")")
 PY
 )"
