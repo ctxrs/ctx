@@ -391,6 +391,9 @@ fn refresh_report_preserves_optional_active_source_record_and_byte_progress() {
         "progress_owner_request_id": "progress-owner",
         "progress_owner_attempt_state": "running",
         "structured_outcome": {"code": "exact-engine-value"},
+        "last_failure": {"request_id": "previous-request", "finished_at_ms": 1,
+            "error_code": "resource_unavailable", "last_error": "free index volume space",
+            "refresh_failure_reason": "io_storage_full"},
         "progress": {
             "phase": "refreshing",
             "completed_sources": 2,
@@ -405,6 +408,9 @@ fn refresh_report_preserves_optional_active_source_record_and_byte_progress() {
     let report = refresh_report(Some(&job), None, &daemon);
 
     assert_eq!(report["progress"]["current_source"], "source.db");
+    assert_eq!(report["status"], "pending");
+    assert_eq!(report["last_failure"], job["last_failure"]);
+    assert!(report.get("last_error").is_none());
     assert_eq!(report["progress"]["completed_records"], 1234);
     assert_eq!(report["progress"]["completed_bytes"], 4 * 1024 * 1024);
     for field in [

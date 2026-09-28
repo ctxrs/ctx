@@ -689,6 +689,9 @@ setup_status=0
 setup_verified=0
 setup_initialized=
 setup_mode=invalid
+setup_refresh_reason=
+setup_refresh_error=
+setup_lexical_status=
 indexed_sessions=
 indexed_items=
 setup_wait_requested=0
@@ -702,31 +705,35 @@ if [ "$run_setup" = "1" ]; then
     log ""
   fi
   ${renderCliInstallShellManagedPairSetupExecution()}
-  if [ "$setup_status" = "0" ]; then
-    if json_document_is_well_formed "$tmp_dir/setup-receipt.json"; then
-      setup_schema_version="$(json_top_level_unsigned_integer_or_null_field "$tmp_dir/setup-receipt.json" schema_version)" ||
-        setup_schema_version=
-      setup_initialized="$(json_top_level_boolean_field "$tmp_dir/setup-receipt.json" initialized)" ||
-        setup_initialized=
-      setup_mode="$(json_top_level_string_field "$tmp_dir/setup-receipt.json" mode)" ||
-        setup_mode=invalid
-      indexed_sessions="$(json_top_level_unsigned_integer_or_null_field "$tmp_dir/setup-receipt.json" indexed_sessions)" ||
-        indexed_sessions=
-      indexed_items="$(json_top_level_unsigned_integer_or_null_field "$tmp_dir/setup-receipt.json" indexed_items)" ||
-        indexed_items=
-      if { [ "$setup_schema_version" = "2" ] || [ "$setup_schema_version" = "3" ]; } &&
-         { [ "$setup_initialized" = "true" ] || [ "$setup_initialized" = "false" ]; } &&
-         { [ "$indexed_sessions" = "null" ] || is_unsigned_integer "$indexed_sessions"; } &&
-         { [ "$indexed_items" = "null" ] || is_unsigned_integer "$indexed_items"; }; then
-        case "$setup_mode" in
-          ready|pending|stale|unavailable) setup_verified=1 ;;
-        esac
-      fi
+  if json_document_is_well_formed "$tmp_dir/setup-receipt.json"; then
+    setup_schema_version="$(json_top_level_unsigned_integer_or_null_field "$tmp_dir/setup-receipt.json" schema_version)" ||
+      setup_schema_version=
+    setup_initialized="$(json_top_level_boolean_field "$tmp_dir/setup-receipt.json" initialized)" ||
+      setup_initialized=
+    setup_mode="$(json_top_level_string_field "$tmp_dir/setup-receipt.json" mode)" ||
+      setup_mode=invalid
+    indexed_sessions="$(json_top_level_unsigned_integer_or_null_field "$tmp_dir/setup-receipt.json" indexed_sessions)" ||
+      indexed_sessions=
+    indexed_items="$(json_top_level_unsigned_integer_or_null_field "$tmp_dir/setup-receipt.json" indexed_items)" ||
+      indexed_items=
+    if { [ "$setup_schema_version" = "2" ] || [ "$setup_schema_version" = "3" ]; } &&
+       { [ "$setup_initialized" = "true" ] || [ "$setup_initialized" = "false" ]; } &&
+       { [ "$indexed_sessions" = "null" ] || is_unsigned_integer "$indexed_sessions"; } &&
+       { [ "$indexed_items" = "null" ] || is_unsigned_integer "$indexed_items"; }; then
+      case "$setup_mode" in
+        ready|pending|stale|unavailable) setup_verified=1 ;;
+      esac
     fi
-
-    if [ "$setup_verified" != "1" ]; then
-      setup_status=1
+  fi
+  if [ "$setup_verified" = "1" ]; then
+    setup_refresh_reason="$(json_object_string_field "$tmp_dir/setup-receipt.json" refresh_request reason)" || setup_refresh_reason=
+    setup_refresh_error="$(json_object_string_or_null_field "$tmp_dir/setup-receipt.json" refresh_request last_error 0)" || setup_refresh_error=
+    setup_lexical_status="$(json_object_string_field "$tmp_dir/setup-receipt.json" lexical status)" || setup_lexical_status=
+    if [ "$setup_refresh_reason" = "refresh_failed" ]; then
+      if [ "$setup_status" = "0" ]; then setup_status=1; fi
     fi
+  elif [ "$setup_status" = "0" ]; then
+    setup_status=1
   fi
   if [ "$setup_status" = "0" ]; then
     report_install_stage "setup" "completed"
@@ -765,7 +772,7 @@ if [ "$setup_verified" = "1" ] && [ -n "$found_count" ]; then
 fi
 
 indexing_continues=0
-if [ "$setup_verified" = "1" ]; then
+if [ "$setup_verified" = "1" ] && [ "$setup_status" = "0" ]; then
   case "$setup_mode" in
     ready) receipt_item "Index ready" ;;
     pending|stale)
@@ -783,6 +790,14 @@ if [ "$setup_verified" = "1" ]; then
 fi
 
 if [ "$run_setup" = "1" ] && [ "$setup_status" != "0" ]; then
+  if [ "$setup_lexical_status" = "ready" ]; then
+    receipt_item "Previously indexed history remains searchable"
+  fi
+  if [ -n "$setup_refresh_error" ]; then
+    receipt_warning "$setup_refresh_error"
+  elif [ "$setup_progress" = "none" ]; then
+    relay_bounded_child_stderr "$tmp_dir/setup.err"
+  fi
   receipt_warning "Setup failed. Retry: ctx setup"
 fi
 if [ "$skill_install_failed" = "1" ]; then

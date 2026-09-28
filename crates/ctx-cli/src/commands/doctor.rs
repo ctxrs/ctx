@@ -70,6 +70,11 @@ pub(crate) fn run_doctor_with_components(
             model.health.as_ref(),
             human_refresh_failure(source_report),
         );
+        ctx_cli_presentation::commands::append_previous_refresh_failure(
+            ui.stdout_context(),
+            &mut document,
+            source_report,
+        );
         ctx_cli_presentation::commands::append_attribution(
             ui.stdout_context(),
             &mut document,

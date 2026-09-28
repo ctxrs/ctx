@@ -103,6 +103,13 @@ function main() {
     return 0;
   }
   assert.equal(actor, install);
+  if (args[0] === "--data-root" && args[2] === "index") {
+    assert.deepEqual(args.slice(2), ["index", "mode", "--format=json"]);
+    // Older fixture cases have no indexing config. Keep their modeled policy
+    // manual without consulting the host's canonical data root.
+    output({ schema_version: 1, indexing: { mode: "manual" }, read_only: true });
+    return 0;
+  }
   if (JSON.stringify(args) === JSON.stringify(["pro", "uninstall", "--help"])) {
     fs.writeFileSync(1, "Usage: ctx pro uninstall <--delete-data|--keep-data> --json\n");
     return 0;

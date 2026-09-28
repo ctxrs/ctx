@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { renderCliInstallPowerShellScript } from "./cli-install-powershell-script.js";
 import { CLI_INSTALL_POWERSHELL_PATH_IDENTITY } from "./cli-install-powershell-managed-install.js";
 import { renderCliUninstallPowerShellScript } from "./cli-uninstall-powershell-script.js";
+import { UNINSTALL_POWERSHELL_INDEXING_PREFERENCE } from "./cli-uninstall-indexing-preference.js";
 import {
   VERIFIED_DAEMON_UNINSTALL_RESULT,
   daemonUninstallResult,
@@ -89,7 +90,7 @@ test("Windows hosted uninstaller is marker-bound and preserves Core history", ()
   assert.match(body, /predates Local Pro/);
   assert.match(body, /Version\.minor -le 25/i);
   assert.doesNotMatch(body, /Stop-InstalledCtxProcesses|Stop-Process|Get-Process/);
-  assert.doesNotMatch(body, /Remove-ManagedUpgradeCoordination|daemon-quiescence-acks/);
+  assert.doesNotMatch(body, /Remove-ManagedUpgradeCoordination/);
   assert.match(body, /function Invoke-HostedUninstallTransaction/);
   assert.match(body, /"daemon_admission_fenced"/);
   assert.match(body, /\$result\.schema_version -ne 2/);
@@ -145,6 +146,97 @@ test("Windows hosted uninstaller diagnostics are bounded and content-free", () =
 
 const powerShell = findPowerShell();
 const windowsPowerShell51 = findWindowsPowerShell51();
+
+test("PowerShell legacy teardown preserves automatic and manual indexing across supported releases", {
+  skip: powerShell ? false : "PowerShell is not installed",
+}, () => {
+  const root = mkdtempSync(path.join(tmpdir(), "ctx-legacy-indexing-"));
+  try {
+    const script = path.join(root, "preferences.ps1");
+    const nativeIdentity = String.raw`\\?\C:\Fixture\ctx.exe`;
+    writeFileSync(script, `param([string]$Root, [int]$Major, [int]$Minor, [string]$Interruption = '')
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$homeDirectory = $Root
+$DataRoot = Join-Path $Root '.ctx'
+$InstallPath = 'Invoke-LegacyIndexMode'
+$TransactionPath = Join-Path $Root 'hosted-install-transaction.json'
+$transaction = [pscustomobject]@{ attempt_id = 'ia_preferences_retry'; install_path = '${nativeIdentity}' }
+function Fail([string]$Message) { throw $Message }
+function Assert-RegularManagedFile([string]$Path, [string]$Label) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw $Label }
+}
+function Invoke-LegacyIndexMode {
+    & $env:CTX_TEST_NODE $env:CTX_TEST_LEGACY_FIXTURE read $args[1]
+}
+${UNINSTALL_POWERSHELL_INDEXING_PREFERENCE}
+$preference = Get-LegacyIndexingPreferences -Version ([pscustomobject]@{major=$Major; minor=$Minor}) -Transaction $transaction
+foreach ($version in @(@{major=0;minor=26}, @{major=2;minor=1})) {
+    if ($null -ne (Get-LegacyIndexingPreferences -Version ([pscustomobject]$version) -Transaction $transaction)) { throw 'unexpected compatibility version' }
+}
+foreach ($data in @($DataRoot, (Join-Path $Root 'registered'))) {
+    & $env:CTX_TEST_NODE $env:CTX_TEST_LEGACY_FIXTURE disable $data
+    if ($LASTEXITCODE -ne 0) { throw 'legacy disable failed' }
+}
+if ($Interruption -eq 'kill') { [Diagnostics.Process]::GetCurrentProcess().Kill() }
+if ($Interruption -eq 'restore') {
+    $config = Join-Path $DataRoot 'config.toml'
+    [IO.File]::Move($config, ($config + '.saved'))
+    [IO.Directory]::CreateDirectory($config) | Out-Null
+}
+Restore-LegacyIndexingPreferences $preference
+`);
+    const namespace = createHash("sha256").update(nativeIdentity, "utf16le").digest("hex");
+    const registrations = path.join(root, ".ctx/daemon-installations", namespace, "daemon-quiescence-acks");
+    mkdirSync(registrations, { recursive: true });
+    const dataRoots = [path.join(root, ".ctx"), path.join(root, "registered")];
+    mkdirSync(dataRoots[1]);
+    writeFileSync(path.join(registrations, "owned.json"), JSON.stringify({ data_root: dataRoots[1] }));
+    for (const version of ["1.0.0", "1.6.3", "1.6.5", "2.0.5"]) {
+      for (const mode of ["auto", "manual"]) {
+        const config = `[indexing]\nmode = "${mode}"\n[search]\nsemantic = false\n`;
+        for (const data of dataRoots) writeFileSync(path.join(data, "config.toml"), config);
+        const [major, minor] = version.split(".");
+        const result = spawnSync(powerShell, ["-NoProfile", "-NonInteractive", "-File", script,
+          "-Root", root, "-Major", major, "-Minor", minor], {
+          encoding: "utf8", timeout: 30000, env: { ...process.env,
+            CTX_TEST_NODE: process.execPath,
+            CTX_TEST_LEGACY_FIXTURE: fileURLToPath(new URL("./test/legacy-indexing-teardown-fixture.cjs", import.meta.url)),
+          },
+        });
+        assert.equal(result.status, 0, `${version} ${mode}: ${result.stdout}${result.stderr}`);
+        for (const data of dataRoots) {
+          const retained = readFileSync(path.join(data, "config.toml"), "utf8").replaceAll("\r\n", "\n");
+          assert.ok(retained.includes(`mode = "${mode}"`), retained);
+          assert.ok(retained.includes("[search]\nsemantic = false\n"), retained);
+        }
+      }
+    }
+    for (const interruption of ["kill", "restore"]) {
+      writeFileSync(path.join(dataRoots[0], "config.toml"), '[indexing]\nmode = "auto"\n');
+      writeFileSync(path.join(dataRoots[1], "config.toml"), '[indexing]\nmode = "manual"\n');
+      const invoke = (fault) => spawnSync(powerShell, ["-NoProfile", "-NonInteractive", "-File", script,
+        "-Root", root, "-Major", "1", "-Minor", "6", "-Interruption", fault], {
+        encoding: "utf8", timeout: 30000, env: { ...process.env, CTX_TEST_NODE: process.execPath,
+          CTX_TEST_LEGACY_FIXTURE: fileURLToPath(new URL("./test/legacy-indexing-teardown-fixture.cjs", import.meta.url)) },
+      });
+      const interrupted = invoke(interruption);
+      assert.notEqual(interrupted.status, 0);
+      const record = path.join(root, 'hosted-install-transaction.json.indexing-preferences');
+      assert.ok(existsSync(record));
+      if (interruption === 'restore') {
+        rmSync(path.join(dataRoots[0], 'config.toml'), { recursive: true });
+        writeFileSync(path.join(dataRoots[0], 'config.toml'), readFileSync(path.join(dataRoots[0], 'config.toml.saved')));
+      }
+      const retry = invoke('none');
+      assert.equal(retry.status, 0, retry.stdout + retry.stderr);
+      assert.match(readFileSync(path.join(dataRoots[0], 'config.toml'), 'utf8'), /mode = "auto"/);
+      assert.match(readFileSync(path.join(dataRoots[1], 'config.toml'), 'utf8'), /mode = "manual"/);
+      assert.equal(existsSync(record), false);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 let forwarderRoot;
 after(() => { if (forwarderRoot) rmSync(forwarderRoot, { recursive: true, force: true }); });
 

@@ -1,3 +1,4 @@
+import { runRenderedCliInstaller } from "./test/cli-install-test-helpers.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -936,3 +937,107 @@ test("hosted uninstall supports canonical installer paths containing spaces and 
     rmSync(sandboxRoot, { recursive: true, force: true });
   }
 });
+
+for (const nativeVersion of ["1.0.0", "1.6.3", "1.6.5", "2.0.5"]) {
+  for (const [name, config, automatic] of [
+    ["default", "[search]\nsemantic = false\n", true],
+    ["automatic", "[indexing]\nmode = \"auto\"\n[search]\nsemantic = false\n", true],
+    ["explicit manual", "[indexing]\nmode = \"manual\"\n[search]\nsemantic = false\n", false],
+    ["legacy manual", "[daemon]\nenabled = false\n[search]\nsemantic = false\n", false],
+  ]) {
+    test(`${nativeVersion} teardown preserves ${name} indexing for reinstall`, () => {
+      const fixtureEnv = { CTX_TEST_LEGACY_DISABLE_POLICY: "1" };
+      let customRoot;
+      const removed = runUninstaller({
+        os: "Linux", nativeVersion, args: ["--keep-data"], env: fixtureEnv,
+        prepareOwnedArtifacts({ homeDir, sandboxDir }) {
+          writeFileSync(path.join(homeDir, ".ctx/config.toml"), config);
+          customRoot = path.join(sandboxDir, 'registered "root" with \\ slash');
+          mkdirSync(customRoot);
+          writeFileSync(path.join(customRoot, "config.toml"), config);
+          fixtureEnv.CTX_TEST_LEGACY_EXTRA_ROOT = customRoot;
+          const executable = path.join(homeDir, ".local/bin/ctx");
+          const registrations = path.join(homeDir, ".ctx/daemon-installations", sha256(executable), "daemon-quiescence-acks");
+          mkdirSync(registrations, { recursive: true });
+          writeFileSync(path.join(registrations, "live.json"), JSON.stringify({ schema_version: 1, data_root: customRoot }, null, 2));
+          return [];
+        },
+      });
+      try {
+        assert.equal(removed.status, 0, removed.stderr);
+        for (const root of [removed.dataDir, customRoot]) {
+          const retained = readFileSync(path.join(root, "config.toml"), "utf8");
+          assert.ok(retained.includes(`mode = "${automatic ? "auto" : "manual"}"`), retained);
+          assert.ok(retained.includes("[search]\nsemantic = false\n"), retained);
+        }
+        const retained = readFileSync(path.join(removed.dataDir, "config.toml"), "utf8");
+        const reinstalled = runRenderedCliInstaller({
+          releaseVersion: "2.1.0", rawConfig: retained,
+          args: ["--no-man", "--no-skill", "--no-modify-path"],
+          env: { CTX_FAKE_SETUP_MODE: "unavailable" },
+        });
+        try {
+          assert.equal(reinstalled.result.status, 0, reinstalled.result.stderr);
+          if (automatic) assert.doesNotMatch(reinstalled.result.stderr, /daemon disabled/);
+          else assert.match(reinstalled.result.stderr, /daemon disabled/);
+        } finally { reinstalled.cleanup(); }
+      } finally { removed.cleanup(); }
+    });
+  }
+}
+
+test("failed legacy teardown restores automatic indexing before retaining the installation", () => {
+  const removed = runUninstaller({
+    os: "Linux", nativeVersion: "1.6.3", daemonStatus: 61, args: ["--keep-data"],
+    env: { CTX_TEST_LEGACY_DISABLE_POLICY: "1" },
+    prepareOwnedArtifacts({ homeDir }) {
+      writeFileSync(path.join(homeDir, ".ctx/config.toml"), '[indexing]\nmode = "auto"\n');
+      return [];
+    },
+  });
+  try {
+    assert.notEqual(removed.status, 0);
+    assert.ok(existsSync(removed.installPath));
+    assert.match(readFileSync(path.join(removed.dataDir, "config.toml"), "utf8"), /mode = "auto"/);
+  } finally { removed.cleanup(); }
+});
+
+for (const interruption of ["kill", "restore"]) {
+  test(`legacy teardown ${interruption} retains transaction preference until retry succeeds`, () => {
+    const fixtureEnv = { CTX_TEST_LEGACY_DISABLE_POLICY: "1", CTX_TEST_LEGACY_INTERRUPT: interruption };
+    let manualRoot;
+    const removed = runUninstaller({
+      os: "Linux", nativeVersion: "1.6.3", args: ["--keep-data"], env: fixtureEnv,
+      prepareOwnedArtifacts({ homeDir, sandboxDir }) {
+        writeFileSync(path.join(homeDir, ".ctx/config.toml"), '[indexing]\nmode = "auto"\n');
+        manualRoot = path.join(sandboxDir, "intentional-manual");
+        mkdirSync(manualRoot);
+        writeFileSync(path.join(manualRoot, "config.toml"), '[indexing]\nmode = "manual"\n');
+        fixtureEnv.CTX_TEST_LEGACY_EXTRA_ROOT = manualRoot;
+        const executable = path.join(homeDir, ".local/bin/ctx");
+        const registrations = path.join(homeDir, ".ctx/daemon-installations", sha256(executable), "daemon-quiescence-acks");
+        mkdirSync(registrations, { recursive: true });
+        writeFileSync(path.join(registrations, "live.json"), JSON.stringify({ data_root: manualRoot }, null, 2));
+        return [];
+      },
+    });
+    try {
+      assert.notEqual(removed.status, 0);
+      if (interruption === "kill") assert.equal(removed.signal, "SIGKILL");
+      const record = `${removed.transactionPath}.indexing-preferences`;
+      assert.ok(existsSync(record), removed.stderr);
+      assert.ok(existsSync(removed.transactionPath));
+      if (interruption === "restore") {
+        rmSync(path.join(removed.dataDir, "config.toml"), { recursive: true });
+        writeFileSync(path.join(removed.dataDir, "config.toml"), readFileSync(path.join(removed.dataDir, "config.before-restore")));
+      }
+      assert.match(readFileSync(path.join(removed.dataDir, "config.toml"), "utf8"), /mode = "manual"/);
+      const retry = removed.rerun(["--keep-data"], { CTX_TEST_LEGACY_INTERRUPT: "" });
+      assert.equal(retry.status, 0, retry.stderr);
+      assert.match(readFileSync(path.join(removed.dataDir, "config.toml"), "utf8"), /mode = "auto"/);
+      assert.match(readFileSync(path.join(manualRoot, "config.toml"), "utf8"), /mode = "manual"/);
+      assert.equal(existsSync(record), false);
+      assert.equal(existsSync(removed.transactionPath), false);
+    } finally { removed.cleanup(); }
+  });
+}

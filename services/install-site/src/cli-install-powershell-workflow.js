@@ -612,6 +612,8 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
     $setupVerified = $false
     $setupInitialized = $false
     $setupMode = "invalid"
+    $setupRefreshError = $null
+    $setupLexicalStatus = $null
     [long]$indexedSessions = -1
     [long]$indexedItems = -1
     $setupWaitRequested = $false
@@ -641,34 +643,47 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
         }
         $setupCommand = Invoke-HostedInstallerSetupCtxCaptured -Arguments $setupArgs -InheritStandardError:($SetupProgress -cne "none")
         $setupStatus = $setupCommand.ExitCode
-        if ($setupStatus -eq 0) {
-            try {
-                $setupReceipt = Get-Content -LiteralPath $setupCommand.OutputPath -Raw
-                Assert-ExactSetupReceiptProperties -ReceiptJson $setupReceipt
-                $setupReceipt = $setupReceipt | ConvertFrom-Json
-                $schemaProperty = $setupReceipt.PSObject.Properties["schema_version"]
-                $initializedProperty = $setupReceipt.PSObject.Properties["initialized"]
-                $modeProperty = $setupReceipt.PSObject.Properties["mode"]
-                if ($null -eq $schemaProperty -or
-                    -not (Test-JsonIntegerValue -Value $schemaProperty.Value) -or
-                    [Convert]::ToInt64($schemaProperty.Value) -notin @(2, 3) -or
-                    $null -eq $initializedProperty -or
-                    $initializedProperty.Value -isnot [bool] -or
-                    $null -eq $modeProperty -or
-                    $modeProperty.Value -isnot [string] -or
-                    $modeProperty.Value -cnotin @("ready", "pending", "stale", "unavailable")) {
-                    throw "invalid setup receipt"
-                }
-                $setupInitialized = [bool]$initializedProperty.Value
-                $setupMode = [string]$modeProperty.Value
-                $indexedSessions = Get-OptionalUnsignedCount -Json $setupReceipt -Name "indexed_sessions"
-                $indexedItems = Get-OptionalUnsignedCount -Json $setupReceipt -Name "indexed_items"
-                $setupVerified = $true
-
-            } catch {
-                $setupVerified = $false
-                $setupStatus = 1
+        try {
+            $setupReceipt = Get-Content -LiteralPath $setupCommand.OutputPath -Raw
+            Assert-ExactSetupReceiptProperties -ReceiptJson $setupReceipt
+            $setupReceipt = $setupReceipt | ConvertFrom-Json
+            $schemaProperty = $setupReceipt.PSObject.Properties["schema_version"]
+            $initializedProperty = $setupReceipt.PSObject.Properties["initialized"]
+            $modeProperty = $setupReceipt.PSObject.Properties["mode"]
+            if ($null -eq $schemaProperty -or
+                -not (Test-JsonIntegerValue -Value $schemaProperty.Value) -or
+                [Convert]::ToInt64($schemaProperty.Value) -notin @(2, 3) -or
+                $null -eq $initializedProperty -or
+                $initializedProperty.Value -isnot [bool] -or
+                $null -eq $modeProperty -or
+                $modeProperty.Value -isnot [string] -or
+                $modeProperty.Value -cnotin @("ready", "pending", "stale", "unavailable")) {
+                throw "invalid setup receipt"
             }
+            $setupInitialized = [bool]$initializedProperty.Value
+            $setupMode = [string]$modeProperty.Value
+            $indexedSessions = Get-OptionalUnsignedCount -Json $setupReceipt -Name "indexed_sessions"
+            $indexedItems = Get-OptionalUnsignedCount -Json $setupReceipt -Name "indexed_items"
+            $setupVerified = $true
+            $refreshProperty = $setupReceipt.PSObject.Properties["refresh_request"]
+            if ($null -ne $refreshProperty -and $null -ne $refreshProperty.Value) {
+                $reason = $refreshProperty.Value.PSObject.Properties["reason"]
+                $errorDetail = $refreshProperty.Value.PSObject.Properties["last_error"]
+                if ($null -ne $reason -and $reason.Value -ceq "refresh_failed") {
+                    if ($setupStatus -eq 0) { $setupStatus = 1 }
+                    if ($null -ne $errorDetail -and $errorDetail.Value -is [string]) {
+                        $setupRefreshError = $errorDetail.Value
+                    }
+                }
+            }
+            $lexicalProperty = $setupReceipt.PSObject.Properties["lexical"]
+            if ($null -ne $lexicalProperty -and $null -ne $lexicalProperty.Value) {
+                $statusProperty = $lexicalProperty.Value.PSObject.Properties["status"]
+                if ($null -ne $statusProperty) { $setupLexicalStatus = $statusProperty.Value }
+            }
+        } catch {
+            $setupVerified = $false
+            if ($setupStatus -eq 0) { $setupStatus = 1 }
         }
         if ($setupStatus -eq 0) {
             Send-InstallStage -Stage "setup" -Status "completed"
@@ -690,7 +705,7 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
     }
 
     $indexingContinues = $false
-    if ($setupVerified) {
+    if ($setupVerified -and $setupStatus -eq 0) {
         if ($setupMode -ceq "ready") {
             Write-ReceiptItem "Index ready"
         } elseif ($setupMode -in @("pending", "stale")) {
@@ -706,6 +721,14 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
     }
 
     if ($runSetup -and $setupStatus -ne 0) {
+        if ($setupLexicalStatus -ceq "ready") {
+            Write-ReceiptItem "Previously indexed history remains searchable"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($setupRefreshError)) {
+            Write-ReceiptWarning $setupRefreshError
+        } elseif ($SetupProgress -ceq "none") {
+            Write-BoundedCapturedChildError -ErrorPath $setupCommand.ErrorPath
+        }
         Write-ReceiptWarning "Setup failed. Retry: ctx setup"
     }
     if ($skillInstallFailed) {

@@ -324,6 +324,7 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         "trigger": job.get("trigger"),
         "trigger_provenance": job.get("trigger_provenance"),
         "last_error": job.get("last_error"),
+        "last_failure": job.get("last_failure"),
         "current": receipt.and_then(|receipt| receipt.get("current")),
         "source_failure_total": receipt
             .and_then(|receipt| receipt.get("source_failure_total")),
