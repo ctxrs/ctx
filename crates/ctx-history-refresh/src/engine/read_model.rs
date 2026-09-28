@@ -530,12 +530,14 @@ pub(super) fn projected_status_json(
 ) -> Option<Value> {
     let attempt = find_attempt(state, request_id)?;
     let mut status = apply_read_projection(attempt, attempt.to_json(), false);
-    apply_last_failure(state, attempt, &mut status);
-    if state
+    let persisting_terminal = state
         .pending_terminal_persistence
         .as_ref()
-        .is_some_and(|pending| pending.request_id == request_id)
-    {
+        .is_some_and(|pending| pending.request_id == request_id);
+    if attempt.state.is_active() || persisting_terminal {
+        apply_last_failure(state, attempt, &mut status);
+    }
+    if persisting_terminal {
         // The generation is queryable, but the request result is not durable
         // yet. Keep the exact terminal job internal to the existing retry.
         let fields = status.as_object_mut()?;
@@ -584,7 +586,9 @@ pub(super) fn projected_job_json(
 ) -> Option<Value> {
     let attempt = find_attempt(state, request_id)?;
     let mut job = apply_read_projection(attempt, attempt.job_json(), true);
-    apply_last_failure(state, attempt, &mut job);
+    if attempt.state.is_active() {
+        apply_last_failure(state, attempt, &mut job);
+    }
     Some(job)
 }
 
@@ -593,9 +597,6 @@ fn apply_last_failure(
     attempt: &SourceBackedRefreshAttempt,
     value: &mut Value,
 ) {
-    if !attempt.state.is_active() {
-        return;
-    }
     let previous = state
         .attempts
         .iter()

@@ -72,6 +72,68 @@ fn active_successor_keeps_the_previous_disk_failure_across_restart_until_complet
 }
 
 #[test]
+fn previous_failure_remains_visible_until_the_retry_result_is_durable() {
+    for succeeds in [false, true] {
+        let coordinator = CoreRefreshEngine::new();
+        coordinator.enqueue(None);
+        let previous = coordinator
+            .run_next_with(
+                |_, _| Err(std::io::Error::from(std::io::ErrorKind::StorageFull).into()),
+                || Ok(None),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .unwrap();
+        let request = coordinator.enqueue(None);
+        let id = request_id(&request);
+        let prior_failure = coordinator.status(&id).unwrap()["last_failure"].clone();
+        assert_eq!(prior_failure["request_id"], previous.job["request_id"]);
+        let run = coordinator
+            .run_next_with(
+                |_, engine| {
+                    assert_eq!(engine.status(&id).unwrap()["last_failure"], prior_failure);
+                    if succeeds {
+                        Ok(test_publication("generation-1"))
+                    } else {
+                        Err(anyhow!("subsequent refresh failure"))
+                    }
+                },
+                || Ok(succeeds.then(|| "generation-1".to_owned())),
+                |_| Err(anyhow!("terminal status is not durable")),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(run.terminal_persistence_pending);
+        assert!(run.job.get("last_failure").is_none());
+        let pending = coordinator.status(&id).unwrap();
+        assert_eq!(pending["request_state"], "running");
+        assert_eq!(pending["progress"]["phase"], "persisting_terminal");
+        assert_eq!(pending["last_failure"], prior_failure);
+        assert!(pending.get("last_error").is_none());
+        assert!(pending.get("structured_outcome").is_none());
+        let retry = coordinator
+            .run_next_with(
+                |_, _| panic!("status persistence must not execute capture"),
+                || panic!("status persistence must not reopen Core"),
+                |job| {
+                    assert_eq!(job, &run.job);
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(!retry.terminal_persistence_pending);
+        let terminal = coordinator.status(&id).unwrap();
+        assert!(terminal.get("last_failure").is_none());
+        assert_eq!(
+            terminal["request_state"],
+            if succeeds { "published" } else { "failed" }
+        );
+        assert_eq!(terminal.get("last_error").is_none(), succeeds);
+    }
+}
+
+#[test]
 fn raw_disk_full_is_retryable_resource_pressure_not_an_internal_failure() {
     for error in [
         anyhow::Error::new(std::io::Error::new(
