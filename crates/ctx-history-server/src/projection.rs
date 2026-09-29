@@ -1,6 +1,5 @@
 use crate::{
     auth::authorize_any,
-    catalog,
     publication::{visit_payload, Descriptor},
     types::collection_id,
     *,
@@ -48,7 +47,6 @@ impl HistoryServer {
         }
         let _writer = self.projection.lock().map_err(|_| Error::Unavailable)?;
         let connection = self.lock()?;
-        catalog::serving(&connection)?;
         let status = self.status_locked(&connection, collection)?;
         if status.searchable_sequence == status.stored_sequence {
             connection.execute(
@@ -168,7 +166,6 @@ impl HistoryServer {
         collection_id(collection)?;
         let _writer = self.projection.lock().map_err(|_| Error::Unavailable)?;
         let connection = self.lock()?;
-        catalog::serving(&connection)?;
         self.status_numbers(&connection, collection)?;
         drop(connection);
         let path = self.collection_root(collection).join("index");
@@ -182,13 +179,15 @@ impl HistoryServer {
 
     pub fn status(&self, token: &str, collection: &str) -> Result<CollectionStatus> {
         let connection = self.lock()?;
-        authorize_any(
+        let principal = authorize_any(
             &connection,
             token,
             collection,
             &[Access::Read, Access::Publish, Access::Manage],
         )?;
-        self.status_locked(&connection, collection)
+        let mut status = self.status_locked(&connection, collection)?;
+        status.principal = principal;
+        Ok(status)
     }
 
     pub(crate) fn safe_index(
@@ -244,6 +243,7 @@ impl HistoryServer {
                 (0, None)
             };
         Ok(CollectionStatus {
+            principal: String::new(),
             collection: collection.into(),
             stored_sequence: stored,
             searchable_sequence: sequence,

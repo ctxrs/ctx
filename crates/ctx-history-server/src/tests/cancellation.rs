@@ -2,7 +2,6 @@ use super::{
     repair::{Pause, Stage},
     *,
 };
-use rusqlite::params;
 
 pub(super) fn unsubmitted(input: &Fixture, key: &str) -> PublishRequest {
     PublishRequest {
@@ -414,7 +413,7 @@ fn cancellation_binds_principal_operation_fingerprint_and_current_publish_author
         .lock()
         .unwrap()
         .execute(
-            "UPDATE credentials SET expires=0 WHERE id=?1",
+            "UPDATE credentials SET expires=1 WHERE id=?1",
             [&expired.id],
         )
         .unwrap();
@@ -445,71 +444,39 @@ fn cancellation_binds_principal_operation_fingerprint_and_current_publish_author
 }
 
 #[test]
-fn terminal_settlement_rechecks_expiry_and_rolls_back_both_outcome_fences() {
-    let inputs = tempfile::tempdir().unwrap();
-    let input = fixture(inputs.path(), "late-cancel", &["safe berry"]);
-    for accepted in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let (server, admin) = bootstrap(root.path());
-        let request = if accepted {
-            let request = stage(
-                &server,
-                &admin.credential.secret,
-                &admin.collection,
-                &input,
-                "pub",
-                None,
-                "settle",
-            );
-            server
-                .publish(&admin.credential.secret, &admin.collection, request.clone())
-                .unwrap();
-            request
-        } else {
-            unsubmitted(&input, "settle")
-        };
-        let event = if accepted { "UPDATE" } else { "INSERT" };
-        server.lock().unwrap().execute_batch(&format!(
-            "CREATE TEMP TRIGGER expire_settlement AFTER {event} ON main.operations BEGIN UPDATE credentials SET expires=0; END;"
-        )).unwrap();
-        let cancel = cancel_request(&admin.principal, &request);
-        assert!(matches!(
-            server.cancel_publish(&admin.credential.secret, &admin.collection, cancel.clone()),
-            Err(Error::Forbidden)
-        ));
-        let fenced: u64 = server
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT count(*) FROM operations WHERE cancel_fenced=1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(fenced, 0);
-        server
-            .lock()
-            .unwrap()
-            .execute_batch("DROP TRIGGER expire_settlement")
-            .unwrap();
-        let response = server
-            .cancel_publish(&admin.credential.secret, &admin.collection, cancel)
-            .unwrap();
-        assert_eq!(
-            matches!(response.outcome, CancelPublishOutcome::Accepted { .. }),
-            accepted
-        );
-        assert_eq!(
-            server
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT count(*) FROM operations WHERE cancel_fenced=1 AND collection=?1",
-                    params![admin.collection],
-                    |r| r.get::<_, u64>(0)
-                )
-                .unwrap(),
-            1
-        );
-    }
+fn cancellation_rechecks_expiry_and_rolls_back_its_new_outcome() {
+    let root = tempfile::tempdir().unwrap();
+    let input = fixture(root.path(), "late-cancel", &["safe berry"]);
+    let (server, admin) = bootstrap(root.path());
+    let request = unsubmitted(&input, "settle");
+    server.lock().unwrap().execute_batch(
+        "CREATE TEMP TRIGGER expire_settlement AFTER INSERT ON main.operations BEGIN UPDATE credentials SET expires=1; END;"
+    ).unwrap();
+    let cancel = cancel_request(&admin.principal, &request);
+    assert!(matches!(
+        server.cancel_publish(&admin.credential.secret, &admin.collection, cancel.clone()),
+        Err(Error::Forbidden)
+    ));
+    let count: u64 = server
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM operations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    server
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER expire_settlement")
+        .unwrap();
+    let response = server
+        .cancel_publish(&admin.credential.secret, &admin.collection, cancel)
+        .unwrap();
+    assert!(matches!(
+        response.outcome,
+        CancelPublishOutcome::Cancelled { .. }
+    ));
+    assert!(matches!(
+        server.publish(&admin.credential.secret, &admin.collection, request),
+        Err(Error::OperationCancelled)
+    ));
 }

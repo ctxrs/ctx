@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
 #[derive(Clone)]
@@ -52,6 +52,10 @@ pub fn router(server: Arc<HistoryServer>) -> Router {
         .route("/v1/collections/{collection}/remove", post(remove))
         .route("/v1/collections/{collection}/receipts/{id}", get(receipt))
         .route(
+            "/v1/collections/{collection}/publications",
+            get(publications),
+        )
+        .route(
             "/v1/collections/{collection}/publications/{id}",
             get(publication_state),
         )
@@ -68,18 +72,37 @@ pub fn router(server: Arc<HistoryServer>) -> Router {
 }
 
 pub fn serve_blocking(server: Arc<HistoryServer>) -> Result<()> {
+    serve_blocking_with_ready(server, |_| Ok(()))
+}
+
+/// Run the callback with the actual bound address before accepting requests.
+/// A failed bind skips it; callback failure closes the listener and returns.
+pub fn serve_blocking_with_ready(
+    server: Arc<HistoryServer>,
+    ready: impl FnOnce(SocketAddr) -> Result<()>,
+) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
-    runtime.block_on(serve(server))
+    runtime.block_on(serve_with_ready(server, ready))
 }
 
 /// Plain HTTP is bound to loopback unless trusted TLS ingress was explicitly
 /// selected. Authorization never trusts forwarded identity headers.
 pub async fn serve(server: Arc<HistoryServer>) -> Result<()> {
+    serve_with_ready(server, |_| Ok(())).await
+}
+
+async fn serve_with_ready(
+    server: Arc<HistoryServer>,
+    ready: impl FnOnce(SocketAddr) -> Result<()>,
+) -> Result<()> {
     server.config.validate()?;
     let listener = tokio::net::TcpListener::bind(server.config.bind).await?;
+    let address = listener.local_addr()?;
+    ready(address)?;
+    eprintln!("ctx history server listening on {address}");
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let index_server = server.clone();
     let indexer = tokio::spawn(async move {
@@ -332,6 +355,18 @@ async fn publication_state(
     })
     .await
 }
+async fn publications(
+    State(state): State<HttpState>,
+    Path(collection): Path<String>,
+    Query(request): Query<PublicationListRequest>,
+    headers: HeaderMap,
+) -> Result<Json<PublicationPage>> {
+    let token = bearer(&headers)?;
+    blocking(state, move |server| {
+        server.list_publications(&token, &collection, request)
+    })
+    .await
+}
 async fn status(
     State(state): State<HttpState>,
     Path(collection): Path<String>,
@@ -391,7 +426,6 @@ impl IntoResponse for Error {
             | Self::Core(_)
             | Self::Identity(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
             Self::Capacity => (StatusCode::TOO_MANY_REQUESTS, "capacity"),
-            Self::RecoveryClosed => (StatusCode::SERVICE_UNAVAILABLE, "recovery_closed"),
             Self::Unavailable | Self::Index(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "search_unavailable")
             }

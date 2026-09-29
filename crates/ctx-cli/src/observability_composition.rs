@@ -58,7 +58,7 @@ fn resolve_analytics_policy(data_root: &Path) -> anyhow::Result<ResolvedAnalytic
     if ctx_app_config::normalized_analytics_environment_override() == Some(false) {
         return Ok(ResolvedAnalyticsPolicy::Purge);
     }
-    let config = AppConfig::load(data_root)?;
+    let config = AppConfig::load_read_only(data_root)?;
     Ok(match analytics_policy(&config) {
         AnalyticsPolicy::Purge => ResolvedAnalyticsPolicy::Purge,
         AnalyticsPolicy::DryRun => ResolvedAnalyticsPolicy::DryRun,
@@ -404,11 +404,7 @@ mod tests {
         ctx_history_platform::platform_security::verify_private_file(&path).unwrap();
         let outbox_b = crate::analytics_outbox::AnalyticsOutbox::open(path.clone(), &id_b).unwrap();
         let queued_b = outbox_b.snapshot(&endpoint).unwrap().remove(0);
-        fs::write(
-            AppConfig::config_path(&root_a),
-            "[analytics]\nenabled = false\n",
-        )
-        .unwrap();
+        consent_tests::configure(&root_a, false, &endpoint);
 
         // The file transport exercises the production drain without a daemon or network.
         drain_analytics_outbox(&root_b, Duration::from_secs(1)).unwrap();

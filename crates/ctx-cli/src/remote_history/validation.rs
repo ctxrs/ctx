@@ -60,26 +60,39 @@ pub(super) fn cli_search(args: &ScopedSearchArgs) -> Result<()> {
         (1..=100).contains(&args.limit),
         "shared search --limit must be 1..100"
     );
+    let unsupported = [
+        ("--term", !args.term.is_empty()),
+        ("--provider", args.provider.is_some()),
+        ("--history-source", args.history_source.is_some()),
+        ("--provider-key", args.provider_key.is_some()),
+        ("--source-id", args.source_id.is_some()),
+        ("--source-format", args.source_format.is_some()),
+        ("--source-root", !args.source_roots.is_empty()),
+        ("--source-group", !args.source_groups.is_empty()),
+        ("--workspace", args.workspace.is_some()),
+        ("--since", args.since.is_some()),
+        ("--primary-only", args.primary_only),
+        ("--event-type", args.event_type.is_some()),
+        ("--file", args.file.is_some()),
+        ("--session", args.session.is_some()),
+        ("--exclude-session", !args.exclude_sessions.is_empty()),
+        (
+            "--content-scope",
+            !matches!(args.content_scope, None | Some(ContentScopeArg::All)),
+        ),
+        (
+            "--backend",
+            !matches!(args.backend, None | Some(SearchBackendArg::Lexical)),
+        ),
+        ("--semantic-weight", args.semantic_weight != 0.35),
+    ]
+    .into_iter()
+    .filter_map(|(flag, supplied)| supplied.then_some(flag))
+    .collect::<Vec<_>>();
     ensure!(
-        args.term.is_empty()
-            && args.provider.is_none()
-            && args.history_source.is_none()
-            && args.provider_key.is_none()
-            && args.source_id.is_none()
-            && args.source_format.is_none()
-            && args.source_roots.is_empty()
-            && args.source_groups.is_empty()
-            && args.workspace.is_none()
-            && args.since.is_none()
-            && !args.primary_only
-            && args.event_type.is_none()
-            && args.file.is_none()
-            && args.session.is_none()
-            && args.exclude_sessions.is_empty()
-            && matches!(args.content_scope, None | Some(ContentScopeArg::All))
-            && matches!(args.backend, None | Some(SearchBackendArg::Lexical))
-            && args.semantic_weight == 0.35,
-        FILTER_HELP
+        unsupported.is_empty(),
+        "{} not supported with --server; use one lexical query and --limit",
+        unsupported.join(", ")
     );
     ensure!(
         args.refresh != CliRefreshArg::Wait,

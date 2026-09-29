@@ -1,9 +1,5 @@
-import {
-  CURRENT_PROVIDERS,
-  isProviderId,
-  normalizeProviderId,
-  PROVIDERS,
-} from "./provider-contract";
+import { isProviderId, normalizeProviderId } from "./provider-contract";
+import * as hosted from "./hosted-operation-contract";
 import { ORDINARY_BLAME_PROPERTY_KEYS, parseOrdinaryBlameProperties } from "./ordinary-blame-contract";
 
 export { CURRENT_PROVIDERS, PROVIDERS } from "./provider-contract";
@@ -82,6 +78,7 @@ const SEARCH_BYTE_BUCKETS = new Set([
 const TEXT_LENGTH_BUCKETS = new Set(["0", "1-20", "21-100", "101-500", "500+"]);
 
 export const CURRENT_CLI_OPERATIONS = new Set([
+  ...hosted.HOSTED_OPERATIONS,
   "setup", "semantic_enable", "semantic_status", "semantic_disable", "status", "index",
   "sources", "import", "show", "locate", "search", "docs", "integration", "upgrade",
   "doctor", "blame",
@@ -381,6 +378,7 @@ export function parseOperationProperties(
 ): Record<string, TelemetryScalar> {
   const properties = requireRecord(value, "invalid_properties");
   if (surface !== "cli") throw schemaError("invalid_surface");
+  if (hosted.HOSTED_OPERATIONS.has(operation)) return hosted.parseHostedProperties(properties, outcome);
   const operationKeys = OPERATION_PROPERTY_KEYS.get(operation);
   if (!operationKeys) throw schemaError("invalid_operation");
   rejectUnknownKeys(
@@ -888,7 +886,7 @@ export function normalizeTelemetryProvider(value: unknown, code: string): string
 }
 
 export function isKnownOperationPropertyKey(key: string): boolean {
-  return KNOWN_OPERATION_PROPERTY_KEYS.has(key);
+  return KNOWN_OPERATION_PROPERTY_KEYS.has(key) || hosted.HOSTED_PROPERTY_KEYS.has(key);
 }
 
 export function requireBoolean(value: unknown, code: string): boolean {

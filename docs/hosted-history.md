@@ -62,89 +62,96 @@ require an explicit `--source` selection.
 
 ## Start a server
 
-Initialize an explicit server directory and save the operator credential to a
-private file:
+Initialize your server and run it:
 
 ```sh
-ctx server --root ./history-server init team --credentials-out ./operator.json \
-  --authority-file ./history-authority.json
-ctx server --root ./history-server run
+ctx server init
+ctx server run
 ```
 
-Keep `history-authority.json` outside server checkpoints and retain it separately;
-it prevents a restored backup from undoing later access changes. Losing the
-server disk and this file together leaves a restore closed to serving. See
-[recovery](#recover-the-server-safely) below.
+ctx chooses a separate server directory under its data root, saves the initial
+administrator credential privately, and configures the local administrator
+connection. You do not need to copy a collection ID or choose credential files.
+Use `--root PATH` when you want to choose the server's storage location.
 
-Initialization prints the collection ID. The default listener is
-`127.0.0.1:7332`. For access from other machines, put the listener behind an HTTPS
-reverse proxy. `--trusted-ingress` explicitly permits a non-loopback bind for that
-deployment; it does not configure TLS or trust client-supplied identity headers.
-Keep the backend listener inaccessible to untrusted networks.
+The default listener is `127.0.0.1:7332`. The server runs in the foreground;
+leave that terminal open and use another terminal for administration. Use your
+existing service manager to keep it running after logout or reboot. ctx does
+not install a server service or auto-upgrade the server.
 
-The process runs in the foreground. Use your existing service manager to start
-it on boot. It does not install a service or auto-upgrade itself.
+For other machines, put the loopback listener behind an HTTPS reverse proxy and
+use that HTTPS URL when connecting. `--trusted-ingress` permits an explicit
+non-loopback backend bind; it does not configure TLS or trust identity headers.
+Keep the backend inaccessible to untrusted networks.
 
-Connect the operator's client, replacing `COLLECTION_ID` with the printed ID:
+Live transcripts, SQLite data, the search index, and exported checkpoints are
+not encrypted by ctx. Put them on encrypted storage if you need encryption at
+rest. restic encrypts its backup repository separately.
+
+## Invite someone
+
+While the server is running:
 
 ```sh
-ctx remote connect team --url http://127.0.0.1:7332 \
-  --collection COLLECTION_ID --token-file ./operator.json
-ctx remote status team --online
+ctx server invite alice
 ```
 
-HTTP is accepted only for numeric loopback addresses. Other destinations require
-HTTPS. Connecting saves the destination and credential; it uploads no history.
+ctx saves a short-lived, single-use invitation in a protected file and explains
+how to use it. Deliver that file securely. On Alice's machine:
 
-## Invite people and choose an audience
+```sh
+ctx remote connect https://history.example.com
+```
+
+Paste the invitation when prompted. For scripts, use `--enrollment-file PATH`
+instead. ctx saves the credential privately and reports the connection name.
+Connecting does not upload any history or enable local indexing. Device and
+operator credentials stay valid until revoked by default; invitations expire
+quickly and can be used only once. An administrator can choose a finite lifetime
+when issuing a credential.
 
 A collection is a sharing audience. Read, publish and manage are separate rights.
-A member can publish without reading anyone else's history, read without
-publishing, or do both. Create separate collections for separate audiences.
-There is no implicit organization-wide read permission.
+A member can publish without reading other people's history, read without
+publishing, or do both. Use separate collections for separate audiences; there
+is no implicit organization-wide read permission. Invitations normally grant
+read and publish. Use `--read-only` for a reader or `--manage` for an administrator.
 
-Invite a team member while the server is running:
-
-```sh
-ctx server --remote team user invite alice --output ./alice-enrollment.json
-```
-
-Deliver that private file securely. On Alice's machine:
-
-```sh
-ctx remote connect team --url https://history.example.com \
-  --collection COLLECTION_ID --enrollment-file ./alice-enrollment.json
-```
-
-The enrollment is short-lived and single-use. Ordinary invitations grant read
-and publish; add `--read-only` for a reader or `--manage` for an administrator.
-Tokens belong in protected files or piped stdin, not command-line arguments.
-
-An administrator can change a member's exact rights or revoke collection access:
+An administrator can set exact rights or revoke collection access through a
+saved connection:
 
 ```sh
 ctx server --remote team grant --user PRINCIPAL_ID --publish
 ctx server --remote team revoke --user PRINCIPAL_ID
 ```
 
-Omitted grant flags remove those rights. Credentials can only exercise rights
-they were issued with, intersected with the member's current grants. Increasing
-rights may therefore require issuing a new credential. Revocation prevents future
-access; it cannot retract copies someone already retrieved.
+Omitted grant flags remove those rights. Credential rights are intersected with
+the current grant, so increasing rights may require issuing a new credential.
+The `--remote` form revokes membership in that connection's collection. For
+server-wide revocation, stop the server and use
+`ctx server --root PATH revoke --user PRINCIPAL_ID`; it refuses while the root
+is busy rather than silently narrowing its scope. Revocation prevents future
+access; it cannot retract copies already retrieved.
 
 ## Select history explicitly
 
-Authorize an existing provider profile and project scope:
+List indexed profiles with `ctx sources`. To add a new profile, register its
+absolute root and import it first:
+
+```sh
+ctx sources add work --provider codex --root /path/to/agent-profile
+ctx import --all
+```
+
+Then authorize that registered profile and a project scope:
 
 ```sh
 ctx remote share team --profile-root /path/to/agent-profile \
-  --mode automatic --backfill all --include-future \
   --work-root /path/to/team-project
 ctx remote sync team
 ```
 
-After registering a new profile with `ctx sources add`, run `ctx import --all`
-to commit its source membership before selecting it for sharing.
+A standalone `ctx import --path ...` does not establish a registered profile
+identity. Use the registered root for `--profile-root`.
 
 Use the profile root registered with ctx, or select exact indexed sources with
 repeatable `--source` digests. Work-directory evidence must fit the selected
@@ -152,10 +159,12 @@ roots; unknown or mixed scope stays held. `--whole-source` explicitly includes
 the entire selected source instead. Repository labels do not guarantee that
 every sentence concerns only that project.
 
-`--backfill none --include-future` excludes the current baseline. Reviewed mode
-uses `--mode reviewed --backfill all` without `--include-future` and authorizes
-only the exact current session revisions. The command leaves an inspectable
-normalized snapshot and reports its path.
+The default reviewed mode authorizes only the exact current session revisions.
+The command leaves an inspectable normalized snapshot and reports its path.
+First selection verifies your publishing identity with the server; later policy
+narrowing can work offline. Add `--mode automatic --include-future` to authorize
+future revisions and sessions within that scope. With automatic mode,
+`--backfill none --include-future` excludes the current baseline.
 
 An already-enabled local daemon discovers the saved policy within 30 seconds and
 retries offline work in the background. Sharing does not enable a disabled
@@ -211,35 +220,78 @@ Withdrawal closes reads and stale upload retries for that publication. Retained
 payload files are not physically erased; storage erasure and backup retention
 remain separate operational decisions.
 
-## Recover the server safely
+## Back up and recover the server
 
-With the server stopped, create a coherent checkpoint and back it up with restic:
+With the server stopped, create a coherent checkpoint, then back it up with
+restic to your chosen repository:
 
 ```sh
-ctx server --root ./history-server backup --output ./server-checkpoint
+ctx server backup --output ./server-checkpoint
 restic backup ./server-checkpoint
 ```
 
-A checkpoint includes the permission catalog and accepted payload closure.
-Copying an arbitrary live server directory is not a supported checkpoint.
+Use a fresh output directory for each checkpoint. The checkpoint includes the
+permission catalog and accepted history. It is plaintext until your backup tool
+encrypts it. Copying an arbitrary live server directory is not a supported backup.
+Keep the backup repository and its password somewhere that survives losing the
+server.
 
-An old backup must not restore access that was revoked after it was made. For
-recoverable serving, configure `--authority-file /independent/location/current.json`
-when initializing the server and retain that file independently and continuously.
-The server records its location and advances it before acknowledging permission,
-withdrawal, publishing-policy changes, or explicit settlement of an uncertain
-upload. Ordinary uploads do not advance it.
-It is a current security floor, not a file to roll back alongside the database.
+Restore into a new server directory:
 
 ```sh
-ctx server --root ./recovered-server restore ./server-checkpoint \
-  --authority-file /independent/location/current.json
+ctx server --root ./recovered-server restore ./server-checkpoint
+ctx server --root ./recovered-server run
 ```
 
-Only a checkpoint matching that current security authority can reopen. It may
-omit uploads or content corrections accepted afterward: those are the backup
-data-loss window. A checkpoint predating later security changes, or an ordinary
-restore without matching authority, remains closed to serving.
-Keeping the authority file on the same lost disk does not provide disaster
-recovery. This version does not reconcile older checkpoints forward or provide
-multi-node replication, enterprise identity federation, or a zero-data-loss SLA.
+The restored history is private to a new recovery owner. All previous logins,
+pending invitations and access grants are invalidated. ctx saves the new owner
+credential privately and configures its local administrator connection. Original
+transcript evidence and publisher provenance remain intact.
+
+**Review recovered history before inviting people again.** An older backup does
+not know about withdrawals or permission changes made after the backup. A new
+owner can inspect the retained history and withdraw material before deliberately
+issuing fresh invitations. Revoked users do not automatically regain access.
+
+List retained publications without knowing a search term:
+
+```sh
+ctx server --root ./recovered-server publications
+```
+
+Follow `next_cursor` with `--after CURSOR` until it is empty. Add
+`--collection COLLECTION_ID` to review another restored collection. Each page supplies
+publication IDs, original publishers and exact citations for retained revisions.
+Read access includes older retained revisions, even when search shows a newer
+correction. Use a returned
+publication ID with `server --root ./recovered-server withdraw --publication ID`;
+include the same `--collection COLLECTION_ID` for a nondefault collection.
+For full transcript inspection, save an owner connection and use a returned citation:
+
+```sh
+ctx remote connect http://127.0.0.1:7332 --name recovered \
+  --token-file ./recovered-server/operator.json
+ctx --server recovered show session SESSION_CITATION
+```
+
+Add `--collection COLLECTION_ID` when connecting to another restored collection.
+Review each collection before granting access to it.
+
+On previously connected clients, remove the old connection, connect using a new
+invitation, then select history again:
+
+```sh
+ctx remote remove team
+ctx remote connect https://history.example.com
+ctx remote share team --profile-root /path/to/agent-profile --whole-source
+```
+
+Removing the connection discards its local backlog, not its local history or
+server copies. Re-selecting history grants fresh permission to publish under
+the new identity. Replacing a credential for the same authenticated publisher
+preserves the existing policy and backlog.
+
+A restore can lose uploads or corrections accepted after the checkpoint. This
+version does not reconcile an old backup forward or provide multi-node
+replication or a zero-data-loss guarantee. A backup kept on the same lost disk
+is not disaster recovery.

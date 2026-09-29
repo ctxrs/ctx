@@ -27,6 +27,7 @@ import time
 from urllib.parse import quote, urlencode
 
 from hosted_history_settlement import cancel_before_publish, settle_accepted
+from hosted_history_recovery import private_recovery
 from hosted_history_fixtures import codex_fixture, fixture, prepare_ongoing
 
 
@@ -276,10 +277,8 @@ class Harness:
 
     def setup_server(self):
         self.server_root = self.root / "server-store"
-        self.authority_file = self.root / "retained-current-authority.json"
         (self.root / "credentials").mkdir(mode=0o700)
-        initial = self.admin("init", "team", "--credentials-out", self.token_file("alice"),
-                             "--authority-file", self.authority_file)
+        initial = self.admin("init", "team", "--credentials-out", self.token_file("alice"))
         self.users = {"alice": initial["principal"]}
         self.team = initial["collection"]
         self.restricted = self.admin("collection", "create", "restricted")["collection"]
@@ -299,7 +298,7 @@ class Harness:
             name = "restricted" if actor == "dana" else "team"
             invitation_path = self.token_file(actor + "-enrollment")
             rights = ["--read-only"] if actor in ("carol", "erin") else []
-            self.cli("alice", "server", "--remote", name, "user", "invite", actor,
+            self.cli("alice", "server", "--remote", name, "invite", actor,
                      "--output", invitation_path, *rights, "--format=json")
             invitation = json.loads(invitation_path.read_text())
             enrollment = invitation["enrollment"]["secret"]
@@ -356,7 +355,7 @@ class Harness:
         raise AssertionError("server did not become ready before deadline")
 
     def connect(self, actor, name, collection, *, read_only=False, port=None):
-        args = ["remote", "connect", name, "--url", f"http://127.0.0.1:{port or self.port}",
+        args = ["remote", "connect", f"http://127.0.0.1:{port or self.port}", "--name", name,
                 "--collection", collection, "--token-file", self.token_file(actor),
                 "--format=json"]
         if read_only:
@@ -501,6 +500,7 @@ class Harness:
             if status["reads_available"] and status["searchable_sequence"] >= sequence:
                 return status
             time.sleep(0.1)
+        (self.log / "searchable-timeout.json").write_bytes(self.redact(json.dumps(status).encode()))
         raise AssertionError("accepted revision never became searchable")
 
     def search(self, actor, collection, marker):
@@ -546,7 +546,8 @@ class Harness:
                 require(len(packet["results"]) == 1, "retry created duplicate visible events")
                 return packet["results"][0]
             time.sleep(0.1)
-        raise AssertionError("ongoing collector did not publish the expected marker")
+        (self.log / "marker-timeout.json").write_bytes(self.redact(json.dumps(packet).encode()))
+        raise AssertionError(f"ongoing collector did not publish {marker}")
 
     def start_collector(self, actor):
         env = self.env(actor)
@@ -708,16 +709,39 @@ def ongoing_acceptance(h, sources):
         h.share("alice", "ongoing", selected[:1], profiles=True)
         paused = h.cli("alice", "remote", "status", "ongoing", "--format=json")["local"]
         require(paused["paused"], "editing policy unexpectedly resumed paused sharing")
+        # A restart preserves scheduled retries. Start the acceptance budget
+        # after that saved delay, then measure projection separately.
+        queue = h.root / "alice/data/sharing/ongoing/queue"
+        retry_at = max(json.loads(path.read_text())["retry_at"]
+                       for path in queue.glob("*/pending.json"))
+        retry_delay = max(0, retry_at - time.time())
         probe.seen.clear()
         h.start_server()
         h.cli("alice", "remote", "pause", "ongoing", "--resume", "--format=json")
         collector = h.start_collector("alice")
-        h.wait_for_marker("erin", h.team, "allowedqueue")
+        deadline = time.monotonic() + retry_delay + 30 + h.timeout
+        while time.monotonic() < deadline:
+            require(collector.poll() is None, "collector exited before offline retry acceptance")
+            accepted = h.http("GET", h.route(h.team, "status"), h.tokens["erin"])
+            if accepted["stored_sequence"] > before["stored_sequence"]:
+                break
+            time.sleep(0.1)
+        else:
+            write_json(h.log / "offline-retry-timeout.json",
+                       {"retry_at": retry_at, "saved_retry_delay_seconds": retry_delay, "server": accepted})
+            raise AssertionError("offline retry did not reach durable acceptance after its saved deadline")
+        h.wait_searchable(h.team, "erin", accepted["stored_sequence"])
+        wait_pending(lambda status: status["pending"] == status["held"] == 1,
+                     "allowed receipt did not settle independently of excluded queued history")
+        h.evidence("erin", h.team, "allowedqueue", "allowedqueue may retry after reconnect.", "alice")
+        write_json(h.log / "offline-retry.json", {"saved_retry_delay_seconds": retry_delay,
+                   "accepted_sequence": accepted["stored_sequence"], "searchable": True})
         require("excludedqueue" not in probe.seen, "narrowed queued payload crossed the wire")
         require(not h.search("erin", h.team, "excludedqueue"), "narrowed queued payload became searchable")
         require(len(h.search("erin", h.team, "otterseed")) == 1, "narrowing implicitly deleted accepted history")
         codex_fixture(selected[0], 3, "newrootless future session has no repository metadata.", rootless=True)
         h.import_file("alice", provider="codex")
+        h.local_event("alice", "newrootless", "newrootless future session has no repository metadata.")
         h.wait_for_marker("erin", h.team, "newrootless")
         require("excludedqueue" not in probe.seen, "later capture retried a narrowed payload")
         h.stop(collector)
@@ -903,42 +927,12 @@ def acceptance(h, restic):
     shutil.rmtree(h.root / "bob/data")
     shutil.rmtree(h.server_root)
     h.personal_restore(recovered / "personal", "cedarcorrected", corrected)
-    # This small authority file survives independently of the lost roots and
-    # encrypted snapshots. It must reject A and permit exact-current B.
-    h.admin("restore", recovered / "before-removal", "--authority-file", h.authority_file,
-            root=h.root / "rejected-stale", ok=False)
-    stale_root = h.root / "restored-closed"
-    h.admin("restore", recovered / "before-removal", root=stale_root)
-    require(h.admin("status", root=stale_root)["health"]["recovery_closed"],
-            "restore without current authority reopened shared history")
-    h.start_server(stale_root)
-    h.http("GET", h.route(h.team, "events/" + quote(old_hit["citation"], safe="")),
-           h.tokens["carol"], statuses=(503,))
-    h.stop(h.server)
-    target = h.root / "restored-current"
-    h.admin("restore", recovered / "current", "--authority-file", h.authority_file, root=target)
-    require(not h.admin("status", root=target)["health"]["recovery_closed"],
-            "exact-current authority did not reopen fresh recovery")
-    h.start_server(target)
-    h.wait_searchable(h.team, "erin", last_status["stored_sequence"])
-    h.wait_searchable(h.restricted, "erin", last_restricted["stored_sequence"])
-    h.evidence("erin", h.team, "oakbeacon", sibling, "bob")
-    h.evidence("erin", h.restricted, "violetbeacon", restricted, "dana")
-    h.evidence("erin", h.team, "allowedqueue", "allowedqueue may retry after reconnect.", "alice")
-    h.mcp("erin", "restricted", "violetbeacon", private_hit)
-    require(h.http("GET", h.route(h.team, "receipts/" + quote(
-        sibling_receipt["operation"]["idempotency_key"], safe="")), h.tokens["bob"]) == sibling_receipt,
-        "fresh recovery changed durable receipt identity")
-    for hit in (old_hit, new_hit):
-        h.deny("GET", h.route(h.team, "events/" + quote(hit["citation"], safe="")), h.tokens["erin"])
-    require(not h.search("erin", h.team, "cedarcorrected"), "fresh restore resurrected withdrawal")
-    h.deny("GET", h.route(h.team, "search?q=oakbeacon"), h.tokens["carol"])
-    h.deny("GET", h.route(h.restricted, "events/" + quote(private_hit["citation"], safe="")), h.tokens["bob"])
-    h.stop(h.server)
+    private_recovery(h, recovered, old_hit, new_hit, private_hit, sibling, restricted,
+                     last_status["stored_sequence"], last_restricted["stored_sequence"])
     for path in h.log.iterdir():
         require(not any(secret.encode() in path.read_bytes() for secret in h.secrets),
                 "product log exposed a credential")
-    h.phase("fresh personal and current-server recovery; stale authority, revoke and withdrawal denial")
+    h.phase("fresh personal recovery and private server restore; old access denied, deliberate new sharing")
 
 
 def main():

@@ -149,14 +149,6 @@ impl HistoryServer {
         let mut promoted = false;
         let result: Result<Receipt> = (|| {
             let tx = connection.transaction()?;
-            // A policy advance rejects older writer consent even when the
-            // credential stays active. Unlike content acceptance, it must
-            // survive recovery from an earlier checkpoint.
-            let policy_advanced: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM publications WHERE collection=?1 AND publication=?2 AND policy<?3)",
-                params![collection, request.operation.publication, request.operation.policy_revision],
-                |r| r.get(0),
-            )?;
             let sequence = next_sequence(
                 &tx,
                 collection,
@@ -200,19 +192,12 @@ impl HistoryServer {
             // Check expiry after metadata insertion/fsync and all catalog
             // writes. Grants/predecessors cannot change under this lock.
             authorize(&tx, token, collection, Access::Publish)?;
-            if policy_advanced {
-                self.commit_authority(tx)?;
-            } else {
-                // Immutable revisions remain readable by exact citation until
-                // withdrawal. Losing later content/receipts is the declared
-                // checkpoint data-loss window, not restored access authority.
-                tx.commit()?;
-            }
+            tx.commit()?;
             Ok(receipt)
         })();
         if result.is_err() && promoted {
-            // A floor write can fail after SQLite committed. Never unlink a
-            // payload referenced by that commit (or another publication).
+            // Never unlink a payload referenced by a committed revision.
+            // A failed commit can leave its outcome uncertain.
             let referenced = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM revisions WHERE collection=?1 AND payload=?2)",
                 params![collection, payload_json],
@@ -290,7 +275,7 @@ impl HistoryServer {
         // Authority stayed locked since the predecessor check; recheck expiry
         // at acceptance, as on the publish path.
         authorize(&tx, token, collection, Access::Publish)?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(receipt)
     }
 
@@ -340,7 +325,7 @@ impl HistoryServer {
         record_receipt(&tx, &receipt, &fingerprint)?;
         catalog::audit(&tx, "remove", Some(&principal), Some(collection))?;
         authorize(&tx, token, collection, Access::Manage)?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(receipt)
     }
 }

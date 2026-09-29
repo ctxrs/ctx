@@ -4,6 +4,7 @@ mod archive;
 mod credentials;
 mod remote;
 mod server;
+mod telemetry;
 
 pub(crate) use remote::store as remote_store;
 
@@ -36,18 +37,25 @@ pub(crate) fn json_output(command: &HostedCommand) -> bool {
     }
 }
 
-/// Dispatch before local configuration, telemetry, or daemon initialization.
+/// Hosted operations never initialize the local index or daemon. Selected
+/// completed operations may append consent-controlled, content-free analytics.
 pub(crate) fn run(
     command: &HostedCommand,
     data_root: Option<&Path>,
     color: ColorMode,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
     let mut ui = Ui::stdio(color);
-    let result = match command {
+    let result = (match command {
         HostedCommand::Archive(args) => archive::run(args, data_root, &mut ui),
         HostedCommand::Server(args) => server::run(args, data_root, &mut ui),
         HostedCommand::Remote(args) => remote::run(args, data_root, &mut ui),
-    };
+    })
+    .and_then(|()| {
+        ui.flush()
+            .map_err(|error| anyhow::Error::new(error).context(telemetry::OutputFailure))
+    });
+    telemetry::record(command, data_root, &result, started.elapsed());
     if let Err(error) = result {
         if json_output(command) {
             writeln!(
@@ -62,7 +70,6 @@ pub(crate) fn run(
         }
         return Err(error);
     }
-    ui.flush()?;
     Ok(())
 }
 
@@ -85,7 +92,6 @@ fn error_code(error: &anyhow::Error) -> &'static str {
             Server::Forbidden => "forbidden",
             Server::NotFound => "not_found",
             Server::Conflict => "conflict",
-            Server::RecoveryClosed => "recovery_closed",
             Server::Unavailable => "unavailable",
             Server::Capacity => "capacity",
             Server::Expired => "staging_expired",
@@ -129,12 +135,17 @@ fn print_result(
     text: impl AsRef<str>,
     ui: &mut Ui,
 ) -> Result<()> {
-    if format.is_json() {
-        ctx_terminal::print_json(value)
-    } else {
-        for line in text.as_ref().lines() {
-            ui.write_stdout(&Document::from_line(Line::text(line)))?;
+    let result = (|| {
+        if format.is_json() {
+            ui.write_stdout_bytes(&serde_json::to_vec_pretty(&value)?)?;
+            ui.write_stdout_bytes(b"\n")?;
+            Ok(())
+        } else {
+            for line in text.as_ref().lines() {
+                ui.write_stdout(&Document::from_line(Line::text(line)))?;
+            }
+            Ok(())
         }
-        Ok(())
-    }
+    })();
+    result.map_err(|error: anyhow::Error| error.context(telemetry::OutputFailure))
 }

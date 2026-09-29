@@ -14,11 +14,40 @@ use tempfile::tempdir;
 use super::*;
 
 mod maintenance;
-mod mock;
+pub(crate) mod mock;
 mod observation;
 mod recovery;
 mod settlement;
 use mock::{Mock, Response};
+
+pub(crate) fn publishing_mock(
+    mut respond: impl FnMut(&mock::Request) -> Response + Send + 'static,
+) -> Mock {
+    Mock::new(move |request| {
+        if request.method == "GET" && request.path == format!("/v1/collections/{COLLECTION}/status")
+        {
+            assert_eq!(request.authorization, format!("Bearer {TOKEN}"));
+            publisher_status("synthetic-publisher")
+        } else {
+            respond(request)
+        }
+    })
+}
+
+fn publisher_status(principal: &str) -> Response {
+    Response::json(
+        200,
+        &ctx_history_server::CollectionStatus {
+            principal: principal.into(),
+            collection: COLLECTION.into(),
+            stored_sequence: 0,
+            searchable_sequence: 0,
+            generation: None,
+            reads_available: true,
+            off_host_checkpoint: None,
+        },
+    )
+}
 
 const TOKEN: &str = "synthetic-member-token";
 const COLLECTION: &str = "00000000-0000-4000-8000-000000000001";
@@ -233,7 +262,7 @@ fn narrowed_or_paused_policy_blocks_queued_bytes_then_current_authorized_scope_r
     let temp = tempdir().unwrap();
     let expected = Arc::new(Mutex::new(0_u64));
     let mock_expected = expected.clone();
-    let server = Mock::new(move |request| {
+    let server = publishing_mock(move |request| {
         assert!(request.authorization.ends_with(TOKEN));
         if request.method == "POST" {
             let spec: UploadSpec = serde_json::from_slice(&request.body).unwrap();
@@ -266,7 +295,7 @@ fn narrowed_or_paused_policy_blocks_queued_bytes_then_current_authorized_scope_r
     assert_eq!(collector.tick(), TickOutcome::Progress); // begin upload
     store.pause(true).unwrap();
     assert_eq!(collector.tick(), TickOutcome::Paused);
-    assert_eq!(server.requests().len(), 1);
+    assert_eq!(server.requests().len(), 2); // Authentication, then begin upload.
     policy.revision = 2;
     policy.sources[0].whole_source = false;
     policy.sources[0].work_roots = vec![temp.path().join("work")];
@@ -274,13 +303,13 @@ fn narrowed_or_paused_policy_blocks_queued_bytes_then_current_authorized_scope_r
     store.pause(false).unwrap();
     assert_eq!(collector.tick(), TickOutcome::Idle);
     assert_eq!(store.status().unwrap().held, 1);
-    assert_eq!(server.requests().len(), 1);
+    assert_eq!(server.requests().len(), 2);
     policy.revision = 3;
     policy.sources[0].whole_source = true;
     policy.sources[0].work_roots.clear();
     store.set_policy(policy).unwrap();
     assert_eq!(collector.tick(), TickOutcome::Progress);
-    assert_eq!(server.requests().len(), 2);
+    assert_eq!(server.requests().len(), 3);
 }
 
 #[test]
@@ -290,52 +319,53 @@ fn lost_chunk_and_acceptance_acknowledgements_resume_same_bytes_and_receipt_afte
     let retained = Arc::new(Mutex::new(Vec::<u8>::new()));
     let receipt = Arc::new(Mutex::new(None::<Receipt>));
     let (s, b, r) = (spec.clone(), retained.clone(), receipt.clone());
-    let server = Mock::new(
-        move |request| match (request.method.as_str(), request.path.as_str()) {
-            ("POST", path) if path.ends_with("/uploads") => {
-                let value: UploadSpec = serde_json::from_slice(&request.body).unwrap();
-                let status = UploadStatus {
-                    publisher: "synthetic-publisher".into(),
-                    id: "upload-a".into(),
-                    received_bytes: 0,
-                    expected_bytes: value.bytes,
-                    expires_at: u64::MAX,
-                };
-                *s.lock().unwrap() = Some(value);
-                Response::json(200, &status)
-            }
-            ("PUT", _) => {
-                *b.lock().unwrap() = request.body.clone();
-                Response::Drop
-            }
-            ("GET", path) if path.ends_with("/uploads/upload-a") => Response::json(
-                200,
-                &UploadStatus {
-                    publisher: "synthetic-publisher".into(),
-                    id: "upload-a".into(),
-                    received_bytes: b.lock().unwrap().len() as u64,
-                    expected_bytes: s.lock().unwrap().as_ref().unwrap().bytes,
-                    expires_at: u64::MAX,
-                },
-            ),
-            ("POST", path) if path.ends_with("/revisions") => {
-                assert!(r.lock().unwrap().is_none(), "duplicate admission");
-                let publish: PublishRequest = serde_json::from_slice(&request.body).unwrap();
-                *r.lock().unwrap() = Some(Receipt {
-                    collection: COLLECTION.into(),
-                    publisher: "synthetic-publisher".into(),
-                    operation: publish.operation,
-                    sequence: 7,
-                    kind: "publish".into(),
-                    payload: s.lock().unwrap().clone(),
-                    accepted_at: 1,
-                });
-                Response::Drop
-            }
-            ("GET", _) => Response::json(200, r.lock().unwrap().as_ref().unwrap()),
-            _ => panic!("unexpected method"),
-        },
-    );
+    let server =
+        publishing_mock(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("POST", path) if path.ends_with("/uploads") => {
+                    let value: UploadSpec = serde_json::from_slice(&request.body).unwrap();
+                    let status = UploadStatus {
+                        publisher: "synthetic-publisher".into(),
+                        id: "upload-a".into(),
+                        received_bytes: 0,
+                        expected_bytes: value.bytes,
+                        expires_at: u64::MAX,
+                    };
+                    *s.lock().unwrap() = Some(value);
+                    Response::json(200, &status)
+                }
+                ("PUT", _) => {
+                    *b.lock().unwrap() = request.body.clone();
+                    Response::Drop
+                }
+                ("GET", path) if path.ends_with("/uploads/upload-a") => Response::json(
+                    200,
+                    &UploadStatus {
+                        publisher: "synthetic-publisher".into(),
+                        id: "upload-a".into(),
+                        received_bytes: b.lock().unwrap().len() as u64,
+                        expected_bytes: s.lock().unwrap().as_ref().unwrap().bytes,
+                        expires_at: u64::MAX,
+                    },
+                ),
+                ("POST", path) if path.ends_with("/revisions") => {
+                    assert!(r.lock().unwrap().is_none(), "duplicate admission");
+                    let publish: PublishRequest = serde_json::from_slice(&request.body).unwrap();
+                    *r.lock().unwrap() = Some(Receipt {
+                        collection: COLLECTION.into(),
+                        publisher: "synthetic-publisher".into(),
+                        operation: publish.operation,
+                        sequence: 7,
+                        kind: "publish".into(),
+                        payload: s.lock().unwrap().clone(),
+                        accepted_at: 1,
+                    });
+                    Response::Drop
+                }
+                ("GET", _) => Response::json(200, r.lock().unwrap().as_ref().unwrap()),
+                _ => panic!("unexpected method"),
+            },
+        );
     let (store, collector, _) = make_ready(temp.path(), server.endpoint());
     assert_eq!(collector.tick(), TickOutcome::Progress); // begin
     assert_eq!(collector.tick(), TickOutcome::Failed(Error::Unavailable)); // chunk ack lost
@@ -354,7 +384,7 @@ fn lost_chunk_and_acceptance_acknowledgements_resume_same_bytes_and_receipt_afte
     assert_eq!(store.status().unwrap().pending, 0);
     assert_eq!(store.status().unwrap().last_accepted_sequence, Some(7));
     assert_eq!(restarted.tick(), TickOutcome::Idle); // unchanged generation checkpoint
-    assert_eq!(server.requests().len(), 5);
+    assert_eq!(server.requests().len(), 6);
     let acknowledged = store
         .publication_checkpoint(
             &receipt
@@ -389,11 +419,12 @@ fn remote_status_and_errors_need_no_local_index_and_never_echo_secrets() {
     assert!(!format!("{client:?} {error:?} {error}").contains(TOKEN));
     assert_eq!(client.receipt("key").unwrap_err(), Error::MissingCredential);
     assert_eq!(server.requests().len(), 1);
-    let good = Mock::new(|_| {
+    let good = Mock::new(|request| {
+        assert_eq!(request.authorization, format!("Bearer {TOKEN}"));
         Response::Raw(
             200,
             format!(
-                "{{\"collection\":\"{COLLECTION}\",\"stored_sequence\":12,\"searchable_sequence\":10,\"generation\":null,\"reads_available\":true,\"off_host_checkpoint\":null}}"
+                "{{\"principal\":\"synthetic-reader\",\"collection\":\"{COLLECTION}\",\"stored_sequence\":12,\"searchable_sequence\":10,\"generation\":null,\"reads_available\":true,\"off_host_checkpoint\":null}}"
             ),
             vec![],
         )
@@ -407,6 +438,7 @@ fn remote_status_and_errors_need_no_local_index_and_never_echo_secrets() {
     )
     .unwrap();
     let status = reader.status().unwrap();
+    assert_eq!(status.principal, "synthetic-reader");
     assert_eq!(
         (status.stored_sequence, status.searchable_sequence),
         (12, 10)
@@ -486,13 +518,13 @@ fn credential_files_are_private_and_symlinks_or_public_secrets_are_rejected() {
 #[test]
 fn worker_stop_is_observed_before_any_request() {
     let temp = tempdir().unwrap();
-    let server = Mock::new(|_| panic!("stopped collector sent request"));
+    let server = publishing_mock(|_| panic!("stopped collector sent request"));
     let (store, collector, _) = make_ready(temp.path(), server.endpoint());
     let stop = std::sync::atomic::AtomicBool::new(false);
     stop.store(true, Ordering::Release);
     assert_eq!(collector.tick_with_stop(&stop), TickOutcome::Idle);
     assert_eq!(store.status().unwrap().pending, 1);
-    assert_eq!(server.requests().len(), 0);
+    assert_eq!(server.requests().len(), 1); // Initial policy authentication only.
 }
 
 #[test]
@@ -500,7 +532,7 @@ fn policy_preparation_baselines_old_sessions_and_removal_disables_without_remote
     let temp = tempdir().unwrap();
     let data = temp.path().join("data");
     let record = seed(&data);
-    let server = Mock::new(|_| panic!("preparation/removal made a network request"));
+    let server = publishing_mock(|_| panic!("preparation/removal made a network request"));
     let store = SharingStore::new(data.join("sharing/team"));
     connect(&store, server.endpoint());
     let mut selection = policy(capture::hex(&record.source.identity().digest())).sources;
@@ -521,6 +553,7 @@ fn policy_preparation_baselines_old_sessions_and_removal_disables_without_remote
             .members,
         1
     );
+    assert!(server.requests().is_empty());
     store.set_policy(prepared.clone()).unwrap();
     let collector = Collector::new(data.clone(), store.root().to_owned());
     assert_eq!(collector.tick(), TickOutcome::Idle);
@@ -549,7 +582,7 @@ fn policy_preparation_baselines_old_sessions_and_removal_disables_without_remote
     assert!(!store.root().join("settings.json").exists());
     assert!(!store.root().join("queue").exists());
     assert!(store.root().join("settings.lock").exists());
-    assert_eq!(server.requests().len(), 0);
+    assert_eq!(server.requests().len(), 1); // Initial policy authentication only.
 }
 
 #[test]
@@ -622,6 +655,7 @@ fn remote_search_event_and_session_preserve_provenance_paging_and_unavailability
                 200,
                 &SearchResponse {
                     status: CollectionStatus {
+                        principal: "synthetic-reader".into(),
                         collection: COLLECTION.into(),
                         stored_sequence: 5,
                         searchable_sequence: 3,
@@ -695,8 +729,9 @@ fn remote_search_event_and_session_preserve_provenance_paging_and_unavailability
 #[test]
 fn offline_backlog_does_not_retry_after_policy_narrows() {
     let temp = tempdir().unwrap();
-    let server = Mock::new(|_| Response::Raw(503, "{\"error\":\"offline\"}".into(), vec![]));
+    let (server, remote) = recovery::accepting_remote();
     let (store, collector, mut policy) = make_ready(temp.path(), server.endpoint());
+    remote.lock().unwrap().failure = Some(503);
     assert_eq!(collector.tick(), TickOutcome::Failed(Error::Unavailable));
     expire_backoff(&store);
     policy.revision = 2;
@@ -705,7 +740,7 @@ fn offline_backlog_does_not_retry_after_policy_narrows() {
     store.set_policy(policy).unwrap();
     assert_eq!(collector.tick(), TickOutcome::Idle);
     assert_eq!(collector.tick(), TickOutcome::Idle);
-    assert_eq!(server.requests().len(), 1);
+    assert_eq!(server.requests().len(), 2);
     assert_eq!(store.status().unwrap().held, 1);
 }
 
@@ -714,7 +749,7 @@ fn expired_staging_resends_retained_member_under_the_same_operation() {
     let temp = tempdir().unwrap();
     let mut expected = 0;
     let mut attempt = 0;
-    let server = Mock::new(move |request| {
+    let server = publishing_mock(move |request| {
         attempt += 1;
         if request.method == "POST" {
             expected = serde_json::from_slice::<UploadSpec>(&request.body)
@@ -758,7 +793,7 @@ fn expired_staging_resends_retained_member_under_the_same_operation() {
     let resumed: queue::Pending = private_file::read(&path.join("pending.json")).unwrap();
     assert_eq!(original.operation, resumed.operation);
     let requests = server.requests();
-    assert_eq!(requests[1].body, requests[3].body);
-    assert_eq!(requests[3].body, fs::read(path.join("payload")).unwrap());
+    assert_eq!(requests[2].body, requests[4].body);
+    assert_eq!(requests[4].body, fs::read(path.join("payload")).unwrap());
     assert_eq!(store.status().unwrap().stored_sessions, 0);
 }

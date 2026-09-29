@@ -8,6 +8,7 @@ mod admission;
 mod auth;
 mod catalog;
 mod http;
+mod inventory;
 mod operations;
 mod projection;
 mod publication;
@@ -20,13 +21,14 @@ pub use auth::{
     write_token_file, BootstrapInfo, EnrollRequest, EnrollmentFile, GrantRequest, InviteRequest,
     PublicationState, TokenFile,
 };
-pub use http::{router, serve, serve_blocking};
+pub use http::{router, serve, serve_blocking, serve_blocking_with_ready};
+pub use inventory::{PublicationEntry, PublicationListRequest, PublicationPage};
 pub use operations::{
     publish_fingerprint, CancelPublishOutcome, CancelPublishRequest, CancelPublishResponse,
 };
 pub use publication::{PublishRequest, WithdrawRequest};
 pub use read::*;
-pub use storage::CheckpointInfo;
+pub use recovery::{CheckpointInfo, RestoreInfo};
 pub use types::*;
 
 use rusqlite::Connection;
@@ -48,16 +50,14 @@ pub struct HistoryServer {
     projection: Mutex<()>,
     authority_unavailable: AtomicBool,
     _owner: File,
-    _authority_owner: Option<File>,
     #[cfg(test)]
     hooks: tests::repair::Hooks,
 }
 
 impl HistoryServer {
-    pub fn open(mut config: ServerConfig) -> Result<Self> {
+    pub fn open(config: ServerConfig) -> Result<Self> {
         config.validate()?;
         let (connection, owner) = catalog::open(&config.root)?;
-        let authority_owner = recovery::initialize(&mut config, &connection)?;
         admission::clean_scratch(&config.root, &connection)?;
         Ok(Self {
             config,
@@ -65,7 +65,6 @@ impl HistoryServer {
             projection: Mutex::new(()),
             authority_unavailable: AtomicBool::new(false),
             _owner: owner,
-            _authority_owner: authority_owner,
             #[cfg(test)]
             hooks: tests::repair::Hooks::default(),
         })

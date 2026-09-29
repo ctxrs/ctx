@@ -50,7 +50,7 @@ fn uploader_reclaims_only_abandoned_scratch_and_removal_preserves_explicit_previ
     let owner = store.lock("uploader.lock", false).unwrap();
     assert_eq!(collector.tick(), TickOutcome::Failed(Error::Busy));
     assert!(scratch.iter().all(|p| p.exists()));
-    assert!(server.requests().is_empty());
+    assert_eq!(server.requests().len(), 1); // Initial policy authentication only.
     drop(owner);
     assert_eq!(collector.tick(), TickOutcome::Progress);
     assert!(scratch.iter().all(|p| !p.exists()));

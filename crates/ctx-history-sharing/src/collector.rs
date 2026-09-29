@@ -425,18 +425,15 @@ fn unix_now() -> Result<u64> {
 mod tests {
     use super::*;
     use crate::{
-        tests::{commit_records, make_ready, synthetic_record},
-        Endpoint, PublicationMode,
+        tests::{commit_records, make_ready, publishing_mock, synthetic_record},
+        PublicationMode,
     };
 
     #[test]
     fn local_denial_before_publish_does_not_create_uncertainty_and_replacement_can_capture() {
         let temp = tempfile::tempdir().unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let endpoint =
-            Endpoint::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-        let (store, collector, mut policy) = make_ready(temp.path(), endpoint);
+        let server = publishing_mock(|_| panic!("denied publisher sent a request"));
+        let (store, collector, mut policy) = make_ready(temp.path(), server.endpoint());
         let path = store.pending_paths().unwrap().pop().unwrap();
         let mut pending: Pending = private_file::read(&path.join("pending.json")).unwrap();
         pending.upload = Some(UploadStatus {
@@ -463,10 +460,7 @@ mod tests {
         let saved: Pending = private_file::read(&path.join("pending.json")).unwrap();
         assert!(!saved.publish_attempted && !saved.lookup_receipt);
         assert_eq!(saved.operation, original);
-        assert_eq!(
-            listener.accept().unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
+        assert_eq!(server.requests().len(), 1); // Initial policy authentication only.
 
         let data = temp.path().join("data");
         commit_records(
@@ -490,9 +484,6 @@ mod tests {
         let b: Pending = private_file::read(&path.join("pending.json")).unwrap();
         assert_ne!(b.operation.idempotency_key, original.idempotency_key);
         assert_eq!(b.operation.expected_sequence, None);
-        assert_eq!(
-            listener.accept().unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
+        assert_eq!(server.requests().len(), 1);
     }
 }

@@ -145,7 +145,7 @@ pub(crate) enum CommandRoot {
     Stats(StatsArgs),
     #[command(about = "Show or configure local indexing and follow progress")]
     Index(commands::index::IndexArgs),
-    #[command(about = "List configured and discovered agent history sources")]
+    #[command(about = "List and manage agent history sources")]
     Sources(SourcesArgs),
     #[command(about = "Index provider history into local search")]
     Import(ImportArgs),

@@ -180,8 +180,9 @@ impl HistoryServer {
             ));
         }
         let connection = self.lock()?;
-        authorize(&connection, token, collection, Access::Read)?;
-        let status = self.status_locked(&connection, collection)?;
+        let principal = authorize(&connection, token, collection, Access::Read)?;
+        let mut status = self.status_locked(&connection, collection)?;
+        status.principal = principal;
         if status.stored_sequence == 0 {
             return Ok(SearchResponse {
                 status,

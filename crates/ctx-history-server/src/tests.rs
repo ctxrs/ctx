@@ -16,11 +16,14 @@ use tower::ServiceExt;
 
 mod cancellation;
 mod cancellation_recovery;
+mod credentials;
+mod inventory;
 mod predecessors;
 mod recovery;
 pub(crate) mod repair;
 mod revisions;
 mod search;
+mod startup;
 
 struct Fixture {
     identity: ArchiveIdentity,
@@ -725,142 +728,6 @@ fn chunk_retry_incomplete_corrupt_and_expired_inputs_never_acknowledge() {
             .sequence,
         1
     );
-}
-
-#[test]
-fn checkpoint_restore_requires_current_independent_authority_and_preserves_revocation() {
-    let root = tempfile::tempdir().unwrap();
-    let input = fixture(&root.path().join("source"), "zeta", &["restorable orange"]);
-    let authority = root.path().join("independent-authority.json");
-    let mut config = ServerConfig::new(root.path().join("server"));
-    config.authority_file = Some(authority.clone());
-    let server = HistoryServer::open(config).unwrap();
-    let device = root.path().join("device.json");
-    server.bootstrap("team", &device).unwrap();
-    let token: TokenFile = serde_json::from_slice(&fs::read(device).unwrap()).unwrap();
-    let request = stage(
-        &server,
-        &token.credential.secret,
-        &token.collection,
-        &input,
-        "pub",
-        None,
-        "accepted",
-    );
-    server
-        .publish(&token.credential.secret, &token.collection, request)
-        .unwrap();
-    server.index_pending(&token.collection, 16).unwrap();
-    let result = find(
-        &server,
-        &token.credential.secret,
-        &token.collection,
-        "orange",
-    )
-    .remove(0);
-    let old = root.path().join("old-checkpoint");
-    server.checkpoint(&old).unwrap();
-    let member = server.create_principal("departed").unwrap();
-    server
-        .set_grants(
-            &member,
-            &token.collection,
-            Grants {
-                read: true,
-                publish: false,
-                manage: false,
-            },
-        )
-        .unwrap();
-    let revoked = server
-        .issue_credential(
-            &member,
-            Grants {
-                read: true,
-                publish: false,
-                manage: false,
-            },
-            3600,
-        )
-        .unwrap();
-    server.revoke_principal(&member).unwrap();
-    assert!(matches!(
-        HistoryServer::restore_checkpoint_with_authority(
-            &old,
-            &root.path().join("stale"),
-            &authority
-        ),
-        Err(Error::RecoveryClosed)
-    ));
-    let current = root.path().join("current-checkpoint");
-    server.checkpoint(&current).unwrap();
-    let floor_before = fs::read(&authority).unwrap();
-    drop(server);
-    let restored_root = root.path().join("restored");
-    HistoryServer::restore_checkpoint_with_authority(&current, &restored_root, &authority).unwrap();
-    // Omitted run flag still loads the configured authority path from catalog.
-    let restored = HistoryServer::open(ServerConfig::new(&restored_root)).unwrap();
-    assert_eq!(fs::read(&authority).unwrap(), floor_before);
-    restored.index_pending(&token.collection, 16).unwrap();
-    assert_eq!(
-        restored
-            .read_event(
-                &token.credential.secret,
-                &token.collection,
-                &result.citation
-            )
-            .unwrap()
-            .record
-            .content
-            .meaningful_text(),
-        "restorable orange"
-    );
-    assert!(matches!(
-        restored.status(&revoked.secret, &token.collection),
-        Err(Error::Forbidden)
-    ));
-    restored
-        .withdraw(
-            &token.credential.secret,
-            &token.collection,
-            WithdrawRequest {
-                operation: Operation {
-                    idempotency_key: "remove".into(),
-                    publication: "pub".into(),
-                    writer_epoch: 1,
-                    policy_revision: 1,
-                    expected_revision: Some(input.member.sha256),
-                    expected_sequence: Some(1),
-                    revision: "withdrawn".into(),
-                },
-            },
-        )
-        .unwrap();
-    assert_ne!(fs::read(&authority).unwrap(), floor_before);
-    assert!(matches!(
-        HistoryServer::restore_checkpoint_with_authority(
-            &current,
-            &root.path().join("older"),
-            &authority
-        ),
-        Err(Error::RecoveryClosed)
-    ));
-    drop(restored);
-    // An older ordinary root cannot lower the independent floor on startup.
-    let latest = fs::read(&authority).unwrap();
-    assert!(matches!(
-        HistoryServer::open(ServerConfig::new(root.path().join("server"))),
-        Err(Error::RecoveryClosed)
-    ));
-    assert_eq!(fs::read(&authority).unwrap(), latest);
-    let closed_root = root.path().join("closed");
-    HistoryServer::restore_checkpoint(&current, &closed_root).unwrap();
-    let closed = HistoryServer::open(ServerConfig::new(closed_root)).unwrap();
-    assert!(closed.local_health().unwrap().recovery_closed);
-    assert!(matches!(
-        closed.status(&token.credential.secret, &token.collection),
-        Err(Error::RecoveryClosed)
-    ));
 }
 
 #[tokio::test]

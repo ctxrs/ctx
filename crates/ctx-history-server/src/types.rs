@@ -23,8 +23,6 @@ pub enum Error {
     Invalid(&'static str),
     #[error("collection is unavailable until its safe search generation is ready")]
     Unavailable,
-    #[error("restored authority is recovery-closed")]
-    RecoveryClosed,
     #[error("resource capacity exhausted; retry later")]
     Capacity,
     #[error("upload expired; resubmit the complete revision")]
@@ -48,10 +46,6 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub root: PathBuf,
-    /// Independently retained security floor. Configure outside the data root;
-    /// it must advance before acknowledging access, withdrawal or writer-policy
-    /// changes. It does not track ordinary content acceptance or backup coverage.
-    pub authority_file: Option<PathBuf>,
     pub bind: SocketAddr,
     /// Non-loopback HTTP requires an explicitly trusted TLS reverse proxy.
     pub trusted_ingress: bool,
@@ -67,7 +61,6 @@ impl ServerConfig {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            authority_file: None,
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7332),
             trusted_ingress: false,
             max_in_flight: 8,
@@ -141,6 +134,8 @@ pub struct IssuedSecret {
     pub grants: Grants,
     pub id: String,
     pub secret: String,
+    /// Unix seconds, or zero for a device credential valid until revoked.
+    /// Enrollment secrets always have a positive, short-lived expiry.
     pub expires_at: u64,
 }
 
@@ -187,6 +182,9 @@ pub struct Receipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionStatus {
+    /// Authenticated bearer principal. Empty only for local indexer results,
+    /// which have no presented credential; HTTP status/search always populate it.
+    pub principal: String,
     pub collection: String,
     pub stored_sequence: u64,
     pub searchable_sequence: u64,
@@ -206,7 +204,6 @@ pub struct AuditEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalHealth {
-    pub recovery_closed: bool,
     pub collections: u64,
     pub pending_operations: u64,
     pub staged_uploads: u64,

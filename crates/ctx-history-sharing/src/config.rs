@@ -10,7 +10,7 @@ use ctx_history_platform::platform_security::{
 use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 
-use crate::{private_file, Error, Result, SharingPolicy};
+use crate::{private_file, Error, RemoteClient, Result, SharingPolicy};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -137,6 +137,9 @@ pub(crate) struct Settings {
     pub credentials: Credentials,
     pub policy: Option<SharingPolicy>,
     pub paused: bool,
+    /// Authenticated publisher to whom this saved sharing consent belongs.
+    #[serde(default)]
+    publisher: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +156,8 @@ impl SharingStore {
         &self.root
     }
 
+    /// Initial and reader-only connections are local. Replacing a publishing
+    /// credential under an existing policy authenticates its publisher first.
     pub fn connect(&self, connection: Connection, credentials: Credentials) -> Result<()> {
         if connection.collection.is_empty() {
             return Err(Error::InvalidConfig);
@@ -165,6 +170,16 @@ impl SharingStore {
                 if current.connection != connection {
                     return Err(Error::DestinationChanged);
                 }
+                if current.policy.is_some() {
+                    if credentials.publish.is_none() {
+                        current.paused = true;
+                    } else if credentials.publish != current.credentials.publish {
+                        let publisher = current.publisher.as_deref().ok_or(Error::Credentials)?;
+                        if authenticated_publisher(&connection, &credentials)? != publisher {
+                            return Err(Error::Credentials);
+                        }
+                    }
+                }
                 current.credentials = credentials;
                 current
             }
@@ -173,11 +188,14 @@ impl SharingStore {
                 credentials,
                 policy: None,
                 paused: false,
+                publisher: None,
             },
         };
         private_file::write(&self.root.join("settings.json"), &settings)
     }
 
+    /// First authorization binds the authenticated publisher online. Subsequent
+    /// policy changes retain that binding and can be made while offline.
     pub fn set_policy(&self, policy: SharingPolicy) -> Result<()> {
         policy.validate()?;
         let _lock = self.lock("settings.lock", false)?;
@@ -189,6 +207,16 @@ impl SharingStore {
             .is_some_and(|p| p.revision >= policy.revision)
         {
             return Err(Error::PolicyConflict);
+        }
+        if settings.policy.is_none() {
+            settings.publisher = Some(authenticated_publisher(
+                &settings.connection,
+                &settings.credentials,
+            )?);
+        } else if settings.publisher.is_none() {
+            // Unbound, unpublished settings need explicit remove/reconnect;
+            // current token input must not adopt an older policy's consent.
+            return Err(Error::Credentials);
         }
         settings.policy = Some(policy);
         private_file::write(&self.root.join("settings.json"), &settings)
@@ -276,3 +304,17 @@ impl SharingStore {
         Ok(file)
     }
 }
+
+fn authenticated_publisher(connection: &Connection, credentials: &Credentials) -> Result<String> {
+    let status = RemoteClient::new(connection.clone(), credentials.clone())?.publisher_status()?;
+    if status.collection != connection.collection {
+        return Err(Error::Protocol);
+    }
+    if status.principal.is_empty() {
+        return Err(Error::Credentials);
+    }
+    Ok(status.principal)
+}
+
+#[cfg(test)]
+mod tests;

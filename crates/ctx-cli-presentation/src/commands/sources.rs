@@ -42,7 +42,7 @@ pub enum SourcesCommand {
         #[arg(
             long,
             value_name = "PATH",
-            help = "Existing provider history root (file or directory, depending on provider)"
+            help = "Absolute path to an existing provider history root (file or directory, depending on provider)"
         )]
         root: PathBuf,
         #[arg(
@@ -288,8 +288,9 @@ mod tests {
             "{add_help}"
         );
         assert!(add_help.contains("--root <PATH>"), "{add_help}");
+        assert!(normalized_help.contains("Absolute path"), "{add_help}");
         assert!(
-            add_help.contains("file or directory, depending on provider"),
+            normalized_help.contains("file or directory, depending on provider"),
             "{add_help}"
         );
         assert!(!add_help.contains("Claude or Codex home"), "{add_help}");

@@ -52,7 +52,7 @@ impl Sandbox {
         command
     }
 
-    fn std_command(&self) -> std::process::Command {
+    pub fn std_command(&self) -> std::process::Command {
         let program = PathBuf::from(Command::cargo_bin("ctx").unwrap().get_program());
         let program = std::path::absolute(program).unwrap();
         let mut command = std::process::Command::new(program);
@@ -122,21 +122,34 @@ impl Sandbox {
     }
 
     pub fn start_server(&self) -> RunningServer<'_> {
+        self.start_server_at(&self.path("server"), &self.path("operator.json"))
+    }
+
+    pub fn start_server_at(&self, root: &Path, _credentials: &Path) -> RunningServer<'_> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        self.start_server_bound(root, address)
+    }
+
+    pub fn start_server_ephemeral(&self) -> RunningServer<'_> {
+        self.start_server_bound(&self.path("server"), "127.0.0.1:0".parse().unwrap())
+    }
+
+    fn start_server_bound(&self, root: &Path, address: std::net::SocketAddr) -> RunningServer<'_> {
         use std::{
-            net::{TcpListener, TcpStream},
+            net::{SocketAddr, TcpStream},
             process::Stdio,
             time::Instant,
         };
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
+        let readiness = tempfile::NamedTempFile::new_in(self.path("tmp")).unwrap();
         let mut command = self.std_command();
-        command.arg("server").arg("--root").arg(self.path("server"));
+        command.arg("server").arg("--root").arg(root);
         command.args(["run", "--bind", &address.to_string()]);
         let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(readiness.reopen().unwrap()))
             .spawn()
             .unwrap();
         let mut server = RunningServer {
@@ -150,8 +163,27 @@ impl Sandbox {
                 server.child.try_wait().unwrap().is_none(),
                 "server stopped before readiness"
             );
-            if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
-                return server;
+            let log = fs::read_to_string(readiness.path()).unwrap();
+            if let Some(bound) = log
+                .split_inclusive('\n')
+                .filter(|line| line.ends_with('\n'))
+                .find_map(|line| {
+                    line.trim_end()
+                        .strip_prefix("ctx history server listening on ")
+                })
+            {
+                let bound: SocketAddr = bound.parse().unwrap();
+                let settings: Value =
+                    serde_json::from_slice(&fs::read(root.join("admin/settings.json")).unwrap())
+                        .unwrap();
+                let endpoint = settings["connection"]["endpoint"].as_str().unwrap();
+                let saved: SocketAddr = endpoint.strip_prefix("http://").unwrap().parse().unwrap();
+                assert_eq!(saved.port(), bound.port());
+                assert_ne!(bound.port(), 0);
+                if TcpStream::connect_timeout(&saved, Duration::from_millis(100)).is_ok() {
+                    server.endpoint = endpoint.to_owned();
+                    return server;
+                }
             }
             assert!(Instant::now() < deadline, "server did not become ready");
             std::thread::sleep(Duration::from_millis(25));

@@ -1,0 +1,15 @@
+{
+  "event_id": "4c4bc52a-2571-4d2b-aeef-eef16e6e4f2f",
+  "event_name": "operation_completed",
+  "event_version": 1,
+  "occurred_at": "2026-07-22T12:34:00Z",
+  "surface": "cli",
+  "operation": "server_invite",
+  "outcome": "failure",
+  "duration_bucket": "lt_1s",
+  "properties": {
+    "output": "human",
+    "hosted_failure_stage": "operation",
+    "failure_type": "unauthorized"
+  }
+}

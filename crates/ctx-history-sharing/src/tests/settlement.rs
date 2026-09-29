@@ -437,16 +437,15 @@ fn crash_before_dispatch_is_cancelled_and_credentials_remain_bound_to_original_p
     let (store, collector) = reviewed_ready(temp.path(), server.endpoint());
     let (path, a) = before_dispatch(&store, &collector);
     let bytes = fs::read(path.join("payload")).unwrap();
-    let cutoff = server.requests().len();
     approve_replacement(temp.path(), &store);
     let connection = store.connection().unwrap().unwrap();
-    store
-        .connect(
+    assert_eq!(
+        store.connect(
             connection.clone(),
             Credentials::device("synthetic-other-token".into()).unwrap(),
-        )
-        .unwrap();
-    assert_eq!(collector.tick(), TickOutcome::Failed(Error::Forbidden));
+        ),
+        Err(Error::Credentials)
+    );
     assert_eq!(fs::read(path.join("payload")).unwrap(), bytes);
     assert_eq!(read_pending(&path).publisher, a.publisher);
     assert!(remote.lock().unwrap().cancelled.is_empty());
@@ -456,6 +455,7 @@ fn crash_before_dispatch_is_cancelled_and_credentials_remain_bound_to_original_p
             Credentials::device("synthetic-rotated-token".into()).unwrap(),
         )
         .unwrap();
+    let cutoff = server.requests().len();
     expire_backoff(&store);
     assert_eq!(collector.tick(), TickOutcome::Progress);
     assert_eq!(remote.lock().unwrap().cancelled.len(), 1);
@@ -693,13 +693,13 @@ fn staging_principal_changes_never_rebind_a_saved_operation() {
             expire_backoff(&store);
         }
         let connection = store.connection().unwrap().unwrap();
-        store
-            .connect(
+        assert_eq!(
+            store.connect(
                 connection.clone(),
                 Credentials::device("synthetic-other-token".into()).unwrap(),
-            )
-            .unwrap();
-        assert_eq!(collector.tick(), TickOutcome::Failed(Error::Protocol));
+            ),
+            Err(Error::Credentials)
+        );
         let saved = read_pending(&path);
         assert_eq!(saved.publisher, a.publisher);
         assert_eq!(saved.operation, a.operation);

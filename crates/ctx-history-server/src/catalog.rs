@@ -9,6 +9,11 @@ use std::{
 };
 
 pub(crate) fn open(root: &Path) -> Result<(Connection, File)> {
+    if root.join("checkpoint.json").exists() {
+        return Err(Error::Invalid(
+            "restore the checkpoint into a fresh server root",
+        ));
+    }
     ensure_private_directory(root)?;
     let lock_path = root.join("server.lock");
     private_file(&lock_path)?;
@@ -27,27 +32,8 @@ pub(crate) fn open(root: &Path) -> Result<(Connection, File)> {
         return Err(Error::Invalid("unsupported hosted catalog version"));
     }
     connection.execute_batch(SCHEMA)?;
-    connection.execute(
-        "UPDATE deployment SET instance=?1 WHERE instance=''",
-        [uuid::Uuid::new_v4().to_string()],
-    )?;
-    // Restored checkpoint marker is inspected on every open. A copied old
-    // catalog cannot reactivate credentials merely by restarting the process.
-    if root.join("recovery-closed").exists() {
-        connection.execute("UPDATE deployment SET recovery_closed=1", [])?;
-    }
     File::open(root)?.sync_all()?;
     Ok((connection, owner))
-}
-
-pub(crate) fn serving(connection: &Connection) -> Result<()> {
-    let closed: bool =
-        connection.query_row("SELECT recovery_closed FROM deployment", [], |r| r.get(0))?;
-    if closed {
-        Err(Error::RecoveryClosed)
-    } else {
-        Ok(())
-    }
 }
 
 pub(crate) fn audit(
@@ -76,17 +62,16 @@ pub(crate) fn private_file(path: &Path) -> Result<()> {
     }
 }
 
+// credentials.expires=0 means valid until revoked; enrollment expiry is always finite.
 const SCHEMA: &str = "
 BEGIN IMMEDIATE;
-CREATE TABLE IF NOT EXISTS deployment (id INTEGER PRIMARY KEY CHECK(id=1), recovery_closed INTEGER NOT NULL DEFAULT 0, instance TEXT NOT NULL DEFAULT '', authority_revision INTEGER NOT NULL DEFAULT 0, authority_path TEXT);
-INSERT OR IGNORE INTO deployment(id) VALUES(1);
 CREATE TABLE IF NOT EXISTS principals (id TEXT PRIMARY KEY, name TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, name TEXT NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, unsafe_sequence INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS grants (principal TEXT NOT NULL REFERENCES principals(id), collection TEXT NOT NULL REFERENCES collections(id), read INTEGER NOT NULL, publish INTEGER NOT NULL, manage INTEGER NOT NULL, PRIMARY KEY(principal,collection));
 CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, digest BLOB NOT NULL UNIQUE, principal TEXT NOT NULL REFERENCES principals(id), scope INTEGER NOT NULL, expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS enrollments (id TEXT PRIMARY KEY, digest BLOB NOT NULL UNIQUE, principal TEXT NOT NULL REFERENCES principals(id), scope INTEGER NOT NULL, expires INTEGER NOT NULL, credential_ttl INTEGER NOT NULL, collection TEXT NOT NULL REFERENCES collections(id));
 CREATE TABLE IF NOT EXISTS publications (collection TEXT NOT NULL REFERENCES collections(id), publication TEXT NOT NULL, owner TEXT NOT NULL REFERENCES principals(id), epoch INTEGER NOT NULL, policy INTEGER NOT NULL, revision TEXT NOT NULL, identity TEXT NOT NULL, sequence INTEGER NOT NULL, withdrawn INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(collection,publication), UNIQUE(collection,identity));
-CREATE TABLE IF NOT EXISTS operations (collection TEXT NOT NULL REFERENCES collections(id), key TEXT NOT NULL, principal TEXT NOT NULL REFERENCES principals(id), fingerprint TEXT NOT NULL, terminal TEXT NOT NULL, receipt TEXT, sequence INTEGER, operation TEXT, cancel_fenced INTEGER NOT NULL DEFAULT 0 CHECK(cancel_fenced IN (0,1)), PRIMARY KEY(collection,principal,key), UNIQUE(collection,sequence), CHECK((terminal='accepted' AND receipt IS NOT NULL AND sequence IS NOT NULL AND operation IS NULL) OR (terminal='cancelled' AND receipt IS NULL AND sequence IS NULL AND operation IS NOT NULL AND cancel_fenced=1)));
+CREATE TABLE IF NOT EXISTS operations (collection TEXT NOT NULL REFERENCES collections(id), key TEXT NOT NULL, principal TEXT NOT NULL REFERENCES principals(id), fingerprint TEXT NOT NULL, terminal TEXT NOT NULL, receipt TEXT, sequence INTEGER, operation TEXT, PRIMARY KEY(collection,principal,key), UNIQUE(collection,sequence), CHECK((terminal='accepted' AND receipt IS NOT NULL AND sequence IS NOT NULL AND operation IS NULL) OR (terminal='cancelled' AND receipt IS NULL AND sequence IS NULL AND operation IS NOT NULL)));
 CREATE TABLE IF NOT EXISTS revisions (collection TEXT NOT NULL, publication TEXT NOT NULL, revision TEXT NOT NULL, source TEXT NOT NULL, payload TEXT NOT NULL, descriptor TEXT NOT NULL, PRIMARY KEY(collection,publication,revision), FOREIGN KEY(collection,publication) REFERENCES publications(collection,publication));
 CREATE TABLE IF NOT EXISTS event_refs (collection TEXT NOT NULL, publication TEXT NOT NULL, revision TEXT NOT NULL, event TEXT NOT NULL, session TEXT NOT NULL, sequence INTEGER NOT NULL, offset INTEGER NOT NULL, bytes INTEGER NOT NULL, digest BLOB NOT NULL, PRIMARY KEY(collection,publication,revision,event), FOREIGN KEY(collection,publication,revision) REFERENCES revisions(collection,publication,revision));
 CREATE INDEX IF NOT EXISTS event_refs_direct ON event_refs(collection,event);

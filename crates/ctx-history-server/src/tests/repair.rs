@@ -1,5 +1,4 @@
 use super::*;
-use rusqlite::params;
 use std::{
     sync::{mpsc, Mutex},
     thread,
@@ -169,7 +168,7 @@ fn validation_releases_authority_and_rechecks_revoke_grants_and_expiry() {
                         server
                             .lock()
                             .unwrap()
-                            .execute("UPDATE credentials SET expires=0 WHERE id=?1", [&device.id])
+                            .execute("UPDATE credentials SET expires=1 WHERE id=?1", [&device.id])
                             .unwrap();
                     }
                     _ => unreachable!(),
@@ -486,7 +485,7 @@ fn final_transaction_checks_expiry_and_cleans_only_uncommitted_promotion() {
         .unwrap()
         .execute_batch(
             "CREATE TEMP TRIGGER expire_during_merge AFTER INSERT ON main.event_refs
-         BEGIN UPDATE credentials SET expires=0; END;",
+         BEGIN UPDATE credentials SET expires=1; END;",
         )
         .unwrap();
     assert!(matches!(
@@ -606,105 +605,4 @@ fn catalog_failure_after_promotion_preserves_existing_payloads_and_allows_retry(
         .len(),
         1
     );
-}
-
-#[test]
-fn failed_floor_persistence_cannot_remove_a_committed_payload() {
-    let root = tempfile::tempdir().unwrap();
-    let initial = fixture(
-        &root.path().join("initial"),
-        "floor",
-        &["initial cranberry"],
-    );
-    let input = fixture(
-        &root.path().join("input"),
-        "floor",
-        &["committed cranberry"],
-    );
-    let authority = root.path().join("authority.json");
-    let mut config = ServerConfig::new(root.path().join("server"));
-    config.authority_file = Some(authority.clone());
-    let server = HistoryServer::open(config).unwrap();
-    let token_path = root.path().join("token.json");
-    server.bootstrap("team", &token_path).unwrap();
-    let admin: TokenFile = serde_json::from_slice(&fs::read(token_path).unwrap()).unwrap();
-    let first = stage(
-        &server,
-        &admin.credential.secret,
-        &admin.collection,
-        &initial,
-        "pub",
-        None,
-        "initial",
-    );
-    server
-        .publish(&admin.credential.secret, &admin.collection, first)
-        .unwrap();
-    let previous_floor = fs::read(&authority).unwrap();
-    let mut request = stage(
-        &server,
-        &admin.credential.secret,
-        &admin.collection,
-        &input,
-        "pub",
-        Some(initial.member.sha256),
-        "floor-failure",
-    );
-    // A content-only correction needs no floor write. Advancing the accepted
-    // policy rejects older writer consent, so it must persist the security floor.
-    request.operation.policy_revision = 2;
-    // Native rename cannot replace a directory with the new floor file.
-    fs::remove_file(&authority).unwrap();
-    fs::create_dir(&authority).unwrap();
-    assert!(matches!(
-        server.publish(&admin.credential.secret, &admin.collection, request.clone()),
-        Err(Error::Io(_))
-    ));
-    assert!(matches!(
-        server.status(&admin.credential.secret, &admin.collection),
-        Err(Error::Unavailable)
-    ));
-    let retained = server
-        .collection_root(&admin.collection)
-        .join("payloads")
-        .join(&input.member.sha256);
-    assert!(retained.is_file());
-    // Restore the pre-failure floor to model retrying its interrupted write
-    // from the surviving live catalog, not reopening an older checkpoint.
-    fs::remove_dir(&authority).unwrap();
-    let mut file =
-        ctx_history_platform::platform_security::create_private_file_new(&authority).unwrap();
-    std::io::Write::write_all(&mut file, &previous_floor).unwrap();
-    file.sync_all().unwrap();
-    drop(file);
-    drop(server);
-    let server = HistoryServer::open(ServerConfig::new(root.path().join("server"))).unwrap();
-    assert_eq!(
-        server
-            .publish(&admin.credential.secret, &admin.collection, request)
-            .unwrap()
-            .sequence,
-        2
-    );
-    server.index_pending(&admin.collection, 16).unwrap();
-    assert_eq!(
-        find(
-            &server,
-            &admin.credential.secret,
-            &admin.collection,
-            "cranberry"
-        )
-        .len(),
-        1
-    );
-    let receipts: u64 = server
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT count(*) FROM operations WHERE terminal='accepted' AND collection=?1",
-            params![admin.collection],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(receipts, 2);
 }

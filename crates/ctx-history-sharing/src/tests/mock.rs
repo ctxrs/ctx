@@ -12,14 +12,14 @@ use std::{
 use crate::Endpoint;
 
 #[derive(Clone)]
-pub(super) struct Request {
+pub(crate) struct Request {
     pub method: String,
     pub path: String,
     pub authorization: String,
     pub body: Vec<u8>,
 }
 
-pub(super) enum Response {
+pub(crate) enum Response {
     Drop,
     Raw(u16, String, Vec<(String, String)>),
 }
@@ -29,7 +29,7 @@ impl Response {
     }
 }
 
-pub(super) struct Mock {
+pub(crate) struct Mock {
     endpoint: Endpoint,
     requests: Arc<Mutex<Vec<Request>>>,
     stop: Arc<AtomicBool>,

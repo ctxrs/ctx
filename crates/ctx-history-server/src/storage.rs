@@ -4,24 +4,14 @@ use crate::{
     types::{collection_id, now},
     *,
 };
-use ctx_history_platform::platform_security::{ensure_private_directory, ensure_private_file};
+use ctx_history_platform::platform_security::ensure_private_directory;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
-    time::Duration,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckpointInfo {
-    pub version: u32,
-    pub created_at: u64,
-    pub payloads: u64,
-    pub catalog_sha256: String,
-}
 
 impl HistoryServer {
     pub fn begin_upload(
@@ -173,135 +163,6 @@ impl HistoryServer {
         }
         Ok(())
     }
-
-    /// Finalizes a consistent checkpoint for ordinary backup software. No live
-    /// directory copying, custom encryption or remote backup transport is used.
-    /// The copied authority starts recovery-closed; an exact independently
-    /// retained current security floor is required to reopen it. Later data-only
-    /// acceptance does not invalidate this checkpoint; those bytes and receipts
-    /// are outside its backup window and are not reconstructed by restore.
-    pub fn checkpoint(&self, destination: &Path) -> Result<CheckpointInfo> {
-        let connection = self.lock()?;
-        let parent = destination
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        if destination.exists() {
-            return Err(Error::Conflict);
-        }
-        let temporary = tempfile::Builder::new()
-            .prefix(".ctx-checkpoint-")
-            .tempdir_in(parent)?;
-        let catalog_path = temporary.path().join("authority.sqlite");
-        let mut copy = Connection::open(&catalog_path)?;
-        let backup = rusqlite::backup::Backup::new(&connection, &mut copy)?;
-        backup.run_to_completion(128, Duration::from_millis(10), None)?;
-        drop(backup);
-        copy.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; UPDATE deployment SET recovery_closed=1; DELETE FROM uploads;")?;
-        drop(copy);
-        ensure_private_file(&catalog_path)?;
-        File::open(&catalog_path)?.sync_all()?;
-        let payloads = copy_payloads(&connection, &self.config.root, temporary.path())?;
-        let info = CheckpointInfo {
-            version: 1,
-            created_at: now()?,
-            payloads,
-            catalog_sha256: file_digest(&catalog_path)?,
-        };
-        let manifest = temporary.path().join("checkpoint.json");
-        crate::auth::write_token_file(&manifest, &info)?;
-        let marker = temporary.path().join("recovery-closed");
-        catalog::private_file(&marker)?;
-        File::open(marker)?.sync_all()?;
-        catalog::sync_directory(temporary.path())?;
-        fs::rename(temporary.path(), destination)?;
-        catalog::sync_directory(parent)?;
-        Ok(info)
-    }
-
-    /// Restore only finalized checkpoints to a new root. Ordinary credentials,
-    /// reads and uploads remain disabled; no stale-authority override exists.
-    pub fn restore_checkpoint(checkpoint: &Path, destination: &Path) -> Result<CheckpointInfo> {
-        if destination.exists() {
-            return Err(Error::Conflict);
-        }
-        let info: CheckpointInfo =
-            serde_json::from_reader(File::open(checkpoint.join("checkpoint.json"))?)?;
-        if info.version != 1 || !checkpoint.join("recovery-closed").is_file() {
-            return Err(Error::Invalid("not a finalized checkpoint"));
-        }
-        if file_digest(&checkpoint.join("authority.sqlite"))? != info.catalog_sha256 {
-            return Err(Error::Invalid("checkpoint catalog checksum mismatch"));
-        }
-        let connection = Connection::open_with_flags(
-            checkpoint.join("authority.sqlite"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let closed: bool =
-            connection.query_row("SELECT recovery_closed FROM deployment", [], |r| r.get(0))?;
-        if !closed {
-            return Err(Error::Invalid("checkpoint is not recovery-closed"));
-        }
-        let parent = destination
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let temporary = tempfile::Builder::new()
-            .prefix(".ctx-restore-")
-            .tempdir_in(parent)?;
-        if copy_payloads(&connection, checkpoint, temporary.path())? != info.payloads {
-            return Err(Error::Invalid("checkpoint payload inventory mismatch"));
-        }
-        fs::copy(
-            checkpoint.join("authority.sqlite"),
-            temporary.path().join("authority.sqlite"),
-        )?;
-        let restored = Connection::open(temporary.path().join("authority.sqlite"))?;
-        restored.execute_batch("PRAGMA synchronous=FULL; INSERT OR IGNORE INTO pending SELECT collection,sequence FROM operations WHERE terminal='accepted';")?;
-        drop(restored);
-        ensure_private_file(&temporary.path().join("authority.sqlite"))?;
-        File::open(temporary.path().join("authority.sqlite"))?.sync_all()?;
-        catalog::private_file(&temporary.path().join("recovery-closed"))?;
-        File::open(temporary.path().join("recovery-closed"))?.sync_all()?;
-        catalog::sync_directory(temporary.path())?;
-        fs::rename(temporary.path(), destination)?;
-        catalog::sync_directory(parent)?;
-        Ok(info)
-    }
-}
-
-fn copy_payloads(connection: &Connection, source: &Path, destination: &Path) -> Result<u64> {
-    ensure_private_directory(&destination.join("collections"))?;
-    let mut statement = connection
-        .prepare("SELECT DISTINCT collection,payload FROM revisions ORDER BY collection,payload")?;
-    let mut rows = statement.query([])?;
-    let mut count = 0;
-    while let Some(row) = rows.next()? {
-        let collection: String = row.get(0)?;
-        let payload: String = row.get(1)?;
-        collection_id(&collection)?;
-        let spec: UploadSpec = serde_json::from_str(&payload)?;
-        valid_spec(&spec)?;
-        let from = source
-            .join("collections")
-            .join(&collection)
-            .join("payloads")
-            .join(&spec.sha256);
-        verify_payload(&from, &spec)?;
-        let root = destination.join("collections").join(&collection);
-        ensure_private_directory(&root)?;
-        ensure_private_directory(&root.join("payloads"))?;
-        let to = root.join("payloads").join(&spec.sha256);
-        fs::copy(from, &to)?;
-        ensure_private_file(&to)?;
-        verify_payload(&to, &spec)?;
-        File::open(to)?.sync_all()?;
-        catalog::sync_directory(&root.join("payloads"))?;
-        catalog::sync_directory(&root)?;
-        count += 1;
-    }
-    catalog::sync_directory(&destination.join("collections"))?;
-    Ok(count)
 }
 
 pub(crate) fn owned_upload(
@@ -348,18 +209,4 @@ pub(crate) fn verify_payload(path: &Path, spec: &UploadSpec) -> Result<()> {
         return Err(Error::Invalid("payload digest mismatch"));
     }
     Ok(())
-}
-
-fn file_digest(path: &Path) -> Result<String> {
-    let mut file = File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut bytes = [0; 64 * 1024];
-    loop {
-        let count = file.read(&mut bytes)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&bytes[..count]);
-    }
-    Ok(hex::encode(hash.finalize()))
 }

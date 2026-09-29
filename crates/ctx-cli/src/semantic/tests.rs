@@ -265,10 +265,7 @@ fn daemon_observation_delivery_rechecks_config_at_each_ownership_boundary() -> R
     std::env::remove_var("CTX_ANALYTICS_DRY_RUN");
     initialize()?;
     let root = tempfile::tempdir()?;
-    fs::write(
-        root.path().join(ctx_app_config::CONFIG_FILE),
-        "[analytics]\nenabled = true\n\n[upgrade]\nauto = \"off\"\n",
-    )?;
+    ctx_app_config::set_auto_upgrade_mode(root.path(), ctx_app_config::AutoUpgradeMode::Off)?;
     let event = PublicEventV1::OperationCompleted(OperationCompletedV1::for_daemon(
         DaemonOperationV1::Status,
         Outcome::Success,

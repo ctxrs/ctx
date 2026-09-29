@@ -30,9 +30,15 @@ pub struct InviteRequest {
     pub name: String,
     pub grants: Grants,
     pub enrollment_ttl_seconds: u64,
+    /// Zero (the default) means the device credential is valid until revoked.
+    /// Positive values select an explicit lifetime of at most 90 days.
+    #[serde(default)]
     pub credential_ttl_seconds: u64,
 }
 
+/// Protected invitation descriptor. Clients can discover its collection and
+/// offered scope before redeeming the single-use secret; redemption returns
+/// the server-authoritative collection and issued credential.
 #[derive(Serialize, Deserialize)]
 pub struct EnrollmentFile {
     pub principal: String,
@@ -69,7 +75,6 @@ impl HistoryServer {
     pub fn bootstrap(&self, name: &str, token_file: &Path) -> Result<BootstrapInfo> {
         identifier(name)?;
         let mut connection = self.lock()?;
-        catalog::serving(&connection)?;
         let tx = connection.transaction()?;
         let count: u64 = tx.query_row("SELECT count(*) FROM principals", [], |r| r.get(0))?;
         if count != 0 {
@@ -89,7 +94,6 @@ impl HistoryServer {
             "INSERT INTO grants VALUES (?1,?2,1,1,1)",
             params![principal, collection],
         )?;
-        let ttl = 30 * 24 * 3600;
         let tokens = TokenFile {
             principal: principal.clone(),
             collection: collection.clone(),
@@ -101,12 +105,12 @@ impl HistoryServer {
                     publish: true,
                     manage: true,
                 },
-                ttl,
+                0,
             )?,
         };
         write_token_file(token_file, &tokens)?;
         catalog::audit(&tx, "bootstrap", Some(&principal), Some(&collection))?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(BootstrapInfo {
             principal,
             collection,
@@ -118,7 +122,6 @@ impl HistoryServer {
     pub fn create_principal(&self, name: &str) -> Result<String> {
         identifier(name)?;
         let mut connection = self.lock()?;
-        catalog::serving(&connection)?;
         let tx = connection.transaction()?;
         let id = uuid::Uuid::new_v4().to_string();
         tx.execute(
@@ -126,14 +129,13 @@ impl HistoryServer {
             params![id, name],
         )?;
         catalog::audit(&tx, "create_principal", Some(&id), None)?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(id)
     }
 
     pub fn create_collection(&self, name: &str) -> Result<String> {
         identifier(name)?;
         let mut connection = self.lock()?;
-        catalog::serving(&connection)?;
         let tx = connection.transaction()?;
         let id = uuid::Uuid::new_v4().to_string();
         tx.execute(
@@ -141,17 +143,16 @@ impl HistoryServer {
             params![id, name],
         )?;
         catalog::audit(&tx, "create_collection", None, Some(&id))?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(id)
     }
 
     pub fn set_grants(&self, principal: &str, collection: &str, grants: Grants) -> Result<()> {
         collection_id(collection)?;
         let mut connection = self.lock()?;
-        catalog::serving(&connection)?;
         let tx = connection.transaction()?;
         set_grants(&tx, principal, collection, grants)?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -166,10 +167,11 @@ impl HistoryServer {
         let tx = connection.transaction()?;
         authorize(&tx, token, collection, Access::Manage)?;
         set_grants(&tx, principal, collection, grants)?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(())
     }
 
+    /// A zero TTL issues a credential valid until revoked; positive TTLs expire.
     pub fn issue_credential(
         &self,
         principal: &str,
@@ -177,11 +179,10 @@ impl HistoryServer {
         ttl_seconds: u64,
     ) -> Result<IssuedSecret> {
         let mut connection = self.lock()?;
-        catalog::serving(&connection)?;
         let tx = connection.transaction()?;
         let secret = insert_credential(&tx, principal, scope, ttl_seconds)?;
         catalog::audit(&tx, "issue_credential", Some(principal), None)?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(secret)
     }
 
@@ -194,15 +195,10 @@ impl HistoryServer {
         credential_ttl_seconds: u64,
     ) -> Result<IssuedSecret> {
         collection_id(collection)?;
-        if ttl_seconds == 0
-            || ttl_seconds > 3600
-            || credential_ttl_seconds == 0
-            || credential_ttl_seconds > 90 * 24 * 3600
-        {
+        if ttl_seconds == 0 || ttl_seconds > 3600 || credential_ttl_seconds > 90 * 24 * 3600 {
             return Err(Error::Invalid("invalid enrollment lifetime"));
         }
         let mut connection = self.lock()?;
-        catalog::serving(&connection)?;
         let tx = connection.transaction()?;
         active_principal(&tx, principal)?;
         let secret = new_secret(ttl_seconds, scope)?;
@@ -219,13 +215,12 @@ impl HistoryServer {
             ],
         )?;
         catalog::audit(&tx, "issue_enrollment", Some(principal), None)?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(secret)
     }
 
     pub fn redeem(&self, enrollment: &str) -> Result<TokenFile> {
         let mut connection = self.lock()?;
-        catalog::serving(&connection)?;
         let tx = connection.transaction()?;
         let (principal,scope,ttl,collection): (String,u8,u64,String) = tx.query_row(
             "SELECT principal,scope,credential_ttl,collection FROM enrollments WHERE digest=?1 AND expires>?2",
@@ -238,7 +233,7 @@ impl HistoryServer {
             [hash_secret(enrollment)],
         )?;
         catalog::audit(&tx, "redeem_enrollment", Some(&principal), None)?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(TokenFile {
             principal,
             collection,
@@ -256,7 +251,6 @@ impl HistoryServer {
         if request.grants.bits() == 0
             || request.enrollment_ttl_seconds == 0
             || request.enrollment_ttl_seconds > 3600
-            || request.credential_ttl_seconds == 0
             || request.credential_ttl_seconds > 90 * 24 * 3600
         {
             return Err(Error::Invalid("invite scope or lifetime"));
@@ -284,7 +278,7 @@ impl HistoryServer {
             ],
         )?;
         catalog::audit(&tx, "invite", Some(&manager), Some(collection))?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(EnrollmentFile {
             principal,
             collection: collection.into(),
@@ -314,36 +308,29 @@ impl HistoryServer {
 
     pub fn revoke_credential(&self, credential_id: &str) -> Result<()> {
         let mut connection = self.lock()?;
-        catalog::serving(&connection)?;
         let tx = connection.transaction()?;
         tx.execute(
             "UPDATE credentials SET revoked=1 WHERE id=?1",
             [credential_id],
         )?;
         catalog::audit(&tx, "revoke_credential", None, None)?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn revoke_principal(&self, principal: &str) -> Result<()> {
         let mut connection = self.lock()?;
-        catalog::serving(&connection)?;
         let tx = connection.transaction()?;
         tx.execute("UPDATE principals SET revoked=1 WHERE id=?1", [principal])?;
         tx.execute("DELETE FROM enrollments WHERE principal=?1", [principal])?;
         catalog::audit(&tx, "revoke_principal", Some(principal), None)?;
-        self.commit_authority(tx)?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn local_health(&self) -> Result<LocalHealth> {
         let connection = self.lock()?;
         Ok(LocalHealth {
-            recovery_closed: connection.query_row(
-                "SELECT recovery_closed FROM deployment",
-                [],
-                |r| r.get(0),
-            )?,
             collections: connection
                 .query_row("SELECT count(*) FROM collections", [], |r| r.get(0))?,
             pending_operations: connection
@@ -415,11 +402,20 @@ pub(crate) fn authorize(
     collection: &str,
     required: Access,
 ) -> Result<String> {
+    authorize_at(connection, token, collection, required, now()?)
+}
+
+pub(crate) fn authorize_at(
+    connection: &Connection,
+    token: &str,
+    collection: &str,
+    required: Access,
+    at: u64,
+) -> Result<String> {
     collection_id(collection)?;
-    catalog::serving(connection)?;
     let principal: Option<String> = connection.query_row(
-        "SELECT c.principal FROM credentials c JOIN principals p ON p.id=c.principal JOIN grants g ON g.principal=p.id WHERE c.digest=?1 AND c.revoked=0 AND c.expires>?2 AND p.revoked=0 AND (c.scope & ?3) != 0 AND g.collection=?4 AND CASE ?3 WHEN 1 THEN g.read WHEN 2 THEN g.publish WHEN 4 THEN g.manage ELSE 0 END=1",
-        params![hash_secret(token),now()?,required.bit(),collection], |r| r.get(0)).optional()?;
+        "SELECT c.principal FROM credentials c JOIN principals p ON p.id=c.principal JOIN grants g ON g.principal=p.id WHERE c.digest=?1 AND c.revoked=0 AND (c.expires=0 OR c.expires>?2) AND p.revoked=0 AND (c.scope & ?3) != 0 AND g.collection=?4 AND CASE ?3 WHEN 1 THEN g.read WHEN 2 THEN g.publish WHEN 4 THEN g.manage ELSE 0 END=1",
+        params![hash_secret(token),at,required.bit(),collection], |r| r.get(0)).optional()?;
     principal.ok_or(Error::Forbidden)
 }
 
@@ -448,21 +444,25 @@ fn new_secret(ttl: u64, grants: Grants) -> Result<IssuedSecret> {
         grants,
         id: uuid::Uuid::new_v4().to_string(),
         secret: hex::encode(bytes),
-        expires_at: now()?
-            .checked_add(ttl)
-            .ok_or(Error::Invalid("credential lifetime"))?,
+        expires_at: if ttl == 0 {
+            0
+        } else {
+            now()?
+                .checked_add(ttl)
+                .ok_or(Error::Invalid("credential lifetime"))?
+        },
     })
 }
 
-fn insert_credential(
+pub(crate) fn insert_credential(
     connection: &Connection,
     principal: &str,
     scope: Grants,
     ttl: u64,
 ) -> Result<IssuedSecret> {
-    if scope.bits() == 0 || ttl == 0 || ttl > 90 * 24 * 3600 {
+    if scope.bits() == 0 || ttl > 90 * 24 * 3600 {
         return Err(Error::Invalid(
-            "credential lifetime must be at most 90 days",
+            "credential needs a scope and a lifetime of zero or at most 90 days",
         ));
     }
     active_principal(connection, principal)?;

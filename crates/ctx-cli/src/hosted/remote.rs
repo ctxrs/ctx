@@ -18,30 +18,42 @@ pub(crate) struct RemoteArgs {
     command: RemoteCommand,
 }
 
+impl RemoteArgs {
+    pub(super) fn telemetry_operation(
+        &self,
+    ) -> Option<ctx_client_observability::analytics::HostedOperationV1> {
+        use ctx_client_observability::analytics::HostedOperationV1 as Operation;
+        Some(match self.command {
+            RemoteCommand::Connect { .. } => Operation::RemoteConnect,
+            RemoteCommand::Share(_) => Operation::RemoteShare,
+            RemoteCommand::Sync { .. } => Operation::RemoteSync,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum RemoteCommand {
     /// Save a named destination and credentials; does not upload or enable sharing.
     Connect {
-        name: String,
-        #[arg(long)]
+        /// Server URL. Paste a one-time invitation at the hidden terminal prompt.
         url: String,
+        #[arg(long, default_value = "team")]
+        name: String,
+        /// Token's selected collection, or an explicit check of an invitation's audience.
         #[arg(long)]
-        collection: String,
+        collection: Option<String>,
         /// Owner-private token file, or '-' for piped stdin.
-        #[arg(
-            long,
-            required_unless_present = "enrollment_file",
-            conflicts_with = "enrollment_file"
-        )]
+        #[arg(long, conflicts_with = "enrollment_file")]
         token_file: Option<PathBuf>,
         /// Redeem a short-lived enrollment from a protected file or piped stdin.
-        #[arg(long, required_unless_present = "token_file")]
+        #[arg(long)]
         enrollment_file: Option<PathBuf>,
-        /// Save only read access for this client.
+        /// Disable publishing from this client; keep authorized read/admin access.
         #[arg(long)]
         read_only: bool,
     },
-    /// Authorize the selected normalized history, backfill, and future updates.
+    /// Authorize a reviewed snapshot of selected history; future updates require opt-in.
     Share(ShareArgs),
     /// Capture and send a bounded batch under the saved sharing policy.
     Sync { name: String },
@@ -54,6 +66,7 @@ enum RemoteCommand {
     /// Inspect connection/policy/backlog; optionally fetch current server status.
     Status {
         name: String,
+        /// Contact the server to verify access and stored/searchable coverage.
         #[arg(long)]
         online: bool,
     },
@@ -62,6 +75,9 @@ enum RemoteCommand {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_help = "List indexed sources with ctx sources, or register and import a profile first:\n  ctx sources add work --provider codex --root /absolute/profile\n  ctx import --all\n  ctx remote share team --profile-root /absolute/profile --whole-source\nStandalone exact-path imports do not establish a registered profile identity."
+)]
 struct ShareArgs {
     name: String,
     /// Full Core source digest (repeat to authorize additional sources).
@@ -71,12 +87,12 @@ struct ShareArgs {
     #[arg(long, required_unless_present = "source")]
     profile_root: Vec<PathBuf>,
     /// Automatic authorizes later coherent revisions; reviewed pins current bytes.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, default_value = "reviewed")]
     mode: Mode,
     /// Include all existing sessions or only sessions created after this baseline.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, default_value = "all")]
     backfill: BackfillArg,
-    /// Authorize future sessions and revisions within these sources/profiles.
+    /// With --mode automatic, authorize future sessions and revisions in this scope.
     #[arg(long)]
     include_future: bool,
     /// Authorize full source content, including unknown/mixed project metadata.
@@ -136,29 +152,60 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
             read_only,
             ..
         } => {
-            let connection = Connection {
-                endpoint: Endpoint::parse(url)?,
-                collection: collection.clone(),
-            };
-            if store
-                .connection()?
-                .is_some_and(|current| current != connection)
+            let endpoint = Endpoint::parse(url)?;
+            let current = store.connection()?;
+            if token_file.is_none() && current.is_some() {
+                let status = store.status()?;
+                if status.enabled || status.pending != 0 || status.stored_sessions != 0 {
+                    bail!("a new invitation cannot replace a connection with sharing history or queued uploads; run ctx remote remove {name}, then connect and select history again. Remove discards local backlog; retained server history remains and re-sharing can create duplicate backfill");
+                }
+            }
+            if current
+                .as_ref()
+                .is_some_and(|current| current.endpoint != endpoint)
             {
                 return Err(ctx_history_sharing::Error::DestinationChanged.into());
             }
-            let token = if let Some(file) = token_file {
-                super::credentials::read(file)?
-            } else if let Some(file) = enrollment_file {
-                let enrollment = super::credentials::read(file)?;
-                let issued = RemoteClient::enroll(&connection.endpoint, &enrollment)?;
-                if issued.collection != *collection {
+            let input = if let Some(file) = token_file.as_ref().or(enrollment_file.as_ref()) {
+                super::credentials::read_input(file)?
+            } else {
+                super::credentials::prompt()?
+            };
+            if token_file.is_none()
+                && collection
+                    .as_ref()
+                    .zip(input.collection.as_ref())
+                    .is_some_and(|(selected, issued)| selected != issued)
+            {
+                bail!("credential belongs to a different collection");
+            }
+            let selected = collection.as_ref().or(input.collection.as_ref());
+            if current
+                .as_ref()
+                .zip(selected)
+                .is_some_and(|(current, selected)| &current.collection != selected)
+            {
+                return Err(ctx_history_sharing::Error::DestinationChanged.into());
+            }
+            let (collection, token, only_read) = if token_file.is_some() {
+                let collection = selected.ok_or_else(|| anyhow::anyhow!("a bare token requires --collection; an invitation or operator JSON file includes it"))?;
+                (collection.clone(), input.secret, *read_only)
+            } else {
+                // A raw enrollment needs an explicit collection so a saved
+                // destination can be checked before consuming the one-use value.
+                let collection = selected.ok_or_else(|| anyhow::anyhow!("use the complete invitation JSON, or supply --collection for a bare enrollment"))?;
+                let issued = RemoteClient::enroll(&endpoint, &input.secret)?;
+                if &issued.collection != collection {
                     bail!("enrollment belongs to a different collection");
                 }
-                issued.credential.secret
-            } else {
-                bail!("provide a protected token or enrollment file");
+                let only_read = *read_only || !issued.credential.grants.publish;
+                (issued.collection, issued.credential.secret, only_read)
             };
-            let credentials = if *read_only {
+            let connection = Connection {
+                endpoint,
+                collection: collection.clone(),
+            };
+            let credentials = if only_read {
                 Credentials::read_only(token)?
             } else {
                 Credentials::device(token)?
@@ -168,7 +215,7 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
             super::print_result(args.format, json!({
                 "schema_version": 1, "operation": "remote_connect", "name": name,
                 "connection": connection, "local": status
-            }), format!("Saved connection {name} to {} / {}. Sharing enabled: {}. No history was uploaded by this command.",
+            }), format!("Saved connection {name} to {} / {}. Sharing enabled: {}. No history was uploaded by this command.\nCheck access and searchable coverage: ctx remote status {name} --online",
                 connection.endpoint.as_str(), collection, status.enabled), ui)
         }
         RemoteCommand::Share(selection) => share(selection, &root, &store, args.format, ui),
@@ -241,6 +288,8 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
                     "\nServer stored sequence: {}. Searchable sequence: {}. Reads available: {}.",
                     status.stored_sequence, status.searchable_sequence, status.reads_available
                 ));
+            } else {
+                text.push_str(&format!("\nLocal state only. Check server access and coverage: ctx remote status {name} --online"));
             }
             if let Some(error) = &local.last_error {
                 text.push_str(&format!("\nLast sharing error: {error}"));
@@ -327,7 +376,12 @@ fn share(
             revisions: BTreeSet::new(),
         },
     };
-    let policy = store.prepare_policy(root, &preview, mode, sources)?;
+    let policy = store.prepare_policy(root, &preview, mode, sources).map_err(|error| match error {
+        ctx_history_sharing::Error::PolicyDenied => anyhow::Error::new(error).context(
+            "no indexed source matches this selection; list sources with ctx sources. For a new profile, run ctx sources add NAME --provider PROVIDER --root /absolute/profile, then ctx import --all and retry with that registered --profile-root"
+        ),
+        error => error.into(),
+    })?;
     store.set_policy(policy.clone())?;
     let status = store.status()?;
     let paused = status.paused;
@@ -343,7 +397,7 @@ fn share(
 
 fn sharing_summary(status: &SharingStatus) -> String {
     let mut text = format!(
-        "Stored sessions: {}. Queued revisions: {} pending, {} held.",
+        "This client's publication state: {} stored sessions.\nThis client's upload queue: {} pending revisions, {} held.",
         status.stored_sessions, status.pending, status.held
     );
     let Some(selection) = &status.selection else {
@@ -351,7 +405,7 @@ fn sharing_summary(status: &SharingStatus) -> String {
         return text;
     };
     text.push_str(&format!(
-        "\nObserved sessions (policy {}): {} selected, {} held, {} excluded.",
+        "\nObserved sessions within the selected scope only (policy {}): {} selected, {} held, {} excluded.",
         selection.policy_revision,
         selection.selected(),
         selection.held(),

@@ -36,23 +36,20 @@ fn mcp_serve_help_describes_local_and_shared_access() {
 
 #[test]
 fn remote_filters_fail_explicitly_before_any_connection_or_local_state() {
-    let parsed = crate::Cli::try_parse_from([
-        "ctx",
-        "--server",
-        "team",
-        "search",
-        "needle",
-        "--workspace",
-        "secret",
-    ])
-    .unwrap();
-    let CommandRoot::Search(args) = parsed.command else {
-        panic!("search expected")
-    };
-    assert!(validation::cli_search(&args)
-        .unwrap_err()
-        .to_string()
-        .contains("not supported"));
+    for flag in ["--workspace", "--term"] {
+        let parsed = crate::Cli::try_parse_from([
+            "ctx", "--server", "team", "search", "needle", flag, "secret",
+        ])
+        .unwrap();
+        let CommandRoot::Search(args) = parsed.command else {
+            panic!("search expected")
+        };
+        let error = validation::cli_search(&args).unwrap_err().to_string();
+        assert!(error.contains("not supported"));
+        assert!(error.contains(flag));
+        assert!(error.contains("one lexical query"));
+        assert!(!error.contains("secret"));
+    }
     let parsed = crate::Cli::try_parse_from([
         "ctx",
         "--server",
@@ -240,6 +237,7 @@ fn search_snippets_are_escaped_only_for_terminal_and_exact_show_keeps_full_conte
     event.record.content.structured_content = Some(json!({"exact_only":"full structure"}));
     let response = SearchResponse {
         status: CollectionStatus {
+            principal: "synthetic-reader".into(),
             collection: COLLECTION.into(),
             stored_sequence: 1,
             searchable_sequence: 1,
@@ -397,6 +395,7 @@ fn search_notices_distinguish_query_bounds_from_indexing_backlog() {
     ] {
         let response = SearchResponse {
             status: CollectionStatus {
+                principal: "synthetic-reader".into(),
                 collection: COLLECTION.into(),
                 stored_sequence: 2,
                 searchable_sequence: searchable,

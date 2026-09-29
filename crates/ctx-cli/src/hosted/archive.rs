@@ -15,6 +15,19 @@ pub(crate) struct ArchiveArgs {
     command: ArchiveCommand,
 }
 
+impl ArchiveArgs {
+    pub(super) fn telemetry_operation(
+        &self,
+    ) -> Option<ctx_client_observability::analytics::HostedOperationV1> {
+        use ctx_client_observability::analytics::HostedOperationV1 as Operation;
+        Some(match self.command {
+            ArchiveCommand::Export { .. } => Operation::ArchiveExport,
+            ArchiveCommand::Restore { .. } => Operation::ArchiveRestore,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum ArchiveCommand {
     /// Save a coherent snapshot of retained normalized history; no provider files or credentials.

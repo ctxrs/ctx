@@ -56,7 +56,7 @@ pub(crate) fn fingerprint(value: &impl Serialize) -> Result<String> {
 impl HistoryServer {
     /// Settle an uncertain publish without resending its payload. Cancellation
     /// preserves any accepted content; withdrawal is a separate operation.
-    /// First settlement fences either outcome against stale checkpoint restore.
+    /// Restoring a checkpoint revokes the publisher rather than resuming old work.
     pub fn cancel_publish(
         &self,
         token: &str,
@@ -89,8 +89,7 @@ impl HistoryServer {
         }
         let publication =
             publication_state_locked(&tx, collection, &request.operation.publication)?;
-        let changed = stored.as_ref().is_none_or(|stored| !stored.cancel_fenced);
-        if changed
+        if stored.is_none()
             && publication
                 .as_ref()
                 .is_some_and(|state| state.owner != principal)
@@ -98,29 +97,19 @@ impl HistoryServer {
             return Err(Error::Forbidden);
         }
         let outcome = if let Some(stored) = stored {
-            if changed {
-                tx.execute("UPDATE operations SET cancel_fenced=1 WHERE collection=?1 AND principal=?2 AND key=?3",
-                    params![collection, principal, request.operation.idempotency_key])?;
-            }
             stored.outcome
         } else {
-            tx.execute("INSERT INTO operations(collection,key,principal,fingerprint,terminal,operation,cancel_fenced) VALUES (?1,?2,?3,?4,'cancelled',?5,1)",
+            tx.execute("INSERT INTO operations(collection,key,principal,fingerprint,terminal,operation) VALUES (?1,?2,?3,?4,'cancelled',?5)",
                 params![collection, request.operation.idempotency_key, principal, request.fingerprint, serde_json::to_string(&request.operation)?])?;
+            catalog::audit(&tx, "settle_publish", Some(&principal), Some(collection))?;
             CancelPublishOutcome::Cancelled {
                 publisher: principal.clone(),
                 operation: request.operation,
                 fingerprint: request.fingerprint,
             }
         };
-        if changed {
-            catalog::audit(&tx, "settle_publish", Some(&principal), Some(collection))?;
-        }
         authorize(&tx, token, collection, Access::Publish)?;
-        if changed {
-            self.commit_authority(tx)?;
-        } else {
-            tx.commit()?;
-        }
+        tx.commit()?;
         Ok(CancelPublishResponse {
             outcome,
             publication,
@@ -141,7 +130,6 @@ impl HistoryServer {
 struct StoredOperation {
     fingerprint: String,
     outcome: CancelPublishOutcome,
-    cancel_fenced: bool,
 }
 
 impl StoredOperation {
@@ -159,7 +147,7 @@ impl StoredOperation {
     }
 }
 
-type OperationRow = (String, String, Option<String>, Option<String>, bool);
+type OperationRow = (String, String, Option<String>, Option<String>);
 
 fn lookup(
     connection: &Connection,
@@ -168,28 +156,25 @@ fn lookup(
     key: &str,
 ) -> Result<Option<StoredOperation>> {
     let row: Option<OperationRow> = connection.query_row(
-        "SELECT fingerprint,terminal,receipt,operation,cancel_fenced FROM operations WHERE collection=?1 AND principal=?2 AND key=?3",
-        params![collection,principal,key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
-    row.map(
-        |(fingerprint, terminal, receipt, operation, cancel_fenced)| {
-            let outcome = match (terminal.as_str(), receipt, operation) {
-                ("accepted", Some(receipt), None) => CancelPublishOutcome::Accepted {
-                    receipt: serde_json::from_str(&receipt)?,
-                },
-                ("cancelled", None, Some(operation)) => CancelPublishOutcome::Cancelled {
-                    publisher: principal.into(),
-                    operation: serde_json::from_str(&operation)?,
-                    fingerprint: fingerprint.clone(),
-                },
-                _ => return Err(Error::Unavailable),
-            };
-            Ok(StoredOperation {
-                fingerprint,
-                outcome,
-                cancel_fenced,
-            })
-        },
-    )
+        "SELECT fingerprint,terminal,receipt,operation FROM operations WHERE collection=?1 AND principal=?2 AND key=?3",
+        params![collection,principal,key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    row.map(|(fingerprint, terminal, receipt, operation)| {
+        let outcome = match (terminal.as_str(), receipt, operation) {
+            ("accepted", Some(receipt), None) => CancelPublishOutcome::Accepted {
+                receipt: serde_json::from_str(&receipt)?,
+            },
+            ("cancelled", None, Some(operation)) => CancelPublishOutcome::Cancelled {
+                publisher: principal.into(),
+                operation: serde_json::from_str(&operation)?,
+                fingerprint: fingerprint.clone(),
+            },
+            _ => return Err(Error::Unavailable),
+        };
+        Ok(StoredOperation {
+            fingerprint,
+            outcome,
+        })
+    })
     .transpose()
 }
 

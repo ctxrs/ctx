@@ -1,6 +1,9 @@
 #[path = "hosted_history/support.rs"]
 mod support;
 
+#[path = "hosted_history/admin_regressions.rs"]
+mod admin_regressions;
+
 use std::fs;
 
 use predicates::prelude::*;
@@ -20,7 +23,6 @@ fn server_bootstrap_and_checkpoint_restore_keep_local_history_untouched() {
         .unwrap();
 
     let before = success(sandbox.server().args(["status", "--format=json"]));
-    assert_eq!(before["health"]["recovery_closed"], false);
     assert_eq!(before["health"]["collections"], 1);
     let backup = success(
         sandbox
@@ -31,6 +33,52 @@ fn server_bootstrap_and_checkpoint_restore_keep_local_history_untouched() {
     );
     assert_eq!(backup["off_host_copy_verified"], false);
 
+    let malformed = sandbox.path("not-a-checkpoint.json");
+    fs::write(&malformed, b"{}").unwrap();
+    let error = failure(
+        sandbox
+            .command()
+            .args(["server", "--root"])
+            .arg(sandbox.path("recovered"))
+            .arg("restore")
+            .arg(&malformed)
+            .arg("--format=json"),
+    );
+    assert_eq!(error["error"]["code"], "server_error");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(message.contains(malformed.to_str().unwrap()));
+    assert!(message.contains("storage error"));
+    assert!(message.contains("checkpoint directory"));
+    assert!(message.contains("ctx server backup"));
+    assert!(!sandbox.path("recovered").exists());
+
+    let damaged = sandbox.path("damaged-checkpoint");
+    fs::create_dir(&damaged).unwrap();
+    fs::copy(
+        sandbox.path("checkpoint/checkpoint.json"),
+        damaged.join("checkpoint.json"),
+    )
+    .unwrap();
+    let mut catalog = fs::read(sandbox.path("checkpoint/authority.sqlite")).unwrap();
+    catalog[0] ^= 1;
+    fs::write(damaged.join("authority.sqlite"), catalog).unwrap();
+    let error = failure(
+        sandbox
+            .command()
+            .args(["server", "--root"])
+            .arg(sandbox.path("recovered"))
+            .arg("restore")
+            .arg(&damaged)
+            .arg("--format=json"),
+    );
+    assert_eq!(error["error"]["code"], "invalid_request");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(message.contains(damaged.to_str().unwrap()));
+    assert!(message.contains("invalid request: checkpoint catalog checksum mismatch"));
+    assert!(message.contains("checkpoint directory"));
+    assert!(message.contains("ctx server backup"));
+    assert!(!sandbox.path("recovered").exists());
+    // Correcting only the input succeeds at the same destination without repair.
     let restored = success(
         sandbox
             .command()
@@ -40,87 +88,89 @@ fn server_bootstrap_and_checkpoint_restore_keep_local_history_untouched() {
             .arg(sandbox.path("checkpoint"))
             .arg("--format=json"),
     );
-    assert_eq!(restored["recovery_closed"], true);
-    let after = success(
+    assert_eq!(restored["previous_access_revoked"], true);
+    assert_ne!(restored["principal"], initialized["principal"]);
+    assert_eq!(restored["collection"], initialized["collection"]);
+    let fresh: Value =
+        serde_json::from_slice(&fs::read(sandbox.path("recovered/operator.json")).unwrap())
+            .unwrap();
+    assert_ne!(
+        fresh["credential"]["secret"],
+        secret["credential"]["secret"]
+    );
+    let server = sandbox.start_server_at(
+        &sandbox.path("recovered"),
+        &sandbox.path("recovered/operator.json"),
+    );
+    for (name, path) in [
+        ("old", "operator.json"),
+        ("fresh", "recovered/operator.json"),
+    ] {
+        success(
+            sandbox
+                .command()
+                .args([
+                    "remote",
+                    "connect",
+                    &server.endpoint,
+                    "--name",
+                    name,
+                    "--token-file",
+                ])
+                .arg(sandbox.path(path))
+                .arg("--format=json"),
+        );
+    }
+    failure(
         sandbox
             .command()
-            .args(["server", "--root"])
-            .arg(sandbox.path("recovered"))
-            .args(["status", "--format=json"]),
+            .args(["remote", "status", "old", "--online", "--format=json"]),
     );
-    assert_eq!(after["health"]["recovery_closed"], true);
-    let error = failure(
-        sandbox
-            .command()
-            .args(["server", "--root"])
-            .arg(sandbox.path("recovered"))
-            .args(["user", "create", "blocked", "--format=json"]),
-    );
-    assert_eq!(error["error"]["code"], "recovery_closed");
+    let status =
+        success(
+            sandbox
+                .command()
+                .args(["remote", "status", "fresh", "--online", "--format=json"]),
+        );
+    assert_eq!(status["server"]["stored_sequence"], 0);
     sandbox.assert_no_local_index();
 }
 
 #[test]
-fn matching_authority_reopens_a_checkpoint_but_later_mutations_block_stale_restore() {
+fn authority_file_and_nested_user_invite_are_removed() {
     let sandbox = Sandbox::new();
-    let authority = sandbox.path("independent-authority.json");
-    success(
-        sandbox
-            .server()
-            .args(["init", "recovery-team", "--credentials-out"])
-            .arg(sandbox.path("operator.json"))
-            .arg("--authority-file")
-            .arg(&authority)
-            .arg("--format=json"),
-    );
-    success(
-        sandbox
-            .server()
-            .args(["backup", "--output"])
-            .arg(sandbox.path("checkpoint"))
-            .arg("--format=json"),
-    );
-    let restored = success(
-        sandbox
-            .command()
-            .args(["server", "--root"])
-            .arg(sandbox.path("recovered"))
-            .arg("restore")
-            .arg(sandbox.path("checkpoint"))
-            .arg("--authority-file")
-            .arg(&authority)
-            .arg("--format=json"),
-    );
-    assert_eq!(restored["recovery_closed"], false);
-    let health = success(
-        sandbox
-            .command()
-            .args(["server", "--root"])
-            .arg(sandbox.path("recovered"))
-            .args(["status", "--format=json"]),
-    );
-    assert_eq!(health["health"]["recovery_closed"], false);
+    for args in [
+        vec!["server", "init", "--authority-file", "unused"],
+        vec!["server", "run", "--authority-file", "unused"],
+        vec!["server", "restore", "unused", "--authority-file", "unused"],
+        vec!["server", "user", "invite", "alice"],
+    ] {
+        sandbox.command().args(args).assert().failure();
+    }
+    assert!(!sandbox.path("history").exists());
+}
 
-    // The original configured authority path is reused without passing it again.
-    success(
-        sandbox
-            .server()
-            .args(["user", "create", "after-checkpoint", "--format=json"]),
-    );
+#[test]
+fn oversized_credential_input_is_bounded_without_saving_state() {
+    let sandbox = Sandbox::new();
+    let input = "synthetic-too-long".repeat(1100);
     let error = failure(
         sandbox
             .command()
-            .args(["server", "--root"])
-            .arg(sandbox.path("stale"))
-            .arg("restore")
-            .arg(sandbox.path("checkpoint"))
-            .arg("--authority-file")
-            .arg(&authority)
-            .arg("--format=json"),
+            .args([
+                "remote",
+                "connect",
+                "https://history.invalid",
+                "--collection",
+                "example",
+                "--token-file=-",
+                "--format=json",
+            ])
+            .write_stdin(input),
     );
-    assert_eq!(error["error"]["code"], "recovery_closed");
-    assert!(!sandbox.path("stale").exists());
-    sandbox.assert_no_local_index();
+    assert!(error["error"]["message"].as_str().unwrap().contains("size"));
+    assert!(!error.to_string().contains("synthetic-too-long"));
+    assert!(!sandbox.path("history").exists());
 }
 
 #[test]
@@ -130,6 +180,206 @@ fn server_status_does_not_create_an_uninitialized_root() {
     assert!(!sandbox.path("server").exists());
     assert!(!sandbox.path("history").exists());
     sandbox.assert_no_local_index();
+}
+
+#[test]
+fn default_init_is_private_repeatable_and_uses_native_data_root() {
+    let sandbox = Sandbox::new();
+    let first = success(sandbox.command().env_remove("CTX_DATA_ROOT").args([
+        "server",
+        "init",
+        "--format=json",
+    ]));
+    let root = sandbox.path("home/.ctx/server");
+    assert_eq!(first["root"], root.to_str().unwrap());
+    assert_eq!(first["initialized"], true);
+    let credential_path = root.join("operator.json");
+    let credential = fs::read(&credential_path).unwrap();
+    let saved = fs::read(root.join("admin/settings.json")).unwrap();
+    ctx_history_platform::platform_security::verify_private_file(&credential_path).unwrap();
+    ctx_history_platform::platform_security::verify_private_file(&root.join("admin/settings.json"))
+        .unwrap();
+    let repeated = success(sandbox.command().env_remove("CTX_DATA_ROOT").args([
+        "server",
+        "init",
+        "--format=json",
+    ]));
+    assert_eq!(repeated["initialized"], false);
+    assert_eq!(repeated["principal"], first["principal"]);
+    assert_eq!(repeated["collection"], first["collection"]);
+    assert_eq!(fs::read(credential_path).unwrap(), credential);
+    assert_eq!(fs::read(root.join("admin/settings.json")).unwrap(), saved);
+    assert!(!sandbox.path("home/.ctx/search").exists());
+    assert!(!sandbox.path("home/.ctx/daemon").exists());
+    assert!(!sandbox.path("home/.ctx/config.toml").exists());
+}
+
+#[test]
+fn explicit_data_root_works_without_home_and_preserves_existing_credentials_on_error() {
+    let sandbox = Sandbox::new();
+    let initialized = success(
+        sandbox
+            .command()
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .args(["server", "init", "--format=json"]),
+    );
+    assert_eq!(
+        initialized["root"],
+        sandbox.path("history/server").to_str().unwrap()
+    );
+    let original = fs::read(sandbox.path("history/server/operator.json")).unwrap();
+    failure(
+        sandbox
+            .command()
+            .args(["server", "init", "--credentials-out"])
+            .arg(sandbox.path("missing/operator.json"))
+            .arg("--format=json"),
+    );
+    assert_eq!(
+        fs::read(sandbox.path("history/server/operator.json")).unwrap(),
+        original
+    );
+    sandbox.assert_no_local_index();
+}
+
+#[test]
+fn connect_without_explicit_input_fails_promptly_in_scripts_and_redacts_bad_inputs() {
+    let sandbox = Sandbox::new();
+    let error = failure(
+        sandbox
+            .command()
+            .timeout(std::time::Duration::from_secs(3))
+            .args([
+                "remote",
+                "connect",
+                "https://history.invalid",
+                "--format=json",
+            ]),
+    );
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--enrollment-file"));
+    for input in [
+        "{\"secret\":\"synthetic-never-print-this\",",
+        "two synthetic-never-print-this tokens\n",
+    ] {
+        let error = failure(
+            sandbox
+                .command()
+                .args([
+                    "remote",
+                    "connect",
+                    "https://history.invalid",
+                    "--enrollment-file=-",
+                    "--format=json",
+                ])
+                .write_stdin(input),
+        );
+        assert!(!error.to_string().contains("synthetic-never-print-this"));
+    }
+    failure(
+        sandbox
+            .command()
+            .args([
+                "remote",
+                "connect",
+                "https://history.invalid",
+                "--enrollment-file",
+            ])
+            .arg(sandbox.path("absent/invitation.json"))
+            .arg("--format=json"),
+    );
+    sandbox
+        .command()
+        .args([
+            "remote",
+            "connect",
+            "https://history.invalid",
+            "--name",
+            "../outside",
+            "--token-file=-",
+            "--collection",
+            "test",
+            "--format=json",
+        ])
+        .write_stdin("synthetic-never-print-this")
+        .assert()
+        .failure();
+    assert!(!sandbox.path("history").exists());
+}
+
+#[test]
+fn token_envelopes_allow_explicit_other_collection_without_enabling_sharing() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let connected = success(
+        sandbox
+            .command()
+            .args([
+                "remote",
+                "connect",
+                "https://history.invalid",
+                "--collection",
+                "another-authorized-collection",
+                "--token-file",
+            ])
+            .arg(sandbox.path("operator.json"))
+            .arg("--format=json"),
+    );
+    assert_eq!(connected["name"], "team");
+    assert_eq!(
+        connected["connection"]["collection"],
+        "another-authorized-collection"
+    );
+    assert_eq!(connected["local"]["enabled"], false);
+    assert_eq!(connected["local"]["pending"], 0);
+    sandbox.assert_no_local_index();
+}
+
+#[test]
+fn custom_bind_updates_admin_endpoint_without_rotating_identity() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let original = fs::read(sandbox.path("operator.json")).unwrap();
+    let repeated = success(sandbox.server().args(["init", "--format=json"]));
+    assert_eq!(
+        repeated["credentials_file"],
+        sandbox.path("operator.json").to_str().unwrap()
+    );
+    assert_eq!(fs::read(sandbox.path("operator.json")).unwrap(), original);
+    let server = sandbox.start_server();
+    let invite = success(
+        sandbox
+            .server()
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("CTX_DATA_ROOT")
+            .args(["invite", "alice", "--format=json"]),
+    );
+    assert!(invite["file"]
+        .as_str()
+        .unwrap()
+        .starts_with(sandbox.path("server/invitations").to_str().unwrap()));
+    assert_eq!(fs::read(sandbox.path("operator.json")).unwrap(), original);
+    let member = Sandbox::new();
+    let connected = success(member.command().args([
+        "remote",
+        "connect",
+        &server.endpoint,
+        "--enrollment-file",
+        invite["file"].as_str().unwrap(),
+        "--format=json",
+    ]));
+    assert_eq!(connected["connection"]["collection"], invite["collection"]);
+    assert_eq!(connected["local"]["enabled"], false);
+    member.assert_no_local_index();
+    sandbox.assert_no_local_index();
+    let endpoint = server.endpoint.clone();
+    drop(server);
+    let repeated = success(sandbox.server().args(["init", "--format=json"]));
+    assert_eq!(repeated["admin_endpoint"], endpoint);
 }
 
 #[test]
@@ -185,9 +435,9 @@ fn connect_offline_stores_no_policy_and_ignores_local_config_errors() {
             .args([
                 "remote",
                 "connect",
-                "team",
-                "--url",
                 "https://history.invalid",
+                "--name",
+                "team",
                 "--collection",
                 "synthetic-collection",
                 "--token-file",
@@ -221,9 +471,9 @@ fn raw_stdin_and_bootstrap_envelopes_are_accepted_without_printing_secrets() {
             .args([
                 "remote",
                 "connect",
-                "operator",
-                "--url",
                 "http://127.0.0.1:7332",
+                "--name",
+                "operator",
                 "--collection",
                 collection,
                 "--token-file",
@@ -236,9 +486,9 @@ fn raw_stdin_and_bootstrap_envelopes_are_accepted_without_printing_secrets() {
         .args([
             "remote",
             "connect",
-            "reader",
-            "--url",
             "https://history.invalid",
+            "--name",
+            "reader",
             "--collection",
             collection,
             "--token-file=-",
@@ -299,9 +549,9 @@ fn permissive_and_symlinked_credentials_are_rejected_before_saving_connection() 
             .args([
                 "remote",
                 "connect",
-                "team",
-                "--url",
                 "https://history.invalid",
+                "--name",
+                "team",
                 "--collection",
                 "test",
                 "--token-file",
@@ -317,9 +567,9 @@ fn permissive_and_symlinked_credentials_are_rejected_before_saving_connection() 
             .args([
                 "remote",
                 "connect",
-                "team",
-                "--url",
                 "https://history.invalid",
+                "--name",
+                "team",
                 "--collection",
                 "test",
                 "--token-file",

@@ -32,6 +32,7 @@ pub(super) fn accepting_remote() -> (Mock, Arc<Mutex<RemoteState>>) {
             return Response::Raw(status, "{}".into(), vec![]);
         }
         match (request.method.as_str(), request.path.as_str()) {
+            ("GET", path) if path.ends_with("/status") => publisher_status(publisher),
             ("POST", path) if path.ends_with("/operations/cancel") => {
                 let cancel: CancelPublishRequest = serde_json::from_slice(&request.body).unwrap();
                 if cancel.publisher != publisher {
@@ -249,8 +250,8 @@ fn backoff_captures_new_sessions_without_replacing_unresolved_revisions() {
         let temp = tempdir().unwrap();
         let data = temp.path().join("data");
         let (server, remote) = accepting_remote();
-        remote.lock().unwrap().failure = Some(failure);
         let (store, collector, mut policy) = make_ready(temp.path(), server.endpoint());
+        remote.lock().unwrap().failure = Some(failure);
         let a_path = store.pending_paths().unwrap().pop().unwrap();
         assert_eq!(collector.tick(), TickOutcome::Failed(error));
         let mut a = read_pending(&a_path);
@@ -277,13 +278,13 @@ fn backoff_captures_new_sessions_without_replacing_unresolved_revisions() {
             stamp["generation"],
             capture::open_index(&data).unwrap().generation_id()
         );
-        assert_eq!(server.requests().len(), 1);
+        assert_eq!(server.requests().len(), 2);
 
         let mut sleeping_b = read_pending(&b_path);
         sleeping_b.retry_at = u64::MAX;
         sleeping_b.save(&b_path).unwrap();
         assert_eq!(collector.tick(), TickOutcome::Idle); // Unchanged generation checkpoint.
-        assert_eq!(server.requests().len(), 1);
+        assert_eq!(server.requests().len(), 2);
 
         // An even newer revision of A must wait, while B remains independent.
         let corrected = synthetic_record("session-one", "corrected local A");
@@ -305,7 +306,7 @@ fn backoff_captures_new_sessions_without_replacing_unresolved_revisions() {
         store.set_policy(policy.clone()).unwrap();
         assert_eq!(collector.tick(), TickOutcome::Idle);
         assert_eq!(store.status().unwrap().held, 2);
-        assert_eq!(server.requests().len(), 1);
+        assert_eq!(server.requests().len(), 2);
 
         policy.revision += 1;
         policy.sources[0].whole_source = true;
@@ -318,7 +319,7 @@ fn backoff_captures_new_sessions_without_replacing_unresolved_revisions() {
         assert_eq!(store.status().unwrap().pending, 1);
         assert_eq!(fs::read(a_path.join("pending.json")).unwrap(), a_metadata);
         assert_eq!(fs::read(a_path.join("payload")).unwrap(), a_bytes);
-        assert_eq!(server.requests()[2].body, b_bytes);
+        assert_eq!(server.requests()[3].body, b_bytes);
         let accepted_b = store
             .publication_checkpoint(&b.operation.publication)
             .unwrap()
@@ -334,7 +335,7 @@ fn backoff_captures_new_sessions_without_replacing_unresolved_revisions() {
             .unwrap()
             .unwrap();
         assert_eq!(accepted_a.revision, a.operation.revision);
-        assert_eq!(server.requests()[5].body, a_bytes);
+        assert_eq!(server.requests()[6].body, a_bytes);
         assert_eq!(collector.tick(), TickOutcome::Progress); // Now capture A's successor.
         let successor = read_pending(&a_path);
         assert_eq!(
@@ -435,7 +436,10 @@ fn restart_at_acceptance_boundaries_cleans_only_retired_work_and_advances_neighb
             .collect();
         assert_eq!(published.len(), 1); // Only B; A never receives a fresh identity.
         assert_ne!(published[0].operation.publication, a.operation.publication);
-        let lookups: Vec<_> = requests.iter().filter(|r| r.method == "GET").collect();
+        let lookups: Vec<_> = requests
+            .iter()
+            .filter(|r| r.path.contains("/receipts/"))
+            .collect();
         assert_eq!(lookups.len(), usize::from(boundary < 2));
         if let Some(lookup) = lookups.first() {
             assert!(lookup.path.ends_with(&a.operation.idempotency_key));
@@ -446,7 +450,7 @@ fn restart_at_acceptance_boundaries_cleans_only_retired_work_and_advances_neighb
 #[test]
 fn unmatched_receipts_and_receipt_write_failures_never_discard_live_bytes() {
     let temp = tempdir().unwrap();
-    let server = Mock::new(|_| panic!("cleanup must not use the network"));
+    let server = publishing_mock(|_| panic!("cleanup must not use the network"));
     let (store, collector, _) = make_ready(temp.path(), server.endpoint());
     let path = store.pending_paths().unwrap().pop().unwrap();
     let mut pending = read_pending(&path);
@@ -490,7 +494,7 @@ fn unmatched_receipts_and_receipt_write_failures_never_discard_live_bytes() {
     store.cleanup_retired().unwrap();
     assert_eq!(collector.tick(), TickOutcome::Failed(Error::State));
     assert_eq!(fs::read(path.join("payload")).unwrap(), bytes);
-    assert!(server.requests().is_empty());
+    assert_eq!(server.requests().len(), 1); // Initial policy authentication only.
 
     pending.save(&path).unwrap();
     store.accepted(&path, &pending, receipt).unwrap();

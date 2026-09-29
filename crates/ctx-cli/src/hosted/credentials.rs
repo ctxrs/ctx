@@ -9,10 +9,50 @@ use ctx_history_platform::platform_security::{
     create_private_file_new, verify_private_file_handle,
 };
 
+mod terminal;
+
 const MAX_CREDENTIAL_BYTES: u64 = 16 * 1024;
+
+// Deliberately no Debug: both raw tokens and JSON envelopes contain secrets.
+pub(super) struct Input {
+    pub secret: String,
+    pub collection: Option<String>,
+}
 
 /// A dash explicitly selects piped stdin. File credentials must be owner-private.
 pub(super) fn read(path: &Path) -> Result<String> {
+    Ok(read_input(path)?.secret)
+}
+
+pub(super) fn read_input(path: &Path) -> Result<Input> {
+    parse(&read_bytes(path)?)
+}
+
+pub(super) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    serde_json::from_slice(&read_bytes(path)?)
+        .map_err(|_| anyhow::anyhow!("invalid credential file"))
+}
+
+pub(super) fn prompt() -> Result<Input> {
+    if !std::io::stdin().is_terminal() {
+        bail!("enrollment input is required; use --enrollment-file PATH or --enrollment-file - for piped stdin");
+    }
+    let bytes = terminal::read_hidden()?;
+    if !bytes
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| *b == b'{')
+    {
+        bail!("paste the compact invitation JSON, or use --enrollment-file PATH");
+    }
+    let input = parse(&bytes)?;
+    if input.collection.is_none() {
+        bail!("invitation JSON must contain its collection; use the complete invitation file");
+    }
+    Ok(input)
+}
+
+fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     if path == Path::new("-") {
         let stdin = std::io::stdin();
@@ -33,22 +73,42 @@ pub(super) fn read(path: &Path) -> Result<String> {
     if bytes.len() > MAX_CREDENTIAL_BYTES as usize {
         bail!("credential exceeds the supported size");
     }
-    let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("credential must be UTF-8"))?;
-    let token = if text.trim_start().starts_with('{') {
+    Ok(bytes)
+}
+
+fn parse(bytes: &[u8]) -> Result<Input> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| anyhow::anyhow!("credential must be UTF-8"))?;
+    let (token, collection) = if text.trim_start().starts_with('{') {
         // Read the server's bootstrap, enrollment, or issued-secret envelope.
         // Never include its JSON or decoder errors in diagnostics.
         let value: serde_json::Value =
-            serde_json::from_str(&text).map_err(|_| anyhow::anyhow!("invalid credential file"))?;
-        value
+            serde_json::from_str(text).map_err(|_| anyhow::anyhow!("invalid credential file"))?;
+        let token = value
             .get("credential")
             .or_else(|| value.get("enrollment"))
             .unwrap_or(&value)
             .get("secret")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("credential file contains no secret"))?
-            .to_owned()
+            .to_owned();
+        let collection = value
+            .get("collection")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| {
+                        !value.is_empty()
+                            && value.len() <= 128
+                            && value.bytes().all(|b| b.is_ascii_graphic())
+                    })
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow::anyhow!("invalid credential collection"))
+            })
+            .transpose()?;
+        (token, collection)
     } else {
-        text.trim_end_matches(['\r', '\n']).to_owned()
+        (text.trim_end_matches(['\r', '\n']).to_owned(), None)
     };
     if token.is_empty()
         || token
@@ -57,7 +117,10 @@ pub(super) fn read(path: &Path) -> Result<String> {
     {
         bail!("credential must be one nonempty token");
     }
-    Ok(token)
+    Ok(Input {
+        secret: token,
+        collection,
+    })
 }
 
 fn open(path: &Path) -> Result<File> {

@@ -46,9 +46,10 @@ Provider files are read as import sources, not modified.
 Explicit hosted history adds a separate server boundary. The operator and the
 server's OS account are trusted with retained plaintext history. TLS protects
 transport; it does not hide shared history from that operator. Collection
-permissions are checked on search, exact citation reads and uploads. An old
-checkpoint cannot safely reinstate later-revoked access; serving after restore
-requires the independently retained current authority described in
+permissions are checked on search, exact citation reads and uploads. Restoring a
+checkpoint invalidates old credentials, invitations and grants, and makes the
+history private to a new owner. An older backup cannot know later withdrawals:
+the owner must review content before explicitly sharing it again. See
 [hosted-history.md](hosted-history.md).
 
 Remote evidence is untrusted historical content. It does not authorize commands,

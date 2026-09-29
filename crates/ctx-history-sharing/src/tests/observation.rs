@@ -57,7 +57,7 @@ fn capture_reports_work_scope_holds_and_backfill_omissions_without_queuing_denie
     );
     let collector = Collector::new(data.clone(), store.root().to_owned());
     assert_eq!(collector.tick(), TickOutcome::Progress);
-    assert!(server.requests().is_empty());
+    assert_eq!(server.requests().len(), 1); // Initial policy authentication only.
     let status = store.status().unwrap();
     assert_eq!((status.pending, status.held), (1, 0));
     let observed = status.selection.unwrap();
@@ -124,7 +124,7 @@ fn wholly_held_observation_survives_restart_and_distinguishes_review_from_intent
     let temp = tempdir().unwrap();
     let data = temp.path().join("data");
     let record = seed(&data);
-    let server = Mock::new(|_| panic!("denied selection sent history"));
+    let server = publishing_mock(|_| panic!("denied selection sent history"));
     let store = SharingStore::new(data.join("sharing/team"));
     connect(&store, server.endpoint());
     let mut policy = policy(capture::hex(&record.source.identity().digest()));
@@ -181,5 +181,5 @@ fn wholly_held_observation_survives_restart_and_distinguishes_review_from_intent
     assert_eq!((observed.held(), observed.omitted()), (0, 1));
     assert_eq!(observed.counts[&SelectionDecision::FutureExcluded], 1);
     assert!(!store.root().join("queue").exists());
-    assert!(server.requests().is_empty());
+    assert_eq!(server.requests().len(), 1); // Initial policy authentication only.
 }

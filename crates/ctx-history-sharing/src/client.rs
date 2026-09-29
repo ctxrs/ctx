@@ -2,8 +2,9 @@ use std::{io::Read, time::Duration};
 
 use ctx_history_server::{
     CancelPublishRequest, CancelPublishResponse, CollectionStatus, EnrollRequest, EnrollmentFile,
-    GrantRequest, HostedEvent, InviteRequest, PublicationState, PublishRequest, Receipt,
-    SearchResponse, SessionPage, TokenFile, UploadSpec, UploadStatus, WithdrawRequest,
+    GrantRequest, HostedEvent, InviteRequest, PublicationListRequest, PublicationPage,
+    PublicationState, PublishRequest, Receipt, SearchResponse, SessionPage, TokenFile, UploadSpec,
+    UploadStatus, WithdrawRequest,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use url::Url;
@@ -71,16 +72,16 @@ impl RemoteClient {
     }
 
     pub fn invite(&self, request: &InviteRequest) -> Result<EnrollmentFile> {
-        self.post(self.url(&["invite"])?, request)
+        self.admin_post(self.url(&["invite"])?, request)
     }
 
     pub fn grant(&self, request: &GrantRequest) -> Result<()> {
-        let _: serde_json::Value = self.post(self.url(&["grants"])?, request)?;
+        let _: serde_json::Value = self.admin_post(self.url(&["grants"])?, request)?;
         Ok(())
     }
 
     pub fn revoke_member(&self, principal: &str) -> Result<()> {
-        let _: serde_json::Value = self.post(
+        let _: serde_json::Value = self.admin_post(
             self.url(&["members", principal, "revoke"])?,
             &serde_json::json!({}),
         )?;
@@ -88,7 +89,23 @@ impl RemoteClient {
     }
 
     pub fn publication(&self, publication: &str) -> Result<PublicationState> {
-        self.get(self.url(&["publications", publication])?, true)
+        self.get(
+            self.url(&["publications", publication])?,
+            self.credentials.publish().is_ok(),
+        )
+    }
+
+    pub fn list_publications(&self, request: &PublicationListRequest) -> Result<PublicationPage> {
+        if !(1..=100).contains(&request.limit) {
+            return Err(Error::InvalidConfig);
+        }
+        let mut url = self.url(&["publications"])?;
+        url.query_pairs_mut()
+            .append_pair("limit", &request.limit.to_string());
+        if let Some(after) = &request.after {
+            url.query_pairs_mut().append_pair("after", after);
+        }
+        self.get(url, self.credentials.publish().is_ok())
     }
 
     pub fn withdraw(&self, request: &WithdrawRequest) -> Result<Receipt> {
@@ -96,12 +113,17 @@ impl RemoteClient {
     }
 
     pub fn remove(&self, request: &WithdrawRequest) -> Result<Receipt> {
-        self.post(self.url(&["remove"])?, request)
+        self.admin_post(self.url(&["remove"])?, request)
     }
 
     pub fn status(&self) -> Result<CollectionStatus> {
         // The server exposes status to either current read or publish rights.
         self.get(self.url(&["status"])?, self.credentials.read().is_err())
+    }
+
+    /// Authenticate the publishing identity even when a separate read token exists.
+    pub(crate) fn publisher_status(&self) -> Result<CollectionStatus> {
+        self.get(self.url(&["status"])?, true)
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<SearchResponse> {
@@ -184,9 +206,24 @@ impl RemoteClient {
     }
 
     pub(crate) fn post<T: DeserializeOwned>(&self, url: Url, body: &impl Serialize) -> Result<T> {
+        self.post_with_credential(url, body, true)
+    }
+
+    // A read+manage credential can administer without granting this client
+    // permission to upload. Only administrative routes use this fallback.
+    fn admin_post<T: DeserializeOwned>(&self, url: Url, body: &impl Serialize) -> Result<T> {
+        self.post_with_credential(url, body, self.credentials.publish().is_ok())
+    }
+
+    fn post_with_credential<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        body: &impl Serialize,
+        publish: bool,
+    ) -> Result<T> {
         let bytes = serde_json::to_vec(body).map_err(|_| Error::InvalidConfig)?;
         decode(
-            self.request("POST", &url, true)?
+            self.request("POST", &url, publish)?
                 .set("Content-Type", "application/json")
                 .send_bytes(&bytes),
         )
