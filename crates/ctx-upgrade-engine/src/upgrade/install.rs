@@ -23,6 +23,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::{bail, Result};
 
+#[cfg(all(test, unix))]
+pub(in crate::upgrade) use hosted_transaction::lifecycle_tests::assert_migration_refused_without_changes;
 #[cfg(test)]
 pub(in crate::upgrade) use hosted_transaction::set_hosted_install_fault_for_test;
 pub use hosted_transaction::{
@@ -34,7 +36,7 @@ pub use hosted_transaction::{
 pub(in crate::upgrade) use hosted_transaction::{
     hosted_install_journal_exists,
     run_under_upgrade_lock as run_hosted_transaction_under_upgrade_lock,
-    validated_hosted_pair_digest,
+    validate_hosted_migration_under_installation_lock, validated_hosted_pair_digest,
 };
 pub use hosted_transaction::{
     run as run_hosted_transaction, HostedTransactionAction, HostedTransactionArgs,
@@ -56,6 +58,7 @@ pub use marker::{
 pub(in crate::upgrade) use marker::{install_marker_path, managed_install_receipt};
 pub use marker::{managed_install_marker_for_current_exe, ManagedInstallMarker};
 pub use path_identity::managed_install_path_identity_matches;
+pub(in crate::upgrade) use transaction::installation_transaction_exists;
 pub(super) use transaction::ApplyResult;
 #[cfg(windows)]
 pub(in crate::upgrade) use transaction::HelperOutcome;

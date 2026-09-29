@@ -288,6 +288,16 @@ pub fn verify_or_certify_physical_integrity(
     slot: &GenerationSlot,
     index: &tantivy::Index,
 ) -> Result<CertifiedPhysicalIntegrity> {
+    // An exact authenticated snapshot needs no coordination with a writer
+    // copying unrelated bytes. Only a miss waits for managed link updates;
+    // recheck afterward because the writer may have refreshed the sidecar.
+    if let Ok(Some(certification)) = matching_certification(root, pointer, slot, index) {
+        return Ok(CertifiedPhysicalIntegrity {
+            certification,
+            recertified: false,
+        });
+    }
+    let _certification_guard = crate::retention::CertificationGuard::read(root)?;
     if let Some(certification) = matching_certification(root, pointer, slot, index)? {
         return Ok(CertifiedPhysicalIntegrity {
             certification,
@@ -348,138 +358,13 @@ pub fn active_generation_storage_metadata(
     }))
 }
 
-/// Verifies one immutable generation from its existing publication-time
-/// certification without changing durable state.
-///
-/// The certification remains bound to the exact slot, manifest file, artifact
-/// path set, and exact native files after the active pointer moves on. Any
-/// metadata transition invalidates the inherited SHA authority because a
-/// later link/unlink can mask an intervening same-size, restored-mtime write.
-/// Missing, malformed, or otherwise unsupported certification fails closed.
-/// Active candidate-link changes and previous-slot publication changes are
-/// checked against the full digest; other stale certifications fail closed.
-pub fn verify_physical_integrity_read_only(
-    root: &Path,
-    slot: &GenerationSlot,
-    index: &tantivy::Index,
-) -> Result<()> {
-    ensure_real_directory(root)?;
-    ensure_real_directory(&root.join(MANIFEST_DIRECTORY))?;
-    ensure_real_directory(&root.join(INDEX_GENERATIONS_DIRECTORY))?;
-    let generation_path = slot_path(root, slot);
-    ensure_real_directory(&generation_path)?;
-    if crate::read_root::has_retained_read_authority(root, slot.generation_id()) {
-        return crate::verify_physical_integrity(
-            index,
-            &generation_path,
-            None,
-            slot.physical_integrity_digest(),
-        );
-    }
-    ensure_real_directory(&root.join(CERTIFICATION_DIRECTORY))?;
-
-    let bytes =
-        read_certification(&certification_path(root, slot)).ok_or(IndexError::ChecksumMismatch)?;
-    let certification = serde_json::from_slice::<GenerationIntegrityCertification>(&bytes)
-        .map_err(|_| IndexError::ChecksumMismatch)?;
-    if serde_json::to_vec(&certification)? != bytes
-        || certification.version != CERTIFICATION_VERSION
-        || certification.slot != *slot
-        || !certification_digest_matches_slot(&certification)?
-        || capture_single_link_control(&manifest_path(root, slot.generation_id()))?
-            != certification.manifest_identity
-    {
-        return Err(IndexError::ChecksumMismatch);
-    }
-
-    let expected_paths = expected_artifact_paths(index)?;
-    if certification
-        .artifacts
-        .iter()
-        .map(|artifact| artifact.artifact.path.clone())
-        .collect::<Vec<_>>()
-        != expected_paths
-    {
-        return Err(IndexError::ChecksumMismatch);
-    }
-    let current_pointer = load_current_pointer(root)?;
-    let pointer_fence = ActiveGenerationPointerFence::capture(root, Some(&current_pointer))?;
-    let alias_authority = CertificationAliasAuthority::capture(root, &pointer_fence, slot)?;
-    for expected in &certification.artifacts {
-        let current = capture_artifact_with_retained_aliases(
-            root,
-            &generation_path,
-            Path::new(&expected.artifact.path),
-            alias_authority.directories(),
-        )?;
-        if current != expected.artifact {
-            if current_pointer.active() == slot {
-                if !expected.artifact.same_payload_identity_changed(&current) {
-                    return Err(IndexError::ChecksumMismatch);
-                }
-                // Candidate links change metadata; rehash against the pointer digest.
-                crate::verify_physical_integrity(
-                    index,
-                    &generation_path,
-                    Some(&current_pointer),
-                    slot.physical_integrity_digest(),
-                )?;
-            } else {
-                verify_certified_previous_after_publication(
-                    root,
-                    slot,
-                    index,
-                    &generation_path,
-                    &current_pointer,
-                )?;
-            }
-            alias_authority.validate(root, &pointer_fence)?;
-            return Ok(());
-        }
-    }
-    alias_authority.validate(root, &pointer_fence)?;
-    Ok(())
-}
-
-fn verify_certified_previous_after_publication(
-    root: &Path,
-    slot: &GenerationSlot,
-    index: &tantivy::Index,
-    generation_path: &Path,
-    pointer: &ActiveGenerationPointer,
-) -> Result<()> {
-    if pointer.previous() != Some(slot) {
-        return Err(IndexError::ChecksumMismatch);
-    }
-    let active_index =
-        crate::open_slot_index(root, pointer.active()).map_err(|_| IndexError::ChecksumMismatch)?;
-    verify_physical_integrity_read_only(root, pointer.active(), &active_index).map_err(
-        |error| {
-            if matches!(error, IndexError::ConcurrentGenerationChange) {
-                error
-            } else {
-                IndexError::ChecksumMismatch
-            }
-        },
-    )?;
-    crate::verify_physical_integrity(
-        index,
-        generation_path,
-        Some(pointer),
-        slot.physical_integrity_digest(),
-    )?;
-    if load_current_pointer(root)? != *pointer {
-        return Err(IndexError::ConcurrentGenerationChange);
-    }
-    Ok(())
-}
-
 pub fn scrub_and_certify_physical_integrity(
     root: &Path,
     pointer: &ActiveGenerationPointer,
     slot: &GenerationSlot,
     index: &tantivy::Index,
 ) -> Result<CertifiedPhysicalIntegrity> {
+    let _certification_guard = crate::retention::CertificationGuard::read(root)?;
     let generation_path = slot_path(root, slot);
     let audit = physical_integrity_audit(index, &generation_path, Some(pointer))?;
     if audit.digest() != slot.physical_integrity_digest() {
@@ -972,8 +857,11 @@ pub(crate) use artifact_io::{
 };
 mod candidate;
 mod install;
+pub(crate) mod managed_links;
 mod pointer_fence;
+mod read_only;
 mod reclaim;
+pub use read_only::verify_physical_integrity_read_only;
 mod sidecar;
 use candidate::{certification_digest_matches_slot, CertificationAliasAuthority};
 pub use candidate::{

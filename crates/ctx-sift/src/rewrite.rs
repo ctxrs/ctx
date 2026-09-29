@@ -246,7 +246,7 @@ pub fn command(
     shell: Shell,
     exclusions: &[String],
 ) -> Option<String> {
-    command_with_namespace(input, executable, shell, exclusions, true)
+    command_with_namespace(input, executable, shell, exclusions, Some("sift"))
 }
 
 // History discovery also verifies the exact wrappers emitted by released Sift.
@@ -255,7 +255,7 @@ pub(crate) fn command_with_namespace(
     executable: &Path,
     shell: Shell,
     exclusions: &[String],
-    namespaced: bool,
+    namespace: Option<&str>,
 ) -> Option<String> {
     if input.len() > 64 * 1024 || shell == Shell::PowerShell {
         return None;
@@ -289,7 +289,7 @@ pub(crate) fn command_with_namespace(
         return None;
     }
     let executable = executable.to_str()?;
-    let prefix = if namespaced { "output run" } else { "run" };
+    let prefix = namespace.map_or_else(|| "run".to_owned(), |name| format!("{name} run"));
     let wrapper = format!("command {} {prefix}", quote(executable, shell));
     let mut checks = String::new();
     let mut insertions = Vec::new();

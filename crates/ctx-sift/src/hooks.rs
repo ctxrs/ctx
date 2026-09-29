@@ -69,10 +69,13 @@ fn wrapper_mode(argv: &[OsString]) -> Option<bool> {
         argv
     };
     let program = argv.first()?.to_str()?;
+    let current_executable = std::env::current_exe().ok();
+    let is_current = current_executable.as_deref() == Some(Path::new(program));
     let program = program.rsplit(['/', '\\']).next().unwrap_or(program);
     let (command, ctx_sift) = match program {
         "sift" | "sift.exe" => (&argv[1..], false),
         "ctx" | "ctx.exe" => ctx_sift_command(&argv[1..])?,
+        _ if is_current => ctx_sift_command(&argv[1..])?,
         _ => return None,
     };
     let first = command.first()?.to_str()?;

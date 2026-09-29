@@ -45,11 +45,15 @@ pub(super) fn ensure_legacy_pair_transaction_inactive_with_state(
     install_path: &Path,
     migration_owns_upgrade_state: bool,
 ) -> Result<()> {
-    let Some((root, _, _, _)) = managed_pair_paths(install_path) else {
-        return Ok(());
-    };
-    if path_entry_exists(&root.join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH))? {
-        bail!("finish the pending managed-pair upgrade before reinstalling");
+    // Legacy pair and standard ctx upgrades share this journal pathname.
+    // Keep its established admission error before checking other install paths.
+    if let Some((root, _, _, _)) = managed_pair_paths(install_path) {
+        if path_entry_exists(&root.join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH))? {
+            bail!("finish the pending managed-pair upgrade before reinstalling");
+        }
+    }
+    if super::super::installation_transaction_exists(install_path)? {
+        bail!("finish the pending ctx upgrade before reinstalling");
     }
     if !migration_owns_upgrade_state {
         crate::upgrade::state::ensure_legacy_pair_scheduler_terminal(install_path)?;

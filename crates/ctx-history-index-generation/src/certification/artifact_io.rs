@@ -226,9 +226,6 @@ pub(super) fn stable_artifact_link_snapshot_with_alias_authority(
             });
         }
         if alias_snapshot.aliases == 0 || alias_snapshot.aliases != final_identity.link_count() {
-            if alias_snapshot.saw_unpublished_generation {
-                return Ok(ArtifactLinkSnapshot::Retry);
-            }
             return Ok(ArtifactLinkSnapshot::Unaccounted {
                 identity: final_identity,
                 aliases: alias_snapshot.aliases,
@@ -328,14 +325,18 @@ pub(super) fn capture_pointer_bound_single_link_control(
 }
 
 pub(super) fn open_regular_file(path: &Path) -> Result<(File, FileIdentity)> {
-    validate_named_regular_file(path)?;
-    let file = open_nofollow(path).map_err(|_| IndexError::ChecksumMismatch)?;
-    let identity = file_identity(&file).map_err(|_| IndexError::ChecksumMismatch)?;
+    open_regular_file_preserving_io(path).map_err(missing_artifact_error)
+}
+
+fn open_regular_file_preserving_io(path: &Path) -> Result<(File, FileIdentity)> {
+    validate_named_regular_file_preserving_io(path)?;
+    let file = open_nofollow(path)?;
+    let identity = file_identity(&file)?;
     #[cfg(test)]
     run_regular_file_identity_test_hook(path);
-    validate_named_regular_file(path)?;
-    let named = open_nofollow(path).map_err(|_| IndexError::ChecksumMismatch)?;
-    let named_identity = file_identity(&named).map_err(|_| IndexError::ChecksumMismatch)?;
+    validate_named_regular_file_preserving_io(path)?;
+    let named = open_nofollow(path)?;
+    let named_identity = file_identity(&named)?;
     if identity != named_identity {
         return Err(IndexError::ChecksumMismatch);
     }
@@ -400,8 +401,21 @@ pub(super) fn open_nofollow(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+fn missing_artifact_error(error: IndexError) -> IndexError {
+    match error {
+        IndexError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            IndexError::ChecksumMismatch
+        }
+        error => error,
+    }
+}
+
 pub(super) fn validate_named_regular_file(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| IndexError::ChecksumMismatch)?;
+    validate_named_regular_file_preserving_io(path).map_err(missing_artifact_error)
+}
+
+fn validate_named_regular_file_preserving_io(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
         || metadata_is_reparse_point(&metadata)
         || !metadata.file_type().is_file()
@@ -545,10 +559,6 @@ impl ManagedAliasAuthority<'_> {
         }
     }
 
-    fn tracks_unpublished_generations(&self) -> bool {
-        matches!(self, Self::Publication(Some(_)))
-    }
-
     fn requires_accounted_aliases(&self) -> bool {
         matches!(self, Self::Retained(_))
     }
@@ -563,19 +573,18 @@ pub(super) fn managed_artifact_alias_count(
     let generations = root.join(INDEX_GENERATIONS_DIRECTORY);
     let mut aliases = 0_u64;
     let mut unaccounted_aliases = 0_u64;
-    let mut saw_unpublished_generation = false;
-    for entry in fs::read_dir(generations).map_err(|_| IndexError::ChecksumMismatch)? {
+    for entry in fs::read_dir(generations)? {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) if retryable_alias_snapshot_error(&error) => return Ok(None),
-            Err(_) => return Err(IndexError::ChecksumMismatch),
+            Err(error) => return Err(error.into()),
         };
         #[cfg(test)]
         run_alias_entry_test_hook(&entry.path());
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(error) if retryable_alias_snapshot_error(&error) => return Ok(None),
-            Err(_) => return Err(IndexError::ChecksumMismatch),
+            Err(error) => return Err(error.into()),
         };
         let Some(directory_name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -584,13 +593,18 @@ pub(super) fn managed_artifact_alias_count(
             continue;
         }
         let accounted_directory = alias_authority.accounts_directory(&directory_name);
-        if alias_authority.tracks_unpublished_generations() && !accounted_directory {
-            saw_unpublished_generation = true;
-        }
         let candidate = entry.path().join(relative_path);
-        let (file, candidate_identity) = match open_regular_file(&candidate) {
+        let (file, candidate_identity) = match open_regular_file_preserving_io(&candidate) {
             Ok(opened) => opened,
-            Err(_) => continue,
+            Err(IndexError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(IndexError::Io(error)) if retryable_alias_snapshot_error(&error) => {
+                return Ok(None)
+            }
+            // An unrelated candidate can replace its own meta.json during
+            // this scan. Only authenticated native-file matches count; the
+            // held target's stable nlink still rejects any missing alias.
+            Err(IndexError::ChecksumMismatch) => continue,
+            Err(error) => return Err(error),
         };
         drop(file);
         if candidate_identity.same_native_file(identity) {
@@ -605,7 +619,6 @@ pub(super) fn managed_artifact_alias_count(
     Ok(Some(ManagedAliasSnapshot {
         aliases,
         unaccounted_aliases,
-        saw_unpublished_generation,
     }))
 }
 
@@ -613,7 +626,6 @@ pub(super) fn managed_artifact_alias_count(
 pub(super) struct ManagedAliasSnapshot {
     aliases: u64,
     unaccounted_aliases: u64,
-    saw_unpublished_generation: bool,
 }
 
 pub(super) fn retryable_alias_snapshot_error(error: &std::io::Error) -> bool {

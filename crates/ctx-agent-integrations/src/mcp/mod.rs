@@ -447,9 +447,6 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
             Some(json!({ "error": format!("unknown tool {name}") })),
         )));
     };
-    if let McpToolKind::Unified(kind) = operation {
-        return Ok(unified::handle(kind, &params, backend, render_text));
-    }
     let mut usage = McpUsage {
         operation,
         facts: if operation == McpToolKind::Search {
@@ -469,8 +466,11 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
                 "Invalid params",
                 Some(json!({ "error": "tools/call params.arguments must be an object" })),
             ),
-            usage: Some(usage),
+            usage: (!matches!(operation, McpToolKind::Unified(_))).then_some(usage),
         });
+    }
+    if let McpToolKind::Unified(kind) = operation {
+        return Ok(unified::handle(kind, &arguments, backend, render_text));
     }
 
     if let Err(error) = validate_argument_keys(&arguments, allowed_arguments) {
@@ -698,9 +698,9 @@ fn tool_definitions(provider_names: Vec<&'static str>) -> Vec<Value> {
             "description": "Return an indexed event and optional surrounding event window by ctx event id.",
             "inputSchema": object_schema(json!({
                 "ctx_event_id": { "type": "string" },
-                "before": { "type": "integer", "minimum": 0, "default": 0 },
-                "after": { "type": "integer", "minimum": 0, "default": 0 },
-                "window": { "type": "integer", "minimum": 0 }
+                "before": { "type": "integer", "minimum": 0, "maximum": MAX_EVENT_WINDOW, "default": 0 },
+                "after": { "type": "integer", "minimum": 0, "maximum": MAX_EVENT_WINDOW, "default": 0 },
+                "window": { "type": "integer", "minimum": 0, "maximum": MAX_EVENT_WINDOW }
             }), vec!["ctx_event_id"]),
             "annotations": { "readOnlyHint": true },
         }),
@@ -783,5 +783,7 @@ fn event_type_names() -> Vec<&'static str> {
     ]
 }
 
+#[cfg(test)]
+mod protocol_consistency_tests;
 #[cfg(test)]
 mod request_id_tests;

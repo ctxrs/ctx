@@ -387,11 +387,18 @@ pub fn sync_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Reader authorities borrowed during reclamation. A writer retains these
+/// through activation so reader completion cannot orphan its managed aliases.
+#[derive(Default)]
+pub struct RetainedGenerationDirectories {
+    _guards: Vec<crate::retention::ExistingGenerationDirectoryReadAuthority>,
+}
+
 pub fn reclaim_inactive_generation_directories(
     root: &Path,
     pointer: Option<&ActiveGenerationPointer>,
     lease: Option<&GenerationRetentionLease>,
-) -> Result<()> {
+) -> Result<RetainedGenerationDirectories> {
     ensure_generation_read_lease_coordinator(root)?;
     let generations = root.join(INDEX_GENERATIONS_DIRECTORY);
     ensure_private_directory(&generations)?;
@@ -401,7 +408,8 @@ pub fn reclaim_inactive_generation_directories(
         .map(|slot| slot.directory().to_owned())
         .chain(lease.map(|lease| lease.target().directory().to_owned()))
         .collect::<HashSet<_>>();
-    let mut removed = false;
+    let mut retained_readers = RetainedGenerationDirectories::default();
+    let mut candidates = Vec::new();
     for entry in fs::read_dir(&generations)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -411,37 +419,51 @@ pub fn reclaim_inactive_generation_directories(
             continue;
         };
         if is_generation_directory_name(&name) && !retained.contains(&name) {
-            let Some(_reclaim_authority) = try_generation_directory_reclaim_authority(root, &name)?
-            else {
+            if let Some(authority) =
+                crate::retention::acquire_existing_generation_directory_read_authority(root, &name)?
+            {
+                retained_readers._guards.push(authority);
                 continue;
-            };
-            let candidate = RetainedGenerationDirectory::open(entry.path())?;
-            reclamation_checkpoint(ReclamationStage::AfterCandidateRetained, candidate.path())?;
-            remove_reclaimed_generation_directory(root, pointer, &candidate)?;
-            removed = true;
+            }
+            candidates.push((name, entry.path()));
         }
     }
-    if removed {
-        sync_directory(&generations)?;
+    if candidates.is_empty() {
+        return Ok(retained_readers);
     }
-    Ok(())
-}
-
-fn remove_reclaimed_generation_directory(
-    root: &Path,
-    pointer: Option<&ActiveGenerationPointer>,
-    candidate: &RetainedGenerationDirectory,
-) -> Result<()> {
-    let remove = || remove_reclaimed_generation_directory_inner(candidate);
-    if let (Some(pointer), Some(directory)) = (
-        pointer,
-        candidate.path().file_name().and_then(|name| name.to_str()),
-    ) {
-        return crate::certification::reclaim_with_pointer_certifications(
-            root, pointer, directory, remove,
-        );
+    let _certification_update = crate::retention::CertificationGuard::update(root)?;
+    // Every pending deletion remains under exact exclusive authority for the
+    // whole batch. Its aliases remain accounted for while another target is
+    // removed and the surviving certificates are refreshed.
+    let candidates = candidates
+        .into_iter()
+        .map(|(name, path)| {
+            let authority = try_generation_directory_reclaim_authority(root, &name)?
+                .ok_or(IndexError::ConcurrentGenerationChange)?;
+            let candidate = RetainedGenerationDirectory::open(path)?;
+            Ok((name, candidate, authority))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let directories = candidates
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect::<Vec<_>>();
+    for (_, candidate, _) in &candidates {
+        reclamation_checkpoint(ReclamationStage::AfterCandidateRetained, candidate.path())?;
+        let remove = || remove_reclaimed_generation_directory_inner(candidate);
+        if let Some(pointer) = pointer {
+            crate::certification::reclaim_with_pointer_certifications(
+                root,
+                pointer,
+                &directories,
+                remove,
+            )?;
+        } else {
+            remove()?;
+        }
     }
-    remove()
+    sync_directory(&generations)?;
+    Ok(retained_readers)
 }
 
 fn remove_reclaimed_generation_directory_inner(

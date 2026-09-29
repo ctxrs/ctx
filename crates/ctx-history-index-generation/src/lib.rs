@@ -60,7 +60,7 @@ pub use generation::{
     load_active_generation_pointer, open_slot_index, publish_active_generation_pointer,
     publish_active_generation_pointer_validated, reclaim_inactive_generation_directories,
     slot_path, sync_directory, sync_generation, ActiveGenerationPointer, CandidateGeneration,
-    GenerationSlot, PointerPublicationOutcome,
+    GenerationSlot, PointerPublicationOutcome, RetainedGenerationDirectories,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use generation::{ReclamationStage, ReclamationTestHookGuard};

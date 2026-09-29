@@ -31,7 +31,7 @@ fn native_envelopes_preserve_all_arguments() {
         }
         assert_eq!(
             args.string("command").unwrap(),
-            "command true || git status; command '/opt/ctx' output run --capture -- git status"
+            "command true || git status; command '/opt/ctx' sift run --capture -- git status"
         );
         assert_eq!(args.string("description").unwrap(), "test");
         assert!(output.contains("123456789012345678901234567890"));

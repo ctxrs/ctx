@@ -126,7 +126,31 @@ impl SegmentMaterializer {
         _expected_materializer_revision: Option<&str>,
     ) -> Result<(), SegmentMaterializerError> {
         crate::graph::segment::SegmentStore::new(&self.root).cleanup_candidates()?;
-        self.active = super::super::publication::load_active_for_materializer(&self.root)?;
+        self.active = match super::super::publication::load_active_for_materializer(&self.root) {
+            Ok(active) => active,
+            Err(SegmentMaterializerError::Store(
+                ctx_attribution_index::SegmentStoreError::Corrupt(_)
+                | ctx_attribution_index::SegmentStoreError::File(
+                    ctx_attribution_index::SegmentFileError::Corrupt(_)
+                    | ctx_attribution_index::SegmentFileError::Bounds(_),
+                )
+                | ctx_attribution_index::SegmentStoreError::Manifest(
+                    ctx_attribution_index::ManifestError::Invalid(_)
+                    | ctx_attribution_index::ManifestError::Bounds(_)
+                    | ctx_attribution_index::ManifestError::Encoding(_),
+                ),
+            )) => {
+                // Only an unreadable derived manifest loses authority. Under the
+                // writer lease, retire that owner-private file and use the normal
+                // cold build from retained Core. I/O and unsafe paths still fail.
+                let manifest =
+                    crate::graph::segment::SegmentStore::new(&self.root).active_manifest_path();
+                super::super::locking::remove_private_file_if_exists(&manifest)?;
+                super::super::locking::sync_private_root(&self.root)?;
+                None
+            }
+            Err(error) => return Err(error),
+        };
 
         super::super::publication::cleanup_candidate_orphans(
             &self.root,

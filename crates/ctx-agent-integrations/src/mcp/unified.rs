@@ -168,11 +168,6 @@ fn parse(
     kind: UnifiedToolKind,
     arguments: &Value,
 ) -> Result<UnifiedToolOperation, ToolBackendError> {
-    if !arguments.is_object() {
-        return Err(ToolBackendError::invalid_request(
-            "tools/call params.arguments must be an object",
-        ));
-    }
     validate_argument_keys(arguments, kind.allowed_arguments())?;
     let symbol = || required_string(arguments, "symbol", 1024, true);
     let graph = match kind {
@@ -220,15 +215,11 @@ fn parse(
 
 pub(super) fn handle<B: ToolBackend>(
     kind: UnifiedToolKind,
-    params: &Value,
+    arguments: &Value,
     backend: &B,
     render_text: &impl Fn(&Value) -> String,
 ) -> McpHandled<Value> {
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let result = parse(kind, &arguments)
+    let result = parse(kind, arguments)
         .map_err(Into::into)
         .and_then(|operation| backend.execute_unified(operation));
     let result = match result {

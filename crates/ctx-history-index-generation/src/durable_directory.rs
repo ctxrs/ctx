@@ -656,6 +656,8 @@ impl AtomicWriteTestHookGuard {
             _guard: PublicationIoProbeGuard::set_raw(move |event| match event {
                 PublicationIoEvent::Atomic(stage, target) => hook(stage, target),
                 PublicationIoEvent::CandidateGenerationSync => Ok(()),
+                PublicationIoEvent::CertificationWait => Ok(()),
+                PublicationIoEvent::PhysicalAudit => Ok(()),
                 #[cfg(windows)]
                 PublicationIoEvent::TerminalSealOpen => Ok(()),
                 PublicationIoEvent::AtomicReplacementFailure(_) => Ok(()),

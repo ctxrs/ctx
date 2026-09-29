@@ -815,7 +815,7 @@ prior_skill_matches() {
   expected_digest="$2"
   valid_prior_owned_path "$candidate" || return 1
   case "$candidate" in
-    */skills/ctx-agent-history-search) ;;
+    */skills/ctx|*/skills/ctx-agent-history-search) ;;
     *) return 1 ;;
   esac
   skill_body="$candidate/SKILL.md"
@@ -839,7 +839,7 @@ prior_skill_matches() {
   skill_actual_sha256="$(sha256_file "$skill_body" 2>/dev/null | tr 'A-F' 'a-f' || true)"
   [ "$skill_schema" = "1" ] &&
     [ "$skill_installer" = "ctx-cli" ] &&
-    [ "$skill_name" = "ctx-agent-history-search" ] &&
+    [ "$skill_name" = "\${candidate##*/}" ] &&
     [ "$skill_hash" = "sha256:$skill_actual_sha256" ] ||
     return 1
   skill_ownership_copy="$tmp_dir/prior-skill-ownership"

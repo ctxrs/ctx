@@ -210,6 +210,13 @@ pub(super) fn create_authenticated_candidate_generation(
         destination_name,
         destination,
     };
+    let _certification_update = crate::retention::CertificationGuard::update(root)?;
+    let certifications = crate::certification::managed_links::ManagedLinkCertifications::capture(
+        root,
+        predecessor_pointer,
+        &[&directory_name],
+    )
+    .ok();
     let clone_result = (|| {
         let mut physical_proof = CandidatePhysicalProof::default();
         let mut metrics = CandidateCloneMetrics::default();
@@ -228,6 +235,9 @@ pub(super) fn create_authenticated_candidate_generation(
             &mut physical_proof,
             &mut metrics,
         )?;
+        if let Some(certifications) = certifications {
+            certifications.finish_clone(root, &physical_proof);
+        }
         guard.generations.file.sync_all()?;
         validate_child_binding(&guard.generations.file, source_name, source.identity)?;
         guard.validate_binding()?;

@@ -308,7 +308,7 @@ record_installed_skills() {
   while IFS= read -r skill_path; do
     [ -n "$skill_path" ] || continue
     case "$skill_path" in
-      /*/skills/ctx-agent-history-search) ;;
+      /*/skills/ctx|/*/skills/ctx-agent-history-search) ;;
       *) continue ;;
     esac
     skill_body="$skill_path/SKILL.md"
@@ -326,7 +326,7 @@ record_installed_skills() {
     skill_actual_sha256="$(sha256_file "$skill_body" | tr 'A-F' 'a-f')"
     if [ "$skill_schema" = "1" ] &&
        [ "$skill_installer" = "ctx-cli" ] &&
-       [ "$skill_name" = "ctx-agent-history-search" ] &&
+       [ "$skill_name" = "\${skill_path##*/}" ] &&
        [ "$skill_hash" = "sha256:$skill_actual_sha256" ]; then
       skill_ownership_copy="$tmp_dir/skill-ownership"
       cat "$skill_body" "$skill_marker" >"$skill_ownership_copy"

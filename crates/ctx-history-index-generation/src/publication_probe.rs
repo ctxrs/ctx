@@ -36,6 +36,8 @@ pub enum PublicationIoProbe {
     ActivePointer(AtomicPublicationStage),
     OtherAtomicPublication(AtomicPublicationStage),
     CandidateGenerationSync,
+    CertificationWait,
+    PhysicalAudit,
     TerminalSealOpen,
     AtomicReplacementFailure(AtomicReplacementFailureProbe),
 }
@@ -58,6 +60,8 @@ impl PublicationIoProbe {
 pub(crate) enum PublicationIoEvent<'a> {
     Atomic(crate::AtomicWriteStage, &'a Path),
     CandidateGenerationSync,
+    CertificationWait,
+    PhysicalAudit,
     #[cfg(windows)]
     TerminalSealOpen,
     AtomicReplacementFailure(AtomicReplacementFailureProbe),
@@ -68,6 +72,8 @@ impl PublicationIoEvent<'_> {
         match self {
             Self::Atomic(stage, path) => PublicationIoProbe::atomic(path, stage),
             Self::CandidateGenerationSync => PublicationIoProbe::CandidateGenerationSync,
+            Self::CertificationWait => PublicationIoProbe::CertificationWait,
+            Self::PhysicalAudit => PublicationIoProbe::PhysicalAudit,
             #[cfg(windows)]
             Self::TerminalSealOpen => PublicationIoProbe::TerminalSealOpen,
             Self::AtomicReplacementFailure(probe) => {

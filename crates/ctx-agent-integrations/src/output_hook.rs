@@ -1,12 +1,17 @@
 //! Explicit native output-hook registration. The host's permission settings and
 //! unrelated hooks are never changed; runtime transformation lives in ctx-sift.
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
-use serde_json::{json, Value};
+use serde_json::{
+    json,
+    value::{to_raw_value, RawValue},
+    Value,
+};
 
 use crate::{
     filesystem::atomic_update,
@@ -174,19 +179,6 @@ fn hook_entries<'a>(value: &'a Value, event: &str) -> Result<Option<&'a Vec<Valu
         .transpose()
 }
 
-fn hook_entries_mut<'a>(value: &'a mut Value, event: &str) -> Result<&'a mut Vec<Value>> {
-    let root = value
-        .as_object_mut()
-        .context("hook config root must be an object")?;
-    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
-    let hooks = hooks.as_object_mut().context("hooks must be an object")?;
-    hooks
-        .entry(event)
-        .or_insert_with(|| json!([]))
-        .as_array_mut()
-        .context("hook event must be an array")
-}
-
 fn invocation(value: &Value, name: &str, agent: Agent) -> bool {
     let suffixes = if name == "ctx" {
         vec![
@@ -245,16 +237,33 @@ fn contains_invocation(value: &Value, name: &str, agent: Agent) -> bool {
         }
 }
 
-fn count_invocations(value: &Value, name: &str, agent: Agent) -> usize {
-    usize::from(invocation(value, name, agent))
+fn count_invocations(value: &Value, name: &str, agent: Agent, desired: &Value) -> usize {
+    // An exact generated entry owns one invocation regardless of its executable name.
+    if name == "ctx" && owned_entry(value, agent) {
+        return 1;
+    }
+    let desired_hook = if agent == Agent::Copilot {
+        desired
+    } else {
+        &desired["hooks"][0]
+    };
+    let matches_desired = if agent == Agent::Copilot {
+        value.get("exec") == desired_hook.get("exec")
+            && value.get("args") == desired_hook.get("args")
+    } else {
+        value
+            .get("command")
+            .is_some_and(|command| Some(command) == desired_hook.get("command"))
+    };
+    usize::from(invocation(value, name, agent) || matches_desired)
         + match value {
             Value::Array(items) => items
                 .iter()
-                .map(|v| count_invocations(v, name, agent))
+                .map(|v| count_invocations(v, name, agent, desired))
                 .sum(),
             Value::Object(fields) => fields
                 .values()
-                .map(|v| count_invocations(v, name, agent))
+                .map(|v| count_invocations(v, name, agent, desired))
                 .sum(),
             _ => 0,
         }
@@ -408,7 +417,7 @@ fn local_state(agent: Agent, value: Option<&Value>, desired: &Value) -> Result<S
         .unwrap_or(0);
     let total = value
         .get("hooks")
-        .map(|hooks| count_invocations(hooks, "ctx", agent))
+        .map(|hooks| count_invocations(hooks, "ctx", agent, desired))
         .unwrap_or(0);
     if current == 1 && total == 1 {
         return Ok(State::Current);
@@ -467,10 +476,8 @@ pub fn install(agent: Agent, project: bool, context: &Context) -> Result<State> 
     let target = path(agent, project, context);
     let desired = expected(agent, &context.executable)?;
     atomic_update(&target, |body| {
-        let mut value = match body {
-            Some(bytes) => json::parse(std::str::from_utf8(bytes)?, &target)?,
-            None => json!({}),
-        };
+        let body = body.map(std::str::from_utf8).transpose()?.unwrap_or("{}");
+        let value = json::parse(body, &target)?;
         ensure!(
             !value
                 .get("hooks")
@@ -482,27 +489,39 @@ pub fn install(agent: Agent, project: bool, context: &Context) -> Result<State> 
             matches!(prior, State::Missing | State::Legacy),
             "hook config changed; retry after inspecting it"
         );
+        let mut document = json::raw_object(body, &target)?;
         if agent == Agent::Copilot {
-            let root = value
-                .as_object_mut()
-                .context("hook config root must be an object")?;
             ensure!(
-                root.get("version").is_none_or(|v| v == &json!(1)),
+                value.get("version").is_none_or(|v| v == &json!(1)),
                 "unsupported Copilot hook version"
             );
-            root.insert("version".into(), json!(1));
+            document.insert("version".into(), to_raw_value(&1)?);
         }
-        let entries = hook_entries_mut(&mut value, agent.event())?;
+        let mut hooks: BTreeMap<String, Box<RawValue>> = document
+            .get("hooks")
+            .map(|raw| serde_json::from_str(raw.get()))
+            .transpose()?
+            .unwrap_or_default();
+        let mut entries: Vec<Box<RawValue>> = hooks
+            .get(agent.event())
+            .map(|raw| serde_json::from_str(raw.get()))
+            .transpose()?
+            .unwrap_or_default();
         if prior == State::Legacy {
-            let old = entries
-                .iter_mut()
-                .find(|entry| owned_legacy_entry(entry, agent))
+            let index = hook_entries(&value, agent.event())?
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .position(|entry| owned_legacy_entry(entry, agent))
+                })
                 .context("legacy ctx hook changed; retry")?;
-            *old = desired;
+            entries[index] = to_raw_value(&desired)?;
         } else {
-            entries.push(desired);
+            entries.push(to_raw_value(&desired)?);
         }
-        Ok(json::render(&value)?.into_bytes())
+        hooks.insert(agent.event().into(), to_raw_value(&entries)?);
+        document.insert("hooks".into(), to_raw_value(&hooks)?);
+        Ok(json::render(&document)?.into_bytes())
     })?;
     Ok(State::Current)
 }
@@ -522,15 +541,35 @@ pub fn remove(agent: Agent, project: bool, context: &Context) -> Result<State> {
     }
     atomic_update(&target, |body| {
         let bytes = body.ok_or_else(|| anyhow!("hook config disappeared; retry"))?;
-        let mut value = json::parse(std::str::from_utf8(bytes)?, &target)?;
-        let entries = hook_entries_mut(&mut value, agent.event())?;
-        let before = entries.len();
-        entries.retain(|entry| !owned_entry(entry, agent));
+        let body = std::str::from_utf8(bytes)?;
+        let value = json::parse(body, &target)?;
+        let mut document = json::raw_object(body, &target)?;
+        let mut hooks: BTreeMap<String, Box<RawValue>> = serde_json::from_str(
+            document
+                .get("hooks")
+                .context("hook config changed; retry")?
+                .get(),
+        )?;
+        let mut entries: Vec<Box<RawValue>> = serde_json::from_str(
+            hooks
+                .get(agent.event())
+                .context("hook event changed; retry")?
+                .get(),
+        )?;
+        let owned: Vec<_> = hook_entries(&value, agent.event())?
+            .context("hook event changed; retry")?
+            .iter()
+            .map(|entry| owned_entry(entry, agent))
+            .collect();
         ensure!(
-            before > entries.len(),
+            owned.iter().any(|owned| *owned),
             "hook config changed; retry after inspecting it"
         );
-        Ok(json::render(&value)?.into_bytes())
+        let mut owned = owned.into_iter();
+        entries.retain(|_| !owned.next().unwrap_or(false));
+        hooks.insert(agent.event().into(), to_raw_value(&entries)?);
+        document.insert("hooks".into(), to_raw_value(&hooks)?);
+        Ok(json::render(&document)?.into_bytes())
     })?;
     Ok(State::Missing)
 }

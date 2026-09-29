@@ -232,9 +232,8 @@ pub(crate) fn acquire_existing_generation_directory_read_authority(
     if !GenerationSlot::names_are_valid(&"0".repeat(64), directory) {
         return Err(IndexError::InvalidActiveGenerationPointer);
     }
-    let coordinator = match crate::read_root::registered_read_directory(root)? {
-        Some(opened) => coordinator_for_opened(opened.registry_identity(), &opened, true)?,
-        None => coordinator(&GenerationReadRoot::open_index_root(root)?, true)?,
+    let Some(coordinator) = existing_coordinator(root)? else {
+        return Ok(None);
     };
     let keys = directory_keys(directory);
     if let Some(uncontended) =
@@ -270,6 +269,67 @@ pub(crate) fn acquire_candidate_generation_directory_read_authority(
 #[derive(Debug)]
 pub(crate) struct ExistingGenerationDirectoryReadAuthority {
     _guard: RangeLeaseGuard,
+}
+
+/// Serializes certificate snapshots with managed link changes, independently
+/// of the long-lived writer and generation retention locks.
+pub(crate) struct CertificationGuard {
+    _guard: RangeLeaseGuard,
+}
+
+impl CertificationGuard {
+    pub(crate) fn read(root: &Path) -> Result<Self> {
+        Self::acquire(root, RangeLockKind::Shared)
+    }
+
+    pub(crate) fn update(root: &Path) -> Result<Self> {
+        Self::acquire(root, RangeLockKind::Exclusive)
+    }
+
+    /// Read-only verification can still audit an immutable snapshot when no
+    /// writable coordinator is available. Never initialize one for that API.
+    pub(crate) fn read_existing(root: &Path) -> Result<Option<Self>> {
+        existing_coordinator(root)?
+            .map(|coordinator| Self::acquire_coordinator(coordinator, RangeLockKind::Shared))
+            .transpose()
+    }
+
+    fn acquire(root: &Path, kind: RangeLockKind) -> Result<Self> {
+        let coordinator = match crate::read_root::registered_read_directory(root)? {
+            Some(opened) => coordinator_for_opened(opened.registry_identity(), &opened, true)?,
+            None => coordinator(&GenerationReadRoot::open_index_root(root)?, true)?,
+        };
+        Self::acquire_coordinator(coordinator, kind)
+    }
+
+    fn acquire_coordinator(
+        coordinator: Arc<LeaseCoordinator>,
+        kind: RangeLockKind,
+    ) -> Result<Self> {
+        // This key name is outside the generation-directory namespace. Reuse
+        // the coordinator's cross-process and same-process lock ownership.
+        // Payload audits and copy fallbacks have no fixed duration. Wait for
+        // their owner to finish; process exit also releases the OS lease.
+        let keys = directory_keys("physical-certification-update-v1");
+        loop {
+            let guard = match kind {
+                RangeLockKind::Shared => {
+                    RangeLeaseGuard::try_shared(Arc::clone(&coordinator), keys.clone())?
+                }
+                RangeLockKind::Exclusive => {
+                    RangeLeaseGuard::try_exclusive(Arc::clone(&coordinator), keys.clone())?
+                }
+            };
+            if let Some(guard) = guard {
+                return Ok(Self { _guard: guard });
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            crate::publication_probe::publication_io_checkpoint(
+                crate::publication_probe::PublicationIoEvent::CertificationWait,
+            )?;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -441,6 +501,27 @@ fn coordinator(root: &GenerationReadRoot, create: bool) -> Result<Arc<LeaseCoord
     coordinator_for_opened(root.identity(), root.opened(), create)
 }
 
+fn existing_coordinator(root: &Path) -> Result<Option<Arc<LeaseCoordinator>>> {
+    let existing = match crate::read_root::registered_read_directory(root)? {
+        Some(opened) => coordinator_for_opened(opened.registry_identity(), &opened, false),
+        None => coordinator(&GenerationReadRoot::open_index_root(root)?, false),
+    };
+    match existing {
+        Ok(coordinator) => Ok(Some(coordinator)),
+        Err(IndexError::Io(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn coordinator_for_opened(
     root_identity: DirectoryIdentity,
     root: &OpenedDirectory,
@@ -482,7 +563,20 @@ fn coordinator_for_opened(
         COORDINATOR_MAGIC,
         create,
     )
-    .map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
+    .map_err(|error| {
+        if !create
+            && matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::ReadOnlyFilesystem
+            )
+        {
+            IndexError::Io(error)
+        } else {
+            IndexError::InvalidGenerationRetentionLease
+        }
+    })?;
     let coordinator = Arc::new(LeaseCoordinator {
         process_id,
         opened,

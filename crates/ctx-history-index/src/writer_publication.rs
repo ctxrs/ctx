@@ -618,6 +618,9 @@ impl GenerationWriter {
         // temporarily obstructed. A malformed lease suppresses every reclaim:
         // treating it as absent could delete the one target it was meant to
         // preserve before the next strict writer open reports it.
+        // Release borrowed reader holds only after terminal certification and
+        // activation, before reclaiming readers that finished during this write.
+        drop(std::mem::take(&mut self.retained_generation_directories));
         let _ = clear_active_generation_rebuild_marker(&root);
         if let Ok(retention_lease) = load_generation_retention_lease(&root) {
             let mut retained_generation_ids = std::iter::once(next_pointer.active())

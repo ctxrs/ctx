@@ -48,6 +48,13 @@ pub fn source_epoch_findings(report: &Value, semantic_required: bool) -> Vec<Str
             findings.push(format!("{name} is {status} ({reason})"));
         }
     }
+    if let Some(error) = report["attribution"]
+        .get("error")
+        .filter(|error| error.is_object())
+    {
+        let reason = error["error_code"].as_str().unwrap_or("unknown");
+        findings.push(format!("attribution is unavailable ({reason})"));
+    }
     findings
 }
 
@@ -286,6 +293,7 @@ fn humanize_doctor_finding(finding: &str) -> HumanDoctorFinding {
         "catalog" => "History source catalog",
         "refresh" => "History refresh",
         "semantic" => "Semantic search",
+        "attribution" => "Blame index",
         _ => {
             return HumanDoctorFinding {
                 summary: finding.to_owned(),
@@ -300,6 +308,7 @@ fn humanize_doctor_finding(finding: &str) -> HumanDoctorFinding {
         (other, _) => format!("{label} is {}", other.replace('_', " ")),
     };
     let detail = match reason {
+        "corrupt_graph" => "The attribution index cannot be read safely.",
         "model_load_failed"
         | "model_acquisition_failed"
         | "model_integrity_failed"
@@ -467,6 +476,39 @@ mod ui_tests {
             source_epoch_findings(&failures, false),
             vec!["refresh is partial (completed_with_source_failures)"],
         );
+    }
+
+    #[test]
+    fn attribution_errors_change_doctor_health_without_requiring_optional_coverage() {
+        let mut report = json!({
+            "history_epoch": {"status": "ready"},
+            "lexical": {"status": "ready"},
+            "catalog": {"status": "ready"},
+            "refresh": {"status": "ready"},
+            "semantic": {"status": "disabled"},
+        });
+        for attribution in [
+            Value::Null,
+            json!({"currentness":"current", "materialized_coverage":"empty"}),
+            json!({"currentness":"current", "materialized_coverage":"abstained"}),
+            json!({"currentness":"not_materialized", "indexing_enabled":false}),
+            json!({"currentness":"not_materialized", "indexing_enabled":true}),
+        ] {
+            report["attribution"] = attribution;
+            assert!(source_epoch_findings(&report, false).is_empty());
+        }
+        report["attribution"] = json!({"indexing_enabled":true, "error": {
+            "error_code":"corrupt_graph", "message":"The attribution index cannot be read safely."
+        }});
+        let findings = source_epoch_findings(&report, false);
+        assert_eq!(findings, ["attribution is unavailable (corrupt_graph)"]);
+        let rendered = render_doctor_human(&context(80), &findings, None, None).render_plain();
+        assert!(
+            rendered.contains("Blame index is unavailable"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("cannot be read safely"), "{rendered}");
+        assert!(!rendered.contains("No problems found"), "{rendered}");
     }
 
     #[test]

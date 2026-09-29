@@ -128,12 +128,13 @@ impl GenerationWriter {
                     .as_ref()
                     .map(ActivePublicationAuthority::pointer),
             )?;
+        let mut retained_generation_directories = Default::default();
         if !pointer_requires_rebuild {
             let active_pointer_ref = active_authority
                 .as_ref()
                 .map(ActivePublicationAuthority::pointer);
             let retention_lease = load_generation_retention_lease(&root)?;
-            reclaim_inactive_generation_directories(
+            retained_generation_directories = reclaim_inactive_generation_directories(
                 &root,
                 active_pointer_ref,
                 retention_lease.as_ref(),
@@ -263,6 +264,7 @@ impl GenerationWriter {
                 candidate_directory_name,
                 candidate_physical_proof,
                 candidate_activation_fence,
+                retained_generation_directories,
                 preflight_lock: Some(preflight_lock),
                 writer: None,
                 writer_options: options,

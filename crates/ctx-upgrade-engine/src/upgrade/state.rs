@@ -25,6 +25,12 @@ use super::{
     SemanticLayoutPort, UpgradePlan,
 };
 
+mod hosted_migration;
+pub(super) use hosted_migration::finish_hosted_migration_locked;
+pub(in crate::upgrade) use hosted_migration::{
+    ensure_hosted_install_scheduler_available,
+    recover_removed_hosted_migration_under_installation_lock,
+};
 mod managed_pair;
 mod projection;
 mod replacement;
@@ -523,20 +529,6 @@ pub(super) fn write_state_phase_locked(
     Ok(true)
 }
 
-pub(super) fn finish_hosted_migration_locked(
-    lock: &UpgradeLock,
-    attempt: &UpgradeAttempt,
-) -> Result<()> {
-    let mut state = read_state_object(&lock.install_path);
-    if !state.is_current(attempt) {
-        return Err(anyhow!(
-            "hosted migration lost its upgrade attempt identity"
-        ));
-    }
-    state.terminal(attempt, "applied", Duration::ZERO, now_unix_s());
-    write_state_object_locked(lock, state)
-}
-
 pub(super) fn write_state_checked_locked(
     _data_root: &Path,
     lock: &UpgradeLock,
@@ -690,26 +682,7 @@ fn read_state_object(install_path: &Path) -> UpgradeState {
 
 /// Cleanup cannot discard the image while a released updater still expects it.
 pub(in crate::upgrade) fn ensure_legacy_pair_scheduler_terminal(install_path: &Path) -> Result<()> {
-    let Some(bytes) = super::install::read_stable_file(
-        &state_path(install_path),
-        "ctx upgrade scheduler state",
-        DUE_HINT_STATE_MAX_BYTES,
-        super::install::StableFileKind::Data,
-    )?
-    else {
-        return Ok(());
-    };
-    let state: UpgradeState = serde_json::from_slice(&bytes)?;
-    if state.schema_version != STATE_SCHEMA_VERSION || is_active_upgrade_status(&state.status) {
-        return Err(anyhow!(
-            "finish the pending upgrade before retiring legacy installation files"
-        ));
-    }
-    // Terminal publication has finished every pair-slot read. Daemon restart
-    // owns only the installed executable and its lifecycle record; it neither
-    // consumes these retired files nor grants installation ownership. Do not
-    // turn a stale/abandoned lifecycle record into a second installation fence.
-    Ok(())
+    ensure_hosted_install_scheduler_available(install_path, false)
 }
 
 fn read_state_object_bounded(install_path: &Path) -> Option<UpgradeState> {

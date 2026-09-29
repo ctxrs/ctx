@@ -70,6 +70,7 @@ pub(super) fn shell_words(input: &str) -> Vec<String> {
         return Vec::new();
     }
     let mut executable = None;
+    let mut namespace = None;
     let mut removals = Vec::new();
     let mut exclusions = Vec::new();
     let body_tokens = start;
@@ -84,7 +85,7 @@ pub(super) fn shell_words(input: &str) -> Vec<String> {
             let run = start + 2 + usize::from(namespaced);
             if word(start) == Some("command")
                 && candidate.is_some()
-                && (!namespaced || word(start + 2) == Some("output"))
+                && (!namespaced || matches!(word(start + 2), Some("sift" | "output")))
                 && word(run) == Some("run")
             {
                 let payload = run
@@ -96,10 +97,14 @@ pub(super) fn shell_words(input: &str) -> Vec<String> {
                 if payload >= end || word(payload - 1) != Some("--") {
                     return Vec::new();
                 }
-                if executable.is_some() && executable != candidate {
+                let candidate_namespace = if namespaced { word(start + 2) } else { None };
+                if executable.is_some()
+                    && (executable != candidate || namespace != candidate_namespace)
+                {
                     return Vec::new();
                 }
                 executable = candidate;
+                namespace = candidate_namespace;
                 removals.push((
                     tokens[start].start - body_start,
                     tokens[payload].start - body_start,
@@ -119,20 +124,19 @@ pub(super) fn shell_words(input: &str) -> Vec<String> {
     for (from, to) in removals.into_iter().rev() {
         original.replace_range(from..to, "");
     }
-    let namespaced = matches!(basename(executable), "ctx" | "ctx.exe");
     if rewrite::command_with_namespace(
         &original,
         Path::new(executable),
         Shell::Posix,
         &exclusions,
-        namespaced,
+        namespace,
     )
     .as_deref()
         == Some(input)
     {
         let mut words = vec![executable.to_owned()];
-        if namespaced {
-            words.push("output".into());
+        if let Some(namespace) = namespace {
+            words.push(namespace.into());
         }
         words.push("run".into());
         words
@@ -162,7 +166,9 @@ pub(super) fn command_label(words: &[String]) -> (String, bool) {
         && (words
             .get(1)
             .is_some_and(|s| matches!(s.as_str(), "run" | "compact" | "restore" | "recall"))
-            || (words.get(1).is_some_and(|s| s == "output")
+            || (words
+                .get(1)
+                .is_some_and(|s| matches!(s.as_str(), "sift" | "output"))
                 && words.get(2).is_some_and(|s| {
                     matches!(
                         s.as_str(),
@@ -200,7 +206,11 @@ pub(super) fn command_label(words: &[String]) -> (String, bool) {
         safe,
         "git" | "cargo" | "npm" | "pnpm" | "yarn" | "go" | "sift" | "ctx sift"
     ) && let Some(sub) = words.get(
-        if ctx_sift_invocation && words.get(1).is_some_and(|s| s == "output") {
+        if ctx_sift_invocation
+            && words
+                .get(1)
+                .is_some_and(|s| matches!(s.as_str(), "sift" | "output"))
+        {
             2
         } else {
             1

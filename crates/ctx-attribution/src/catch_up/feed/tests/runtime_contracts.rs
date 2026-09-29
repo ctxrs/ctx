@@ -71,7 +71,7 @@ fn progress_observer_failure_cancels_wait_without_modifying_writer() {
     let mut owner = fixture.materializer();
     let error =
         crate::catch_up_with_progress(&fixture.data_root, &snapshot, &|| false, &|progress| {
-            assert_eq!(progress.phase, MaterializationPhase::WaitingForWriter);
+            assert_eq!(progress.phase, MaterializationPhase::Preparing);
             anyhow::bail!("authored observer failure")
         })
         .unwrap_err();

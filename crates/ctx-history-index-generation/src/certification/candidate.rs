@@ -12,6 +12,14 @@ impl CertificationAliasAuthority {
         predecessor_fence: &ActiveGenerationPointerFence,
         slot: &GenerationSlot,
     ) -> Result<Self> {
+        Self::capture_directories(root, predecessor_fence, &[slot.directory()])
+    }
+
+    pub(super) fn capture_directories(
+        root: &Path,
+        predecessor_fence: &ActiveGenerationPointerFence,
+        managed_directories: &[&str],
+    ) -> Result<Self> {
         predecessor_fence.validate(root)?;
         let retention_lease = crate::retention::load_generation_retention_lease(root)?;
         let mut directories = predecessor_fence
@@ -19,7 +27,11 @@ impl CertificationAliasAuthority {
             .into_iter()
             .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
             .map(|slot| slot.directory().to_owned())
-            .chain(std::iter::once(slot.directory().to_owned()))
+            .chain(
+                managed_directories
+                    .iter()
+                    .map(|directory| (*directory).to_owned()),
+            )
             .chain(
                 retention_lease
                     .as_ref()

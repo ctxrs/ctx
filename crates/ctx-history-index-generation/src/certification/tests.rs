@@ -563,10 +563,305 @@ fn stable_unmanaged_hardlink_remains_checksum_mismatch() {
     let relative = Path::new("payload.bin");
     let active_path = active.join(relative);
     fs::write(&active_path, b"immutable payload").unwrap();
+    // A retained older directory does not make a static external alias a
+    // generation race. Missing files in an ordinary peer remain supported.
+    fs::create_dir_all(generation(root, '2')).unwrap();
+    let pointer = pointer('1');
+    open_artifact(root, &active, relative, Some(&pointer)).unwrap();
     fs::hard_link(&active_path, root.join("unmanaged-hardlink")).unwrap();
 
+    for topology in [None, Some(&pointer)] {
+        assert!(matches!(
+            open_artifact(root, &active, relative, topology),
+            Err(IndexError::ChecksumMismatch)
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn alias_open_preserves_descriptor_exhaustion() {
+    const CHILD: &str = "CTX_CERTIFICATION_ALIAS_FD_EXHAUSTION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "certification::tests::alias_open_preserves_descriptor_exhaustion",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let active = generation(temp.path(), '1');
+    fs::create_dir_all(&active).unwrap();
+    fs::create_dir_all(generation(temp.path(), '2')).unwrap();
+    fs::write(active.join("payload.bin"), b"payload").unwrap();
+    let limit = libc::rlimit {
+        rlim_cur: 64,
+        rlim_max: 64,
+    };
+    // This process is an isolated test child; the parent retains its limit.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+    let mut descriptors = Vec::new();
+    let hook = AliasEntryTestHookGuard::install(move |_| {
+        while let Ok(file) = File::open("/dev/null") {
+            descriptors.push(file);
+        }
+    });
+    let error = open_artifact(
+        temp.path(),
+        &active,
+        Path::new("payload.bin"),
+        Some(&pointer('1')),
+    )
+    .unwrap_err();
+    drop(hook);
+    assert!(
+        matches!(error, IndexError::Io(ref io) if io.raw_os_error() == Some(libc::EMFILE)),
+        "{error:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn delayed_reader_cache_cannot_overwrite_completed_managed_link_refresh() {
+    let fixture = read_only_certification_fixture();
+    let root = fixture.root();
+    let pointer = load_current_pointer(root).unwrap();
+    let stale = scrub_and_certify_physical_integrity(root, &pointer, &fixture.slot, &fixture.index)
+        .unwrap();
+    let _clone_options = crate::CloneTestHookGuard::set(
+        crate::CloneTestOptions {
+            force_reflink_fallback: true,
+            ..Default::default()
+        },
+        |_, _| Ok(()),
+    );
+    let _candidate =
+        crate::create_authenticated_candidate_generation(root, &pointer, &fixture.index, 0)
+            .unwrap();
+    assert!(crate::candidate_clone_metrics().retained_hardlinked_files > 0);
+    let path = certification_path(root, &fixture.slot);
+    let refreshed = fs::read(&path).unwrap();
     assert!(matches!(
-        open_artifact(root, &active, relative, None),
+        cache_recertified_physical_integrity(root, &pointer, &fixture.slot, &fixture.index, &stale),
         Err(IndexError::ChecksumMismatch)
     ));
+    assert_eq!(fs::read(path).unwrap(), refreshed);
+    crate::reset_physical_verification_activity();
+    verify_or_certify_physical_integrity(root, &pointer, &fixture.slot, &fixture.index).unwrap();
+    assert_eq!(crate::hashed_artifact_bytes(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn cold_read_only_snapshots_never_initialize_or_require_writable_coordinator() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (FileIdentity, Vec<u8>)> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(snapshot(&path));
+            } else {
+                let file = open_nofollow(&path).unwrap();
+                files.insert(
+                    path.clone(),
+                    (file_identity(&file).unwrap(), fs::read(path).unwrap()),
+                );
+            }
+        }
+        files
+    }
+
+    for (existing_coordinator, root_mode, stale) in [
+        (false, 0o700, false),
+        (false, 0o500, false),
+        (true, 0o500, false),
+        (false, 0o700, true),
+        (false, 0o500, true),
+        (true, 0o500, true),
+    ] {
+        let fixture = read_only_certification_fixture();
+        let root = fixture.root();
+        // Inspecting an unrelated directory for an existing reader must not
+        // initialize coordination either, or grant that directory authority.
+        fs::create_dir(generation(root, 'f')).unwrap();
+        if stale {
+            // A completed benign link/unlink leaves immutable bytes intact,
+            // but ctime must force a full audit instead of reusing the SHA.
+            let alias = root.join("temporary-alias");
+            fs::hard_link(fixture.artifact_path(), &alias).unwrap();
+            fs::remove_file(alias).unwrap();
+        }
+        // No live guard survives this call. This exercises the cold opener,
+        // including existing coordinator files that deny O_RDWR access.
+        crate::retention::ensure_generation_read_lease_coordinator(root).unwrap();
+        for name in [
+            ".ctx-generation-read-leases-v2.lock",
+            ".ctx-generation-lease-coordinator-init-v2.lock",
+        ] {
+            let path = root.join(name);
+            if existing_coordinator {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o400)).unwrap();
+            } else {
+                fs::remove_file(path).unwrap();
+            }
+        }
+        fs::set_permissions(root, fs::Permissions::from_mode(root_mode)).unwrap();
+        let before = snapshot(root);
+        crate::reset_physical_verification_activity();
+        verify_physical_integrity_read_only(root, &fixture.slot, &fixture.index).unwrap();
+        assert_eq!(crate::hashed_artifact_bytes() > 0, stale);
+        assert_eq!(snapshot(root), before);
+
+        if stale {
+            mutate_same_length_and_restore_metadata(&fixture.artifact_path());
+            let before = snapshot(root);
+            assert!(matches!(
+                verify_physical_integrity_read_only(root, &fixture.slot, &fixture.index),
+                Err(IndexError::ChecksumMismatch)
+            ));
+            assert_eq!(snapshot(root), before);
+        }
+        fs::write(certification_path(root, &fixture.slot), b"{").unwrap();
+        let before = snapshot(root);
+        assert!(matches!(
+            verify_physical_integrity_read_only(root, &fixture.slot, &fixture.index),
+            Err(IndexError::ChecksumMismatch)
+        ));
+        assert_eq!(snapshot(root), before);
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exact_readers_finish_while_guarded_full_audit_is_paused() {
+    use crate::{PublicationIoProbe, PublicationIoProbeGuard};
+    use std::{sync::mpsc, time::Duration};
+
+    let fixture = read_only_certification_fixture();
+    let pointer = load_current_pointer(fixture.root()).unwrap();
+    std::thread::scope(|scope| {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let audit_fixture = &fixture;
+        let audit_pointer = &pointer;
+        let audit = scope.spawn(move || {
+            // Candidate reclamation may audit under this same exclusive guard.
+            let _guard =
+                crate::retention::CertificationGuard::update(audit_fixture.root()).unwrap();
+            let _probe = PublicationIoProbeGuard::set(move |event| {
+                if event == PublicationIoProbe::PhysicalAudit {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                }
+                Ok(())
+            });
+            physical_integrity_audit(
+                &audit_fixture.index,
+                &slot_path(audit_fixture.root(), &audit_fixture.slot),
+                Some(audit_pointer),
+            )
+            .unwrap()
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let _probe = PublicationIoProbeGuard::set(|event| {
+            assert_ne!(event, PublicationIoProbe::CertificationWait);
+            Ok(())
+        });
+        crate::reset_physical_verification_activity();
+        verify_or_certify_physical_integrity(
+            fixture.root(),
+            &pointer,
+            &fixture.slot,
+            &fixture.index,
+        )
+        .unwrap();
+        verify_physical_integrity_read_only(fixture.root(), &fixture.slot, &fixture.index).unwrap();
+        assert_eq!(crate::hashed_artifact_bytes(), 0);
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            audit.join().unwrap().digest(),
+            fixture.slot.physical_integrity_digest()
+        );
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn candidate_clone_waits_for_a_running_full_audit_then_finishes() {
+    use crate::{PublicationIoProbe, PublicationIoProbeGuard};
+    use std::{sync::mpsc, time::Duration};
+
+    let fixture = read_only_certification_fixture();
+    let pointer = load_current_pointer(fixture.root()).unwrap();
+    std::thread::scope(|scope| {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let audit_fixture = &fixture;
+        let audit_pointer = &pointer;
+        let audit = scope.spawn(move || {
+            let _probe = PublicationIoProbeGuard::set(move |event| {
+                if event == PublicationIoProbe::PhysicalAudit {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                }
+                Ok(())
+            });
+            scrub_and_certify_physical_integrity(
+                audit_fixture.root(),
+                audit_pointer,
+                &audit_fixture.slot,
+                &audit_fixture.index,
+            )
+            .unwrap()
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let clone_fixture = &fixture;
+        let clone_pointer = &pointer;
+        let candidate = scope.spawn(move || {
+            let mut waiting_tx = Some(waiting_tx);
+            let _probe = PublicationIoProbeGuard::set(move |event| {
+                if event == PublicationIoProbe::CertificationWait {
+                    if let Some(tx) = waiting_tx.take() {
+                        tx.send(()).unwrap();
+                    }
+                }
+                Ok(())
+            });
+            crate::create_authenticated_candidate_generation(
+                clone_fixture.root(),
+                clone_pointer,
+                &clone_fixture.index,
+                50_000_000,
+            )
+            .unwrap()
+        });
+        waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!candidate.is_finished());
+        resume_tx.send(()).unwrap();
+        audit.join().unwrap();
+        let candidate = candidate.join().unwrap();
+        verify_or_certify_physical_integrity(
+            fixture.root(),
+            &pointer,
+            &fixture.slot,
+            &fixture.index,
+        )
+        .unwrap();
+        drop(candidate);
+    });
 }

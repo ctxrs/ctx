@@ -174,7 +174,7 @@ if [ "$install_man" = "1" ] && [ "$preserve_core_man_pages" != "1" ]; then
   generated_man_dir="$tmp_dir/generated-man"
   mkdir -p "$generated_man_dir"
   if "$install_path" docs man --out "$generated_man_dir" >"$tmp_dir/man-install.out" 2>&1; then
-    if ! mkdir -p "$man_dir"; then
+    if ! (umask 022; mkdir -p "$man_dir"); then
       record_man_install_failure "$man_dir" "could not create directory"
     elif [ -L "$man_dir" ]; then
       record_man_install_failure "$man_dir" "destination is a symlink"

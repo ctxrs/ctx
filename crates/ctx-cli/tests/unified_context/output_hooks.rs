@@ -197,3 +197,133 @@ fn legacy_output_hook_can_be_reinstalled_or_removed_after_the_top_level_route_is
     let remaining: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
     assert_eq!(remaining["hooks"]["PostToolUse"], json!([]));
 }
+
+#[cfg(unix)]
+#[test]
+fn generated_sift_commands_execute_the_real_cli_once_and_preserve_exit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = Sandbox::new();
+    sandbox.write("repo/git", b"#!/bin/sh\nprintf 'ran\\n' >> invocations\nprintf '%s\\n' \"$@\"\nprintf 'child diagnostic\\n' >&2\nexit 17\n");
+    fs::set_permissions(
+        sandbox.repo().join("git"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let original = "./git status 'two words' '' 'literal $value;*'";
+    let rewritten = sandbox.json(&["sift", "rewrite", "--json", "--", original]);
+    let mut commands = vec![rewritten["command"].as_str().unwrap().to_owned()];
+    for (host, tool, event, pointer) in [
+        (
+            "codex",
+            "Bash",
+            "PreToolUse",
+            "/hookSpecificOutput/updatedInput",
+        ),
+        (
+            "vibe",
+            "bash",
+            "pre_tool",
+            "/hook_specific_output/tool_input",
+        ),
+    ] {
+        let input = json!({"hook_event_name":event, "tool_name":tool,
+            "tool_input":{"command":original, "shell":"bash", "description":"keep me"}});
+        let output =
+            json_output(sandbox.output(&["sift", "hook", host], input.to_string().as_bytes()));
+        let updated = output.pointer(pointer).unwrap();
+        assert_eq!(updated["description"], "keep me");
+        commands.push(updated["command"].as_str().unwrap().to_owned());
+    }
+    let isolated = sandbox.command();
+    for command in commands {
+        assert!(command.starts_with(&format!("command true || {original}; ")));
+        assert!(command.contains(" sift run "));
+        for shell in ["/bin/sh", "/bin/bash"] {
+            let counter = sandbox.repo().join("invocations");
+            fs::write(&counter, b"").unwrap();
+            let output = Command::new(shell)
+                .env_clear()
+                .envs(
+                    isolated
+                        .get_envs()
+                        .filter_map(|(key, value)| value.map(|value| (key, value))),
+                )
+                .current_dir(sandbox.repo())
+                .timeout(Duration::from_secs(30))
+                .args(["-c", &command])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(17), "{output:?}");
+            assert_eq!(output.stdout, b"status\ntwo words\n\nliteral $value;*\n");
+            assert_eq!(output.stderr, b"child diagnostic\n");
+            assert_eq!(fs::read(&counter).unwrap(), b"ran\n");
+        }
+    }
+    sandbox.assert_no_connection();
+}
+
+#[test]
+fn renamed_cli_hook_registration_is_idempotent_and_raw_output_is_exempt() {
+    let mut sandbox = Sandbox::new();
+    let renamed = sandbox.root.join(if cfg!(windows) {
+        "ctx-linux-x64.exe"
+    } else {
+        "ctx-linux-x64"
+    });
+    fs::copy(&sandbox.binary, &renamed).unwrap();
+    sandbox.binary = renamed;
+    for (agent, relative, event) in [
+        ("claude-code", ".claude/settings.json", "PostToolUse"),
+        ("github-copilot", ".github/hooks/ctx.json", "postToolUse"),
+        ("codex", ".codex/hooks.json", "PreToolUse"),
+    ] {
+        if agent == "codex" && !cfg!(unix) {
+            continue;
+        }
+        for action in ["install", "status", "install"] {
+            let result = sandbox.json(&[
+                "integrations",
+                action,
+                "sift",
+                "--agent",
+                agent,
+                "--project",
+                "--format",
+                "json",
+            ]);
+            assert_eq!(
+                result["results"][0]["status"], "installed",
+                "{agent} {action}: {result}"
+            );
+        }
+        let config: Value =
+            serde_json::from_slice(&fs::read(sandbox.repo().join(relative)).unwrap()).unwrap();
+        assert_eq!(config["hooks"][event].as_array().unwrap().len(), 1);
+    }
+    let output = "synthetic hook output remains complete\n".repeat(160);
+    let program = sandbox.binary.to_str().unwrap();
+    let command = if cfg!(windows) {
+        format!(
+            "& '{}' sift --raw -- cat fixture",
+            program.replace('\'', "''")
+        )
+    } else {
+        format!(
+            "'{}' sift --raw -- cat fixture",
+            program.replace('\'', "'\"'\"'")
+        )
+    };
+    for (command, wrapped) in [
+        (command.as_str(), true),
+        ("unrelated sift --raw -- cat fixture", false),
+        ("/other/ctx-linux-x64 sift --raw -- cat fixture", false),
+    ] {
+        let input = json!({"hook_event_name":"PostToolUse", "tool_name":if cfg!(windows) { "PowerShell" } else { "Bash" },
+            "tool_input":{"command":command}, "tool_response":{"stdout":output,"stderr":"","interrupted":false,"isImage":false}});
+        let result =
+            json_output(sandbox.output(&["sift", "hook", "claude"], input.to_string().as_bytes()));
+        assert_eq!(result == json!({}), wrapped, "{command}: {result}");
+    }
+    sandbox.assert_no_connection();
+}

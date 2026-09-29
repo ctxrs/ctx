@@ -16,6 +16,8 @@ use ctx_history_platform::platform_security::restrict_private_directory;
 
 use super::*;
 
+#[path = "tests/manifest_recovery.rs"]
+mod manifest_recovery;
 #[path = "tests/replacement_regressions.rs"]
 mod replacement_regressions;
 #[path = "tests/runtime_contracts.rs"]

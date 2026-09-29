@@ -302,6 +302,7 @@ fn atomic_stages(
 fn common_publication_stages() -> Vec<PublicationIoProbe> {
     let stages = vec![
         PublicationIoProbe::CandidateGenerationSync,
+        PublicationIoProbe::PhysicalAudit,
         PublicationIoProbe::CertificationSidecar(AtomicPublicationStage::Preparation),
         PublicationIoProbe::CertificationSidecar(AtomicPublicationStage::Validation),
         PublicationIoProbe::CertificationSidecar(AtomicPublicationStage::Replacement),
@@ -314,7 +315,7 @@ fn common_publication_stages() -> Vec<PublicationIoProbe> {
     #[cfg(windows)]
     let stages = {
         let mut stages = stages;
-        stages.insert(1, PublicationIoProbe::TerminalSealOpen);
+        stages.insert(2, PublicationIoProbe::TerminalSealOpen);
         stages
     };
     stages
@@ -358,6 +359,57 @@ fn assert_raw_access_denied(error: &std::io::Error) {
     assert!(StdError::source(error).is_none());
 }
 
+fn assert_precursor_cache_failures_remain_usable(cache_route: &[PublicationIoProbe]) -> Result<()> {
+    for (stage_index, forced_stage) in cache_route.iter().copied().enumerate() {
+        let fixture = Fixture::new(1)?;
+        let root = fixture.data_root.join("index-cache-publication-diagnostic");
+        seed_incremental_attempt(&fixture, &root);
+        let observed = observe_fixture_publication(
+            FixturePublicationAttempt::Incremental,
+            &root,
+            Some((forced_stage, 1)),
+            || {
+                fixture.publish_to_root(
+                    &root,
+                    "cache-failure-attempt",
+                    &[(
+                        0,
+                        publication_records(FixturePublicationAttempt::Incremental),
+                    )],
+                )
+            },
+        );
+        // This is the predecessor's best-effort cache refresh before the
+        // mandatory candidate route. Prove the injected occurrence was reached.
+        assert_eq!(observed.stages[..=stage_index], cache_route[..=stage_index]);
+        let published = observed.into_value_or_panic();
+        let generation_id = published.generation_id().to_owned();
+        drop(published);
+        let reopened = VerifiedIndex::open_pinned_with_retained_peer(&root)?;
+        assert_eq!(reopened.generation_id(), generation_id);
+        assert_eq!(reopened.count_term("base")?, 1);
+        assert_eq!(reopened.count_term("appended")?, 1);
+        let mut store =
+            SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
+        let outcome = reconcile_all(
+            &mut store,
+            &reopened,
+            &mut CoreBuilder::default(),
+            &mut MarkerEmbedder::default(),
+        )?;
+        assert!(outcome.ready);
+        assert_eq!(outcome.records_decoded, 2);
+        assert_eq!(
+            store
+                .source_acknowledgement()?
+                .expect("verified cache-failure generation")
+                .core_generation_id,
+            generation_id
+        );
+    }
+    Ok(())
+}
+
 fn assert_forced_publication_stages(attempt: FixturePublicationAttempt) -> Result<()> {
     let expected_route = expected_publication_route(attempt);
     let route_fixture = Fixture::new(1)?;
@@ -377,7 +429,24 @@ fn assert_forced_publication_stages(attempt: FixturePublicationAttempt) -> Resul
     if let Err(error) = &route.result {
         panic!("{error}");
     }
-    assert_eq!(route.stages, expected_route);
+    // Hardlink cloning can refresh the predecessor sidecar before publication;
+    // reflink/copy routes need no such refresh. Keep the mandatory route fixed
+    // independently of observed events, and account for only this exact prefix.
+    let cache_route = route
+        .stages
+        .iter()
+        .take_while(|stage| matches!(stage, PublicationIoProbe::CertificationSidecar(_)))
+        .copied()
+        .collect::<Vec<_>>();
+    if !cache_route.is_empty() {
+        assert_eq!(attempt, FixturePublicationAttempt::Incremental);
+        assert_eq!(
+            cache_route,
+            atomic_stages(PublicationIoProbe::CertificationSidecar)
+        );
+    }
+    assert_eq!(route.stages[cache_route.len()..], expected_route);
+    assert_precursor_cache_failures_remain_usable(&cache_route)?;
     if attempt == FixturePublicationAttempt::Incremental {
         assert!(!route
             .stages
@@ -386,8 +455,9 @@ fn assert_forced_publication_stages(attempt: FixturePublicationAttempt) -> Resul
     }
 
     for (stage_index, forced_stage) in expected_route.iter().copied().enumerate() {
-        let forced_occurrence = expected_route[..=stage_index]
+        let forced_occurrence = cache_route
             .iter()
+            .chain(expected_route[..=stage_index].iter())
             .filter(|stage| **stage == forced_stage)
             .count();
         let fixture = Fixture::new(1)?;
@@ -405,7 +475,12 @@ fn assert_forced_publication_stages(attempt: FixturePublicationAttempt) -> Resul
             || fixture.publish_to_root(&root, "forced-attempt", &[(0, records)]),
         );
 
-        assert_eq!(observed.stages, expected_route[..=stage_index]);
+        let expected_observed = cache_route
+            .iter()
+            .chain(expected_route[..=stage_index].iter())
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(observed.stages, expected_observed);
         let failure = match observed.result {
             Ok(_) => panic!(
                 "stage not reached: {forced_stage:?}; observed={:?}",

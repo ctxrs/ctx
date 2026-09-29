@@ -55,6 +55,8 @@ const PRESENTATION_MAX_EVENT_WINDOW_EVENTS: usize = MAX_SESSION_EVENT_COORDINATE
 /// Typed failures exposed by the transport-neutral show application boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum ShowApplicationError {
+    #[error("the Core index does not exist; retry with daemon refresh enabled")]
+    SourceUnavailable,
     #[error(
         "History changed while ctx was opening the searchable generation. Retry the same request."
     )]
@@ -85,6 +87,7 @@ impl ShowApplicationError {
     fn from_index_ref(error: &IndexError) -> Self {
         let detail = error.to_string();
         match error {
+            IndexError::MissingActiveGenerationPointer => Self::SourceUnavailable,
             IndexError::ConcurrentGenerationChange => Self::GenerationChanged,
             IndexError::SessionEventCursorGenerationMismatch { .. } => Self::CursorStale { detail },
             IndexError::SessionEventCursorSessionMismatch => Self::CursorMismatch { detail },
@@ -124,6 +127,9 @@ impl ShowApplicationError {
     #[cfg(test)]
     fn into_cli_error(self) -> anyhow::Error {
         match self {
+            Self::SourceUnavailable => {
+                anyhow::Error::new(IndexError::MissingActiveGenerationPointer)
+            }
             Self::GenerationChanged => anyhow::Error::new(IndexError::ConcurrentGenerationChange),
             Self::CursorStale { .. } => {
                 anyhow::Error::new(IndexError::SessionEventCursorGenerationMismatch {
