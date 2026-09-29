@@ -100,6 +100,7 @@ rust_library(
 ctx_cli_contract_test(
     name = "cli_public_help_docs_tests",
     src = "tests/contracts/cli_public_help_docs.rs",
+    extra_srcs = ["tests/contracts/cli_status_diagnostics_tests.rs"],
     tags = ["cli-contract"],
     test_support = [
         "base",
