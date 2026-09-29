@@ -17,7 +17,7 @@ pub(super) fn parse_as(path: &str, text: &str, hash: &str, format: &str) -> Resu
         "yaml" | "yml" => yaml(path, text, hash),
         "gdoc" | "gsheet" | "gslides" => {
             let mut facts = base(path, hash, "document_pointer");
-            let pointer = google_pointer(text)?;
+            let pointer = google_pointer(path, text)?;
             if let Some(url) = pointer["url"].as_str().filter(|url| !url.is_empty()) {
                 link(&mut facts, url, url, 1)?;
             }
@@ -297,8 +297,11 @@ fn markdown(path: &str, text: &str, hash: &str) -> Result<FileFacts> {
         let mut offset = first;
         for line in text[first..].split_inclusive('\n').take(200) {
             if matches!(line.trim(), "---" | "...") {
-                let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text[first..offset])
-                    .context("invalid Markdown frontmatter")?;
+                let frontmatter = &text[first..offset];
+                let value: serde_yaml_ng::Value =
+                    serde_yaml_ng::from_str(frontmatter).map_err(|error| {
+                        super::rejection::yaml_error(path, frontmatter, None, 1, error)
+                    })?;
                 facts.nodes[0].metadata["frontmatter"] = serde_json::to_value(value)?;
                 start = offset + line.len();
                 break;
@@ -507,50 +510,76 @@ fn html(path: &str, text: &str, hash: &str) -> Result<FileFacts> {
 }
 
 fn yaml(path: &str, text: &str, hash: &str) -> Result<FileFacts> {
-    let value: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(text).context("invalid YAML document")?;
+    use serde::Deserialize;
     let mut facts = base(path, hash, "document");
-    let mut pending = vec![(String::new(), &value, 0)];
+    let mut documents = serde_yaml_ng::Deserializer::from_str(text).peekable();
     let mut visited = 0;
-    while let Some((name, value, depth)) = pending.pop() {
-        visited += 1;
-        ensure!(
-            depth <= 64 && visited < MAX_FACTS,
-            "YAML nesting/fact limit exceeded"
-        );
-        match value {
-            serde_yaml_ng::Value::Mapping(map) => {
-                for (key, value) in map {
-                    if let Some(key) = key.as_str() {
-                        pending.push((
-                            if name.is_empty() {
-                                key.into()
-                            } else {
-                                format!("{name}.{key}")
-                            },
-                            value,
-                            depth + 1,
-                        ));
+    let mut document = 0;
+    while let Some(deserializer) = documents.next() {
+        document += 1;
+        let value = serde_yaml_ng::Value::deserialize(deserializer)
+            .map_err(|error| super::rejection::yaml_error(path, text, Some(document), 0, error))?;
+        let multiple = document > 1 || documents.peek().is_some();
+        let node_start = facts.nodes.len();
+        let edge_start = facts.edges.len();
+        let mut pending = vec![(String::new(), &value, 0)];
+        while let Some((name, value, depth)) = pending.pop() {
+            visited += 1;
+            ensure!(
+                depth <= 64 && visited < MAX_FACTS,
+                "YAML nesting/fact limit exceeded"
+            );
+            match value {
+                serde_yaml_ng::Value::Mapping(map) => {
+                    for (key, value) in map {
+                        if let Some(key) = key.as_str() {
+                            pending.push((
+                                if name.is_empty() {
+                                    key.into()
+                                } else {
+                                    format!("{name}.{key}")
+                                },
+                                value,
+                                depth + 1,
+                            ));
+                        }
                     }
                 }
-            }
-            serde_yaml_ng::Value::Sequence(values) => {
-                for (i, value) in values.iter().enumerate() {
-                    pending.push((format!("{name}[{i}]"), value, depth + 1));
+                serde_yaml_ng::Value::Sequence(values) => {
+                    for (i, value) in values.iter().enumerate() {
+                        pending.push((format!("{name}[{i}]"), value, depth + 1));
+                    }
                 }
+                serde_yaml_ng::Value::String(value) => {
+                    let field = section(
+                        &mut facts,
+                        &name,
+                        1,
+                        "document_field",
+                        json!({"value":value,"provenance":"yaml_scalar"}),
+                    )?;
+                    let reference_start = facts.references.len();
+                    prose(&mut facts, value, 1)?;
+                    if multiple {
+                        for reference in &mut facts.references[reference_start..] {
+                            reference.source = field.clone();
+                        }
+                    }
+                }
+                _ => {}
             }
-            serde_yaml_ng::Value::String(value) => {
-                section(
-                    &mut facts,
-                    &name,
-                    1,
-                    "document_field",
-                    json!({"value":value,"provenance":"yaml_scalar"}),
-                )?;
-                prose(&mut facts, value, 1)?;
-            }
-            _ => {}
         }
+        if multiple {
+            for node in &mut facts.nodes[node_start..] {
+                node.metadata["yaml_document"] = json!(document);
+            }
+            for edge in &mut facts.edges[edge_start..] {
+                edge.metadata["yaml_document"] = json!(document);
+            }
+        }
+    }
+    if document > 1 {
+        facts.nodes[0].metadata["yaml_documents"] = json!(document);
     }
     for n in &mut facts.nodes[1..] {
         n.line = None;
@@ -562,8 +591,9 @@ fn yaml(path: &str, text: &str, hash: &str) -> Result<FileFacts> {
     Ok(facts)
 }
 
-pub(super) fn google_pointer(text: &str) -> Result<Value> {
-    let value: Value = serde_json::from_str(text).context("invalid Google pointer JSON")?;
+pub(super) fn google_pointer(path: &str, text: &str) -> Result<Value> {
+    let value: Value = serde_json::from_str(text)
+        .map_err(|error| super::rejection::pointer_json_error(path, text, error))?;
     let url = value["url"].as_str().unwrap_or("");
     let mut id = ["doc_id", "file_id", "fileId", "id"]
         .iter()

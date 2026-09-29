@@ -296,3 +296,37 @@ fn dns_http_and_downloader_share_the_original_retrieval_deadline() {
         assert!(start.elapsed() < Duration::from_secs(3));
     }
 }
+
+#[test]
+fn downloaded_document_syntax_is_an_operation_failure() {
+    let url = safe_url("https://example.test/guide.md", false).unwrap();
+    let options = IngestOptions::default();
+    let facts = downloaded(
+        b"# Ordinary document\n",
+        Some("text/markdown"),
+        &url,
+        "guide.md",
+        &options,
+    )
+    .unwrap();
+    assert!(
+        facts
+            .nodes
+            .iter()
+            .any(|node| node.label == "Ordinary document")
+    );
+    let malformed = b"---\ntitle: [unfinished\n---\nBody\n";
+    let local = extract_bytes(
+        Path::new("guide.md"),
+        "guide.md",
+        malformed,
+        "hash",
+        &options,
+    )
+    .unwrap_err();
+    assert!(local.is::<InputRejected>());
+    let remote =
+        downloaded(malformed, Some("text/markdown"), &url, "guide.md", &options).unwrap_err();
+    assert!(!remote.is::<InputRejected>(), "{remote:#}");
+    assert!(format!("{remote:#}").contains("frontmatter"));
+}

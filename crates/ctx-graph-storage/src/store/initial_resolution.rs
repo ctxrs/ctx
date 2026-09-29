@@ -36,6 +36,12 @@ pub(super) fn resolved_reference_edge(reference: &Reference, source: &Node, targ
     if let Some(context) = reference_context(source, &reference.id) {
         metadata["context"] = serde_json::Value::String(context.to_owned());
     }
+    let line = if let Some(document) = source.metadata.get("yaml_document") {
+        metadata["yaml_document"] = document.clone();
+        None
+    } else {
+        Some(reference.line)
+    };
     Edge {
         id: format!("reference:{}", reference.id),
         source: reference.source.clone(),
@@ -43,7 +49,7 @@ pub(super) fn resolved_reference_edge(reference: &Reference, source: &Node, targ
         relation: reference.relation.clone(),
         directed: true,
         file: Some(reference.file.clone()),
-        line: Some(reference.line),
+        line,
         confidence: "statically_resolved".to_owned(),
         metadata,
     }

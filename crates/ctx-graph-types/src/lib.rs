@@ -79,6 +79,9 @@ pub struct IndexReport {
     pub schema_version: u32,
     pub generation: u64,
     pub parsed_files: usize,
+    /// Local documents rejected during this run; unchanged diagnostics remain below.
+    #[serde(default)]
+    pub rejected_files: usize,
     pub unchanged_files: usize,
     pub deleted_files: usize,
     pub nodes: usize,
@@ -242,3 +245,17 @@ pub use source_io::read_source;
 pub const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 
 pub const EXTRACTOR_REVISION: u32 = 12;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_report_without_rejection_count_remains_readable() {
+        let old = r#"{"schema_version":1,"generation":7,"parsed_files":2,"unchanged_files":3,"deleted_files":0,"nodes":5,"edges":1,"diagnostics":[]}"#;
+        let report: IndexReport = serde_json::from_str(old).unwrap();
+        assert_eq!(report.rejected_files, 0);
+        assert_eq!(report.parsed_files, 2);
+        assert_eq!(report.generation, 7);
+    }
+}
