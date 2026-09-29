@@ -58,10 +58,16 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
             return error.exit_code();
         }
     };
-    match run_parsed(cli.graph) {
+    run_parsed_exit(cli.graph)
+}
+
+/// Execute parsed graph arguments with the same runtime error output on every entry path.
+pub fn run_parsed_exit(cli: GraphArgs) -> i32 {
+    let json = cli.json;
+    match run_parsed(cli) {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("ctx graph: {}", human(&format!("{error:#}")));
+            let _ = output::write_error(&mut io::stderr().lock(), &error, json);
             1
         }
     }

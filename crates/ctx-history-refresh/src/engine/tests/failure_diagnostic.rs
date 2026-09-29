@@ -32,7 +32,7 @@ fn active_successor_keeps_the_previous_disk_failure_across_restart_until_complet
     assert!(status["last_failure"]["last_error"]
         .as_str()
         .unwrap()
-        .contains("free space"));
+        .contains("free at least 512 B; required 1.0 KiB; available 512 B"));
     coordinator
         .persist_job_status_for_test(temp.path(), &next_id)
         .unwrap();

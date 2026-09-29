@@ -400,7 +400,10 @@ impl Store {
         Ok(snapshot)
     }
 
-    pub fn semantic_losses(&self, changed: &[FileFacts]) -> Result<Vec<String>> {
+    pub fn semantic_losses<'a>(
+        &self,
+        changed: impl IntoIterator<Item = &'a FileFacts>,
+    ) -> Result<Vec<String>> {
         let tx = self.conn.unchecked_transaction()?;
         let layout = storage_layout(&tx)?;
         let mut losses = Vec::new();

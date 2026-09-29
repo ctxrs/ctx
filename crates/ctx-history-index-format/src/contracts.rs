@@ -7,6 +7,7 @@ use ctx_history_core::{
     CertifiedSource, CoreRecordError, ProjectionContractError, SourceKey, CORE_RECORD_VERSION,
     IDENTITY_VERSION,
 };
+use ctx_history_platform::resource_format::{format_bytes, format_disk_shortage};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -128,14 +129,14 @@ pub enum IndexError {
     CurrentRepublishSourceTopology(&'static str),
     #[error("current publication republish exceeds the file limit: {actual}/{maximum}")]
     CurrentRepublishFileLimit { actual: usize, maximum: usize },
-    #[error("current publication republish exceeds the byte limit: {actual}/{maximum}")]
+    #[error("current publication republish exceeds the byte limit: {} > {}", format_bytes(*.actual), format_bytes(*.maximum))]
     CurrentRepublishByteLimit { actual: u64, maximum: u64 },
     #[error(
-        "current publication republish needs {required} bytes of headroom, but only {available} are available; free space on the index volume and retry"
+        "current publication republish has insufficient headroom on the index volume: {}; then retry", format_disk_shortage(*.required, *.available)
     )]
     CurrentRepublishInsufficientHeadroom { required: u64, available: u64 },
     #[error(
-        "indexing failed with {available} bytes observed free on the index volume; free space and retry; underlying error: {cause}"
+        "indexing failed with {} observed free on the index volume; free space and retry; underlying error: {cause}", format_bytes(*.available)
     )]
     CandidateFailureWithLowSpace {
         available: u64,
@@ -231,10 +232,10 @@ pub enum IndexError {
     },
     #[error("lexical schema is missing required field {0}")]
     MissingSchemaField(&'static str),
-    #[error("index memory {actual} is below the {minimum} byte minimum")]
+    #[error("index memory {} is below the {} minimum", format_bytes(*.actual as u64), format_bytes(*.minimum as u64))]
     IndexMemoryTooSmall { actual: usize, minimum: usize },
     #[error(
-        "changed-session registry requires {required_bytes} charged bytes for {attempted_entries} entries, exceeding the {maximum_bytes} byte writer memory budget ({maximum_entries} entries maximum)"
+        "changed-session registry requires {} for {attempted_entries} entries, exceeding the {} writer memory budget ({maximum_entries} entries maximum)", format_bytes(*.required_bytes as u64), format_bytes(*.maximum_bytes as u64)
     )]
     ChangedSessionRegistryMemoryLimitExceeded {
         attempted_entries: usize,
@@ -243,7 +244,7 @@ pub enum IndexError {
         maximum_entries: usize,
     },
     #[error(
-        "logical verification scratch requires {required_bytes} bytes, exceeding the {maximum_bytes} byte ceiling"
+        "logical verification scratch requires {}, exceeding the {} ceiling", format_bytes(*.required_bytes), format_bytes(*.maximum_bytes)
     )]
     VerificationScratchLimitExceeded {
         required_bytes: u64,

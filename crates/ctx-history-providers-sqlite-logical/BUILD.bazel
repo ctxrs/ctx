@@ -70,7 +70,10 @@ ctx_rust_test(
 
 ctx_rust_test(
     name = "capture_facade_replay_tests",
-    srcs = ["tests/bazel/capture_facade_replay.rs"],
+    srcs = [
+        "tests/bazel/capture_facade_replay.rs",
+        "tests/bazel/opencode_changes.rs",
+    ],
     crate_name = "logical_sqlite_capture_facade_replay",
     crate_root = "tests/bazel/capture_facade_replay.rs",
     edition = crate_edition(),

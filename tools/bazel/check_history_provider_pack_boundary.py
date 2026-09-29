@@ -39,6 +39,7 @@ EXPECTED_PACK_DEPENDENCIES = {
     "ctx-history-capture-model": {"path": "../ctx-history-capture-model"},
     "ctx-history-capture-runtime": {"path": "../ctx-history-capture-runtime"},
     "ctx-history-core": {"path": "../ctx-history-core"},
+    "ctx-history-platform": {"path": "../ctx-history-platform"},
     "ctx-history-source-io": {"path": "../ctx-history-source-io"},
     "ctx-history-source-sqlite": {"path": "../ctx-history-source-sqlite"},
 }
@@ -49,6 +50,7 @@ PACK_DIRECT_BAZEL_DEPENDENCIES = (
     "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-capture-runtime:lib",
     "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-platform:lib",
     "//crates/ctx-history-source-io:lib",
     "//crates/ctx-history-source-sqlite:lib",
 )

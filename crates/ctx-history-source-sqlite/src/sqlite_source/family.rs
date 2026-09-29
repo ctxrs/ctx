@@ -1,5 +1,6 @@
 use super::*;
 
+mod committed_view;
 mod native_file;
 
 pub(super) use native_file::{
@@ -131,13 +132,12 @@ impl SqliteSourceFamily {
                 .as_ref()
                 .map(SqliteFamilyMember::content_digest)
                 .transpose()?,
+            committed_wal_view: self.committed_wal_view()?,
         })
     }
 
-    /// Captures the bounded physical revision used only as conservative
-    /// admitted-snapshot routing evidence. SHM content is deliberately not
-    /// hashed because it is volatile reader coordination and is not part of
-    /// the revision digest.
+    /// Captures native state and the published WAL commit header. Volatile SHM
+    /// reader marks are excluded; unavailable commit evidence denies replay.
     pub(super) fn capture_revision_evidence(
         &self,
     ) -> SqliteSourceAccessResult<SqliteFamilyEvidence> {
@@ -169,13 +169,12 @@ impl SqliteSourceFamily {
                 .map(SqliteFamilyMember::bounded_revision_token)
                 .transpose()?,
             shared_memory_token: None,
+            committed_wal_view: self.committed_wal_view()?,
         })
     }
 
     /// Revalidates the exact bounded DB/WAL revision used to admit a durable
-    /// no-op replay. SHM bytes remain excluded because SQLite mutates reader
-    /// coordination there, but its object identity and size bound remain
-    /// certified.
+    /// no-op replay, including the published WAL commit but not reader marks.
     pub(super) fn revalidate_revision(
         &self,
         expected: &SqliteFamilyEvidence,
@@ -194,6 +193,12 @@ impl SqliteSourceFamily {
             &self.shared_memory_path,
             Some(SQLITE_SHM_MAX_BYTES),
         )?;
+        if expected.has_wal()
+            && (expected.committed_wal_view.is_none()
+                || self.committed_wal_view()? != expected.committed_wal_view)
+        {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
         if SqliteFamilyMember::open_optional(
             &self.authority,
             self.journal_name.clone(),
@@ -627,6 +632,7 @@ pub(super) struct SqliteFamilyEvidence {
     shared_memory: Option<NativeFileState>,
     wal_token: Option<[u8; 32]>,
     shared_memory_token: Option<[u8; 32]>,
+    committed_wal_view: Option<committed_view::WalIndexHeader>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -653,6 +659,7 @@ impl SqliteSourceEvidence {
     pub(super) fn from_snapshot(
         native: &SqliteFamilyEvidence,
         sqlite: &SqliteSnapshotEvidence,
+        replay_safe: bool,
     ) -> Self {
         let identity = native.database.identity.digest();
         let mut revision = Sha256::new();
@@ -668,7 +675,13 @@ impl SqliteSourceEvidence {
                 .as_ref()
                 .and_then(|state| (state.length != 0).then_some(state.length)),
             shared_memory_length: native.shared_memory.as_ref().map(|state| state.length),
-            physical_revision: native.content_revision_token(),
+            // An unproven snapshot must never match a persisted replay fence,
+            // including consumers that retain physical revisions directly.
+            physical_revision: if replay_safe {
+                native.revision_token()
+            } else {
+                revision.clone().finalize().into()
+            },
             schema: sqlite.schema.clone(),
             source: sqlite.source.clone(),
             revision: revision.finalize().into(),
@@ -677,34 +690,16 @@ impl SqliteSourceEvidence {
 }
 
 impl SqliteFamilyEvidence {
-    /// Bounded DB/WAL content evidence suitable for persisted replay policy.
-    ///
-    /// Native object and parent identities are deliberately excluded so an
-    /// unchanged SQLite family keeps the same content revision when moved.
-    /// A replay fence retains the full native evidence separately and still
-    /// rejects object replacement during one publication attempt.
-    pub(super) fn content_revision_token(&self) -> [u8; 32] {
-        let mut digest = Sha256::new();
-        digest.update(EVIDENCE_DOMAIN);
-        digest.update(b"content-revision\0");
-        digest.update(self.database.length.to_le_bytes());
-        digest.update(self.database_token);
-        let committed_wal = self.wal.as_ref().filter(|state| state.length != 0);
-        match committed_wal.zip(self.wal_token) {
-            Some((wal, wal_token)) => {
-                digest.update([1]);
-                digest.update(wal.length.to_le_bytes());
-                digest.update(wal_token);
-            }
-            None => digest.update([0]),
-        }
-        digest.finalize().into()
+    pub(super) fn has_wal(&self) -> bool {
+        self.wal.as_ref().is_some_and(|wal| wal.length != 0)
     }
 
+    /// Separate from old physical-only tokens: both WAL reuse and header-only
+    /// commit publication must invalidate persisted replay.
     pub(super) fn revision_token(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
         digest.update(EVIDENCE_DOMAIN);
-        digest.update(b"admitted-revision\0");
+        digest.update(b"committed-revision\0");
         self.hash_into(&mut digest);
         digest.finalize().into()
     }
@@ -715,9 +710,15 @@ impl SqliteFamilyEvidence {
         digest.update(self.database_token);
         let committed_wal = self.wal.as_ref().filter(|state| state.length != 0);
         hash_optional_state(digest, committed_wal);
-        // SHM is SQLite's volatile lock coordination, not provider content.
-        // Stock read-only WAL readers may update its reader marks, so source
-        // revisions intentionally derive from the DB, WAL, and SQLite evidence.
+        if self.has_wal() {
+            match self.committed_wal_view {
+                Some(header) => {
+                    digest.update([1]);
+                    digest.update(header);
+                }
+                None => digest.update([0]),
+            }
+        }
         match committed_wal.and(self.wal_token) {
             Some(wal_token) => {
                 digest.update([1]);

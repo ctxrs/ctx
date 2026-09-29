@@ -45,9 +45,12 @@ use super::{
 
 mod diagnostics;
 mod path_safety;
+mod replay;
 mod scratch;
 #[cfg(target_os = "linux")]
 mod selective;
+#[cfg(target_os = "linux")]
+mod wal_commit;
 
 fn create_database(path: &Path, value: &str) {
     let connection = Connection::open(path).unwrap();
@@ -59,7 +62,6 @@ fn create_database(path: &Path, value: &str) {
         .unwrap();
 }
 
-#[cfg(target_os = "linux")]
 fn create_persistent_wal(path: &Path) -> Connection {
     use rusqlite::config::DbConfig;
 
@@ -158,115 +160,6 @@ fn read_values_from_connection(connection: &Connection) -> Vec<String> {
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap()
-}
-
-#[test]
-fn physical_replay_fence_unchanged_is_zero_copy() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let data_root = crate::test_support_paths::tempdir().unwrap();
-    let database = temp.path().join("provider.sqlite");
-    create_database(&database, "first");
-    let authority = retain_parent_in_data_root(data_root.path(), temp.path());
-    let fence = authority
-        .observe_replay_fence(OsStr::new("provider.sqlite"))
-        .unwrap();
-    let revision = *fence.revision();
-
-    fence.revalidate().unwrap();
-    assert_eq!(authority.snapshot_counters(), Default::default());
-    assert_eq!(staging_entries(data_root.path()), 0);
-    assert_eq!(*fence.revision(), revision);
-}
-
-#[test]
-fn physical_replay_revision_survives_move_but_old_fence_rejects_it() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let data_root = crate::test_support_paths::tempdir().unwrap();
-    let original = temp.path().join("original");
-    let moved = temp.path().join("moved");
-    fs::create_dir(&original).unwrap();
-    fs::create_dir(&moved).unwrap();
-    create_database(&original.join("provider.sqlite"), "first");
-    let original_authority = retain_parent_in_data_root(data_root.path(), &original);
-    let original_fence = original_authority
-        .observe_replay_fence(OsStr::new("provider.sqlite"))
-        .unwrap();
-    let revision = *original_fence.revision();
-
-    fs::rename(
-        original.join("provider.sqlite"),
-        moved.join("provider.sqlite"),
-    )
-    .unwrap();
-    assert!(matches!(
-        original_fence.revalidate(),
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
-
-    let moved_authority = retain_parent_in_data_root(data_root.path(), &moved);
-    let moved_fence = moved_authority
-        .observe_replay_fence(OsStr::new("provider.sqlite"))
-        .unwrap();
-    assert_eq!(*moved_fence.revision(), revision);
-    moved_fence.revalidate().unwrap();
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn physical_replay_fence_rejects_committed_wal_mutation() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let data_root = crate::test_support_paths::tempdir().unwrap();
-    let database = temp.path().join("provider.sqlite");
-    let writer = create_persistent_wal(&database);
-    let authority = retain_parent_in_data_root(data_root.path(), temp.path());
-    let fence = authority
-        .observe_replay_fence(OsStr::new("provider.sqlite"))
-        .unwrap();
-
-    writer
-        .execute("INSERT INTO messages (body) VALUES ('later')", [])
-        .unwrap();
-
-    assert!(matches!(
-        fence.revalidate(),
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
-    assert_eq!(authority.snapshot_counters(), Default::default());
-    assert_eq!(staging_entries(data_root.path()), 0);
-}
-
-#[test]
-fn physical_replay_fence_rejects_database_leaf_and_parent_replacement() {
-    let data_root = crate::test_support_paths::tempdir().unwrap();
-    let leaf_root = crate::test_support_paths::tempdir().unwrap();
-    let database = leaf_root.path().join("provider.sqlite");
-    create_database(&database, "first");
-    let authority = retain_parent_in_data_root(data_root.path(), leaf_root.path());
-    let fence = authority
-        .observe_replay_fence(OsStr::new("provider.sqlite"))
-        .unwrap();
-    fs::rename(&database, leaf_root.path().join("retired.sqlite")).unwrap();
-    create_database(&database, "first");
-    assert!(matches!(
-        fence.revalidate(),
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
-
-    let parent_root = crate::test_support_paths::tempdir().unwrap();
-    let parent = parent_root.path().join("source");
-    fs::create_dir(&parent).unwrap();
-    create_database(&parent.join("provider.sqlite"), "first");
-    let authority = retain_parent_in_data_root(data_root.path(), &parent);
-    let fence = authority
-        .observe_replay_fence(OsStr::new("provider.sqlite"))
-        .unwrap();
-    fs::rename(&parent, parent_root.path().join("retired-source")).unwrap();
-    fs::create_dir(&parent).unwrap();
-    create_database(&parent.join("provider.sqlite"), "first");
-    assert!(matches!(
-        fence.revalidate(),
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
 }
 
 fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
@@ -656,6 +549,7 @@ fn near_limit_rejection_happens_before_any_scratch_write() {
 
     assert!(error.is_systemic_resource_failure());
     assert!(error.is_snapshot_capacity_failure());
+    assert!(!error.to_string().contains("free at least"));
     assert_eq!(staging_entries(data_root.path()), 0);
     assert_eq!(authority.snapshot_counters().source_bytes_copied(), 0);
 }
@@ -736,6 +630,7 @@ fn free_space_headroom_rejection_happens_before_any_scratch_write() {
             | SqliteSourceAccessError::Diagnosed { .. }
     ));
     assert!(error.is_snapshot_capacity_failure());
+    assert!(error.to_string().contains("free at least 1 B;"));
     assert_eq!(staging_entries(data_root.path()), 0);
 }
 
@@ -1074,4 +969,31 @@ fn retained_copy_and_ordering_database_share_one_exact_route_bound() {
     assert!(counters.max_route_scratch_bytes() <= aggregate_limit);
     assert_eq!(counters.scratch_admissions(), 2);
     snapshot.finish().unwrap();
+}
+
+#[test]
+fn snapshot_capacity_messages_distinguish_shortages_from_size_limits() {
+    let shortage = SqliteSourceAccessError::InsufficientScratchSpace {
+        path: PathBuf::from("provider.sqlite"),
+        required: 8_685_611_961,
+        available: 8_558_231_552,
+    };
+    assert_eq!(
+        shortage.to_string(),
+        "provider SQLite scratch has insufficient free-space headroom for \"provider.sqlite\": free at least 121.5 MiB; required 8.1 GiB; available 8.0 GiB; then retry"
+    );
+    assert!(matches!(
+        shortage,
+        SqliteSourceAccessError::InsufficientScratchSpace {
+            required: 8_685_611_961,
+            available: 8_558_231_552,
+            ..
+        }
+    ));
+    let limit = SqliteSourceAccessError::SnapshotTooLarge {
+        path: PathBuf::from("provider.sqlite"),
+        length: 2_097_152,
+        maximum: 1_048_576,
+    };
+    assert_eq!(limit.to_string(), "SQLite source snapshot exceeds the bounded limit for \"provider.sqlite\": 2.0 MiB > 1.0 MiB");
 }

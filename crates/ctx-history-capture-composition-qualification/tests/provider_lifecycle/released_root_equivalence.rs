@@ -31,6 +31,7 @@ struct PublicationBytes {
     aggregates: Vec<u8>,
     source_routes: Vec<u8>,
     route_controls: Vec<u8>,
+    hermes_physical_revisions: BTreeMap<SourceRouteIdentity, [u8; 32]>,
     records: Vec<Vec<u8>>,
 }
 
@@ -291,9 +292,12 @@ fn route_bytes(registry: &SourceBackedProviderRegistry) -> Vec<RouteBytes> {
     routes
 }
 
-fn normalized_route_controls(route_controls: &BTreeMap<SourceRouteIdentity, Vec<u8>>) -> Vec<u8> {
+fn normalized_route_controls(
+    route_controls: &BTreeMap<SourceRouteIdentity, Vec<u8>>,
+) -> (Vec<u8>, BTreeMap<SourceRouteIdentity, [u8; 32]>) {
     const HERMES_EXACT_INTERVAL_MS: i64 = 60 * 60 * 1_000;
 
+    let mut physical_revisions = BTreeMap::new();
     let normalized = route_controls
         .iter()
         .map(|(route, control)| {
@@ -306,6 +310,11 @@ fn normalized_route_controls(route_controls: &BTreeMap<SourceRouteIdentity, Vec<
                 return (route.clone(), control.clone());
             }
             let object = value.as_object_mut().unwrap();
+            // Native replay proof may change on relocation without changing
+            // logical publication bytes. Validate and compare it separately.
+            let physical_revision: [u8; 32] =
+                serde_json::from_value(object.remove("physical_revision").unwrap()).unwrap();
+            physical_revisions.insert(route.clone(), physical_revision);
             let last_exact = object["last_successful_exhaustive_at_ms"].as_i64().unwrap();
             let exact_due = object["exact_due_at_ms"].as_i64().unwrap();
             let exact_interval = exact_due.checked_sub(last_exact).unwrap();
@@ -318,7 +327,7 @@ fn normalized_route_controls(route_controls: &BTreeMap<SourceRouteIdentity, Vec<
             (route.clone(), serde_json::to_vec(&value).unwrap())
         })
         .collect::<BTreeMap<_, _>>();
-    serde_json::to_vec(&normalized).unwrap()
+    (serde_json::to_vec(&normalized).unwrap(), physical_revisions)
 }
 
 fn publication_bytes(
@@ -348,7 +357,8 @@ fn publication_bytes(
     sources.sort();
     let aggregates = serde_json::to_vec(&manifest.core_record_aggregates).unwrap();
     let source_routes = serde_json::to_vec(manifest.source_routes()).unwrap();
-    let route_controls = normalized_route_controls(&receipt.route_controls);
+    let (route_controls, hermes_physical_revisions) =
+        normalized_route_controls(&receipt.route_controls);
     let mut records = search_event_candidates(&index, marker, 32)
         .into_iter()
         .filter_map(|candidate| {
@@ -368,6 +378,7 @@ fn publication_bytes(
         aggregates,
         source_routes,
         route_controls,
+        hermes_physical_revisions,
         records,
     }
 }
@@ -375,6 +386,7 @@ fn publication_bytes(
 fn assert_publication_bytes_eq(
     actual: &PublicationBytes,
     expected: &PublicationBytes,
+    relocated: bool,
     context: &str,
 ) {
     assert_eq!(actual.sources, expected.sources, "{context} sources");
@@ -391,6 +403,28 @@ fn assert_publication_bytes_eq(
         "{context} route controls"
     );
     assert_eq!(actual.records, expected.records, "{context} records");
+    assert_eq!(
+        actual.hermes_physical_revisions.keys().collect::<Vec<_>>(),
+        expected
+            .hermes_physical_revisions
+            .keys()
+            .collect::<Vec<_>>(),
+        "{context} Hermes physical proof routes"
+    );
+    for (route, revision) in &actual.hermes_physical_revisions {
+        let prior = &expected.hermes_physical_revisions[route];
+        if relocated {
+            assert_ne!(
+                revision, prior,
+                "{context} {route:?} relocated physical proof"
+            );
+        } else {
+            assert_eq!(
+                revision, prior,
+                "{context} {route:?} unchanged physical proof"
+            );
+        }
+    }
 }
 
 fn records_matching(index_root: &Path, marker: &str) -> Vec<CoreRecord> {
@@ -702,6 +736,7 @@ fn disjoint_openhands_automatic_routes_each_adopt_released_identity() {
                 MARKER,
             ),
             &automatic_publication,
+            false,
             &format!("OpenHands automatic={automatic_enabled} disjoint released routes"),
         );
     }
@@ -1036,6 +1071,7 @@ fn matching_released_roots_reproduce_automatic_authority_and_record_bytes() {
                     fixture.marker,
                 ),
                 &automatic_publication,
+                false,
                 &format!("{provider} automatic={automatic_enabled}"),
             );
         }
@@ -1067,6 +1103,11 @@ fn moved_released_roots_survive_restart_and_second_move_without_rotating_bytes()
                 &temp.path().join("automatic-index"),
                 &automatic.registry,
                 fixture.marker,
+            );
+            assert_eq!(
+                automatic_publication.hermes_physical_revisions.len(),
+                usize::from(provider == CaptureProvider::Hermes),
+                "{provider} automatic={automatic_enabled} physical proof presence"
             );
 
             let initial_context = fixture
@@ -1111,14 +1152,20 @@ fn moved_released_roots_survive_restart_and_second_move_without_rotating_bytes()
                 automatic_routes,
                 "{provider} automatic={automatic_enabled} first move route authority"
             );
+            let first_index = temp.path().join("first-move-index");
+            let first_publication =
+                publication_bytes(&first_index, &first.registry, fixture.marker);
             assert_publication_bytes_eq(
-                &publication_bytes(
-                    &temp.path().join("first-move-index"),
-                    &first.registry,
-                    fixture.marker,
-                ),
+                &first_publication,
                 &automatic_publication,
+                true,
                 &format!("{provider} automatic={automatic_enabled} first move"),
+            );
+            assert_publication_bytes_eq(
+                &publication_bytes(&first_index, &first.registry, fixture.marker),
+                &first_publication,
+                false,
+                &format!("{provider} automatic={automatic_enabled} first move replay"),
             );
 
             let first_applied = first.registry.applied_provider_roots().unwrap().2[0].clone();
@@ -1155,14 +1202,27 @@ fn moved_released_roots_survive_restart_and_second_move_without_rotating_bytes()
                 automatic_routes,
                 "{provider} automatic={automatic_enabled} second move route authority"
             );
+            let second_index = temp.path().join("second-move-index");
+            let second_publication =
+                publication_bytes(&second_index, &second.registry, fixture.marker);
             assert_publication_bytes_eq(
-                &publication_bytes(
-                    &temp.path().join("second-move-index"),
-                    &second.registry,
-                    fixture.marker,
-                ),
+                &second_publication,
                 &automatic_publication,
+                true,
                 &format!("{provider} automatic={automatic_enabled} second move"),
+            );
+            if provider == CaptureProvider::Hermes {
+                assert_ne!(
+                    second_publication.hermes_physical_revisions,
+                    first_publication.hermes_physical_revisions,
+                    "{provider} automatic={automatic_enabled} second move recertifies first move"
+                );
+            }
+            assert_publication_bytes_eq(
+                &publication_bytes(&second_index, &second.registry, fixture.marker),
+                &second_publication,
+                false,
+                &format!("{provider} automatic={automatic_enabled} second move replay"),
             );
         }
     }

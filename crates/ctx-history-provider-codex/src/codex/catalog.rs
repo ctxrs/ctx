@@ -450,7 +450,8 @@ fn codex_uuid_suffix(bytes: &[u8]) -> Option<&str> {
         .flatten()
 }
 
-pub(crate) fn is_codex_session_rollout_path(path: &Path) -> bool {
+/// Whether the filename is eligible for the Codex session rollout inventory.
+pub fn is_codex_session_rollout_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))

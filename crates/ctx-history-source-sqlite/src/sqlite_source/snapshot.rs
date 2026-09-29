@@ -281,14 +281,18 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         }
     };
 
-    // A transaction may pin later than the initial physical observation. Only
-    // advertise exact replay if that physical revision survived the capture.
+    // A transaction may pin later than the initial observation. Require the
+    // same published WAL header on both sides of capture. A full WAL copy must
+    // additionally recover exactly that commit, not later unpublished frames.
     let replay_safe = match options.policy {
-        SqliteSourceSnapshotPolicy::PinnedReadOnlyWal => false,
-        SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+        SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
+        | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
             family.revalidate_revision(&native_evidence).is_ok()
         }
-        _ => true,
+        _ => {
+            native_evidence.copied_commit_matches(acquired.snapshot_directory.as_ref())
+                && family.revalidate_revision(&native_evidence).is_ok()
+        }
     };
     let policy = match options.policy {
         SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
@@ -296,7 +300,8 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         }
         policy => policy,
     };
-    let evidence = SqliteSourceEvidence::from_snapshot(&native_evidence, &sqlite_evidence);
+    let evidence =
+        SqliteSourceEvidence::from_snapshot(&native_evidence, &sqlite_evidence, replay_safe);
     let AcquiredSqliteConnection {
         connection,
         strategy,

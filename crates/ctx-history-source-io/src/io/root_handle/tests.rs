@@ -315,3 +315,39 @@ fn authority_fingerprints_are_stable_for_the_same_objects_and_change_on_mutation
     );
     assert!(first_root.revalidate().is_err());
 }
+
+#[test]
+fn source_size_limit_is_readable_and_does_not_suggest_freeing_disk() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("source.jsonl");
+    fs::write(&path, vec![b'a'; 2048]).unwrap();
+    let source = ProviderSourceRoot::open(temp.path())
+        .unwrap()
+        .open_file(Path::new("source.jsonl"))
+        .unwrap();
+    assert_eq!(
+        source.read_all_bounded(1024).unwrap_err().to_string(),
+        "invalid capture payload: provider source file exceeds the size limit (1.0 KiB)"
+    );
+    assert_eq!(
+        source
+            .read_exact_range(0, 2048, 1024)
+            .unwrap_err()
+            .to_string(),
+        "invalid capture payload: provider source range exceeds the size limit (1.0 KiB)"
+    );
+    assert_eq!(
+        source
+            .read_exact_range_allow_append(0, 2048, 1024)
+            .unwrap_err()
+            .to_string(),
+        "invalid capture payload: provider source range exceeds the size limit (1.0 KiB)"
+    );
+    assert_eq!(
+        crate::read_text_file_limited(&path, 1024, "source")
+            .unwrap_err()
+            .to_string(),
+        "invalid capture payload: source exceeds the size limit (1.0 KiB)"
+    );
+    assert_eq!(source.read_all_bounded(2048).unwrap(), vec![b'a'; 2048]);
+}

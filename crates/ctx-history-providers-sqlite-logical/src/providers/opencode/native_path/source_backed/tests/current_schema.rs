@@ -1,5 +1,66 @@
 use super::*;
+
+#[path = "scan_measurement.rs"]
+mod scan_measurement;
 use ctx_history_capture_runtime::SourceBackedRecordRejectionClass;
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unavailable_wal_commit_header_is_a_replay_miss_and_capture_can_retry() {
+    use super::super::adapter::{discover_document_tree_for_test, observes_exact_replay_for_test};
+    use ctx_history_capture_runtime::{document_full_snapshot_frontier, DocumentLeafFingerprint};
+    use std::os::unix::fs::FileExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let database = temp.path().join("opencode.db");
+    let writer = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type":"text","text":"retained"}),
+    );
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer
+        .execute("UPDATE part SET time_updated=time_updated+1", [])
+        .unwrap();
+    let (_, scan, _) = scan_current_schema(&database);
+    let prior = scan.certificate;
+    let base = ctx_history_core::CertifiedSource::certify_with_frontier(
+        prior.observation().clone(),
+        prior.observation().clone(),
+        prior.parser_revision(),
+        *prior.content_digest(),
+        prior.counts(),
+        Some(
+            document_full_snapshot_frontier(
+                DocumentLeafFingerprint::new([7; 32]),
+                prior.counts().certified_bytes,
+                *prior.content_digest(),
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    let shm = temp.path().join("opencode.db-shm");
+    let original = fs::read(&shm).unwrap();
+    let file = fs::OpenOptions::new().write(true).open(&shm).unwrap();
+    let mut torn = original[..96].to_vec();
+    torn[8] ^= 1;
+    for header in [vec![0; 96], torn] {
+        file.write_all_at(&header, 0).unwrap();
+        assert!(!observes_exact_replay_for_test(data.path(), &database, &base).unwrap());
+        // Once the producer completes publication, the ordinary full-capture
+        // path succeeds. Other errors are not converted into replay misses.
+        file.write_all_at(&original[..96], 0).unwrap();
+        discover_document_tree_for_test(
+            data.path(),
+            &database,
+            &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+        )
+        .unwrap();
+    }
+    assert!(observes_exact_replay_for_test(data.path(), temp.path(), &base).is_err());
+}
 
 fn padded_json_value(mut value: serde_json::Value, bytes: usize) -> String {
     let fixed_bytes = value.to_string().len();

@@ -21,6 +21,7 @@ FORMAT_DEPS = [
     "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-index-generation:lib",
+    "//crates/ctx-history-platform:lib",
     "//crates/ctx-semantic-model:lib",
 ]
 
@@ -48,6 +49,7 @@ rust_library(
         "//crates/ctx-history-capture-model:lib",
         "//crates/ctx-history-core:lib",
         "//crates/ctx-history-index-generation:test_support_lib",
+        "//crates/ctx-history-platform:lib",
         "//crates/ctx-semantic-model:lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
@@ -73,6 +75,7 @@ ctx_rust_test(
         "//crates/ctx-history-capture-model:lib",
         "//crates/ctx-history-core:lib",
         "//crates/ctx-history-index-generation:test_support_lib",
+        "//crates/ctx-history-platform:lib",
         "//crates/ctx-semantic-model:lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),

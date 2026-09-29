@@ -1,4 +1,5 @@
 use super::*;
+use ctx_history_platform::resource_format::format_bytes;
 
 pub(crate) fn native_root(db: &Path) -> Result<PathBuf> {
     let stats = Store::open_read_only(db)?.stats()?;
@@ -276,9 +277,9 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
                 return print_value(&report, true);
             }
             println!(
-                "Compacted database: {} -> {} bytes of database pages.",
-                report.pages_before * report.page_size,
-                report.pages_after * report.page_size
+                "Compacted database: {} -> {} of database pages.",
+                format_bytes(report.pages_before * report.page_size),
+                format_bytes(report.pages_after * report.page_size)
             );
             if report.checkpoint_busy {
                 println!("Another connection is delaying disk-space reclamation.");

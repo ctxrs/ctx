@@ -21,6 +21,7 @@ TASK_DOCS_DEPS = [
     "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-capture-runtime:lib",
     "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-platform:lib",
     "//crates/ctx-history-source-io:lib",
     "//crates/ctx-history-source-sqlite:lib",
 ]

@@ -26,7 +26,11 @@ EXPECTED_DEPENDENCIES: dict[str, Any] = {
 EXPECTED_WINDOWS_DEPENDENCIES: dict[str, Any] = {
     "windows-sys": {
         "version": "0.61",
-        "features": ["Win32_Storage_FileSystem"],
+        "features": [
+            "Win32_Security",
+            "Win32_Storage_FileSystem",
+            "Win32_System_Memory",
+        ],
     }
 }
 EXPECTED_INTERNAL_BAZEL = {

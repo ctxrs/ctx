@@ -351,9 +351,14 @@ fn observe_exact_replay_tree(
         return Ok(None);
     };
     let retained = retain_root_authorized_source(data_root, path)?;
-    let physical_fence = retained
+    let physical_fence = match retained
         .sqlite_authority
-        .observe_replay_fence(&retained.database_leaf)?;
+        .observe_replay_fence(&retained.database_leaf)
+    {
+        Ok(fence) => fence,
+        Err(error) if error.is_source_changed() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     let physical_revision = *physical_fence.revision();
     let source = base.observation().source().clone();
     let leaf_fingerprint = admitted_leaf_fingerprint(&source, &physical_revision);
@@ -378,6 +383,15 @@ fn observe_exact_replay_tree(
         )],
         OpenCodeTreeAuthority::Present,
     )))
+}
+
+#[cfg(test)]
+pub(super) fn observes_exact_replay_for_test(
+    data_root: &Path,
+    path: &Path,
+    base: &CertifiedSource,
+) -> OpenCodeSourceBackedResult<bool> {
+    observe_exact_replay_tree(data_root, path, base).map(|tree| tree.is_some())
 }
 
 fn observe_present_document_tree_with_progress(

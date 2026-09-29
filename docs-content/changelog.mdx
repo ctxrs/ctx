@@ -8,6 +8,18 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.1.3
+
+Released: 2026-09-29
+
+### Fixed
+
+- Codex history watching on Linux and macOS ignores ordinary files that cannot contain transcripts, avoiding unnecessary refreshes while preserving transcript updates.
+- Automatic source discovery recognizes Codex session directories containing many transcript files.
+- Codex refresh avoids a redundant file-validation pass. Blame uses a small in-memory lookup index to reduce repeated disk reads for large source inventories.
+- OpenCode refresh reuses prepared SQL statements when scanning changed databases.
+- SQLite-backed history detects committed edits and deletions after rolled-back writes reuse WAL frames.
+
 ## 2.1.2
 
 Released: 2026-09-29

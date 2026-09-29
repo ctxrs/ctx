@@ -1,3 +1,4 @@
+use ctx_history_platform::resource_format::{format_bytes, format_disk_shortage};
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, GenerationError>;
@@ -75,9 +76,9 @@ pub enum GenerationError {
     CurrentRepublishSourceTopology(&'static str),
     #[error("current-generation republish exceeds file limit: {actual} > {maximum}")]
     CurrentRepublishFileLimit { actual: usize, maximum: usize },
-    #[error("current-generation republish exceeds byte limit: {actual} > {maximum}")]
+    #[error("current-generation republish exceeds byte limit: {} > {}", format_bytes(*.actual), format_bytes(*.maximum))]
     CurrentRepublishByteLimit { actual: u64, maximum: u64 },
-    #[error("current-generation republish has insufficient headroom: required {required}, available {available}; free space on the index volume and retry")]
+    #[error("current-generation republish has insufficient headroom on the index volume: {}; then retry", format_disk_shortage(*.required, *.available))]
     CurrentRepublishInsufficientHeadroom { required: u64, available: u64 },
     #[error("count overflow")]
     CountOverflow,
