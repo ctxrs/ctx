@@ -299,7 +299,7 @@ fn hosted_migration_preserves_pending_pair_and_its_recovery() -> Result<()> {
     assert_migration_refused_without_changes(
         &fixture.data_root,
         &fixture.install_path,
-        &[pending.clone()],
+        std::slice::from_ref(&pending),
         "pending managed-pair upgrade",
     )?;
     let lock = fixture.lock()?;
