@@ -202,6 +202,16 @@ pub(crate) fn run_cli() -> Result<()> {
         }
         command => command,
     };
+    if let CommandRoot::Status(args) = &cli.command {
+        if let Some(seconds) = args.sample {
+            return crate::commands::status::diagnostics::run(
+                args,
+                cli.data_root.as_deref(),
+                seconds,
+                quiet_output(cli.quiet),
+            );
+        }
+    }
     semantic::initialize()?;
     cli.command = match cli.command {
         CommandRoot::Mcp(args) => {

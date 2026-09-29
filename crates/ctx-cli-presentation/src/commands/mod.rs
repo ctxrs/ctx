@@ -13,6 +13,7 @@ pub mod show;
 pub mod sources;
 pub mod stats;
 pub mod status;
+pub mod status_diagnostics;
 mod status_health;
 mod status_presentation;
 mod status_usage;
