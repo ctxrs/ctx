@@ -165,7 +165,7 @@ where
             catalog_leaves.push(catalog_leaf);
             fingerprints.push(catalog_leaf);
             observed.push(ObservedDocumentLeaf::with_durable_replay(
-                DocumentLeafFingerprint::new(replay_fingerprint),
+                DocumentLeafFingerprint::new(replay_fingerprint.unwrap_or(catalog_leaf)),
                 SqliteInventoryDocumentLeaf {
                     index,
                     source: leaf.source,
@@ -183,7 +183,7 @@ where
                     #[cfg(test)]
                     semantic_counters: Mutex::new(SqliteInventorySemanticCounters::default()),
                 },
-                true,
+                replay_fingerprint.is_some(),
             ));
         }
         let tree_fingerprint =
@@ -213,7 +213,7 @@ pub(super) struct SqliteInventoryDocumentLeaf<L> {
     source: SourceKey,
     path: PathBuf,
     catalog_fingerprint: [u8; 32],
-    replay_fingerprint: [u8; 32],
+    replay_fingerprint: Option<[u8; 32]>,
     #[cfg(test)]
     base_certificate: Option<CertifiedSource>,
     provider_leaf: L,
@@ -292,15 +292,19 @@ impl RetainedSqliteInventoryLeaf {
     fn replay_fingerprint(
         &self,
         catalog_fingerprint: [u8; 32],
-    ) -> SourceBackedRouteResult<[u8; 32]> {
-        let revision = self
+    ) -> SourceBackedRouteResult<Option<[u8; 32]>> {
+        let revision = match self
             .authority
             .observe_physical_revision(&self.database_name)
-            .map_err(sqlite_source_route_error)?;
-        Ok(sqlite_inventory_replay_fingerprint(
+        {
+            Ok(revision) => revision,
+            Err(error) if error.is_source_changed() => return Ok(None),
+            Err(error) => return Err(sqlite_source_route_error(error)),
+        };
+        Ok(Some(sqlite_inventory_replay_fingerprint(
             catalog_fingerprint,
             revision,
-        ))
+        )))
     }
 }
 
@@ -352,6 +356,23 @@ where
         validate_catalog_slot(authority, leaf)?;
         let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
         let snapshot = retained.open()?;
+        if leaf.replay_fingerprint.is_some_and(|expected| {
+            !snapshot.admitted_revision_is_replay_safe()
+                || sqlite_inventory_replay_fingerprint(
+                    leaf.catalog_fingerprint,
+                    *snapshot.evidence().physical_revision(),
+                ) != expected
+        }) {
+            // Discovery promised a durable frontier. If capture cannot prove
+            // that same view, retry discovery rather than stamp old evidence
+            // onto newer/recovered rows. Leaves without proof scan logically.
+            return Err(abort_sqlite_inventory_snapshot(
+                snapshot,
+                sqlite_inventory_changed(
+                    "SQLite committed view changed between discovery and capture",
+                ),
+            ));
+        }
         let revalidate = snapshot.terminal_revalidator();
         #[cfg(test)]
         let counter_authority = retained.authority.clone();
@@ -471,7 +492,9 @@ where
                 revalidate()?;
             } else {
                 let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
-                if retained.replay_fingerprint(leaf.catalog_fingerprint)? != leaf.replay_fingerprint
+                if leaf.replay_fingerprint.is_none()
+                    || retained.replay_fingerprint(leaf.catalog_fingerprint)?
+                        != leaf.replay_fingerprint
                 {
                     return Err(sqlite_inventory_changed(
                         "SQLite replay revision changed during staging",

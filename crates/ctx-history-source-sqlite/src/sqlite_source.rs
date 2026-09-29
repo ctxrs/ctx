@@ -279,8 +279,9 @@ impl SqliteSourceEvidence {
         &self.revision
     }
 
-    /// Returns the move-stable bounded DB/WAL content revision that can be
-    /// reobserved without copying or opening a logical SQLite snapshot.
+    /// Returns a bounded native/committed-view revision. A snapshot without
+    /// replay proof deliberately cannot match an observed replay fence. Moves
+    /// and metadata may invalidate replay; logical identity is independent.
     ///
     /// This token is suitable only for exact replay. Callers must reobserve it
     /// through [`SqliteSourceReplayFence::revalidate`] at terminal validation
@@ -378,7 +379,7 @@ impl SqliteSourceDirectoryAuthority {
         let family = SqliteSourceFamily::open(self, database_name, || {})?;
         let evidence = family.capture_revision_evidence()?;
         family.revalidate_revision(&evidence)?;
-        let revision = evidence.content_revision_token();
+        let revision = evidence.revision_token();
         Ok(SqliteSourceReplayFence {
             authority: self.clone(),
             database_name: database_name.to_os_string(),

@@ -102,6 +102,12 @@ pub(super) fn record_watch_event(
         }
         if let Some(catalog) = catalog.as_ref() {
             for route in catalog.routes_overlapping_path(event_path) {
+                if !control_matched
+                    && !event.requires_rearm()
+                    && catalog.event_is_known_non_source_file(&route, event_path)
+                {
+                    continue;
+                }
                 path_matched = true;
                 let member = catalog.exact_member_for_event(&route, event_path);
                 batch.record_route(route, watermark, member);

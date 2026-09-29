@@ -1,9 +1,13 @@
+use ctx_history_capture_model::ProviderRootDefinition;
 use ctx_history_core::CaptureProvider;
 
 use super::super::probes::BoundedProbe;
 #[cfg(unix)]
 use super::super::ProviderSource;
-use super::super::{ProviderDefaultLocation, ProviderSourceKind, ProviderSourceStatus};
+use super::super::{
+    DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderDefaultLocation,
+    ProviderSourceKind, ProviderSourceStatus,
+};
 use super::support::{tempdir, EnvGuard, ENV_LOCK};
 
 fn default_location_import_probe(
@@ -39,31 +43,65 @@ fn discover_provider_sources_for_provider_report(
 }
 
 #[test]
-fn codex_nested_probe_reports_budget_exhaustion_as_explicit_unknown() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempdir();
-    let _codex_home = EnvGuard::remove("CODEX_HOME");
-    let sessions = temp.path().join(".codex/sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    for index in 0..10_001 {
-        std::fs::create_dir(sessions.join(format!("partition-{index:05}"))).unwrap();
-    }
+fn configured_codex_dense_date_directory_remains_available() {
+    const FILES: usize = 10_000;
+    const SEEDS: usize = 16;
 
-    let report = super::super::discover_provider_sources_for_provider_report(
+    let temp = tempdir();
+    let home = temp.path().join("codex-home");
+    let sessions = home.join("sessions");
+    let day = sessions.join("2025/01/02");
+    std::fs::create_dir_all(&day).unwrap();
+    std::fs::create_dir(home.join("archived_sessions")).unwrap();
+    std::fs::write(home.join("history.jsonl"), b"").unwrap();
+    // Authored path-only fixtures: discovery does not parse session contents.
+    let seeds = (0..SEEDS)
+        .map(|index| {
+            let path = temp.path().join(format!("seed-{index:02}"));
+            std::fs::write(&path, b"{}\n").unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    for index in 0..FILES {
+        std::fs::hard_link(
+            &seeds[index % SEEDS],
+            day.join(format!("00000000-0000-4000-8000-{index:012x}.jsonl")),
+        )
+        .unwrap();
+    }
+    let context = DiscoveryContext::new(
+        temp.path().to_path_buf(),
+        temp.path().to_path_buf(),
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    )
+    .with_automatic_provider_discovery(false)
+    .with_configured_provider_roots(vec![ProviderRootDefinition {
+        id: "codex".to_owned(),
+        provider: CaptureProvider::Codex,
+        path: home.clone(),
+        group: None,
+        kind: None,
+    }]);
+    let report = super::super::discover_provider_sources_for_provider_with_context(
         &super::super::TEST_PROVIDER_PROBES,
-        temp.path(),
+        &context,
         CaptureProvider::Codex,
     );
-    let source = report
-        .sources
-        .iter()
-        .find(|source| source.path == sessions)
-        .expect("bounded Codex source remains visible as incomplete");
-    assert_eq!(source.status, ProviderSourceStatus::Unknown);
-    assert_eq!(
-        source.unsupported_reason,
-        Some("path exists but the Codex session transcript probe hit its scan budget")
-    );
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
+    assert_eq!(report.sources.len(), 3);
+    for (path, status) in [
+        (sessions, ProviderSourceStatus::Available),
+        (home.join("archived_sessions"), ProviderSourceStatus::Empty),
+        (home.join("history.jsonl"), ProviderSourceStatus::Available),
+    ] {
+        let source = report
+            .sources
+            .iter()
+            .find(|source| source.path == path)
+            .unwrap();
+        assert_eq!(source.status, status, "{}", path.display());
+    }
 }
 
 #[test]

@@ -598,9 +598,28 @@ fn codex_filesystem_probe_admits_a_flat_tree_above_the_generic_budget() {
     assert_eq!(has_codex_session_file(&root), BoundedProbe::Found);
 }
 
+#[test]
+fn codex_session_probe_preserves_missing_empty_and_direct_file_results() {
+    let temp = tempdir();
+    assert_eq!(
+        has_codex_session_file(&temp.path().join("missing")),
+        BoundedProbe::NotFound
+    );
+    assert_eq!(has_codex_session_file(temp.path()), BoundedProbe::NotFound);
+    let unrelated = temp.path().join("unrelated.txt");
+    fs::write(&unrelated, b"").unwrap();
+    assert_eq!(has_codex_session_file(&unrelated), BoundedProbe::NotFound);
+    assert_eq!(has_codex_session_file(temp.path()), BoundedProbe::NotFound);
+    for name in ["session.jsonl", "session.jsonl.zst"] {
+        let path = temp.path().join(name);
+        fs::write(&path, b"").unwrap();
+        assert_eq!(has_codex_session_file(&path), BoundedProbe::Found);
+    }
+}
+
 #[cfg(unix)]
 #[test]
-fn codex_flat_session_probe_does_not_admit_a_symlinked_jsonl() {
+fn codex_session_probe_does_not_admit_symlinked_files_or_directories() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
@@ -608,8 +627,13 @@ fn codex_flat_session_probe_does_not_admit_a_symlinked_jsonl() {
     let target = outside.path().join("session.jsonl");
     fs::write(&target, b"{}\n").unwrap();
     symlink(&target, temp.path().join("session.jsonl")).unwrap();
+    symlink(outside.path(), temp.path().join("linked")).unwrap();
 
     assert_eq!(has_codex_session_file(temp.path()), BoundedProbe::NotFound);
+    assert_eq!(
+        has_codex_session_file(&temp.path().join("linked/session.jsonl")),
+        BoundedProbe::IoError
+    );
 }
 
 #[test]

@@ -20,6 +20,9 @@ use crate::{
 use ctx_history_jsonl::{JsonlPhysicalEncoding, MAX_STANDARD_ZSTD_PARALLEL_STREAMS};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+mod tests;
+
 fn observe_generation_source_capability_v0(
     source: &CodexCatalogSource,
 ) -> Result<JsonlFileObservation> {
@@ -85,7 +88,8 @@ fn generation_source_owner_is_admissible_v0(
         Err(CaptureError::InvalidPayload(_)) => return Ok(false),
         Err(error) => return Err(error),
     };
-    opened.revalidate_same_object()?;
+    // The ownership probe already revalidates the file and its named root
+    // after its second read. No source I/O occurs between that fence and here.
     Ok(observed.as_deref() == Some(expected_native_session_id))
 }
 

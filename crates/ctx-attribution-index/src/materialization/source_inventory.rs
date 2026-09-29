@@ -1,5 +1,5 @@
 //! Ordered source metadata with fixed-width on-disk lookup rows.
-//! Memory is independent of inventory length; callers retain only their page.
+//! Lookup keys are bounded independently of inventory length.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -56,11 +56,19 @@ pub struct ActiveSource {
 }
 
 const ROW_BYTES: usize = 76;
+const MAX_LOOKUP_KEYS: usize = 1024;
+
+#[cfg(test)]
+thread_local! {
+    static ROW_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 pub struct SourceInventory {
     rows: RuntimeFile,
     values: RuntimeFile,
     count: usize,
+    lookup_keys: Vec<[u8; 32]>,
+    lookup_stride: usize,
     value_bytes: u64,
     snapshot: CoreSourceSnapshotBuilder,
 }
@@ -71,6 +79,8 @@ impl SourceInventory {
             rows: RuntimeFile::new(root)?,
             values: RuntimeFile::new(root)?,
             count: 0,
+            lookup_keys: Vec::new(),
+            lookup_stride: 1,
             value_bytes: 0,
             snapshot: CoreSourceSnapshotBuilder::default(),
         })
@@ -125,6 +135,22 @@ impl SourceInventory {
             .count
             .checked_add(1)
             .ok_or(MaterializationIndexError::Bounds)?;
+        let ordinal = self.count - 1;
+        if ordinal.is_multiple_of(self.lookup_stride) {
+            if self.lookup_keys.len() == MAX_LOOKUP_KEYS {
+                // Keep at most 32 KiB of evenly spaced keys, even for very
+                // large histories. These only narrow the disk search; the
+                // selected row and its checksummed value are still read.
+                let mut index = 0;
+                self.lookup_keys.retain(|_| {
+                    let keep = index % 2 == 0;
+                    index += 1;
+                    keep
+                });
+                self.lookup_stride *= 2;
+            }
+            self.lookup_keys.push(identity);
+        }
         Ok(())
     }
 
@@ -163,8 +189,24 @@ impl SourceInventory {
         &self,
         identity: [u8; 32],
     ) -> Result<Option<ActiveSource>, MaterializationIndexError> {
-        let mut low = 0;
-        let mut high = self.count;
+        let (mut low, mut high) = match self.lookup_keys.binary_search(&identity) {
+            Ok(index) => {
+                let ordinal = index * self.lookup_stride;
+                (ordinal, ordinal + 1)
+            }
+            Err(index) => (
+                if index == 0 {
+                    0
+                } else {
+                    (index - 1) * self.lookup_stride + 1
+                },
+                if index == self.lookup_keys.len() {
+                    self.count
+                } else {
+                    index * self.lookup_stride
+                },
+            ),
+        };
         while low < high {
             let mid = low + (high - low) / 2;
             let row = self.row(mid)?;
@@ -234,6 +276,8 @@ impl SourceInventory {
             .ok_or(MaterializationIndexError::Bounds)?;
         let mut row = [0; ROW_BYTES];
         self.rows.read_at(offset, &mut row)?;
+        #[cfg(test)]
+        ROW_READS.with(|reads| reads.set(reads.get() + 1));
         Ok(row)
     }
 
