@@ -48,7 +48,7 @@ async fn cancellation_without_dispatch_is_terminal_on_http_and_fresh_key_can_pub
     let input = fixture(root.path(), "cancel-http", &["permitted pear"]);
     let (server, admin) = bootstrap(root.path());
     let device = server
-        .issue_credential(&admin.principal, publish_only(), 3600)
+        .issue_credential(&admin.principal, &admin.collection, publish_only(), 3600)
         .unwrap();
     let server = Arc::new(server);
     let app = router(server.clone());
@@ -141,7 +141,7 @@ fn cancel_wins_validation_and_publish_wins_returns_original_receipt_with_current
     let b = fixture(&root.path().join("b"), "race-cancel", &["corrected lime"]);
     let (server, admin) = bootstrap(root.path());
     let other_device = server
-        .issue_credential(&admin.principal, publish_only(), 3600)
+        .issue_credential(&admin.principal, &admin.collection, publish_only(), 3600)
         .unwrap();
     let server = Arc::new(server);
     let collection = &admin.collection;
@@ -264,13 +264,15 @@ fn cancellation_binds_principal_operation_fingerprint_and_current_publish_author
     let input = fixture(root.path(), "binding", &["private apple"]);
     let (server, admin) = bootstrap(root.path());
     let publisher = server
-        .issue_credential(&admin.principal, publish_only(), 3600)
+        .issue_credential(&admin.principal, &admin.collection, publish_only(), 3600)
         .unwrap();
     let q = server.create_principal("other publisher").unwrap();
     server
         .set_grants(&q, &admin.collection, publish_only())
         .unwrap();
-    let other = server.issue_credential(&q, publish_only(), 3600).unwrap();
+    let other = server
+        .issue_credential(&q, &admin.collection, publish_only(), 3600)
+        .unwrap();
     let request = unsubmitted(&input, "shared-key");
     let p_cancel = cancel_request(&admin.principal, &request);
     assert!(matches!(
@@ -407,7 +409,7 @@ fn cancellation_binds_principal_operation_fingerprint_and_current_publish_author
         Err(Error::Conflict)
     ));
     let expired = server
-        .issue_credential(&admin.principal, publish_only(), 3600)
+        .issue_credential(&admin.principal, &admin.collection, publish_only(), 3600)
         .unwrap();
     server
         .lock()
@@ -426,6 +428,9 @@ fn cancellation_binds_principal_operation_fingerprint_and_current_publish_author
         server.cancel_publish(&publisher.secret, &admin.collection, p_cancel.clone()),
         Err(Error::Forbidden)
     ));
+    let grant_device = server
+        .issue_credential(&admin.principal, &admin.collection, publish_only(), 0)
+        .unwrap();
     server
         .set_grants(
             &admin.principal,
@@ -438,7 +443,7 @@ fn cancellation_binds_principal_operation_fingerprint_and_current_publish_author
         )
         .unwrap();
     assert!(matches!(
-        server.cancel_publish(&admin.credential.secret, &admin.collection, p_cancel),
+        server.cancel_publish(&grant_device.secret, &admin.collection, p_cancel),
         Err(Error::Forbidden)
     ));
 }

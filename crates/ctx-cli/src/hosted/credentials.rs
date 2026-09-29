@@ -17,6 +17,7 @@ const MAX_CREDENTIAL_BYTES: u64 = 16 * 1024;
 pub(super) struct Input {
     pub secret: String,
     pub collection: Option<String>,
+    pub principal: Option<String>,
 }
 
 /// A dash explicitly selects piped stdin. File credentials must be owner-private.
@@ -79,7 +80,7 @@ fn read_bytes(path: &Path) -> Result<Vec<u8>> {
 fn parse(bytes: &[u8]) -> Result<Input> {
     let text =
         std::str::from_utf8(bytes).map_err(|_| anyhow::anyhow!("credential must be UTF-8"))?;
-    let (token, collection) = if text.trim_start().starts_with('{') {
+    let (token, collection, principal) = if text.trim_start().starts_with('{') {
         // Read the server's bootstrap, enrollment, or issued-secret envelope.
         // Never include its JSON or decoder errors in diagnostics.
         let value: serde_json::Value =
@@ -92,23 +93,25 @@ fn parse(bytes: &[u8]) -> Result<Input> {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("credential file contains no secret"))?
             .to_owned();
-        let collection = value
-            .get("collection")
-            .map(|value| {
-                value
-                    .as_str()
-                    .filter(|value| {
-                        !value.is_empty()
-                            && value.len() <= 128
-                            && value.bytes().all(|b| b.is_ascii_graphic())
-                    })
-                    .map(str::to_owned)
-                    .ok_or_else(|| anyhow::anyhow!("invalid credential collection"))
-            })
-            .transpose()?;
-        (token, collection)
+        let identifier = |field: &str| {
+            value
+                .get(field)
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|value| {
+                            !value.is_empty()
+                                && value.len() <= 128
+                                && value.bytes().all(|b| b.is_ascii_graphic())
+                        })
+                        .map(str::to_owned)
+                        .ok_or_else(|| anyhow::anyhow!("invalid credential {field}"))
+                })
+                .transpose()
+        };
+        (token, identifier("collection")?, identifier("principal")?)
     } else {
-        (text.trim_end_matches(['\r', '\n']).to_owned(), None)
+        (text.trim_end_matches(['\r', '\n']).to_owned(), None, None)
     };
     if token.is_empty()
         || token
@@ -120,6 +123,7 @@ fn parse(bytes: &[u8]) -> Result<Input> {
     Ok(Input {
         secret: token,
         collection,
+        principal,
     })
 }
 

@@ -193,6 +193,9 @@ fn default_init_is_private_repeatable_and_uses_native_data_root() {
     let root = sandbox.path("home/.ctx/server");
     assert_eq!(first["root"], root.to_str().unwrap());
     assert_eq!(first["initialized"], true);
+    assert_eq!(first["schema_version"], 1);
+    assert_eq!(first["feature_maturity"], "beta");
+    assert_eq!(first["sharing"], "opt_in");
     let credential_path = root.join("operator.json");
     let credential = fs::read(&credential_path).unwrap();
     let saved = fs::read(root.join("admin/settings.json")).unwrap();
@@ -212,6 +215,143 @@ fn default_init_is_private_repeatable_and_uses_native_data_root() {
     assert!(!sandbox.path("home/.ctx/search").exists());
     assert!(!sandbox.path("home/.ctx/daemon").exists());
     assert!(!sandbox.path("home/.ctx/config.toml").exists());
+}
+
+#[test]
+fn repeated_init_rejects_scoped_owner_credential_without_replacing_admin_access() {
+    let sandbox = Sandbox::new();
+    let initialized = sandbox.init();
+    let operator_path = sandbox.path("operator.json");
+    let original = fs::read(&operator_path).unwrap();
+    let admin_path = sandbox.path("server/admin/settings.json");
+    let admin = fs::read(&admin_path).unwrap();
+    let pointer_path = sandbox.path("server/operator-file.json");
+    let pointer = fs::read(&pointer_path).unwrap();
+
+    // Even the owner's own read+publish+manage credential remains scoped to
+    // its collection. Put it at the saved operator path so a path mismatch
+    // cannot mask an incorrect publication-list authorization check.
+    success(
+        sandbox
+            .server()
+            .args([
+                "user",
+                "credential",
+                initialized["principal"].as_str().unwrap(),
+                "--read",
+                "--publish",
+                "--manage",
+                "--output",
+            ])
+            .arg(sandbox.path("scoped-owner.json"))
+            .arg("--format=json"),
+    );
+    let mut scoped: Value = serde_json::from_slice(&original).unwrap();
+    scoped["credential"] =
+        serde_json::from_slice(&fs::read(sandbox.path("scoped-owner.json")).unwrap()).unwrap();
+    let scoped_bytes = serde_json::to_vec(&scoped).unwrap();
+    fs::write(&operator_path, &scoped_bytes).unwrap();
+    ctx_history_platform::platform_security::verify_private_file(&operator_path).unwrap();
+
+    let error = failure(sandbox.server().args(["init", "--format=json"]));
+    assert_eq!(error["error"]["code"], "forbidden");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("server-owner authority"));
+    assert!(!error
+        .to_string()
+        .contains(scoped["credential"]["secret"].as_str().unwrap()));
+    assert_eq!(fs::read(&operator_path).unwrap(), scoped_bytes);
+    assert_eq!(fs::read(&admin_path).unwrap(), admin);
+    assert_eq!(fs::read(&pointer_path).unwrap(), pointer);
+
+    // Restoring the genuine protected bootstrap file is sufficient; retrying
+    // init preserves the original identity, credential and admin connection.
+    fs::write(&operator_path, &original).unwrap();
+    let repeated = success(sandbox.server().args(["init", "--format=json"]));
+    assert_eq!(repeated["initialized"], false);
+    assert_eq!(repeated["principal"], initialized["principal"]);
+    assert_eq!(repeated["collection"], initialized["collection"]);
+    assert_eq!(fs::read(operator_path).unwrap(), original);
+    assert_eq!(fs::read(admin_path).unwrap(), admin);
+    assert_eq!(fs::read(pointer_path).unwrap(), pointer);
+    sandbox.assert_no_local_index();
+}
+
+#[test]
+fn first_init_and_help_explain_beta_and_opt_in_without_repeating_warnings() {
+    let sandbox = Sandbox::new();
+    let note = "Hosted history is beta. Sharing is opt-in.";
+    sandbox
+        .server()
+        .args(["init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(note));
+    assert!(!sandbox.path("server").exists());
+    sandbox
+        .server()
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(note));
+    let original = fs::read(sandbox.path("server/operator.json")).unwrap();
+    for command in ["init", "status"] {
+        sandbox
+            .server()
+            .arg(command)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(note).not());
+    }
+    assert_eq!(
+        fs::read(sandbox.path("server/operator.json")).unwrap(),
+        original
+    );
+    sandbox.assert_no_local_index();
+}
+
+#[test]
+fn invitation_text_shows_the_returned_utc_deadline_without_the_secret() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let _running = sandbox.start_server();
+    let path = sandbox.path("deadline-invitation.json");
+    let output = sandbox
+        .server()
+        .args([
+            "invite",
+            "deadline-member",
+            "--ttl-seconds",
+            "60",
+            "--output",
+        ])
+        .arg(&path)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let invitation: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    let deadline = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Enrollment expires at "))
+        .unwrap()
+        .strip_suffix(" UTC.")
+        .unwrap();
+    let parsed = chrono::NaiveDateTime::parse_from_str(deadline, "%Y-%m-%d %H:%M:%S")
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    assert_eq!(
+        parsed as u64,
+        invitation["enrollment"]["expires_at"].as_u64().unwrap()
+    );
+    let secret = invitation["enrollment"]["secret"].as_str().unwrap();
+    assert!(!text.contains(secret));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+    sandbox.assert_no_local_index();
 }
 
 #[test]
@@ -392,6 +532,20 @@ fn admin_credential_is_private_and_existing_output_is_not_overwritten() {
             .args(["user", "create", "reader", "--format=json"]),
     );
     let user = user["user"].as_str().unwrap();
+    let denied = failure(
+        sandbox
+            .server()
+            .args(["user", "credential", user, "--read", "--output"])
+            .arg(sandbox.path("reader.json"))
+            .arg("--format=json"),
+    );
+    assert_eq!(denied["error"]["code"], "forbidden");
+    assert!(!sandbox.path("reader.json").exists());
+    success(
+        sandbox
+            .server()
+            .args(["grant", "--user", user, "--read", "--format=json"]),
+    );
     let credential = success(
         sandbox
             .server()

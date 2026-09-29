@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use ctx_history_sharing::{
-    Collector, Connection, Credentials, Endpoint, RemoteClient, SelectionDecision, SharingStatus,
-    SharingStore, TickOutcome,
+    Collector, Connection, Credentials, Endpoint, SelectionDecision, SharingStatus, SharingStore,
+    TickOutcome,
 };
 use serde_json::json;
 
@@ -154,12 +154,6 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
         } => {
             let endpoint = Endpoint::parse(url)?;
             let current = store.connection()?;
-            if token_file.is_none() && current.is_some() {
-                let status = store.status()?;
-                if status.enabled || status.pending != 0 || status.stored_sessions != 0 {
-                    bail!("a new invitation cannot replace a connection with sharing history or queued uploads; run ctx remote remove {name}, then connect and select history again. Remove discards local backlog; retained server history remains and re-sharing can create duplicate backfill");
-                }
-            }
             if current
                 .as_ref()
                 .is_some_and(|current| current.endpoint != endpoint)
@@ -187,36 +181,69 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
             {
                 return Err(ctx_history_sharing::Error::DestinationChanged.into());
             }
-            let (collection, token, only_read) = if token_file.is_some() {
-                let collection = selected.ok_or_else(|| anyhow::anyhow!("a bare token requires --collection; an invitation or operator JSON file includes it"))?;
-                (collection.clone(), input.secret, *read_only)
-            } else {
-                // A raw enrollment needs an explicit collection so a saved
-                // destination can be checked before consuming the one-use value.
-                let collection = selected.ok_or_else(|| anyhow::anyhow!("use the complete invitation JSON, or supply --collection for a bare enrollment"))?;
-                let issued = RemoteClient::enroll(&endpoint, &input.secret)?;
-                if &issued.collection != collection {
-                    bail!("enrollment belongs to a different collection");
+            let collection = selected.ok_or_else(|| {
+                if token_file.is_some() {
+                    anyhow::anyhow!("a bare token requires --collection; an invitation or operator JSON file includes it")
+                } else {
+                    anyhow::anyhow!("use the complete invitation JSON, or supply --collection for a bare enrollment")
                 }
-                let only_read = *read_only || !issued.credential.grants.publish;
-                (issued.collection, issued.credential.secret, only_read)
-            };
+            })?;
             let connection = Connection {
                 endpoint,
                 collection: collection.clone(),
             };
-            let credentials = if only_read {
-                Credentials::read_only(token)?
+            let already_connected = if token_file.is_some() {
+                let credentials = if *read_only {
+                    Credentials::read_only(input.secret)?
+                } else {
+                    Credentials::device(input.secret)?
+                };
+                store.connect(connection.clone(), credentials)?;
+                false
             } else {
-                Credentials::device(token)?
+                let unbound_connection = current.is_some() && store.saved_principal()?.is_none();
+                store.enroll(
+                    connection.clone(),
+                    &input.secret,
+                    input.principal.as_deref(),
+                    *read_only,
+                ).map_err(|error| {
+                    let detail = match error {
+                        ctx_history_sharing::Error::Forbidden if unbound_connection =>
+                            "the saved connection has no verified user ID and remote access was denied. If its old credential was revoked, use the same invitation with a new connection name (--name NEW_NAME). The existing connection and its local data were not changed",
+                        ctx_history_sharing::Error::Credentials =>
+                            "enrollment identity does not match the saved connection or invitation; use a fresh enrollment for the same user and collection. Saved credentials and sharing policy were not changed",
+                        ctx_history_sharing::Error::Unauthorized =>
+                            "enrollment is expired, revoked, or already used without a matching saved connection; ask the operator to issue a fresh enrollment for the same user. Saved credentials and sharing policy were not changed",
+                        _ => "enrollment could not be completed; if the one-time exchange succeeded but its response or local save was lost, ask the operator for a fresh enrollment for the same user",
+                    };
+                    anyhow::Error::new(error).context(detail)
+                })?
             };
-            store.connect(connection.clone(), credentials)?;
             let status = store.status()?;
+            let principal = store.saved_principal()?;
+            let mut message = if already_connected {
+                format!("Already connected locally: {name} to {} / {}. Sharing enabled: {}, paused: {}. Server access was not checked.{}", connection.endpoint.as_str(), collection, status.enabled, status.paused, if *read_only { " Publishing is disabled on this client." } else { "" })
+            } else {
+                format!(
+                    "Saved connection {name} to {} / {}. Sharing enabled: {}, paused: {}.",
+                    connection.endpoint.as_str(),
+                    collection,
+                    status.enabled,
+                    status.paused
+                )
+            };
+            if let Some(principal) = &principal {
+                message.push_str(&format!("\nSaved user ID: {principal}"));
+            }
+            if status.paused {
+                message.push_str(&format!("\n{}", resume_guidance(&store, name)?));
+            }
             super::print_result(args.format, json!({
                 "schema_version": 1, "operation": "remote_connect", "name": name,
+                "already_connected": already_connected, "principal": principal,
                 "connection": connection, "local": status
-            }), format!("Saved connection {name} to {} / {}. Sharing enabled: {}. No history was uploaded by this command.\nCheck access and searchable coverage: ctx remote status {name} --online",
-                connection.endpoint.as_str(), collection, status.enabled), ui)
+            }), format!("{message}\nNo history was uploaded by this command.\nCheck access and searchable coverage: ctx remote status {name} --online"), ui)
         }
         RemoteCommand::Share(selection) => share(selection, &root, &store, args.format, ui),
         RemoteCommand::Sync { .. } => {
@@ -230,7 +257,8 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
                         bail!("sharing is not enabled; select history with remote share first")
                     }
                     TickOutcome::Paused => {
-                        return Err(ctx_history_sharing::Error::PolicyDenied.into())
+                        return Err(anyhow::Error::new(ctx_history_sharing::Error::PolicyDenied)
+                            .context(resume_guidance(&store, name)?));
                     }
                     TickOutcome::Failed(error) => return Err(error.into()),
                 }
@@ -271,6 +299,7 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
         RemoteCommand::Status { online, .. } => {
             let local = store.status()?;
             let connection = store.connection()?;
+            let principal = store.saved_principal()?;
             let server = if *online {
                 Some(store.remote_client()?.status()?)
             } else {
@@ -283,6 +312,9 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
                 local.paused,
                 sharing_summary(&local)
             );
+            if let Some(principal) = &principal {
+                text.push_str(&format!("\nSaved user ID: {principal}"));
+            }
             if let Some(status) = &server {
                 text.push_str(&format!(
                     "\nServer stored sequence: {}. Searchable sequence: {}. Reads available: {}.",
@@ -298,7 +330,7 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
                 args.format,
                 json!({
                     "schema_version": 1, "operation": "remote_status", "name": name,
-                    "connection": connection, "local": local, "server": server
+                    "connection": connection, "principal": principal, "local": local, "server": server
                 }),
                 text,
                 ui,
@@ -317,6 +349,17 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
             )
         }
     }
+}
+
+fn resume_guidance(store: &SharingStore, name: &str) -> Result<String> {
+    let next = if store.has_publish_credential()? {
+        "Resume explicitly"
+    } else {
+        "Restore a publishing credential for this user first, then resume explicitly"
+    };
+    Ok(format!(
+        "Sharing remains paused. {next}: ctx remote pause {name} --resume"
+    ))
 }
 
 fn share(

@@ -18,10 +18,20 @@ fn distinct_devices_cannot_overwrite_a_reversion_with_a_paused_stale_publish() {
     let b = fixture(&root.path().join("b"), "cycle", &["changed walnut"]);
     let (server, admin) = bootstrap(root.path());
     let d1 = server
-        .issue_credential(&admin.principal, publisher_grants(), 3600)
+        .issue_credential(
+            &admin.principal,
+            &admin.collection,
+            publisher_grants(),
+            3600,
+        )
         .unwrap();
     let d2 = server
-        .issue_credential(&admin.principal, publisher_grants(), 3600)
+        .issue_credential(
+            &admin.principal,
+            &admin.collection,
+            publisher_grants(),
+            3600,
+        )
         .unwrap();
     assert_ne!(d1.id, d2.id);
     let server = Arc::new(server);
@@ -197,7 +207,7 @@ fn stale_withdraw_and_manager_remove_fail_but_current_publication_sequences_succ
             .set_grants(&owner, collection, publisher_grants())
             .unwrap();
         let writer = server
-            .issue_credential(&owner, publisher_grants(), 3600)
+            .issue_credential(&owner, collection, publisher_grants(), 3600)
             .unwrap();
         let remove = |request| {
             if manager {

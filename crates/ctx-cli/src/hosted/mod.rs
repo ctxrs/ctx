@@ -23,7 +23,7 @@ use crate::{
 pub(crate) enum HostedCommand {
     /// Export, verify, and restore portable retained history.
     Archive(archive::ArchiveArgs),
-    /// Run or administer an explicitly selected history server.
+    /// Run or administer an opt-in beta history server.
     Server(server::ServerArgs),
     /// Connect to a history server and explicitly select history to share.
     Remote(remote::RemoteArgs),

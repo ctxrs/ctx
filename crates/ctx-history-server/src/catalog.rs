@@ -28,10 +28,14 @@ pub(crate) fn open(root: &Path) -> Result<(Connection, File)> {
         "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
     )?;
     let version: u32 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 1 {
+    if version > 2 {
         return Err(Error::Invalid("unsupported hosted catalog version"));
     }
-    connection.execute_batch(SCHEMA)?;
+    if version == 0 {
+        connection.execute_batch(SCHEMA)?;
+    } else if version == 1 {
+        crate::migration::migrate(&connection, Some(root))?;
+    }
     File::open(root)?.sync_all()?;
     Ok((connection, owner))
 }
@@ -65,11 +69,12 @@ pub(crate) fn private_file(path: &Path) -> Result<()> {
 // credentials.expires=0 means valid until revoked; enrollment expiry is always finite.
 const SCHEMA: &str = "
 BEGIN IMMEDIATE;
-CREATE TABLE IF NOT EXISTS principals (id TEXT PRIMARY KEY, name TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS principals (id TEXT PRIMARY KEY, name TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, server_owner INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, name TEXT NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, unsafe_sequence INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS grants (principal TEXT NOT NULL REFERENCES principals(id), collection TEXT NOT NULL REFERENCES collections(id), read INTEGER NOT NULL, publish INTEGER NOT NULL, manage INTEGER NOT NULL, PRIMARY KEY(principal,collection));
-CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, digest BLOB NOT NULL UNIQUE, principal TEXT NOT NULL REFERENCES principals(id), scope INTEGER NOT NULL, expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS enrollments (id TEXT PRIMARY KEY, digest BLOB NOT NULL UNIQUE, principal TEXT NOT NULL REFERENCES principals(id), scope INTEGER NOT NULL, expires INTEGER NOT NULL, credential_ttl INTEGER NOT NULL, collection TEXT NOT NULL REFERENCES collections(id));
+CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, digest BLOB NOT NULL UNIQUE, principal TEXT NOT NULL REFERENCES principals(id), scope INTEGER NOT NULL, expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, collection TEXT REFERENCES collections(id), server_owner INTEGER NOT NULL DEFAULT 0, enrollment_id TEXT);
+CREATE INDEX IF NOT EXISTS credentials_principal ON credentials(principal,id);
+CREATE TABLE IF NOT EXISTS enrollments (id TEXT PRIMARY KEY, digest BLOB NOT NULL UNIQUE, principal TEXT NOT NULL REFERENCES principals(id), scope INTEGER NOT NULL, expires INTEGER NOT NULL, credential_ttl INTEGER NOT NULL, collection TEXT NOT NULL REFERENCES collections(id), credential_expires_ceiling INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS publications (collection TEXT NOT NULL REFERENCES collections(id), publication TEXT NOT NULL, owner TEXT NOT NULL REFERENCES principals(id), epoch INTEGER NOT NULL, policy INTEGER NOT NULL, revision TEXT NOT NULL, identity TEXT NOT NULL, sequence INTEGER NOT NULL, withdrawn INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(collection,publication), UNIQUE(collection,identity));
 CREATE TABLE IF NOT EXISTS operations (collection TEXT NOT NULL REFERENCES collections(id), key TEXT NOT NULL, principal TEXT NOT NULL REFERENCES principals(id), fingerprint TEXT NOT NULL, terminal TEXT NOT NULL, receipt TEXT, sequence INTEGER, operation TEXT, PRIMARY KEY(collection,principal,key), UNIQUE(collection,sequence), CHECK((terminal='accepted' AND receipt IS NOT NULL AND sequence IS NOT NULL AND operation IS NULL) OR (terminal='cancelled' AND receipt IS NULL AND sequence IS NULL AND operation IS NOT NULL)));
 CREATE TABLE IF NOT EXISTS revisions (collection TEXT NOT NULL, publication TEXT NOT NULL, revision TEXT NOT NULL, source TEXT NOT NULL, payload TEXT NOT NULL, descriptor TEXT NOT NULL, PRIMARY KEY(collection,publication,revision), FOREIGN KEY(collection,publication) REFERENCES publications(collection,publication));
@@ -81,6 +86,6 @@ CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, collection TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS audit (sequence INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, action TEXT NOT NULL, principal TEXT, collection TEXT);
 CREATE INDEX IF NOT EXISTS revisions_source ON revisions(collection,source);
 CREATE INDEX IF NOT EXISTS uploads_collection ON uploads(collection);
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 COMMIT;
 ";

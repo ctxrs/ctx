@@ -10,6 +10,9 @@ use serde_json::json;
 
 use crate::{output::JsonOutputFormat, ui::Ui};
 
+mod admin;
+use admin::run_remote;
+
 #[derive(Debug, Args)]
 pub(crate) struct ServerArgs {
     /// Server storage (default: the native ctx data root / server).
@@ -45,6 +48,8 @@ impl ServerArgs {
 #[derive(Debug, Subcommand)]
 enum ServerCommand {
     /// Create the first collection/operator and save scoped credentials privately.
+    ///
+    /// Hosted history is beta. Sharing is opt-in.
     Init {
         #[arg(default_value = "team")]
         name: String,
@@ -65,17 +70,25 @@ enum ServerCommand {
         #[command(subcommand)]
         command: CollectionCommand,
     },
-    /// Create a user or issue an individually revocable credential/enrollment.
+    /// List users and credentials, create a user, or issue a scoped credential.
     User {
         #[command(subcommand)]
         command: UserCommand,
     },
-    /// Invite a named member in one step and save a single-use enrollment file.
+    /// Invite a new member or enroll another device for an explicit user ID.
     Invite {
-        name: String,
+        /// Optional display label for a new user; labels never select existing users.
+        #[arg(conflicts_with = "user")]
+        name: Option<String>,
+        /// Existing user ID for another device; requires that user or server-owner access.
+        #[arg(long)]
+        user: Option<String>,
         /// Invite a reader instead of a read-and-publish member.
         #[arg(long)]
         read_only: bool,
+        /// Invite a publisher without read access, including a backup-only device.
+        #[arg(long, conflicts_with = "read_only")]
+        publish_only: bool,
         /// Also authorize collection administration.
         #[arg(long)]
         manage: bool,
@@ -112,6 +125,8 @@ enum ServerCommand {
     },
     /// Revoke future access without deleting already shared history.
     Revoke {
+        /// With --remote, remove collection membership unless --server-wide is set.
+        /// Local root administration always revokes this user across the server.
         #[arg(
             long,
             required_unless_present = "credential",
@@ -119,8 +134,12 @@ enum ServerCommand {
         )]
         user: Option<String>,
         /// Credential identifier, never its bearer secret.
+        /// Revoke only this device credential; remote use requires server-owner access.
         #[arg(long, required_unless_present = "user")]
         credential: Option<String>,
+        /// Revoke the user across the server; remote use requires server-owner access.
+        #[arg(long, requires = "user")]
+        server_wide: bool,
     },
     /// Withdraw an exact publication revision using a manage credential.
     Withdraw {
@@ -158,12 +177,27 @@ enum CollectionCommand {
 
 #[derive(Debug, Subcommand)]
 enum UserCommand {
+    /// List server-wide user IDs and labels; requires server-owner access.
+    List {
+        #[command(flatten)]
+        page: AccessPage,
+    },
+    /// List a user's safe credential IDs, collection scopes, rights, expiry and revocations.
+    /// Requires server-owner access; bearer secrets are never displayed.
+    Credentials {
+        user: String,
+        #[command(flatten)]
+        page: AccessPage,
+    },
     Create {
         name: String,
     },
     /// Write a scoped credential directly to a new protected file.
     Credential {
         user: String,
+        /// Credential's collection (default: this root's initialized collection).
+        #[arg(long)]
+        collection: Option<String>,
         #[command(flatten)]
         rights: Rights,
         /// Credential lifetime; zero means valid until explicitly revoked.
@@ -172,6 +206,23 @@ enum UserCommand {
         #[arg(long)]
         output: PathBuf,
     },
+}
+
+#[derive(Debug, Args)]
+struct AccessPage {
+    #[arg(long)]
+    after: Option<String>,
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
+    limit: u32,
+}
+
+impl AccessPage {
+    fn request(&self) -> ctx_history_server::AccessListRequest {
+        ctx_history_server::AccessListRequest {
+            after: self.after.clone(),
+            limit: self.limit as usize,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Args)]
@@ -276,7 +327,12 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
         Err(ctx_history_server::Error::Unavailable)
             if matches!(
                 args.command,
-                ServerCommand::Grant { .. } | ServerCommand::Status
+                ServerCommand::Grant { .. }
+                    | ServerCommand::Revoke { .. }
+                    | ServerCommand::User {
+                        command: UserCommand::List { .. } | UserCommand::Credentials { .. }
+                    }
+                    | ServerCommand::Status
             ) =>
         {
             return run_remote(
@@ -285,11 +341,6 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
                 &root.join("invitations"),
                 ui,
             );
-        }
-        Err(ctx_history_server::Error::Unavailable)
-            if matches!(args.command, ServerCommand::Revoke { .. }) =>
-        {
-            bail!("server root is in use; stop its server before revoking access across this root. For collection-only membership revocation, use ctx server --remote NAME revoke --user ID");
         }
         Err(ctx_history_server::Error::Unavailable)
             if matches!(args.command, ServerCommand::Init { .. }) =>
@@ -310,9 +361,16 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
             let initialized = if credentials_out.try_exists()? {
                 let owner: ctx_history_server::TokenFile =
                     super::credentials::read_json(&credentials_out)?;
-                server.list_publications(&owner.credential.secret, &owner.collection,
-                    ctx_history_server::PublicationListRequest { after: None, limit: 1 })
-                    .context("existing operator credential does not authorize this server; use its original credential file, or restore a checkpoint into a new root")?;
+                server
+                    .whoami(&owner.credential.secret, &owner.collection)
+                    .and_then(|identity| {
+                        if identity.server_owner {
+                            Ok(())
+                        } else {
+                            Err(ctx_history_server::Error::Forbidden)
+                        }
+                    })
+                    .context("existing operator credential lacks server-owner authority; use its original credential file, or restore a checkpoint into a new root")?;
                 false
             } else {
                 server.bootstrap(name, &credentials_out)
@@ -327,11 +385,13 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
             let owner = save_admin(root, &credentials_out, &url)?;
             super::print_result(args.format, json!({
                 "schema_version": 1, "operation": "server_init", "initialized": initialized,
+                "feature_maturity": "beta", "sharing": "opt_in",
                 "principal": owner.principal, "collection": owner.collection,
                 "credentials_file": credentials_out, "root": root, "admin_endpoint": url
             }), format!(
-                "{} server. Operator credentials: {}.\nLocal administration configured for {url}.\nNext: ctx server run, then ctx server invite NAME in another terminal. Use this same --root override for each command if selected.",
-                if initialized { "Initialized" } else { "Reused existing" }, credentials_out.display()
+                "{} server. Operator credentials: {}.\n{}Local administration configured for {url}.\nNext: ctx server run, then ctx server invite in another terminal. Use this same --root override for each command if selected.",
+                if initialized { "Initialized" } else { "Reused existing" }, credentials_out.display(),
+                if initialized { "Hosted history is beta. Sharing is opt-in.\n" } else { "" }
             ), ui)
         }
         ServerCommand::Run { .. } => {
@@ -375,7 +435,7 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
                 ui,
             )
         }
-        ServerCommand::User { command } => run_user(command, &server, args.format, ui),
+        ServerCommand::User { command } => run_user(command, &server, root, args.format, ui),
         ServerCommand::Grant {
             user,
             collection,
@@ -405,7 +465,9 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
                 ui,
             )
         }
-        ServerCommand::Revoke { user, credential } => {
+        ServerCommand::Revoke {
+            user, credential, ..
+        } => {
             let (kind, id) = if let Some(user) = user {
                 server.revoke_principal(user)?;
                 ("user", user)
@@ -415,15 +477,7 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
             } else {
                 bail!("select a user or credential to revoke");
             };
-            super::print_result(
-                args.format,
-                json!({
-                    "schema_version": 1, "operation": "revoke", "kind": kind, "id": id,
-                    "retained_history_unchanged": true
-                }),
-                format!("Revoked {kind} {id}. Previously shared history is retained."),
-                ui,
-            )
+            admin::print_revoked(args.format, kind, id, ui)
         }
         ServerCommand::Withdraw {
             collection,
@@ -494,9 +548,31 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
 fn run_user(
     command: &UserCommand,
     server: &HistoryServer,
+    root: &Path,
     format: JsonOutputFormat,
     ui: &mut Ui,
 ) -> Result<()> {
+    if matches!(
+        command,
+        UserCommand::List { .. } | UserCommand::Credentials { .. }
+    ) {
+        let owner: ctx_history_server::TokenFile =
+            super::credentials::read_json(&operator_file(root, None)?)?;
+        return match command {
+            UserCommand::List { page } => admin::print_users(
+                format,
+                server.list_principals(&owner.credential.secret, page.request())?,
+                ui,
+            ),
+            UserCommand::Credentials { user, page } => admin::print_credentials(
+                format,
+                user,
+                server.list_credentials(&owner.credential.secret, user, page.request())?,
+                ui,
+            ),
+            _ => unreachable!(),
+        };
+    }
     if let UserCommand::Create { name } = command {
         let id = server.create_principal(name)?;
         return super::print_result(
@@ -508,24 +584,38 @@ fn run_user(
             ui,
         );
     }
-    let (user, rights, output) = match command {
+    let (user, collection, rights, output) = match command {
         UserCommand::Credential {
             user,
+            collection,
             rights,
             output,
             ..
-        } => (user, *rights, output),
-        UserCommand::Create { .. } => unreachable!(),
+        } => (user, collection, *rights, output),
+        _ => unreachable!(),
     };
     if !rights.read && !rights.publish && !rights.manage {
         bail!("select at least one credential right: --read, --publish, or --manage");
     }
+    let collection = match collection {
+        Some(collection) => collection.clone(),
+        None => {
+            admin_store(root)
+                .connection()?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "select --collection or run server init to configure local administration"
+                    )
+                })?
+                .collection
+        }
+    };
     // Reserve the protected file before issuing anything. A failed issuance
     // removes only that file, never an existing credential.
     let mut file = super::credentials::create(output)?;
     let issued = match command {
         UserCommand::Credential { ttl_seconds, .. } => {
-            server.issue_credential(user, rights.into(), *ttl_seconds)
+            server.issue_credential(user, &collection, rights.into(), *ttl_seconds)
         }
         _ => unreachable!(),
     };
@@ -543,10 +633,11 @@ fn run_user(
         format,
         json!({
             "schema_version": 1, "operation": format!("user_{kind}"), "user": user,
+            "scope": "collection", "collection": collection,
             "id": secret.id, "expires_at": secret.expires_at, "grants": secret.grants, "file": output
         }),
         format!(
-            "Saved {kind} {} to {} ({})",
+            "Saved {kind} {} for collection {collection} to {} ({})",
             secret.id,
             output.display(),
             if secret.expires_at == 0 {
@@ -557,124 +648,6 @@ fn run_user(
         ),
         ui,
     )
-}
-
-fn run_remote(
-    args: &ServerArgs,
-    client: &ctx_history_sharing::RemoteClient,
-    invitations: &Path,
-    ui: &mut Ui,
-) -> Result<()> {
-    let collection = &client.connection().collection;
-    let result: Result<()> = (|| {
-        match &args.command {
-        ServerCommand::Publications { collection: selected, after, limit } => {
-            require_collection(selected.as_deref(), collection)?;
-            let page = client.list_publications(&ctx_history_server::PublicationListRequest {
-                after: after.clone(), limit: *limit as usize,
-            })?;
-            let mut text = format!("Retained revisions in {collection}: {} on this page.", page.publications.len());
-            for entry in &page.publications {
-                text.push_str(&format!("\n{}  owner={}  withdrawn={}", entry.state.publication, entry.state.owner, entry.state.withdrawn));
-                text.push_str(&format!("\n  revision={}{}", entry.retained_revision,
-                    if entry.retained_revision == entry.state.revision { " (current)" } else { " (older retained revision)" }));
-                for citation in &entry.session_citations {
-                    text.push_str(&format!("\n  {citation}"));
-                }
-            }
-            if let Some(cursor) = &page.next_cursor {
-                text.push_str(&format!("\nMore publications: repeat with --after {cursor}"));
-            }
-            text.push_str("\nA new read grant exposes all nonwithdrawn retained history in this collection, including older revisions.");
-            super::print_result(args.format, json!({
-                "schema_version": 1, "operation": "server_publications", "collection": collection,
-                "publications": page.publications, "next_cursor": page.next_cursor
-            }), text, ui)
-        }
-        ServerCommand::Invite { name, read_only, manage, ttl_seconds, credential_ttl_seconds, output } => {
-            let output = match output {
-                Some(output) => output.clone(),
-                None => {
-                    let directory = invitations;
-                    ctx_history_platform::platform_security::create_private_directory_all(directory)?;
-                    directory.join(format!("{}.json", uuid::Uuid::new_v4()))
-                }
-            };
-            let mut file = super::credentials::create(&output)?;
-            let invitation = match client.invite(&ctx_history_server::InviteRequest {
-                name: name.clone(), grants: Grants { read: true, publish: !read_only, manage: *manage },
-                enrollment_ttl_seconds: *ttl_seconds, credential_ttl_seconds: *credential_ttl_seconds,
-            }) {
-                Ok(invitation) => invitation,
-                Err(error) => {
-                    drop(file);
-                    let _ = std::fs::remove_file(&output);
-                    return Err(error.into());
-                }
-            };
-            super::credentials::write(&mut file, &invitation)?;
-            super::print_result(args.format, json!({
-                "schema_version": 1, "operation": "user_invite", "user": invitation.principal,
-                "collection": invitation.collection, "id": invitation.enrollment.id,
-                "expires_at": invitation.enrollment.expires_at, "grants": invitation.enrollment.grants,
-                "file": output
-            }), format!("Invited {name} to {collection}; one-time enrollment saved to {}.\nSend that protected file to the member. They run ctx remote connect SERVER_URL and paste its compact JSON, or use --enrollment-file PATH.", output.display()), ui)
-        }
-        ServerCommand::Grant { user, collection: selected, read, publish, manage } => {
-            require_collection(selected.as_deref(), collection)?;
-            let grants = Grants { read: *read, publish: *publish, manage: *manage };
-            client.grant(&ctx_history_server::GrantRequest { principal: user.clone(), grants })?;
-            super::print_result(args.format, json!({
-                "schema_version": 1, "operation": "grant", "user": user, "collection": collection,
-                "grants": grants
-            }), format!("Set {user}'s rights in {collection}: read={read}, publish={publish}, manage={manage}"), ui)
-        }
-        ServerCommand::Revoke { user: Some(user), .. } => {
-            client.revoke_member(user)?;
-            super::print_result(args.format, json!({
-                "schema_version": 1, "operation": "revoke", "kind": "membership", "id": user,
-                "collection": collection, "retained_history_unchanged": true
-            }), format!("Revoked {user}'s access to {collection}. Previously shared history is retained."), ui)
-        }
-        ServerCommand::Withdraw { collection: selected, publication, expected_revision, token_file } => {
-            require_collection(selected.as_deref(), collection)?;
-            if token_file.is_some() { bail!("remote administration uses the saved connection credential"); }
-            let state = client.publication(publication)?;
-            let receipt = client.remove(&removal(collection, &state, expected_revision.as_deref())?)?;
-            super::print_result(args.format, json!({
-                "schema_version": 1, "operation": "withdraw", "receipt": receipt
-            }), format!("Withdrew publication {publication} from {collection}"), ui)
-        }
-        ServerCommand::Status => {
-            let status = client.status()?;
-            super::print_result(args.format, json!({
-                "schema_version": 1, "operation": "server_status", "status": status
-            }), format!("Collection {collection}: stored {}, searchable {}, reads available: {}",
-                status.stored_sequence, status.searchable_sequence, status.reads_available), ui)
-        }
-        _ => bail!("this operation requires local --root administration; remote administration supports invite, grant, revoke --user, withdraw, and status"),
-    }
-    })();
-    result.map_err(|error| {
-        if matches!(
-            error.downcast_ref::<ctx_history_sharing::Error>(),
-            Some(ctx_history_sharing::Error::Unavailable)
-        ) {
-            error.context(format!(
-                "history server at {} is unavailable; check or start the listener, then retry",
-                client.connection().endpoint.as_str()
-            ))
-        } else {
-            error
-        }
-    })
-}
-
-fn require_collection(selected: Option<&str>, connected: &str) -> Result<()> {
-    if selected.is_some_and(|collection| collection != connected) {
-        bail!("selected collection differs from the saved connection");
-    }
-    Ok(())
 }
 
 fn removal(

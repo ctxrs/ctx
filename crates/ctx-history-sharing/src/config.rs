@@ -8,6 +8,7 @@ use ctx_history_platform::platform_security::{
     create_private_directory_all, create_private_file_new, verify_private_directory,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 use crate::{private_file, Error, RemoteClient, Result, SharingPolicy};
@@ -140,6 +141,19 @@ pub(crate) struct Settings {
     /// Authenticated publisher to whom this saved sharing consent belongs.
     #[serde(default)]
     publisher: Option<String>,
+    /// Receipt for the last locally saved enrollment, never its bearer secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enrollment: Option<SavedEnrollment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedEnrollment {
+    fingerprint: String,
+    principal: String,
+    credential_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enrollment_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,8 +170,9 @@ impl SharingStore {
         &self.root
     }
 
-    /// Initial and reader-only connections are local. Replacing a publishing
-    /// credential under an existing policy authenticates its publisher first.
+    /// Initial token connections are local. Replacing a credential bound by
+    /// enrollment or sharing consent authenticates the replacement identity.
+    /// Removing only publishing capability remains a local operation.
     pub fn connect(&self, connection: Connection, credentials: Credentials) -> Result<()> {
         if connection.collection.is_empty() {
             return Err(Error::InvalidConfig);
@@ -170,12 +185,34 @@ impl SharingStore {
                 if current.connection != connection {
                     return Err(Error::DestinationChanged);
                 }
+                let authenticated = if current.enrollment.is_some()
+                    && (credentials.read != current.credentials.read
+                        || credentials.publish != current.credentials.publish)
+                    && !(credentials.publish.is_none()
+                        && credentials.read == current.credentials.read)
+                {
+                    let principal = authenticated_identity(&connection, &credentials)?;
+                    if current
+                        .enrollment
+                        .as_ref()
+                        .is_some_and(|saved| saved.principal != principal)
+                    {
+                        return Err(Error::Credentials);
+                    }
+                    Some(principal)
+                } else {
+                    None
+                };
                 if current.policy.is_some() {
                     if credentials.publish.is_none() {
                         current.paused = true;
                     } else if credentials.publish != current.credentials.publish {
                         let publisher = current.publisher.as_deref().ok_or(Error::Credentials)?;
-                        if authenticated_publisher(&connection, &credentials)? != publisher {
+                        let replacement = match authenticated {
+                            Some(principal) => principal,
+                            None => authenticated_publisher(&connection, &credentials)?,
+                        };
+                        if replacement != publisher {
                             return Err(Error::Credentials);
                         }
                     }
@@ -189,9 +226,116 @@ impl SharingStore {
                 policy: None,
                 paused: false,
                 publisher: None,
+                enrollment: None,
             },
         };
         private_file::write(&self.root.join("settings.json"), &settings)
+    }
+
+    /// Redeem and save one enrollment, or recognize the exact saved enrollment
+    /// without another exchange. Returns true when already saved; read_only can
+    /// still narrow local publishing without replacing credentials.
+    /// The optional principal is an invitation claim, not authentication proof.
+    pub fn enroll(
+        &self,
+        connection: Connection,
+        enrollment: &str,
+        principal: Option<&str>,
+        read_only: bool,
+    ) -> Result<bool> {
+        if connection.collection.is_empty() || principal.is_some_and(str::is_empty) {
+            return Err(Error::InvalidConfig);
+        }
+        Credentials::read_only(enrollment.to_owned())?;
+        create_private_directory_all(&self.root).map_err(|_| Error::State)?;
+        // Serialize the check, redemption and save so concurrent scripted reruns
+        // cannot both consume a single-use enrollment.
+        let _lock = self.lock("settings.lock", false)?;
+        let current = self.settings()?;
+        let fingerprint = crate::capture::hex(&Sha256::digest(enrollment.as_bytes()));
+        let expected = if let Some(current) = &current {
+            if current.connection != connection {
+                return Err(Error::DestinationChanged);
+            }
+            let bound = if current.policy.is_some() {
+                Some(current.publisher.as_deref().ok_or(Error::Credentials)?)
+            } else {
+                current
+                    .enrollment
+                    .as_ref()
+                    .map(|saved| saved.principal.as_str())
+            };
+            if let Some(saved) = &current.enrollment {
+                if bound.is_some_and(|bound| bound != saved.principal)
+                    || principal.is_some_and(|claim| claim != saved.principal)
+                {
+                    return Err(Error::Credentials);
+                }
+                if saved.fingerprint == fingerprint {
+                    if read_only
+                        && (current.credentials.publish.is_some()
+                            || (current.policy.is_some() && !current.paused))
+                    {
+                        let mut narrowed = current.clone();
+                        narrowed.credentials.publish = None;
+                        narrowed.credentials.validate()?;
+                        if narrowed.policy.is_some() {
+                            narrowed.paused = true;
+                        }
+                        private_file::write(&self.root.join("settings.json"), &narrowed)?;
+                    }
+                    return Ok(true);
+                }
+            }
+            let expected = match bound {
+                Some(bound) => bound.to_owned(),
+                None => authenticated_identity(&connection, &current.credentials)?,
+            };
+            if principal.is_some_and(|claim| claim != expected) {
+                return Err(Error::Credentials);
+            }
+            Some(expected)
+        } else {
+            None
+        };
+        let issued = RemoteClient::enroll(&connection.endpoint, enrollment)?;
+        if issued.collection != connection.collection {
+            return Err(Error::Protocol);
+        }
+        if issued.principal.is_empty()
+            || issued.credential.id.is_empty()
+            || principal.is_some_and(|claim| claim != issued.principal)
+            || expected
+                .as_ref()
+                .is_some_and(|expected| expected != &issued.principal)
+        {
+            return Err(Error::Credentials);
+        }
+        let credentials = if read_only || !issued.credential.grants.publish {
+            Credentials::read_only(issued.credential.secret)?
+        } else {
+            Credentials::device(issued.credential.secret)?
+        };
+        let mut settings = current.unwrap_or_else(|| Settings {
+            connection,
+            credentials: credentials.clone(),
+            policy: None,
+            paused: false,
+            publisher: None,
+            enrollment: None,
+        });
+        if settings.policy.is_some() && credentials.publish.is_none() {
+            settings.paused = true;
+        }
+        settings.credentials = credentials;
+        settings.enrollment = Some(SavedEnrollment {
+            fingerprint,
+            principal: issued.principal,
+            credential_id: issued.credential.id,
+            enrollment_id: issued.enrollment_id,
+        });
+        private_file::write(&self.root.join("settings.json"), &settings)?;
+        Ok(false)
     }
 
     /// First authorization binds the authenticated publisher online. Subsequent
@@ -231,6 +375,20 @@ impl SharingStore {
 
     pub fn connection(&self) -> Result<Option<Connection>> {
         Ok(self.settings()?.map(|s| s.connection))
+    }
+
+    /// Last authenticated enrollment or sharing identity; no online access check.
+    pub fn saved_principal(&self) -> Result<Option<String>> {
+        Ok(self
+            .settings()?
+            .and_then(|s| s.enrollment.map(|saved| saved.principal).or(s.publisher)))
+    }
+
+    /// Local publishing capability only, not the credential's current server grant.
+    pub fn has_publish_credential(&self) -> Result<bool> {
+        Ok(self
+            .settings()?
+            .is_some_and(|s| s.credentials.publish.is_some()))
     }
 
     pub fn policy(&self) -> Result<Option<SharingPolicy>> {
@@ -314,6 +472,17 @@ fn authenticated_publisher(connection: &Connection, credentials: &Credentials) -
         return Err(Error::Credentials);
     }
     Ok(status.principal)
+}
+
+fn authenticated_identity(connection: &Connection, credentials: &Credentials) -> Result<String> {
+    let identity = RemoteClient::new(connection.clone(), credentials.clone())?.whoami()?;
+    if identity.collection != connection.collection {
+        return Err(Error::Protocol);
+    }
+    if identity.principal.is_empty() {
+        return Err(Error::Credentials);
+    }
+    Ok(identity.principal)
 }
 
 #[cfg(test)]

@@ -15,6 +15,8 @@ use super::*;
 use crate::tests::mock::{Mock, Response};
 use crate::{Backfill, PublicationMode, SourceSelection};
 
+mod enrollment;
+
 const COLLECTION: &str = "00000000-0000-4000-8000-000000000001";
 
 fn status_server() -> (Mock, Arc<AtomicBool>) {
@@ -312,6 +314,15 @@ fn unbound_policy_cannot_be_adopted_by_replacement_or_reselection() {
     let mut next = policy();
     next.revision = 2;
     assert_eq!(store.set_policy(next), Err(Error::Credentials));
+    assert_eq!(
+        store.enroll(
+            connection.clone(),
+            "unused-enrollment",
+            Some("publisher-one"),
+            false
+        ),
+        Err(Error::Credentials)
+    );
     assert_eq!(
         fs::read(store.root().join("settings.json")).unwrap(),
         before

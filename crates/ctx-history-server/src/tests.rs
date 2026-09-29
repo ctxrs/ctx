@@ -14,9 +14,12 @@ use sha2::{Digest, Sha256};
 use std::{fs, path::Path, sync::Arc};
 use tower::ServiceExt;
 
+mod access;
+mod access_migration;
 mod cancellation;
 mod cancellation_recovery;
 mod credentials;
+mod enrollment_expiry;
 mod inventory;
 mod predecessors;
 mod recovery;
@@ -289,7 +292,8 @@ fn member_isolation_duplicate_owner_and_revocation_close_every_data_path() {
             &admin.credential.secret,
             &admin.collection,
             InviteRequest {
-                name: "member".into(),
+                principal: None,
+                name: Some("member".into()),
                 grants: Grants {
                     read: true,
                     publish: true,
@@ -352,6 +356,41 @@ fn member_isolation_duplicate_owner_and_revocation_close_every_data_path() {
         .unwrap();
     assert!(matches!(
         server.read_event(&member.credential.secret, &separate, &result.citation),
+        Err(Error::Forbidden)
+    ));
+    assert!(matches!(
+        server.status(&member.credential.secret, &separate),
+        Err(Error::Forbidden)
+    ));
+    let separate_invite = server
+        .invite(
+            &admin.credential.secret,
+            &separate,
+            InviteRequest {
+                principal: Some(member.principal.clone()),
+                name: None,
+                grants: Grants {
+                    read: true,
+                    publish: true,
+                    manage: false,
+                },
+                enrollment_ttl_seconds: 600,
+                credential_ttl_seconds: 3600,
+            },
+        )
+        .unwrap();
+    let separate_device = server.redeem(&separate_invite.enrollment.secret).unwrap();
+    assert_eq!(separate_device.principal, member.principal);
+    assert_ne!(separate_device.credential.id, member.credential.id);
+    server
+        .status(&separate_device.credential.secret, &separate)
+        .unwrap();
+    assert!(matches!(
+        server.read_event(
+            &separate_device.credential.secret,
+            &separate,
+            &result.citation
+        ),
         Err(Error::NotFound)
     ));
     server
@@ -393,7 +432,29 @@ fn member_isolation_duplicate_owner_and_revocation_close_every_data_path() {
         ),
         Err(Error::Forbidden)
     ));
-    assert!(server.status(&member.credential.secret, &separate).is_ok());
+    assert!(matches!(
+        server.status(&member.credential.secret, &separate),
+        Err(Error::Forbidden)
+    ));
+    server
+        .status(&separate_device.credential.secret, &separate)
+        .unwrap();
+    server
+        .admin_revoke_principal(&admin.credential.secret, &member.principal)
+        .unwrap();
+    for (token, collection) in [
+        (&member.credential.secret, &admin.collection),
+        (&separate_device.credential.secret, &separate),
+    ] {
+        assert!(matches!(
+            server.whoami(token, collection),
+            Err(Error::Forbidden)
+        ));
+        assert!(matches!(
+            server.status(token, collection),
+            Err(Error::Forbidden)
+        ));
+    }
     assert_eq!(
         find(&server, &admin.credential.secret, &admin.collection, "pear").len(),
         1
@@ -736,7 +797,8 @@ async fn running_router_invite_enroll_grant_revoke_and_reject_unknown_filters() 
     let (server, admin) = bootstrap(root.path());
     let app = router(Arc::new(server));
     let invite = InviteRequest {
-        name: "reader and publisher".into(),
+        principal: None,
+        name: Some("reader and publisher".into()),
         grants: Grants {
             read: true,
             publish: true,

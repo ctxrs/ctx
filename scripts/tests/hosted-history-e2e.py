@@ -29,6 +29,7 @@ from urllib.parse import quote, urlencode
 from hosted_history_settlement import cancel_before_publish, settle_accepted
 from hosted_history_recovery import private_recovery
 from hosted_history_fixtures import codex_fixture, fixture, prepare_ongoing
+from hosted_history_enrollment import device_lifecycle, setup_multicollection_reader
 
 
 def require(condition, message):
@@ -312,13 +313,14 @@ class Harness:
             self.deny("POST", "/v1/enroll", None, {"enrollment": enrollment})
         self.http("POST", self.route(self.restricted, "grants"), initial_token, {
             "principal": self.users["erin"], "grants": {"read": True, "publish": False, "manage": False}})
+        setup_multicollection_reader(self)
         for actor in self.users:
             require(self.token_file(actor).stat().st_mode & 0o077 == 0,
                     "issued token file is not owner-private")
         for actor, name, collection in (
             ("alice", "team", self.team), ("bob", "team", self.team),
             ("carol", "team", self.team), ("dana", "restricted", self.restricted),
-            ("erin", "team", self.team), ("erin", "restricted", self.restricted),
+            ("erin", "team", self.team),
         ):
             self.connect(actor, name, collection, read_only=actor in ("carol", "erin"))
         for collection, actor in ((self.team, "alice"), (self.restricted, "dana")):
@@ -673,7 +675,7 @@ def ongoing_acceptance(h, sources):
         # Add a new destination/policy now; do not restart or call remote sync.
         h.connect("alice", "late-policy", h.restricted)
         h.share("alice", "late-policy", selected[:1], profiles=True)
-        h.wait_for_marker("erin", h.restricted, "sparrowseed")
+        h.wait_for_marker("erin-restricted", h.restricted, "sparrowseed")
         require(collector.poll() is None, "policy activation replaced the running daemon")
         h.phase("new sharing policy discovered by the already-running daemon")
         h.cli("alice", "remote", "remove", "late-policy", "--format=json")
@@ -796,16 +798,17 @@ def acceptance(h, restic):
     for actor in ("alice", "bob", "dana"):
         h.export(actor, archives / actor, "authored-origin-" + actor)
     h.setup_server()
+    device_lifecycle(h)
     bob_request, bob_receipt = h.publish_archive("bob", h.team, archives / "bob", "bob-main", "cedarbeacon",
                                                 cancellation=True)
     _, sibling_receipt = h.publish_archive("bob", h.team, archives / "bob", "bob-sibling", "oakbeacon")
     _, alice_receipt = h.publish_archive("alice", h.team, archives / "alice", "alice-main", "amberbeacon")
     _, dana_receipt = h.publish_archive("dana", h.restricted, archives / "dana", "dana-main", "violetbeacon")
     h.wait_searchable(h.team, "erin", max(bob_receipt["sequence"], sibling_receipt["sequence"], alice_receipt["sequence"]))
-    h.wait_searchable(h.restricted, "erin", dana_receipt["sequence"])
+    h.wait_searchable(h.restricted, "erin-restricted", dana_receipt["sequence"])
     old_hit = h.evidence("carol", h.team, "cedarbeacon", original, "bob")
     overlap_hit = h.evidence("erin", h.team, "amberbeacon", overlap, "alice")
-    private_hit = h.evidence("erin", h.restricted, "violetbeacon", restricted, "dana")
+    private_hit = h.evidence("erin-restricted", h.restricted, "violetbeacon", restricted, "dana")
     require(old_hit["citation"] != overlap_hit["citation"], "independent origins collapsed")
     h.phase("upload, interrupted staging, duplicate retry, ownership and exact citations")
 
@@ -917,7 +920,7 @@ def acceptance(h, restic):
 
     ongoing_acceptance(h, sources)
     last_status = h.http("GET", h.route(h.team, "status"), h.tokens["erin"])
-    last_restricted = h.http("GET", h.route(h.restricted, "status"), h.tokens["erin"])
+    last_restricted = h.http("GET", h.route(h.restricted, "status"), h.tokens["erin-restricted"])
     h.stop(h.server)
     h.admin("backup", "--output", snapshots / "current")
     h.export("bob", snapshots / "personal", "authored-origin-bob")

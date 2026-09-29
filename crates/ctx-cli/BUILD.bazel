@@ -353,7 +353,7 @@ ctx_cli_integration_test(
         "tests/hosted_history/support.rs",
         "tests/hosted_history/admin_regressions.rs",
     ],
-    extra_crates = ["libc"],
+    extra_crates = ["chrono", "libc"],
     extra_deps = [
         "//crates/ctx-history-core:lib",
         "//crates/ctx-history-index:lib",
@@ -383,6 +383,19 @@ ctx_cli_integration_test(
         "//crates/ctx-history-core:lib",
         "//crates/ctx-history-index:lib",
         "//crates/ctx-history-platform:lib",
+    ],
+)
+
+ctx_cli_integration_test(
+    name = "hosted_history_enrollment_tests",
+    src = "tests/hosted_history_enrollment.rs",
+    extra_srcs = ["tests/hosted_history/support.rs"],
+    extra_crates = ["libc"],
+    extra_deps = [
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-platform:lib",
+        "//crates/ctx-history-sharing:lib",
     ],
 )
 

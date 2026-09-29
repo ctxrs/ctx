@@ -125,7 +125,16 @@ fn validation_releases_authority_and_rechecks_revoke_grants_and_expiry() {
             )
             .unwrap();
         let device = server
-            .issue_credential(&publisher, all_grants(), 3600)
+            .issue_credential(
+                &publisher,
+                &admin.collection,
+                Grants {
+                    read: true,
+                    publish: true,
+                    manage: false,
+                },
+                3600,
+            )
             .unwrap();
         let request = stage(
             &server,
@@ -324,7 +333,7 @@ fn indexing_releases_authority_and_cannot_reopen_a_withdrawn_prefix() {
         .publish(&admin.credential.secret, &admin.collection, correction)
         .unwrap();
     let device = server
-        .issue_credential(&admin.principal, all_grants(), 3600)
+        .issue_credential(&admin.principal, &admin.collection, all_grants(), 3600)
         .unwrap();
     let pause = Pause::at(&server, Stage::Projection);
     let indexing = {

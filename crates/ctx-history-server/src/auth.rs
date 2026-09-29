@@ -1,3 +1,7 @@
+#[cfg(test)]
+pub(crate) use crate::identity::authorize_at;
+pub(crate) use crate::identity::{authorize, authorize_any};
+use crate::identity::{identity_at, principal_grants, subset};
 use crate::{
     catalog,
     types::{collection_id, identifier, now},
@@ -19,6 +23,8 @@ pub struct BootstrapInfo {
 /// command arguments. Each device can carry a read/publish/manage subset in one credential.
 #[derive(Serialize, Deserialize)]
 pub struct TokenFile {
+    #[serde(default)]
+    pub enrollment_id: Option<String>,
     pub principal: String,
     pub collection: String,
     pub credential: IssuedSecret,
@@ -27,7 +33,10 @@ pub struct TokenFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InviteRequest {
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub principal: Option<String>,
     pub grants: Grants,
     pub enrollment_ttl_seconds: u64,
     /// Zero (the default) means the device credential is valid until revoked.
@@ -83,7 +92,7 @@ impl HistoryServer {
         let principal = uuid::Uuid::new_v4().to_string();
         let collection = uuid::Uuid::new_v4().to_string();
         tx.execute(
-            "INSERT INTO principals(id,name) VALUES (?1,?2)",
+            "INSERT INTO principals(id,name,server_owner) VALUES (?1,?2,1)",
             params![principal, name],
         )?;
         tx.execute(
@@ -95,16 +104,20 @@ impl HistoryServer {
             params![principal, collection],
         )?;
         let tokens = TokenFile {
+            enrollment_id: None,
             principal: principal.clone(),
             collection: collection.clone(),
             credential: insert_credential(
                 &tx,
                 &principal,
+                None,
+                None,
                 Grants {
                     read: true,
                     publish: true,
                     manage: true,
                 },
+                0,
                 0,
             )?,
         };
@@ -165,23 +178,60 @@ impl HistoryServer {
     ) -> Result<()> {
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        authorize(&tx, token, collection, Access::Manage)?;
+        let actor = identity_at(&tx, token, collection, now()?)?;
+        if !actor.server_owner && (!actor.grants.manage || !subset(grants, actor.grants)) {
+            return Err(Error::Forbidden);
+        }
         set_grants(&tx, principal, collection, grants)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// A zero TTL issues a credential valid until revoked; positive TTLs expire.
+    /// Issue a local operator-selected collection credential capped by current grants.
+    /// A zero TTL is valid until revoked; positive TTLs expire.
     pub fn issue_credential(
         &self,
         principal: &str,
+        collection: &str,
         scope: Grants,
+        ttl_seconds: u64,
+    ) -> Result<IssuedSecret> {
+        collection_id(collection)?;
+        let mut connection = self.lock()?;
+        let tx = connection.transaction()?;
+        let secret = insert_credential(
+            &tx,
+            principal,
+            Some(collection),
+            None,
+            scope,
+            ttl_seconds,
+            0,
+        )?;
+        catalog::audit(&tx, "issue_credential", Some(principal), None)?;
+        tx.commit()?;
+        Ok(secret)
+    }
+
+    /// Local root operator may issue another accountwide credential only for
+    /// an explicitly recorded owner. Collection manage grants are insufficient.
+    pub fn issue_owner_credential(
+        &self,
+        principal: &str,
         ttl_seconds: u64,
     ) -> Result<IssuedSecret> {
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        let secret = insert_credential(&tx, principal, scope, ttl_seconds)?;
-        catalog::audit(&tx, "issue_credential", Some(principal), None)?;
+        let secret = insert_credential(
+            &tx,
+            principal,
+            None,
+            None,
+            Grants::from_bits(7),
+            ttl_seconds,
+            0,
+        )?;
+        catalog::audit(&tx, "issue_owner_credential", Some(principal), None)?;
         tx.commit()?;
         Ok(secret)
     }
@@ -195,26 +245,18 @@ impl HistoryServer {
         credential_ttl_seconds: u64,
     ) -> Result<IssuedSecret> {
         collection_id(collection)?;
-        if ttl_seconds == 0 || ttl_seconds > 3600 || credential_ttl_seconds > 90 * 24 * 3600 {
-            return Err(Error::Invalid("invalid enrollment lifetime"));
-        }
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        active_principal(&tx, principal)?;
-        let secret = new_secret(ttl_seconds, scope)?;
-        tx.execute(
-            "INSERT INTO enrollments VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![
-                secret.id,
-                hash_secret(&secret.secret),
-                principal,
-                scope.bits(),
-                secret.expires_at,
-                credential_ttl_seconds,
-                collection
-            ],
+        let secret = insert_enrollment(
+            &tx,
+            principal,
+            collection,
+            scope,
+            ttl_seconds,
+            credential_ttl_seconds,
+            0,
         )?;
-        catalog::audit(&tx, "issue_enrollment", Some(principal), None)?;
+        catalog::audit(&tx, "issue_enrollment", Some(principal), Some(collection))?;
         tx.commit()?;
         Ok(secret)
     }
@@ -222,12 +264,25 @@ impl HistoryServer {
     pub fn redeem(&self, enrollment: &str) -> Result<TokenFile> {
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        let (principal,scope,ttl,collection): (String,u8,u64,String) = tx.query_row(
-            "SELECT principal,scope,credential_ttl,collection FROM enrollments WHERE digest=?1 AND expires>?2",
-            params![hash_secret(enrollment),now()?], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
+        let (principal,scope,ttl,collection,enrollment_id,expires_ceiling): (String,u8,u64,String,String,u64) = tx.query_row(
+            "SELECT principal,scope,credential_ttl,collection,id,credential_expires_ceiling FROM enrollments WHERE digest=?1 AND expires>?2",
+            params![hash_secret(enrollment),now()?], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))
             .optional()?.ok_or(Error::Unauthorized)?;
-        let scope = Grants::from_bits(scope);
-        let secret = insert_credential(&tx, &principal, scope, ttl)?;
+        // Grant removal after invitation also narrows the newly issued token.
+        let scope =
+            Grants::from_bits(scope & principal_grants(&tx, &principal, &collection)?.bits());
+        if scope.bits() == 0 {
+            return Err(Error::Forbidden);
+        }
+        let secret = insert_credential(
+            &tx,
+            &principal,
+            Some(&collection),
+            Some(&enrollment_id),
+            scope,
+            ttl,
+            expires_ceiling,
+        )?;
         tx.execute(
             "DELETE FROM enrollments WHERE digest=?1",
             [hash_secret(enrollment)],
@@ -235,6 +290,7 @@ impl HistoryServer {
         catalog::audit(&tx, "redeem_enrollment", Some(&principal), None)?;
         tx.commit()?;
         Ok(TokenFile {
+            enrollment_id: Some(enrollment_id),
             principal,
             collection,
             credential: secret,
@@ -247,37 +303,57 @@ impl HistoryServer {
         collection: &str,
         request: InviteRequest,
     ) -> Result<EnrollmentFile> {
-        identifier(&request.name)?;
-        if request.grants.bits() == 0
-            || request.enrollment_ttl_seconds == 0
-            || request.enrollment_ttl_seconds > 3600
-            || request.credential_ttl_seconds > 90 * 24 * 3600
-        {
-            return Err(Error::Invalid("invite scope or lifetime"));
+        if let Some(name) = &request.name {
+            identifier(name)?;
+        }
+        if request.principal.is_some() && request.name.is_some() {
+            return Err(Error::Invalid(
+                "existing principal cannot be renamed by enrollment",
+            ));
         }
         let mut connection = self.lock()?;
-        let manager = authorize(&connection, token, collection, Access::Manage)?;
         let tx = connection.transaction()?;
-        let principal = uuid::Uuid::new_v4().to_string();
-        tx.execute(
-            "INSERT INTO principals(id,name) VALUES (?1,?2)",
-            params![principal, request.name],
+        let actor = identity_at(&tx, token, collection, now()?)?;
+        if !actor.server_owner && !subset(request.grants, actor.grants) {
+            return Err(Error::Forbidden);
+        }
+        let principal = if let Some(principal) = request.principal {
+            if !actor.server_owner && actor.principal != principal {
+                return Err(Error::Forbidden);
+            }
+            // Existing identity receives a device, never a grant mutation.
+            principal
+        } else {
+            if !actor.server_owner && !actor.grants.manage {
+                return Err(Error::Forbidden);
+            }
+            let principal = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO principals(id,name) VALUES (?1,?2)",
+                params![principal, request.name.unwrap_or_default()],
+            )?;
+            set_grants(&tx, &principal, collection, request.grants)?;
+            principal
+        };
+        let expires_ceiling = if actor.server_owner {
+            0
+        } else {
+            tx.query_row(
+                "SELECT expires FROM credentials WHERE id=?1",
+                [&actor.credential_id],
+                |r| r.get(0),
+            )?
+        };
+        let secret = insert_enrollment(
+            &tx,
+            &principal,
+            collection,
+            request.grants,
+            request.enrollment_ttl_seconds,
+            request.credential_ttl_seconds,
+            expires_ceiling,
         )?;
-        set_grants(&tx, &principal, collection, request.grants)?;
-        let secret = new_secret(request.enrollment_ttl_seconds, request.grants)?;
-        tx.execute(
-            "INSERT INTO enrollments VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![
-                secret.id,
-                hash_secret(&secret.secret),
-                principal,
-                request.grants.bits(),
-                secret.expires_at,
-                request.credential_ttl_seconds,
-                collection
-            ],
-        )?;
-        catalog::audit(&tx, "invite", Some(&manager), Some(collection))?;
+        catalog::audit(&tx, "invite", Some(&actor.principal), Some(collection))?;
         tx.commit()?;
         Ok(EnrollmentFile {
             principal,
@@ -309,11 +385,7 @@ impl HistoryServer {
     pub fn revoke_credential(&self, credential_id: &str) -> Result<()> {
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        tx.execute(
-            "UPDATE credentials SET revoked=1 WHERE id=?1",
-            [credential_id],
-        )?;
-        catalog::audit(&tx, "revoke_credential", None, None)?;
+        crate::access::revoke_credential(&tx, credential_id)?;
         tx.commit()?;
         Ok(())
     }
@@ -321,9 +393,7 @@ impl HistoryServer {
     pub fn revoke_principal(&self, principal: &str) -> Result<()> {
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        tx.execute("UPDATE principals SET revoked=1 WHERE id=?1", [principal])?;
-        tx.execute("DELETE FROM enrollments WHERE principal=?1", [principal])?;
-        catalog::audit(&tx, "revoke_principal", Some(principal), None)?;
+        crate::access::revoke_principal(&tx, principal)?;
         tx.commit()?;
         Ok(())
     }
@@ -383,7 +453,7 @@ fn set_grants(
     catalog::audit(connection, "set_grants", Some(principal), Some(collection))
 }
 
-fn active_principal(connection: &Connection, principal: &str) -> Result<()> {
+pub(crate) fn active_principal(connection: &Connection, principal: &str) -> Result<()> {
     let active: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM principals WHERE id=?1 AND revoked=0)",
         [principal],
@@ -396,43 +466,38 @@ fn active_principal(connection: &Connection, principal: &str) -> Result<()> {
     }
 }
 
-pub(crate) fn authorize(
+fn insert_enrollment(
     connection: &Connection,
-    token: &str,
+    principal: &str,
     collection: &str,
-    required: Access,
-) -> Result<String> {
-    authorize_at(connection, token, collection, required, now()?)
-}
-
-pub(crate) fn authorize_at(
-    connection: &Connection,
-    token: &str,
-    collection: &str,
-    required: Access,
-    at: u64,
-) -> Result<String> {
-    collection_id(collection)?;
-    let principal: Option<String> = connection.query_row(
-        "SELECT c.principal FROM credentials c JOIN principals p ON p.id=c.principal JOIN grants g ON g.principal=p.id WHERE c.digest=?1 AND c.revoked=0 AND (c.expires=0 OR c.expires>?2) AND p.revoked=0 AND (c.scope & ?3) != 0 AND g.collection=?4 AND CASE ?3 WHEN 1 THEN g.read WHEN 2 THEN g.publish WHEN 4 THEN g.manage ELSE 0 END=1",
-        params![hash_secret(token),at,required.bit(),collection], |r| r.get(0)).optional()?;
-    principal.ok_or(Error::Forbidden)
-}
-
-pub(crate) fn authorize_any(
-    connection: &Connection,
-    token: &str,
-    collection: &str,
-    rights: &[Access],
-) -> Result<String> {
-    for right in rights {
-        match authorize(connection, token, collection, *right) {
-            Ok(principal) => return Ok(principal),
-            Err(Error::Forbidden) => (),
-            Err(error) => return Err(error),
-        }
+    scope: Grants,
+    ttl: u64,
+    credential_ttl: u64,
+    expires_ceiling: u64,
+) -> Result<IssuedSecret> {
+    if scope.bits() == 0 || ttl == 0 || ttl > 3600 || credential_ttl > 90 * 24 * 3600 {
+        return Err(Error::Invalid("invite scope or lifetime"));
     }
-    Err(Error::Forbidden)
+    active_principal(connection, principal)?;
+    if !subset(scope, principal_grants(connection, principal, collection)?) {
+        return Err(Error::Forbidden);
+    }
+    let mut secret = new_secret(ttl, scope)?;
+    cap_expiry(&mut secret, expires_ceiling)?;
+    connection.execute(
+        "INSERT INTO enrollments VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            secret.id,
+            hash_secret(&secret.secret),
+            principal,
+            scope.bits(),
+            secret.expires_at,
+            credential_ttl,
+            collection,
+            expires_ceiling
+        ],
+    )?;
+    Ok(secret)
 }
 
 fn new_secret(ttl: u64, grants: Grants) -> Result<IssuedSecret> {
@@ -457,8 +522,11 @@ fn new_secret(ttl: u64, grants: Grants) -> Result<IssuedSecret> {
 pub(crate) fn insert_credential(
     connection: &Connection,
     principal: &str,
+    collection: Option<&str>,
+    enrollment_id: Option<&str>,
     scope: Grants,
     ttl: u64,
+    expires_ceiling: u64,
 ) -> Result<IssuedSecret> {
     if scope.bits() == 0 || ttl > 90 * 24 * 3600 {
         return Err(Error::Invalid(
@@ -466,21 +534,53 @@ pub(crate) fn insert_credential(
         ));
     }
     active_principal(connection, principal)?;
-    let secret = new_secret(ttl, scope)?;
+    if let Some(collection) = collection {
+        collection_id(collection)?;
+        if !subset(scope, principal_grants(connection, principal, collection)?) {
+            return Err(Error::Forbidden);
+        }
+    } else {
+        let owner: bool = connection.query_row(
+            "SELECT server_owner FROM principals WHERE id=?1",
+            [principal],
+            |r| r.get(0),
+        )?;
+        if !owner || scope.bits() != 7 {
+            return Err(Error::Forbidden);
+        }
+    }
+    let mut secret = new_secret(ttl, scope)?;
+    cap_expiry(&mut secret, expires_ceiling)?;
     connection.execute(
-        "INSERT INTO credentials(id,digest,principal,scope,expires) VALUES (?1,?2,?3,?4,?5)",
+        "INSERT INTO credentials(id,digest,principal,scope,expires,collection,server_owner,enrollment_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             secret.id,
             hash_secret(&secret.secret),
             principal,
             scope.bits(),
-            secret.expires_at
+            secret.expires_at,
+            collection,
+            collection.is_none(),
+            enrollment_id
         ],
     )?;
     Ok(secret)
 }
 
-fn hash_secret(secret: &str) -> Vec<u8> {
+// Delegation cannot outlive a finite issuer, including after a delayed exchange.
+fn cap_expiry(secret: &mut IssuedSecret, ceiling: u64) -> Result<()> {
+    if ceiling != 0 {
+        if ceiling <= now()? {
+            return Err(Error::Forbidden);
+        }
+        if secret.expires_at == 0 || secret.expires_at > ceiling {
+            secret.expires_at = ceiling;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn hash_secret(secret: &str) -> Vec<u8> {
     Sha256::digest(secret.as_bytes()).to_vec()
 }
 

@@ -136,7 +136,7 @@ fn explicitly_expiring_credentials_and_short_lived_enrollments_still_expire() {
     let root = tempfile::tempdir().unwrap();
     let (server, owner) = bootstrap(root.path());
     let finite = server
-        .issue_credential(&owner.principal, read_publish(), 3600)
+        .issue_credential(&owner.principal, &owner.collection, read_publish(), 3600)
         .unwrap();
     assert!(finite.expires_at > now().unwrap());
     {
@@ -174,7 +174,12 @@ fn explicitly_expiring_credentials_and_short_lived_enrollments_still_expire() {
         ));
     }
     assert!(matches!(
-        server.issue_credential(&owner.principal, read_publish(), 90 * 24 * 3600 + 1),
+        server.issue_credential(
+            &owner.principal,
+            &owner.collection,
+            read_publish(),
+            90 * 24 * 3600 + 1
+        ),
         Err(Error::Invalid(_))
     ));
     assert!(matches!(
@@ -224,7 +229,8 @@ fn explicitly_expiring_credentials_and_short_lived_enrollments_still_expire() {
         Err(Error::Unauthorized)
     ));
     let invalid = InviteRequest {
-        name: "invalid lifetime".into(),
+        principal: None,
+        name: Some("invalid lifetime".into()),
         grants: read_publish(),
         enrollment_ttl_seconds: 0,
         credential_ttl_seconds: 0,

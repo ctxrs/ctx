@@ -37,7 +37,8 @@ fn invitation(server: &HistoryServer, secret: &str, collection: &str) -> Enrollm
             secret,
             collection,
             InviteRequest {
-                name: "new member".into(),
+                principal: None,
+                name: Some("new member".into()),
                 grants: all_grants(),
                 enrollment_ttl_seconds: 600,
                 credential_ttl_seconds: 3600,
@@ -177,7 +178,7 @@ fn older_checkpoint_restores_privately_and_never_reactivates_old_members() {
         &pending_invite.principal,
     ] {
         assert!(matches!(
-            server.issue_credential(old_principal, all_grants(), 3600),
+            server.issue_credential(old_principal, collection, all_grants(), 3600),
             Err(Error::Unauthorized)
         ));
         assert!(matches!(
@@ -267,10 +268,31 @@ fn older_checkpoint_restores_privately_and_never_reactivates_old_members() {
     server
         .manage_grants(&owner.secret, &joined.principal, &second, all_grants())
         .unwrap();
-    server.status(&joined.credential.secret, &second).unwrap();
+    assert!(matches!(
+        server.status(&joined.credential.secret, &second),
+        Err(Error::Forbidden)
+    ));
+    let device = server
+        .invite(
+            &owner.secret,
+            &second,
+            InviteRequest {
+                principal: Some(joined.principal.clone()),
+                name: None,
+                grants: all_grants(),
+                enrollment_ttl_seconds: 600,
+                credential_ttl_seconds: 0,
+            },
+        )
+        .unwrap();
+    let second_device = server.redeem(&device.enrollment.secret).unwrap();
+    assert_eq!(second_device.principal, joined.principal);
+    server
+        .status(&second_device.credential.secret, &second)
+        .unwrap();
     let fresh = stage(
         &server,
-        &joined.credential.secret,
+        &second_device.credential.secret,
         &second,
         &input,
         "new",
@@ -278,11 +300,11 @@ fn older_checkpoint_restores_privately_and_never_reactivates_old_members() {
         "new",
     );
     server
-        .publish(&joined.credential.secret, &second, fresh)
+        .publish(&second_device.credential.secret, &second, fresh)
         .unwrap();
     server.index_pending(&second, 16).unwrap();
     assert_eq!(
-        find(&server, &joined.credential.secret, &second, "pear").len(),
+        find(&server, &second_device.credential.secret, &second, "pear").len(),
         1
     );
     drop(server);

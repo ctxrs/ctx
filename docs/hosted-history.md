@@ -4,6 +4,11 @@ ctx works locally by default. You can also export a portable backup or run a
 server that receives selected histories and lets authorized people search them.
 Neither requires changing how ordinary local search works.
 
+**Hosted history is an opt-in beta included in the normal ctx binary.** Installing
+or upgrading ctx does not start a server, connect to one, or enable uploads.
+The server commands and remote API may evolve during beta; keep a server
+checkpoint before upgrading. Ordinary local search is unchanged.
+
 The server is one process with its own storage directory. It uses SQLite for
 permissions and accepted uploads, immutable files for retained history, and
 ctx's existing lexical index for search. Clients keep their local indexes unless
@@ -88,16 +93,50 @@ Live transcripts, SQLite data, the search index, and exported checkpoints are
 not encrypted by ctx. Put them on encrypted storage if you need encryption at
 rest. restic encrypts its backup repository separately.
 
+## Server upgrades
+
+Upgrade the server deliberately: stop it, make a checkpoint, install the chosen
+version, and restart it. Keep the old executable and checkpoint until you have
+verified access, search, and retrieval. Restoring a checkpoint uses a fresh root
+and fresh owner access as described below; do not open a migrated catalog with
+an older executable.
+
+Use a separately managed executable for a server service if the same machine
+also has an automatically updated desktop installation. Updating a remote
+client does not replace or restart the server. The server does not run its own
+automatic updater.
+
+The HTTP API uses versioned routes, and the storage catalog and backup manifest
+carry format versions. An unsupported version is an error, never a reason to
+discard history. During beta, use matching client and server releases unless
+the release notes explicitly qualify another combination.
+
+Upgrading the earlier beta catalog preserves retained history, citations and
+user IDs, but revokes its unscoped device credentials and pending invitations.
+Only the original owner credential proven by the protected operator file is
+preserved. Re-enroll members for their specific collections. If that owner file
+is unavailable, restore a checkpoint into a fresh root to recover owner access.
+
+Older reader connections may have no saved user identity, so a revoked old
+credential cannot prove who they belonged to. Connect the fresh invitation with
+a new `--name` in that case. You can deliberately remove an unused old reader
+connection afterward; removal discards its local pending state. A connection
+with a saved sharing policy and authenticated publisher can be re-enrolled in
+place and keeps its upload queue.
+
 ## Invite someone
 
 While the server is running:
 
 ```sh
-ctx server invite alice
+ctx server invite
 ```
 
 ctx saves a short-lived, single-use invitation in a protected file and explains
-how to use it. Deliver that file securely. On Alice's machine:
+how to use it. Deliver that file securely. An optional label such as
+`ctx server invite alice` helps you recognize the person; it is not a login name
+or a source of permissions. Each new invitation creates a distinct user ID,
+even when labels are identical. On the invited person's machine:
 
 ```sh
 ctx remote connect https://history.example.com
@@ -107,14 +146,17 @@ Paste the invitation when prompted. For scripts, use `--enrollment-file PATH`
 instead. ctx saves the credential privately and reports the connection name.
 Connecting does not upload any history or enable local indexing. Device and
 operator credentials stay valid until revoked by default; invitations expire
-quickly and can be used only once. An administrator can choose a finite lifetime
-when issuing a credential.
+after 15 minutes by default and can be used only once. An administrator can choose a finite lifetime
+when issuing a credential. A non-owner's invitation cannot outlive the credential
+that issued it, and its new device credential cannot extend that expiry.
 
 A collection is a sharing audience. Read, publish and manage are separate rights.
 A member can publish without reading other people's history, read without
 publishing, or do both. Use separate collections for separate audiences; there
 is no implicit organization-wide read permission. Invitations normally grant
-read and publish. Use `--read-only` for a reader or `--manage` for an administrator.
+read and publish. Use `--read-only` for a reader, `--publish-only` for a device
+that can back up history without reading the collection, or `--manage` to also
+authorize collection administration.
 
 An administrator can set exact rights or revoke collection access through a
 saved connection:
@@ -126,11 +168,77 @@ ctx server --remote team revoke --user PRINCIPAL_ID
 
 Omitted grant flags remove those rights. Credential rights are intersected with
 the current grant, so increasing rights may require issuing a new credential.
-The `--remote` form revokes membership in that connection's collection. For
-server-wide revocation, stop the server and use
-`ctx server --root PATH revoke --user PRINCIPAL_ID`; it refuses while the root
-is busy rather than silently narrowing its scope. Revocation prevents future
-access; it cannot retract copies already retrieved.
+The `--remote` form above revokes membership in that connection's collection.
+Revocation prevents future access; it cannot retract copies already retrieved.
+
+Ordinary device credentials are bound to one collection. Giving the same person
+access to another collection does not make an existing device credential work
+there; issue a separate invitation for that collection. Collection management
+does not grant server-owner authority.
+
+## Add or replace a device
+
+The server owner can list users and issue an invitation for an existing ID:
+
+```sh
+ctx server user list
+ctx server invite --user USER_ID
+```
+
+The person can also use `ctx server --remote team invite --user USER_ID` with the
+ID shown by `ctx remote status team`. Match their existing rights: add `--read-only`
+for a reader or `--publish-only` for a publisher without read access.
+Collection managers can invite new people, but cannot issue devices
+as other existing users. An existing-user invitation preserves that person's
+identity and grants; it does not broaden their access.
+
+For a script, connect using the protected invitation file:
+
+```sh
+ctx remote connect https://history.example.com --name team \
+  --enrollment-file ./invitation.json
+```
+
+Repeating a successfully saved invitation reports `already_connected` without
+redeeming it again. This confirms the local setup, not that the server is online
+or the credential is still valid; use `ctx remote status team --online` to check.
+A fresh invitation for the same user rotates the saved credential while retaining
+the sharing selection and upload queue. A different user or server is rejected
+instead of inheriting that selection. Use a new connection name for another
+identity or destination.
+
+Replacing this client's credential does not revoke the old credential. Revoke
+it separately when retiring or replacing a device.
+
+`--read-only` removes local publishing access and pauses any saved sharing policy
+without discarding queued work. Reconnecting with publishing access does not
+silently resume a paused policy.
+
+Server owners can inspect and revoke access while the server is running:
+
+```sh
+ctx server user credentials USER_ID
+ctx server revoke --credential CREDENTIAL_ID
+ctx server revoke --user USER_ID
+```
+
+The root-selected form revokes the user across the server. Through an explicitly
+named owner connection, add `--server-wide` to
+`ctx server --remote team revoke --user USER_ID`; without it, that command removes
+only the collection's membership. Revoking a single credential leaves other
+devices working. Revoking a user blocks all their devices and outstanding
+invitations.
+
+Inventory lists IDs, optional labels, scope, expiry and revocation state, never
+secrets. Follow `next_cursor` with `--after CURSOR` to read subsequent pages.
+If an invitation was consumed but its response could not be saved, run
+`ctx server user credentials USER_ID --format=json`. Match `enrollment_id` to the
+invitation's ID, revoke that row's `credential_id`, and issue a fresh invitation
+for the same user. Invitations cannot be replayed to recover a secret.
+
+Scripts and device-management systems can deliver invitation files and run the
+same connect command. There is no shared fleet-wide enrollment secret, automatic
+history selection, or built-in identity-provider integration in this beta.
 
 ## Select history explicitly
 

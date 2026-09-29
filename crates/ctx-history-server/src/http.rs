@@ -32,6 +32,14 @@ pub fn router(server: Arc<HistoryServer>) -> Router {
             get(|| async { Json(serde_json::json!({"alive":true})) }),
         )
         .route("/v1/enroll", post(enroll))
+        .route("/v1/principals", get(principals))
+        .route("/v1/principals/{principal}/credentials", get(credentials))
+        .route("/v1/principals/{principal}/revoke", post(revoke_principal))
+        .route(
+            "/v1/credentials/{credential_id}/revoke",
+            post(revoke_credential),
+        )
+        .route("/v1/collections/{collection}/whoami", get(whoami))
         .route("/v1/collections/{collection}/invite", post(invite))
         .route("/v1/collections/{collection}/grants", post(grants))
         .route(
@@ -240,6 +248,58 @@ async fn revoke(
     let token = bearer(&headers)?;
     blocking(state, move |server| {
         server.revoke_member(&token, &collection, &principal)?;
+        Ok(serde_json::json!({}))
+    })
+    .await
+}
+async fn whoami(
+    State(state): State<HttpState>,
+    Path(collection): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ConnectionIdentity>> {
+    let token = bearer(&headers)?;
+    blocking(state, move |server| server.whoami(&token, &collection)).await
+}
+async fn principals(
+    State(state): State<HttpState>,
+    Query(request): Query<AccessListRequest>,
+    headers: HeaderMap,
+) -> Result<Json<PrincipalPage>> {
+    let token = bearer(&headers)?;
+    blocking(state, move |server| server.list_principals(&token, request)).await
+}
+async fn credentials(
+    State(state): State<HttpState>,
+    Path(principal): Path<String>,
+    Query(request): Query<AccessListRequest>,
+    headers: HeaderMap,
+) -> Result<Json<CredentialPage>> {
+    let token = bearer(&headers)?;
+    blocking(state, move |server| {
+        server.list_credentials(&token, &principal, request)
+    })
+    .await
+}
+async fn revoke_principal(
+    State(state): State<HttpState>,
+    Path(principal): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>> {
+    let token = bearer(&headers)?;
+    blocking(state, move |server| {
+        server.admin_revoke_principal(&token, &principal)?;
+        Ok(serde_json::json!({}))
+    })
+    .await
+}
+async fn revoke_credential(
+    State(state): State<HttpState>,
+    Path(credential_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>> {
+    let token = bearer(&headers)?;
+    blocking(state, move |server| {
+        server.admin_revoke_credential(&token, &credential_id)?;
         Ok(serde_json::json!({}))
     })
     .await

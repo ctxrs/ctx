@@ -4,11 +4,14 @@
 //! The caller explicitly selects a data root. Opening this library never enables
 //! provider capture, a listener, telemetry, upgrades, or external model calls.
 
+mod access;
 mod admission;
 mod auth;
 mod catalog;
 mod http;
+mod identity;
 mod inventory;
+mod migration;
 mod operations;
 mod projection;
 mod publication;
@@ -17,11 +20,15 @@ mod recovery;
 mod storage;
 mod types;
 
+pub use access::{
+    AccessListRequest, CredentialEntry, CredentialPage, PrincipalEntry, PrincipalPage,
+};
 pub use auth::{
     write_token_file, BootstrapInfo, EnrollRequest, EnrollmentFile, GrantRequest, InviteRequest,
     PublicationState, TokenFile,
 };
 pub use http::{router, serve, serve_blocking, serve_blocking_with_ready};
+pub use identity::ConnectionIdentity;
 pub use inventory::{PublicationEntry, PublicationListRequest, PublicationPage};
 pub use operations::{
     publish_fingerprint, CancelPublishOutcome, CancelPublishRequest, CancelPublishResponse,

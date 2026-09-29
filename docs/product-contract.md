@@ -18,7 +18,7 @@ neither.
 
 - `ctx archive` exports, verifies and restores retained normalized history into
   an archive-owned local root, independently of native provider files.
-- `ctx server` runs an optional single-node history server with collection
+- `ctx server` runs an opt-in beta single-node history server with collection
   read/publish/manage grants, durable upload receipts and exact citations.
 - `ctx remote` saves named connections and explicit sharing policies. An enabled
   local daemon publishes eligible revisions; `--server NAME` selects remote

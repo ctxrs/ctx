@@ -73,7 +73,7 @@ impl HistoryServer {
 
     /// Restore a finalized checkpoint to a fresh root, private to a new owner.
     /// The protected TokenFile selects the first restored collection. Its single
-    /// credential is valid for every restored collection through its owner's grants.
+    /// credential explicitly owns the server and can access every restored collection.
     /// All old credentials,
     /// enrollments and grants are discarded; old principals stay revoked for
     /// provenance. Existing owner identities and exact citation evidence remain.
@@ -103,7 +103,7 @@ impl HistoryServer {
         let connection =
             Connection::open_with_flags(&catalog_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let version: u32 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version != 1 {
+        if !matches!(version, 1 | 2) {
             return Err(Error::Invalid("unsupported hosted catalog version"));
         }
         let collections = connection
@@ -131,15 +131,18 @@ impl HistoryServer {
         }
         let mut restored = Connection::open(&restored_catalog)?;
         restored.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
+        if version == 1 {
+            crate::migration::migrate(&restored, None)?;
+        }
         let tx = restored.transaction()?;
         tx.execute_batch(
             "DELETE FROM credentials; DELETE FROM enrollments; DELETE FROM grants;
-             DELETE FROM uploads; UPDATE principals SET revoked=1;
+             DELETE FROM uploads; UPDATE principals SET revoked=1,server_owner=0;
              INSERT OR IGNORE INTO pending SELECT collection,sequence FROM operations WHERE terminal='accepted';",
         )?;
         let principal = uuid::Uuid::new_v4().to_string();
         tx.execute(
-            "INSERT INTO principals(id,name) VALUES (?1,'Recovery owner')",
+            "INSERT INTO principals(id,name,server_owner) VALUES (?1,'Recovery owner',1)",
             [&principal],
         )?;
         tx.execute(
@@ -149,11 +152,14 @@ impl HistoryServer {
         let credential = insert_credential(
             &tx,
             &principal,
+            None,
+            None,
             Grants {
                 read: true,
                 publish: true,
                 manage: true,
             },
+            0,
             0,
         )?;
         catalog::audit(&tx, "restore_checkpoint", Some(&principal), None)?;
@@ -161,6 +167,7 @@ impl HistoryServer {
         drop(restored);
         File::open(&restored_catalog)?.sync_all()?;
         let tokens = TokenFile {
+            enrollment_id: None,
             principal: principal.clone(),
             collection: default_collection,
             credential,

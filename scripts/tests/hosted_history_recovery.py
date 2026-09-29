@@ -19,7 +19,7 @@ def recovered_owner(h, checkpoint, label):
     h.tokens[label] = token
     h.users[label] = document["principal"]
     h.start_server(root)
-    for old in ("alice", "bob", "carol", "dana", "erin"):
+    for old in ("alice", "bob", "carol", "dana", "erin", "erin-restricted"):
         for collection in (h.team, h.restricted):
             h.deny("GET", h.route(collection, "search?q=beacon"), h.tokens[old])
             h.deny("POST", h.route(collection, "uploads"), h.tokens[old],

@@ -1,10 +1,11 @@
 use std::{io::Read, time::Duration};
 
 use ctx_history_server::{
-    CancelPublishRequest, CancelPublishResponse, CollectionStatus, EnrollRequest, EnrollmentFile,
-    GrantRequest, HostedEvent, InviteRequest, PublicationListRequest, PublicationPage,
-    PublicationState, PublishRequest, Receipt, SearchResponse, SessionPage, TokenFile, UploadSpec,
-    UploadStatus, WithdrawRequest,
+    AccessListRequest, CancelPublishRequest, CancelPublishResponse, CollectionStatus,
+    ConnectionIdentity, CredentialPage, EnrollRequest, EnrollmentFile, GrantRequest, HostedEvent,
+    InviteRequest, PrincipalPage, PublicationListRequest, PublicationPage, PublicationState,
+    PublishRequest, Receipt, SearchResponse, SessionPage, TokenFile, UploadSpec, UploadStatus,
+    WithdrawRequest,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use url::Url;
@@ -73,6 +74,63 @@ impl RemoteClient {
 
     pub fn invite(&self, request: &InviteRequest) -> Result<EnrollmentFile> {
         self.admin_post(self.url(&["invite"])?, request)
+    }
+
+    /// Authenticate the credential used for publishing, or the read credential
+    /// on a reader-only connection. The server owns identity and scope checks.
+    pub fn whoami(&self) -> Result<ConnectionIdentity> {
+        self.get(self.url(&["whoami"])?, self.credentials.publish().is_ok())
+    }
+
+    pub fn list_principals(&self, request: &AccessListRequest) -> Result<PrincipalPage> {
+        let url = self.connection.endpoint.route(&["v1", "principals"])?;
+        self.access_page(url, request)
+    }
+
+    pub fn list_credentials(
+        &self,
+        principal: &str,
+        request: &AccessListRequest,
+    ) -> Result<CredentialPage> {
+        let url =
+            self.connection
+                .endpoint
+                .route(&["v1", "principals", principal, "credentials"])?;
+        self.access_page(url, request)
+    }
+
+    pub fn admin_revoke_principal(&self, principal: &str) -> Result<()> {
+        let url = self
+            .connection
+            .endpoint
+            .route(&["v1", "principals", principal, "revoke"])?;
+        let _: serde_json::Value = self.admin_post(url, &serde_json::json!({}))?;
+        Ok(())
+    }
+
+    pub fn admin_revoke_credential(&self, credential_id: &str) -> Result<()> {
+        let url =
+            self.connection
+                .endpoint
+                .route(&["v1", "credentials", credential_id, "revoke"])?;
+        let _: serde_json::Value = self.admin_post(url, &serde_json::json!({}))?;
+        Ok(())
+    }
+
+    fn access_page<T: DeserializeOwned>(
+        &self,
+        mut url: Url,
+        request: &AccessListRequest,
+    ) -> Result<T> {
+        if !(1..=100).contains(&request.limit) {
+            return Err(Error::InvalidConfig);
+        }
+        url.query_pairs_mut()
+            .append_pair("limit", &request.limit.to_string());
+        if let Some(after) = &request.after {
+            url.query_pairs_mut().append_pair("after", after);
+        }
+        self.get(url, self.credentials.publish().is_ok())
     }
 
     pub fn grant(&self, request: &GrantRequest) -> Result<()> {

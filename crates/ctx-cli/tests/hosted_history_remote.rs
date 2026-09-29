@@ -333,7 +333,7 @@ fn running_server_invite_share_search_pause_and_revoke_use_one_connection_contra
 }
 
 #[test]
-fn new_enrollment_cannot_reuse_sharing_policy_but_token_rotation_keeps_it() {
+fn different_user_enrollment_cannot_reuse_policy_but_same_user_rotation_keeps_it() {
     let operator = Sandbox::new();
     let bootstrap = operator.init();
     success(
@@ -396,6 +396,32 @@ fn new_enrollment_cannot_reuse_sharing_policy_but_token_rotation_keeps_it() {
             .arg("--format=json"),
     );
     assert_eq!(rotation["local"]["enabled"], true);
+    assert_eq!(rotation["principal"], bootstrap["principal"]);
+    let same_user = success(operator.server().args([
+        "invite",
+        "--user",
+        bootstrap["principal"].as_str().unwrap(),
+        "--format=json",
+    ]));
+    let enrolled = success(member.command().args([
+        "remote",
+        "connect",
+        &server.endpoint,
+        "--enrollment-file",
+        same_user["file"].as_str().unwrap(),
+        "--format=json",
+    ]));
+    assert_eq!(enrolled["already_connected"], false);
+    assert_eq!(enrolled["local"]["enabled"], true);
+    let repeated = success(member.command().args([
+        "remote",
+        "connect",
+        &server.endpoint,
+        "--enrollment-file",
+        same_user["file"].as_str().unwrap(),
+        "--format=json",
+    ]));
+    assert_eq!(repeated["already_connected"], true);
     let invitation = success(
         operator
             .server()
@@ -411,10 +437,11 @@ fn new_enrollment_cannot_reuse_sharing_policy_but_token_rotation_keeps_it() {
         path,
         "--format=json",
     ]));
+    assert_eq!(error["error"]["code"], "credentials");
     assert!(error["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("remote remove team"));
+        .contains("same user"));
     assert_eq!(
         std::fs::read(member.path("history/sharing/team/settings.json")).unwrap(),
         before
@@ -509,7 +536,8 @@ fn enrollment_destination_checks_precede_redemption_and_read_scope_is_authoritat
                 .server()
                 .args(["invite", "new-reader", "--read-only", "--format=json"]),
         );
-    let reconnected = success(member.command().args([
+    let before = std::fs::read(member.path("history/sharing/team/settings.json")).unwrap();
+    let error = failure(member.command().args([
         "remote",
         "connect",
         &server.endpoint,
@@ -517,7 +545,37 @@ fn enrollment_destination_checks_precede_redemption_and_read_scope_is_authoritat
         replacement["file"].as_str().unwrap(),
         "--format=json",
     ]));
+    assert_eq!(error["error"]["code"], "credentials");
+    assert_eq!(
+        std::fs::read(member.path("history/sharing/team/settings.json")).unwrap(),
+        before
+    );
+    let same_user = success(operator.server().args([
+        "invite",
+        "--user",
+        invitation["user"].as_str().unwrap(),
+        "--read-only",
+        "--format=json",
+    ]));
+    let reconnected = success(member.command().args([
+        "remote",
+        "connect",
+        &server.endpoint,
+        "--enrollment-file",
+        same_user["file"].as_str().unwrap(),
+        "--format=json",
+    ]));
+    assert_eq!(reconnected["already_connected"], false);
     assert_eq!(reconnected["local"]["enabled"], false);
+    let fresh_reader = Sandbox::new();
+    success(fresh_reader.command().args([
+        "remote",
+        "connect",
+        &server.endpoint,
+        "--enrollment-file",
+        replacement["file"].as_str().unwrap(),
+        "--format=json",
+    ]));
     member.assert_no_local_index();
 }
 

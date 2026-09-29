@@ -164,7 +164,8 @@ async fn recovered_manager_can_review_more_than_a_hundred_publications_across_co
             &owner.secret,
             &admin.collection,
             InviteRequest {
-                name: "reader".into(),
+                principal: None,
+                name: Some("reader".into()),
                 grants: Grants {
                     read: true,
                     publish: false,
@@ -262,7 +263,8 @@ async fn status_identifies_the_presented_credential_including_publish_only_and_r
             &admin.credential.secret,
             &admin.collection,
             InviteRequest {
-                name: "publisher".into(),
+                principal: None,
+                name: Some("publisher".into()),
                 grants: publish,
                 enrollment_ttl_seconds: 600,
                 credential_ttl_seconds: 3600,
@@ -271,7 +273,7 @@ async fn status_identifies_the_presented_credential_including_publish_only_and_r
         .unwrap();
     let publisher = server.redeem(&invitation.enrollment.secret).unwrap();
     let replacement = server
-        .issue_credential(&publisher.principal, publish, 3600)
+        .issue_credential(&publisher.principal, &admin.collection, publish, 3600)
         .unwrap();
     for token in [&publisher.credential.secret, &replacement.secret] {
         let status = server.status(token, &admin.collection).unwrap();
@@ -289,7 +291,8 @@ async fn status_identifies_the_presented_credential_including_publish_only_and_r
             &admin.credential.secret,
             &admin.collection,
             InviteRequest {
-                name: "other publisher".into(),
+                principal: None,
+                name: Some("other publisher".into()),
                 grants: publish,
                 enrollment_ttl_seconds: 600,
                 credential_ttl_seconds: 3600,
@@ -465,7 +468,8 @@ fn recovery_inventory_exposes_all_retained_revisions_and_removal_hides_them_toge
             &owner.secret,
             collection,
             InviteRequest {
-                name: "reader after review".into(),
+                principal: None,
+                name: Some("reader after review".into()),
                 grants: Grants {
                     read: true,
                     publish: false,
