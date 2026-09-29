@@ -149,6 +149,7 @@ fn help_exposes_session_retrieval_commands() {
     for expected in [
         "blame",
         "setup",
+        "data-root",
         "semantic",
         "status",
         "stats",

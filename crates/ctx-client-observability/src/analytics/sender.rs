@@ -512,6 +512,7 @@ fn insert_client_operation_properties(
             insert_optional_bool(properties, "healthy", value.healthy);
         }
         CliOperation::Graph
+        | CliOperation::DataRoot
         | CliOperation::Output
         | CliOperation::Stats
         | CliOperation::McpServe

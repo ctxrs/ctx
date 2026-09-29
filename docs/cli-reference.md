@@ -17,7 +17,10 @@ CTX_QUIET=1 ctx status
 
 `--data-root` overrides the default agent-history root only. The environment
 variable `CTX_DATA_ROOT` provides the same value. The root is used directly; ctx
-does not append another product directory. Graph databases use `ctx graph --db`;
+does not append another product directory. This override does not relocate the
+managed installation or transfer ownership of its native supervisor. See
+[moving the managed root](storage.md#moving-the-managed-root) for a persistent
+change shared by the CLI and background processes. Graph databases use `ctx graph --db`;
 output config and state use `CTX_OUTPUT_CONFIG_DIR` and `CTX_OUTPUT_STATE_DIR`.
 
 `--quiet` suppresses successful human status/onboarding output for `setup` and

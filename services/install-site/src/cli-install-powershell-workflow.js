@@ -95,6 +95,7 @@ if ($null -ne $semanticSearchControlValue) {
         Fail "CTX_SEARCH_SEMANTIC must be a canonical boolean"
     }
 }
+$applyPersistedConfigControls = {
 if (-not $semanticEnabled -and
     $semanticSearchControl -ne "false" -and
     $persistedConfigControls.SemanticEnabled) {
@@ -108,6 +109,8 @@ $daemonEnabled = -not $setupNoDaemon -and -not $daemonConfigurationDisabled
 if ($semanticEnabled -and -not $daemonEnabled) {
     Fail "Semantic installation requires an enabled daemon; remove installer no-daemon controls, clear daemon-disable environment controls, or set [daemon] enabled = true"
 }
+}
+. $applyPersistedConfigControls
 
 $installPath = Join-Path $BinDir "ctx.exe"
 $markerPath = "$installPath.install.json"
@@ -206,6 +209,13 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
         Fail "checksum mismatch for \${artifact}: expected $checksum, got $actualChecksum"
     }
     ${renderCliInstallPowerShellManagedPairDownload()}
+    if ($releasePhase -ceq "final" -and $persistedConfigControls.Deferred) {
+        $persistedConfigControls = Get-PersistedConfigControls -Resolver $downloadPath
+        . $applyPersistedConfigControls
+        if ($explicitMetadata -and $semanticEnabled) {
+            Fail "explicit metadata cannot authorize Semantic repair through the installed release; use the default installer feed"
+        }
+    }
 
     $marker = [ordered]@{
         schema_version = 1

@@ -42,6 +42,7 @@ pub use status::{
 };
 pub use supervisor::{
     DaemonSupervisorStart, DaemonSupervisorUpgradeFence, DaemonSupervisorUpgradeResume,
+    ManagedRootSupervisor,
 };
 
 /// Narrow boundary for product-specific operations around neutral lifecycle
@@ -192,8 +193,34 @@ impl<'a> DaemonApplication<'a> {
         Self { host }
     }
 
+    pub fn capture_managed_root_supervisor(
+        &self,
+        source: &Path,
+    ) -> Result<(
+        ManagedRootSupervisor,
+        ctx_daemon_runtime::SupervisorInstallationLock,
+    )> {
+        ManagedRootSupervisor::capture_locked(self.host, source)
+    }
+
+    pub fn resume_managed_root_supervisor(
+        &self,
+        destination: &Path,
+        snapshot: &ManagedRootSupervisor,
+    ) -> Result<()> {
+        snapshot.resume(self.host, destination)
+    }
+
     pub fn ensure_daemon_supervisor(&self, data_root: &Path) -> Result<DaemonSupervisorStart> {
         supervisor::ensure_daemon_supervisor(self.host, data_root)
+    }
+
+    pub fn disable_managed_root_supervisor(
+        &self,
+        data_root: &Path,
+        installation_lock: &ctx_daemon_runtime::SupervisorInstallationLock,
+    ) -> Result<()> {
+        supervisor::disable_managed_root_supervisor(self.host, data_root, installation_lock)
     }
 
     pub fn disable_daemon_supervisor(&self, data_root: &Path) -> Result<()> {

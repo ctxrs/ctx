@@ -1769,8 +1769,11 @@ version = "2.1.3"
 dependencies = [
  "dirs",
  "libc",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 

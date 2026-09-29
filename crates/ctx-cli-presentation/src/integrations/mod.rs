@@ -134,6 +134,10 @@ enum IntegrationStatusTarget {
 }
 
 impl IntegrationsArgs {
+    pub fn is_status(&self) -> bool {
+        matches!(self.command, IntegrationCommand::Status(_))
+    }
+
     pub fn json_output(&self) -> bool {
         match &self.command {
             IntegrationCommand::Install(args) => match &args.target {

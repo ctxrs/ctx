@@ -151,6 +151,14 @@ metadata_url="$final_metadata_url"
 metadata_signature_url="$final_metadata_signature_url"
 load_release_phase_metadata
 download_release_phase_artifacts
+if [ "$persisted_config_deferred" = "1" ]; then
+  chmod 700 "$artifact_path"
+  load_persisted_config_controls "$artifact_path"
+  apply_persisted_config_controls
+  if [ "$explicit_metadata" = "1" ] && [ "$semantic_enabled" = "1" ]; then
+    fail "explicit metadata cannot authorize Semantic repair through the installed release; use the default installer feed"
+  fi
+fi
 publish_release_phase
 `;
 }

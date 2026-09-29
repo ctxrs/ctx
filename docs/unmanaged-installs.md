@@ -35,9 +35,9 @@ ctx daemon disable --prepare-uninstall --format=json
 This hidden compatibility command is reserved for the installation-wide
 uninstall handoff; it is not the public indexing-mode control. Use
 `ctx index mode auto` or `ctx index mode manual` for normal indexing
-configuration. Daemon lifecycle and supervisor coordination is unified under
-the canonical `~/.ctx` root. The handoff applies even when `CTX_DATA_ROOT` or
-`--data-root` selects a custom history root. It disables and quiesces every
+configuration. Daemon lifecycle and supervisor coordination share the persisted
+managed root, which defaults to `~/.ctx`. The handoff applies even when
+`CTX_DATA_ROOT` or `--data-root` selects a custom history root. It disables and quiesces every
 registered daemon root, removes the singleton native supervisor, releases
 owner locks and endpoints, and retains the executable and history data. Do not
 replace or remove the executable unless the command exits successfully and its

@@ -11,7 +11,6 @@ use ctx_history_platform::platform_security::{
     verify_private_file,
 };
 use fs2::FileExt as _;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -19,13 +18,9 @@ const DEVICE_FILE: &str = "device.json";
 const INSTALLATION_ID_FILE: &str = "install.json";
 const MAX_INSTALLATION_IDENTITY_BYTES: u64 = 1024;
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct InstallationIdentityRecord {
-    schema_version: u16,
-    install_id: String,
-    created_at: String,
-}
+use ctx_history_platform::installation_identity::{
+    validate_installation_record, InstallationIdentityRecord,
+};
 
 /// Loads or creates the one opaque identity owned by this ctx data root.
 ///
@@ -176,20 +171,7 @@ fn access_locked_identity(
     }
     let record: InstallationIdentityRecord =
         serde_json::from_slice(&body).context("parse installation identity")?;
-    validate_installation_record(record)
-}
-
-fn validate_installation_record(record: InstallationIdentityRecord) -> Result<String> {
-    let parsed = Uuid::parse_str(&record.install_id).context("parse opaque installation ID")?;
-    if record.schema_version != 1
-        || parsed.is_nil()
-        || parsed.hyphenated().to_string() != record.install_id
-        || record.created_at.is_empty()
-        || record.created_at.len() > 128
-    {
-        bail!("installation identity record is invalid");
-    }
-    Ok(record.install_id)
+    Ok(validate_installation_record(record)?)
 }
 
 #[cfg(unix)]

@@ -74,7 +74,7 @@ const SUPERVISOR_DAEMON_FIXED_PATH: &str = if cfg!(windows) {
 
 // This launch-only subset intentionally lives here so lifecycle policy does
 // not acquire a history-capture or provider-discovery dependency.
-const DISCOVERY_ENV_ALLOWLIST: &[&str] = &[
+pub(super) const DISCOVERY_ENV_ALLOWLIST: &[&str] = &[
     "APPDATA",
     "ASTRBOT_ROOT",
     "CLAUDE_CONFIG_DIR",

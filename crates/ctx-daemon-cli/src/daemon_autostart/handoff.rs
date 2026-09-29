@@ -10,8 +10,8 @@ use ctx_daemon_runtime::{
 
 mod uninstall;
 
-pub use uninstall::prepare_daemon_uninstall;
 use uninstall::wait_for_daemon_lifecycle_release;
+pub use uninstall::{prepare_daemon_uninstall, quiesce_managed_root_move, ManagedRootQuiescence};
 
 struct CurrentHandoffSupervisorFence<'a> {
     handoff: &'a mut DaemonUpgradeHandoff,

@@ -961,6 +961,12 @@ fi
 
 validate_managed_install
 load_installed_cli_version
+if [ -z "\${CTX_DATA_ROOT:-}" ] &&
+   { [ -e "$home_dir/.ctx-control/data-root.json" ] || [ -L "$home_dir/.ctx-control/data-root.json" ]; }; then
+  data_dir="$("$install_path" data-root show)" ||
+    fail "could not resolve the managed data root; ctx remains installed"
+  case "$data_dir" in /*) ;; *) fail "ctx returned an invalid managed data root" ;; esac
+fi
 if installed_cli_is_unified && [ "$data_choice" = "--delete-data" ]; then
   fail "--delete-data was legacy derived-data cleanup and is retired in ctx 1.5. History and legacy data are preserved; rerun without --delete-data"
 fi

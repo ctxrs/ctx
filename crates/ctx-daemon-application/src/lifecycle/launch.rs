@@ -47,7 +47,14 @@ fn daemon_autostart_command_with_environment_overrides(
         args.push(OsString::from("--loop-interval-seconds"));
         args.push(OsString::from(loop_interval.to_string()));
     }
-    let mut environment = daemon_child_environment();
+    let environment_path = ctx_daemon_runtime::supervisor_environment_path(data_root);
+    let mut environment =
+        if profile == DaemonLaunchProfile::Persistent && environment_path.try_exists()? {
+            ctx_daemon_runtime::read_supervisor_environment(&environment_path)
+                .map_err(io::Error::other)?
+        } else {
+            daemon_child_environment()
+        };
     environment.insert(
         OsString::from(DAEMON_BACKGROUND_CHILD_ENV),
         OsString::from("1"),

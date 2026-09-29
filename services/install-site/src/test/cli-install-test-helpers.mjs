@@ -184,6 +184,16 @@ function runRenderedCliInstaller({
 
   let artifact = `#!/bin/sh
 fixture_version=9.9.9
+fixture_managed_root="$HOME/.ctx"
+if [ -f "$HOME/.ctx-control/data-root.json" ]; then
+  fixture_managed_root="$HOME/relocated data"
+fi
+if [ "\${1-}" = "data-root" ] && [ "\${2-}" = "show" ]; then
+  printf '%s\\n' 'data-root show' >> "$CTX_FAKE_CTX_COMMAND_LOG"
+  [ "\${CTX_FAKE_MANAGED_ROOT_UNAVAILABLE:-0}" != "1" ] || exit 1
+  printf '%s\\n' "$fixture_managed_root"
+  exit 0
+fi
 hosted_transaction_command=0
 if [ "\${1-}" = "upgrade" ] && [ "\${2-}" = "--hosted-transaction" ]; then
   hosted_transaction_command=1
@@ -386,9 +396,10 @@ if [ "$#" = "5" ] && [ "\${1-}" = "--data-root" ] &&
   exec "$CTX_FAKE_NODE" "$CTX_FAKE_LEGACY_INDEXING_FIXTURE" read "$2"
 fi
 if [ "$#" = "6" ] && [ "\${1-}" = "--data-root" ] &&
-   [ "\${2-}" = "$CTX_DATA_ROOT" ] && [ "\${3-}" = "daemon" ] &&
+   [ "\${2-}" = "\${CTX_DATA_ROOT:-$fixture_managed_root}" ] && [ "\${3-}" = "daemon" ] &&
    [ "\${4-}" = "disable" ] && [ "\${5-}" = "--prepare-uninstall" ] &&
    [ "\${6-}" = "--format=json" ]; then
+  CTX_DATA_ROOT="$2"
   if [ "\${CTX_FAKE_LEGACY_DISABLE_POLICY:-0}" = "1" ]; then
     "$CTX_FAKE_NODE" "$CTX_FAKE_LEGACY_INDEXING_FIXTURE" disable "$CTX_DATA_ROOT"
     if [ "$CTX_DATA_ROOT" != "$HOME/.ctx" ]; then
@@ -396,12 +407,12 @@ if [ "$#" = "6" ] && [ "\${1-}" = "--data-root" ] &&
     fi
   fi
   json_requested_root="$(printf '%s' "$CTX_DATA_ROOT" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')"
-  json_canonical_root="$(printf '%s' "$HOME/.ctx" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')"
-  if [ "$CTX_DATA_ROOT" = "$HOME/.ctx" ]; then
-    quiesced_roots="    \\"$json_requested_root\\""
+  json_canonical_root="$(printf '%s' "$fixture_managed_root" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')"
+  if [ "$CTX_DATA_ROOT" = "$fixture_managed_root" ]; then
+    quiesced_roots="$(printf '    "%s"' "$json_requested_root")"
     quiesced_root_count=1
   else
-    quiesced_roots="$(printf '    \\"%s\\",\\n    \\"%s\\"' "$json_requested_root" "$json_canonical_root")"
+    quiesced_roots="$(printf '    "%s",\\n    "%s"' "$json_requested_root" "$json_canonical_root")"
     quiesced_root_count=2
   fi
   cat <<EOF
@@ -1097,7 +1108,7 @@ esac
   };
 }
 
-function runHostedUninstallForInstallerFixture(fixture, args = ["--keep-data"]) {
+function runHostedUninstallForInstallerFixture(fixture, args = ["--keep-data"], envOverrides = {}) {
   const marker = JSON.parse(readFileSync(path.join(fixture.installBin, "ctx.install.json"), "utf8"));
   const uninstallPath = path.join(fixture.sandbox, "uninstall.sh");
   writeFileSync(
@@ -1117,6 +1128,7 @@ function runHostedUninstallForInstallerFixture(fixture, args = ["--keep-data"]) 
       )).integrations_path ?? "",
       CTX_DATA_ROOT: fixture.dataRoot,
       CTX_FAKE_LEGACY_DISABLE_POLICY: /^(1\.|2\.0\.)/.test(marker.version) ? "1" : "0",
+      ...envOverrides,
     },
   });
 }

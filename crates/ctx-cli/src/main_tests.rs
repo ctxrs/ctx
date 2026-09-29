@@ -163,7 +163,7 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
     // and Sift owns its subcommands.
     assert_eq!(
         paths.len(),
-        130,
+        133,
         "unexpected public CLI grammar depth: {paths:?}"
     );
 

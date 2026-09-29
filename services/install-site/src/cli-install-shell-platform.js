@@ -103,11 +103,24 @@ metadata_value_optional() {
 load_persisted_config_controls() {
   persisted_semantic_enabled=0
   persisted_daemon_disabled=0
+  persisted_config_deferred=0
   if [ -n "\${CTX_DATA_ROOT:-}" ]; then
     persisted_config_file="\${CTX_DATA_ROOT%/}/config.toml"
   else
     [ -n "\${HOME:-}" ] || return 0
-    persisted_config_file="\${HOME%/}/.ctx/config.toml"
+    if [ -n "\${1:-}" ]; then
+      persisted_root="$("$1" data-root show)" ||
+        fail "could not resolve the managed data root; restore its filesystem and retry"
+      case "$persisted_root" in /*) ;; *) fail "ctx returned an invalid managed data root" ;; esac
+      persisted_config_file="$persisted_root/config.toml"
+    elif [ -e "$HOME/.ctx-control/data-root.json" ] || [ -L "$HOME/.ctx-control/data-root.json" ]; then
+      # The verified candidate owns locator validation, including reinstall
+      # after the old executable has been removed. Do not parse it in shell.
+      persisted_config_deferred=1
+      return 0
+    else
+      persisted_config_file="\${HOME%/}/.ctx/config.toml"
+    fi
   fi
   [ -f "$persisted_config_file" ] || return 0
 

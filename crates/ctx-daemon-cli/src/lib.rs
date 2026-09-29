@@ -341,8 +341,8 @@ pub use daemon_autostart::{
     begin_daemon_upgrade_handoff_for_installation, complete_replacement_daemon_handoff,
     daemon_autostart_suppression_reason, finish_replacement_daemon_handoff,
     mark_replacement_helper_handoff, maybe_autostart_daemon, observe_daemon_for_setup_and_wait,
-    restart_daemon_with_current_environment_and_wait, DaemonHandoff, DaemonSetupHandoff,
-    DaemonUpgradeHandoff,
+    quiesce_managed_root_move, restart_daemon_with_current_environment_and_wait, DaemonHandoff,
+    DaemonSetupHandoff, DaemonUpgradeHandoff, ManagedRootQuiescence,
 };
 
 /// Persists the final-binary restart intent consumed only after daemon readiness.
@@ -361,3 +361,24 @@ pub fn daemon_restart_intent_pending(data_root: &std::path::Path) -> bool {
 mod health_search;
 #[cfg(test)]
 mod tests;
+
+/// Preserve private service launch settings independently of the invoking shell.
+pub fn capture_managed_root_supervisor(
+    source: &std::path::Path,
+) -> anyhow::Result<(
+    ctx_daemon_application::ManagedRootSupervisor,
+    ctx_daemon_runtime::SupervisorInstallationLock,
+)> {
+    daemon_supervisor::with_daemon_application(|application| {
+        application.capture_managed_root_supervisor(source)
+    })
+}
+
+pub fn resume_managed_root_supervisor(
+    destination: &std::path::Path,
+    snapshot: &ctx_daemon_application::ManagedRootSupervisor,
+) -> anyhow::Result<()> {
+    daemon_supervisor::with_daemon_application(|application| {
+        application.resume_managed_root_supervisor(destination, snapshot)
+    })
+}

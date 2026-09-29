@@ -977,3 +977,29 @@ fn explicit_root_is_noncanonical_when_managed_home_is_unavailable() {
     )
     .unwrap());
 }
+
+#[test]
+fn managed_root_manual_relocation_skips_absent_registration_but_requires_existing_removal(
+) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let backend = FakeSupervisorBackend::default();
+    backend.state.lock().unwrap().manager_unavailable = true;
+    let receipt = stored_supervisor_report(root);
+    relocation::disable_for_move_with(root, None, true, &receipt, &backend)?;
+    assert_eq!(backend.state.lock().unwrap().manager_probes, 0);
+    // Automatic policy is never evidence of an offline installation.
+    assert!(relocation::disable_for_move_with(root, None, false, &receipt, &backend).is_err());
+    let artifact = root.join("fake-native-registration");
+    fs::write(&artifact, "installed service")?;
+    assert!(relocation::disable_for_move_with(root, None, true, &receipt, &backend).is_err());
+    fs::remove_file(artifact)?;
+    // A surviving receipt is evidence even after its artifact was removed.
+    fs::create_dir(root.join("daemon"))?;
+    fs::write(root.join("daemon/supervisor.json"), "{}")?;
+    let active = json!({"kind": native_supervisor_kind(), "status": "ready"});
+    assert!(relocation::disable_for_move_with(root, None, true, &active, &backend).is_err());
+    assert!(relocation::disable_for_move_with(root, None, true, &receipt, &backend).is_err());
+    assert_eq!(backend.state.lock().unwrap().disables, 0);
+    Ok(())
+}

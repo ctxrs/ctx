@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-use crate::{PlatformError, Result};
+use crate::Result;
 
 pub fn default_data_root() -> Result<PathBuf> {
     if let Some(value) = env::var_os("CTX_DATA_ROOT") {
@@ -14,8 +14,7 @@ pub fn default_data_root() -> Result<PathBuf> {
 /// lifecycle. Custom command roots must never acquire the singleton native
 /// daemon supervisor merely by changing `CTX_DATA_ROOT`.
 pub fn managed_data_root() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or(PlatformError::MissingHome)?;
-    Ok(home.join(".ctx"))
+    crate::managed_root::resolve()
 }
 
 pub fn history_dir(root: PathBuf) -> PathBuf {

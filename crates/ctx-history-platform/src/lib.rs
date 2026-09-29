@@ -6,10 +6,17 @@ use thiserror::Error;
 pub enum PlatformError {
     #[error("could not determine a home directory for the default ctx data root")]
     MissingHome,
+    #[error("cannot use managed data-root authority {path}: {source}")]
+    ManagedRoot {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, PlatformError>;
 
+pub mod installation_identity;
+pub mod managed_root;
 pub mod paths;
 pub mod platform_security;
 mod process_resources;

@@ -132,6 +132,8 @@ pub(crate) enum CommandRoot {
     Blame(commands::blame::BlameArgs),
     #[command(about = "Create local ctx storage and index discovered history")]
     Setup(SetupArgs),
+    #[command(about = "Show or relocate the managed ctx data root")]
+    DataRoot(crate::data_root::DataRootArgs),
     #[command(about = "Manage local semantic search")]
     Semantic(SemanticArgs),
     #[command(about = "Show local ctx index and health status")]

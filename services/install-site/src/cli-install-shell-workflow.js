@@ -285,6 +285,7 @@ if [ "\${CTX_SEARCH_SEMANTIC+x}" = "x" ]; then
   esac
 fi
 
+apply_persisted_config_controls() {
 if [ "$semantic_enabled" != "1" ] &&
    [ "$semantic_search_control" != "false" ] &&
    [ "$persisted_semantic_enabled" = "1" ]; then
@@ -303,6 +304,8 @@ fi
 if [ "$semantic_enabled" = "1" ] && [ "$daemon_enabled" != "1" ]; then
   fail "Semantic installation requires an enabled daemon; remove installer no-daemon controls, clear daemon-disable environment controls, or set [daemon] enabled = true"
 fi
+}
+apply_persisted_config_controls
 
 ${renderCliInstallShellMarker({ stagingDogfoodMarker })}validate_existing_managed_install() {
   previous_marker="$install_path.install.json"

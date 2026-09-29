@@ -467,7 +467,8 @@ if ([string]::IsNullOrWhiteSpace($BinDir)) {
     $BinDir = Join-Path $HOME ".local\bin"
 }
 
-if ([string]::IsNullOrWhiteSpace($RuntimeDir)) {
+$runtimeDirIsDefault = [string]::IsNullOrWhiteSpace($RuntimeDir)
+if ($runtimeDirIsDefault) {
     $RuntimeDir = Join-Path $HOME ".ctx\runtime"
 }
 if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
@@ -688,6 +689,17 @@ try {
         if ($actualChecksum -ne $checksum.ToLowerInvariant()) {
             Fail "checksum mismatch for $artifact`: expected $checksum, got $actualChecksum"
         }
+    }
+
+    if ($runtimeDirIsDefault -and $installRuntime -and
+        -not [string]::IsNullOrWhiteSpace($runtimeArtifact) -and
+        $null -ne (Get-Item -LiteralPath (Join-Path $HOME '.ctx-control/data-root.json') -Force -ErrorAction SilentlyContinue)) {
+        $managedRoot = & $downloadPath data-root show
+        if ($LASTEXITCODE -ne 0 -or @($managedRoot).Count -ne 1 -or
+            -not [IO.Path]::IsPathRooted([string]$managedRoot)) {
+            Fail "could not resolve the managed data root"
+        }
+        $RuntimeDir = Join-Path ([string]$managedRoot) 'runtime'
     }
 
     $markerPath = "$installPath.install.json"

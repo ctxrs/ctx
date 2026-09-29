@@ -1,3 +1,4 @@
+use ctx_history_platform::managed_root::DataRootSelection;
 use std::{io, path::PathBuf};
 
 use anyhow::Result;
@@ -50,26 +51,30 @@ struct McpServeArgs {
     graph_db: Option<PathBuf>,
 }
 
-pub(crate) fn run(args: McpArgs, data_root: PathBuf) -> Result<()> {
+pub(crate) fn run(args: McpArgs, data_root: DataRootSelection) -> Result<()> {
     match args.command {
         McpCommand::Serve(args) => serve_stdio(data_root, args.graph_db),
     }
 }
 
-fn serve_stdio(data_root: PathBuf, graph_db: Option<PathBuf>) -> Result<()> {
+fn serve_stdio(data_root: DataRootSelection, graph_db: Option<PathBuf>) -> Result<()> {
     let graph_db = graph_database_at_startup(graph_db);
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdin = stdin.lock();
     let mut stdout = stdout.lock();
-    let mut control =
-        crate::observability_composition::LocalUsageControlAuthority::new(data_root.clone());
+    let mut control = crate::observability_composition::LocalUsageControlAuthority::new(
+        data_root.path().to_path_buf(),
+    );
     let recorder = McpUsageRecorder::start(
-        crate::observability_composition::local_usage_storage_authority(&data_root),
+        crate::observability_composition::local_usage_storage_authority(data_root.path()),
         move || control.snapshot(),
     );
-    let mut usage = LocalUsagePort { recorder };
-    let backend = LocalToolBackend::new(data_root.clone()).with_graph_db(graph_db);
+    let mut usage = LocalUsagePort {
+        recorder,
+        data_root: data_root.clone(),
+    };
+    let backend = LocalToolBackend::from_selection(data_root.clone()).with_graph_db(graph_db);
     let telemetry = product_telemetry(data_root);
     serve_mcp_stdio(
         &mut stdin,
@@ -97,6 +102,7 @@ fn graph_database_at_startup(explicit: Option<PathBuf>) -> Result<Option<PathBuf
 
 struct LocalUsagePort {
     recorder: McpUsageRecorder,
+    data_root: DataRootSelection,
 }
 
 impl McpUsagePort for LocalUsagePort {
@@ -108,8 +114,13 @@ impl McpUsagePort for LocalUsagePort {
         encoded_response_bytes: usize,
         duration: std::time::Duration,
     ) {
+        let Some(operation) = observed_mcp_product_operation(operation) else {
+            return;
+        };
+        let Ok(_root_use) = self.data_root.acquire() else {
+            return;
+        };
         self.recorder.record_delivered(duration, || {
-            let operation = observed_mcp_product_operation(operation)?;
             let mut invocation = McpInvocation::from_operation(operation);
             invocation.bind_tool_usage(crate::observability_product::mcp_tool_usage(usage));
             let completion = crate::observability_product::mcp_completion_facts(
@@ -122,26 +133,35 @@ impl McpUsagePort for LocalUsagePort {
     }
 }
 
-fn product_telemetry(data_root: PathBuf) -> McpTelemetry {
-    let initial_config = config::AppConfig::load(&data_root).ok();
+fn product_telemetry(data_root: DataRootSelection) -> McpTelemetry {
+    let initial_config = data_root
+        .validate()
+        .ok()
+        .and_then(|()| config::AppConfig::load_read_only(data_root.path()).ok());
     let enabled = initial_config
         .as_ref()
         .is_some_and(|config| config.analytics.enabled);
     if initial_config
         .as_ref()
         .is_some_and(|config| !config.analytics.enabled)
+        && data_root.path().exists()
     {
-        crate::analytics::send_batch(&data_root, &[]);
+        if let Ok(_root_use) = data_root.acquire() {
+            crate::analytics::send_batch(data_root.path(), &[]);
+        }
     }
     McpTelemetry::start(enabled, move |events: &[PublicEventV1]| {
-        let Ok(config) = config::AppConfig::load(&data_root) else {
+        let Ok(_root_use) = data_root.acquire() else {
+            return Ok(());
+        };
+        let Ok(config) = config::AppConfig::load(data_root.path()) else {
             return Ok(());
         };
         if !config.analytics.enabled {
-            crate::analytics::send_batch(&data_root, &[]);
+            crate::analytics::send_batch(data_root.path(), &[]);
             return Ok(());
         }
-        crate::analytics::send_batch(&data_root, events);
+        crate::analytics::send_batch(data_root.path(), events);
         Ok(())
     })
 }

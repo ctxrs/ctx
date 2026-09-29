@@ -70,6 +70,8 @@ pub(super) fn run_daemon_host(
     data_root: &Path,
     request: DaemonHostRunRequest,
 ) -> Result<(), DaemonHostRunError> {
+    ctx_history_platform::managed_root::ensure_active_data_root(data_root)
+        .map_err(|error| DaemonHostRunError::Service(error.into()))?;
     run_daemon_host_with(
         data_root,
         request,
