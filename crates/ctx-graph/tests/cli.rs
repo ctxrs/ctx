@@ -944,3 +944,166 @@ fn mcp_stdio_has_typed_read_only_tools_and_honest_errors() {
     assert_eq!(fs::read(dir.path().join(".graf/index.db")).unwrap(), before);
     assert!(!dir.path().join("other.db").exists());
 }
+
+#[test]
+fn yaml_rejection_errors_match_both_graph_entry_paths_and_preserve_capture() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("source.yaml"), "kind: Original\n").unwrap();
+    success(cli(root, &["add", "source.yaml", "--json"]));
+    let cached = fs::read_dir(root.join(".graf/sources"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let previous = fs::read(&cached).unwrap();
+    let initial = success(cli(root, &["stats", "--json"]));
+    fs::write(
+        root.join("source.yaml"),
+        "kind: Partial\n---\nkind: [broken\n",
+    )
+    .unwrap();
+    let mut errors = Vec::new();
+    for root_options in [false, true] {
+        for json in [false, true] {
+            let mut command = ctx_root_command(root);
+            command.current_dir(root);
+            if root_options {
+                command.args(["--color", "never"]);
+            }
+            command.args(["graph", "add", "source.yaml"]);
+            if json {
+                command.arg("--json");
+            }
+            let error = failure(command.output().unwrap());
+            if json {
+                let error: Value = serde_json::from_str(&error).unwrap();
+                assert_eq!(error["error"]["kind"], "input_rejected");
+                assert_eq!(error["error"]["file"], "source.yaml");
+                assert_eq!(error["error"]["document"], 2);
+                assert!(error["error"]["line"].as_u64().unwrap() >= 3);
+                assert!(error["error"]["column"].is_u64());
+                errors.push(error);
+            } else {
+                assert_terminal_safe(&error);
+                assert!(error.contains("source.yaml (document 2)"), "{error}");
+            }
+            assert_eq!(fs::read(&cached).unwrap(), previous);
+            assert_eq!(
+                success(cli(root, &["stats", "--json"]))["generation"],
+                initial["generation"]
+            );
+        }
+    }
+    assert_eq!(errors[0], errors[1]);
+    let report = success(cli(root, &["update", "--json"]));
+    assert_eq!(report["rejected_files"], 1);
+    assert_eq!(report["parsed_files"], 0);
+    assert_eq!(report["diagnostics"][0]["file"], "source.yaml");
+    let noop = success(cli(root, &["update", "--json"]));
+    assert_eq!(noop["generation"], report["generation"]);
+    assert_eq!(noop["diagnostics"], report["diagnostics"]);
+}
+
+#[test]
+fn graph_operational_json_errors_match_root_option_entry_path() {
+    let dir = tempdir().unwrap();
+    let mut errors = Vec::new();
+    for root_options in [false, true] {
+        let mut command = ctx_root_command(dir.path());
+        command.current_dir(dir.path());
+        if root_options {
+            command.arg("--quiet");
+        }
+        command.args(["graph", "--db", "missing.db", "stats", "--json"]);
+        let error = failure(command.output().unwrap());
+        let error: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["error"]["kind"], "operation_failed");
+        assert!(error["error"]["message"].is_string());
+        errors.push(error);
+    }
+    assert_eq!(errors[0], errors[1]);
+}
+
+#[cfg(unix)]
+#[test]
+fn local_input_error_filenames_are_sanitized_on_both_human_entry_paths() {
+    let dir = tempdir().unwrap();
+    let filename = "bad\x1b[2J\u{202e}.txt";
+    fs::write(dir.path().join(filename), b"\xff").unwrap();
+    for root_options in [false, true] {
+        let mut command = ctx_root_command(dir.path());
+        command.current_dir(dir.path());
+        if root_options {
+            command.args(["--color", "never"]);
+        }
+        command.args(["graph", "add", filename]);
+        let error = failure(command.output().unwrap());
+        assert_terminal_safe(&error);
+        assert!(error.contains(r"bad\u{1b}[2J\u{202e}.txt"), "{error:?}");
+    }
+}
+
+#[test]
+fn local_add_name_extension_is_an_explicit_format_override() {
+    let dir = tempdir().unwrap();
+    // These bytes fail native YAML but are ordinary plain text.
+    fs::write(dir.path().join("input.yaml"), "key: [broken\n").unwrap();
+    let failure = failure(cli(dir.path(), &["add", "input.yaml", "--json"]));
+    let error: Value = serde_json::from_str(&failure).unwrap();
+    assert_eq!(error["error"]["kind"], "input_rejected");
+    success(cli(
+        dir.path(),
+        &["add", "input.yaml", "--name", "saved.txt", "--json"],
+    ));
+    fs::write(
+        dir.path().join("extensionless"),
+        "kind: First\n---\nkind: Second\n",
+    )
+    .unwrap();
+    success(cli(
+        dir.path(),
+        &["add", "extensionless", "--name", "saved.yaml", "--json"],
+    ));
+    let records: Vec<Value> = fs::read_dir(dir.path().join(".graf/sources"))
+        .unwrap()
+        .map(|entry| serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap())
+        .collect();
+    let text = records
+        .iter()
+        .find(|record| record["source"] == "input.yaml")
+        .unwrap();
+    assert!(
+        text["facts"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("/saved.txt")
+    );
+    assert!(
+        text["facts"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| node["kind"] != "document_field")
+    );
+    let yaml = records
+        .iter()
+        .find(|record| record["source"] == "extensionless")
+        .unwrap();
+    assert!(
+        yaml["facts"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("/saved.yaml")
+    );
+    assert_eq!(
+        yaml["facts"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["kind"] == "document_field")
+            .count(),
+        2
+    );
+}

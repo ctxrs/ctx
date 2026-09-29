@@ -5,6 +5,33 @@ pub(crate) fn human(text: &str) -> impl std::fmt::Display + '_ {
     text.escape_debug()
 }
 
+pub(crate) fn write_error(
+    out: &mut impl Write,
+    error: &anyhow::Error,
+    json: bool,
+) -> io::Result<()> {
+    if json {
+        let rejection = error.downcast_ref::<ctx_graph_core::ingest::InputRejected>();
+        let mut detail = match rejection {
+            Some(rejection) => serde_json::to_value(rejection)?,
+            None => serde_json::json!({"message": format!("{error:#}")}),
+        };
+        detail["kind"] = serde_json::json!(if rejection.is_some() {
+            "input_rejected"
+        } else {
+            "operation_failed"
+        });
+        let mut value = serde_json::json!({"error": detail});
+        if let Some(usage) = error.downcast_ref::<index::FailedSemanticUsage>() {
+            value["semantic_usage"] = serde_json::to_value(usage)?;
+        }
+        serde_json::to_writer(&mut *out, &value)?;
+        writeln!(out)
+    } else {
+        writeln!(out, "ctx graph: {}", human(&format!("{error:#}")))
+    }
+}
+
 pub(crate) fn diagnostics(out: &mut impl Write, items: &[Diagnostic]) -> io::Result<()> {
     for d in items {
         writeln!(
@@ -144,8 +171,14 @@ pub(crate) fn print_output(output: Output, json: bool) -> Result<()> {
             }
             Output::Index(r) => writeln!(
                 stdout,
-                "Generation {}: {} parsed, {} unchanged, {} deleted files; {} nodes, {} edges",
-                r.generation, r.parsed_files, r.unchanged_files, r.deleted_files, r.nodes, r.edges
+                "Generation {}: {} parsed, {} rejected, {} unchanged, {} deleted files; {} nodes, {} edges",
+                r.generation,
+                r.parsed_files,
+                r.rejected_files,
+                r.unchanged_files,
+                r.deleted_files,
+                r.nodes,
+                r.edges
             )?,
         }
     }

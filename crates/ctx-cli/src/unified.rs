@@ -31,18 +31,7 @@ impl UnifiedCommand {
     pub(crate) fn run(self) -> i32 {
         let args = match self {
             Self::Graph(args) => {
-                return match ctx_graph::run_parsed(*args) {
-                    Ok(()) => 0,
-                    Err(error) => {
-                        crate::output::write_stderr_line(format_args!(
-                            "ctx graph: {}",
-                            crate::ui::sanitize_untrusted_history_body_for_terminal(&format!(
-                                "{error:#}"
-                            ))
-                        ));
-                        1
-                    }
-                };
+                return ctx_graph::run_parsed_exit(*args);
             }
             Self::Sift(args) => args,
         };

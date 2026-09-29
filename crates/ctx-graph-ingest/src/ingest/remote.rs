@@ -269,7 +269,8 @@ fn downloaded(
         relative,
         &content_fingerprint(data, options)?,
         options,
-    )?;
+    )
+    .map_err(rejection::adapter_output)?;
     facts.nodes[0].metadata["format"] = json!(format);
     if let Some(mime) = mime {
         facts.nodes[0].metadata["content_type"] = json!(mime);
