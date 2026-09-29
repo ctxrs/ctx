@@ -92,6 +92,12 @@ By structuring agent history into sessions, events, metadata, and indexed fields
 
 <img src="docs/assets/ctx-token-efficiency-chart.png" alt="Token output per agent history search: ctx search 917 tokens, raw transcript search 45,734 tokens." width="100%">
 
+## Back up and share history (beta)
+
+Back up your agent history, or share selected sessions with your team through a ctx server you control. Your history stays local by default. Sharing is opt-in.
+
+[Setup guide](docs/hosted-history.md).
+
 ## Blame code to the agent that wrote it
 
 `git blame` tells you which commit last changed a line. `ctx blame` tells you which agent session produced that commit, with exact citations back to the original transcript and recorded tool calls.
