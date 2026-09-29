@@ -15,6 +15,9 @@
     "visual:parity": "tsx scripts/visual-parity.ts"
   },
   "pnpm": {
+    "overrides": {
+      "undici": "7.29.1"
+    },
     "onlyBuiltDependencies": []
   },
   "dependencies": {
