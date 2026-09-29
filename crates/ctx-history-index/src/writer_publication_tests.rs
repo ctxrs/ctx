@@ -25,7 +25,12 @@ fn low_space_diagnostic_preserves_the_original_cause_and_probe_failures() {
                 IndexError::CandidateFailureWithLowSpace { available: actual, cause }
                     if *actual == available && matches!(**cause, IndexError::Tantivy(_))
             ));
-            assert!(error.to_string().contains("bytes observed free"));
+            let expected = if available == 0 {
+                "0 B observed free"
+            } else {
+                "16.0 MiB observed free"
+            };
+            assert!(error.to_string().contains(expected));
             let cause = std::error::Error::source(&error).unwrap();
             assert_eq!(cause.to_string(), worker_error().to_string());
             assert!(!error.to_string().contains("ENOSPC"));
