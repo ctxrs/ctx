@@ -1,4 +1,5 @@
 use super::*;
+use ctx_history_platform::resource_format::{format_bytes, format_disk_shortage};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,14 +182,14 @@ pub enum SqliteSourceAccessError {
     ConnectionIdentityMismatch,
     #[error("SQLite source file changed while its read snapshot was active")]
     SourceChanged,
-    #[error("SQLite source snapshot exceeds the bounded limit for {path:?}: {length} > {maximum}")]
+    #[error("SQLite source snapshot exceeds the bounded limit for {path:?}: {} > {}", format_bytes(*.length), format_bytes(*.maximum))]
     SnapshotTooLarge {
         path: PathBuf,
         length: u64,
         maximum: u64,
     },
     #[error(
-        "provider SQLite scratch has insufficient free-space headroom for {path:?}: required {required}, available {available}"
+        "provider SQLite scratch has insufficient free-space headroom for {path:?}: {}; then retry", format_disk_shortage(*.required, *.available)
     )]
     InsufficientScratchSpace {
         path: PathBuf,

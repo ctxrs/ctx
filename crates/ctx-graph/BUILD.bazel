@@ -34,7 +34,10 @@ rust_library(
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(),
-    deps = ["//crates/ctx-graph-core:lib"] + all_crate_deps(normal = True),
+    deps = [
+        "//crates/ctx-graph-core:lib",
+        "//crates/ctx-history-platform:lib",
+    ] + all_crate_deps(normal = True),
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = [":cargo_toml_env_vars"],
@@ -47,7 +50,10 @@ ctx_rust_test(
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
-    deps = ["//crates/ctx-graph-core:lib"] + all_crate_deps(normal = True, normal_dev = True),
+    deps = [
+        "//crates/ctx-graph-core:lib",
+        "//crates/ctx-history-platform:lib",
+    ] + all_crate_deps(normal = True, normal_dev = True),
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = [":cargo_toml_env_vars"],

@@ -407,7 +407,10 @@ pub fn read_text_file_limited(path: &Path, max_bytes: usize, label: &str) -> Res
     let file = open_provider_source_file(path)?;
     let bytes = file.read_all_bounded(max_bytes).map_err(|error| {
         if matches!(error, SourceIoError::InvalidPayload(_)) {
-            SourceIoError::InvalidPayload(format!("{label} exceeds max bytes ({max_bytes})"))
+            SourceIoError::InvalidPayload(format!(
+                "{label} exceeds the size limit ({})",
+                ctx_history_platform::resource_format::format_bytes(max_bytes as u64)
+            ))
         } else {
             error
         }

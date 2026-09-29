@@ -19,6 +19,8 @@
 //! The handles intentionally remain live for the lifetime of these values.
 //! No provider body is copied merely to establish authority.
 
+use ctx_history_platform::resource_format::format_bytes;
+
 use std::{
     ffi::{OsStr, OsString},
     fs::{File, Metadata},
@@ -405,7 +407,8 @@ impl OpenedProviderSourceFile {
     pub fn bounded_reader(&self, maximum_bytes: u64) -> Result<Take<File>> {
         if self.len() > maximum_bytes {
             return Err(SourceIoError::InvalidPayload(format!(
-                "provider source file exceeds {maximum_bytes} bytes"
+                "provider source file exceeds the size limit ({})",
+                format_bytes(maximum_bytes)
             )));
         }
         Ok(provider_source_io_result(
@@ -444,7 +447,8 @@ impl OpenedProviderSourceFile {
     ) -> Result<Vec<u8>> {
         if length > maximum_bytes {
             return Err(SourceIoError::InvalidPayload(format!(
-                "provider source range exceeds {maximum_bytes} bytes"
+                "provider source range exceeds the size limit ({})",
+                format_bytes(maximum_bytes as u64)
             )));
         }
         let length_u64 = u64::try_from(length)
@@ -478,7 +482,8 @@ impl OpenedProviderSourceFile {
     ) -> Result<Vec<u8>> {
         if length > maximum_bytes {
             return Err(SourceIoError::InvalidPayload(format!(
-                "provider source range exceeds {maximum_bytes} bytes"
+                "provider source range exceeds the size limit ({})",
+                format_bytes(maximum_bytes as u64)
             )));
         }
         let length_u64 = u64::try_from(length)

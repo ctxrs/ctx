@@ -13,6 +13,7 @@ pub type Result<T> = std::result::Result<T, PlatformError>;
 pub mod paths;
 pub mod platform_security;
 mod process_resources;
+pub mod resource_format;
 
 pub use paths::{
     config_path, default_data_root, device_path, history_dir, logs_dir, managed_data_root,

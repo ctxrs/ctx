@@ -13,6 +13,7 @@ publish = false
 test-support = ["ctx-history-index-generation/test-support"]
 
 [dependencies]
+ctx-history-platform = { path = "../ctx-history-platform" }
 base64.workspace = true
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-core = { path = "../ctx-history-core" }
