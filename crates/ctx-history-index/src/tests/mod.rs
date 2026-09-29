@@ -24,9 +24,9 @@ use super::*;
 mod append_lookup;
 mod generation_retention;
 mod generation_state;
-mod replacement;
 #[cfg(unix)]
 mod reader_resources;
+mod replacement;
 
 type SessionRelationshipKind = ProviderNativeSessionRelationship;
 type EventCopyProofKind = ProviderNativeCopyProof;
