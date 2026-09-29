@@ -329,7 +329,7 @@ fn human_stats_label_measured_and_estimated_sections_without_time_claims() {
         "search",
         "result_bearing",
         "complete",
-        [1, 1, 20, 20, 100],
+        [1, 1, 1025, 1_048_577, 1_073_741_825],
     );
     drop(connection);
 
@@ -350,8 +350,26 @@ fn human_stats_label_measured_and_estimated_sections_without_time_claims() {
         .assert()
         .success()
         .stdout(predicate::str::contains("cli/search"))
-        .stdout(predicate::str::contains("20 covered"))
+        .stdout(predicate::str::contains("1.0 KiB output"))
+        .stdout(predicate::str::contains("1.0 MiB covered"))
         .stdout(predicate::str::contains("1 complete"));
+    let json = json_output(enabled(ctx(&temp).args([
+        "stats",
+        "--detail",
+        "--format=json",
+    ])));
+    let measured = definition(&json, 2);
+    assert_eq!(measured["summary"]["delivered_output_bytes"], 1025);
+    assert_eq!(measured["summary"]["delivered_context_bytes"], 1_048_577);
+    assert_eq!(
+        measured["summary"]["matched_normalized_session_bytes"],
+        1_073_741_825
+    );
+    assert_eq!(measured["by_operation"][0]["delivered_output_bytes"], 1025);
+    assert_eq!(
+        measured["by_operation"][0]["delivered_context_bytes"],
+        1_048_577
+    );
 }
 
 #[test]

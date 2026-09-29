@@ -458,8 +458,8 @@ identity::home_dir(); CaptureProvider::Unknown; "quoted""####;
                 terminal_build = self.root / "crates/ctx-terminal/BUILD.bazel"
                 self.replace(
                     terminal_build,
-                    "deps = all_crate_deps(normal = True),",
-                    f'deps = all_crate_deps(normal = True) + ["{label}"],',
+                    "deps = all_crate_deps(normal = True)",
+                    f'deps = all_crate_deps(normal = True) + ["{label}"]',
                 )
                 with self.assertRaisesRegex(BoundaryError, "unexpected reverse"):
                     self.validate()
@@ -469,8 +469,8 @@ identity::home_dir(); CaptureProvider::Unknown; "quoted""####;
         terminal_build = self.root / "crates/ctx-terminal/BUILD.bazel"
         self.replace(
             terminal_build,
-            "deps = all_crate_deps(normal = True),",
-            'deps = all_crate_deps(normal = True) + ["//crates/ctx-history-" + "cli:lib"],',
+            "deps = all_crate_deps(normal = True)",
+            'deps = all_crate_deps(normal = True) + ["//crates/ctx-history-" + "cli:lib"]',
         )
         # The static inventory cannot resolve Starlark expressions in an
         # unreviewed consumer. The live Bazel query below must reject its edge.

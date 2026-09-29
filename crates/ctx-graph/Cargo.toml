@@ -10,6 +10,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ctx-history-platform = { path = "../ctx-history-platform" }
 ctx_graph_core.workspace = true
 anyhow.workspace = true
 clap.workspace = true

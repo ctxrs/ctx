@@ -56,8 +56,9 @@ fn index_capture_lifecycle_classifies_low_headroom_as_resource_unavailable() {
         error.kind,
         ctx_history_capture_runtime::SourceBackedRouteErrorKind::ResourceUnavailable
     );
-    assert!(error.detail.contains("1024"));
-    assert!(error.detail.contains("512"));
+    assert!(error
+        .detail
+        .contains("free at least 512 B; required 1.0 KiB; available 512 B"));
 }
 
 #[test]

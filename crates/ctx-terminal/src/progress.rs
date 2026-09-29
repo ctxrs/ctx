@@ -1,3 +1,5 @@
+pub use ctx_history_platform::resource_format::format_bytes;
+
 use std::{
     fmt,
     io::{self, Write},
@@ -949,27 +951,6 @@ fn bounded_progress_text(value: &str, max_bytes: usize) -> String {
     bounded.push_str(SUFFIX);
     bounded
 }
-
-pub fn format_bytes(bytes: u64) -> String {
-    let (value, unit) = scaled_bytes(bytes);
-    if unit == "B" {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {unit}")
-    }
-}
-
-fn scaled_bytes(bytes: u64) -> (f64, &'static str) {
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit + 1 < BYTE_UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    (value, BYTE_UNITS[unit])
-}
-
-const BYTE_UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
 
 pub fn format_count(value: u64) -> String {
     let digits = value.to_string();
