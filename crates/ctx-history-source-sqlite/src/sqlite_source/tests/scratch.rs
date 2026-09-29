@@ -90,7 +90,10 @@ fn private_scratch_cleanup_failure_is_explicit_and_typed_unavailable() {
     let parent = retain_parent_in_data_root(&data_root, &provider_root);
     let snapshot =
         open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite")).unwrap();
+    #[cfg(not(windows))]
     let moved_scratch = temp.path().join("moved-scratch");
+    #[cfg(windows)]
+    let mut cleanup_guard = None;
 
     let result: Result<(), SqliteSourceAccessError> = snapshot
         .with_private_scratch_database_after_use_for_test(
@@ -98,8 +101,25 @@ fn private_scratch_cleanup_failure_is_explicit_and_typed_unavailable() {
             1024 * 1024,
             |_scratch, _path| Ok(()),
             |scratch_directory| {
-                fs::rename(scratch_directory, &moved_scratch).unwrap();
-                fs::write(scratch_directory, b"blocks remove_dir_all").unwrap();
+                #[cfg(not(windows))]
+                {
+                    fs::rename(scratch_directory, &moved_scratch).unwrap();
+                    fs::write(scratch_directory, b"blocks remove_dir_all").unwrap();
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    // Windows cannot rename the directory while SQLite has an
+                    // open file. Instead retain a file that denies deletion.
+                    cleanup_guard = Some(
+                        fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .share_mode(0)
+                            .open(scratch_directory.join("cleanup-blocker"))
+                            .unwrap(),
+                    );
+                }
             },
         );
 
@@ -120,18 +140,24 @@ fn private_scratch_cleanup_failure_is_explicit_and_typed_unavailable() {
             )
     ));
     assert!(error.is_systemic_resource_failure());
-    fs::remove_file(
-        data_root
-            .join("tmp/provider-sqlite-scratch")
-            .read_dir()
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path(),
-    )
-    .unwrap();
-    fs::remove_dir_all(&moved_scratch).unwrap();
+    let blocked_path = data_root
+        .join("tmp/provider-sqlite-scratch")
+        .read_dir()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    #[cfg(not(windows))]
+    {
+        fs::remove_file(blocked_path).unwrap();
+        fs::remove_dir_all(&moved_scratch).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        drop(cleanup_guard);
+        fs::remove_dir_all(blocked_path).unwrap();
+    }
     snapshot.finish().unwrap();
 }
 
