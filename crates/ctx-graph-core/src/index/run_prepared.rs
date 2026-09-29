@@ -112,6 +112,7 @@ pub(super) fn run_prepared(
     let detect_ms = started.elapsed().as_secs_f64() * 1000.0;
     let extracting = std::time::Instant::now();
     let mut changed = vec![];
+    let mut rejected = BTreeSet::new();
     let mut semantic_files = reserved;
     for (path, relative) in files {
         let code = is_code(&relative) || content_probe(&relative);
@@ -231,20 +232,19 @@ pub(super) fn run_prepared(
             }
             let bytes = content
                 .context("document exceeds configured input byte limit; previous graph retained")?;
-            let suffix = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .map(|s| format!(".{s}"))
-                .unwrap_or_default();
-            // Converters receive immutable task-owned bytes, not a source path
-            // that could change after its fingerprint was computed.
-            let mut staged = tempfile::Builder::new()
-                .prefix("graf-ingest-")
-                .suffix(&suffix)
-                .tempfile()?;
-            staged.write_all(&bytes)?;
-            staged.flush()?;
-            ingest::extract(staged.path(), &relative, &hash, &options.ingest)?
+            match ingest::extract_bytes(&path, &relative, &bytes, &hash, &options.ingest) {
+                Ok(facts) => facts,
+                Err(error) => {
+                    let Some(rejection) = error.downcast_ref::<ingest::InputRejected>() else {
+                        return Err(error);
+                    };
+                    rejected.insert(relative.clone());
+                    let mut facts = diagnostic(&relative, &hash, &rejection.to_string());
+                    facts.diagnostics[0].line =
+                        rejection.line.and_then(|line| u32::try_from(line).ok());
+                    facts
+                }
+            }
         };
         if let Some(version) = cached_version {
             ensure!(
@@ -292,7 +292,14 @@ pub(super) fn run_prepared(
     }
     let extract_ms = extracting.elapsed().as_secs_f64() * 1000.0;
     let committing = std::time::Instant::now();
-    let losses = store.semantic_losses(&changed)?;
+    // Invalid local syntax is authoritative absence of current facts. Successful
+    // extraction still needs the semantic-loss guard, and operational errors above
+    // never reach publication.
+    let losses = store.semantic_losses(
+        changed
+            .iter()
+            .filter(|facts| !rejected.contains(&facts.path)),
+    )?;
     if !losses.is_empty() {
         ensure!(
             options.allow_semantic_shrink,
@@ -317,6 +324,8 @@ pub(super) fn run_prepared(
     } else {
         applied?
     };
+    report.rejected_files = rejected.len();
+    report.parsed_files -= report.rejected_files;
     report.semantic_usage = options
         .ingest
         .semantic

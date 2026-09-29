@@ -59,6 +59,22 @@ coverage, unresolved references and truncation before judging completeness.
 Graph reachability describes potential impact, not proof of runtime behavior
 or agent authorship. Use `ctx graph --help` for the full command set.
 
+YAML files may contain multiple documents separated by `---`. Extracted fields
+retain their document number when a file contains more than one document.
+During a directory scan, invalid YAML or Markdown frontmatter syntax, malformed
+Google-pointer JSON, and non-UTF-8 document text replace that file's old facts
+with a diagnostic while other files continue indexing.
+Reports count these files as `rejected_files`, separately from `parsed_files`.
+Unchanged scans retain the diagnostics; editing the file or using `update --force`
+retries extraction. Extraction limits, converter/provider failures and storage
+errors still fail the update and preserve the previous graph.
+
+Explicit `ctx graph add` fails on rejected input and preserves any previous
+capture. For local documents, the extension in `--name` selects the saved
+format: `--name saved.txt` treats the input as text, and an extensionless input
+can be parsed as YAML with `--name saved.yaml`. Runtime failures with `--json` produce an `error` object on stderr,
+including file, document and location when available.
+
 ## Select search scope
 
 ```sh

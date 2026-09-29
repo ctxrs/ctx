@@ -33,6 +33,7 @@ pub(super) fn unchanged_report(
         schema_version: stats.schema_version,
         generation: stats.generation,
         parsed_files: 0,
+        rejected_files: 0,
         unchanged_files: stats.coverage.supported_files,
         deleted_files: 0,
         nodes: stats.nodes,

@@ -200,24 +200,21 @@ fn extract_with_capture(
         ingest::extract_url(source, &relative, options)?
     } else {
         let path = Path::new(source);
-        match ingest::extension(path).as_str() {
-            "gdoc" | "gsheet" | "gslides" => ingest::extract_google(path, &relative, options)?,
+        let extracted = match ingest::extension(path).as_str() {
+            "gdoc" | "gsheet" | "gslides" => ingest::extract_google(path, &relative, options),
             _ => {
                 let (hash, bytes) = index::read_source(path, options.max_input_bytes)?;
                 let bytes = bytes.context("source exceeds input byte limit")?;
-                let extension = Path::new(&name)
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                let mut staged = tempfile::Builder::new()
-                    .suffix(&format!(".{extension}"))
-                    .tempfile()?;
-                staged.write_all(&bytes)?;
-                staged.flush()?;
                 let hash = format!("{}:{hash}", ingest::config_fingerprint(options)?);
-                ingest::extract(staged.path(), &relative, &hash, options)?
+                ingest::extract_bytes(Path::new(&name), &relative, &bytes, &hash, options)
             }
-        }
+        };
+        extracted.map_err(|mut error| {
+            if let Some(rejection) = error.downcast_mut::<ingest::InputRejected>() {
+                rejection.file = source.into();
+            }
+            error
+        })?
     };
     ingest::apply_capture_metadata(&mut facts, capture)?;
     Ok(SourceRecord {

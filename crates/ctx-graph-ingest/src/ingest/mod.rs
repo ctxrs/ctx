@@ -2,6 +2,8 @@
 mod convert;
 pub use convert::run as run_command;
 mod documents;
+mod rejection;
+pub use rejection::InputRejected;
 mod pdf;
 mod remote;
 mod semantic;
@@ -174,7 +176,7 @@ pub fn config_fingerprint(options: &IngestOptions) -> Result<String> {
     }
     let mut bytes = serde_json::to_vec(&settings)?;
     bytes.extend_from_slice(semantic::INSTRUCTIONS.as_bytes());
-    Ok(format!("ingest-v6:{}", blake3::hash(&bytes).to_hex()))
+    Ok(format!("ingest-v7:{}", blake3::hash(&bytes).to_hex()))
 }
 
 pub fn content_fingerprint(content: &[u8], options: &IngestOptions) -> Result<String> {
@@ -222,18 +224,32 @@ pub fn extract(
     validate_relative(relative)?;
     ensure!(supports(path), "unsupported document extension");
     let bytes = read_bounded(path, options.max_input_bytes)?;
+    extract_bytes(path, relative, &bytes, hash, options)
+}
+
+/// Extract an immutable local snapshot. Only adapters requiring a path stage bytes.
+/// `path` selects the format; `relative` is the graph identity.
+pub fn extract_bytes(
+    path: &Path,
+    relative: &str,
+    bytes: &[u8],
+    hash: &str,
+    options: &IngestOptions,
+) -> Result<FileFacts> {
+    validate(options)?;
+    validate_relative(relative)?;
+    ensure!(supports(path), "unsupported document extension");
+    ensure!(
+        bytes.len() as u64 <= options.max_input_bytes,
+        "document exceeds input byte limit"
+    );
     let ext = extension(path);
     // Google pointers always require the separate explicit export action.
     if matches!(
         ext.as_str(),
         "gdoc" | "gsheet" | "gslides" | "url" | "webloc"
     ) {
-        return extract_text(
-            relative,
-            std::str::from_utf8(&bytes).context("pointer is not UTF-8")?,
-            hash,
-            options,
-        );
+        return extract_text(relative, rejection::utf8(relative, bytes)?, hash, options);
     }
     if let Some(adapter) = options.converters.get(&ext) {
         let cache = if matches!(
@@ -260,7 +276,7 @@ pub fn extract(
                     key.update(b"graf-transcript-v1\0");
                     key.update(ext.as_bytes());
                     key.update(&serde_json::to_vec(adapter)?);
-                    key.update(&bytes);
+                    key.update(bytes);
                     Ok::<_, anyhow::Error>(
                         directory.join(format!("{}.json", key.finalize().to_hex())),
                     )
@@ -287,7 +303,7 @@ pub fn extract(
         let temp = tempfile::Builder::new()
             .suffix(&format!(".{ext}"))
             .tempfile()?;
-        std::fs::write(temp.path(), &bytes)?;
+        std::fs::write(temp.path(), bytes)?;
         let text = convert::run(
             adapter,
             Some(temp.path()),
@@ -300,13 +316,14 @@ pub fn extract(
     }
     match ext.as_str() {
         "pdf" => {
-            let text = pdf::extract(&bytes, options)?;
+            let text = pdf::extract(bytes, options)?;
             converted(relative, &text, hash, options, "lopdf")
         }
         "docx" | "xlsx" => {
-            let content = convert::office(&bytes, &ext, options.max_text_bytes)?;
+            let content = convert::office(bytes, &ext, options.max_text_bytes)?;
             let mut facts = if ext == "docx" {
-                let mut facts = extract_text_as(relative, &content.text, hash, options, "md")?;
+                let mut facts = extract_text_as(relative, &content.text, hash, options, "md")
+                    .map_err(rejection::adapter_output)?;
                 facts.nodes[0].metadata["text"] = json!(content.text);
                 facts.nodes[0].metadata["converter"] = json!("zip/quick-xml");
                 facts.nodes[0].metadata["line_basis"] = json!("converted_markdown");
@@ -320,7 +337,7 @@ pub fn extract(
         "md" | "markdown" | "mdx" | "qmd" | "skill" | "svg" | "txt" | "text" | "html" | "htm"
         | "rst" | "yaml" | "yml" => extract_text_as(
             relative,
-            std::str::from_utf8(&bytes).context("document is not UTF-8")?,
+            rejection::utf8(relative, bytes)?,
             hash,
             options,
             &ext,
@@ -338,7 +355,7 @@ pub fn extract(
                 if let Some(mime) = mime {
                     semantic::enrich_image(
                         &mut facts,
-                        &bytes,
+                        bytes,
                         mime,
                         settings,
                         options.force_cache_refresh,
@@ -483,7 +500,7 @@ pub fn extract_google(path: &Path, relative: &str, options: &IngestOptions) -> R
         "expected Google pointer document"
     );
     let bytes = read_bounded(path, options.max_input_bytes)?;
-    let pointer = documents::google_pointer(std::str::from_utf8(&bytes)?)?;
+    let pointer = documents::google_pointer(relative, rejection::utf8(relative, &bytes)?)?;
     let mut adapter = options
         .converters
         .get(&ext)
@@ -635,3 +652,6 @@ pub(crate) fn edge(
         metadata,
     });
 }
+
+#[cfg(test)]
+mod document_tests;
