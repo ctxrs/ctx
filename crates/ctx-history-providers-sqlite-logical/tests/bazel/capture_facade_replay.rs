@@ -21,6 +21,8 @@ use rmpv::{encode::write_value as write_msgpack_value, Value as MsgpackValue};
 use rusqlite::{params, Connection};
 use serde_json::json;
 
+mod opencode_changes;
+
 struct ScopedReplayBinding;
 
 impl LogicalSqliteRuntimeBinding for ScopedReplayBinding {
@@ -478,6 +480,9 @@ fn assert_opencode_family_changed_wal_capture_then_exact_replay(provider: Captur
 fn create_opencode_wal_database(path: &Path, text: &str) -> Connection {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let connection = Connection::open(path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
     let journal_mode = connection
         .query_row("pragma journal_mode = wal", [], |row| {
             row.get::<_, String>(0)
@@ -500,14 +505,14 @@ fn create_opencode_wal_database(path: &Path, text: &str) -> Connection {
              );
              create table message (
                  id text primary key,
-                 session_id text not null,
+                 session_id text not null references session(id) on delete cascade,
                  time_created integer not null,
                  time_updated integer not null,
                  data text not null
              );
              create table part (
                  id text primary key,
-                 message_id text not null,
+                 message_id text not null references message(id) on delete cascade,
                  session_id text not null,
                  time_created integer not null,
                  time_updated integer not null,

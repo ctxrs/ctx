@@ -31,6 +31,7 @@ use crate::{
 };
 
 mod lifecycle_tests;
+mod replay_fallback;
 
 use lifecycle_tests::TestLifecycle;
 

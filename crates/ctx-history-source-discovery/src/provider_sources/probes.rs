@@ -754,9 +754,16 @@ fn has_codex_session_file(root: &Path) -> BoundedProbe {
     // probe's sorting budget. Scan that one directory as a constant-memory
     // stream under the downstream inventory's exact bounds, consuming the
     // complete bounded stream so filesystem enumeration order cannot decide the
-    // result. Nested layouts retain the existing sorted recursive probe.
+    // result. Nested layouts use the existing early-success existence probe
+    // with the inventory's metadata budget, so a dense date directory is not
+    // rejected before checking its first file. The importer still owns full
+    // inventory validation; discovery need not stat every nested session.
     match has_direct_codex_session_file(root) {
-        BoundedProbe::NotFound => has_file_under_matching(root, 10_000, is_codex_session_file),
+        BoundedProbe::NotFound => has_file_under_matching(
+            root,
+            PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
+            is_codex_session_file,
+        ),
         outcome => outcome,
     }
 }

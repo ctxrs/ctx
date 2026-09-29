@@ -391,8 +391,11 @@ fn insert_value_batch(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!("insert into {table} values {tuples}");
+    // Full batches repeat this SQL. Reuse its bytecode within this private
+    // connection's bounded statement cache; no provider data survives the scan.
     scratch
-        .execute(&sql, params_from_iter(rows.iter().flatten()))
+        .prepare_cached(&sql)
+        .and_then(|mut statement| statement.execute(params_from_iter(rows.iter().flatten())))
         .map(|_| ())
         .map_err(|source| private_scratch_error(operation, source))
 }
@@ -409,7 +412,7 @@ fn hydrate_requested_events(
     // two independently accepted 16 MiB values can share one result row.
     let _length_guard = SqliteLengthPreflightGuard::new(source)?;
     let sql = source_backed_fallback_events_by_rowids_sql(schema, requests.len());
-    let mut point = source.prepare(&sql)?;
+    let mut point = source.prepare_cached(&sql)?;
     let mut source_rows = point.query(params_from_iter(
         requests.iter().map(|request| request.source_rowid),
     ))?;

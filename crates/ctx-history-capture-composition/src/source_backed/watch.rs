@@ -1,6 +1,7 @@
 use super::*;
 use std::fs;
 
+mod event_filter;
 mod fingerprint;
 use fingerprint::{hash_file_metadata, hash_os_str};
 
@@ -619,6 +620,8 @@ fn insert_route_watch_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod event_filter;
 
     fn source(
         provider: CaptureProvider,
