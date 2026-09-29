@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use ctx_history_index::{IndexError, VerifiedIndex};
 use serde_json::{json, Value};
 
@@ -302,10 +302,9 @@ fn open_index_with(data_root: &Path, retain_peer: bool) -> Result<VerifiedIndex>
         VerifiedIndex::open_pinned(&root)
     } {
         Ok(index) => index,
-        Err(ctx_history_index::IndexError::MissingActiveGenerationPointer) => {
-            return Err(anyhow!(
-                "the Core index does not exist; retry with daemon refresh enabled"
-            ));
+        Err(error @ IndexError::MissingActiveGenerationPointer) => {
+            return Err(error)
+                .context("the Core index does not exist; retry with daemon refresh enabled");
         }
         Err(error) => {
             return Err(error)

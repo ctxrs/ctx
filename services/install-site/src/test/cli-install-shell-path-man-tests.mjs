@@ -231,7 +231,7 @@ New terminal sessions will include it automatically.`;
       ]);
       const marker = JSON.parse(readFileSync(path.join(fixture.installBin, "ctx.install.json"), "utf8"));
       assert.equal(Object.hasOwn(marker, "man_pages"), false);
-      assert.doesNotMatch(fixture.result.stderr, /Man page/u);
+      assert.match(fixture.result.stderr, /Man page setup incomplete/u);
       const uninstall = runHostedUninstallForInstallerFixture(fixture);
       assert.equal(uninstall.status, 0, uninstall.stderr);
       assert.equal(readFileSync(path.join(fixture.manDir, "ctx.1"), "utf8"), ".TH ctx 1\n");
@@ -250,7 +250,7 @@ New terminal sessions will include it automatically.`;
     });
     try {
       assert.equal(fixture.result.status, 0, fixture.result.stderr);
-      assert.doesNotMatch(fixture.result.stderr, /Man page/u);
+      assert.match(fixture.result.stderr, /Man page setup incomplete/u);
       assert.equal(readFileSync(path.join(fixture.manDir, "ctx.1"), "utf8"), ".TH user-ctx 1\n");
       assert.equal(readFileSync(path.join(fixture.manDir, "ctx-search.1"), "utf8"), ".TH ctx-search 1\n");
       const ownershipRecords = readOwnershipRecords(fixture.installBin);
@@ -288,7 +288,29 @@ New terminal sessions will include it automatically.`;
       assert.deepEqual(readOwnershipRecords(fixture.installBin).map(({ kind }) => kind), ["profile-file"]);
       const marker = JSON.parse(readFileSync(path.join(fixture.installBin, "ctx.install.json"), "utf8"));
       assert.equal(Object.hasOwn(marker, "man_pages"), false);
-      assert.doesNotMatch(fixture.result.stderr, /Man page/u);
+      assert.match(fixture.result.stderr, /Man page setup incomplete/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("rendered CLI installer creates owner-safe man directories under umask 002", () => {
+    const fixture = runRenderedCliInstaller({
+      args: ["--no-setup", "--no-skill"],
+      installUmask: "002",
+      prepareInstall: ({ manDir }) => rmSync(manDir, { recursive: true }),
+    });
+    try {
+      assert.equal(fixture.result.status, 0, fixture.result.stderr);
+      assert.equal(statSync(fixture.manDir).mode & 0o777, 0o755);
+      assert.equal(readFileSync(path.join(fixture.manDir, "ctx.1"), "utf8"), ".TH ctx 1\n");
+      const marker = JSON.parse(readFileSync(path.join(fixture.installBin, "ctx.install.json"), "utf8"));
+      assert.equal(marker.man_pages.status, "installed");
+      assert.equal(marker.man_pages.files.length, 2);
+      assert.doesNotMatch(fixture.result.stderr, /Man page setup incomplete/u);
+      const uninstall = runHostedUninstallForInstallerFixture(fixture);
+      assert.equal(uninstall.status, 0, uninstall.stderr);
+      assert.equal(existsSync(path.join(fixture.manDir, "ctx.1")), false);
     } finally {
       fixture.cleanup();
     }
@@ -301,10 +323,11 @@ New terminal sessions will include it automatically.`;
     });
     try {
       assert.equal(fixture.result.status, 0, fixture.result.stderr);
-      assert.doesNotMatch(fixture.result.stderr, /Man page/u);
+      assert.match(fixture.result.stderr, /Man page setup incomplete/u);
       const marker = JSON.parse(readFileSync(path.join(fixture.installBin, "ctx.install.json"), "utf8"));
       assert.equal(Object.hasOwn(marker, "man_pages"), false);
       assert.equal(existsSync(path.join(fixture.manDir, "ctx.1")), false);
+      assert.equal(statSync(fixture.manDir).mode & 0o777, 0o777);
     } finally {
       fixture.cleanup();
     }

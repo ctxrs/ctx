@@ -121,7 +121,7 @@ EOF
         ;;
       skill)
         case "$prior_target" in
-          */skills/ctx-agent-history-search) ;;
+          */skills/ctx|*/skills/ctx-agent-history-search) ;;
           *) fail "prior managed integration ownership contains an unsafe skill path" ;;
         esac
         ;;

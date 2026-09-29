@@ -277,6 +277,44 @@ fn recovery_rejects_corrupt_retained_components_after_scheduler_error() -> Resul
 }
 
 #[cfg(unix)]
+#[test]
+fn hosted_migration_preserves_pending_pair_and_its_recovery() -> Result<()> {
+    use crate::upgrade::{
+        install::{assert_migration_refused_without_changes, install_marker_path},
+        state::write_state_phase_locked,
+    };
+    let fixture = RecoveryFixture::new()?;
+    let marker = install_marker_path(&fixture.install_path);
+    fs::write(&marker, b"original managed marker")?;
+    restrict_private_file(&marker)?;
+    let (attempt, pair_attempt) = {
+        let lock = fixture.lock()?;
+        let attempts = fixture.stage_failed_attempt(&lock)?;
+        write_state_phase_locked(&lock, &attempts.0, "applying")?;
+        attempts
+    };
+    let pending = fixture
+        .root
+        .join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH);
+    assert_migration_refused_without_changes(
+        &fixture.data_root,
+        &fixture.install_path,
+        &[pending.clone()],
+        "pending managed-pair upgrade",
+    )?;
+    let lock = fixture.lock()?;
+    let recovery = recovery_locked(&lock, attempt.id())?;
+    assert_eq!(recovery.core_sha256, digest(b"new-core"));
+    let outcome = resume_pending_managed_pair_under_installation_lock(&fixture.root, &fixture)?
+        .expect("original pair transaction must remain recoverable");
+    assert_eq!(outcome.attempt_id(), Some(pair_attempt.as_str()));
+    assert_eq!(fs::read(&fixture.install_path)?, b"new-core");
+    assert_eq!(fs::read(marker)?, b"managed-marker");
+    assert!(!pending.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
 mod dispatch;
 
 #[test]

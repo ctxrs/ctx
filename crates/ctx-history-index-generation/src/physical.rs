@@ -82,6 +82,10 @@ pub struct CandidatePhysicalProof {
 }
 
 impl CandidatePhysicalProof {
+    pub(crate) fn file(&self, path: &str) -> Option<&PhysicalFileDigest> {
+        self.files.get(path)
+    }
+
     pub(crate) fn insert(&mut self, file: PhysicalFileDigest) {
         self.files.insert(file.artifact.path.clone(), file);
     }
@@ -174,6 +178,10 @@ pub fn physical_integrity_audit_with_candidate_proof(
     topology_authority: Option<&ActiveGenerationPointer>,
     candidate_proof: Option<&CandidatePhysicalProof>,
 ) -> Result<PhysicalIntegrityAudit> {
+    #[cfg(any(test, feature = "test-support"))]
+    crate::publication_probe::publication_io_checkpoint(
+        crate::publication_probe::PublicationIoEvent::PhysicalAudit,
+    )?;
     #[cfg(any(test, feature = "test-support"))]
     CHECKSUM_WALKS.with(|count| count.set(count.get() + 1));
     let directory =

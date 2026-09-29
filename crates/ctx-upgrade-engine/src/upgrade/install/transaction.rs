@@ -19,6 +19,14 @@ use super::{
 use crate::upgrade::download::DownloadedArtifact;
 
 mod journal;
+
+pub(in crate::upgrade) fn installation_transaction_exists(install_path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(journal::install_transaction_path(install_path)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
 #[cfg(test)]
 mod tests;
 #[cfg(unix)]

@@ -286,3 +286,62 @@ fn existing_runtime_command_is_registered_with_host_schema() {
         assert!(!contains_invocation(&raw, "ctx", agent));
     }
 }
+
+#[test]
+fn renamed_executables_have_one_owned_hook_and_preserve_modified_entries() {
+    for agent in Agent::ALL.into_iter().filter(|agent| agent.supported()) {
+        for name in ["ctx", "ctx-linux-x64", "renamed tools/ctx's copy"] {
+            let (_temp, mut context) = context();
+            context.executable = context.paths.home.join(name);
+            let target = path(agent, true, &context);
+            assert_eq!(install(agent, true, &context).unwrap(), State::Current);
+            assert_eq!(status(agent, true, &context).unwrap(), State::Current);
+            let first = fs::read(&target).unwrap();
+            assert_eq!(install(agent, true, &context).unwrap(), State::Current);
+            assert_eq!(fs::read(&target).unwrap(), first);
+            let mut config = document(&target).unwrap().unwrap();
+            let entries = config["hooks"][agent.event()].as_array_mut().unwrap();
+            assert_eq!(entries.len(), 1);
+            entries[0]["matcher"] = json!("Edited");
+            fs::write(&target, json::render(&config).unwrap()).unwrap();
+            assert_eq!(status(agent, true, &context).unwrap(), State::Conflict);
+            assert!(install(agent, true, &context).is_err());
+            remove(agent, true, &context).unwrap();
+            assert_eq!(document(&target).unwrap().unwrap(), config);
+            fs::write(&target, &first).unwrap();
+            assert_eq!(remove(agent, true, &context).unwrap(), State::Missing);
+            assert!(document(&target).unwrap().unwrap()["hooks"][agent.event()]
+                .as_array()
+                .unwrap()
+                .is_empty());
+        }
+    }
+}
+
+#[test]
+fn hook_edits_preserve_opaque_numbers_in_settings_and_unrelated_hooks() {
+    let opaque = r#"{"wide":123456789012345678901234567890,"max":18446744073709551615,"decimal":1.2300e+04,"negative_zero":-0,"marker":{"$serde_json::private::Number":"001"}}"#;
+    for agent in Agent::ALL.into_iter().filter(|agent| agent.supported()) {
+        let (_temp, context) = context();
+        let target = path(agent, true, &context);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let original = format!(
+            r#"{{"custom":{opaque},"hooks":{{"{}":[{{"command":"unrelated","custom":{opaque}}}]}}}}"#,
+            agent.event()
+        );
+        fs::write(&target, &original).unwrap();
+        for installing in [true, false] {
+            if installing {
+                install(agent, true, &context).unwrap();
+            } else {
+                remove(agent, true, &context).unwrap();
+            }
+            let body = fs::read_to_string(&target).unwrap();
+            assert_eq!(body.matches(opaque).count(), 2, "{body}");
+        }
+        let duplicate = original.replace("\"wide\":", "\"wide\":0,\"wide\":");
+        fs::write(&target, &duplicate).unwrap();
+        assert!(install(agent, true, &context).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), duplicate);
+    }
+}

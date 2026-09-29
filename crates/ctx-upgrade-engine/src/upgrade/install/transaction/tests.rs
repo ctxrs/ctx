@@ -538,6 +538,85 @@ fn interrupted_schema_two_binary_publication(
 
 #[cfg(unix)]
 #[test]
+fn hosted_migration_preserves_pending_ordinary_upgrade_and_its_recovery() -> anyhow::Result<()> {
+    use crate::upgrade::{
+        install::assert_migration_refused_without_changes,
+        state::{begin_recovery_attempt_locked, write_state_phase_locked, UpgradeLock},
+    };
+    let temp = tempdir()?;
+    let root = fs::canonicalize(temp.path())?;
+    let (transaction, target, marker) =
+        interrupted_schema_two_binary_publication(&root, JournalPhase::Publishing);
+    {
+        let lock = UpgradeLock::acquire_for_installation(&target)?;
+        let attempt =
+            begin_recovery_attempt_locked(&lock, &transaction.attempt_id, "manual_apply")?;
+        write_state_phase_locked(&lock, &attempt, "applying")?;
+    }
+    assert_migration_refused_without_changes(
+        &root,
+        &target,
+        &[journal::install_transaction_path(&target)],
+        "pending ctx upgrade",
+    )?;
+    // Recovery validates the current installation. Isolate the existing test
+    // override in a child so parallel tests keep their own executable identity.
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "upgrade::install::transaction::tests::hosted_migration_ordinary_recovery_probe",
+            "--nocapture",
+        ])
+        .env("CTX_HOSTED_MIGRATION_RECOVERY_TARGET", &target)
+        .env("CTX_UPGRADE_TEST_TARGET", &target)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "recovery failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    assert_eq!(fs::read(&target)?, b"current-format");
+    assert_eq!(fs::read(marker)?, b"current-format-marker");
+    assert!(!journal::install_transaction_path(&target).exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn hosted_migration_ordinary_recovery_probe() -> anyhow::Result<()> {
+    use crate::upgrade::{
+        state::{begin_recovery_attempt_locked, UpgradeLock},
+        TEST_RELEASE_PROCESS, TEST_SEMANTIC_LAYOUT,
+    };
+    let Some(target) = std::env::var_os("CTX_HOSTED_MIGRATION_RECOVERY_TARGET") else {
+        return Ok(());
+    };
+    let target = std::path::PathBuf::from(target);
+    let pending = super::pending_recovery(target.parent().unwrap(), &TEST_SEMANTIC_LAYOUT)?
+        .expect("original ordinary transaction must remain recoverable");
+    assert_eq!(pending.attempt_id, "current-format-attempt");
+    assert_eq!(pending.install_path, target);
+    let lock = UpgradeLock::acquire_recovery(&pending, &TEST_SEMANTIC_LAYOUT)?;
+    let attempt = begin_recovery_attempt_locked(&lock, &pending.attempt_id, "manual_apply")?;
+    assert_eq!(attempt.id(), "current-format-attempt");
+    assert_eq!(
+        super::recover_interrupted_install_outcome(
+            &TEST_RELEASE_PROCESS,
+            &pending,
+            lock.installation(),
+            &TEST_SEMANTIC_LAYOUT,
+        )?,
+        RecoveryOutcome::RolledBack {
+            restored_executable: Some(target.clone())
+        },
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn schema_two_interrupted_publication_recovers_by_rolling_back_current_format_install() {
     let temp = tempdir().unwrap();
     let (mut transaction, target, marker) =

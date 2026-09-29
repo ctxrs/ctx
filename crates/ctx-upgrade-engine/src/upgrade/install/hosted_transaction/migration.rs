@@ -3,12 +3,13 @@
 use std::cell::Cell;
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 
 use super::{
-    complete_install_with_fault, journal_path, managed_install_path_identity_matches,
+    complete_install_with_fault, ensure_legacy_pair_transaction_inactive_with_state, journal_path,
+    managed_install_path_identity_matches, normalized_sha256, read_journal,
     reject_unexpected_inputs, run_locked, validate_existing_pair_for_install,
-    validate_install_path, HostedTransactionArgs, Journal,
+    validate_install_path, validate_journal, HostedTransactionArgs, Journal, TransactionKind,
 };
 
 #[cfg(test)]
@@ -34,12 +35,40 @@ pub(in crate::upgrade) fn run_under_upgrade_lock(
 }
 
 pub(in crate::upgrade) fn hosted_install_journal_exists(install_path: &Path) -> Result<bool> {
-    let path = journal_path(install_path);
-    match std::fs::symlink_metadata(&path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    let install_path = validate_install_path(install_path)?;
+    Ok(pending_hosted_install(&install_path)?.is_some())
+}
+
+pub(in crate::upgrade) fn validate_hosted_migration_under_installation_lock(
+    args: &HostedTransactionArgs,
+) -> Result<()> {
+    reject_unexpected_inputs(args)?;
+    let install_path = validate_install_path(&args.install_path)?;
+    let journal = pending_hosted_install(&install_path)?;
+    if let Some(journal) = &journal {
+        let digest = normalized_sha256(args.binary_sha256.as_deref().unwrap_or_default())?;
+        if journal.binary_sha256 != digest {
+            bail!("an interrupted hosted install records a different signed candidate");
+        }
     }
+    // Check filesystem transaction ownership even when a hosted retry exists.
+    // Its scheduler exception is narrower than the post-admission bypass.
+    ensure_legacy_pair_transaction_inactive_with_state(&install_path, true)?;
+    crate::upgrade::state::ensure_hosted_install_scheduler_available(
+        &install_path,
+        journal.is_some(),
+    )
+}
+
+fn pending_hosted_install(install_path: &Path) -> Result<Option<Journal>> {
+    let Some(journal) = read_journal(&journal_path(install_path))? else {
+        return Ok(None);
+    };
+    validate_journal(&journal, install_path, journal.kind)?;
+    if journal.kind != TransactionKind::Install {
+        bail!("finish the pending hosted uninstall before reinstalling");
+    }
+    Ok(Some(journal))
 }
 
 pub(in crate::upgrade) fn validated_hosted_pair_digest(install_path: &Path) -> Result<String> {

@@ -24,7 +24,8 @@ use migration::complete_install;
 #[cfg(test)]
 pub(in crate::upgrade) use migration::set_hosted_install_fault_for_test;
 pub(in crate::upgrade) use migration::{
-    hosted_install_journal_exists, run_under_upgrade_lock, validated_hosted_pair_digest,
+    hosted_install_journal_exists, run_under_upgrade_lock,
+    validate_hosted_migration_under_installation_lock, validated_hosted_pair_digest,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -231,7 +232,6 @@ fn install(
     install_path: PathBuf,
     migration_owns_state: bool,
 ) -> Result<()> {
-    ensure_legacy_pair_transaction_inactive_with_state(&install_path, migration_owns_state)?;
     let supplied_digest = normalized_sha256(
         args.binary_sha256
             .as_deref()
@@ -244,6 +244,12 @@ fn install(
         MAX_BINARY_BYTES,
         "hosted installer candidate",
     )?;
+    if !migration_owns_state && !path_entry_exists(&journal_path(&install_path))? {
+        crate::upgrade::state::recover_removed_hosted_migration_under_installation_lock(
+            &install_path,
+        )?;
+    }
+    ensure_legacy_pair_transaction_inactive_with_state(&install_path, migration_owns_state)?;
     let journal_path = journal_path(&install_path);
     let mut journal = match read_journal(&journal_path)? {
         Some(journal) => {
@@ -978,6 +984,8 @@ fn journal_binding(journal: &Journal) -> String {
     )
 }
 
+#[cfg(all(test, unix))]
+pub(super) mod lifecycle_tests;
 #[cfg(all(test, unix))]
 mod tests;
 

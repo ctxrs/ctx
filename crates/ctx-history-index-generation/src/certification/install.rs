@@ -30,6 +30,10 @@ pub fn cache_recertified_physical_integrity(
     // the anchored scope so the best-effort sidecar write uses a mutable root.
     let directory = DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
     let root = directory.root_path();
+    let _certification_guard = crate::retention::CertificationGuard::read(root)?;
+    // Verification may have finished before a managed link update. Do not
+    // overwrite its newer cache with this reader's now-stale proof.
+    verify_certified_physical_integrity(root, pointer, slot, certified, None)?;
     install_certification_sidecar(
         root,
         Some(pointer),

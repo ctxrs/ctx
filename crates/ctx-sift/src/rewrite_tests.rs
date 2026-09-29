@@ -11,8 +11,8 @@ fn rewrite(text: &str) -> Option<String> {
 fn preserves_literal_arguments_and_operator_order() {
     assert!(rewrite("LANG=C git status --short").is_none());
     assert!(rewrite("rg '$literal' $FILE").is_none());
-    assert_eq!(rewrite("rg 'a b' \"x*y\" file"), Some("command true || rg 'a b' \"x*y\" file; command '/opt/ctx tools/ctx' output run --capture -- rg 'a b' \"x*y\" file".into()));
-    assert_eq!(rewrite("cd project && git status; cargo test"), Some("command true || git status; command true || cargo test; cd project && command '/opt/ctx tools/ctx' output run --capture -- git status; command '/opt/ctx tools/ctx' output run --capture -- cargo test".into()));
+    assert_eq!(rewrite("rg 'a b' \"x*y\" file"), Some("command true || rg 'a b' \"x*y\" file; command '/opt/ctx tools/ctx' sift run --capture -- rg 'a b' \"x*y\" file".into()));
+    assert_eq!(rewrite("cd project && git status; cargo test"), Some("command true || git status; command true || cargo test; cd project && command '/opt/ctx tools/ctx' sift run --capture -- git status; command '/opt/ctx tools/ctx' sift run --capture -- cargo test".into()));
 }
 
 #[test]
@@ -33,7 +33,7 @@ fn leaves_pipeline_data_and_file_output_untouched() {
 fn unknown_syntax_and_existing_wrappers_are_passthrough() {
     for text in [
         "sift git status",
-        "'/opt/ctx tools/ctx' output run -- git status",
+        "'/opt/ctx tools/ctx' sift run -- git status",
         "git show $(touch marker)",
         "git show `date`",
         "git status &",
@@ -52,12 +52,12 @@ fn interactive_or_open_ended_commands_keep_streaming_mode() {
     assert_eq!(
         rewrite("npm run dev"),
         Some(
-            "command true || npm run dev; command '/opt/ctx tools/ctx' output run -- npm run dev"
+            "command true || npm run dev; command '/opt/ctx tools/ctx' sift run -- npm run dev"
                 .into()
         )
     );
-    assert_eq!(rewrite("tail -f app.log"), Some("command true || tail -f app.log; command '/opt/ctx tools/ctx' output run -- tail -f app.log".into()));
-    assert_eq!(rewrite("git add --patch"), Some("command true || git add --patch; command '/opt/ctx tools/ctx' output run -- git add --patch".into()));
+    assert_eq!(rewrite("tail -f app.log"), Some("command true || tail -f app.log; command '/opt/ctx tools/ctx' sift run -- tail -f app.log".into()));
+    assert_eq!(rewrite("git add --patch"), Some("command true || git add --patch; command '/opt/ctx tools/ctx' sift run -- git add --patch".into()));
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn escaped_final_whitespace_keeps_execution_arguments_streams_and_status() {
     std::fs::write(&git, b"#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf 'diagnostic\\n' >&2\ncase \"$1\" in exit17) exit 17;; esac\n").unwrap();
     std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
     let wrapper = root.join("ctx");
-    std::fs::write(&wrapper, b"#!/bin/sh\n[ \"$1\" = output ] || exit 80\nshift\n[ \"$1\" = run ] || exit 81\nshift\n[ \"$1\" != --capture ] || shift\n[ \"$1\" != -- ] || shift\nexec \"$@\"\n").unwrap();
+    std::fs::write(&wrapper, b"#!/bin/sh\n[ \"$1\" = sift ] || exit 80\nshift\n[ \"$1\" = run ] || exit 81\nshift\n[ \"$1\" != --capture ] || shift\n[ \"$1\" != -- ] || shift\nexec \"$@\"\n").unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
     let paths = std::env::join_paths(std::iter::once(root.clone()).chain(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),

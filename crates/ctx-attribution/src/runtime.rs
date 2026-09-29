@@ -193,10 +193,7 @@ pub fn catch_up_with_progress(
 ) -> anyhow::Result<CoreMaterializationSyncOutcome> {
     use crate::materializer::{MaterializationPhase, MaterializationProgress};
     use std::{
-        sync::{
-            Mutex,
-            atomic::{AtomicBool, Ordering},
-        },
+        sync::Mutex,
         time::{Duration, Instant},
     };
 
@@ -210,7 +207,6 @@ pub fn catch_up_with_progress(
         ..Default::default()
     };
     let observer = Mutex::new((None::<Instant>, None::<anyhow::Error>));
-    let owns_writer = AtomicBool::new(false);
     let checkpoint = || {
         if cancelled() {
             return true;
@@ -226,14 +222,17 @@ pub fn catch_up_with_progress(
             .is_none_or(|last| last.elapsed() >= Duration::from_millis(500))
         {
             observer.0 = Some(Instant::now());
-            let progress = if owns_writer.load(Ordering::Relaxed) {
-                materialization_progress(data_root)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-            } else {
-                waiting.clone()
-            };
+            // The lock-validated sidecar belongs to the active writer, including
+            // a daemon whose work this foreground command is waiting to reuse.
+            let mut progress = materialization_progress(data_root)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| waiting.clone());
+            // A writer can finish a different Core generation while retaining
+            // its lease. Only our successful synchronization is terminal here.
+            if progress.phase == MaterializationPhase::Complete {
+                progress.phase = MaterializationPhase::WaitingForWriter;
+            }
             if let Err(error) = report(&progress) {
                 observer.1 = Some(error);
                 return true;
@@ -247,7 +246,6 @@ pub fn catch_up_with_progress(
             crate::core_materialization::CORE_MATERIALIZER_REVISION,
             &checkpoint,
         )?;
-        owns_writer.store(true, Ordering::Relaxed);
         report(&materializer.progress())?;
         let outcome = crate::catch_up::sync_generation_pinned_core(
             data_root,

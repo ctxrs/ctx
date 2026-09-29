@@ -395,6 +395,7 @@ pub struct GenerationWriter {
     candidate_directory_name: Option<String>,
     candidate_physical_proof: Option<CandidatePhysicalProof>,
     candidate_activation_fence: Option<CandidateActivationFence>,
+    retained_generation_directories: ctx_history_index_generation::RetainedGenerationDirectories,
     preflight_lock: Option<DirectoryLock>,
     writer: Option<IndexWriter<IndexDocument>>,
     writer_options: WriterOptions,

@@ -521,6 +521,29 @@ fn hosted_migration_quiesces_installed_image_and_keeps_prior_on_bad_digest() -> 
             assert!(install
                 .with_file_name(".ctx.hosted-install-transaction.json")
                 .exists());
+            let paths = [
+                install.clone(),
+                install_marker_path(&install),
+                install.with_file_name(".ctx.upgrade-state.json"),
+                install.with_file_name(".ctx.hosted-install-transaction.json"),
+            ];
+            let before = paths
+                .iter()
+                .map(fs::read)
+                .collect::<std::io::Result<Vec<_>>>()?;
+            let mut mismatched_retry = args();
+            mismatched_retry.binary_sha256 = Some("0".repeat(64));
+            let error = engine
+                .migrate_hosted_install(&data, mismatched_retry)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("different signed candidate"),
+                "{error:#}"
+            );
+            assert_eq!(*calls.lock().unwrap(), ["begin"]);
+            for (path, bytes) in paths.iter().zip(before) {
+                assert_eq!(fs::read(path)?, bytes);
+            }
             engine.migrate_hosted_install(&data, args())?;
             assert_eq!(*calls.lock().unwrap(), ["begin", "begin", "resume"]);
             assert!(!install

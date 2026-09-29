@@ -6,7 +6,8 @@ use anyhow::{anyhow, Result};
 use crate::upgrade::{
     install::{
         cleanup_legacy_managed_pair_under_installation_lock, hosted_install_journal_exists,
-        run_hosted_transaction_under_upgrade_lock, validated_hosted_pair_digest,
+        run_hosted_transaction_under_upgrade_lock,
+        validate_hosted_migration_under_installation_lock, validated_hosted_pair_digest,
         HostedTransactionAction, HostedTransactionArgs,
     },
     state::{
@@ -31,6 +32,9 @@ impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
         }
         self.prepare_data_root(data_root)?;
         let upgrade_lock = UpgradeLock::acquire_for_installation(&args.install_path)?;
+        // The lock excludes a running writer; interrupted transactions still
+        // own their installation and scheduler until their owner recovers.
+        validate_hosted_migration_under_installation_lock(&args)?;
         let attempt = begin_manual_attempt_locked(data_root, &upgrade_lock, "hosted_migration")?;
         let install_path = args.install_path.clone();
         write_state_phase_locked(&upgrade_lock, &attempt, "quiescing")?;

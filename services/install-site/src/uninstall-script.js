@@ -622,7 +622,7 @@ valid_skill_path() {
   candidate="$1"
   valid_owned_path "$candidate" || return 1
   case "$candidate" in
-    */skills/ctx-agent-history-search) return 0 ;;
+    */skills/ctx|*/skills/ctx-agent-history-search) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -766,7 +766,7 @@ remove_owned_skill() {
   rm -f "$skill_ownership_copy"
   if [ "$skill_schema" != "1" ] ||
      [ "$skill_installer" != "ctx-cli" ] ||
-     [ "$skill_name" != "ctx-agent-history-search" ] ||
+     [ "$skill_name" != "\${skill_path##*/}" ] ||
      [ "$skill_marker_hash" != "sha256:$actual_skill_sha256" ] ||
      [ "$actual_skill_ownership_sha256" != "$skill_sha256" ]; then
     log "Preserved modified or unowned ctx skill: $skill_path"

@@ -800,6 +800,9 @@ if [ "$run_setup" = "1" ] && [ "$setup_status" != "0" ]; then
   fi
   receipt_warning "Setup failed. Retry: ctx setup"
 fi
+if [ "$man_install_failed" = "1" ]; then
+  receipt_warning "Man page setup incomplete. Check $man_dir."
+fi
 if [ "$skill_install_failed" = "1" ]; then
   receipt_warning "Agent skill setup failed. Retry: ctx integrations install skills"
 fi

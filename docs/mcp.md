@@ -104,15 +104,19 @@ returns `invalid_cursor`. These are non-retryable typed tool errors. Restart
 from the first page after `cursor_stale`; do not retry a mismatched or malformed
 cursor unchanged.
 
-`show_event` accepts bounded before, after, or symmetric window sizes. Both show
-tools read complete policy-selected records from the active verified
+`show_event` accepts before, after, or symmetric window sizes from 0 to 50.
+Both show tools read complete policy-selected records from the active verified
 Core/Tantivy generation without reopening provider history. MCP `show_session`
 may return fewer than `limit` events with
 `has_more: true` to stay within the response budget. After combining exact
 `structuredContent` with the text fallback, every show response remains subject
-to the 1 MiB MCP aggregate limit; an individually unrepresentable page fails
-with `output_limit_exceeded` rather than silently clipping an event. MCP hosts
-may log or forward the returned transcript.
+to the 8 MiB MCP aggregate response limit; an individually unrepresentable page
+fails with `output_limit_exceeded` rather than silently clipping an event.
+MCP hosts may log or forward the returned transcript.
+
+The JSON-RPC input line limit is independently 1 MiB. `output_restore` also
+limits restored text to 1 MiB before serializing its response. These input and
+restoration limits are separate from the 8 MiB aggregate response limit.
 
 This paging contract is MCP-specific. CLI `ctx show session` remains a
 complete, unbounded stream unless the user explicitly requests terminal
@@ -193,10 +197,10 @@ search that excludes subagent work. MCP search does not infer or automatically
 exclude the caller's current session. The compatibility
 `include_current_session` input is accepted but has no effect for MCP calls.
 
-Malformed tool arguments return `isError: true` with the existing diagnostic
+Invalid fields or values in tool argument objects return `isError: true` with the diagnostic
 `error` and stable `error_code: "invalid_request"` in `structuredContent`.
-Malformed JSON-RPC framing or envelopes continue to use protocol-level parse
-and invalid-params errors.
+Malformed JSON-RPC framing or envelopes, including non-object `params.arguments`,
+use protocol-level parse and invalid-params errors.
 
 Tool results include MCP text content plus `structuredContent` JSON. Treat all
 MCP output as private local history: it may include absolute paths, source

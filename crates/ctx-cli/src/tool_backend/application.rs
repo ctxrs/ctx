@@ -542,6 +542,9 @@ fn classify_show_error(
     error: crate::commands::source_index::ShowApplicationError,
 ) -> ToolBackendError {
     match error {
+        crate::commands::source_index::ShowApplicationError::SourceUnavailable => {
+            ToolBackendError::SourceUnavailable
+        }
         crate::commands::source_index::ShowApplicationError::GenerationChanged => {
             ToolBackendError::GenerationChanged
         }
@@ -780,5 +783,145 @@ mod tests {
                 detail: observed,
             } if observed == detail
         ));
+    }
+
+    fn show_protocol_result(backend: &LocalToolBackend, name: &str, key: &str, id: &str) -> Value {
+        use ctx_agent_integrations::mcp::{
+            encode_response_line, handle_protocol_message, McpServerIdentity, RequestDescriptor,
+        };
+        let message = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": {key: id}},
+        });
+        let response = handle_protocol_message(
+            message.clone(),
+            RequestDescriptor::from_message(&message),
+            &mut true,
+            McpServerIdentity {
+                name: "ctx",
+                version: "test",
+            },
+            backend,
+            Value::to_string,
+        )
+        .value
+        .unwrap();
+        let encoded = encode_response_line(&response).unwrap();
+        let response: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(response["id"], 1);
+        assert!(response.get("error").is_none(), "{response}");
+        response["result"].clone()
+    }
+
+    #[test]
+    fn mcp_show_classifies_unavailable_store_and_preserves_populated_reads() {
+        use ctx_history_core::{
+            derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
+            NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
+            SourceAnchor, SourceKey, SourceObservation, TypedKey,
+        };
+        use ctx_history_index::{GenerationWriter, WriterOptions};
+
+        let root = private_tempdir();
+        let data_root = root.path().join("data");
+        let backend = LocalToolBackend::new(data_root.clone());
+        let source = SourceKey::derive(
+            "codex",
+            "codex_session_jsonl",
+            "fixture",
+            1,
+            SourceAnchor::CatalogLineage([1; 32]),
+        )
+        .unwrap();
+        let session_id = derive_session_id(SessionIdentityInput {
+            source: &source,
+            logical_session_kind: "thread",
+            native_session_key: &NativeSessionKey::native_id("session", TypedKey::U64(1)).unwrap(),
+        })
+        .unwrap();
+        let event_id = derive_event_id(EventIdentityInput {
+            source: &source,
+            session_id,
+            logical_item_kind: "message",
+            native_item_key: &NativeItemKey::native_id("message", TypedKey::U64(1)).unwrap(),
+            subrecord_selector: None,
+        })
+        .unwrap();
+        let session = session_id.as_uuid().to_string();
+        let event = event_id.as_uuid().to_string();
+        let cases = [
+            ("show_session", "ctx_session_id", session.as_str()),
+            ("show_event", "ctx_event_id", event.as_str()),
+        ];
+        for create_root in [false, true] {
+            if create_root {
+                std::fs::create_dir(&data_root).unwrap();
+            }
+            for (name, key, id) in cases {
+                let result = show_protocol_result(&backend, name, key, id);
+                assert_eq!(result["isError"], true);
+                assert_eq!(
+                    result["structuredContent"]["error_code"],
+                    "source_unavailable"
+                );
+                let invalid = show_protocol_result(&backend, name, key, "invalid-id");
+                assert_eq!(invalid["isError"], true);
+                assert_eq!(
+                    invalid["structuredContent"]["error_code"],
+                    "invalid_request"
+                );
+            }
+        }
+        let mut record = CoreRecord::new_selected(
+            event_id,
+            session_id,
+            source.clone(),
+            1,
+            "message",
+            "fixture-v1",
+            "stored show body",
+        )
+        .unwrap();
+        record.role = Some("user".to_owned());
+        let mut writer = GenerationWriter::open(
+            data_root.join("search/lexical"),
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 32 * 1024 * 1024,
+            },
+        )
+        .unwrap()
+        .into_writer()
+        .unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_core_record(record).unwrap();
+        let observation = SourceObservation::new(source, "fixture-v1", vec![1]).unwrap();
+        writer
+            .certify_source(
+                CertifiedSource::certify(
+                    observation.clone(),
+                    observation,
+                    "fixture-v1",
+                    [1; 32],
+                    ScannedSourceCounts {
+                        complete_records: 1,
+                        retained_records: 1,
+                        indexed_documents: 1,
+                        certified_bytes: 1,
+                        ..ScannedSourceCounts::default()
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        writer.commit(|_| true).unwrap();
+        for (name, key, id) in cases {
+            let result = show_protocol_result(&backend, name, key, id);
+            assert!(result.get("isError").is_none(), "{result}");
+            let rows = result["structuredContent"]["events"].as_array().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["ctx_event_id"], event);
+            assert_eq!(rows[0]["text"], "stored show body");
+        }
     }
 }

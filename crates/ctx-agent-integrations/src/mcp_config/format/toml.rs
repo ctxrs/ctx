@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use toml_edit::{
-    value as toml_value, Array as TomlArray, DocumentMut, Item, Table, Value as TomlValue,
+    value as toml_value, Array as TomlArray, DocumentMut, Item, Table, TableLike,
+    Value as TomlValue,
 };
 
 use super::super::SERVER_NAME;
@@ -12,12 +13,12 @@ pub fn status(body: &str) -> Result<ConfigStatus> {
         return Ok(ConfigStatus::Missing);
     };
     let servers = servers
-        .as_table()
+        .as_table_like()
         .ok_or_else(|| anyhow!("mcp_servers must be a TOML table"))?;
     let Some(server) = servers.get(SERVER_NAME) else {
         return Ok(ConfigStatus::Missing);
     };
-    Ok(if server.as_table().is_some_and(server_is_current) {
+    Ok(if server.as_table_like().is_some_and(server_is_current) {
         ConfigStatus::Current
     } else {
         ConfigStatus::Conflict
@@ -34,10 +35,10 @@ pub fn upsert(body: &str, force: bool) -> Result<String> {
         doc["mcp_servers"] = Item::Table(Table::new());
     }
     let servers = doc["mcp_servers"]
-        .as_table_mut()
+        .as_table_like_mut()
         .ok_or_else(|| anyhow!("mcp_servers must be a TOML table"))?;
-    if let Some(existing) = servers.get(SERVER_NAME).and_then(Item::as_table) {
-        if server_is_current(existing) {
+    if let Some(existing) = servers.get(SERVER_NAME) {
+        if existing.as_table_like().is_some_and(server_is_current) {
             return Ok(doc.to_string());
         }
         if !force {
@@ -54,7 +55,7 @@ pub fn upsert(body: &str, force: bool) -> Result<String> {
         args.push(*arg);
     }
     table["args"] = Item::Value(TomlValue::Array(args));
-    servers[SERVER_NAME] = Item::Table(table);
+    servers.insert(SERVER_NAME, Item::Table(table));
     Ok(doc.to_string())
 }
 
@@ -64,22 +65,24 @@ pub fn remove(body: &str, force: bool) -> Result<String> {
         return Ok(body.to_owned());
     };
     let servers = servers
-        .as_table_mut()
+        .as_table_like_mut()
         .ok_or_else(|| anyhow!("mcp_servers must be a TOML table"))?;
     let Some(existing) = servers.get(SERVER_NAME) else {
         return Ok(body.to_owned());
     };
-    if !existing.as_table().is_some_and(server_is_current) && !force {
+    if !existing.as_table_like().is_some_and(server_is_current) && !force {
         return Err(anyhow!(
             "existing ctx MCP server has different command or args"
         ));
     }
     servers.remove(SERVER_NAME);
-    servers.set_implicit(false);
+    if let Some(table) = doc["mcp_servers"].as_table_mut() {
+        table.set_implicit(false);
+    }
     Ok(doc.to_string())
 }
 
-fn server_is_current(table: &Table) -> bool {
+fn server_is_current(table: &dyn TableLike) -> bool {
     let command = server_command();
     let command_ok = table
         .get("command")
@@ -159,5 +162,51 @@ args = ["mcp", "serve"]
         assert!(removed.contains("[mcp_servers]"));
         assert!(!removed.contains("ctx ="));
         assert!(remove("not valid = [", true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod representation_tests {
+    use super::*;
+
+    #[test]
+    fn equivalent_tables_support_status_install_remove_and_conflict_checks() {
+        for body in [
+            "model = 'chosen'\n[mcp_servers.other]\ncommand = 'other'\n[mcp_servers.ctx]\ncommand = 'ctx'\nargs = ['mcp', 'serve']\n",
+            "model = 'chosen'\n[mcp_servers]\nother = { command = 'other' }\nctx = { command = 'ctx', args = ['mcp', 'serve'] }\n",
+            "model = 'chosen'\nmcp_servers = { other = { command = 'other' }, ctx = { command = 'ctx', args = ['mcp', 'serve'] } }\n",
+        ] {
+            assert_eq!(status(body).unwrap(), ConfigStatus::Current);
+            assert_eq!(upsert(body, false).unwrap(), body);
+            let removed = remove(body, false).unwrap();
+            assert_eq!(status(&removed).unwrap(), ConfigStatus::Missing);
+            let installed = upsert(&removed, false).unwrap();
+            assert_eq!(status(&installed).unwrap(), ConfigStatus::Current);
+            for text in [&removed, &installed] {
+                let doc = text.parse::<DocumentMut>().unwrap();
+                assert_eq!(doc["model"].as_str(), Some("chosen"));
+                assert_eq!(
+                    doc["mcp_servers"]["other"]["command"].as_str(),
+                    Some("other")
+                );
+            }
+            let conflict = body.replace("command = 'ctx'", "command = 'custom'");
+            assert_eq!(status(&conflict).unwrap(), ConfigStatus::Conflict);
+            assert!(upsert(&conflict, false).is_err());
+            assert!(remove(&conflict, false).is_err());
+            assert_eq!(
+                status(&upsert(&conflict, true).unwrap()).unwrap(),
+                ConfigStatus::Current
+            );
+            assert_eq!(
+                status(&remove(&conflict, true).unwrap()).unwrap(),
+                ConfigStatus::Missing
+            );
+        }
+        for body in ["mcp_servers = {", "mcp_servers = []"] {
+            assert!(status(body).is_err());
+            assert!(upsert(body, false).is_err());
+            assert!(remove(body, false).is_err());
+        }
     }
 }

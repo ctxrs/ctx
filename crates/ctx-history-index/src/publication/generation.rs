@@ -76,7 +76,7 @@ pub(crate) fn reclaim_inactive_generation_directories(
     root: &Path,
     pointer: Option<&ActiveGenerationPointer>,
     lease: Option<&ctx_history_index_generation::GenerationRetentionLease>,
-) -> Result<()> {
+) -> Result<ctx_history_index_generation::RetainedGenerationDirectories> {
     Ok(
         ctx_history_index_generation::reclaim_inactive_generation_directories(
             root, pointer, lease,
