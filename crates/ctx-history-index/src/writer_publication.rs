@@ -111,7 +111,9 @@ impl GenerationWriter {
                 self.candidate_activation_fence = Some(candidate.activation_fence);
             }
 
-            let writer = construct_index_writer_with_retry(&self.index, &self.writer_options)?;
+            let mut options = self.writer_options.clone();
+            options.memory_bytes -= self.replacement_memory_bytes;
+            let writer = construct_index_writer_with_retry(&self.index, &options)?;
             #[cfg(test)]
             self.index_writer_constructions
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

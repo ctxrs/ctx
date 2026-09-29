@@ -7,6 +7,8 @@ use ctx_history_core::{
 };
 use ctx_history_index::{GenerationWriter, WriterOptions};
 
+mod base_lookup;
+
 #[test]
 fn index_preparation_classifies_only_source_contract_failures_as_invalid() {
     let invalid_source = [

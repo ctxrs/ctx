@@ -42,6 +42,8 @@ ctx setup --format json
 ctx setup --progress json --format json
 ctx status
 ctx status --format json
+ctx status --sample 5
+ctx status --sample 5 --format json
 ctx stats
 ctx stats --detail
 ctx stats --format json
@@ -92,6 +94,23 @@ ctx daemon run
   searchable. JSON retains the existing `indexed_sources` meaning and is the
   exact diagnostic drilldown. Status does not initialize or repair Core or
   semantic state or open old history.
+- `status --sample SECONDS` observes the existing daemon for 1–60 seconds and
+  prints a shareable plain-text report; `--format json` prints the same facts
+  as JSON. It reads existing daemon/Blame progress records and process accounting
+  without starting a daemon, scanning history, opening databases, or sending data.
+  The report identifies the reporting CLI version, OS, and architecture, and
+  contains recognized states, provider names, and aggregate numbers;
+  it excludes paths, source contents, identifiers, and raw errors. CPU is the
+  observed daemon process's user plus system time, excluding child processes,
+  with 100% meaning one CPU core. Scheduler rates are observed persisted
+  counter increments, not lifetime totals or an exact event timeline. Refresh
+  progress and elapsed phase timings describe the last observed job, not a
+  total for the sample or per-provider CPU. Missing fields and invalidated
+  measurements remain unknown. Use shell redirection to save the report.
+  Blame writer observation is store-wide, not tied to the daemon PID. Blame
+  progress and the last semantic job receipt are advisory and may be stale;
+  neither attributes CPU to that activity or establishes current semantic work.
+  Sampling cannot be combined with `--usage`.
 - `stats` is the read-only, local, offline report for History retrieval, Code
   provenance, Measured delivery, and Estimated savings. Measured facts and
   model-based estimates are separate in JSON; the estimate model and

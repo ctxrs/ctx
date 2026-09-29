@@ -22,6 +22,11 @@
     "test:maintenance:postgres": "node --test --test-name-pattern='telemetry maintenance catch-up' test/maintenance-postgres.integration.mjs",
     "test:blame:postgres": "vitest run --config vitest.postgres.config.ts"
   },
+  "pnpm": {
+    "overrides": {
+      "undici": "7.29.1"
+    }
+  },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.0"
   },

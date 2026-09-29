@@ -246,8 +246,12 @@ pub fn observe_opened_file<E: JsonlFamilyError>(
     source_path: &Path,
     opened: &OpenedProviderSourceFile<E>,
 ) -> JsonlResult<JsonlFileObservation, E> {
-    opened.revalidate()?;
+    // These values come from the retained descriptor and its opening metadata.
+    // The closing fence validates that exact stamp and the named root before
+    // any observation escapes; a second pathname walk before it adds no proof.
     let observation = observe_metadata::<E>(source_path, opened.file(), opened.metadata())?;
+    #[cfg(test)]
+    observation_tests::after_observation();
     opened.revalidate()?;
     Ok(observation)
 }
@@ -274,11 +278,12 @@ pub fn observe_opened_file_leaf<E: JsonlFamilyError>(
     source_path: &Path,
     opened: &OpenedProviderSourceFile<E>,
 ) -> JsonlResult<JsonlFileObservation, E> {
-    opened.revalidate_same_object()?;
-    opened.revalidate_leaf()?;
+    // Keep the exact leaf fence and the append-friendly named-root fence after
+    // deriving the retained observation, as in observe_opened_file above.
     let observation = observe_metadata::<E>(source_path, opened.file(), opened.metadata())?;
-    opened.revalidate_leaf()?;
-    opened.revalidate_same_object()?;
+    #[cfg(test)]
+    observation_tests::after_observation();
+    opened.revalidate_leaf_with_same_object_root()?;
     Ok(observation)
 }
 
@@ -514,3 +519,6 @@ pub(super) fn hash_prefix<E: JsonlFamilyError, H: JsonlPrefixHasher>(
     }
     Ok(hasher)
 }
+
+#[cfg(test)]
+mod observation_tests;

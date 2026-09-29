@@ -256,6 +256,11 @@ impl GenerationWriter {
                     )?;
                 }
             }
+            let replacement_memory_bytes = if base_publication.is_some() {
+                (options.memory_bytes / 8).min(options.memory_bytes - minimum)
+            } else {
+                0
+            };
             Ok(Self {
                 root,
                 index,
@@ -268,6 +273,10 @@ impl GenerationWriter {
                 preflight_lock: Some(preflight_lock),
                 writer: None,
                 writer_options: options,
+                replacement_memory_bytes,
+                replacement_memory_used: 0,
+                #[cfg(test)]
+                replacement_work: writer_replacement::ReplacementWork::default(),
                 fields,
                 base_publication,
                 base_opstamp,
@@ -395,6 +404,17 @@ impl GenerationWriter {
         }) {
             // Missing-state reset and route membership changes are manifest
             // mutations even when every Core source is otherwise unchanged.
+            return Ok(None);
+        }
+
+        // A complete source replacement may retain every document without
+        // constructing a writer. It is not an exact replay claim, and the
+        // ordinary replacement path may carry untouched sources forward.
+        if self
+            .pending
+            .values()
+            .any(|pending| matches!(pending.mode, PendingSourceMode::Replace))
+        {
             return Ok(None);
         }
 

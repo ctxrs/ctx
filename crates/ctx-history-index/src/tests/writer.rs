@@ -737,6 +737,12 @@ fn logical_rescan_advances_only_replay_frontier_without_rewriting_documents() {
 
 #[test]
 fn logically_identical_one_pass_replacement_is_discarded_without_publication() {
+    for differential in [true, false] {
+        identical_one_pass_replacement(differential);
+    }
+}
+
+fn identical_one_pass_replacement(differential: bool) {
     let temp = tempdir().unwrap();
     let source = source("logical-snapshot.sqlite");
     let certificate = certificate(&source, 1, 1);
@@ -762,6 +768,9 @@ fn logically_identical_one_pass_replacement_is_discarded_without_publication() {
         .unwrap()
         .into_writer()
         .unwrap();
+    if !differential {
+        staged.replacement_memory_bytes = 0;
+    }
     let constructions = Arc::clone(&staged.index_writer_constructions);
     staged.begin_source(source.clone()).unwrap();
     staged
@@ -774,8 +783,8 @@ fn logically_identical_one_pass_replacement_is_discarded_without_publication() {
         .unwrap();
     assert_eq!(
         constructions.load(Ordering::SeqCst),
-        1,
-        "one-pass replacement staging should construct one disposable writer"
+        usize::from(!differential),
+        "only ordinary replacement needs a disposable writer"
     );
 
     let mut source_revalidations = 0;

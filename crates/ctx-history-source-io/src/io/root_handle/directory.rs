@@ -135,50 +135,9 @@ impl ProviderSourceDirectory {
     pub fn open_child(&self, name: &OsStr) -> Result<OpenedProviderSourcePath> {
         validate_child_name(name, self.display_path())?;
         let relative_path = self.relative_path.join(name);
-        let named_path = self.root.named_path().join(&relative_path);
         let opened = platform::open_child(&self.directory, name, &self.root.inner.filesystem)
-            .map_err(|error| map_open_error(&named_path, error))?;
-        match opened {
-            platform::OpenedPath::File {
-                file,
-                metadata,
-                filesystem: _,
-            } => {
-                let stamp = provider_source_io_result(
-                    &named_path,
-                    "provider source opened-file identity query",
-                    platform::object_stamp(&file, &metadata),
-                )?;
-                Ok(OpenedProviderSourcePath::File(OpenedProviderSourceFile {
-                    route: ProviderSourceFileRoute::Relative {
-                        root: self.root.clone(),
-                        relative_path,
-                    },
-                    file,
-                    metadata,
-                    opened: stamp,
-                }))
-            }
-            platform::OpenedPath::Directory {
-                file,
-                metadata,
-                filesystem: _,
-            } => {
-                let stamp = provider_source_io_result(
-                    &named_path,
-                    "provider source opened-directory identity query",
-                    platform::object_stamp(&file, &metadata),
-                )?;
-                Ok(OpenedProviderSourcePath::Directory(
-                    ProviderSourceDirectory {
-                        root: self.root.clone(),
-                        relative_path,
-                        directory: file,
-                        opened: stamp,
-                    },
-                ))
-            }
-        }
+            .map_err(|error| map_open_error(&self.root.named_path().join(&relative_path), error))?;
+        self.root.bind_relative_path(relative_path, opened)
     }
 
     /// Detects mutation of the directory while its children were enumerated

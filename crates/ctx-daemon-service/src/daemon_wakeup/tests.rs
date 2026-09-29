@@ -12,6 +12,7 @@ use ctx_history_core::CaptureProvider;
 use std::{sync::Barrier, thread};
 
 mod codex_noise;
+mod receipt_epoch;
 
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};

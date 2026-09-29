@@ -163,6 +163,33 @@ pub fn render_status_human(
 
     let mut history_values = vec![("Search", component_display(&report["lexical"]).to_owned())];
     history_values.extend(history_health_fields(coverage));
+    if report["daemon"]["running"].as_bool() == Some(true) {
+        let job = &report["daemon"]["jobs"]["core_refresh"];
+        let activity = super::status_diagnostics::RefreshActivity::from_job(job);
+        if activity.active() {
+            // Restart recovery can leave the previous daemon's active job on
+            // disk while the new daemon is already reported as running.
+            let current = report["daemon"]["started_at_ms"]
+                .as_u64()
+                .filter(|start| *start > 0)
+                .zip(job["last_run_at_ms"].as_u64())
+                .is_some_and(|(start, run)| run >= start);
+            history_values.push((
+                if current {
+                    "History work"
+                } else {
+                    "Last recorded work"
+                },
+                activity.work_description(),
+            ));
+            if current {
+                if let Some(providers) = activity.provider_names().filter(|value| !value.is_empty())
+                {
+                    history_values.push(("Providers", providers));
+                }
+            }
+        }
+    }
     if component_health == StatusHealth::Healthy {
         history_values.push(("Refresh", component_display(&report["refresh"]).to_owned()));
     } else {
@@ -648,6 +675,56 @@ mod tests {
         let context = context(80, ColorMode::Never);
         let rendered = render_report(&context, &report).render_plain();
         assert!(rendered.contains("1 history service is catching up; search remains available."));
+    }
+
+    #[test]
+    fn active_work_explanation_uses_only_live_jobs_and_closed_provider_names() {
+        let mut report = status_report(true, "ready", "pending");
+        report["daemon"]["started_at_ms"] = json!(100);
+        report["daemon"]["jobs"] = json!({"core_refresh": {
+            "request_state": "running", "trigger": "periodic",
+            "last_run_at_ms": 101,
+            "trigger_provenance": "daemon_scheduler",
+            "progress": {"whole_run_stage": "reading", "providers": ["opencode", "codex"]}
+        }});
+        for width in [32, 48, 80, 120] {
+            let context = context(width, ColorMode::Never);
+            let document = render_report(&context, &report);
+            let plain = document.render_plain();
+            let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(normalized.contains("History work reading; scheduled refresh"));
+            assert!(normalized.contains("Providers Codex, OpenCode"));
+            assert_fits(&document, &context);
+        }
+        for timestamp in [json!(99), Value::Null] {
+            report["daemon"]["jobs"]["core_refresh"]["last_run_at_ms"] = timestamp;
+            let plain = render_report(&context(80, ColorMode::Never), &report).render_plain();
+            let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(!plain.contains("History work"));
+            assert!(!plain.contains("Providers"));
+            assert!(normalized.contains("Last recorded work reading; scheduled refresh"));
+        }
+        report["daemon"]["jobs"]["core_refresh"]["last_run_at_ms"] = json!(101);
+        for (state, expected) in [
+            ("admission_pending", "waiting for admission"),
+            ("queued", "queued"),
+        ] {
+            report["daemon"]["jobs"]["core_refresh"]["request_state"] = json!(state);
+            let plain = render_report(&context(80, ColorMode::Never), &report).render_plain();
+            let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(normalized.contains(&format!("History work {expected}; scheduled refresh")));
+            assert!(!plain.contains("reading"));
+        }
+        report["daemon"]["jobs"]["core_refresh"]["request_state"] = json!("running");
+        report["daemon"]["running"] = json!(false);
+        assert!(!render_report(&context(80, ColorMode::Never), &report)
+            .render_plain()
+            .contains("History work"));
+        report["daemon"]["running"] = json!(true);
+        report["daemon"]["jobs"]["core_refresh"]["request_state"] = json!("published");
+        assert!(!render_report(&context(80, ColorMode::Never), &report)
+            .render_plain()
+            .contains("History work"));
     }
 
     #[test]

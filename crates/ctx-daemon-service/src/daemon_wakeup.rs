@@ -8,7 +8,8 @@ use std::{
 
 use anyhow::Result;
 use ctx_daemon_runtime::{
-    create_private_dir_all, daemon_root_path, write_private_json_file, NativeWatchEvent,
+    create_private_dir_all, daemon_lock_path, daemon_root_path, pid_lock_uses_advisory_protocol,
+    read_pid_lock_json, write_private_json_file, NativeWatchEvent,
 };
 use ctx_history_capture::SourceBackedWatchCatalog;
 use ctx_history_index::SourceRouteIdentity;
@@ -310,11 +311,51 @@ impl WatchAuthority {
 
 pub(super) struct DaemonFileWatcher {
     data_root: PathBuf,
+    daemon_owner: Option<WakeupReceiptOwner>,
     wakeup: Arc<DaemonWakeup>,
     authority: Arc<RwLock<WatchAuthority>>,
     counters: Arc<Mutex<WatchCounters>>,
     runtime: ctx_daemon_runtime::NativeFileWatcher,
     last_error: Option<String>,
+}
+
+struct WakeupReceiptOwner {
+    owner_id: String,
+    pid: u32,
+    started_at_ms: i64,
+}
+
+impl WakeupReceiptOwner {
+    fn read(data_root: &Path) -> Option<Self> {
+        let value = read_pid_lock_json(&daemon_lock_path(data_root))?;
+        let pid = u32::try_from(value.get("pid")?.as_u64()?).ok()?;
+        if !pid_lock_uses_advisory_protocol(&value)
+            || value.get("released")?.as_bool()?
+            || pid != std::process::id()
+        {
+            return None;
+        }
+        Some(Self {
+            owner_id: value
+                .get("owner_id")?
+                .as_str()
+                .filter(|id| !id.is_empty())?
+                .to_owned(),
+            pid,
+            started_at_ms: value
+                .get("started_at_ms")?
+                .as_i64()
+                .filter(|start| *start > 0)?,
+        })
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "owner_id": self.owner_id,
+            "pid": self.pid,
+            "started_at_ms": self.started_at_ms,
+        })
+    }
 }
 
 impl DaemonFileWatcher {
@@ -323,6 +364,9 @@ impl DaemonFileWatcher {
         wakeup: Arc<DaemonWakeup>,
         catalog: DaemonWatchCatalog,
     ) -> Result<Self> {
+        // The service holds its daemon lock throughout the watcher's lifetime.
+        // Capture once: later writes must never relabel old counters with a new owner.
+        let daemon_owner = WakeupReceiptOwner::read(data_root);
         let authority = Arc::new(RwLock::new(WatchAuthority::new(data_root, catalog)));
         let counters = Arc::new(Mutex::new(WatchCounters::default()));
         let classifier_authority = Arc::clone(&authority);
@@ -377,6 +421,7 @@ impl DaemonFileWatcher {
         )?;
         let mut service = Self {
             data_root: data_root.to_path_buf(),
+            daemon_owner,
             wakeup,
             authority,
             counters,
@@ -478,6 +523,7 @@ impl DaemonFileWatcher {
         let runtime = self.runtime.snapshot();
         let value = compact_json(json!({
             "schema_version": 1,
+            "daemon_owner": self.daemon_owner.as_ref().map(WakeupReceiptOwner::to_json),
             "status": status,
             "backend": ctx_daemon_runtime::native_watch_backend(),
             "idle_strategy": "blocking",
