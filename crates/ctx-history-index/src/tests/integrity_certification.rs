@@ -857,6 +857,8 @@ mod headroom;
 
 #[cfg(target_os = "linux")]
 mod lifecycle;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod managed_unlinks;
 mod validation;
 #[cfg(windows)]
 mod windows;

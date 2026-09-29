@@ -210,26 +210,7 @@ pub(super) fn install_certification_sidecar(
         );
     }
 
-    // Ordinary reader/open certification remains a cache optimization. A
-    // verified full hash is still authoritative when setup or the sidecar
-    // write fails. Once replacement succeeds, reread errors remain terminal so
-    // an observed identity race cannot be mistaken for a usable cache entry.
-    if crate::read_root::has_active_read_root() {
-        // The caller caches the completed proof after leaving this anchored
-        // read scope.
-        return Ok(());
-    }
-    if ensure_private_directory(&certification_directory).is_err() {
-        return Ok(());
-    }
-    if ensure_real_directory(&certification_directory).is_err() {
-        return Ok(());
-    }
-    let Ok(directory) = DurableMmapDirectory::open(root) else {
-        return Ok(());
-    };
-    let relative_path = Path::new(CERTIFICATION_DIRECTORY).join(certification_file_name(slot));
-    if directory.atomic_write(&relative_path, &bytes).is_err() {
+    if !write_optional_certification_sidecar(root, slot, &bytes)? {
         return Ok(());
     }
     let pointer = topology_authority.ok_or(IndexError::ConcurrentGenerationChange)?;
@@ -238,4 +219,37 @@ pub(super) fn install_certification_sidecar(
     } else {
         Err(IndexError::ConcurrentGenerationChange)
     }
+}
+
+/// Writes only the optional cache. The caller owns proof validation; readers
+/// still authenticate every artifact identity before using these bytes.
+pub(super) fn write_optional_certification_sidecar(
+    root: &Path,
+    slot: &GenerationSlot,
+    bytes: &[u8],
+) -> Result<bool> {
+    if bytes.len() > MAX_CERTIFICATION_BYTES {
+        return Ok(false);
+    }
+    // Ordinary reader/open certification remains a cache optimization. A
+    // verified full hash is still authoritative when setup or the sidecar
+    // write fails. Once replacement succeeds, reread errors remain terminal so
+    // an observed identity race cannot be mistaken for a usable cache entry.
+    if crate::read_root::has_active_read_root() {
+        // The caller caches the completed proof after leaving this anchored
+        // read scope.
+        return Ok(false);
+    }
+    let certification_directory = root.join(CERTIFICATION_DIRECTORY);
+    if ensure_private_directory(&certification_directory).is_err() {
+        return Ok(false);
+    }
+    if ensure_real_directory(&certification_directory).is_err() {
+        return Ok(false);
+    }
+    let Ok(directory) = DurableMmapDirectory::open(root) else {
+        return Ok(false);
+    };
+    let relative_path = Path::new(CERTIFICATION_DIRECTORY).join(certification_file_name(slot));
+    Ok(directory.atomic_write(&relative_path, bytes).is_ok())
 }

@@ -1,5 +1,10 @@
 use super::*;
 
+mod unlink;
+pub(crate) use unlink::CandidateUnlinks;
+#[cfg(any(test, feature = "test-support"))]
+pub use unlink::{ManagedUnlinkStage, ManagedUnlinkTestGuard};
+
 /// Exact certificates captured before a writer-owned link operation. Keeping
 /// the alias guards alive also covers readers that finish during that operation.
 pub(crate) struct ManagedLinkCertifications {
@@ -40,6 +45,27 @@ impl ManagedLinkCertifications {
         directory: &str,
         aliases: &CertificationAliasAuthority,
     ) -> Result<Option<GenerationIntegrityCertification>> {
+        let Some(certification) = Self::read_certification(root, directory)? else {
+            return Ok(None);
+        };
+        for expected in &certification.artifacts {
+            if capture_artifact_with_retained_aliases(
+                root,
+                &slot_path(root, &certification.slot),
+                Path::new(&expected.artifact.path),
+                aliases.directories(),
+            )? != expected.artifact
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(certification))
+    }
+
+    fn read_certification(
+        root: &Path,
+        directory: &str,
+    ) -> Result<Option<GenerationIntegrityCertification>> {
         let path = root
             .join(CERTIFICATION_DIRECTORY)
             .join(format!("{directory}{CERTIFICATION_SUFFIX}"));
@@ -58,17 +84,6 @@ impl ManagedLinkCertifications {
             ))? != certification.manifest_identity
         {
             return Ok(None);
-        }
-        for expected in &certification.artifacts {
-            if capture_artifact_with_retained_aliases(
-                root,
-                &slot_path(root, &certification.slot),
-                Path::new(&expected.artifact.path),
-                aliases.directories(),
-            )? != expected.artifact
-            {
-                return Ok(None);
-            }
         }
         Ok(Some(certification))
     }
