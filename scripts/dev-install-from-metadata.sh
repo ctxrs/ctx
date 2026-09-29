@@ -33,7 +33,7 @@ Options:
   --bin-dir DIR          Install directory. Defaults to
                          ${CTX_BIN_DIR:-$HOME/.local/bin}.
   --runtime-dir DIR      ONNX Runtime sidecar install directory. Defaults to
-                         CTX_RUNTIME_DIR or runtime/ under the managed root.
+                         ${CTX_RUNTIME_DIR:-${CTX_DATA_ROOT:-$HOME/.ctx}/runtime}.
   --no-runtime           Do not install optional ONNX Runtime sidecar metadata.
   --no-modify-path       Do not update shell startup files when the install
                          directory is not on PATH.
@@ -595,9 +595,7 @@ metadata_source=""
 artifact_dir=""
 platform=""
 bin_dir="${CTX_BIN_DIR:-${HOME:-}/.local/bin}"
-runtime_dir="${CTX_RUNTIME_DIR:-${HOME:-}/.ctx/runtime}"
-runtime_dir_is_default=1
-[[ -z "${CTX_RUNTIME_DIR:-}" ]] || runtime_dir_is_default=0
+runtime_dir="${CTX_RUNTIME_DIR:-${CTX_DATA_ROOT:-${HOME:-}/.ctx}/runtime}"
 man_dir="${CTX_MAN_DIR:-${HOME:-}/.local/share/man/man1}"
 dry_run=0
 modify_path=1
@@ -632,7 +630,6 @@ while (($# > 0)); do
     --runtime-dir)
       shift
       runtime_dir="${1:-}"
-      runtime_dir_is_default=0
       ;;
     --no-runtime)
       install_runtime=0
@@ -873,17 +870,6 @@ if ((dry_run)); then
   exit 0
 fi
 
-resolve_managed_runtime_dir() {
-  if ((runtime_dir_is_default && install_runtime)) && [[ -n "${runtime_artifact}" ]] &&
-     [[ -e "$HOME/.ctx-control/data-root.json" || -L "$HOME/.ctx-control/data-root.json" ]]; then
-    chmod 0700 "${download_path}"
-    local managed_root
-    managed_root="$("${download_path}" data-root show)" || fail "could not resolve the managed data root"
-    [[ "$managed_root" == /* ]] || fail "ctx returned an invalid managed data root"
-    runtime_dir="$managed_root/runtime"
-  fi
-}
-
 if [[ -n "${pair_envelope_artifact}" ]]; then
   fetch_managed_object "${pair_core_object_key}" "${download_path}"
   fetch_managed_object "${pair_companion_object_key}" "${companion_download_path}"
@@ -894,7 +880,6 @@ if [[ -n "${pair_envelope_artifact}" ]]; then
   [[ "$(lowercase "${actual_companion_checksum}")" == "$(lowercase "${pair_companion_checksum}")" ]] || \
     fail "checksum mismatch for ${companion_artifact}: expected ${pair_companion_checksum}, got ${actual_companion_checksum}"
   chmod 0700 "${download_path}"
-  resolve_managed_runtime_dir
   pair_marker_path="${tmp_dir}/ctx.install.json"
   staging_dogfood=false
   if [[ "${channel}" == "staging" ]]; then
@@ -925,7 +910,6 @@ else
   if [[ "$(lowercase "${actual_checksum}")" != "$(lowercase "${checksum}")" ]]; then
     fail "checksum mismatch for ${artifact}: expected ${checksum}, got ${actual_checksum}"
   fi
-  resolve_managed_runtime_dir
   mkdir -p "${bin_dir}"
   install -m 0755 "${download_path}" "${install_path}"
   write_install_marker "${install_path}.install.json" \

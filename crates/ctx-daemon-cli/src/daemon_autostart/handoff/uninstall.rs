@@ -91,64 +91,6 @@ pub fn prepare_daemon_uninstall(data_root: &Path) -> Result<Value> {
     })))
 }
 
-/// Stops installation writers without changing saved indexing policy. The
-/// caller holds stable admission outside the data root until activation ends.
-pub fn quiesce_managed_root_move(
-    data_root: &Path,
-    _admission: &ctx_history_platform::managed_root::ManagedRootMove,
-    validate: impl FnOnce(&ctx_daemon_application::ManagedRootSupervisor) -> Result<()>,
-) -> Result<(
-    ManagedRootQuiescence,
-    ctx_daemon_application::ManagedRootSupervisor,
-)> {
-    let expected_executable =
-        env::current_exe().context("resolve ctx executable before relocation")?;
-    let mut roots = BTreeSet::from([data_root.to_path_buf()]);
-    let controls = lock_discovered_installation_roots(&mut roots)?;
-    let (supervisor, supervisor_lock) = crate::capture_managed_root_supervisor(data_root)?;
-    validate(&supervisor)?;
-    crate::daemon_supervisor::with_daemon_application(|application| {
-        application.disable_managed_root_supervisor(data_root, &supervisor_lock)
-    })
-    .context(
-        "remove native supervisor before relocation; retry after restoring the service manager",
-    )?;
-    // Native removal may delete its environment file. Retain the launch
-    // settings at the source even if stopping a daemon subsequently fails.
-    supervisor.persist(data_root)?;
-    for root in &roots {
-        let _ = ctx_daemon_service::daemon_source_refresh_request(
-            root,
-            compact_json(json!({
-                "schema_version": 1, "op": "upgrade_handoff",
-            })),
-            DAEMON_HEALTH_TIMEOUT,
-            DAEMON_HEALTH_RESPONSE_MAX_BYTES,
-        );
-    }
-    quiesce_daemon_roots(&roots, &expected_executable)?;
-    let installation =
-        crate::daemon_autostart::installation::try_acquire_installation_daemon_quiescence()?
-            .ok_or_else(|| {
-                anyhow!("ctx installation writers remain active; stop them and retry relocation")
-            })?;
-    reject_undiscovered_installation_roots(&roots)?;
-    Ok((
-        ManagedRootQuiescence {
-            _controls: controls,
-            _installation: installation,
-            _supervisor: supervisor_lock,
-        },
-        supervisor,
-    ))
-}
-
-pub struct ManagedRootQuiescence {
-    _controls: Vec<LockedDaemonRoot>,
-    _installation: ctx_daemon_runtime::InstallationQuiescence,
-    _supervisor: ctx_daemon_runtime::SupervisorInstallationLock,
-}
-
 fn lock_discovered_installation_roots(
     roots: &mut BTreeSet<PathBuf>,
 ) -> Result<Vec<LockedDaemonRoot>> {

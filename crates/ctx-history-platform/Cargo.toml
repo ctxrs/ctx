@@ -11,9 +11,6 @@ publish = false
 
 [dependencies]
 dirs.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-uuid.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(unix)'.dependencies]

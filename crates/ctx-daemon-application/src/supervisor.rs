@@ -31,9 +31,7 @@ use crate::{compact_json, lifecycle, DaemonApplicationHost};
 
 mod environment;
 mod native;
-mod relocation;
 mod report;
-pub use relocation::ManagedRootSupervisor;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -224,9 +222,6 @@ pub fn ensure_daemon_supervisor(
         let _installation_lock = SupervisorInstallationLock::acquire(data_root)?;
         ensure_hosted_uninstall_supervisor_admission(host)?;
         let daemon_environment = configured_supervisor_environment(host, data_root, None)?;
-        // Explicit setup/enable refreshes an unmanaged launch from this shell.
-        // A relocation snapshot is used until that next explicit refresh.
-        ctx_daemon_runtime::remove_supervisor_environment(data_root)?;
         write_supervisor_receipt_with_environment_snapshot(
             data_root,
             &SupervisorReceipt {
@@ -240,7 +235,7 @@ pub fn ensure_daemon_supervisor(
                 artifact_path: None,
                 executable_path: None,
                 limitation: Some(
-                    "native per-user restart registration requires the hosted installer and the default data root"
+                    "native per-user restart registration requires the hosted installer and the managed data root"
                         .to_owned(),
                 ),
                 last_error: None,
@@ -533,22 +528,6 @@ fn ensure_hosted_uninstall_supervisor_admission_for_executable(
 
 pub fn disable_daemon_supervisor(host: &dyn DaemonApplicationHost, data_root: &Path) -> Result<()> {
     let _installation_lock = SupervisorInstallationLock::acquire(data_root)?;
-    disable_daemon_supervisor_inner(host, data_root, false)
-}
-
-pub fn disable_managed_root_supervisor(
-    host: &dyn DaemonApplicationHost,
-    data_root: &Path,
-    _installation_lock: &SupervisorInstallationLock,
-) -> Result<()> {
-    disable_daemon_supervisor_inner(host, data_root, true)
-}
-
-fn disable_daemon_supervisor_inner(
-    host: &dyn DaemonApplicationHost,
-    data_root: &Path,
-    relocating: bool,
-) -> Result<()> {
     let current = stored_supervisor_report(data_root);
     if !is_canonical_managed_data_root(data_root)? {
         return write_supervisor_receipt(
@@ -604,15 +583,6 @@ fn disable_daemon_supervisor_inner(
     }
     let manager_environment = supervisor_manager_environment(host)?;
     let backend = PlatformNativeSupervisor::new(host, data_root, None, &manager_environment)?;
-    if relocating {
-        return relocation::disable_for_move_with(
-            data_root,
-            executable,
-            !host.persisted_daemon_enabled(data_root)?,
-            &current,
-            &backend,
-        );
-    }
     disable_native_supervisor_candidate_with(data_root, executable, &backend)
 }
 

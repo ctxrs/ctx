@@ -50,6 +50,7 @@ use autostart::{
 };
 #[cfg(test)]
 use handoff::daemon_upgrade_handoff_is_active;
+pub use handoff::prepare_daemon_uninstall;
 use handoff::remove_daemon_restart_requests;
 pub(super) use handoff::{
     acknowledge_daemon_restart_requests, current_process_owns_daemon_upgrade_handoff,
@@ -61,7 +62,6 @@ pub use handoff::{
     begin_daemon_upgrade_handoff_for_installation, complete_replacement_daemon_handoff,
     finish_replacement_daemon_handoff, mark_replacement_helper_handoff, DaemonUpgradeHandoff,
 };
-pub use handoff::{prepare_daemon_uninstall, quiesce_managed_root_move, ManagedRootQuiescence};
 #[cfg(test)]
 use handoff::{read_daemon_upgrade_handoff, write_daemon_upgrade_handoff};
 pub(super) use installation::InstallationDaemonLease;

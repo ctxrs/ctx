@@ -56,33 +56,7 @@ try {
         }
         if ([IO.File]::ReadAllText($configPath) -cne $case.config) { throw "$($case.name): config changed" }
     }
-    # Exercise the native resolver boundary without changing the user's home.
-    $relocatedRoot = Join-Path $OutputDirectory 'relocated data'
-    $null = [IO.Directory]::CreateDirectory($relocatedRoot)
-    [IO.File]::WriteAllText((Join-Path $relocatedRoot 'config.toml'), "[indexing]`nmode = 'manual'`n", $utf8)
-    $env:CTX_DATA_ROOT = ''
-    function Invoke-RootFixture {
-        if (($args -join ' ') -cne 'data-root show') { throw 'unexpected resolver arguments' }
-        $global:LASTEXITCODE = 0
-        $relocatedRoot
-    }
-    $controls = Get-PersistedConfigControls -Resolver 'Invoke-RootFixture'
-    if (-not $controls.DaemonDisabled -or $controls.SemanticEnabled -or $controls.Deferred) {
-        throw 'resolved root did not preserve manual indexing'
-    }
-    function Invoke-UnavailableRootFixture { $global:LASTEXITCODE = 1 }
-    function Invoke-RelativeRootFixture { $global:LASTEXITCODE = 0; 'relative-root' }
-    foreach ($resolver in @('Invoke-UnavailableRootFixture', 'Invoke-RelativeRootFixture')) {
-        $failure = $null
-        try { $null = Get-PersistedConfigControls -Resolver $resolver } catch { $failure = $_.Exception.Message }
-        if ($null -eq $failure -or -not $failure.Contains('could not resolve the managed data root')) {
-            throw "$resolver did not reject an invalid root"
-        }
-    }
-    $env:CTX_DATA_ROOT = $relocatedRoot
-    $controls = Get-PersistedConfigControls -Resolver 'Invoke-UnavailableRootFixture'
-    if (-not $controls.DaemonDisabled) { throw 'explicit history root lost precedence' }
-    [ordered]@{ cases = $cases.Count; relocated_cases = 4; powershell = $PSVersionTable.PSVersion.ToString() } | ConvertTo-Json -Compress
+    [ordered]@{ cases = $cases.Count; powershell = $PSVersionTable.PSVersion.ToString() } | ConvertTo-Json -Compress
 } finally {
     $env:CTX_DATA_ROOT = $previousRoot
 }

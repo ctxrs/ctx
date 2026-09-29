@@ -579,7 +579,7 @@ mod tests {
             "status": "fallback",
             "registration_verified": false,
             "live_owner_verified": false,
-            "limitation": "native per-user restart registration requires the hosted installer and the default data root",
+            "limitation": "native per-user restart registration requires the hosted installer and the managed data root",
         });
         let startup = DaemonSetupHandoff {
             handoff: DaemonHandoff {

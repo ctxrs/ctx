@@ -5,7 +5,6 @@ use super::*;
 pub(super) fn command_json_output(command: &CommandRoot) -> bool {
     match command {
         CommandRoot::Unified(_) => false,
-        CommandRoot::DataRoot(args) => args.json_output(),
         CommandRoot::Blame(args) => args.json_output(),
         CommandRoot::Setup(args) => args.format.is_json(),
         CommandRoot::Semantic(args) => args.json_output(),
@@ -266,7 +265,6 @@ pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDe
             },
             record_local_usage: !args.replacement_helper && args.hosted_transaction.is_none(),
         },
-        CommandRoot::DataRoot(_) => CliOperation::DataRoot,
         CommandRoot::Doctor(_) => CliOperation::Doctor(DoctorTelemetry::default()),
     };
     OperationDescriptor::Cli(operation)
@@ -276,23 +274,6 @@ pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDe
 pub(super) fn command_local_usage_draft(command: &CommandRoot) -> local_usage::CliUsage {
     let descriptor = command_operation_descriptor(command);
     local_usage::CliUsage::from_descriptor(&descriptor)
-}
-
-pub(super) fn command_reads_history_only(command: &CommandRoot) -> bool {
-    match command {
-        CommandRoot::Status(args) => args.usage.is_none(),
-        CommandRoot::Sources(args) => args.command.is_none(),
-        CommandRoot::Integrations(args) => args.is_status(),
-        CommandRoot::Search(args) => args.scope == crate::unified_search::SearchScope::All,
-        CommandRoot::Mcp(_) => true,
-        CommandRoot::Stats(_)
-        | CommandRoot::Show(_)
-        | CommandRoot::List(_)
-        | CommandRoot::Locate(_)
-        | CommandRoot::Docs(_)
-        | CommandRoot::Doctor(_) => true,
-        _ => false,
-    }
 }
 
 pub(super) fn command_is_status_report(command: &CommandRoot) -> bool {
@@ -318,32 +299,4 @@ pub(super) fn env_truthy(key: &str) -> bool {
             "" | "0" | "false" | "no" | "off"
         )
     })
-}
-
-#[cfg(test)]
-#[test]
-fn managed_root_admission_classifies_usage_and_sources_mutations() {
-    use clap::Parser;
-    for (args, read_only) in [
-        (vec!["ctx", "status"], true),
-        (vec!["ctx", "status", "--usage", "disable"], false),
-        (vec!["ctx", "sources"], true),
-        (
-            vec![
-                "ctx",
-                "sources",
-                "add",
-                "example",
-                "--provider",
-                "codex",
-                "--root",
-                "/provider",
-            ],
-            false,
-        ),
-        (vec!["ctx", "sources", "remove", "example"], false),
-    ] {
-        let cli = crate::Cli::try_parse_from(args).unwrap();
-        assert_eq!(command_reads_history_only(&cli.command), read_only);
-    }
 }

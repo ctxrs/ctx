@@ -52,7 +52,6 @@ fn command_is_refresh_eligible(command: &CommandRoot) -> bool {
         | CommandRoot::Integrations(_)
         | CommandRoot::Mcp(_)
         | CommandRoot::Upgrade(_)
-        | CommandRoot::DataRoot(_)
         | CommandRoot::Doctor(_) => false,
     }
 }

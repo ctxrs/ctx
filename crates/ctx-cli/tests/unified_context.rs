@@ -18,11 +18,10 @@ use tempfile::TempDir;
 mod history_fixture;
 use history_fixture::import_synthetic_history;
 
-#[path = "unified_context/output_hooks.rs"]
-mod output_hooks;
-
 #[path = "unified_context/managed_root.rs"]
 mod managed_root;
+#[path = "unified_context/output_hooks.rs"]
+mod output_hooks;
 
 const PYTHON_SOURCE: &str = "def kernel():\n    return 41\n\ndef launch():\n    return kernel()\n\ndef idle():\n    return 0\n";
 const RUNS_HEADER: &str = "sift:text-runs-v1 counts repeat exact JSON strings; concatenate\n";

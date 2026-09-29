@@ -60,65 +60,65 @@ Default root:
         <platform>/
 ```
 
-`CTX_DATA_ROOT` or `--data-root` selects a custom history root for a command.
-The configured root is used directly; ctx does not append another directory.
-The managed installation has a separate persisted root shared by normal CLI
-commands, the background daemon, native supervision, and installation-wide
-upgrade and uninstall coordination. Its initial location is `~/.ctx`.
+`CTX_DATA_ROOT` selects the complete managed history root, including
+`config.toml`, installation identity, indexes, and default runtime assets.
+The CLI, daemon, supervisor, upgrades, and uninstall use this selection.
+With the variable unset or empty, the root is `~/.ctx`. The configured root is used
+directly; ctx does not append another directory.
+
+```bash
+export CTX_DATA_ROOT=/mnt/history/ctx
+```
+
+Use an absolute path and set the variable in the environment that launches
+ctx, including your agents, MCP servers, and installer or uninstaller.
+For PowerShell, use `$env:CTX_DATA_ROOT = 'D:\History\ctx'`. Set it in your
+shell or launcher configuration to keep using it in future sessions.
+Native supervision captures the selection when enabled with
+`ctx index mode auto`; it does not depend on a later interactive shell.
+Changing an environment variable does not update an already running process.
+
+`--data-root` remains a history-root override for one command. It does not
+change which root owns the managed installation's supervisor. Graph databases,
+output state, the executable, and explicitly overridden runtime/model caches
+have separate locations.
 
 ## Moving The Managed Root
 
-Use the managed-root command to relocate ctx-owned history to a different local
-filesystem. Changing `CTX_DATA_ROOT` alone does not move the managed
-installation. Replacing the root with a symlink or Windows junction is not
-supported.
+Upgrade ctx before migrating. Make sure the destination filesystem is mounted
+and supports private permissions, file locking, and atomic file replacement.
+The destination must be outside provider-owned history directories. Keep the
+same ownership and private permissions; replacing the root with a symlink or
+Windows junction is not supported.
 
-```bash
-ctx data-root show
-ctx data-root move --to /mnt/history/ctx
-ctx status
-ctx search "a known phrase" --refresh off
-```
+1. With the old root still selected, run `ctx index mode manual` and wait for
+   it to succeed. This stops background maintenance and removes its supervisor.
+   Close other ctx commands and MCP sessions before copying.
+2. Copy the entire root, including hidden files, `config.toml`, and installation
+   identity, to a new destination. Preserve permissions. For example, if the
+   current root is `~/.ctx` and `/mnt/history/ctx` does not exist:
 
-In PowerShell, pass an absolute destination such as `D:\History\ctx`. Omit
-`--data-root` and unset `CTX_DATA_ROOT` when moving the managed root. The
-destination must be absent or empty; it cannot overlap the source root or a
-provider history directory. The move copies data across filesystems, preserves
-the installation identity, and retains the source for verification and recovery.
-If copying fails, the source stays active; remove only the incomplete
-destination before retrying.
+   ```bash
+   cp -a "$HOME/.ctx" /mnt/history/ctx
+   export CTX_DATA_ROOT=/mnt/history/ctx
+   ```
 
-Automatic indexing resumes at the new location. If restarting it fails, the
-command reports that the move has completed and asks you to run
-`ctx index mode auto`. Manual indexing remains manual.
-Remove any shell or launcher override pointing to the retained source. ctx
-rejects that old managed copy to prevent two copies of the installation from
-diverging; independent custom history roots remain supported.
+3. Set the same `CTX_DATA_ROOT` in the environments used to launch your agents
+   and other ctx clients. Restart those clients. Run `ctx status` and a known
+   search with `--refresh off` to verify the copied history.
+4. If you want automatic indexing, run `ctx index mode auto` from the new
+   environment. This registers the supervisor for the new root and captures
+   its launch environment. Otherwise leave manual mode enabled.
 
-`ctx data-root show` is a read-only query for the managed root, even when a
-command-level history override is set. `ctx data-root show --format json`
-returns `schema_version` and `path`. The persisted location is recorded in
-`~/.ctx-control/data-root.json`, outside the movable root. Keep that small
-control directory in place; a new shell does not need a root environment
-variable.
+Keep the original copy until verification succeeds, then remove it when you
+no longer need it. Do not run both copies as the same managed installation.
+If copying fails, leave the old root selected and resume automatic mode there
+if desired. The copy operation itself does not change ctx's selected root.
 
-The destination filesystem must support ctx's private file permissions,
-locking, and atomic file replacement. Provider-owned history stays at its
-configured source locations. Explicit runtime or model-cache overrides, graph
-databases, output state, and the installed executable are separate locations;
-they are not relocated with the managed history root.
-If an explicit path points inside the retained source, update that setting
-before removing the source copy.
-
-Upgrade ctx before migrating and close other foreground ctx commands and MCP
-sessions during the move. Retain the original data until the relocated
-installation's status and search results have been checked. An old binary that
-predates managed-root relocation cannot discover the new location; do not
-downgrade while relying on it.
-
-When a configured destination is unavailable, history commands report an error instead of
-silently using `~/.ctx` or creating a replacement installation. Restore access
-to the configured filesystem before resuming normal use.
+There is no remembered relocation: a process without `CTX_DATA_ROOT` uses
+`~/.ctx`. Ensure the destination volume is mounted before starting ctx; a path
+alone cannot distinguish a new empty root from an empty mountpoint. Older ctx
+versions do not apply the variable consistently to the managed lifecycle.
 
 ## Installation Files
 
@@ -237,8 +237,7 @@ cannot permanently disable retention.
 
 When release metadata includes ctx-managed ONNX Runtime assets, the official
 installer and development installer place those native runtime files under
-`<managed-root>/runtime/onnxruntime/<runtime-version>/<platform>`, unless
-`CTX_RUNTIME_DIR` selects another runtime directory.
+`${CTX_RUNTIME_DIR:-$HOME/.ctx/runtime}/onnxruntime/<runtime-version>/<platform>`.
 They are product runtime assets, not provider-history storage, and may be shared
 by multiple ctx data roots on the same machine.
 
@@ -842,9 +841,8 @@ Find the active ctx root before destructive maintenance:
 ctx status
 ```
 
-The default is the managed root printed by `ctx data-root show`, initially
-`~/.ctx`. If you set `CTX_DATA_ROOT` or pass `--data-root`, use that root in the
-commands below instead.
+The default root is `~/.ctx`. If you set `CTX_DATA_ROOT` or pass `--data-root`,
+use that root in the commands below instead.
 
 Re-import or update the index:
 

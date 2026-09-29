@@ -74,7 +74,8 @@ artifacts are preserved when the unavailable manager cannot verify or remove
 them. Ownership, identity, integrity, fencing, and security failures remain
 errors rather than degraded limitations.
 
-An unmanaged install or custom data root instead uses the persistent
+An unmanaged install or a command-level `--data-root` override different from
+the managed root instead uses the persistent
 CLI-self-healing fallback process. Its autostart status is `"degraded"` because
 automatic restart registration is unavailable, but `persistent` is `true` and
 it does not report a process-lifetime limitation. The nested supervisor report

@@ -33,7 +33,6 @@ mod analytics_outbox;
 mod cli;
 mod commands;
 mod core_capability;
-mod data_root;
 mod dispatch;
 mod docs;
 mod execution_capabilities;

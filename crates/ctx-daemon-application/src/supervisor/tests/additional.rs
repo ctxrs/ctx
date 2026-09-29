@@ -954,17 +954,50 @@ fn native_disable_failure_does_not_claim_an_unavailable_launch_probe_is_healthy(
 }
 
 #[test]
-fn canonical_supervisor_root_is_independent_of_ctx_data_root_override() {
+fn selected_managed_supervisor_root_excludes_command_overrides() {
     let _env_lock = crate::test_environment_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let _restore = RestoreTestEnvironment::capture(&["CTX_DATA_ROOT"]);
-    let canonical = ctx_history_platform::managed_data_root().unwrap();
-    let custom = canonical.with_file_name("ctx-custom-supervisor-test");
-    env::set_var("CTX_DATA_ROOT", &custom);
+    env::remove_var("CTX_DATA_ROOT");
+    let default = ctx_history_platform::managed_data_root().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let selected = temp.path().join("managed");
+    let command_override = temp.path().join("override");
+    assert!(is_canonical_managed_data_root(&default).unwrap());
+    assert!(!is_canonical_managed_data_root(&command_override).unwrap());
+    env::set_var("CTX_DATA_ROOT", &selected);
 
-    assert!(is_canonical_managed_data_root(&canonical).unwrap());
-    assert!(!is_canonical_managed_data_root(&custom).unwrap());
+    assert!(is_canonical_managed_data_root(&selected).unwrap());
+    assert!(!is_canonical_managed_data_root(&default).unwrap());
+    assert!(!is_canonical_managed_data_root(&command_override).unwrap());
+    // Even a receipt claiming native ownership cannot let an override root
+    // alter the singleton supervisor.
+    write_supervisor_receipt(
+        &command_override,
+        &SupervisorReceipt {
+            kind: native_supervisor_kind().to_owned(),
+            status: "installed",
+            autostart_supported: true,
+            restart_supported: true,
+            registration_verified: true,
+            live_owner_verified: false,
+            owner_pid: None,
+            artifact_path: None,
+            executable_path: None,
+            limitation: None,
+            last_error: None,
+        },
+    )
+    .unwrap();
+    disable_daemon_supervisor(&TestHost, &command_override).unwrap();
+    assert_eq!(
+        stored_supervisor_report(&command_override)["kind"],
+        "cli_self_heal"
+    );
+    assert!(!selected.exists());
+    env::set_var("CTX_DATA_ROOT", "relative");
+    assert!(is_canonical_managed_data_root(&command_override).is_err());
 }
 
 #[test]
@@ -976,30 +1009,4 @@ fn explicit_root_is_noncanonical_when_managed_home_is_unavailable() {
         Err(ctx_history_platform::PlatformError::MissingHome)
     )
     .unwrap());
-}
-
-#[test]
-fn managed_root_manual_relocation_skips_absent_registration_but_requires_existing_removal(
-) -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let root = temp.path();
-    let backend = FakeSupervisorBackend::default();
-    backend.state.lock().unwrap().manager_unavailable = true;
-    let receipt = stored_supervisor_report(root);
-    relocation::disable_for_move_with(root, None, true, &receipt, &backend)?;
-    assert_eq!(backend.state.lock().unwrap().manager_probes, 0);
-    // Automatic policy is never evidence of an offline installation.
-    assert!(relocation::disable_for_move_with(root, None, false, &receipt, &backend).is_err());
-    let artifact = root.join("fake-native-registration");
-    fs::write(&artifact, "installed service")?;
-    assert!(relocation::disable_for_move_with(root, None, true, &receipt, &backend).is_err());
-    fs::remove_file(artifact)?;
-    // A surviving receipt is evidence even after its artifact was removed.
-    fs::create_dir(root.join("daemon"))?;
-    fs::write(root.join("daemon/supervisor.json"), "{}")?;
-    let active = json!({"kind": native_supervisor_kind(), "status": "ready"});
-    assert!(relocation::disable_for_move_with(root, None, true, &active, &backend).is_err());
-    assert!(relocation::disable_for_move_with(root, None, true, &receipt, &backend).is_err());
-    assert_eq!(backend.state.lock().unwrap().disables, 0);
-    Ok(())
 }

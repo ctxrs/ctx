@@ -22,7 +22,6 @@ pub enum CliOperation {
     /// Independent local engines do not record history usage or emit analytics.
     Graph,
     Output,
-    DataRoot,
     Setup(SetupTelemetry),
     SemanticEnable,
     SemanticStatus,
@@ -56,7 +55,6 @@ impl CliOperation {
         match self {
             Self::Graph => "graph",
             Self::Output => "output",
-            Self::DataRoot => "data_root",
             Self::Setup(_) => "setup",
             Self::SemanticEnable => "semantic_enable",
             Self::SemanticStatus => "semantic_status",
@@ -107,7 +105,7 @@ impl CliOperation {
 
     pub const fn local_usage_operation(&self) -> Option<LocalUsageOperation> {
         match self {
-            Self::Graph | Self::Output | Self::DataRoot => None,
+            Self::Graph | Self::Output => None,
             Self::Setup(_) => Some(LocalUsageOperation::Setup),
             Self::SemanticEnable | Self::SemanticStatus | Self::SemanticDisable => None,
             Self::Status(_) | Self::Stats => None,

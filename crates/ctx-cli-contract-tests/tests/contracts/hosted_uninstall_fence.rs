@@ -57,7 +57,7 @@ fn write_managed_install_marker(install: &Path, attempt_id: &str) -> PathBuf {
 fn installation_registration_root(home: &Path, binary: &Path) -> PathBuf {
     let canonical = fs::canonicalize(binary).unwrap();
     let namespace = format!("{:x}", Sha256::digest(canonical.as_os_str().as_bytes()));
-    home.join(".ctx")
+    home.join("canonical-root")
         .join("daemon-installations")
         .join(namespace)
         .join("daemon-quiescence-acks")
@@ -489,6 +489,14 @@ fn prepare_uninstall_discovers_and_quiesces_a_finite_custom_root_worker() {
         .arg(&requested_root)
         .args(["daemon", "disable", "--prepare-uninstall", "--format=json"]);
     let proof = successful_json(teardown);
+    assert_eq!(
+        proof["canonical_data_root"],
+        json!(temp.path().join("canonical-root"))
+    );
+    assert!(
+        !temp.path().join(".ctx").exists(),
+        "uninstall must not touch the unselected default root"
+    );
     assert_eq!(proof["installation_quiescent"], true, "{proof:#}");
     assert_eq!(proof["coordination_state_removed"], true, "{proof:#}");
     assert!(

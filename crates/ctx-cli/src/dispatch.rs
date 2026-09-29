@@ -1,7 +1,8 @@
-use std::{env, io, process::ExitCode, time::Instant};
+use std::{env, io, path::PathBuf, process::ExitCode, time::Instant};
 
 use anyhow::{Context, Result};
 use clap::CommandFactory as _;
+use ctx_history_platform::default_data_root;
 
 use crate::{
     analytics::{
@@ -180,6 +181,16 @@ fn render_unhandled_command_error(error: &anyhow::Error) -> Result<()> {
     ui.flush().context("flush pre-dispatch error")
 }
 
+pub(crate) fn resolve_history_data_root(command_root: Option<PathBuf>) -> Result<PathBuf> {
+    if env::var_os("CTX_DATA_ROOT").is_some() {
+        ctx_history_platform::managed_data_root().context("resolve managed ctx data root")?;
+    }
+    command_root
+        .map(Ok)
+        .unwrap_or_else(default_data_root)
+        .context("resolve ctx data root")
+}
+
 pub(crate) fn run_cli() -> Result<()> {
     let mut cli = parse_cli_from(env::args_os())?;
     cli.command = match cli.command {
@@ -192,10 +203,6 @@ pub(crate) fn run_cli() -> Result<()> {
         }
         command => command,
     };
-    cli.command = match cli.command {
-        CommandRoot::DataRoot(args) => return crate::data_root::run(args, cli.data_root),
-        command => command,
-    };
     if let CommandRoot::Search(args) = &cli.command {
         crate::unified_search::validate(args)?;
     }
@@ -203,24 +210,16 @@ pub(crate) fn run_cli() -> Result<()> {
         CommandRoot::Search(args) if args.scope != crate::unified_search::SearchScope::History => {
             return crate::unified_search::run(args, cli.data_root, cli.color.into());
         }
+        command => command,
+    };
+    semantic::initialize()?;
+    cli.command = match cli.command {
         CommandRoot::Mcp(args) => {
-            semantic::initialize()?;
-            return mcp::run(
-                args,
-                ctx_history_platform::managed_root::DataRootSelection::select(cli.data_root)?,
-            );
+            let data_root = resolve_history_data_root(cli.data_root)?;
+            return mcp::run(args, data_root);
         }
         command => command,
     };
-    let managed_root_use = if classification::command_reads_history_only(&cli.command) {
-        ctx_history_platform::managed_root::ManagedRootUse::acquire_read_only()?
-    } else {
-        Some(ctx_history_platform::managed_root::ManagedRootUse::acquire()?)
-    };
-    let root_selection =
-        ctx_history_platform::managed_root::DataRootSelection::select(cli.data_root.clone())?;
-    root_selection.validate()?;
-    semantic::initialize()?;
     let started = Instant::now();
     let output_measurement = OutputMeasurement::start();
     integrations::refresh_existing_managed_skills_on_startup(&cli.command);
@@ -258,7 +257,7 @@ pub(crate) fn run_cli() -> Result<()> {
         CommandRoot::Status(args) if args.usage.is_some()
     );
     let quiet = quiet_output(cli.quiet);
-    let data_root = root_selection.path().to_path_buf();
+    let data_root = resolve_history_data_root(cli.data_root.clone())?;
     let local_usage_authority =
         crate::observability_composition::local_usage_storage_authority(&data_root);
     if usage_control_action {
@@ -497,8 +496,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .integration_mut(),
             &mut ui,
         ),
-        CommandRoot::Mcp(_) => unreachable!("MCP runs before history bootstrap"),
-        CommandRoot::DataRoot(_) => unreachable!("data-root commands run before storage bootstrap"),
+        CommandRoot::Mcp(args) => mcp::run(args, data_root.clone()),
         CommandRoot::Daemon(args) => {
             semantic::run_daemon_command(args, data_root.clone(), &config, &mut ui)
         }
@@ -562,16 +560,7 @@ pub(crate) fn run_cli() -> Result<()> {
     let duration = started.elapsed();
     let output_result =
         delivery_result.and_then(|()| search_error_render_failure.map_or(Ok(()), Err));
-    // An observer may have started before the first control directory existed.
-    // Re-admit all post-output writes using its original managed provenance.
-    let accounting_admission = if managed_root_use.is_some()
-        || !(config.local_usage.enabled || config.analytics.enabled || data_root.exists())
-    {
-        root_selection.validate().map(|()| None)
-    } else {
-        root_selection.acquire()
-    };
-    if output_result.is_ok() && accounting_admission.is_ok() {
+    if output_result.is_ok() {
         local_usage::record_best_effort(&local_usage_authority, &usage_control, || {
             if blame_operation {
                 Some(local_usage::CompletedOperation::blame(
@@ -628,9 +617,7 @@ pub(crate) fn run_cli() -> Result<()> {
         }
     }
     let output_result = record_analytics_after_output(output_result, || {
-        if accounting_admission.is_ok() {
-            analytics::send_batch(&data_root, &events);
-        }
+        analytics::send_batch(&data_root, &events);
     });
     if result.is_ok() {
         if let Some(trigger) = daemon_autostart_trigger {

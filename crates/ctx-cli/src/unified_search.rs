@@ -201,10 +201,7 @@ fn graph_query(query: &str, limit: usize, explicit: Option<&Path>) -> Result<Val
 }
 
 fn history_query(args: SearchArgs, data_root: Option<PathBuf>) -> Result<Value> {
-    let _root_use = ctx_history_platform::managed_root::ManagedRootUse::acquire_read_only()?;
-    let selection = ctx_history_platform::managed_root::DataRootSelection::select(data_root)?;
-    selection.validate()?;
-    let root = selection.path().to_path_buf();
+    let root = crate::dispatch::resolve_history_data_root(data_root)?;
     let config = ctx_app_config::AppConfig::load_read_only(&root)?;
     let request = ctx_history_cli::SearchRequest::from(crate::commands::search::adapt(args)).into();
     let result = ctx_history_cli::cli_snapshot_search(

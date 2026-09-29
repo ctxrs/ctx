@@ -9,10 +9,6 @@ use std::{
 
 // The public Codex JSONL import contract is session_meta plus response_item.
 pub(super) fn import_synthetic_history(sandbox: &Sandbox) {
-    import_synthetic_history_with_text(sandbox, "kernel acceptance history retains this citation.");
-}
-
-pub(super) fn import_synthetic_history_with_text(sandbox: &Sandbox, text: &str) {
     sandbox.write(
         "history/config.toml",
         "[indexing]\nmode = \"manual\"\n[sources]\nautomatic = false\n[search]\nsemantic = false\n",
@@ -30,7 +26,7 @@ pub(super) fn import_synthetic_history_with_text(sandbox: &Sandbox, text: &str) 
         json!({
             "timestamp":"2026-09-01T12:00:01Z", "type":"response_item",
             "payload":{"type":"message", "role":"user", "content":[{
-                "type":"input_text", "text":text
+                "type":"input_text", "text":"kernel acceptance history retains this citation."
             }]}
         }),
     ];

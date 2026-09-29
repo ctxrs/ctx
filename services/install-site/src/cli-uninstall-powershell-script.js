@@ -110,7 +110,6 @@ if ([string]::IsNullOrWhiteSpace($MarkerPath)) {
         $MarkerPath = "$InstallPath.install.json"
     }
 }
-$useManagedDataRoot = [string]::IsNullOrWhiteSpace($DataRoot) -and [string]::IsNullOrWhiteSpace($env:CTX_DATA_ROOT)
 if ([string]::IsNullOrWhiteSpace($DataRoot)) {
     if (-not [string]::IsNullOrWhiteSpace($env:CTX_DATA_ROOT)) {
         $DataRoot = $env:CTX_DATA_ROOT
@@ -621,15 +620,6 @@ try {
     Assert-RegularManagedFile -Path $InstallPath -Label "installed ctx executable"
     $marker = Read-ManagedMarker
     $version = Get-InstalledVersion
-    if ($useManagedDataRoot -and
-        $null -ne (Get-Item -LiteralPath (Join-Path $homeDirectory '.ctx-control/data-root.json') -Force -ErrorAction SilentlyContinue)) {
-        $resolvedRoot = & $InstallPath data-root show
-        if ($LASTEXITCODE -ne 0 -or @($resolvedRoot).Count -ne 1 -or
-            -not [IO.Path]::IsPathRooted([string]$resolvedRoot)) {
-            Fail "could not resolve the managed data root; ctx remains installed"
-        }
-        $DataRoot = [IO.Path]::GetFullPath([string]$resolvedRoot)
-    }
     if ($DeleteData -and ($version.major -gt 1 -or ($version.major -eq 1 -and $version.minor -ge 5))) {
         Fail "-DeleteData was legacy derived-data cleanup and is retired in ctx 1.5. History and legacy data are preserved; rerun without -DeleteData"
     }

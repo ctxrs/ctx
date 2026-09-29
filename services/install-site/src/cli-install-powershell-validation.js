@@ -90,30 +90,17 @@ function Assert-PersistedConfigValue(
     }
 }
 
-function Get-PersistedConfigControls([string]$Resolver = "") {
+function Get-PersistedConfigControls {
     $controls = [pscustomobject]@{
         SemanticEnabled = $false
         DaemonDisabled = $false
-        Deferred = $false
     }
     $dataRoot = [Environment]::GetEnvironmentVariable("CTX_DATA_ROOT", "Process")
     if ([string]::IsNullOrWhiteSpace($dataRoot)) {
         if ([string]::IsNullOrWhiteSpace($HOME)) {
             return $controls
         }
-        if (-not [string]::IsNullOrEmpty($Resolver)) {
-            $resolvedRoot = & $Resolver data-root show
-            if ($LASTEXITCODE -ne 0 -or @($resolvedRoot).Count -ne 1 -or
-                -not [IO.Path]::IsPathRooted([string]$resolvedRoot)) {
-                Fail "could not resolve the managed data root; restore its filesystem and retry"
-            }
-            $dataRoot = [string]$resolvedRoot
-        } elseif ($null -ne (Get-Item -LiteralPath (Join-Path $HOME '.ctx-control/data-root.json') -Force -ErrorAction SilentlyContinue)) {
-            $controls.Deferred = $true
-            return $controls
-        } else {
-            $dataRoot = Join-Path $HOME ".ctx"
-        }
+        $dataRoot = Join-Path $HOME ".ctx"
     }
     $configPath = Join-Path $dataRoot "config.toml"
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {

@@ -1008,7 +1008,7 @@ fn runtime_discovery_roots_reject_relative_and_whitespace_paths() {
         (
             "CTX_DATA_ROOT",
             " /tmp/ctx-data",
-            "must not be empty or whitespace-padded",
+            "must be an absolute path",
         ),
     ] {
         let temp = tempdir();

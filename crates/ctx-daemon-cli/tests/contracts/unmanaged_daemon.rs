@@ -192,7 +192,7 @@ mod unix {
         wait_for_running(&mut first);
         wait_for_running(&mut second);
 
-        let coordination_root = temp.path().join(".ctx").join("daemon-installations");
+        let coordination_root = data_root(&temp).join("daemon-installations");
         let namespaces = fs::read_dir(&coordination_root)
             .expect("read user-state installation coordination")
             .map(|entry| entry.unwrap().path())

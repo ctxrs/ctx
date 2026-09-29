@@ -83,9 +83,8 @@ An absent install marker is normal for a source build or package-manager
 install and leaves ctx unmanaged. The hosted installer will not silently adopt
 that executable. Unmanaged installations never write upgrade locks or state
 beside the executable, so read-only package-manager directories (for example
-Nix) keep working. Daemon coordination remains unified under the persisted
-managed root (initially `~/.ctx`), `ctx upgrade check` stays lock-free and
-stateless, and `ctx upgrade` or `ctx upgrade
+Nix) keep working. Daemon coordination remains unified under `~/.ctx`, `ctx
+upgrade check` stays lock-free and stateless, and `ctx upgrade` or `ctx upgrade
 enable` reports the unmanaged guidance instead of a directory-permission error.
 A marker that is malformed, unsupported, path-mismatched, or does not match the
 binary hash leaves the executable and marker as an inconsistent pair; do not
@@ -172,9 +171,9 @@ running `ctx.exe` exits; JSON reports `status: "scheduled"` and
 One scheduler state, `.ctx.upgrade-state.json`, and one replacement transaction
 journal live beside the managed executable. The executable-adjacent
 `.ctx.install.lock` coordinates all data roots sharing that installation.
-Daemon lifecycle and supervisor coordination share the persisted managed root,
-which defaults to `~/.ctx`. A custom `CTX_DATA_ROOT` does not change that
-installation-wide location. `ctx upgrade status` reads the scheduler state and
-shows failed-check details.
+Daemon lifecycle and supervisor coordination is separate and unified under the
+managed root selected by `CTX_DATA_ROOT`, defaulting to `~/.ctx`. Run upgrades
+with the same environment used by your ctx clients. `ctx upgrade status` reads
+the scheduler state and shows failed-check details.
 Upgrade metadata checks do not send provider transcript text, search queries,
 result snippets, source paths, repository names, or command output.

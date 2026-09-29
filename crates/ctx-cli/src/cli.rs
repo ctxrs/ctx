@@ -75,10 +75,8 @@ impl From<CliColorMode> for ColorMode {
 pub(crate) struct Cli {
     #[arg(
         long,
-        env = "CTX_DATA_ROOT",
-        hide_env_values = true,
         global = true,
-        help = "Agent-history data root only; graph and output stores use separate paths"
+        help = "Override this command's history root; CTX_DATA_ROOT selects the managed root (default: ~/.ctx)"
     )]
     pub(crate) data_root: Option<PathBuf>,
     #[arg(
@@ -132,8 +130,6 @@ pub(crate) enum CommandRoot {
     Blame(commands::blame::BlameArgs),
     #[command(about = "Create local ctx storage and index discovered history")]
     Setup(SetupArgs),
-    #[command(about = "Show or relocate the managed ctx data root")]
-    DataRoot(crate::data_root::DataRootArgs),
     #[command(about = "Manage local semantic search")]
     Semantic(SemanticArgs),
     #[command(about = "Show local ctx index and health status")]

@@ -332,6 +332,10 @@ mod tests {
             assert!(apply_supervisor_environment_handoff()?);
             assert_eq!(env::var("HOME").as_deref(), Ok("/private/home"));
             assert_eq!(
+                env::var("CTX_DATA_ROOT").as_deref(),
+                Ok("/private/managed-root")
+            );
+            assert_eq!(
                 env::var("CTX_SEMANTIC_EMBEDDING_TOKEN").as_deref(),
                 Ok("private-bearer-token")
             );
@@ -355,6 +359,10 @@ mod tests {
                 vec![OsString::from("daemon"), OsString::from("run")],
                 BTreeMap::from([
                     (OsString::from("HOME"), OsString::from("/private/home")),
+                    (
+                        OsString::from("CTX_DATA_ROOT"),
+                        OsString::from("/private/managed-root"),
+                    ),
                     (
                         OsString::from("CTX_SEMANTIC_EMBEDDING_TOKEN"),
                         OsString::from("private-bearer-token"),

@@ -1,4 +1,3 @@
-use ctx_history_platform::managed_root::DataRootSelection;
 use std::path::PathBuf;
 
 use ctx_agent_application::{
@@ -35,7 +34,7 @@ use ctx_app_config as config;
 
 #[derive(Debug, Clone)]
 pub(crate) struct LocalToolBackend {
-    data_root: DataRootSelection,
+    data_root: PathBuf,
     graph_db: Result<Option<PathBuf>, String>,
 }
 
@@ -78,12 +77,7 @@ fn adapt_tool_search_request(
 }
 
 impl LocalToolBackend {
-    #[cfg(test)]
     pub(crate) fn new(data_root: PathBuf) -> Self {
-        Self::from_selection(DataRootSelection::select(Some(data_root)).unwrap())
-    }
-
-    pub(crate) fn from_selection(data_root: DataRootSelection) -> Self {
         Self {
             data_root,
             graph_db: Ok(None),
@@ -97,15 +91,15 @@ impl LocalToolBackend {
 
     fn status(&self) -> Result<Value, ToolBackendError> {
         let config =
-            config::AppConfig::load(self.data_root.path()).map_err(classify_application_error)?;
-        let storage = local_usage_storage_authority(self.data_root.path());
+            config::AppConfig::load(&self.data_root).map_err(classify_application_error)?;
+        let storage = local_usage_storage_authority(&self.data_root);
         let control = usage_control_snapshot(config.local_usage.enabled);
         let components = match &self.graph_db {
             Ok(path) => crate::unified_health::UnifiedHealth::inspect(path.as_deref()),
             Err(_) => crate::unified_health::UnifiedHealth::unavailable(),
         };
         let value = crate::commands::status::status_read_model_authorized_with_components(
-            self.data_root.path(),
+            &self.data_root,
             &config,
             &storage,
             &control,
@@ -118,12 +112,12 @@ impl LocalToolBackend {
 
     fn sources(&self) -> Result<SourceCatalog, ToolBackendError> {
         let config =
-            config::AppConfig::load(self.data_root.path()).map_err(classify_application_error)?;
+            config::AppConfig::load(&self.data_root).map_err(classify_application_error)?;
         let automatic_discovery = config.automatic_source_discovery_enabled();
         let provider_roots = config.provider_root_definitions();
         let report = ctx_history_cli::discovered_sources_report_with_data_root_and_provider_roots(
             crate::identity::home_dir().as_deref(),
-            self.data_root.path(),
+            &self.data_root,
             automatic_discovery,
             &provider_roots,
         );
@@ -134,7 +128,7 @@ impl LocalToolBackend {
             &provider_roots,
         );
         source_values.extend(
-            crate::discovered_plugin_sources_json(self.data_root.path())
+            crate::discovered_plugin_sources_json(&self.data_root)
                 .map_err(classify_application_error)?,
         );
         let (issues, issues_truncated) =
@@ -155,7 +149,7 @@ impl LocalToolBackend {
         let request = adapt_tool_search_request(request);
         crate::commands::source_index::validate_explicit_semantic_scope(&request)
             .map_err(classify_mcp_search_error)?;
-        let config = config::AppConfig::load(self.data_root.path());
+        let config = config::AppConfig::load(&self.data_root);
         if let Ok(config) = &config {
             crate::semantic::bind_embedding_auth_endpoint(config);
             self.recover_enabled_daemon_before_search(config);
@@ -172,7 +166,7 @@ impl LocalToolBackend {
         let (structured, observation, compact, execution) =
             match crate::commands::source_index::mcp_search_with_compact(
                 request,
-                self.data_root.path(),
+                &self.data_root,
                 ctx_history_cli::HistoryCliConfig {
                     daemon_enabled: config.automatic_indexing_enabled(),
                     semantic_search_enabled: config.semantic_search_enabled(),
@@ -214,7 +208,7 @@ impl LocalToolBackend {
             return;
         }
         let _ = crate::semantic::autostart_daemon_and_wait(
-            self.data_root.path(),
+            &self.data_root,
             config,
             crate::DaemonTriggerCommandArg::Search,
         );
@@ -230,7 +224,7 @@ impl LocalToolBackend {
             ToolTranscriptMode::Log => crate::TranscriptMode::Log,
         };
         crate::commands::source_index::mcp_show_session_application(
-            self.data_root.path(),
+            &self.data_root,
             &request.selector,
             match mode {
                 crate::TranscriptMode::Full => ctx_history_cli::TranscriptMode::Full,
@@ -253,7 +247,7 @@ impl LocalToolBackend {
         request: ShowEventRequest,
     ) -> Result<HistoryReadOutcome, ToolBackendError> {
         crate::commands::source_index::mcp_show_event_application(
-            self.data_root.path(),
+            &self.data_root,
             &request.selector,
             request.before,
             request.after,
@@ -313,7 +307,7 @@ impl LocalToolBackend {
         let strict_budget =
             CoreEventPageBudget::new(record_bytes, record_bytes.min(MAX_CORE_CONTENT_BYTES));
         event_range_page_value(
-            self.data_root.path(),
+            &self.data_root,
             &selection,
             cursor.as_ref(),
             &wire,
@@ -423,7 +417,7 @@ impl HistoryReadPort for LocalToolBackend {
         limit: u32,
         cursor: Option<String>,
     ) -> Result<ToolOutcome, ToolExecutionError> {
-        crate::commands::blame::tool(self.data_root.path(), target, limit, cursor)
+        crate::commands::blame::tool(&self.data_root, target, limit, cursor)
     }
 
     fn status(&self) -> Result<Value, ToolBackendError> {
@@ -479,10 +473,6 @@ impl ToolBackend for LocalToolBackend {
     }
 
     fn execute(&self, operation: ToolOperation) -> Result<ToolOutcome, ToolExecutionError> {
-        let _root_use = self
-            .data_root
-            .acquire()
-            .map_err(|error| ToolBackendError::internal(error.to_string()))?;
         invoke_mcp_tool_call(operation, self, self, self)
     }
 

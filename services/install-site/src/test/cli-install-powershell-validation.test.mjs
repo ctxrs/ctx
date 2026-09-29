@@ -72,7 +72,6 @@ test(
       ], { encoding: "utf8", timeout: 30_000 });
       assert.equal(result.status, 0, result.stderr);
       assert.equal(JSON.parse(result.stdout).cases, 11);
-      assert.equal(JSON.parse(result.stdout).relocated_cases, 4);
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
     }

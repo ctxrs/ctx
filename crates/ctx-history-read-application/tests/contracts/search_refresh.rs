@@ -344,10 +344,8 @@ fn assert_source_backed_search_show_oracle(
             .expect("Core search next commands");
         let event_id = result["ctx_event_id"].as_str().unwrap();
         let session_id = result["ctx_session_id"].as_str().unwrap();
-        let command_prefix = format!(
-            "ctx --data-root {}",
-            search_refresh_data_root(temp).display()
-        );
+        // Follow-up commands inherit the same managed root from CTX_DATA_ROOT.
+        let command_prefix = "ctx";
         assert!(
             commands
                 .iter()
