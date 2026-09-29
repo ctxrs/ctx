@@ -609,6 +609,17 @@ impl OpenedProviderSourceFile {
         Ok(())
     }
 
+    /// Confirms exact leaf contents/metadata and the same named root object,
+    /// permitting sibling changes. Unlike an exact root fence, this does not
+    /// certify directory membership; the inventory owner does that separately.
+    pub fn revalidate_leaf_with_same_object_root(&self) -> Result<()> {
+        self.revalidate_leaf()?;
+        if let ProviderSourceFileRoute::Relative { root, .. } = &self.route {
+            root.revalidate_same_object()?;
+        }
+        Ok(())
+    }
+
     /// Confirms same-object leaf identity and the retained root route. This is
     /// used only by append-friendly providers that separately freeze and hash
     /// the admitted byte prefix.

@@ -499,10 +499,12 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
                 continue;
             };
             for source in route.sources() {
-                let certificate = snapshot
-                    .sources()
-                    .iter()
-                    .find(|candidate| candidate.observation().source().exact_descriptor_eq(source))
+                let certificate = self
+                    .lifecycle
+                    .base_source(source)
+                    .filter(|candidate| {
+                        candidate.observation().source().exact_descriptor_eq(source)
+                    })
                     .cloned()
                     .ok_or_else(|| {
                         L::invariant_error("source-route snapshot names a missing certified source")

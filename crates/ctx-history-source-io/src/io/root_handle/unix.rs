@@ -91,28 +91,97 @@ pub(super) fn open_absolute(path: &Path) -> Result<OpenedPath, AuthorityOpenErro
 }
 
 fn open_absolute_handle(path: &Path) -> Result<File, AuthorityOpenError> {
-    let mut components = path.components().peekable();
+    let path = validated_absolute_path(path)?;
+    #[cfg(target_os = "linux")]
+    // Linux limits a syscall's entire pathname, including NUL. The guarded
+    // component walk also supports longer paths with individually valid names.
+    if path.as_bytes_with_nul().len() <= libc::PATH_MAX as usize {
+        match open_absolute_native(&path) {
+            Ok(file) => return Ok(file),
+            // Old kernels and syscall-blocking sandboxes retain the same guarded
+            // component walk. Never retry a pathname/resolve failure with weaker
+            // flags, and do not cache a thread's syscall policy process-wide.
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EPERM)) => {}
+            Err(error) => {
+                return Err(classify_open_component_error(
+                    libc::AT_FDCWD,
+                    &path,
+                    None,
+                    error,
+                ));
+            }
+        }
+    }
+    open_absolute_components(Path::new(OsStr::from_bytes(path.to_bytes())))
+}
+
+fn validated_absolute_path(path: &Path) -> Result<CString, AuthorityOpenError> {
+    let mut components = path.components();
     if !matches!(components.next(), Some(Component::RootDir)) {
         return Err(AuthorityOpenError::Rejected(
             "Unix provider source authority paths must be absolute",
         ));
     }
+    // Match the existing component walk's handling of repeated separators,
+    // current-directory components and trailing separators. Validate the whole
+    // path before either strategy can perform a filesystem operation.
+    let mut normalized = PathBuf::from("/");
+    for component in components {
+        match component {
+            Component::Normal(name) => normalized.push(name),
+            Component::CurDir => {}
+            _ => {
+                return Err(AuthorityOpenError::Rejected(
+                    "Unix provider source paths contain an unsupported component",
+                ));
+            }
+        }
+    }
+    CString::new(normalized.as_os_str().as_bytes()).map_err(|_| {
+        AuthorityOpenError::Rejected("provider source path components may not contain NUL bytes")
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn open_absolute_native(path: &CStr) -> io::Result<File> {
+    #[cfg(test)]
+    open_tests::before_native_open(path)?;
+
+    // RESOLVE_NO_SYMLINKS also rejects procfs magic links. Absolute authority
+    // discovery already permits mount crossings; open_child independently
+    // retains the stricter descendant filesystem boundary.
+    // SAFETY: open_how consists of integer fields; zero also disables any
+    // future extension fields. The kernel requires that unused bytes be zero.
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags = (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK) as u64;
+    how.resolve = libc::RESOLVE_NO_SYMLINKS;
+    // SAFETY: path is NUL-terminated, how is fully initialized, and its exact
+    // ABI size is supplied. On success the returned descriptor is owned here.
+    let descriptor = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            &how as *const libc::open_how,
+            std::mem::size_of::<libc::open_how>(),
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(descriptor as libc::c_int) })
+}
+
+fn open_absolute_components(path: &Path) -> Result<File, AuthorityOpenError> {
+    let mut components = path.components().skip(1).peekable();
     let mut current = open_component(
         libc::AT_FDCWD,
         OsStr::new("/"),
         Some(ExpectedType::Directory),
     )?;
     while let Some(component) = components.next() {
-        let Component::Normal(name) = component else {
-            if matches!(component, Component::CurDir) {
-                continue;
-            }
-            return Err(AuthorityOpenError::Rejected(
-                "Unix provider source paths contain an unsupported component",
-            ));
-        };
         let expected = components.peek().map(|_| ExpectedType::Directory);
-        current = open_component(current.as_raw_fd(), name, expected)?;
+        current = open_component(current.as_raw_fd(), component.as_os_str(), expected)?;
     }
     Ok(current)
 }
@@ -508,6 +577,10 @@ fn clear_errno() {
 fn current_errno() -> libc::c_int {
     unsafe { *errno_location() }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "unix_open_tests.rs"]
+mod open_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 mod tests {
