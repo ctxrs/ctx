@@ -549,6 +549,7 @@ fn near_limit_rejection_happens_before_any_scratch_write() {
 
     assert!(error.is_systemic_resource_failure());
     assert!(error.is_snapshot_capacity_failure());
+    assert!(!error.to_string().contains("free at least"));
     assert_eq!(staging_entries(data_root.path()), 0);
     assert_eq!(authority.snapshot_counters().source_bytes_copied(), 0);
 }
@@ -629,6 +630,7 @@ fn free_space_headroom_rejection_happens_before_any_scratch_write() {
             | SqliteSourceAccessError::Diagnosed { .. }
     ));
     assert!(error.is_snapshot_capacity_failure());
+    assert!(error.to_string().contains("free at least 1 B;"));
     assert_eq!(staging_entries(data_root.path()), 0);
 }
 
@@ -967,4 +969,31 @@ fn retained_copy_and_ordering_database_share_one_exact_route_bound() {
     assert!(counters.max_route_scratch_bytes() <= aggregate_limit);
     assert_eq!(counters.scratch_admissions(), 2);
     snapshot.finish().unwrap();
+}
+
+#[test]
+fn snapshot_capacity_messages_distinguish_shortages_from_size_limits() {
+    let shortage = SqliteSourceAccessError::InsufficientScratchSpace {
+        path: PathBuf::from("provider.sqlite"),
+        required: 8_685_611_961,
+        available: 8_558_231_552,
+    };
+    assert_eq!(
+        shortage.to_string(),
+        "provider SQLite scratch has insufficient free-space headroom for \"provider.sqlite\": free at least 121.5 MiB; required 8.1 GiB; available 8.0 GiB; then retry"
+    );
+    assert!(matches!(
+        shortage,
+        SqliteSourceAccessError::InsufficientScratchSpace {
+            required: 8_685_611_961,
+            available: 8_558_231_552,
+            ..
+        }
+    ));
+    let limit = SqliteSourceAccessError::SnapshotTooLarge {
+        path: PathBuf::from("provider.sqlite"),
+        length: 2_097_152,
+        maximum: 1_048_576,
+    };
+    assert_eq!(limit.to_string(), "SQLite source snapshot exceeds the bounded limit for \"provider.sqlite\": 2.0 MiB > 1.0 MiB");
 }

@@ -753,3 +753,67 @@ fn persisted_exact_membership_is_strict_and_shared_route_sets_must_be_disjoint()
         .remove("exact_source_memberships");
     assert!(serde_json::from_value::<GenerationManifest>(transient_v10).is_err());
 }
+
+#[test]
+fn storage_errors_format_sizes_without_changing_typed_evidence() {
+    use ctx_history_index_generation::GenerationError;
+
+    let generation = GenerationError::CurrentRepublishInsufficientHeadroom {
+        required: 8_685_611_961,
+        available: 8_558_231_552,
+    };
+    assert_eq!(generation.to_string(), "current-generation republish has insufficient headroom on the index volume: free at least 121.5 MiB; required 8.1 GiB; available 8.0 GiB; then retry");
+    let index = IndexError::from(generation);
+    assert_eq!(index.to_string(), "current publication republish has insufficient headroom on the index volume: free at least 121.5 MiB; required 8.1 GiB; available 8.0 GiB; then retry");
+    assert!(matches!(
+        index,
+        IndexError::CurrentRepublishInsufficientHeadroom {
+            required: 8_685_611_961,
+            available: 8_558_231_552,
+        }
+    ));
+
+    let generation = GenerationError::CurrentRepublishByteLimit {
+        actual: 2_097_152,
+        maximum: 1_048_576,
+    };
+    assert_eq!(
+        generation.to_string(),
+        "current-generation republish exceeds byte limit: 2.0 MiB > 1.0 MiB"
+    );
+    assert_eq!(
+        IndexError::from(generation).to_string(),
+        "current publication republish exceeds the byte limit: 2.0 MiB > 1.0 MiB"
+    );
+    assert_eq!(
+        IndexError::VerificationScratchLimitExceeded {
+            required_bytes: 2_097_152,
+            maximum_bytes: 1_048_576,
+        }
+        .to_string(),
+        "logical verification scratch requires 2.0 MiB, exceeding the 1.0 MiB ceiling"
+    );
+}
+
+#[test]
+fn unknown_disk_requirement_reports_only_available_space_and_retains_cause() {
+    let error = IndexError::CandidateFailureWithLowSpace {
+        available: 8_558_231_552,
+        cause: Box::new(IndexError::Io(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "disk full",
+        ))),
+    };
+    assert_eq!(error.to_string(), "indexing failed with 8.0 GiB observed free on the index volume; free space and retry; underlying error: disk full");
+    assert_eq!(
+        error.io_error().unwrap().kind(),
+        std::io::ErrorKind::StorageFull
+    );
+    assert!(matches!(
+        error,
+        IndexError::CandidateFailureWithLowSpace {
+            available: 8_558_231_552,
+            ..
+        }
+    ));
+}

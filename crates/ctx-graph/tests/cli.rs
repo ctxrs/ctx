@@ -300,10 +300,15 @@ fn compact_reclaims_native_space_without_source_access_or_graph_changes() {
         "{}",
         String::from_utf8_lossy(&human.stderr)
     );
-    assert!(
-        String::from_utf8(human.stdout)
-            .unwrap()
-            .contains("Compacted database:")
+    let compacted_bytes =
+        report["pages_after"].as_u64().unwrap() * report["page_size"].as_u64().unwrap();
+    assert!((1024..1_048_576).contains(&compacted_bytes));
+    let compacted_kib = compacted_bytes as f64 / 1024.0;
+    assert_eq!(
+        String::from_utf8(human.stdout).unwrap(),
+        format!(
+            "Compacted database: {compacted_kib:.1} KiB -> {compacted_kib:.1} KiB of database pages.\n"
+        )
     );
     let after = serde_json::to_value(
         ctx_graph_core::store::Store::open_read_only(&db)

@@ -10,6 +10,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ctx-history-platform = { path = "../ctx-history-platform" }
 anstream.workspace = true
 anstyle.workspace = true
 anyhow.workspace = true

@@ -16,6 +16,7 @@ pub use source_backed::ContinueSourceBackedReader;
 
 use std::{io, path::PathBuf};
 
+use ctx_history_platform::resource_format::format_bytes;
 use thiserror::Error;
 
 // Structural provider failures remain source-addressable, provider-owned I/O
@@ -35,7 +36,7 @@ pub(crate) enum ContinueNativePathError {
         raw_os_error: Option<i32>,
         message: String,
     },
-    #[error("Continue source `{path}` exceeds the {limit} byte limit ({observed} bytes)")]
+    #[error("Continue source `{path}` exceeds the {} limit ({})", format_bytes(*.limit as u64), format_bytes(*.observed))]
     SourceTooLarge {
         path: PathBuf,
         limit: usize,

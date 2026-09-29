@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Args;
+use ctx_terminal::format_bytes;
 
 use crate::{
     local_usage::{self, UsageReport},
@@ -153,9 +154,9 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
                 }
             );
             let results = format!("{} results", summary.result_count);
-            let output = format!("{} bytes", summary.delivered_output_bytes);
-            let covered_context = format!("{} bytes", summary.delivered_context_bytes);
-            let matched_history = format!("{} bytes", summary.matched_normalized_session_bytes);
+            let output = format_bytes(summary.delivered_output_bytes);
+            let covered_context = format_bytes(summary.delivered_context_bytes);
+            let matched_history = format_bytes(summary.matched_normalized_session_bytes);
             let coverage = format!(
                 "{} complete · {} unavailable",
                 summary.complete_context_eligible_calls, summary.unavailable_context_eligible_calls
@@ -200,7 +201,7 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
                         format!(
                             "{} · {} covered · {} complete · {} unavailable",
                             output,
-                            operation.delivered_context_bytes,
+                            format_bytes(operation.delivered_context_bytes),
                             operation.complete_context_eligible_calls,
                             operation.unavailable_context_eligible_calls
                         ),
@@ -223,7 +224,7 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
 
     if let Some(estimates) = &report.estimates {
         let tokens = estimates.approximate_context_tokens;
-        let delivered = format!("{} bytes", tokens.delivered_context_bytes);
+        let delivered = format_bytes(tokens.delivered_context_bytes);
         let range = format!(
             "{} low · {} central · {} high",
             tokens.token_equivalents.low,
@@ -246,9 +247,9 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
         let reduction = estimates.estimated_context_reduction;
         let bytes = format!(
             "{} baseline · {} observed · {} estimated reduction",
-            reduction.comparison_baseline_bytes,
-            reduction.observed_delivered_context_bytes,
-            reduction.estimated_avoided_context_bytes
+            format_bytes(reduction.comparison_baseline_bytes),
+            format_bytes(reduction.observed_delivered_context_bytes),
+            format_bytes(reduction.estimated_avoided_context_bytes)
         );
         let token_range = format!(
             "{} low · {} central · {} high",
@@ -282,7 +283,7 @@ fn measured_operation_output(surface: &str, operation: &str, bytes: u64) -> Stri
     if surface == "cli" && operation == "blame" {
         "output n/a".to_owned()
     } else {
-        format!("{bytes} output")
+        format!("{} output", format_bytes(bytes))
     }
 }
 
@@ -344,8 +345,8 @@ mod ui_tests {
     #[test]
     fn stats_marks_only_unmeasured_cli_blame_output_as_unavailable() {
         assert_eq!(measured_operation_output("cli", "blame", 0), "output n/a");
-        assert_eq!(measured_operation_output("mcp", "blame", 0), "0 output");
-        assert_eq!(measured_operation_output("cli", "search", 0), "0 output");
+        assert_eq!(measured_operation_output("mcp", "blame", 0), "0 B output");
+        assert_eq!(measured_operation_output("cli", "search", 0), "0 B output");
     }
 
     #[test]
@@ -355,6 +356,47 @@ mod ui_tests {
         let summary = &report["definitions"][0]["summary"];
         assert!(summary.get("citation_count").is_none());
         assert!(summary.get("pro_blame").is_none());
+    }
+
+    #[test]
+    fn human_sizes_are_readable_while_json_retains_exact_bytes() {
+        let mut report = UsageReport::ui_test_ready();
+        let summary = &mut report.definitions.as_mut().unwrap()[0].summary;
+        summary.delivered_output_bytes = 1025;
+        summary.delivered_context_bytes = 1_048_577;
+        summary.matched_normalized_session_bytes = 1_073_741_825;
+        report.estimates = local_usage::estimate_usage(local_usage::EstimateFacts {
+            complete_calls: 1,
+            unavailable_calls: 0,
+            delivered_context_bytes: 1_048_577,
+            matched_normalized_session_bytes: 1_073_741_825,
+        })
+        .unwrap();
+        let rendered =
+            render_stats_human(&context(120, ColorMode::Never), &report, true).render_plain();
+        for expected in [
+            "1.0 KiB",
+            "1.0 MiB",
+            "1.0 GiB",
+            "1.0 GiB baseline",
+            "1.0 MiB observed",
+            "1023.0 MiB estimated reduction",
+        ] {
+            assert!(rendered.contains(expected), "{rendered}");
+        }
+        assert_eq!(
+            measured_operation_output("mcp", "search", 1025),
+            "1.0 KiB output"
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        let summary = &json["definitions"][0]["summary"];
+        assert_eq!(summary["delivered_output_bytes"], 1025);
+        assert_eq!(summary["delivered_context_bytes"], 1_048_577);
+        assert_eq!(summary["matched_normalized_session_bytes"], 1_073_741_825);
+        assert_eq!(
+            json["estimates"]["estimated_context_reduction"]["estimated_avoided_context_bytes"],
+            1_072_693_248
+        );
     }
 
     #[test]
