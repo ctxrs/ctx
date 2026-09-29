@@ -1,8 +1,5 @@
 mod support;
 
-#[path = "cli_status_diagnostics_tests.rs"]
-mod status_diagnostics;
-
 use support::*;
 
 #[test]

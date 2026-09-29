@@ -1,4 +1,7 @@
-use super::support::*;
+#[path = "../../ctx-cli-contract-tests/tests/contracts/support/mod.rs"]
+mod support;
+
+use support::*;
 
 #[test]
 fn sampled_status_is_passive_even_with_malformed_config_and_missing_history() {

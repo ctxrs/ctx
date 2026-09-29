@@ -26,6 +26,10 @@ name = "stats"
 path = "tests/stats.rs"
 
 [[test]]
+name = "status_diagnostics"
+path = "tests/status_diagnostics.rs"
+
+[[test]]
 name = "grok_build"
 path = "tests/grok_build.rs"
 
