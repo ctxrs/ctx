@@ -524,6 +524,7 @@ impl GenerationWriter {
         self.complete_inventories = checkpoint.complete_inventories;
         self.source_route_plan = Some(checkpoint.source_route_plan);
         self.pending = checkpoint.pending;
+        self.restore_replacement_memory();
         self.deletions = checkpoint.deletions;
         self.route_deletions = checkpoint.route_deletions;
         self.observed_missing_routes = checkpoint.observed_missing_routes;
@@ -562,6 +563,7 @@ impl GenerationWriter {
         self.complete_inventories = checkpoint.complete_inventories;
         self.source_route_plan = Some(checkpoint.source_route_plan);
         self.pending = checkpoint.pending;
+        self.restore_replacement_memory();
         self.deletions = checkpoint.deletions;
         self.route_deletions = checkpoint.route_deletions;
         self.observed_missing_routes = checkpoint.observed_missing_routes;

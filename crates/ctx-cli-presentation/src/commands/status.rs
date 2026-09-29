@@ -12,6 +12,14 @@ pub struct StatusArgs {
         help = "Local usage control: enable, disable, or reset"
     )]
     pub usage: Option<UsageStatusMode>,
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        value_parser = clap::value_parser!(u64).range(1..=60),
+        conflicts_with = "usage",
+        help = "Observe daemon activity for 1–60 seconds and print a shareable report"
+    )]
+    pub sample: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

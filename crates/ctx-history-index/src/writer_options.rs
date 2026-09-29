@@ -7,7 +7,9 @@ pub(crate) const CHANGED_SESSION_REGISTRY_ENTRY_CHARGE_BYTES: usize = 1024;
 #[derive(Debug, Clone)]
 pub struct WriterOptions {
     pub indexer_threads: usize,
-    /// Explicit writer memory budget. Tantivy uses it for indexing buffers;
+    /// Explicit writer memory budget. Warm writers reserve up to one eighth
+    /// of the indexing buffers for bounded source reconciliation; cold writers
+    /// give the full buffer budget to Tantivy. This is not a process RSS cap;
     /// the changed-session registry independently uses it as a hard charged
     /// ceiling so construction-time identity authority cannot grow unbounded.
     pub memory_bytes: usize,

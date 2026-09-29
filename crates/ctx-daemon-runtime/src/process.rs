@@ -4,18 +4,27 @@ use anyhow::{Context, Result};
 use ring::digest::{Context as DigestContext, SHA256};
 use serde_json::{json, Value};
 
-use crate::{daemon_lock_path, pid_lock_payload, read_pid_lock_json};
+use crate::{daemon_lock_path, observe_process_cpu, pid_lock_payload, read_pid_lock_json};
 
 #[cfg(all(test, target_os = "linux"))]
 mod linux_inspection_tests;
 
 pub fn current_daemon_lock_identity(data_root: &Path) -> Result<Value> {
     let binary = env::current_exe().context("resolve ctx daemon executable identity")?;
-    Ok(pid_lock_payload(json!({
+    let mut payload = pid_lock_payload(json!({
         "binary": binary,
         "binary_sha256": executable_sha256(&binary)?,
         "data_root": data_root,
-    })))
+    }));
+    // Optional accounting binds this daemon owner to its native process birth.
+    // Missing OS/boot inspection must not prevent ordinary daemon startup.
+    if let Some(token) = observe_process_cpu(std::process::id())
+        .ok()
+        .and_then(|observation| observation.identity.private_json_token())
+    {
+        payload["process_creation_token"] = token;
+    }
+    Ok(payload)
 }
 
 pub fn daemon_lock_matches_executable(data_root: &Path, executable: &Path) -> Result<bool> {

@@ -1,6 +1,189 @@
 use super::*;
 
 #[test]
+fn opencode_middle_session_refresh_survives_restart_wal_reset_and_old_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let database = temp.path().join("source/opencode.db");
+    let writer = create_opencode_wal_database(&database, "prefixmarker");
+    for (session, message, part, marker) in [
+        (
+            "session-0",
+            "outer-message-0",
+            "outer-part-0",
+            "beforemarker",
+        ),
+        (
+            "session-2",
+            "outer-message-2",
+            "outer-part-2",
+            "aftermarker",
+        ),
+    ] {
+        writer
+            .execute(
+                "insert into session select ?1,parent_id,directory,branch,agent,time_created,time_updated
+                 from session where id='session-1'",
+                [session],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "insert into message values (?1,?2,1,1,'{\"role\":\"user\"}')",
+                params![message, session],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "insert into part values (?1,?2,?3,1,1,?4)",
+                params![
+                    part,
+                    message,
+                    session,
+                    json!({"type":"text","text":marker}).to_string()
+                ],
+            )
+            .unwrap();
+    }
+    let index_root = temp.path().join("index");
+    // Every refresh builds a new adapter/executor and reloads the durable base.
+    let refresh = |expected| {
+        let source_contents = || {
+            ["opencode.db", "opencode.db-wal"]
+                .map(|name| fs::read(database.with_file_name(name)).unwrap())
+        };
+        let before = source_contents();
+        let mut registry = SourceBackedProviderRegistry::new();
+        register_landed_source_backed_route_with_data_root(
+            &mut registry,
+            provider_source_for_path(CaptureProvider::OpenCode, database.clone()),
+            SourceBackedRouteSelection::Automatic,
+            &data_root,
+        )
+        .unwrap();
+        let report = SourceBackedRefreshExecutor::new(registry, WriterOptions::default())
+            .refresh_scope_with_detailed_progress(
+                &index_root,
+                SourceBackedRefreshScope::All,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(report.successful_route_outcomes.len(), 1);
+        assert_eq!(report.sources.len(), 1);
+        let counts = report.sources[0].counts();
+        assert_eq!(counts.complete_records, expected);
+        assert_eq!(counts.retained_records, expected);
+        assert_eq!(counts.indexed_documents, expected);
+        assert_eq!(counts.rejected_records, 0);
+        assert_eq!(counts.ignored_records, 0);
+        for (name, (after, before)) in ["DB", "WAL"]
+            .into_iter()
+            .zip(source_contents().into_iter().zip(before))
+        {
+            assert!(after == before, "refresh must not modify source {name}");
+        }
+        report
+    };
+    let cold = refresh(3);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    let original = only_matching_event(&index, "prefixmarker");
+    let outer = ["beforemarker", "aftermarker"].map(|marker| only_matching_event(&index, marker));
+    drop(index);
+    let assert_outer_sessions = || {
+        let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+        for (marker, expected) in ["beforemarker", "aftermarker"].into_iter().zip(&outer) {
+            assert_eq!(&only_matching_event(&index, marker), expected);
+        }
+    };
+    assert_eq!(refresh(3).commit.generation_id, cold.commit.generation_id);
+
+    append_opencode_message(&writer, "suffixmarker");
+    let appended = refresh(4);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(only_matching_event(&index, "prefixmarker"), original);
+    let suffix = only_matching_event(&index, "suffixmarker");
+    assert_ne!(suffix.event_id, original.event_id);
+    assert_eq!(suffix.session_id, original.session_id);
+    assert_eq!(suffix.event_sequence, 1);
+    drop(index);
+    assert_outer_sessions();
+    assert_eq!(
+        refresh(4).commit.generation_id,
+        appended.commit.generation_id
+    );
+
+    writer
+        .execute_batch("pragma wal_checkpoint(truncate)")
+        .unwrap();
+    writer
+        .execute(
+            "insert into part values ('part-3','message-2','session-1',3,3,?1)",
+            [json!({"type":"text","text":"resetmarker"}).to_string()],
+        )
+        .unwrap();
+    refresh(5);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(only_matching_event(&index, "suffixmarker"), suffix);
+    assert_eq!(only_matching_event(&index, "resetmarker").event_sequence, 2);
+    drop(index);
+    assert_outer_sessions();
+
+    let edit =
+        "update part set data='{\"type\":\"text\",\"text\":\"editedprefix\"}' where id='part-1'";
+    writer.execute_batch("begin immediate").unwrap();
+    writer.execute_batch(edit).unwrap();
+    writer.cache_flush().unwrap();
+    refresh(5);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert!(matching_events(&index, "editedprefix").is_empty());
+    assert_eq!(only_matching_event(&index, "prefixmarker"), original);
+    drop(index);
+    writer.execute_batch("rollback").unwrap();
+    refresh(5);
+    writer.execute_batch(edit).unwrap();
+    refresh(5);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert!(matching_events(&index, "prefixmarker").is_empty());
+    assert_eq!(only_matching_event(&index, "editedprefix"), original);
+    drop(index);
+    assert_outer_sessions();
+
+    writer
+        .execute("delete from part where id='part-1'", [])
+        .unwrap();
+    refresh(4);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert!(matching_events(&index, "editedprefix").is_empty());
+    let mut shifted_suffix = suffix.clone();
+    shifted_suffix.event_sequence = 0;
+    assert_eq!(only_matching_event(&index, "suffixmarker"), shifted_suffix);
+    assert_eq!(only_matching_event(&index, "resetmarker").event_sequence, 1);
+    drop(index);
+    assert_outer_sessions();
+
+    writer
+        .execute(
+            "update session set parent_id='session-0' where id='session-1'",
+            [],
+        )
+        .unwrap();
+    refresh(4);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    for marker in ["suffixmarker", "resetmarker"] {
+        assert_eq!(
+            only_matching_event(&index, marker).parent_session_id,
+            Some(outer[0].session_id)
+        );
+    }
+    assert_eq!(
+        only_matching_event(&index, "suffixmarker").event_id,
+        suffix.event_id
+    );
+    drop(index);
+    assert_outer_sessions();
+}
+
+#[test]
 fn opencode_recertifies_old_checkpoints_and_relocation_preserves_identity() {
     use ctx_history_capture_runtime::{document_full_snapshot_frontier, DocumentLeafFingerprint};
     use ctx_history_core::CertifiedSource;

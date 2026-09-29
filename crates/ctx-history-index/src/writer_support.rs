@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 pub(super) struct PendingSource {
     pub(super) staged: StagedPendingSource,
+    pub(super) replacement: Option<writer_replacement::Replacement>,
 }
 
 impl std::ops::Deref for PendingSource {

@@ -14,6 +14,11 @@ pub(crate) fn record_base_source_manifest_visit() {
     BASE_SOURCE_MANIFEST_VISITS.with(|visits| visits.set(visits.get().saturating_add(1)));
 }
 
+#[cfg(test)]
+pub(crate) fn take_base_source_manifest_visits() -> u64 {
+    BASE_SOURCE_MANIFEST_VISITS.with(|visits| visits.replace(0))
+}
+
 pub use ctx_history_capture_runtime::{
     CompleteInventoryOwner, SourceBackedCertifiedRemoval, SourceBackedCurrentSourceProgress,
     SourceBackedCurrentSourceProgressStage, SourceBackedFailedRoute,

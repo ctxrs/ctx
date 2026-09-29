@@ -35,6 +35,12 @@ ctx_cli_contract_test(
     tags = ["cli-contract", "privacy"],
 )
 
+ctx_cli_contract_test(
+    name = "status_diagnostics_tests",
+    src = "tests/status_diagnostics.rs",
+    tags = ["cli-contract", "privacy"],
+)
+
 ctx_rust_test(
     name = "grok_build_tests",
     testonly = True,

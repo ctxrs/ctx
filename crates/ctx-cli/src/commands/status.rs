@@ -13,6 +13,7 @@ use crate::StatusArgs;
 use ctx_app_config::{self as config, CONFIG_FILE};
 use ctx_cli_presentation::commands::compact_usage_health_json;
 
+pub(crate) mod diagnostics;
 mod usage;
 
 pub(crate) use usage::{
