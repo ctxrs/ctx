@@ -12,6 +12,21 @@ use crate::{ProviderSourceRoot, SourceIoError};
 thread_local! {
     static NATIVE_ERROR: Cell<Option<i32>> = const { Cell::new(None) };
     static NATIVE_CALLS: Cell<usize> = const { Cell::new(0) };
+    static COMPONENT_OPENS: Cell<usize> = const { Cell::new(0) };
+    static OPEN_METADATA: Cell<usize> = const { Cell::new(0) };
+    static FILESYSTEM_PROOFS: Cell<usize> = const { Cell::new(0) };
+}
+
+pub(super) fn record_component_open() {
+    COMPONENT_OPENS.set(COMPONENT_OPENS.get() + 1);
+}
+
+pub(super) fn record_open_metadata() {
+    OPEN_METADATA.set(OPEN_METADATA.get() + 1);
+}
+
+pub(super) fn record_filesystem_proof() {
+    FILESYSTEM_PROOFS.set(FILESYSTEM_PROOFS.get() + 1);
 }
 
 pub(super) fn before_native_open(_path: &CStr) -> io::Result<()> {
@@ -27,6 +42,9 @@ impl NativeErrorGuard {
     fn new(errno: Option<i32>) -> Self {
         assert!(NATIVE_ERROR.replace(errno).is_none());
         NATIVE_CALLS.set(0);
+        COMPONENT_OPENS.set(0);
+        OPEN_METADATA.set(0);
+        FILESYSTEM_PROOFS.set(0);
         Self
     }
 }
@@ -116,7 +134,15 @@ fn long_absolute_paths_preserve_ordinary_sources_and_reject_links_and_long_compo
     let component = CString::new("d".repeat(128)).unwrap();
     // Construct the real tree by dirfd: an absolute create_dir_all would itself
     // exceed Linux's single-syscall pathname limit before the test could run.
-    while directory_path.as_os_str().as_bytes().len() < 5 * 1024 {
+    while directory_path.as_os_str().as_bytes().len() < 5 * 1024
+        || directory_path
+            .strip_prefix(temp.path())
+            .unwrap()
+            .as_os_str()
+            .as_bytes()
+            .len()
+            < libc::PATH_MAX as usize
+    {
         // SAFETY: the parent descriptor and NUL-terminated component are live.
         assert_eq!(
             unsafe { libc::mkdirat(directory.as_raw_fd(), component.as_ptr(), 0o700) },
@@ -169,6 +195,9 @@ fn long_absolute_paths_preserve_ordinary_sources_and_reject_links_and_long_compo
     let mut bytes = Vec::new();
     old.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"long source\n");
+    let base = ProviderSourceRoot::open(temp.path()).unwrap();
+    let relative_path = path.strip_prefix(temp.path()).unwrap();
+    assert!(relative_path.as_os_str().as_bytes().len() >= libc::PATH_MAX as usize);
 
     for errno in strategies() {
         let _guard = NativeErrorGuard::new(errno);
@@ -193,6 +222,20 @@ fn long_absolute_paths_preserve_ordinary_sources_and_reject_links_and_long_compo
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"long source\n");
+        let relative = base.open_file(relative_path).unwrap();
+        assert_eq!(relative.metadata().ino(), expected_inode);
+        let mut bytes = Vec::new();
+        relative.file().read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"long source\n");
+        for invalid in [
+            relative_path.with_file_name("linked-file"),
+            relative_path
+                .with_file_name("linked-dir")
+                .join("source.jsonl"),
+            relative_path.with_file_name("x".repeat(256)),
+        ] {
+            assert!(base.open_path(&invalid).is_err());
+        }
         let authority = ProviderSourceRoot::open(&directory_path).unwrap();
         authority
             .open_file(Path::new("source.jsonl"))
@@ -230,6 +273,9 @@ fn long_absolute_paths_preserve_ordinary_sources_and_reject_links_and_long_compo
         assert_eq!(NATIVE_CALLS.get(), 2);
     }
 }
+
+#[path = "unix_relative_tests.rs"]
+mod relative_tests;
 
 #[test]
 fn absolute_path_normalization_preserves_component_walk_semantics() {

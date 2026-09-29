@@ -144,23 +144,27 @@ fn validated_absolute_path(path: &Path) -> Result<CString, AuthorityOpenError> {
 
 #[cfg(target_os = "linux")]
 fn open_absolute_native(path: &CStr) -> io::Result<File> {
+    // Absolute discovery permits mount crossings; relative opens below a
+    // retained authority independently require the stricter mount boundary.
+    open_native(libc::AT_FDCWD, path, libc::RESOLVE_NO_SYMLINKS)
+}
+
+#[cfg(target_os = "linux")]
+fn open_native(parent: libc::c_int, path: &CStr, resolve: u64) -> io::Result<File> {
     #[cfg(test)]
     open_tests::before_native_open(path)?;
 
-    // RESOLVE_NO_SYMLINKS also rejects procfs magic links. Absolute authority
-    // discovery already permits mount crossings; open_child independently
-    // retains the stricter descendant filesystem boundary.
     // SAFETY: open_how consists of integer fields; zero also disables any
     // future extension fields. The kernel requires that unused bytes be zero.
     let mut how: libc::open_how = unsafe { std::mem::zeroed() };
     how.flags = (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK) as u64;
-    how.resolve = libc::RESOLVE_NO_SYMLINKS;
+    how.resolve = resolve;
     // SAFETY: path is NUL-terminated, how is fully initialized, and its exact
     // ABI size is supplied. On success the returned descriptor is owned here.
     let descriptor = unsafe {
         libc::syscall(
             libc::SYS_openat2,
-            libc::AT_FDCWD,
+            parent,
             path.as_ptr(),
             &how as *const libc::open_how,
             std::mem::size_of::<libc::open_how>(),
@@ -170,6 +174,62 @@ fn open_absolute_native(path: &CStr) -> io::Result<File> {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { File::from_raw_fd(descriptor as libc::c_int) })
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn try_open_relative(
+    parent: &File,
+    relative_path: &Path,
+    filesystem: &FilesystemIdentity,
+) -> Result<Option<(PathBuf, OpenedPath)>, AuthorityOpenError> {
+    let mut normalized = PathBuf::new();
+    for component in relative_path.components() {
+        let Component::Normal(name) = component else {
+            return Err(AuthorityOpenError::Rejected(
+                "provider source descendants must use normal relative components",
+            ));
+        };
+        normalized.push(name);
+    }
+    let path = CString::new(normalized.as_os_str().as_bytes()).map_err(|_| {
+        AuthorityOpenError::Rejected("provider source path components may not contain NUL bytes")
+    })?;
+    // Empty selectors retain directory()'s clone semantics. Validate even an
+    // oversized selector before choosing the existing per-component walk.
+    if path.as_bytes().is_empty() || path.as_bytes_with_nul().len() > libc::PATH_MAX as usize {
+        return Ok(None);
+    }
+    // NO_XDEV also excludes same-device bind mounts, matching the retained
+    // filesystem's mount ID comparison. NO_SYMLINKS includes magic links.
+    let file = match open_native(
+        parent.as_raw_fd(),
+        &path,
+        libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_XDEV,
+    ) {
+        Ok(file) => file,
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EPERM)) => {
+            return Ok(None);
+        }
+        Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+            return Err(AuthorityOpenError::Rejected(
+                "provider source descendants must remain beneath their root on the same filesystem mount",
+            ));
+        }
+        Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => {
+            return Err(AuthorityOpenError::Rejected(
+                "provider source ancestor components must be directories",
+            ));
+        }
+        Err(error) => {
+            return Err(classify_open_component_error(
+                parent.as_raw_fd(),
+                &path,
+                None,
+                error,
+            ));
+        }
+    };
+    Ok(Some((normalized, classify_child(file, filesystem)?)))
 }
 
 fn open_absolute_components(path: &Path) -> Result<File, AuthorityOpenError> {
@@ -192,6 +252,13 @@ pub(super) fn open_child(
     filesystem: &FilesystemIdentity,
 ) -> Result<OpenedPath, AuthorityOpenError> {
     let file = open_component(parent.as_raw_fd(), name, None)?;
+    classify_child(file, filesystem)
+}
+
+fn classify_child(
+    file: File,
+    filesystem: &FilesystemIdentity,
+) -> Result<OpenedPath, AuthorityOpenError> {
     let opened = classify_opened(file)?;
     let child_filesystem = match &opened {
         OpenedPath::File { filesystem, .. } | OpenedPath::Directory { filesystem, .. } => {
@@ -359,6 +426,8 @@ fn open_component(
     if expected == Some(ExpectedType::Directory) {
         flags |= libc::O_DIRECTORY;
     }
+    #[cfg(all(test, target_os = "linux"))]
+    open_tests::record_component_open();
     let descriptor = unsafe { libc::openat(parent, name.as_ptr(), flags) };
     if descriptor < 0 {
         let cause = io::Error::last_os_error();
@@ -370,11 +439,14 @@ fn open_component(
         ));
     }
     let file = unsafe { File::from_raw_fd(descriptor) };
-    let metadata = file.metadata()?;
-    if expected == Some(ExpectedType::Directory) && !metadata.file_type().is_dir() {
-        return Err(AuthorityOpenError::Rejected(
-            "provider source ancestor components must be directories",
-        ));
+    if expected == Some(ExpectedType::Directory) {
+        #[cfg(all(test, target_os = "linux"))]
+        open_tests::record_open_metadata();
+        if !file.metadata()?.file_type().is_dir() {
+            return Err(AuthorityOpenError::Rejected(
+                "provider source ancestor components must be directories",
+            ));
+        }
     }
     Ok(file)
 }
@@ -423,6 +495,8 @@ fn component_is_symlink(parent: libc::c_int, name: &CStr) -> bool {
 }
 
 fn classify_opened(file: File) -> Result<OpenedPath, AuthorityOpenError> {
+    #[cfg(all(test, target_os = "linux"))]
+    open_tests::record_open_metadata();
     let metadata = file.metadata()?;
     let filesystem = filesystem_identity(&file)?;
     if metadata.file_type().is_file() {
@@ -455,6 +529,8 @@ fn filesystem_stat(file: &File) -> io::Result<libc::statfs> {
 
 #[cfg(target_os = "linux")]
 fn filesystem_identity(file: &File) -> Result<FilesystemIdentity, AuthorityOpenError> {
+    #[cfg(test)]
+    open_tests::record_filesystem_proof();
     let filesystem = filesystem_stat(file)?;
     let filesystem_type = filesystem.f_type;
     if filesystem_type != ecryptfs::SUPER_MAGIC && !linux_filesystem_is_qualified(filesystem_type) {

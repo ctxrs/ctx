@@ -1,7 +1,7 @@
 //! Capability-bound access to ordinary provider files and trees.
 //!
 //! A [`ProviderSourceRoot`] retains the exact directory opened as source
-//! authority. Every descendant is opened one component at a time relative to
+//! authority. Every descendant is opened without following links relative to
 //! that handle. Callers may retain the root and deterministically reopen a
 //! relative path without returning to an ancestor pathname.
 //!
@@ -199,6 +199,16 @@ impl ProviderSourceRoot {
 
     pub fn open_path(&self, relative_path: &Path) -> Result<OpenedProviderSourcePath> {
         validate_relative_path(relative_path)?;
+        #[cfg(target_os = "linux")]
+        if let Some((relative_path, opened)) = platform::try_open_relative(
+            &self.inner.directory,
+            relative_path,
+            &self.inner.filesystem,
+        )
+        .map_err(|error| map_open_error(&self.named_path().join(relative_path), error))?
+        {
+            return self.bind_relative_path(relative_path, opened);
+        }
         let mut directory = self.directory()?;
         let mut components = relative_path.components().peekable();
         while let Some(component) = components.next() {
@@ -221,6 +231,47 @@ impl ProviderSourceRoot {
             directory = child_directory;
         }
         Ok(OpenedProviderSourcePath::Directory(directory))
+    }
+
+    fn bind_relative_path(
+        &self,
+        relative_path: PathBuf,
+        opened: platform::OpenedPath,
+    ) -> Result<OpenedProviderSourcePath> {
+        let named_path = self.named_path().join(&relative_path);
+        match opened {
+            platform::OpenedPath::File { file, metadata, .. } => {
+                let stamp = provider_source_io_result(
+                    &named_path,
+                    "provider source opened-file identity query",
+                    platform::object_stamp(&file, &metadata),
+                )?;
+                Ok(OpenedProviderSourcePath::File(OpenedProviderSourceFile {
+                    route: ProviderSourceFileRoute::Relative {
+                        root: self.clone(),
+                        relative_path,
+                    },
+                    file,
+                    metadata,
+                    opened: stamp,
+                }))
+            }
+            platform::OpenedPath::Directory { file, metadata, .. } => {
+                let stamp = provider_source_io_result(
+                    &named_path,
+                    "provider source opened-directory identity query",
+                    platform::object_stamp(&file, &metadata),
+                )?;
+                Ok(OpenedProviderSourcePath::Directory(
+                    ProviderSourceDirectory {
+                        root: self.clone(),
+                        relative_path,
+                        directory: file,
+                        opened: stamp,
+                    },
+                ))
+            }
+        }
     }
 
     pub fn open_file(&self, relative_path: &Path) -> Result<OpenedProviderSourceFile> {
