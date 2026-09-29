@@ -249,7 +249,7 @@
     "@@aspect_rules_js+//npm:extensions.bzl%pnpm": {
       "general": {
         "bzlTransitiveDigest": "avI8mTOs2UWOoxWyDGQENp0bV/+LmqoTAQtMBvBH/i8=",
-        "usagesDigest": "kqj7lOd5r8eQvXylMQRfNez+tg/umG2Ds02oLi7Gbpg=",
+        "usagesDigest": "oatDKer+NCA+tZqG9DTWDelgHzcSgsGET6hR2/4AnXY=",
         "recordedInputs": [
           "REPO_MAPPING:aspect_bazel_lib+,bazel_skylib bazel_skylib+",
           "REPO_MAPPING:aspect_bazel_lib+,bazel_tools bazel_tools",
@@ -622,7 +622,7 @@
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
         "bzlTransitiveDigest": "qL3sSlj9UfbrFrXGxVG/YFFPId7vO9RcW1XsCZdKZ0A=",
-        "usagesDigest": "Z25s93HYTfTiB8dCjo4CQ5YslVaUbsP2LExLVsu0QO8=",
+        "usagesDigest": "qECnM0gdatuyqQXVeB+/FQ2g8PRLWX2Er7z1binMT/4=",
         "recordedInputs": [
           "ENV:CARGO_BAZEL_DEBUG \\0",
           "ENV:CARGO_BAZEL_GENERATOR_SHA256 \\0",
