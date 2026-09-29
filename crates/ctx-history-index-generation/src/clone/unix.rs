@@ -242,8 +242,9 @@ pub(super) fn create_authenticated_candidate_generation(
         validate_child_binding(&guard.generations.file, source_name, source.identity)?;
         guard.validate_binding()?;
 
-        let directory =
-            DurableMmapDirectory::open(&destination_path).map_err(tantivy::TantivyError::from)?;
+        let directory = DurableMmapDirectory::open(&destination_path)
+            .map_err(tantivy::TantivyError::from)?
+            .with_managed_unlinks(root, predecessor_pointer, &directory_name);
         let index = Index::open(directory)?;
         if index.settings() != &lexical_index_settings() {
             return Err(IndexError::IndexSettingsMismatch);

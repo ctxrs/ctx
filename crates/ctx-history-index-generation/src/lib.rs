@@ -19,6 +19,8 @@ mod publication_probe;
 mod read_root;
 mod retention;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use certification::managed_links::{ManagedUnlinkStage, ManagedUnlinkTestGuard};
 #[cfg(windows)]
 pub use certification::{acquire_terminal_publication_guard, TerminalPublicationGuard};
 pub use certification::{

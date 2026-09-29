@@ -42,6 +42,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 const TEMPORARY_FILE_PREFIX: &str = ".ctx-tantivy-atomic-";
 const TEMPORARY_FILE_ATTEMPTS: usize = 16;
 
+mod managed_unlinks;
 mod write_failure;
 use write_failure::WriteFailure;
 
@@ -70,6 +71,7 @@ pub struct DurableMmapDirectory {
     inner: DurableDirectoryBackend,
     root_path: Arc<PathBuf>,
     write_failure: WriteFailure,
+    managed_unlinks: Option<Arc<crate::certification::managed_links::CandidateUnlinks>>,
 }
 
 #[derive(Clone)]
@@ -107,6 +109,7 @@ impl DurableMmapDirectory {
                 inner: DurableDirectoryBackend::Anchored(opened),
                 root_path: Arc::new(directory_path.to_path_buf()),
                 write_failure: WriteFailure::default(),
+                managed_unlinks: None,
             });
         }
         let inner = DurableDirectoryBackend::Mmap(MmapDirectory::open(directory_path)?);
@@ -115,6 +118,7 @@ impl DurableMmapDirectory {
             inner,
             root_path: Arc::new(root_path),
             write_failure: WriteFailure::default(),
+            managed_unlinks: None,
         })
     }
 
@@ -283,13 +287,7 @@ impl Directory for DurableMmapDirectory {
     }
 
     fn delete(&self, path: &Path) -> Result<(), DeleteError> {
-        match &self.inner {
-            DurableDirectoryBackend::Mmap(inner) => inner.delete(path),
-            DurableDirectoryBackend::Anchored(_) => Err(DeleteError::IoError {
-                io_error: Arc::new(read_only_directory_error()),
-                filepath: path.to_path_buf(),
-            }),
-        }
+        self.delete_with_certifications(path)
     }
 
     fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
