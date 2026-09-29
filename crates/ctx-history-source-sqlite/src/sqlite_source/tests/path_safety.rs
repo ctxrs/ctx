@@ -3,7 +3,7 @@ use super::*;
 #[cfg(unix)]
 #[test]
 fn leaf_swap_between_admission_and_stock_open_is_fail_closed() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let admitted = temp.path().join("admitted.sqlite");
     let attacker = temp.path().join("attacker.sqlite");
@@ -25,7 +25,7 @@ fn leaf_swap_between_admission_and_stock_open_is_fail_closed() {
 #[cfg(unix)]
 #[test]
 fn symlink_database_is_rejected_before_sqlite_open() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let target = temp.path().join("target.sqlite");
     let link = temp.path().join("provider.sqlite");
     create_database(&target, "target");
@@ -41,7 +41,7 @@ fn symlink_database_is_rejected_before_sqlite_open() {
 #[cfg(unix)]
 #[test]
 fn symlink_sidecar_is_rejected_before_sqlite_open() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let target = temp.path().join("outside-wal");
     create_database(&database, "expected");
@@ -57,7 +57,7 @@ fn symlink_sidecar_is_rejected_before_sqlite_open() {
 
 #[test]
 fn nonregular_database_is_rejected_before_sqlite_open() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     fs::create_dir(temp.path().join("provider.sqlite")).unwrap();
     let parent = retain_parent(temp.path());
 
@@ -69,7 +69,7 @@ fn nonregular_database_is_rejected_before_sqlite_open() {
 
 #[test]
 fn nonregular_sidecar_is_rejected_before_sqlite_open() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "expected");
     fs::create_dir(database.with_file_name("provider.sqlite-shm")).unwrap();
@@ -83,7 +83,7 @@ fn nonregular_sidecar_is_rejected_before_sqlite_open() {
 
 #[test]
 fn rollback_journal_is_typed_unavailable_without_recovery() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "expected");
     fs::write(

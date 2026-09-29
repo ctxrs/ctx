@@ -247,7 +247,7 @@ impl SqliteRouteScratch {
         })
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub(super) fn admit_available_capacity(&self) -> SqliteSourceAccessResult<u64> {
         let available = scratch_available_space(&self.context.data_root)?;
         let headroom = sqlite_snapshot_free_headroom_bytes(available);

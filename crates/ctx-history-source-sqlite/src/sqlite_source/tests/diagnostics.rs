@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn contextual_source_errors_preserve_absence_and_resource_classification() {
+    for (kind, unavailable, resource) in [
+        (io::ErrorKind::NotFound, true, false),
+        (io::ErrorKind::PermissionDenied, true, false),
+        (io::ErrorKind::StorageFull, false, true),
+        (io::ErrorKind::OutOfMemory, false, true),
+    ] {
+        let error = super::super::map_provider_source_error(
+            ctx_history_source_io::SourceIoError::SystemIo {
+                operation: "provider source target open",
+                source: io::Error::from(kind),
+            },
+            "opening a SQLite source family member",
+            Path::new("provider.sqlite-wal"),
+        );
+        assert_eq!(error.is_provider_path_unavailable(), unavailable);
+        assert_eq!(error.is_systemic_resource_failure(), resource);
+        if resource {
+            assert_revalidation_resource_unavailable(map_revalidation_error(error));
+        } else {
+            assert!(map_revalidation_error(error).is_source_changed());
+        }
+    }
+}
+
+#[test]
 fn snapshot_capacity_failures_are_distinct_from_runtime_resource_failures() {
     let capacity = SqliteSourceAccessError::InsufficientScratchSpace {
         path: PathBuf::from("ctx-data"),

@@ -36,7 +36,7 @@ impl SqliteSourceFamily {
         &self.database.name
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn retain_parent_handle(&self) -> SqliteSourceAccessResult<File> {
         self.authority
             .directory
@@ -761,11 +761,13 @@ pub(super) fn map_provider_source_error(
     path: &Path,
 ) -> SqliteSourceAccessError {
     match error {
-        SourceIoError::Io(source) => SqliteSourceAccessError::Io {
-            operation,
-            path: path.to_path_buf(),
-            source,
-        },
+        SourceIoError::Io(source) | SourceIoError::SystemIo { source, .. } => {
+            SqliteSourceAccessError::Io {
+                operation,
+                path: path.to_path_buf(),
+                source,
+            }
+        }
         SourceIoError::InvalidProviderTranscriptPath { reason, .. } => {
             SqliteSourceAccessError::UnsafeFile {
                 path: path.to_path_buf(),

@@ -3,6 +3,7 @@ use super::*;
 pub(super) mod acquisition;
 mod copy_progress;
 mod scratch;
+mod selected_reader;
 pub(super) mod selective;
 #[cfg(any(test, feature = "test-support"))]
 mod test_api;
@@ -215,6 +216,21 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
                 SqliteCleanupStatus::NotRequired,
             ))
         })?;
+    // The selected reader requires either sidecar-free input or an existing
+    // readable WAL/SHM pair. Unsupported acquisition keeps the full-family
+    // capture; resource exhaustion never falls back to another allocation.
+    let options = if matches!(
+        options.policy,
+        SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_)
+    ) && !selected_reader::available(&family)
+    {
+        SqliteSourceSnapshotOptions::new(
+            SqliteSourceSnapshotPolicy::StablePrivateCopy,
+            options.limits,
+        )
+    } else {
+        options
+    };
     let native_evidence = match options.policy {
         SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
         | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
@@ -335,9 +351,13 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
 
 #[cfg(any(test, feature = "test-support"))]
 pub(super) use test_api::{
-    open_root_handle_sqlite_source_snapshot_before_revalidation_for_test,
     open_root_handle_sqlite_source_snapshot_with_limit_for_test,
     open_root_handle_sqlite_source_stable_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_stable_snapshot_before_revalidation_for_test,
-    planned_snapshot_copy_bytes_for_test,
 };
+
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub(super) use test_api::open_root_handle_sqlite_source_snapshot_before_revalidation_for_test;
+
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub(super) use test_api::planned_snapshot_copy_bytes_for_test;

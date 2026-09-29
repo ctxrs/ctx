@@ -265,18 +265,21 @@ contract for that source family:
   available temporary disk capacity plus safety headroom, not a fixed source
   size ceiling; copy memory remains bounded and the private family is removed
   when the route finishes.
-  For OpenCode, Kilo, and MiMo Code on Linux under a non-root user, ctx instead
+  For OpenCode, Kilo, and MiMo Code on Linux, macOS, and Windows, ctx instead
   streams `session`, `message`, `part`, `session_message`, and `session_entry`
   (when present) from one read transaction into one private SQLite snapshot.
   Their indexes and native rowids are retained; unrelated tables such as
   OpenCode's `event` log are not copied. The live read closes before parsing.
   Scratch grows with these selected tables and indexes, bounded by available
   space minus safety headroom, rather than the complete DB/WAL family. This is
-  not a fixed-size or universal SQLite import guarantee. Other platforms and
-  Linux processes running as root retain full-family snapshots: the selective
-  path depends on Linux's retained-directory SQLite `readonly_shm` reader, and
-  root can alter SHM ownership even on a read-only open. Unsupported source
-  schemas or unavailable no-write reads fail without modifying provider files.
+  not a fixed-size or universal SQLite import guarantee. A source with no WAL
+  or SHM uses an immutable read and must retain its exact physical revision
+  throughout capture. Live WAL reads require an existing WAL/SHM pair and use
+  SQLite's `readonly_shm` mode; Unix root retains full-family snapshots for
+  live WAL because SQLite can change SHM ownership even on a read-only open.
+  Other platforms and unsupported sidecar topologies also retain full-family
+  snapshots. Unsupported source schemas or unavailable no-write reads fail
+  without modifying provider files.
 - JSON documents and document trees use unchanged-or-replace semantics. A
   mutation during a scan invalidates that candidate; the retry reads one
   complete replacement.

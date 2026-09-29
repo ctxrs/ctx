@@ -3,8 +3,8 @@ use sha2::{Digest, Sha256};
 
 #[test]
 fn recovered_wal_copy_certifies_matching_commit_and_subsequent_no_copy_replay() {
-    let temp = tempfile::tempdir().unwrap();
-    let data = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let writer = create_persistent_wal(&database);
     let authority = retain_parent_in_data_root(data.path(), temp.path());
@@ -110,8 +110,8 @@ fn physical_replay_revision_changes_on_move_and_old_fence_rejects_it() {
 fn snapshot_replay_recertifies_legacy_tokens_and_metadata_only_changes() {
     use std::time::Duration;
 
-    let temp = tempfile::tempdir().unwrap();
-    let data = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "same content");
     let before = fs::read(&database).unwrap();
@@ -160,8 +160,8 @@ fn snapshot_replay_recertifies_legacy_tokens_and_metadata_only_changes() {
 #[cfg(target_os = "linux")]
 #[test]
 fn persisted_replay_revision_detects_committed_wal_frame_reuse() {
-    let temp = tempfile::tempdir().unwrap();
-    let data = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let writer = create_persistent_wal(&database);
     writer

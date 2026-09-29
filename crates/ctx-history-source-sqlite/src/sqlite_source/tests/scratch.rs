@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn private_staging_open_failures_are_typed_as_scratch_io() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let missing = temp.path().join("missing");
     let error = open_private_sqlite_staging_file(&missing).unwrap_err();
     assert!(matches!(
@@ -31,7 +31,7 @@ fn private_staging_open_failures_are_typed_as_scratch_io() {
 
 #[test]
 fn every_post_open_staging_operation_preserves_scratch_io_provenance() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let mut staging = open_private_sqlite_staging_file(temp.path()).unwrap();
     for (operation, expected_operation) in [
         (
@@ -81,7 +81,7 @@ fn every_post_open_staging_operation_preserves_scratch_io_provenance() {
 
 #[test]
 fn private_scratch_cleanup_failure_is_explicit_and_typed_unavailable() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let provider_root = temp.path().join("provider");
     let data_root = temp.path().join("ctx-data");
     fs::create_dir_all(&provider_root).unwrap();
@@ -137,7 +137,7 @@ fn private_scratch_cleanup_failure_is_explicit_and_typed_unavailable() {
 
 #[test]
 fn scratch_callback_preserves_simultaneous_directory_cleanup_failure() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let provider_root = temp.path().join("provider");
     let data_root = temp.path().join("ctx-data");
     fs::create_dir_all(&provider_root).unwrap();
@@ -175,7 +175,7 @@ fn scratch_callback_preserves_simultaneous_directory_cleanup_failure() {
 
 #[test]
 fn scratch_callback_preserves_simultaneous_connection_close_failure() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let provider_root = temp.path().join("provider");
     let data_root = temp.path().join("ctx-data");
     fs::create_dir_all(&provider_root).unwrap();
@@ -213,7 +213,7 @@ fn scratch_callback_preserves_simultaneous_connection_close_failure() {
 
 #[test]
 fn scratch_open_preserves_simultaneous_directory_cleanup_failure() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let provider_root = temp.path().join("provider");
     let data_root = temp.path().join("ctx-data");
     fs::create_dir_all(&provider_root).unwrap();

@@ -25,6 +25,7 @@ fn open_with_hooks(
     }
 }
 
+#[cfg(unix)]
 pub(in crate::sqlite_source) fn open_root_handle_sqlite_source_snapshot_before_revalidation_for_test(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,
@@ -73,6 +74,7 @@ pub(in crate::sqlite_source) fn open_root_handle_sqlite_source_snapshot_with_lim
     )
 }
 
+#[cfg(target_os = "linux")]
 pub(in crate::sqlite_source) fn planned_snapshot_copy_bytes_for_test(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,

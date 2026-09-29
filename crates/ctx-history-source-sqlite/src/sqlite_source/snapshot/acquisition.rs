@@ -315,8 +315,9 @@ pub(in crate::sqlite_source) fn open_pinned_read_only_wal(
             source: std::io::Error::last_os_error(),
         });
     }
-    let encoded_leaf =
-        url::form_urlencoded::byte_serialize(family.database_name().as_bytes()).collect::<String>();
+    let encoded_leaf = url::form_urlencoded::byte_serialize(family.database_name().as_bytes())
+        .collect::<String>()
+        .replace('+', "%20");
     let uri = format!("file:{encoded_leaf}?mode=ro&readonly_shm=1&vfs=unix");
     let opened = Connection::open_with_flags(
         &uri,

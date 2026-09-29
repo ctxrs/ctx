@@ -13,29 +13,13 @@ impl SqliteSourceDirectoryAuthority {
         tables: &'static [&'static str],
         mut report_progress: impl FnMut(SqliteSourceProgress) -> Result<(), E>,
     ) -> Result<SqliteSourceReadSnapshot, SqliteSourceProgressError<E>> {
-        let policy = if selective_reader_available() {
-            SqliteSourceSnapshotPolicy::SelectivePrivateCopy(tables)
-        } else {
-            SqliteSourceSnapshotPolicy::StablePrivateCopy
-        };
         open_root_handle_sqlite_source_snapshot_with_progress(
             self,
             database_name,
-            policy,
+            SqliteSourceSnapshotPolicy::SelectivePrivateCopy(tables),
             SqliteSourceSnapshotLimits::default(),
             &mut report_progress,
         )
-    }
-}
-
-fn selective_reader_available() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        (unsafe { libc::geteuid() }) != 0
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
     }
 }
 
@@ -47,22 +31,37 @@ pub(super) fn acquire<E>(
     tables: &[&str],
     report: &mut impl FnMut(SqliteSourceProgress) -> Result<(), E>,
 ) -> Result<AcquiredSqliteConnection, SqliteSourceProgressError<E>> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (context, family, evidence, limits, tables, report);
         Err(SqliteSourceAccessError::SnapshotUnavailable {
-            reason: "selective snapshots require the Linux no-write SQLite reader".into(),
+            reason: "selective snapshots require a native no-write SQLite reader".into(),
         }
         .into())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
-        let (source, _authority) = open_pinned_read_only_wal(family)?;
+        let (source, _authority) = super::selected_reader::open(family, evidence)?;
         let operation = (|| {
             verify_connection_read_only(&source)?;
             configure_and_pin_snapshot(&source)?;
             family.revalidate_database_identity(evidence)?;
-            copy_tables(context, &source, limits, tables, report)
+            let copy = copy_tables(context, &source, limits, tables, report)?;
+            // Sidecar-free reads use immutable mode. Certify their exact
+            // physical revision before retaining the private copy.
+            if family.wal.is_none() && family.shared_memory.is_none() {
+                if let Err(error) = family.revalidate_revision(evidence) {
+                    return match copy.cleanup() {
+                        Ok(()) => Err(error.into()),
+                        Err(cleanup) => Err(SqliteSourceAccessError::Finalization {
+                            primary: Box::new(error),
+                            cleanup: Box::new(cleanup),
+                        }
+                        .into()),
+                    };
+                }
+            }
+            Ok(copy)
         })();
         // Close the live transaction before any adapter query. A failed close
         // also discards the private candidate; no second allocation is opened.
@@ -83,7 +82,7 @@ pub(super) fn acquire<E>(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn copy_tables<E>(
     context: &Arc<SqliteSourceSnapshotContext>,
     source: &Connection,
@@ -171,7 +170,7 @@ fn copy_tables<E>(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn copy_table<E>(
     source: &Connection,
     target: &Connection,
@@ -285,7 +284,7 @@ fn copy_table<E>(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn report_progress<E>(
     report: &mut impl FnMut(SqliteSourceProgress) -> Result<(), E>,
     bytes: u64,
@@ -296,27 +295,27 @@ fn report_progress<E>(
     report(progress).map_err(SqliteSourceProgressError::Progress)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn source_error(error: rusqlite::Error) -> SqliteSourceAccessError {
     sqlite_error("reading selected provider SQLite tables", error)
         .with_exact_provider_content_provenance()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn private_error(error: rusqlite::Error) -> SqliteSourceAccessError {
     SqliteSourceAccessError::private_scratch_sqlite("writing selected SQLite snapshot", error)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 struct BorrowedCell<'a>(rusqlite::types::ValueRef<'a>);
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 impl rusqlite::ToSql for BorrowedCell<'_> {
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
         Ok(rusqlite::types::ToSqlOutput::Borrowed(self.0))
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(in crate::sqlite_source) fn execute_schema(
     target: &Connection,
     table: &str,

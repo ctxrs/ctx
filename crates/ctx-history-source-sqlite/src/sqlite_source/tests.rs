@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use std::{
     io::Read as _,
     process::{Child, Command, Stdio},
@@ -15,22 +15,23 @@ use std::{
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::MetadataExt;
 
+use crate::test_support_paths::tempdir;
 use rusqlite::{ffi, params, Connection};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use sha2::Digest as _;
 
+#[cfg(unix)]
+use super::snapshot::open_root_handle_sqlite_source_snapshot_before_revalidation_for_test;
+#[cfg(target_os = "linux")]
+use super::snapshot::planned_snapshot_copy_bytes_for_test;
 use super::snapshot::{
     fail_next_private_directory_cleanup_for_test, fail_next_private_scratch_close_for_test,
     fail_next_private_scratch_open_for_test, fail_next_snapshot_open_for_test,
     fail_next_snapshot_write_enospc_for_test,
-    open_root_handle_sqlite_source_snapshot_before_revalidation_for_test,
     open_root_handle_sqlite_source_snapshot_with_limit_for_test,
     open_root_handle_sqlite_source_stable_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_stable_snapshot_before_revalidation_for_test,
-    planned_snapshot_copy_bytes_for_test,
 };
 use super::{
     fail_next_private_sqlite_staging_operation_for_test, map_revalidation_error,
@@ -47,7 +48,7 @@ mod diagnostics;
 mod path_safety;
 mod replay;
 mod scratch;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod selective;
 #[cfg(target_os = "linux")]
 mod wal_commit;
@@ -82,12 +83,12 @@ fn create_persistent_wal(path: &Path) -> Connection {
     connection
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 struct PersistentWalWriterProcess {
     child: Child,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 impl PersistentWalWriterProcess {
     fn start(database: &Path, ready: &Path) -> Self {
         let mut child = Command::new(std::env::current_exe().unwrap())
@@ -115,7 +116,7 @@ impl PersistentWalWriterProcess {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 impl Drop for PersistentWalWriterProcess {
     fn drop(&mut self) {
         drop(self.child.stdin.take());
@@ -125,7 +126,7 @@ impl Drop for PersistentWalWriterProcess {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]
 fn persistent_wal_writer_process_helper() {
     let Some(database) = std::env::var_os("CTX_TEST_PROVIDER_DATABASE") else {
@@ -144,7 +145,12 @@ fn retain_parent(path: &Path) -> SqliteSourceDirectoryAuthority {
 
 fn retain_parent_in_data_root(data_root: &Path, path: &Path) -> SqliteSourceDirectoryAuthority {
     fs::create_dir_all(data_root).unwrap();
-    let parent = File::open(path).unwrap();
+    let root = super::ProviderSourceRoot::open(path).unwrap();
+    let parent = root
+        .directory()
+        .unwrap()
+        .try_clone_authority_handle()
+        .unwrap();
     retain_sqlite_source_directory_authority(data_root, &parent, path).unwrap()
 }
 
@@ -172,35 +178,30 @@ fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
         .collect()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[derive(Debug, PartialEq, Eq)]
 struct DirectoryFileState {
     digest: [u8; 32],
-    len: u64,
-    mode: u32,
-    mtime: i64,
-    mtime_nsec: i64,
-    ctime: i64,
-    ctime_nsec: i64,
+    state: super::NativeFileState,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn directory_file_state(path: &Path) -> BTreeMap<OsString, DirectoryFileState> {
     fs::read_dir(path)
         .unwrap()
         .map(|entry| {
             let entry = entry.unwrap();
-            let metadata = entry.metadata().unwrap();
+            let file = File::open(entry.path()).unwrap();
             (
                 entry.file_name(),
                 DirectoryFileState {
                     digest: sha2::Sha256::digest(fs::read(entry.path()).unwrap()).into(),
-                    len: metadata.len(),
-                    mode: metadata.mode(),
-                    mtime: metadata.mtime(),
-                    mtime_nsec: metadata.mtime_nsec(),
-                    ctime: metadata.ctime(),
-                    ctime_nsec: metadata.ctime_nsec(),
+                    state: super::NativeFileState::read(
+                        &file,
+                        &entry.path(),
+                        super::ExpectedObjectKind::RegularFile,
+                    )
+                    .unwrap(),
                 },
             )
         })
@@ -226,8 +227,8 @@ fn physical_error(error: &SqliteSourceAccessError) -> &SqliteSourceAccessError {
 
 #[test]
 fn stable_copy_is_one_private_snapshot_and_never_writes_provider_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "stable");
     fs::write(temp.path().join("unrelated"), b"unchanged").unwrap();
@@ -255,8 +256,8 @@ fn stable_copy_is_one_private_snapshot_and_never_writes_provider_files() {
 #[cfg(target_os = "linux")]
 #[test]
 fn active_wal_retains_one_family_copy_under_one_aggregate_limit() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let writer = create_persistent_wal(&database);
     let before = directory_file_bytes(temp.path());
@@ -285,8 +286,8 @@ fn active_wal_retains_one_family_copy_under_one_aggregate_limit() {
 #[cfg(target_os = "linux")]
 #[test]
 fn pinned_read_only_wal_is_zero_write_and_accepts_no_mutation() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let ready = data_root.path().join("provider-ready");
     let writer = PersistentWalWriterProcess::start(&database, &ready);
@@ -353,7 +354,7 @@ fn pinned_read_only_wal_parent_swap_reads_retained_authority_and_fails_terminal_
     if unsafe { libc::geteuid() } == 0 {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let selected = temp.path().join("selected");
     let moved = temp.path().join("moved");
     fs::create_dir(&selected).unwrap();
@@ -405,7 +406,7 @@ fn pinned_read_only_wal_leaf_swap_fails_terminal_identity_revalidation() {
     if unsafe { libc::geteuid() } == 0 {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let original_ready = temp.path().join("original-ready");
     let original_writer = PersistentWalWriterProcess::start(&database, &original_ready);
@@ -472,8 +473,8 @@ fn pinned_read_only_wal_admission_rejects_root_before_sqlite_open() {
 
 #[test]
 fn sidecar_free_unavailable_incremental_never_copies_the_database_family() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "sidecar-free");
     assert!(!temp.path().join("provider.sqlite-wal").exists());
@@ -501,7 +502,7 @@ fn sidecar_free_unavailable_incremental_never_copies_the_database_family() {
 #[cfg(target_os = "linux")]
 #[test]
 fn active_source_family_contract_sqlite_keeps_a_pinned_view_and_fails_changed_writer_generation() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let writer = create_persistent_wal(&database);
     let parent = retain_parent(temp.path());
@@ -533,8 +534,8 @@ fn active_source_family_contract_sqlite_keeps_a_pinned_view_and_fails_changed_wr
 
 #[test]
 fn near_limit_rejection_happens_before_any_scratch_write() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "limit");
     let database_bytes = fs::metadata(&database).unwrap().len();
@@ -558,8 +559,8 @@ fn near_limit_rejection_happens_before_any_scratch_write() {
 fn production_snapshot_admission_has_no_fixed_source_size_ceiling() {
     const TEN_GIB: u64 = 10 * 1024 * 1024 * 1024;
 
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "capacity");
     let authority = retain_parent_in_data_root(data_root.path(), temp.path());
@@ -595,8 +596,8 @@ fn production_snapshot_admission_has_no_fixed_source_size_ceiling() {
 fn multi_gibibyte_sparse_source_produces_an_available_disk_copy_plan() {
     const FIVE_GIB: u64 = 5 * 1024 * 1024 * 1024;
 
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     File::create(&database).unwrap().set_len(FIVE_GIB).unwrap();
     let authority = retain_parent_in_data_root(data_root.path(), temp.path());
@@ -610,8 +611,8 @@ fn multi_gibibyte_sparse_source_produces_an_available_disk_copy_plan() {
 
 #[test]
 fn free_space_headroom_rejection_happens_before_any_scratch_write() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "headroom");
     let database_bytes = fs::metadata(&database).unwrap().len();
@@ -636,8 +637,8 @@ fn free_space_headroom_rejection_happens_before_any_scratch_write() {
 
 #[test]
 fn injected_enospc_cleans_the_single_private_directory() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "enospc");
     let authority = retain_parent_in_data_root(data_root.path(), temp.path());
@@ -653,8 +654,8 @@ fn injected_enospc_cleans_the_single_private_directory() {
 
 #[test]
 fn progress_cancellation_cleans_a_partial_family_copy() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let connection = Connection::open(&database).unwrap();
     connection
@@ -691,8 +692,8 @@ fn progress_cancellation_cleans_a_partial_family_copy() {
 
 #[test]
 fn progress_cancellation_preserves_simultaneous_cleanup_failure() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let connection = Connection::open(&database).unwrap();
     connection
@@ -741,8 +742,8 @@ fn progress_cancellation_preserves_simultaneous_cleanup_failure() {
 
 #[test]
 fn snapshot_open_preserves_simultaneous_cleanup_failure() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "open failure");
     let authority = retain_parent_in_data_root(data_root.path(), temp.path());
@@ -769,8 +770,8 @@ fn snapshot_open_preserves_simultaneous_cleanup_failure() {
 
 #[test]
 fn acquisition_revalidation_preserves_simultaneous_cleanup_failure() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "revalidation failure");
     let authority = retain_parent_in_data_root(data_root.path(), temp.path());
@@ -802,8 +803,8 @@ fn acquisition_revalidation_preserves_simultaneous_cleanup_failure() {
 
 #[test]
 fn corrupt_source_copy_fails_closed_and_cleans_scratch() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     fs::write(
         temp.path().join("provider.sqlite"),
         b"not a sqlite database",
@@ -819,8 +820,8 @@ fn corrupt_source_copy_fails_closed_and_cleans_scratch() {
 
 #[test]
 fn source_race_after_database_copy_fails_closed_and_cleans_scratch() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "before");
     let authority = retain_parent_in_data_root(data_root.path(), temp.path());
@@ -850,8 +851,8 @@ fn source_race_after_database_copy_fails_closed_and_cleans_scratch() {
 
 #[test]
 fn database_revision_token_fails_closed_when_native_metadata_cannot_distinguish_mutation() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "before");
     let authority = retain_parent_in_data_root(data_root.path(), temp.path());
@@ -882,8 +883,8 @@ fn database_revision_token_fails_closed_when_native_metadata_cannot_distinguish_
 
 #[test]
 fn finish_is_mandatory_observable_and_revalidates_source_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let admitted = temp.path().join("admitted.sqlite");
     create_database(&database, "expected");
@@ -904,8 +905,8 @@ fn finish_is_mandatory_observable_and_revalidates_source_identity() {
 
 #[test]
 fn abort_and_unfinished_drop_are_distinct_observable_paths() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "observable");
     let authority = retain_parent_in_data_root(data_root.path(), temp.path());
@@ -930,8 +931,8 @@ fn abort_and_unfinished_drop_are_distinct_observable_paths() {
 
 #[test]
 fn retained_copy_and_ordering_database_share_one_exact_route_bound() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = tempfile::tempdir().unwrap();
+    let temp = tempdir().unwrap();
+    let data_root = tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "aggregate");
     let database_bytes = fs::metadata(&database).unwrap().len();
