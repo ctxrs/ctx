@@ -52,6 +52,15 @@ pub(super) fn fake_operational_systemd_user_manager(
 ) -> (std::path::PathBuf, FakeSystemdDaemon) {
     use std::os::unix::fs::PermissionsExt as _;
 
+    // These setup fixtures exercise supervision, not release downloads. Persist
+    // the policy so it also applies to the manager's env -i daemon and restarts.
+    fs::create_dir_all(managed_root).unwrap();
+    fs::write(
+        managed_root.join("config.toml"),
+        "[upgrade]\nauto = \"off\"\n",
+    )
+    .unwrap();
+
     let manager_bin = temp.path().join("fake-systemd-bin");
     fs::create_dir(&manager_bin).unwrap();
     let systemctl = manager_bin.join("systemctl");

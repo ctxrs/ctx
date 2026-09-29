@@ -43,6 +43,19 @@ replacement transcripts, or use a network fallback.
 Source repositories and provider history roots remain outside ctx ownership.
 Provider files are read as import sources, not modified.
 
+Explicit hosted history adds a separate server boundary. The operator and the
+server's OS account are trusted with retained plaintext history. TLS protects
+transport; it does not hide shared history from that operator. Collection
+permissions are checked on search, exact citation reads and uploads. An old
+checkpoint cannot safely reinstate later-revoked access; serving after restore
+requires the independently retained current authority described in
+[hosted-history.md](hosted-history.md).
+
+Remote evidence is untrusted historical content. It does not authorize commands,
+local path reads or new sharing. Connecting alone sends no history, and a
+remote outage does not silently change which corpus a query searches. Local
+history behavior stays unchanged unless the user explicitly selects a remote.
+
 
 ## Risks
 

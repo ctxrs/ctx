@@ -184,9 +184,11 @@ Lexical search remains available while embeddings build; hybrid search uses
 lexical and semantic evidence automatically when coverage is ready.
 `ctx semantic disable` turns the feature off without deleting downloaded assets.
 
-ctx has no hosted-history client or `ctx cloud` subcommand. Official
-installer-managed binaries can separately run signed CLI
-upgrade checks; that updater does not collect provider history.
+Optional [hosted history](hosted-history.md) uses `ctx remote` and an explicitly
+configured server. Connecting alone uploads nothing; sharing requires a saved
+source and backfill policy. There is no `ctx cloud` subcommand. Official
+installer-managed binaries can separately run signed CLI upgrade checks;
+that updater does not collect provider history.
 
 ## 3. See Available Sources
 

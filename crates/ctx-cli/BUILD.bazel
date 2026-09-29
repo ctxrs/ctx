@@ -97,6 +97,9 @@ CTX_CLI_DEPS = [
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-cli:lib",
     "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-archive:lib",
+    "//crates/ctx-history-server:lib",
+    "//crates/ctx-history-sharing:lib",
     "//crates/ctx-history-platform:lib",
     "//crates/ctx-history-ingest-application:lib",
     "//crates/ctx-history-index:lib",
@@ -125,6 +128,9 @@ CTX_CLI_TEST_DEPS = [
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-cli:test_support_lib",
     "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-archive:lib",
+    "//crates/ctx-history-server:lib",
+    "//crates/ctx-history-sharing:lib",
     "//crates/ctx-history-platform:lib",
     "//crates/ctx-history-ingest-application:test_support_lib",
     "//crates/ctx-history-index:lib",
@@ -155,6 +161,9 @@ CTX_CLI_QUALIFICATION_DEPS = [
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-cli:lib",
     "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-archive:lib",
+    "//crates/ctx-history-server:lib",
+    "//crates/ctx-history-sharing:lib",
     "//crates/ctx-history-platform:lib",
     "//crates/ctx-history-ingest-application:lib",
     "//crates/ctx-history-index:lib",
@@ -335,6 +344,40 @@ ctx_cli_integration_test(
     src = "tests/cloud_removed.rs",
     extra_data = ["//:cloud_removed_build_inputs"],
     tags = ["privacy", "security"],
+)
+
+ctx_cli_integration_test(
+    name = "hosted_history_tests",
+    src = "tests/hosted_history.rs",
+    extra_srcs = ["tests/hosted_history/support.rs"],
+    extra_deps = [
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-platform:lib",
+    ],
+)
+
+ctx_cli_integration_test(
+    name = "hosted_history_archive_tests",
+    src = "tests/hosted_history_archive.rs",
+    extra_srcs = ["tests/hosted_history/support.rs"],
+    extra_deps = [
+        "//crates/ctx-history-archive:lib",
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-platform:lib",
+    ],
+)
+
+ctx_cli_integration_test(
+    name = "hosted_history_remote_tests",
+    src = "tests/hosted_history_remote.rs",
+    extra_srcs = ["tests/hosted_history/support.rs"],
+    extra_deps = [
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-platform:lib",
+    ],
 )
 
 ctx_cli_integration_test(

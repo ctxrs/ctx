@@ -1,0 +1,29 @@
+[package]
+name = "ctx-history-sharing"
+version.workspace = true
+description = "Opt-in history publication and authenticated remote reading for ctx"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ctx-history-archive = { path = "../ctx-history-archive" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-index = { path = "../ctx-history-index" }
+ctx-history-server = { path = "../ctx-history-server" }
+ctx-history-platform = { path = "../ctx-history-platform" }
+fs2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

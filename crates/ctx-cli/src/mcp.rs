@@ -5,7 +5,10 @@ use clap::{Args, Subcommand};
 use ctx_agent_application::mcp::{
     serve_stdio as serve_mcp_stdio, McpTelemetry, McpUsagePort, ProductIdentity,
 };
-use ctx_agent_integrations::{mcp::McpToolKind, tool_backend::ToolUsageFacts};
+use ctx_agent_integrations::{
+    mcp::McpToolKind,
+    tool_backend::{ToolBackend, ToolUsageFacts},
+};
 use ctx_client_observability::local_usage::{McpInvocation, McpUsageRecorder};
 use serde_json::Value;
 
@@ -37,15 +40,15 @@ pub(crate) struct McpArgs {
 #[derive(Debug, Subcommand)]
 enum McpCommand {
     #[command(
-        about = "Serve local ctx tools over stdio",
-        long_about = "Serve local ctx tools over newline-delimited stdio JSON-RPC. Search, Blame, and history tool calls execute locally.\n\nExample:\n  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"client\",\"version\":\"0\"}}}' | ctx mcp serve"
+        about = "Serve ctx tools over stdio",
+        long_about = "Serve ctx tools over newline-delimited stdio JSON-RPC. By default, tools execute locally. With --server NAME, expose status, lexical search, exact event retrieval, and paginated session logs from the saved shared collection.\n\nExample:\n  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"client\",\"version\":\"0\"}}}' | ctx mcp serve"
     )]
     Serve(McpServeArgs),
 }
 
 #[derive(Debug, Args)]
 struct McpServeArgs {
-    /// Graph snapshot for read-only tools; defaults to the nearest ancestor's .graf/index.db.
+    /// Local-only graph snapshot; defaults to the nearest ancestor's .graf/index.db.
     #[arg(long, value_name = "PATH")]
     graph_db: Option<PathBuf>,
 }
@@ -53,6 +56,56 @@ struct McpServeArgs {
 pub(crate) fn run(args: McpArgs, data_root: PathBuf) -> Result<()> {
     match args.command {
         McpCommand::Serve(args) => serve_stdio(data_root, args.graph_db),
+    }
+}
+
+pub(crate) fn run_remote(
+    args: McpArgs,
+    backend: crate::remote_history::RemoteBackend,
+) -> Result<()> {
+    let McpCommand::Serve(args) = args.command;
+    anyhow::ensure!(
+        args.graph_db.is_none(),
+        "--graph-db is local-only; it cannot be combined with --server"
+    );
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    serve_remote_stdio(&mut stdin.lock(), &mut stdout.lock(), &backend)
+}
+
+pub(crate) fn serve_remote_stdio(
+    input: &mut impl io::BufRead,
+    output: &mut impl io::Write,
+    backend: &impl ToolBackend,
+) -> Result<()> {
+    // An explicit remote reader has no local index, configuration, usage store,
+    // daemon, provider discovery or client analytics initialization.
+    serve_mcp_stdio(
+        input,
+        output,
+        ProductIdentity {
+            name: "ctx",
+            version: env!("CARGO_PKG_VERSION"),
+        },
+        backend,
+        &ctx_agent_application::mcp::render_generic_tool_text,
+        &mut RemoteUsage,
+        McpTelemetry::start(false, |_| Ok(())),
+    )
+    .map_err(|failure| failure.into_error())
+}
+
+struct RemoteUsage;
+
+impl McpUsagePort for RemoteUsage {
+    fn record_delivered(
+        &mut self,
+        _operation: McpToolKind,
+        _usage: ToolUsageFacts,
+        _response: &Value,
+        _encoded_response_bytes: usize,
+        _duration: std::time::Duration,
+    ) {
     }
 }
 

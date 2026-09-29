@@ -36,7 +36,8 @@ const DIRECT_OUTPUT_BOUNDARIES: &[(&str, &[(&str, usize)])] = &[
         "crates/ctx-cli/src/dispatch.rs",
         &[("eprintln!", 2), ("stdout()", 1), ("stderr()", 1)],
     ),
-    ("crates/ctx-cli/src/mcp.rs", &[("stdout()", 1)]),
+    // Local and explicit remote MCP each hand stdout to the existing framed transport.
+    ("crates/ctx-cli/src/mcp.rs", &[("stdout()", 2)]),
     (
         "crates/ctx-cli/src/release_build_identity.rs",
         &[("println!", 3)],
@@ -473,11 +474,11 @@ fn forbidden_direct_output_mutations_are_detected() {
             .any(|(marker, _)| marker == &"println!")
     );
     assert_eq!(
-        direct_output_counts("std::io::stdout();"),
+        direct_output_counts("std::io::stdout(); std::io::stdout();"),
         approved_direct_output_counts("crates/ctx-cli/src/mcp.rs")
     );
     assert_ne!(
-        direct_output_counts("std::io::stdout(); std::io::stdout();"),
+        direct_output_counts("std::io::stdout(); std::io::stdout(); std::io::stdout();"),
         approved_direct_output_counts("crates/ctx-cli/src/mcp.rs"),
         "an additional call inside an approved path must be rejected"
     );

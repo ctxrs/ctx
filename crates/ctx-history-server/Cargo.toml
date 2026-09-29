@@ -1,0 +1,30 @@
+[package]
+name = "ctx-history-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "query"] }
+base64.workspace = true
+ctx-history-archive = { path = "../ctx-history-archive" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-index = { path = "../ctx-history-index" }
+ctx-history-platform = { path = "../ctx-history-platform" }
+ctx-history-read-application = { path = "../ctx-history-read-application" }
+fs2.workspace = true
+hex.workspace = true
+ring.workspace = true
+rusqlite = { workspace = true, features = ["backup"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "signal"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

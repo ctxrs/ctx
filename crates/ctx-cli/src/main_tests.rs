@@ -160,10 +160,11 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
     // Integrations exposes install, status, and remove for five canonical
     // targets; hidden compatibility aliases do not add grammar nodes.
     // The original 63 nodes remain; graph contributes its nested command tree
-    // and Sift owns its subcommands.
+    // and Sift owns its subcommands. Archive/server/remote add 26 explicit
+    // command nodes without changing the existing local paths.
     assert_eq!(
         paths.len(),
-        130,
+        156,
         "unexpected public CLI grammar depth: {paths:?}"
     );
 

@@ -81,6 +81,9 @@ pub(crate) struct Cli {
         help = "Agent-history data root only; graph and output stores use separate paths"
     )]
     pub(crate) data_root: Option<PathBuf>,
+    /// Read shared history from a saved server connection.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub(crate) server: Option<String>,
     #[arg(
         long,
         value_enum,
@@ -126,6 +129,8 @@ pub(crate) struct IndexDashboardFixtureArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CommandRoot {
+    #[command(flatten)]
+    Hosted(crate::hosted::HostedCommand),
     #[command(flatten)]
     Unified(crate::unified::UnifiedCommand),
     #[command(about = "Show cited agent provenance for committed code or a pull request")]

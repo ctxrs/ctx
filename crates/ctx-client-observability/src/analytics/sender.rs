@@ -513,6 +513,7 @@ fn insert_client_operation_properties(
         }
         CliOperation::Graph
         | CliOperation::Output
+        | CliOperation::Hosted
         | CliOperation::Stats
         | CliOperation::McpServe
         | CliOperation::DaemonRun

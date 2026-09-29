@@ -4,6 +4,7 @@ use super::*;
 
 pub(super) fn command_json_output(command: &CommandRoot) -> bool {
     match command {
+        CommandRoot::Hosted(command) => crate::hosted::json_output(command),
         CommandRoot::Unified(_) => false,
         CommandRoot::Blame(args) => args.json_output(),
         CommandRoot::Setup(args) => args.format.is_json(),
@@ -96,6 +97,7 @@ pub(super) fn command_can_report_malformed_config(command: &CommandRoot) -> bool
 
 pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDescriptor {
     let operation = match command {
+        CommandRoot::Hosted(_) => CliOperation::Hosted,
         CommandRoot::Unified(command) => {
             if command.is_graph() {
                 CliOperation::Graph

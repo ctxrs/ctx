@@ -183,7 +183,21 @@ fn render_unhandled_command_error(error: &anyhow::Error) -> Result<()> {
 
 pub(crate) fn run_cli() -> Result<()> {
     let mut cli = parse_cli_from(env::args_os())?;
+    if cli.server.is_some()
+        && !matches!(
+            &cli.command,
+            CommandRoot::Search(_) | CommandRoot::Show(_) | CommandRoot::Mcp(_)
+        )
+    {
+        anyhow::bail!("--server is supported by search, show, and mcp serve");
+    }
+    if let Some(name) = &cli.server {
+        return crate::remote_history::run(cli.command, cli.data_root, name, cli.color.into());
+    }
     cli.command = match cli.command {
+        CommandRoot::Hosted(command) => {
+            return crate::hosted::run(&command, cli.data_root.as_deref(), cli.color.into());
+        }
         CommandRoot::Unified(command) => {
             let status = command.run();
             if status == 0 {
@@ -254,6 +268,13 @@ pub(crate) fn run_cli() -> Result<()> {
         .unwrap_or_else(default_data_root)
         .context("resolve ctx data root");
     let data_root = data_root?;
+    if let CommandRoot::Search(args) = &mut cli.command {
+        if ctx_history_archive::is_archive_root(&data_root)? {
+            // Archive generations are refreshed by restore, not native capture.
+            // Keep ordinary read validation and pinning on the existing path.
+            args.history.refresh = CliRefreshArg::Off;
+        }
+    }
     let local_usage_authority =
         crate::observability_composition::local_usage_storage_authority(&data_root);
     if usage_control_action {
@@ -344,7 +365,9 @@ pub(crate) fn run_cli() -> Result<()> {
     let blame_operation = matches!(&cli.command, CommandRoot::Blame(_));
     let foreground_finite_wait = command_uses_foreground_finite_wait(&cli.command);
     let execute_command = || match cli.command {
-        CommandRoot::Unified(_) => anyhow::bail!("independent command reached history dispatch"),
+        CommandRoot::Unified(_) | CommandRoot::Hosted(_) => {
+            anyhow::bail!("independent command reached history dispatch")
+        }
         CommandRoot::Blame(args) => crate::commands::blame::run(
             args,
             &data_root,

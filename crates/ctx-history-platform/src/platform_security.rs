@@ -462,12 +462,32 @@ pub fn verify_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
     }
 }
 
-/// Opens a Windows private file while rejecting reparse points in every path
-/// component, then verifies type, bounded token ownership, and the protected
-/// DACL on the retained handle.
+/// Opens a private file and verifies the retained handle. On Windows, reject
+/// reparse points in every component and verify the protected DACL.
 #[cfg(windows)]
 pub fn open_verified_private_file(path: &Path) -> io::Result<std::fs::File> {
     windows_acl::open_verified_private_file(path)
+}
+
+/// Open for reading without following a final symlink, then verify the opened
+/// file's type, owner, mode and ACL through the existing platform policy.
+#[cfg(unix)]
+pub fn open_verified_private_file(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    verify_private_file_handle(&file)?;
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn open_verified_private_file(_path: &Path) -> io::Result<std::fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "private file verification is unavailable on this platform",
+    ))
 }
 
 #[cfg(unix)]
@@ -502,6 +522,23 @@ mod unix_tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
+
+    #[test]
+    fn verified_read_opens_private_regular_file_but_rejects_link_and_public_mode() -> io::Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("credential");
+        let file = create_private_file_new(&path)?;
+        drop(file);
+        assert_eq!(open_verified_private_file(&path)?.metadata()?.len(), 0);
+        let link = temp.path().join("alias");
+        std::os::unix::fs::symlink(&path, &link)?;
+        assert!(open_verified_private_file(&link).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+        assert!(open_verified_private_file(&path).is_err());
+        assert!(open_verified_private_file(temp.path()).is_err());
+        Ok(())
+    }
 
     #[test]
     fn ensure_private_directory_repairs_permissive_existing_target() -> io::Result<()> {

@@ -1,5 +1,18 @@
 use super::*;
 
+pub(super) fn recover_source_refresh_coordinator_before_ipc(
+    runtime: &mut DaemonRuntime,
+    data_root: &Path,
+    config: &'static dyn DaemonConfigPort,
+) -> Result<Arc<CoreRefreshEngine>> {
+    let source_refresh = Arc::new(crate::source_backed_refresh_adapter::refresh_engine(config));
+    source_refresh
+        .recover_interrupted_publication(data_root)
+        .context("recover interrupted Core refresh before daemon readiness")?;
+    runtime.source_refresh_coordinator = Some(Arc::clone(&source_refresh));
+    Ok(source_refresh)
+}
+
 const FINITE_WORKER_REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const FINITE_WORKER_QUIET_GRACE: StdDuration = StdDuration::from_millis(300);
 

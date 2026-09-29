@@ -39,6 +39,7 @@ mod execution_capabilities;
 mod foreground_interrupt;
 mod history_config;
 mod history_source_plugins;
+mod hosted;
 mod identity;
 mod integrations;
 mod local_usage;
@@ -48,6 +49,7 @@ mod observability_composition;
 mod observability_product;
 mod operation_descriptor;
 mod output;
+mod remote_history;
 mod presentation_limit {
     pub(crate) use ctx_terminal::presentation_limit::*;
 }

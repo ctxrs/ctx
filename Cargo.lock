@@ -913,6 +913,7 @@ dependencies = [
  "ctx-daemon-cli",
  "ctx-graph",
  "ctx-graph-core",
+ "ctx-history-archive",
  "ctx-history-capture",
  "ctx-history-cli",
  "ctx-history-core",
@@ -921,6 +922,8 @@ dependencies = [
  "ctx-history-platform",
  "ctx-history-read-application",
  "ctx-history-refresh",
+ "ctx-history-server",
+ "ctx-history-sharing",
  "ctx-history-snapshot-reader",
  "ctx-sift",
  "ctx-sift-codec",
@@ -1271,6 +1274,7 @@ dependencies = [
  "ctx-history-index",
  "ctx-history-platform",
  "ctx-history-refresh",
+ "ctx-history-sharing",
  "ctx-semantic-index",
  "ctx-semantic-model",
  "ctx-upgrade-engine",
@@ -1482,6 +1486,24 @@ dependencies = [
  "serde",
  "serde_json",
  "tree-sitter",
+]
+
+[[package]]
+name = "ctx-history-archive"
+version = "2.1.2"
+dependencies = [
+ "ctx-history-core",
+ "ctx-history-index",
+ "ctx-history-index-generation",
+ "ctx-history-platform",
+ "fs2",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2110,6 +2132,52 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+]
+
+[[package]]
+name = "ctx-history-server"
+version = "2.1.2"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "ctx-history-archive",
+ "ctx-history-core",
+ "ctx-history-index",
+ "ctx-history-platform",
+ "ctx-history-read-application",
+ "fs2",
+ "hex",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "uuid",
+]
+
+[[package]]
+name = "ctx-history-sharing"
+version = "2.1.2"
+dependencies = [
+ "ctx-history-archive",
+ "ctx-history-core",
+ "ctx-history-index",
+ "ctx-history-platform",
+ "ctx-history-server",
+ "fs2",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "ureq 2.12.1",
+ "url",
+ "uuid",
 ]
 
 [[package]]
