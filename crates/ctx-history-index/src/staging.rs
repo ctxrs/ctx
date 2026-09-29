@@ -75,6 +75,7 @@ impl GenerationWriter {
         self.pending.insert(
             token.clone(),
             super::PendingSource {
+                replacement: None,
                 staged: PendingSource {
                     source: source.clone(),
                     mode: PendingSourceMode::Retain { base },
@@ -333,11 +334,17 @@ fn staged_manifest_matches_base(
     if generation.writer.is_none()
         && generation.complete_inventories.is_empty()
         && generation.source_route_plan.is_none()
+        && !generation.pending.values().any(|pending| {
+            pending
+                .replacement
+                .as_ref()
+                .is_some_and(|replacement| replacement.finished)
+        })
     {
         // A writerless candidate still needs current inventory authority. An
-        // exact route plan plus the manifest equality and source coverage
-        // checks below supplies it; otherwise preserve the ordinary path so
-        // its terminal witness can reject races.
+        // exact route plan, or a fully submitted differential replacement,
+        // supplies it with the manifest equality and source coverage checks
+        // below. Otherwise preserve the ordinary terminal witness path.
         return Ok(false);
     }
     let Some(base_publication) = generation.base_publication.as_ref() else {

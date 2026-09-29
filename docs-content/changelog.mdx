@@ -8,6 +8,22 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.1.4
+
+Released: 2026-09-29
+
+### Fixed
+
+- Large history refreshes avoid repeated source lookups. Linux refreshes resolve source paths with fewer filesystem calls while retaining replacement and symlink checks.
+- Changed history sources reuse unchanged indexed records instead of deleting and rebuilding them. Edits and deletions remain visible, including older OpenCode messages.
+- Graph indexing accepts YAML streams and reports local document extraction failures correctly.
+- Disk-space errors show readable sizes and the additional space needed.
+
+### Added
+
+- `ctx status` explains the current history refresh stage and what triggered it.
+- `ctx status --sample 5` produces a plain-text CPU and activity report. Add `--format json` for structured output. Reports include recorded refresh timings, scheduler activity, Blame progress, and semantic job status, without transcript content, file paths, or source identifiers. Missing or stale measurements remain unknown.
+
 ## 2.1.3
 
 Released: 2026-09-29

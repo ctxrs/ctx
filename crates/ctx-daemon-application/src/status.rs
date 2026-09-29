@@ -12,6 +12,8 @@ use crate::{compact_json, supervisor, DaemonApplicationHost, DaemonConfigSnapsho
 
 mod config_reload;
 mod core_refresh_job;
+mod diagnostics;
+pub use diagnostics::DaemonDiagnosticSnapshot;
 
 use config_reload::daemon_config_reload_report;
 pub use config_reload::DaemonConfigReloadContext;

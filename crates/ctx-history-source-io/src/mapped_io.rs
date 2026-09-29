@@ -488,6 +488,12 @@ where
         self.0.revalidate_leaf().map_err(Into::into)
     }
 
+    pub fn revalidate_leaf_with_same_object_root(&self) -> Result<(), E> {
+        self.0
+            .revalidate_leaf_with_same_object_root()
+            .map_err(Into::into)
+    }
+
     pub fn revalidate_same_object_leaf(&self) -> Result<(), E> {
         self.0.revalidate_same_object_leaf().map_err(Into::into)
     }

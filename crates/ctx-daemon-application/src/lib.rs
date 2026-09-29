@@ -37,8 +37,8 @@ pub use lifecycle::{
     FiniteWorkerLease,
 };
 pub use status::{
-    DaemonConfigReloadContext, DaemonSemanticStatusContext, DaemonStatusPreparation,
-    DaemonStatusSnapshot,
+    DaemonConfigReloadContext, DaemonDiagnosticSnapshot, DaemonSemanticStatusContext,
+    DaemonStatusPreparation, DaemonStatusSnapshot,
 };
 pub use supervisor::{
     DaemonSupervisorStart, DaemonSupervisorUpgradeFence, DaemonSupervisorUpgradeResume,

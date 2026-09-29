@@ -176,6 +176,9 @@ fn identical_replacement_preserves_certification_when_discarding_shared_files() 
             .unwrap()
             .into_writer()
             .unwrap();
+        // This test owns disposal of a real candidate sharing the base's files.
+        // Force ordinary replacement; differential no-op coverage is separate.
+        writer.replacement_memory_bytes = 0;
         writer.begin_source(source.clone()).unwrap();
         writer
             .add_core_record(document(&source, 1, "certified generation body"))

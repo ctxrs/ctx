@@ -12,6 +12,7 @@ mod staging;
 mod writer_deletion;
 mod writer_options;
 mod writer_publication;
+mod writer_replacement;
 mod writer_routes;
 mod writer_support;
 
@@ -399,6 +400,10 @@ pub struct GenerationWriter {
     preflight_lock: Option<DirectoryLock>,
     writer: Option<IndexWriter<IndexDocument>>,
     writer_options: WriterOptions,
+    replacement_memory_bytes: usize,
+    replacement_memory_used: usize,
+    #[cfg(test)]
+    replacement_work: writer_replacement::ReplacementWork,
     fields: Fields,
     base_publication: Option<PinnedPublication>,
     base_opstamp: u64,
@@ -494,14 +499,22 @@ impl GenerationWriter {
         if self.pending.contains_key(&token) {
             return Err(IndexError::DuplicateSource(source.identity().to_string()));
         }
-        let source_key_field = self.fields.source_key;
-        self.writer_mut()?
-            .delete_term(Term::from_field_text(source_key_field, &token));
+        let replacement = self.begin_replacement(&source)?;
+        if replacement.is_none() {
+            let source_key_field = self.fields.source_key;
+            self.writer_mut()?
+                .delete_term(Term::from_field_text(source_key_field, &token));
+            #[cfg(test)]
+            {
+                self.replacement_work.source_deletions += 1;
+            }
+        }
         self.deletions.remove(&source);
         self.route_deletions.remove(&source);
         self.pending.insert(
             token,
             PendingSource {
+                replacement,
                 staged: StagedPendingSource {
                     source,
                     mode: PendingSourceMode::Replace,
@@ -524,8 +537,12 @@ impl GenerationWriter {
             .and_then(|manifest| {
                 manifest
                     .sources
-                    .iter()
-                    .find(|candidate| candidate.observation().source() == &source)
+                    .binary_search_by_key(&source.identity().digest(), |candidate| {
+                        candidate.observation().source().identity().digest()
+                    })
+                    .ok()
+                    .and_then(|index| manifest.sources.get(index))
+                    .filter(|candidate| candidate.observation().source() == &source)
             })
             .cloned()
             .ok_or_else(|| IndexError::SourceNotAppendable(source.identity().to_string()))?;
@@ -609,6 +626,7 @@ impl GenerationWriter {
         self.pending.insert(
             token.clone(),
             PendingSource {
+                replacement: None,
                 staged: StagedPendingSource {
                     source,
                     mode: PendingSourceMode::Append { base },
@@ -661,7 +679,12 @@ impl GenerationWriter {
             Some(pending) if pending.source.exact_descriptor_eq(prepared.source()) => pending,
             _ => return Err(IndexError::DocumentSourceNotActive),
         };
-        if matches!(&pending_source.mode, PendingSourceMode::Retain { .. }) {
+        if matches!(&pending_source.mode, PendingSourceMode::Retain { .. })
+            || pending_source
+                .replacement
+                .as_ref()
+                .is_some_and(|replacement| replacement.finished)
+        {
             return Err(IndexError::DocumentSourceNotActive);
         }
         if matches!(&pending_source.mode, PendingSourceMode::Append { .. })
@@ -737,14 +760,17 @@ impl GenerationWriter {
         let advances = self.changed_sessions.get(&session_uuid).copied() != Some(merged);
         let mut document = document;
         let is_replacement = matches!(&pending_source.mode, PendingSourceMode::Replace);
+        let differential = pending_source.replacement.is_some();
         if (first_for_candidate && (is_replacement || prior.is_none() || prior != Some(merged)))
             || (!first_for_candidate && advances)
         {
             document.add_session_authority(self.fields);
         }
-        self.writer_mut()?.add_document(document).map_err(|error| {
-            writer_publication::observe_candidate_failure(&self.root, error.into())
-        })?;
+        if differential {
+            self.stage_replacement_document(&token, identity_facts.event_id, document)?;
+        } else {
+            self.add_index_document(document)?;
+        }
         if first_for_candidate {
             self.changed_sessions.insert(session_uuid, merged);
             if let Some(checkpoint) = self.active_source_route_stage.as_mut() {
@@ -850,7 +876,11 @@ impl GenerationWriter {
                 staged: pending.staged_documents,
             });
         }
-        pending.certificate = Some(certificate);
+        self.finish_replacement(&token)?;
+        self.pending
+            .get_mut(&token)
+            .ok_or(IndexError::DocumentSourceNotActive)?
+            .certificate = Some(certificate);
         Ok(())
     }
 

@@ -303,34 +303,43 @@ pub struct PidAdvisoryLockObservation {
     pub released: bool,
 }
 
+/// Inspect only the existing advisory guard associated with a PID metadata path.
+/// `Some(true)` means an exclusive holder prevented a shared probe; `Some(false)`
+/// means the shared probe succeeded. `None` means inspection was unavailable.
+/// No JSON is read and no file is created or written. A successful shared probe
+/// is released before return. This does not identify the holder: daemon cleanup
+/// can hold the same guard without owning the process named in retained metadata.
+pub fn observe_pid_advisory_guard(path: &Path) -> Option<bool> {
+    let (_guard, held) = probe_pid_advisory_guard(path)?;
+    Some(held)
+}
+
 pub fn observe_pid_advisory_lock(path: &Path) -> Option<PidAdvisoryLockObservation> {
-    let guard = private_open_existing_lock_file(&pid_lock_guard_path(path)).ok()?;
-    match fs2::FileExt::try_lock_shared(&guard) {
-        Ok(()) => {
-            let observation = read_pid_lock_json(path)
-                .filter(pid_lock_uses_advisory_protocol)
-                .map(|value| PidAdvisoryLockObservation {
-                    held: false,
-                    released: value
-                        .get("released")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                });
-            let _ = fs2::FileExt::unlock(&guard);
-            observation
-        }
-        Err(error) if pid_lock_error_is_contended(&error) => {
-            let released = read_pid_lock_json(path)
-                .filter(pid_lock_uses_advisory_protocol)
-                .and_then(|value| value.get("released").and_then(Value::as_bool))
-                .unwrap_or(false);
-            Some(PidAdvisoryLockObservation {
-                held: true,
-                released,
-            })
-        }
-        Err(_) => None,
+    // Keep a successful shared probe until after the metadata read, preserving
+    // exclusion of an acquiring owner during the existing combined observation.
+    let (_guard, held) = probe_pid_advisory_guard(path)?;
+    let value = read_pid_lock_json(path).filter(pid_lock_uses_advisory_protocol);
+    if !held && value.is_none() {
+        return None;
     }
+    Some(PidAdvisoryLockObservation {
+        held,
+        released: value
+            .as_ref()
+            .and_then(|value| value.get("released"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn probe_pid_advisory_guard(path: &Path) -> Option<(fs::File, bool)> {
+    let guard = private_open_existing_lock_file(&pid_lock_guard_path(path)).ok()?;
+    let held = match fs2::FileExt::try_lock_shared(&guard) {
+        Ok(()) => false,
+        Err(error) if pid_lock_error_is_contended(&error) => true,
+        Err(_) => return None,
+    };
+    Some((guard, held))
 }
 
 fn pid_lock_error_is_contended(error: &std::io::Error) -> bool {
@@ -462,6 +471,67 @@ mod tests {
         fs2::FileExt::unlock(&owner)?;
         assert!(try_lock_pid_file(&waiter)?);
         fs2::FileExt::unlock(&waiter)?;
+        Ok(())
+    }
+
+    #[test]
+    fn passive_guard_observation_reads_no_metadata_and_creates_nothing() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        assert_eq!(
+            observe_pid_advisory_guard(&temp.path().join("absent/daemon.pid")),
+            None
+        );
+        assert_eq!(fs::read_dir(temp.path())?.count(), 0);
+
+        let path = temp.path().join("daemon.pid");
+        assert_eq!(observe_pid_advisory_guard(&path), None);
+        assert_eq!(fs::read_dir(temp.path())?.count(), 0);
+        let guard_path = pid_lock_guard_path(&path);
+        let mut owner = private_create_new_lock_file(&guard_path)?;
+        owner.write_all(b"guard-canary")?;
+
+        assert_eq!(observe_pid_advisory_guard(&path), Some(false));
+        fs2::FileExt::try_lock_exclusive(&owner)?;
+        assert_eq!(observe_pid_advisory_guard(&path), Some(true));
+        assert_eq!(
+            observe_pid_advisory_lock(&path),
+            Some(PidAdvisoryLockObservation {
+                held: true,
+                released: false,
+            })
+        );
+        fs2::FileExt::unlock(&owner)?;
+        assert_eq!(observe_pid_advisory_guard(&path), Some(false));
+        assert_eq!(observe_pid_advisory_lock(&path), None);
+        assert!(!path.exists());
+        // A probe must release its own shared lock before returning.
+        fs2::FileExt::try_lock_exclusive(&owner)?;
+        fs2::FileExt::unlock(&owner)?;
+
+        fs::write(&path, b"not-json-canary")?;
+        assert_eq!(observe_pid_advisory_guard(&path), Some(false));
+        assert_eq!(fs::read(&path)?, b"not-json-canary");
+        assert_eq!(fs::read(&guard_path)?, b"guard-canary");
+        assert_eq!(fs::read_dir(temp.path())?.count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn passive_guard_contention_does_not_authenticate_retained_owner_metadata() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        create_private_dir_all(&daemon_root_path(temp.path()))?;
+        let path = daemon_lock_path(temp.path());
+        // Synthetic retained owner: the PID is alive but does not own this guard.
+        let payload = pid_lock_payload(json!({"owner_id": "retained-owner"}));
+        fs::write(&path, serde_json::to_vec(&payload)?)?;
+        let before = fs::read(&path)?;
+        let quiescence = DaemonQuiescenceGuard::acquire(temp.path())?.expect("cleanup guard");
+        assert_eq!(observe_pid_advisory_guard(&path), Some(true));
+        assert_eq!(read_pid_lock_json(&path), Some(payload));
+        assert_eq!(fs::read(&path)?, before);
+        drop(quiescence);
+        assert_eq!(observe_pid_advisory_guard(&path), Some(false));
+        assert_eq!(fs::read(&path)?, before);
         Ok(())
     }
 
