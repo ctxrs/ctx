@@ -2,16 +2,16 @@ use super::*;
 
 #[test]
 fn opencode_recertifies_old_checkpoints_and_relocation_preserves_identity() {
-    use ctx_history_capture_runtime::{
-        document_full_snapshot_frontier, DocumentLeafFingerprint,
-    };
+    use ctx_history_capture_runtime::{document_full_snapshot_frontier, DocumentLeafFingerprint};
     use ctx_history_core::CertifiedSource;
 
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let original = temp.path().join("original/opencode.db");
     let writer = create_opencode_wal_database(&original, "relocationmarker");
-    writer.pragma_update(None, "journal_mode", "delete").unwrap();
+    writer
+        .pragma_update(None, "journal_mode", "delete")
+        .unwrap();
     drop(writer);
     let index_root = temp.path().join("index");
     let executor = |path: &Path| {
@@ -73,7 +73,10 @@ fn opencode_recertifies_old_checkpoints_and_relocation_preserves_identity() {
             Ok(())
         })
         .unwrap();
-    assert!(recopied, "old checkpoint must fall back to current snapshot admission");
+    assert!(
+        recopied,
+        "old checkpoint must fall back to current snapshot admission"
+    );
     adapter.revalidate_complete(&tree).unwrap();
     drop(tree);
     let tree = adapter
@@ -125,7 +128,10 @@ fn opencode_recertifies_old_checkpoints_and_relocation_preserves_identity() {
         .unwrap();
     assert!(recopied, "new native location must be recertified");
     assert_eq!(relocated.sources.len(), 1);
-    assert_eq!(relocated.sources[0].content_digest(), prior.content_digest());
+    assert_eq!(
+        relocated.sources[0].content_digest(),
+        prior.content_digest()
+    );
     assert!(relocated.sources[0]
         .observation()
         .source()
@@ -146,7 +152,10 @@ fn opencode_recertifies_old_checkpoints_and_relocation_preserves_identity() {
             },
         )
         .unwrap();
-    assert_eq!(repeated.commit.generation_id, relocated.commit.generation_id);
+    assert_eq!(
+        repeated.commit.generation_id,
+        relocated.commit.generation_id
+    );
 }
 
 // Authored adversarial cases, including native message/part foreign-key cascades.
@@ -201,8 +210,7 @@ fn opencode_changed_database_preserves_transactional_edits_and_deletions() {
             &data_root,
         )
         .unwrap();
-        let executor =
-            SourceBackedRefreshExecutor::new(registry, WriterOptions::default());
+        let executor = SourceBackedRefreshExecutor::new(registry, WriterOptions::default());
         let refresh = |expected| {
             let mut scanned = false;
             let report = executor
@@ -227,8 +235,7 @@ fn opencode_changed_database_preserves_transactional_edits_and_deletions() {
             report.commit.generation_id
         };
         let has = |marker: &str| {
-            !matching_events(&VerifiedIndex::open_pinned(&index_root).unwrap(), marker)
-                .is_empty()
+            !matching_events(&VerifiedIndex::open_pinned(&index_root).unwrap(), marker).is_empty()
         };
         let cold = refresh(131);
         assert_eq!(refresh(131), cold);
@@ -279,10 +286,16 @@ fn opencode_changed_database_preserves_transactional_edits_and_deletions() {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(times, (1, 1), "edit intentionally leaves both timestamps equal");
+        assert_eq!(
+            times,
+            (1, 1),
+            "edit intentionally leaves both timestamps equal"
+        );
 
         // Schema changes may advance the certificate, but preserve records and identity.
-        writer.execute_batch("alter table part add column extra text").unwrap();
+        writer
+            .execute_batch("alter table part add column extra text")
+            .unwrap();
         refresh(130);
         let after_schema = only_matching_event(
             &VerifiedIndex::open_pinned(&index_root).unwrap(),
@@ -290,18 +303,23 @@ fn opencode_changed_database_preserves_transactional_edits_and_deletions() {
         );
         assert_eq!(after_schema.event_id, event.event_id);
         assert_eq!(after_schema.role, event.role);
-        writer.execute("delete from message where id='message-1'", []).unwrap();
+        writer
+            .execute("delete from message where id='message-1'", [])
+            .unwrap();
         refresh(129);
         assert!(!has("editedmarker"));
-        writer.execute("delete from session where id='session-1'", []).unwrap();
+        writer
+            .execute("delete from session where id='session-1'", [])
+            .unwrap();
         refresh(0);
         assert!(!has("batchmarker"));
         drop(writer);
 
         let replacement = temp.path().join("replacement/opencode.db");
-        let replacement_writer =
-            create_opencode_wal_database(&replacement, "replacementmarker");
-        replacement_writer.pragma_update(None, "journal_mode", "delete").unwrap();
+        let replacement_writer = create_opencode_wal_database(&replacement, "replacementmarker");
+        replacement_writer
+            .pragma_update(None, "journal_mode", "delete")
+            .unwrap();
         drop(replacement_writer);
         fs::rename(&replacement, &database).unwrap();
         refresh(1);
