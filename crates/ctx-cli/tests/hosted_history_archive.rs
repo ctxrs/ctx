@@ -245,8 +245,10 @@ fn restored_root_stays_archive_only_through_default_and_wait_refresh() {
     .unwrap();
 
     // Prove this provider is discoverable through ordinary native-root refresh.
+    // Keep this native control's managed state separate from the archive destination.
     // Manual indexing still permits the explicit finite worker for --refresh wait.
     let native_root = destination.path("native-history");
+    let native_managed_root = destination.path("home/.ctx");
     fs::create_dir(&native_root).unwrap();
     fs::write(
         native_root.join("config.toml"),
@@ -256,10 +258,12 @@ fn restored_root_stays_archive_only_through_default_and_wait_refresh() {
     let native_cleanup = WorkerCleanup {
         sandbox: &destination,
         root: native_root.clone(),
+        managed_root: native_managed_root.clone(),
     };
     let native = success(
         destination
             .command()
+            .env("CTX_DATA_ROOT", &native_managed_root)
             .env_remove("CTX_DAEMON_AUTOSTART_OFF")
             .arg("--data-root")
             .arg(&native_root)
@@ -302,6 +306,7 @@ fn restored_root_stays_archive_only_through_default_and_wait_refresh() {
     let archive_cleanup = WorkerCleanup {
         sandbox: &destination,
         root: destination.path("history"),
+        managed_root: destination.path("history"),
     };
     for refresh in [None, Some("wait")] {
         let mut command = destination.command();
@@ -362,6 +367,7 @@ fn restored_root_stays_archive_only_through_default_and_wait_refresh() {
 struct WorkerCleanup<'a> {
     sandbox: &'a Sandbox,
     root: PathBuf,
+    managed_root: PathBuf,
 }
 
 impl WorkerCleanup<'_> {
@@ -369,6 +375,7 @@ impl WorkerCleanup<'_> {
         let stopped = self
             .sandbox
             .command()
+            .env("CTX_DATA_ROOT", &self.managed_root)
             .timeout(Duration::from_secs(12))
             .arg("--data-root")
             .arg(&self.root)
@@ -386,6 +393,7 @@ impl WorkerCleanup<'_> {
             let output = self
                 .sandbox
                 .command()
+                .env("CTX_DATA_ROOT", &self.managed_root)
                 .timeout(Duration::from_secs(2))
                 .arg("--data-root")
                 .arg(&self.root)
