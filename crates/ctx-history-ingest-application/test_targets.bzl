@@ -6,15 +6,20 @@ _CONTRACT_SUPPORT_SRCS = [
     "tests/support/mod.rs",
     "tests/support/native_fixtures.rs",
     "//crates/ctx-cli-contract-tests:contract_support_base",
+    "//crates/ctx-cli-contract-tests:contract_support_fixtures",
 ]
 
 _CONTRACT_SUPPORT_DEPS = [
     "@crates//:assert_cmd",
+    "@crates//:libc",
     "@crates//:predicates",
+    "@crates//:rusqlite",
     "@crates//:serde_json-1.0.151",
     "@crates//:tempfile",
     "@crates//:uuid",
+    "@crates//:windows-sys",
     "@crates//:zstd",
+    "//crates/ctx-history-index:lib",
 ]
 
 def history_ingest_binary_contract(name, src, tags = []):
