@@ -18,6 +18,8 @@ use tempfile::TempDir;
 mod history_fixture;
 use history_fixture::import_synthetic_history;
 
+#[path = "unified_context/managed_root.rs"]
+mod managed_root;
 #[path = "unified_context/output_hooks.rs"]
 mod output_hooks;
 

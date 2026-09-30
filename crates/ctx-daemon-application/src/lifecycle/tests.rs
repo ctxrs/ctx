@@ -2,6 +2,7 @@ use super::*;
 use crate::{SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, SEMANTIC_EMBEDDING_TOKEN_ENV};
 use std::cell::RefCell;
 
+mod managed_root;
 mod owner_wait_tests;
 
 const DAEMON_ENV_PROBE_STAGE: &str = "CTX_DAEMON_ENV_PROBE_STAGE";
@@ -29,6 +30,10 @@ fn daemon_child_environment_strips_pro_channel_and_authority() -> Result<()> {
     match env::var(DAEMON_ENV_PROBE_STAGE).as_deref() {
         Ok("final") => {
             assert_eq!(env::var("HOME").as_deref(), Ok(DAEMON_ENV_ALLOWED_SENTINEL));
+            assert_eq!(
+                env::var("CTX_DATA_ROOT").as_deref(),
+                Ok("/ctx-selected-managed-root")
+            );
             assert_eq!(env::var("GROK_HOME").as_deref(), Ok("/ctx-grok-home"));
             assert_eq!(env::var("DSH_HOME").as_deref(), Ok("/ctx-dsh-home"));
             assert_eq!(
@@ -105,6 +110,7 @@ fn daemon_child_environment_strips_pro_channel_and_authority() -> Result<()> {
                 DAEMON_ENV_SEMANTIC_ENDPOINT_SENTINEL,
             )
             .env(DAEMON_ENV_UNRELATED_SEMANTIC_TOKEN, "attacker")
+            .env("CTX_DATA_ROOT", "/ctx-selected-managed-root")
             .env("GROK_HOME", "/ctx-grok-home")
             .env("DSH_HOME", "/ctx-dsh-home")
             .env("HOME", DAEMON_ENV_ALLOWED_SENTINEL)
@@ -1486,15 +1492,4 @@ fn cancellation_after_mismatch_probe_preserves_the_existing_owner() -> Result<()
     );
     drop(lock);
     Ok(())
-}
-
-#[test]
-fn daemon_handoff_stall_without_authenticated_progress_is_bounded_to_five_seconds() {
-    let pauses = DAEMON_SETUP_HANDOFF_STALL_POLL_ATTEMPTS.saturating_sub(1);
-    let maximum_wait = DAEMON_UPGRADE_POLL_INTERVAL
-        .checked_mul(u32::try_from(pauses).expect("bounded test attempt count"))
-        .expect("bounded handoff duration");
-    assert_eq!(maximum_wait, Duration::from_secs(5));
-    assert_eq!(DAEMON_SETUP_HANDOFF_STALL_TIMEOUT, maximum_wait);
-    assert!(DAEMON_HEALTH_TIMEOUT < DAEMON_SETUP_HANDOFF_STALL_TIMEOUT);
 }

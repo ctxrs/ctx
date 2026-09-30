@@ -66,6 +66,65 @@ fn upgrade_resume_preserves_installed_contract_despite_observer_drift() -> Resul
     Ok(())
 }
 
+#[test]
+fn explicit_setup_refreshes_a_copied_managed_root_snapshot() -> Result<()> {
+    let _env_lock = crate::test_environment_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _restore = RestoreTestEnvironment::capture(&["CTX_DATA_ROOT"]);
+    let temp = tempfile::tempdir()?;
+    let old_root = temp.path().join("old");
+    let new_root = temp.path().join("new");
+    env::set_var("CTX_DATA_ROOT", &old_root);
+    let old_snapshot = configured_supervisor_environment(&TestHost, &old_root, None)?;
+    assert!(old_snapshot.values.contains(&(
+        "CTX_DATA_ROOT".to_owned(),
+        old_root.to_str().unwrap().to_owned(),
+    )));
+    // A manual copy retains the old environment and its receipt. Status and
+    // upgrade resume preserve that contract until explicit index mode auto.
+    let copied = install_environment_fixture(&new_root, &old_snapshot)?;
+    env::set_var("CTX_DATA_ROOT", &new_root);
+    assert_eq!(
+        resumed_supervisor_environment(&TestHost, &new_root, None)?,
+        old_snapshot
+    );
+    let backend = FakeSupervisorBackend::with_registration(Some(4_242));
+    backend.state.lock().unwrap().installed_environment_sha256 =
+        Some(old_snapshot.identity_sha256().to_owned());
+    let input = ManagedSupervisorInput::new(&TestHost, &new_root, copied.launch().program())?;
+    assert!(old_snapshot.requires_restart(&input.daemon_environment));
+    assert!(input.daemon_environment.values.contains(&(
+        "CTX_DATA_ROOT".to_owned(),
+        new_root.to_str().unwrap().to_owned(),
+    )));
+    backend.expect_environment(&input.daemon_environment);
+    ensure_native_supervisor_with(&TestHost, &input, &backend)?;
+    assert_eq!(backend.state.lock().unwrap().installs, 1);
+    let refreshed = install_environment_fixture(&new_root, &input.daemon_environment)?;
+    let installed = ctx_daemon_runtime::read_supervisor_environment(refreshed.environment_path())?;
+    assert_eq!(
+        installed.get(OsStr::new("CTX_DATA_ROOT")),
+        Some(&new_root.clone().into_os_string())
+    );
+    assert_eq!(
+        resumed_supervisor_environment(&TestHost, &new_root, None)?,
+        input.daemon_environment
+    );
+
+    env::remove_var("CTX_DATA_ROOT");
+    let default = ctx_history_platform::managed_data_root()?;
+    let snapshot = configured_supervisor_environment(&TestHost, &new_root, None)?;
+    assert!(
+        snapshot.values.contains(&(
+            "CTX_DATA_ROOT".to_owned(),
+            default.to_str().unwrap().to_owned(),
+        )),
+        "a command override must not become the managed selection"
+    );
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn upgrade_resume_restores_only_the_canonical_managed_root_alias() -> Result<()> {

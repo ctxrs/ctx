@@ -235,7 +235,7 @@ pub fn ensure_daemon_supervisor(
                 artifact_path: None,
                 executable_path: None,
                 limitation: Some(
-                    "native per-user restart registration requires the hosted installer and the default data root"
+                    "native per-user restart registration requires the hosted installer and the managed data root"
                         .to_owned(),
                 ),
                 last_error: None,
@@ -832,5 +832,6 @@ fn is_canonical_managed_data_root_with(
     match managed_root {
         Ok(managed_root) => Ok(data_root == managed_root),
         Err(PlatformError::MissingHome) => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }

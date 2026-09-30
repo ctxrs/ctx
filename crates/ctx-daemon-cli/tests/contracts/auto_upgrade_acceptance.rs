@@ -40,7 +40,7 @@ mod unix {
         let canonical = fs::canonicalize(binary).unwrap();
         let namespace = sha256_hex(canonical.as_os_str().as_bytes());
         installation_home(binary)
-            .join(".ctx")
+            .join("managed-state")
             .join("daemon-installations")
             .join(namespace)
             .join("daemon-quiescence-acks")
@@ -51,7 +51,20 @@ mod unix {
         release: &FakeRelease,
         binary: &Path,
     ) -> &'a mut assert_cmd::Command {
-        managed_release_env(command, release, binary).env("HOME", installation_home(binary))
+        // Multiple command roots share one installation lifecycle selection.
+        let command_root = command
+            .get_envs()
+            .find(|(name, _)| *name == "CTX_DATA_ROOT")
+            .and_then(|(_, value)| value.map(PathBuf::from))
+            .expect("isolated command data root");
+        managed_release_env(command, release, binary)
+            .arg("--data-root")
+            .arg(command_root)
+            .env(
+                "CTX_DATA_ROOT",
+                installation_home(binary).join("managed-state"),
+            )
+            .env("HOME", installation_home(binary))
     }
 
     fn configured_hook_fixture() -> PathBuf {
@@ -1070,9 +1083,24 @@ mod unix {
         fs::create_dir(&home).unwrap();
         seed_authoritative_codex_source(&home);
 
-        let mut command = managed_daemon(&temp, &release, &binary);
+        let mut command = ctx_from_binary(&temp, &binary);
+        // Select this fixture's nondefault command store before the shared
+        // installation helper pins it with --data-root.
+        command.env("CTX_DATA_ROOT", data_root);
+        managed_release_env_for_installation(&mut command, &release, &binary);
         command
-            .env("CTX_DATA_ROOT", data_root)
+            .args([
+                "daemon",
+                "run",
+                "--loop-interval-seconds",
+                "1",
+                "--start-mode",
+                "auto",
+                "--trigger-command",
+                "setup",
+                "--format=json",
+            ])
+            .env("CTX_DAEMON_BACKGROUND_CHILD", "1")
             .env("HOME", &home)
             .env("XDG_STATE_HOME", &state_root)
             .env("LOCALAPPDATA", &state_root)

@@ -29,35 +29,56 @@ fn retained_local_layout_paths_are_flat_under_data_root() {
 }
 
 #[test]
-fn managed_data_root_matches_the_home_only_platform_api() {
+fn ctx_data_root_selects_the_complete_managed_root() {
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => env::set_var("CTX_DATA_ROOT", value),
+                None => env::remove_var("CTX_DATA_ROOT"),
+            }
+        }
+    }
+    let _restore = Restore(env::var_os("CTX_DATA_ROOT"));
     let home = dirs::home_dir().expect("test host must provide a home directory");
-    assert_eq!(managed_data_root().unwrap(), home.join(".ctx"));
-}
+    for value in [None, Some("")] {
+        match value {
+            None => env::remove_var("CTX_DATA_ROOT"),
+            Some(value) => env::set_var("CTX_DATA_ROOT", value),
+        }
+        assert_eq!(managed_data_root().unwrap(), home.join(".ctx"));
+        assert_eq!(default_data_root().unwrap(), home.join(".ctx"));
+    }
 
-#[test]
-fn ctx_data_root_env_is_the_ctx_root_itself() {
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    let _guard = ENV_LOCK.lock().unwrap();
-    let previous = env::var_os("CTX_DATA_ROOT");
-    env::remove_var("CTX_DATA_ROOT");
-
-    let default_root = default_data_root().unwrap();
-    assert!(default_root.ends_with(".ctx"));
-    let managed_root = managed_data_root().unwrap();
-    assert_eq!(managed_root, default_root);
-
-    env::set_var("CTX_DATA_ROOT", "/tmp/custom-ctx-root");
-
+    let temp = tempfile::tempdir().unwrap();
+    let selected = temp.path().join("managed root-λ");
+    env::set_var("CTX_DATA_ROOT", &selected);
+    assert_eq!(managed_data_root().unwrap(), selected);
+    assert_eq!(default_data_root().unwrap(), selected);
     assert_eq!(
-        default_data_root().unwrap(),
-        PathBuf::from("/tmp/custom-ctx-root")
+        config_path(default_data_root().unwrap()),
+        selected.join("config.toml")
     );
-    assert_eq!(managed_data_root().unwrap(), managed_root);
+    assert!(!selected.exists(), "resolution must not create the root");
 
-    if let Some(previous) = previous {
-        env::set_var("CTX_DATA_ROOT", previous);
-    } else {
-        env::remove_var("CTX_DATA_ROOT");
+    for value in ["relative", "~/ctx", " ", "/tmp/ctx\nroot", "/tmp/ctx\troot"] {
+        env::set_var("CTX_DATA_ROOT", value);
+        assert!(managed_data_root()
+            .unwrap_err()
+            .to_string()
+            .starts_with("CTX_DATA_ROOT "));
+        assert!(default_data_root().is_err());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        env::set_var(
+            "CTX_DATA_ROOT",
+            std::ffi::OsString::from_vec(b"/tmp/ctx-\xff".to_vec()),
+        );
+        assert_eq!(
+            managed_data_root().unwrap_err().to_string(),
+            "CTX_DATA_ROOT must be a Unicode path"
+        );
     }
 }

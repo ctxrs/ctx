@@ -417,8 +417,8 @@ pub fn installation_executable_path() -> Result<PathBuf> {
 pub fn installation_daemon_coordination_paths_for(
     install_path: &Path,
 ) -> Result<(PathBuf, PathBuf)> {
-    let user_state_root = ctx_history_platform::managed_data_root()
-        .context("resolve environment-independent ctx user state")?;
+    let user_state_root =
+        ctx_history_platform::managed_data_root().context("resolve managed ctx data root")?;
     installation_daemon_coordination_paths_in(&user_state_root, install_path)
 }
 

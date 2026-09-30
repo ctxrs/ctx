@@ -33,7 +33,7 @@ Options:
   --bin-dir DIR          Install directory. Defaults to
                          ${CTX_BIN_DIR:-$HOME/.local/bin}.
   --runtime-dir DIR      ONNX Runtime sidecar install directory. Defaults to
-                         ${CTX_RUNTIME_DIR:-$HOME/.ctx/runtime}.
+                         ${CTX_RUNTIME_DIR:-${CTX_DATA_ROOT:-$HOME/.ctx}/runtime}.
   --no-runtime           Do not install optional ONNX Runtime sidecar metadata.
   --no-modify-path       Do not update shell startup files when the install
                          directory is not on PATH.
@@ -595,7 +595,7 @@ metadata_source=""
 artifact_dir=""
 platform=""
 bin_dir="${CTX_BIN_DIR:-${HOME:-}/.local/bin}"
-runtime_dir="${CTX_RUNTIME_DIR:-${HOME:-}/.ctx/runtime}"
+runtime_dir="${CTX_RUNTIME_DIR:-${CTX_DATA_ROOT:-${HOME:-}/.ctx}/runtime}"
 man_dir="${CTX_MAN_DIR:-${HOME:-}/.local/share/man/man1}"
 dry_run=0
 modify_path=1
