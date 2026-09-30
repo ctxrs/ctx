@@ -150,6 +150,8 @@ def prepare(archives, lock_file, output, notify_source=None):
         (source / NOTICE).write_text(notice(record, transform), encoding="utf-8")
         records.append(record)
         paths.append(str(source.resolve()))
+    if records != manifest["prepared_packages"]:
+        raise ValueError("compact grammar prepared package pin mismatch")
     provenance = {"transform": transform, "packages": records}
     (output / "provenance.json").write_text(canonical(provenance), encoding="utf-8")
     config_path(output).write_text("paths = " + json.dumps(paths) + "\n", encoding="utf-8")
@@ -167,10 +169,11 @@ def bind_metadata(metadata, output):
     provenance = json.loads((output / "provenance.json").read_text(encoding="utf-8"))
     if provenance["transform"] != identity():
         raise ValueError("compact grammar transform identity mismatch")
-    selected = crates(manifest)
     records = provenance["packages"]
-    if [f"{r['name']}-{r['version']}" for r in records] != list(selected):
-        raise ValueError("compact grammar staged package set mismatch")
+    # Local provenance and notices are writable: only checked-in output pins
+    # authorize the prepared tree, parser hashes and equivalence proof records.
+    if records != manifest["prepared_packages"]:
+        raise ValueError("compact grammar prepared package pin mismatch")
     for record in records:
         crate = f"{record['name']}-{record['version']}"
         source = output / crate
@@ -179,8 +182,7 @@ def bind_metadata(metadata, output):
                 or packages[0]["source"] is not None
                 or Path(packages[0]["manifest_path"]).resolve() != (source / "Cargo.toml").resolve()):
             raise ValueError(f"Cargo did not select compact grammar source: {crate}")
-        if (record["archive_sha256"] != selected[crate][0]["archive_sha256"]
-                or record["source"] != REGISTRY or tree_digest(source) != record["source_sha256"]):
+        if tree_digest(source) != record["source_sha256"]:
             raise ValueError(f"compact grammar staged source mismatch: {crate}")
         if (source / NOTICE).read_text(encoding="utf-8") != notice(record, provenance["transform"]):
             raise ValueError(f"compact grammar notice mismatch: {crate}")

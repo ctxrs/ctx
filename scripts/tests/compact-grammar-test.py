@@ -65,6 +65,20 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+# Independently specified expected output, including the action/goto collision.
+COMPACTED_PARSER = PARSER.replace("#define LARGE_STATE_COUNT 3", "#define LARGE_STATE_COUNT 2").replace(
+    """  [2] = {
+    [sym_n] = STATE(5),
+    [sym_b] = ACTIONS(5),
+    [sym_a] = ACTIONS(7),
+    [ts_builtin_sym_end] = ACTIONS(0),
+  },
+""", "",
+).replace("      sym_a,\n", "      sym_a,\n  [4] = 3, 7, 1, 1, 5, 1, 2, 5, 1, 3,\n").replace(
+    "  [SMALL_STATE(3)] = 0,\n", "  [SMALL_STATE(3)] = 0,\n  [SMALL_STATE(2)] = 4,\n",
+)
+
+
 class CompactGrammarTest(unittest.TestCase):
     def test_order_zero_defaults_category_collision_and_protected_source(self):
         original = PARSER + '\n#pragma GCC optimize ("O3")\n'
@@ -128,6 +142,23 @@ class CompactGrammarTest(unittest.TestCase):
             "parser": f"{language}/parser.c", "symbol": f"tree_sitter_{language}",
             "files": {relative: sha(raw) for relative, raw in files.items()},
         } for language in ("one", "two")]}
+        def tree_hash(contents):
+            return sha((json.dumps({path: sha(raw) for path, raw in contents.items()},
+                                   sort_keys=True, separators=(",", ":")) + "\n").encode())
+        transformed_files = dict(files)
+        for language in ("one", "two"):
+            transformed_files[f"{language}/parser.c"] = COMPACTED_PARSER.encode()
+        manifest["prepared_packages"] = [{
+            "name": "tree-sitter-fixture", "version": "1.0.0", "source": staging.REGISTRY,
+            "archive_sha256": sha(archive.read_bytes()),
+            "original_source_sha256": tree_hash(files), "source_sha256": tree_hash(transformed_files),
+            "parsers": [{
+                "id": language, "path": f"{language}/parser.c",
+                "original_sha256": sha(PARSER.encode()), "transformed_sha256": sha(COMPACTED_PARSER.encode()),
+                "converted_rows": 1, "saved_bytes": -16, "new_sparse_words": 10,
+                "states": 4, "symbols": 4, "cells_checked": 16,
+            } for language in ("one", "two")],
+        }]
         pin_file = root / "pins.json"
         pin_file.write_text(json.dumps(manifest))
         lock = root / "Cargo.lock"
@@ -240,6 +271,44 @@ class CompactGrammarTest(unittest.TestCase):
                 extra.write_text("unexpected source")
                 with self.assertRaisesRegex(ValueError, "staged source mismatch"):
                     staging.bind_metadata(copy.deepcopy(metadata), stage)
+
+    def test_inventory_rejects_self_consistent_scanner_and_provenance_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archives, lock, stage, pins, metadata = self.fixture(Path(directory))
+            with patch.object(staging, "PINS", pins):
+                staging.prepare(archives, lock, stage)
+                staging.bind_metadata(copy.deepcopy(metadata), stage)
+                source = Path(metadata["packages"][0]["manifest_path"]).parent
+                (source / "src/scanner.c").write_text("/* unauthorized scanner */\n")
+                provenance = json.loads((stage / "provenance.json").read_text())
+                record = provenance["packages"][0]
+                record["source_sha256"] = staging.tree_digest(source)
+                (source / staging.NOTICE).write_text(staging.notice(record, provenance["transform"]))
+                (stage / "provenance.json").write_text(staging.canonical(provenance))
+                with self.assertRaisesRegex(ValueError, "prepared package pin mismatch"):
+                    staging.bind_metadata(copy.deepcopy(metadata), stage)
+
+    def test_preparation_and_inventory_require_exact_pinned_proof_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archives, lock, stage, pins, metadata = self.fixture(Path(directory))
+            with patch.object(staging, "PINS", pins):
+                staging.prepare(archives, lock, stage)
+                source = Path(metadata["packages"][0]["manifest_path"]).parent
+                original = json.loads((stage / "provenance.json").read_text())
+                for field in ("original_source_sha256", "transformed_sha256", "cells_checked"):
+                    provenance = copy.deepcopy(original)
+                    record = provenance["packages"][0]
+                    owner = record if field == "original_source_sha256" else record["parsers"][0]
+                    owner[field] = 0 if field == "cells_checked" else "0" * 64
+                    (source / staging.NOTICE).write_text(staging.notice(record, provenance["transform"]))
+                    (stage / "provenance.json").write_text(staging.canonical(provenance))
+                    with self.subTest(field=field), self.assertRaisesRegex(ValueError, "prepared package pin mismatch"):
+                        staging.bind_metadata(copy.deepcopy(metadata), stage)
+                manifest = json.loads(pins.read_text())
+                manifest["prepared_packages"][0]["source_sha256"] = "0" * 64
+                pins.write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, "prepared package pin mismatch"):
+                    staging.prepare(archives, lock, stage.with_name("drifted-stage"))
 
     def test_inventory_composes_notify_and_grammar_paths_without_losing_patch_provenance(self):
         with tempfile.TemporaryDirectory() as directory:

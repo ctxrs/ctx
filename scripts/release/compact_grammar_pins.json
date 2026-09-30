@@ -372,5 +372,339 @@
         "typescript/src/tree_sitter/parser.h": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
       }
     }
+  ],
+  "prepared_packages": [
+    {
+      "archive_sha256": "d4e7e0360395852f1f6ff5b7b82c72dc6557d181073188df1d60ec469ea69c66",
+      "name": "tree-sitter-verilog",
+      "original_source_sha256": "b18298b8207305bca0dc789846da94f0e085a613e915ad5fc1d09877447acc50",
+      "parsers": [
+        {
+          "cells_checked": 24681868,
+          "converted_rows": 6918,
+          "id": "verilog",
+          "new_sparse_words": 1726788,
+          "original_sha256": "fe014cd25643bea9e380cc358c126359574387f420d9a6e71c1699fc83bfb822",
+          "path": "src/parser.c",
+          "saved_bytes": 13149624,
+          "states": 20534,
+          "symbols": 1202,
+          "transformed_sha256": "f3273f59a05539ba8edd75b311297bd1d9d6f547731090d159f06cae4b695e1b"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "13653a8067ef355a37adef5c3ff07a59a156b178eee2655a4262bdc901a5028a",
+      "version": "1.0.3"
+    },
+    {
+      "archive_sha256": "e88ed4ad300c2fb7ed7dde1d9c1b0926bd93fc8ae1c8766898191bd85f2220f5",
+      "name": "tree-sitter-cuda",
+      "original_source_sha256": "2d194989c1d772e4bba739a0cdcb3c7ae36ced30dea717385fe22c55a2c0f237",
+      "parsers": [
+        {
+          "cells_checked": 7702353,
+          "converted_rows": 4891,
+          "id": "cuda",
+          "new_sparse_words": 928396,
+          "original_sha256": "eb8a71550508fae0ce6b9602f3d77006e19af79417e424a9d8c944498a40adf2",
+          "path": "src/parser.c",
+          "saved_bytes": 3885242,
+          "states": 13077,
+          "symbols": 589,
+          "transformed_sha256": "6611345554aacb42c6a08680a01daa39df0c39c2c685728b36b4c46d39213c84"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "2665c60e7d8c06b5cde412d2038a6a987cd1d6d5922a147f7aa176c25928e785",
+      "version": "0.21.2"
+    },
+    {
+      "archive_sha256": "ea5fea41363a9b59666001dc26c4b356d4e164da27c6ce31145e00aba6bf9b16",
+      "name": "tree-sitter-fortran",
+      "original_source_sha256": "37b24c2a7b887a3508841840c8b6bd6e78e9b1eb420fa6fa1f459528151668f3",
+      "parsers": [
+        {
+          "cells_checked": 6216672,
+          "converted_rows": 4135,
+          "id": "fortran",
+          "new_sparse_words": 986347,
+          "original_sha256": "2379275cc5e7f0e34258e36b63f4b6ef45d67cb8d02a4d7a68204ece0c53a230",
+          "path": "src/parser.c",
+          "saved_bytes": 3568206,
+          "states": 9251,
+          "symbols": 672,
+          "transformed_sha256": "14f3f681d78c33d64131227f7347ef56f40caf062e50001c2b7b04b6df00594b"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "08253cc94e1db3f8f36de0e23cacdcb809c7272b035c01f79a6eeb25f107b0c2",
+      "version": "0.6.0"
+    },
+    {
+      "archive_sha256": "43adb10fcccbcbbce0f4adc9dab7cd55f0a5eafc2d71bd4c03fcc5d6767066e0",
+      "name": "tree-sitter-ocaml",
+      "original_source_sha256": "9d3852c473d5eb370d65c28f21474b87f5726dba845a5098bc7be225ff7fecba",
+      "parsers": [
+        {
+          "cells_checked": 7279572,
+          "converted_rows": 3271,
+          "id": "ocaml",
+          "new_sparse_words": 794110,
+          "original_sha256": "f76cc46f96f9ed152354743539cc642dcb6a67343795dd9d548fc4d0b0ebce74",
+          "path": "grammars/ocaml/src/parser.c",
+          "saved_bytes": 1911750,
+          "states": 13556,
+          "symbols": 537,
+          "transformed_sha256": "968bfee71d5c03f2493b81f30d0ce41b59214011702abedd18647dfc3286227b"
+        },
+        {
+          "cells_checked": 6483992,
+          "converted_rows": 2688,
+          "id": "ocaml_interface",
+          "new_sparse_words": 651423,
+          "original_sha256": "62634bd351247bd2152eb15438f5bea3f0a1ccce4291f318aa86a79d29bf111e",
+          "path": "grammars/interface/src/parser.c",
+          "saved_bytes": 1567938,
+          "states": 12097,
+          "symbols": 536,
+          "transformed_sha256": "c76a190310bda307db93786ee034fe9b807e42cb0f187bcaf13c7fcfd41eea7f"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "8a3a160f3de84c18ebf891c311b8f8e04b106fd68a406f38ae867cb13c1b670e",
+      "version": "0.26.0"
+    },
+    {
+      "archive_sha256": "9ca8bb556423fc176f0535e79d525f783a6684d3c9da81bf9d905303c129e1d2",
+      "name": "tree-sitter-objc",
+      "original_source_sha256": "09279b6cb6cf6a308a963e54e98e76189f8e0860dbf7096631ff006517d9afd4",
+      "parsers": [
+        {
+          "cells_checked": 3977415,
+          "converted_rows": 4119,
+          "id": "objc",
+          "new_sparse_words": 867943,
+          "original_sha256": "9a02110d10eb9e28ea507312f8639c16790cfb5760ce9aad757d564ea571ef8a",
+          "path": "src/parser.c",
+          "saved_bytes": 3066868,
+          "states": 6799,
+          "symbols": 585,
+          "transformed_sha256": "a1d96b9a5d496a09b295bd15bb4f828b7f5d75185f308280c404cef649d0c381"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "f3fd7a0224486a96bb445c11315e5996b0b5d648002ac86879ec809e76579963",
+      "version": "3.0.2"
+    },
+    {
+      "archive_sha256": "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c",
+      "name": "tree-sitter-c-sharp",
+      "original_source_sha256": "a66a8da2bb7e3155ba6cbed4df68eb9e3b4669beb2f064bc473abf6f6d5dac2a",
+      "parsers": [
+        {
+          "cells_checked": 4268090,
+          "converted_rows": 4094,
+          "id": "c_sharp",
+          "new_sparse_words": 1128540,
+          "original_sha256": "0a2651e49de7c7237c535c41a132a7ec0424da79d12f197f1df3edd7d6ea4427",
+          "path": "src/parser.c",
+          "saved_bytes": 2066184,
+          "states": 8053,
+          "symbols": 530,
+          "transformed_sha256": "5b47f1ac9accf4005f8aa2d7e76f6d484f1c3d5c1cc7627d61848e47f3f17cec"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "7a81689e09c67823376be023d9765bb7f8f19016a0c4842570a3aa0f3e91af8b",
+      "version": "0.23.5"
+    },
+    {
+      "archive_sha256": "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743",
+      "name": "tree-sitter-cpp",
+      "original_source_sha256": "31e60de9f0b4db826804f1bee423bdd8cf120e65f513263712c9ea1169001199",
+      "parsers": [
+        {
+          "cells_checked": 4646706,
+          "converted_rows": 2320,
+          "id": "cpp",
+          "new_sparse_words": 449454,
+          "original_sha256": "2a35a43b4af6c9f7b69624ac00c2c50808912591450dc79c05dea03ac1bae814",
+          "path": "src/parser.c",
+          "saved_bytes": 1588132,
+          "states": 8637,
+          "symbols": 538,
+          "transformed_sha256": "d4542818421a5cc1a7dd6b2eb145fd1c41df3040405c39c8ad824e73781c7a82"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "e0e292363753a5ef89f02207c0749d57f8d527c41961253907954a0a9c28badf",
+      "version": "0.23.4"
+    },
+    {
+      "archive_sha256": "fe36052155b9dd69ca82b3b8f1b4ccfb2d867125ac1a4db1dd7331829242668c",
+      "name": "tree-sitter-swift",
+      "original_source_sha256": "a60b7c86b348419318b56c6f37f459553811fa61fc4c162cf7b97d04bfd8de3e",
+      "parsers": [
+        {
+          "cells_checked": 5759118,
+          "converted_rows": 2126,
+          "id": "swift",
+          "new_sparse_words": 502312,
+          "original_sha256": "d3edff6effe31b9a507f496577407987343b101b23eb7bee7a9b050e8ab5d27a",
+          "path": "src/parser.c",
+          "saved_bytes": 1359488,
+          "states": 10321,
+          "symbols": 558,
+          "transformed_sha256": "45a6a6054f6b4ba117c8fa48d3b32d09d73e3b61272b2709628c0e29fbc7b24c"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "3ba8d1ef90cd6338706e4e32fd8f457740d5c7be884ab21a335a5f15ecf7f85d",
+      "version": "0.7.3"
+    },
+    {
+      "archive_sha256": "4144731a178812ee867619b1e98b3b91e54c1652304b26e5ebe3175b701de323",
+      "name": "tree-sitter-julia",
+      "original_source_sha256": "bffe23a612e4e9968903ec7885fc0d55a7770dc7ff4abd251f2eb80f09e7ae9a",
+      "parsers": [
+        {
+          "cells_checked": 4767174,
+          "converted_rows": 9474,
+          "id": "julia",
+          "new_sparse_words": 1839622,
+          "original_sha256": "450694136c1341ed032a2f68f31bf8dc800873ba8fc038434c519c23ce3de86d",
+          "path": "src/parser.c",
+          "saved_bytes": 887224,
+          "states": 19618,
+          "symbols": 243,
+          "transformed_sha256": "e196fe989db8d257aedc684ac636b46ef1d8b26086f8f7a5396e78571a8e0a56"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "26552a5ce897296dc46b1d94bd393237e2efa25da3ab867772e8c10ff8fa0325",
+      "version": "0.23.1"
+    },
+    {
+      "archive_sha256": "e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450",
+      "name": "tree-sitter-kotlin-ng",
+      "original_source_sha256": "6a24a0acca8d6c8f5186dfb0c7a2c461579d87c24f007017683ee6a49f614ef7",
+      "parsers": [
+        {
+          "cells_checked": 3303848,
+          "converted_rows": 4173,
+          "id": "kotlin",
+          "new_sparse_words": 756797,
+          "original_sha256": "9ff65161845b9e9c9d62c12e9a4e4b8d8628bdc31c681ec7e6b4bd3bd6444cb3",
+          "path": "src/parser.c",
+          "saved_bytes": 881708,
+          "states": 11432,
+          "symbols": 289,
+          "transformed_sha256": "42b748f92841a5f784d958d9eef00466e4b3c41f0ca9ac3bb36de7c8419b894c"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "72d5ce9aaa453fb125e06759d827cd4facf2c5939a092d81b8d3d448080ed952",
+      "version": "1.1.0"
+    },
+    {
+      "archive_sha256": "24e0ab4505990bfe30051761d40a7bf4033ce5a81c9eda9e20e987a5cdc84826",
+      "name": "tree-sitter-scala",
+      "original_source_sha256": "35b7b46deda2cdd03a3797b7d000abe94ed7d514c38796962ef692192f30a4a6",
+      "parsers": [
+        {
+          "cells_checked": 8217450,
+          "converted_rows": 2173,
+          "id": "scala",
+          "new_sparse_words": 648972,
+          "original_sha256": "9f6d03fa6c63d2d855b6f9e0368046a58568587eefc38b5e38bdb001e8ec68db",
+          "path": "src/parser.c",
+          "saved_bytes": 649064,
+          "states": 18261,
+          "symbols": 450,
+          "transformed_sha256": "b0863f8db3752749ca0ff86cfd0a7e9d72d6f0a063a8c35df5cafdd129649183"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "157c93b1290b9ce65d6f0c562d332e37e9eb3f01f6552f766cae6c92717eaf12",
+      "version": "0.26.2"
+    },
+    {
+      "archive_sha256": "e902b5d7951d1477ff43ad5ec8b2e6adae029cce593a770c64e10362ee7dec7b",
+      "name": "tree-sitter-sfapex",
+      "original_source_sha256": "0c464d6c53fe34951bee5ef4e95195a6a757c37624124763637f1b62c9e41239",
+      "parsers": [
+        {
+          "cells_checked": 2755956,
+          "converted_rows": 888,
+          "id": "apex",
+          "new_sparse_words": 157206,
+          "original_sha256": "17c58f2ef3726022a7b24b5564dadf59d46641e24a1cddf725dc247986b9586e",
+          "path": "apex/src/parser.c",
+          "saved_bytes": 598452,
+          "states": 5341,
+          "symbols": 516,
+          "transformed_sha256": "7184f652016301edb6381ed531ac59c50093f93a5f6cc3f9dc7213d9bd19d20d"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "0e10ee28e7802c7ad41778ea4f3337f87a28d2853fd1d20a8068fb4d3ae89c09",
+      "version": "3.0.1"
+    },
+    {
+      "archive_sha256": "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17",
+      "name": "tree-sitter-sequel",
+      "original_source_sha256": "d093dd7be5fade3b24fb9d651884e3b8e6efdc486e165abd404d4db8719503c6",
+      "parsers": [
+        {
+          "cells_checked": 12598183,
+          "converted_rows": 391,
+          "id": "sql",
+          "new_sparse_words": 58180,
+          "original_sha256": "852e088fb8470952cdb2a1b78c1c58626c7d91562b26baa4672d51f9754bf580",
+          "path": "src/parser.c",
+          "saved_bytes": 450590,
+          "states": 17329,
+          "symbols": 727,
+          "transformed_sha256": "5df42424f4c603693bf067a81a5e7e8d549fdfaeecc6e325473d022239eb15a1"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "a156eebb28e3318cb90b53ca7ead3ff3760c09f46c1c62c3fa1ec1aabb5e0902",
+      "version": "0.3.11"
+    },
+    {
+      "archive_sha256": "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff",
+      "name": "tree-sitter-typescript",
+      "original_source_sha256": "fbc6a269f267289309cf6f1f85b3b6005c60af9aa7eb92226c36169ba4ee48b7",
+      "parsers": [
+        {
+          "cells_checked": 2207120,
+          "converted_rows": 1191,
+          "id": "typescript",
+          "new_sparse_words": 252757,
+          "original_sha256": "74fe453edd70f4eae9af0a1050cbd7943d8971d59165b6aaebbaa0a0b716d1aa",
+          "path": "typescript/src/parser.c",
+          "saved_bytes": 385354,
+          "states": 5870,
+          "symbols": 376,
+          "transformed_sha256": "b82324e40786c44464a92312f9ffb9dfdcc42d5e49a1b8220fbe2dc11dc21fa7"
+        },
+        {
+          "cells_checked": 2352498,
+          "converted_rows": 1165,
+          "id": "tsx",
+          "new_sparse_words": 251869,
+          "original_sha256": "1902cb53fa7ff5179df89b2eea863165e84c8cc866226419dc26921d8c055885",
+          "path": "tsx/src/parser.c",
+          "saved_bytes": 407292,
+          "states": 5986,
+          "symbols": 393,
+          "transformed_sha256": "58b7f1463c2ed23d9fefa46ff19638a0332d9ebd4c3087f8ab2664fd74cc62b9"
+        }
+      ],
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source_sha256": "aa7a37772816a035bf880f23af89742fb72de4ef8264bccfd1383d60a98d0877",
+      "version": "0.23.2"
+    }
   ]
 }
