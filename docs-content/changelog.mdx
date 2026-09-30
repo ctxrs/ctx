@@ -8,6 +8,22 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.2.0
+
+Released: 2026-09-30
+
+### Added
+
+- Export and restore portable history archives. Use a backup tool such as restic for encrypted filesystem or object-storage backups.
+- Run a ctx server to share selected sessions with your team. Hosted history is beta and opt-in; ordinary local search and indexing keep working as before.
+- Enroll with an invitation or an administrator-issued credential file, choose which sessions to upload, and search shared history from the CLI or MCP. Administrators can revoke access and control collection permissions.
+- Queue selected history for upload while offline and send it when the server is available again.
+
+### Fixed
+
+- Managed history state honors an explicit `CTX_DATA_ROOT`, keeping custom data roots isolated.
+- Service tooling uses updated undici dependencies.
+
 ## 2.1.4
 
 Released: 2026-09-29
