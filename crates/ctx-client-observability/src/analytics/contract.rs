@@ -1,4 +1,7 @@
-use super::{OperationCompletedV1, ProviderRefreshCompletedV1, RuntimeObservationV1};
+use super::{
+    HostedOperationCompletedV1, OperationCompletedV1, ProviderRefreshCompletedV1,
+    RuntimeObservationV1,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
@@ -58,6 +61,8 @@ impl OutputKind {
 #[derive(Debug)]
 pub enum PublicEventV1 {
     OperationCompleted(OperationCompletedV1),
+    /// A finite hosted command, serialized as ordinary `operation_completed@1`.
+    HostedOperationCompleted(HostedOperationCompletedV1),
     ProviderRefreshCompleted(ProviderRefreshCompletedV1),
     RuntimeObservation(RuntimeObservationV1),
 }

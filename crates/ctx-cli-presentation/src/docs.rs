@@ -111,6 +111,15 @@ const MAN_PAGE_COMPATIBILITY_ALIASES: &[(&str, &str)] = &[
 
 const TOPICS: &[DocTopic] = &[
     DocTopic {
+        id: "hosted-history",
+        title: "Back Up and Share History",
+        audience: "human-agent",
+        summary: "Portable archives, optional hosted search, explicit sharing, and recovery.",
+        tags: &["archive", "backup", "server", "remote", "sharing"],
+        source_path: "docs/hosted-history.md",
+        body: include_str!("../../../docs/hosted-history.md"),
+    },
+    DocTopic {
         id: "unified-context",
         title: "History, Graphs and Command Output",
         audience: "human-agent",

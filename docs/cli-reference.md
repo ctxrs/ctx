@@ -6,6 +6,10 @@ lexical search lives under `search/lexical`, optional flat-F32 semantic data
 lives under `search/semantic`, and typed presentation reads complete stored Core
 records.
 
+Optional portable backups and hosted history use `ctx archive`, `ctx server`
+and `ctx remote`. See [Back up and share history](hosted-history.md) for setup,
+permissions, source selection and recovery.
+
 ## Global Options
 
 ```bash
@@ -23,6 +27,10 @@ another product directory. Graph databases use `ctx graph --db`; output config
 and state use `CTX_OUTPUT_CONFIG_DIR` and `CTX_OUTPUT_STATE_DIR`.
 See [Moving The Managed Root](storage.md#moving-the-managed-root) before moving
 an existing installation.
+
+`--server NAME` selects a saved connection for `search`, `show` and `mcp serve`.
+It requires no local index and never falls back to local results. Without this
+option those commands retain their local behavior.
 
 `--quiet` suppresses successful human status/onboarding output for `setup` and
 top-level `status`. `CTX_QUIET=1` provides the same default for scripts and

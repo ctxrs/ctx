@@ -94,6 +94,11 @@ pub fn set_daemon_enabled(data_root: &Path, enabled: bool) -> Result<()> {
     set_indexing_mode(data_root, IndexingMode::from_legacy_daemon_enabled(enabled))
 }
 
+/// Persist whether default provider roots participate in source discovery.
+pub fn set_automatic_source_discovery_enabled(data_root: &Path, enabled: bool) -> Result<()> {
+    set_config_bool(data_root, "sources", "automatic", enabled)
+}
+
 pub fn persisted_daemon_enabled(data_root: &Path) -> Result<bool> {
     Ok(AppConfig::load_persisted(data_root)?
         .indexing

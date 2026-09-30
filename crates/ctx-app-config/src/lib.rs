@@ -28,8 +28,9 @@ mod toml_subset;
 pub use mutation::add_claude_root;
 pub use mutation::{
     add_provider_root_with_kind, persisted_daemon_enabled, remove_provider_root,
-    set_auto_upgrade_mode, set_daemon_enabled, set_semantic_search_enabled,
-    set_semantic_search_enabled_with_executor, write_default_config, ProviderRootMutation,
+    set_auto_upgrade_mode, set_automatic_source_discovery_enabled, set_daemon_enabled,
+    set_semantic_search_enabled, set_semantic_search_enabled_with_executor, write_default_config,
+    ProviderRootMutation,
 };
 pub use removed_cloud_mode::is_removed_cloud_mode_error;
 use removed_cloud_mode::RemovedCloudModeConfigError;

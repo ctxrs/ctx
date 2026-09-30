@@ -1,0 +1,41 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "cargo_package_data",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+DEPS = [
+    "//crates/ctx-history-archive:lib",
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-index:lib",
+    "//crates/ctx-history-platform:lib",
+    "//crates/ctx-history-read-application:lib",
+]
+
+rust_library(
+    name = "lib",
+    srcs = glob(["src/**/*.rs"], exclude = RUST_PROD_SRC_EXCLUDES),
+    crate_name = "ctx_history_server",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+)
+
+ctx_rust_test(
+    name = "unit_tests",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "ctx_history_server",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal = True, normal_dev = True) + DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)

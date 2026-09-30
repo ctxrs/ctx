@@ -22,6 +22,9 @@ pub(crate) enum SearchScope {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_help = "With --server NAME, use one lexical query and --limit (1..100); local filters such as --term are unavailable.\nExample: ctx --server team search \"database migration\""
+)]
 pub(crate) struct ScopedSearchArgs {
     #[command(flatten)]
     pub(crate) history: SearchArgs,

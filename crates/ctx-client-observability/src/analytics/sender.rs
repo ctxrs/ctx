@@ -183,6 +183,14 @@ pub(super) fn serialize_event(
                 properties,
             )
         }
+        PublicEventV1::HostedOperationCompleted(event) => (
+            "operation_completed",
+            Surface::Cli,
+            event.operation.as_str(),
+            event.outcome(),
+            event.duration,
+            event.properties(),
+        ),
         PublicEventV1::ProviderRefreshCompleted(event) => {
             let mut properties = Map::new();
             if let Some(foreground) = event.foreground {
@@ -513,6 +521,7 @@ fn insert_client_operation_properties(
         }
         CliOperation::Graph
         | CliOperation::Output
+        | CliOperation::Hosted
         | CliOperation::Stats
         | CliOperation::McpServe
         | CliOperation::DaemonRun

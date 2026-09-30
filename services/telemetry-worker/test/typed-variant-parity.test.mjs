@@ -45,9 +45,12 @@ describe("exhaustive public typed telemetry parity", () => {
       "sources", "import", "show", "locate", "search", "docs", "integration", "upgrade",
       "doctor",
     ]);
-    // Preserve the released matrix; ordinary 1.5 Blame has its own producer
-    // fixture and HTTP/Queue parity coverage in ordinary-blame-admission.
+    // Preserve the released matrix; Blame and finite hosted terminals have
+    // separate shared producer fixtures and HTTP/Queue parity coverage.
     expect([...CURRENT_CLI_OPERATIONS]).toEqual([
+      "archive_export", "archive_restore", "remote_connect", "remote_share", "remote_sync",
+      "server_init", "server_invite", "server_grant", "server_revoke", "server_withdraw",
+      "server_backup", "server_restore",
       ...unique(MATRIX.operations.cli.map(({ operation }) => operation)), "blame",
     ]);
     expect(unique(MATRIX.operations.daemon.map(({ operation }) => operation))).toEqual([

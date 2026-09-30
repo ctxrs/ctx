@@ -48,7 +48,9 @@ pub(super) fn isolate_analytics_environment(root: &Path) -> Vec<RestoreEnvironme
     guards
 }
 
-fn configure(root: &Path, enabled: bool, endpoint: &str) {
+pub(super) fn configure(root: &Path, enabled: bool, endpoint: &str) {
+    // Create the fixture through the real config writer, retaining its private permissions.
+    ctx_app_config::set_auto_upgrade_mode(root, ctx_app_config::AutoUpgradeMode::Off).unwrap();
     let endpoint = serde_json::to_string(endpoint).unwrap();
     fs::write(
         AppConfig::config_path(root),
@@ -349,4 +351,80 @@ fn recovery_queueing_rechecks_the_captured_owner_without_creating_a_replacement(
     assert!(queue_pending_delivery_observation(&a, &id_a, &config, &outbox).is_err());
     assert!(!crate::identity::install_path(&a).exists());
     assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn analytics_consent_reads_never_mutate_the_callers_config() {
+    let _env_lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let sandbox = tempfile::tempdir().unwrap();
+    let _environment = isolate_analytics_environment(sandbox.path());
+    let root = sandbox.path().join("data");
+    ctx_app_config::set_auto_upgrade_mode(&root, ctx_app_config::AutoUpgradeMode::Off).unwrap();
+    fs::remove_file(root.join(".config.mutation.lock")).unwrap();
+    let path = AppConfig::config_path(&root);
+    let original = "# preserve caller formatting\n[analytics]\nenabled = false\n";
+    fs::write(&path, original).unwrap();
+    let before = fs::read_dir(&root).unwrap().count();
+    assert!(matches!(
+        resolve_analytics_policy(&root).unwrap(),
+        ResolvedAnalyticsPolicy::Purge
+    ));
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(fs::read_dir(&root).unwrap().count(), before);
+
+    fs::write(&path, "[analytics\nmalformed").unwrap();
+    assert!(resolve_analytics_policy(&root).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "[analytics\nmalformed");
+    assert_eq!(fs::read_dir(&root).unwrap().count(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn analytics_suppresses_unsafe_config_without_repairing_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let _env_lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let sandbox = tempfile::tempdir().unwrap();
+    let _environment = isolate_analytics_environment(sandbox.path());
+    let root = sandbox.path().join("data");
+    let sink = sandbox.path().join("unexpected.jsonl");
+    let endpoint = url::Url::from_file_path(&sink).unwrap().to_string();
+    configure(&root, true, &endpoint);
+    fs::remove_file(root.join(".config.mutation.lock")).unwrap();
+    let path = AppConfig::config_path(&root);
+    let original = fs::read(&path).unwrap();
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(matches!(
+        resolve_analytics_policy(&root).unwrap(),
+        ResolvedAnalyticsPolicy::Active(_)
+    ));
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(resolve_analytics_policy(&root).is_err());
+    assert!(append_analytics_batch(&root, &[daemon_event()]).is_err());
+    assert!(drain_analytics_outbox(&root, Duration::from_secs(1)).is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    assert!(!crate::identity::device_path(&root).unwrap().exists());
+    for file in [
+        ANALYTICS_OUTBOX_FILE,
+        CAPABILITY_CLAIM_FILE,
+        CAPABILITY_REPORTED_FILE,
+    ] {
+        assert!(!crate::identity::device_state_path(file, &root)
+            .unwrap()
+            .exists());
+    }
+    assert!(!sink.exists());
 }

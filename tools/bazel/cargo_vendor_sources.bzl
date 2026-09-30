@@ -3,32 +3,39 @@
 load("@rules_rust//rust:defs.bzl", "rust_common")
 
 
-def _cargo_vendor_sources_impl(ctx):
+_CargoVendorSourcesInfo = provider(fields = {
+    "sources": "depset[File]: Rust source and compile data dependency closure.",
+})
+
+
+def _cargo_vendor_sources_aspect_impl(target, ctx):
     source_sets = []
-    crate_infos = []
-
-    targets = list(ctx.attr.crates) + list(ctx.attr.platform_crates)
-    for target in targets:
-        crate_infos.append(target[rust_common.crate_info])
-        crate_infos.extend(target[rust_common.dep_info].transitive_crates.to_list())
-
-    seen = {}
-    for _unused in range(100000):
-        if not crate_infos:
-            break
-        crate_info = crate_infos.pop()
-        owner = str(crate_info.owner)
-        if owner in seen:
-            continue
-        seen[owner] = True
+    if rust_common.crate_info in target:
+        crate_info = target[rust_common.crate_info]
         source_sets.extend([crate_info.srcs, crate_info.compile_data])
-        for dependency in crate_info.deps.to_list() + crate_info.proc_macro_deps.to_list():
-            if dependency.crate_info:
-                crate_infos.append(dependency.crate_info)
-            if dependency.dep_info:
-                crate_infos.extend(dependency.dep_info.transitive_crates.to_list())
 
-    sources = depset(transitive = source_sets)
+    dependencies = getattr(ctx.rule.attr, "deps", []) + getattr(ctx.rule.attr, "proc_macro_deps", [])
+    crate = getattr(ctx.rule.attr, "crate", None)
+    if crate:
+        dependencies.append(crate)
+    for dependency in dependencies:
+        if _CargoVendorSourcesInfo in dependency:
+            source_sets.append(dependency[_CargoVendorSourcesInfo].sources)
+
+    return [_CargoVendorSourcesInfo(sources = depset(transitive = source_sets))]
+
+
+# DepInfo.transitive_crates omits proc-macro descendants. Let Bazel traverse
+# those edges too, without a capped worklist that can silently drop sources.
+_cargo_vendor_sources_aspect = aspect(
+    implementation = _cargo_vendor_sources_aspect_impl,
+    attr_aspects = ["deps", "proc_macro_deps", "crate"],
+)
+
+
+def _cargo_vendor_sources_impl(ctx):
+    targets = list(ctx.attr.crates) + list(ctx.attr.platform_crates)
+    sources = depset(transitive = [target[_CargoVendorSourcesInfo].sources for target in targets])
     cargo_manifests = []
     for source in sources.to_list():
         short_path = source.short_path
@@ -53,10 +60,12 @@ cargo_vendor_sources = rule(
     implementation = _cargo_vendor_sources_impl,
     attrs = {
         "crates": attr.label_list(
+            aspects = [_cargo_vendor_sources_aspect],
             mandatory = True,
             providers = [[rust_common.crate_info, rust_common.dep_info]],
         ),
         "platform_crates": attr.label_list(
+            aspects = [_cargo_vendor_sources_aspect],
             providers = [[rust_common.crate_info, rust_common.dep_info]],
         ),
     },

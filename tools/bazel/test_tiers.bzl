@@ -1,6 +1,13 @@
 """Canonical public Rust format target inventory."""
 
 RUST_FORMAT_TARGETS = [
+    "//crates/ctx-history-archive:unit_tests",
+    "//crates/ctx-history-server:unit_tests",
+    "//crates/ctx-history-sharing:unit_tests",
+    "//crates/ctx-cli:hosted_history_tests",
+    "//crates/ctx-cli:hosted_history_archive_tests",
+    "//crates/ctx-cli:hosted_history_remote_tests",
+    "//crates/ctx-cli:hosted_history_enrollment_tests",
     "//crates/ctx-agent-application:unit_tests",
     "//crates/ctx-agent-integrations:unit_tests",
     "//crates/ctx-app-config:unit_tests",

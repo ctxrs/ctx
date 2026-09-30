@@ -978,6 +978,24 @@ Recommended handling:
 
 ## Network Behavior
 
+Hosted history is optional and separate from local indexing. `ctx remote
+connect` saves credentials without uploading history; enrollment exchanges a
+single-use invitation when explicitly requested. A saved sharing policy
+authorizes selected retained normalized sessions to the configured endpoint.
+The persistent daemon or explicit `remote sync` sends those sessions and retries
+under the current policy. `--server NAME` sends lexical queries and retrieves
+authorized results from that named server, without local fallback. Connections
+require HTTPS except numeric loopback HTTP. The server runtime and remote
+search/show/MCP add no first-party telemetry. Explicit archive, connection,
+sharing, sync and administration commands can queue content-free completion
+events under the normal analytics consent settings: operation, output format,
+duration bucket and a fixed failure category. No history, queries, credentials,
+server addresses, collection IDs or file paths enter those events. These commands
+do not start a daemon or send telemetry; the existing local daemon delivers the
+queue when enabled. Standalone server operators may therefore never send it.
+See [hosted-history.md](hosted-history.md) for storage, permissions, withdrawal
+and backup recovery.
+
 Core indexing work uses the local filesystem and Tantivy, and semantic vectors
 remain in the local flat-vector sidecar. The built-in embedding executor is
 local. When a URL executor is explicitly selected, semantic indexing sends

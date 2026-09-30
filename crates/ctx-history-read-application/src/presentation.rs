@@ -5,10 +5,8 @@ use std::{
 
 #[cfg(test)]
 use ctx_history_core::MAX_CORE_CONTENT_BYTES;
-#[cfg(test)]
-use ctx_history_index_format::search_projection::project_search_content;
 use ctx_history_index_format::search_projection::{
-    visit_body_analyzer_tokens, SearchContentProjection, SearchFragmentKind,
+    project_search_content, visit_body_analyzer_tokens, SearchContentProjection, SearchFragmentKind,
 };
 use ctx_history_index_query::LEXICAL_QUERY_LIMITS;
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation as _};
@@ -877,6 +875,19 @@ pub fn search_snippet_fragment(body: &str, query_texts: &[&str]) -> (String, boo
     prepared.map_or((String::new(), true), |prepared| {
         render_prepared_excerpt(body, &prepared, false)
     })
+}
+
+/// Bounded, match-aware presentation over the same complete content fragments
+/// used by lexical search. None means the content has no searchable projection.
+pub fn search_content_snippet(
+    content: ctx_history_core::CoreContent,
+    query_texts: &[&str],
+) -> anyhow::Result<Option<(String, bool)>> {
+    let projection = project_search_content(content)?;
+    Ok(
+        projection
+            .map(|projection| search_excerpt(&projection, &analyzed_query_terms(query_texts))),
+    )
 }
 
 #[cfg(test)]

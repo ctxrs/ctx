@@ -291,6 +291,11 @@ impl ToolSearchUsageFacts {
 pub trait ToolBackend: Send + Sync {
     fn execute(&self, operation: ToolOperation) -> Result<ToolOutcome, ToolExecutionError>;
 
+    /// Selects MCP discovery and request semantics without changing local backends.
+    fn history_tool_surface(&self) -> crate::mcp::HistoryToolSurface {
+        crate::mcp::HistoryToolSurface::Local
+    }
+
     /// Optional graph/output capability; history-only backends retain their contract.
     fn execute_unified(
         &self,

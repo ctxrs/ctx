@@ -12,6 +12,7 @@ mod arguments;
 mod blame;
 mod input;
 mod query_events;
+mod remote;
 mod response;
 mod response_bound;
 mod show;
@@ -26,6 +27,7 @@ use arguments::{
 };
 pub use input::{read_mcp_input_line, McpInputLine};
 use query_events::query_events_operation;
+pub use remote::HistoryToolSurface;
 pub use response::error_response;
 use response::{
     invalid_request_response, invalid_tool_request, json_rpc_error, success_response,
@@ -333,11 +335,15 @@ pub fn handle_protocol_message<B: ToolBackend>(
             Ok(McpHandled::plain(initialize_result(
                 &params,
                 server_identity,
+                backend.history_tool_surface(),
             )))
         }
         "ping" => Ok(McpHandled::plain(json!({}))),
         "tools/list" => Ok(McpHandled::plain(json!({
-            "tools": tool_definitions(backend.provider_names())
+            "tools": match backend.history_tool_surface() {
+                HistoryToolSurface::Local => tool_definitions(backend.provider_names()),
+                HistoryToolSurface::RemoteLog => remote::tool_definitions(),
+            }
         }))),
         "tools/call" => handle_tools_call_with_backend(
             params,
@@ -395,8 +401,16 @@ pub fn handle_protocol_message<B: ToolBackend>(
     }
 }
 
-fn initialize_result(params: &Value, server_identity: McpServerIdentity<'_>) -> Value {
+fn initialize_result(
+    params: &Value,
+    server_identity: McpServerIdentity<'_>,
+    surface: HistoryToolSurface,
+) -> Value {
     let protocol_version = negotiate_protocol_version(params);
+    let instructions = match surface {
+        HistoryToolSurface::Local => "Local access to ctx search, cited Blame, history, read-only graph, and pure output tools. Graph uses the database selected at server startup. Tool output may include absolute paths, source metadata, snippets, and transcript text; MCP hosts may log or forward it.",
+        HistoryToolSurface::RemoteLog => "Read-only access to the selected shared ctx history collection through status, lexical search, show_event, and paginated show_session logs. Search returns bounded snippets; pass returned citations unchanged to show_event or show_session for retained content. Tool output may include absolute paths, source metadata, snippets, and transcript text; MCP hosts may log or forward it.",
+    };
     json!({
         "protocolVersion": protocol_version,
         "capabilities": {
@@ -408,7 +422,7 @@ fn initialize_result(params: &Value, server_identity: McpServerIdentity<'_>) -> 
             "name": server_identity.name,
             "version": server_identity.version
         },
-        "instructions": "Local access to ctx search, cited Blame, history, read-only graph, and pure output tools. Graph uses the database selected at server startup. Tool output may include absolute paths, source metadata, snippets, and transcript text; MCP hosts may log or forward it."
+        "instructions": instructions
     })
 }
 
@@ -440,7 +454,11 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
             Some(json!({ "error": "tools/call requires params.name" })),
         )));
     };
-    let Some(allowed_arguments) = operation.allowed_arguments() else {
+    let allowed_arguments = match backend.history_tool_surface() {
+        HistoryToolSurface::Local => operation.allowed_arguments(),
+        HistoryToolSurface::RemoteLog => remote::allowed_arguments(operation),
+    };
+    let Some(allowed_arguments) = allowed_arguments else {
         return Err(McpHandled::plain(json_rpc_error(
             -32602,
             "Invalid params",
@@ -521,6 +539,10 @@ fn parse_operation<B: ToolBackend>(
     arguments: &Value,
     backend: &B,
 ) -> Result<ToolOperation, McpOperationParseError> {
+    if backend.history_tool_surface() == HistoryToolSurface::RemoteLog {
+        return remote::parse_operation(operation, arguments, backend)
+            .map_err(McpOperationParseError::from);
+    }
     let operation = match operation {
         McpToolKind::Status => Ok(ToolOperation::Status),
         McpToolKind::Sources => Ok(ToolOperation::Sources),

@@ -46,6 +46,7 @@ use super::{
 mod automatic_upgrade;
 mod config_reload;
 mod lifecycle;
+mod sharing;
 mod source_watch;
 mod storage_telemetry;
 mod telemetry;
@@ -383,6 +384,8 @@ where
         let mut config_reload = DaemonConfigReloadState::pending(&config);
         let mut query_service = None;
         let mut refresh_service = None;
+        // Error exits withdraw readiness before joining optional workers.
+        let mut sharing_workers;
         let _lifecycle_stopping = lifecycle_state.stopping_guard();
         write_daemon_lifecycle_status_with_runtime(
             data_root,
@@ -498,6 +501,7 @@ where
                 ports.installation,
                 !finite_worker,
             )?;
+        sharing_workers = sharing::start_workers(data_root, args.profile, lifecycle_ready);
         // The ready persistent daemon is the automatic-check driver; foreground commands never are.
         if lifecycle_ready
             && !finite_worker
@@ -546,6 +550,7 @@ where
             if stop_disabled {
                 break;
             }
+            sharing_workers.reconcile(data_root);
             let reload_outcome = reload_daemon_runtime_config(
                 data_root,
                 &args,
@@ -769,7 +774,7 @@ where
                 next_safety_reconcile,
                 now,
             );
-            let wake = wakeup.wait(wait_for);
+            let wake = wakeup.wait(sharing_workers.wait_duration(wait_for));
             if wake.shutdown {
                 break;
             }
@@ -868,6 +873,7 @@ where
         }
 
         lifecycle_state.mark_stopping();
+        drop(sharing_workers);
         if let Some(attempt_id) = prepared_auto_upgrade
             .as_ref()
             .and_then(PreparedAutomaticUpgrade::attempt_id)
@@ -977,19 +983,6 @@ where
         )?;
     }
     Ok(())
-}
-
-fn recover_source_refresh_coordinator_before_ipc(
-    runtime: &mut DaemonRuntime,
-    data_root: &Path,
-    config: &'static dyn DaemonConfigPort,
-) -> Result<Arc<CoreRefreshEngine>> {
-    let source_refresh = Arc::new(super::source_backed_refresh_adapter::refresh_engine(config));
-    source_refresh
-        .recover_interrupted_publication(data_root)
-        .context("recover interrupted Core refresh before daemon readiness")?;
-    runtime.source_refresh_coordinator = Some(Arc::clone(&source_refresh));
-    Ok(source_refresh)
 }
 
 #[cfg(test)]

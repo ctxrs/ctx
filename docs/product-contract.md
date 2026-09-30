@@ -9,11 +9,21 @@ records as the acquisition authority for import and refresh, publishes an
 immutable local Core/Tantivy search generation, and returns deterministic
 retrieval results with citations and stable provider/source identities. Core
 does not generate an LLM interpretation or require a hosted research agent. It
-does not upload transcript content unless the user explicitly selects an
-external semantic executor, which receives the raw query text and eligible
-ctx-created document chunks documented below.
+uploads transcript content only through an explicitly selected external
+semantic executor or an explicitly authorized hosted-history sharing policy.
+These are separate choices; ordinary local indexing and lexical search require
+neither.
 
 ## In Scope
+
+- `ctx archive` exports, verifies and restores retained normalized history into
+  an archive-owned local root, independently of native provider files.
+- `ctx server` runs an opt-in beta single-node history server with collection
+  read/publish/manage grants, durable upload receipts and exact citations.
+- `ctx remote` saves named connections and explicit sharing policies. An enabled
+  local daemon publishes eligible revisions; `--server NAME` selects remote
+  lexical search and retrieval for CLI/MCP without a local index. See
+  [hosted history](hosted-history.md) for its boundaries and recovery contract.
 
 - `ctx setup` initializes local storage, publishes discovered supported local
   transcript formats, and in automatic indexing mode can start persistent
@@ -113,10 +123,9 @@ ctx-created document chunks documented below.
 - hidden LLM calls, a ctx-hosted embedding service, or cloud authentication
   and credential provisioning for external executors; model selection and
   execution belong to the explicitly configured executor;
-- team and enterprise seats, invitations, SSO, SCIM, or organization
-  administration;
+- commercial seats, SSO, SCIM, or organization-wide identity federation;
 - annual plans, device caps, and device-management UI;
-- hosted transcript storage or remote repository analysis;
+- multi-node history serving or remote repository analysis;
 - ask/brief agents, cloud research agents, or universal deterministic detector
   accuracy;
 - a ctx history browser UI;
@@ -159,4 +168,7 @@ are private by default. A user must review copied output before sharing it
 outside the machine. Selecting an external semantic executor is an explicit
 authorization to send it raw semantic query text and eligible ctx-created
 document chunks and rollups; lexical search and the built-in executor remain
-local.
+local. Authorizing hosted sharing sends the selected retained sessions to the
+configured server. Its operator can read that data. Source/project labels are
+selection evidence, not guarantees that transcript text contains no unrelated
+work or secrets. Revocation stops future reads; it cannot retract prior copies.

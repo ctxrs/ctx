@@ -30,6 +30,7 @@ printf '%s\n' \
   '//crates/ctx-history-core:lib' \
   '//crates/ctx-history-index:lib' \
   '//crates/ctx-history-refresh:lib' \
+  '//crates/ctx-history-sharing:lib' \
   '//crates/ctx-semantic-index:lib' \
   '//crates/ctx-semantic-model:lib' \
   '//crates/ctx-upgrade-engine:lib' >"${expected_direct}"
@@ -49,6 +50,7 @@ printf '%s\n' \
   '//crates/ctx-history-core:lib' \
   '//crates/ctx-history-index:lib' \
   '//crates/ctx-history-refresh:lib' \
+  '//crates/ctx-history-sharing:lib' \
   '//crates/ctx-semantic-index:lib' \
   '//crates/ctx-semantic-model:lib' \
   '//crates/ctx-upgrade-engine:qualification_lib' >"${expected_qualification}"
@@ -69,6 +71,7 @@ printf '%s\n' \
   '//crates/ctx-history-core:lib' \
   '//crates/ctx-history-index:lib' \
   '//crates/ctx-history-refresh:test_support_lib' \
+  '//crates/ctx-history-sharing:lib' \
   '//crates/ctx-semantic-index:test_support_lib' \
   '//crates/ctx-semantic-model:test_support_lib' \
   '//crates/ctx-upgrade-engine:test_support_lib' >"${expected_test_support}"
@@ -155,6 +158,7 @@ allowed_internal = {
     "ctx-history-core",
     "ctx-history-index",
     "ctx-history-refresh",
+    "ctx-history-sharing",
     "ctx-semantic-index",
     "ctx-semantic-model",
     "ctx-upgrade-engine",

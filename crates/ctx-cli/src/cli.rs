@@ -79,6 +79,9 @@ pub(crate) struct Cli {
         help = "Override this command's history root; CTX_DATA_ROOT selects the managed root (default: ~/.ctx)"
     )]
     pub(crate) data_root: Option<PathBuf>,
+    /// Read shared history from a saved server connection.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub(crate) server: Option<String>,
     #[arg(
         long,
         value_enum,
@@ -125,6 +128,8 @@ pub(crate) struct IndexDashboardFixtureArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum CommandRoot {
     #[command(flatten)]
+    Hosted(crate::hosted::HostedCommand),
+    #[command(flatten)]
     Unified(crate::unified::UnifiedCommand),
     #[command(about = "Show cited agent provenance for committed code or a pull request")]
     Blame(commands::blame::BlameArgs),
@@ -138,7 +143,7 @@ pub(crate) enum CommandRoot {
     Stats(StatsArgs),
     #[command(about = "Show or configure local indexing and follow progress")]
     Index(commands::index::IndexArgs),
-    #[command(about = "List configured and discovered agent history sources")]
+    #[command(about = "List and manage agent history sources")]
     Sources(SourcesArgs),
     #[command(about = "Index provider history into local search")]
     Import(ImportArgs),

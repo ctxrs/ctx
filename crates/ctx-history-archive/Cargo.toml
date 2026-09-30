@@ -1,0 +1,24 @@
+[package]
+name = "ctx-history-archive"
+version.workspace = true
+description = "Portable retained Core history snapshots and owned restore"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-index = { path = "../ctx-history-index" }
+ctx-history-index-generation = { path = "../ctx-history-index-generation" }
+ctx-history-platform = { path = "../ctx-history-platform" }
+fs2.workspace = true
+libc.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true

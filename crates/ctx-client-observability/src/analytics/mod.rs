@@ -20,6 +20,8 @@ mod storage;
 pub use storage::*;
 mod contract;
 pub use contract::*;
+mod hosted;
+pub use hosted::*;
 mod operation;
 pub use operation::*;
 mod product;

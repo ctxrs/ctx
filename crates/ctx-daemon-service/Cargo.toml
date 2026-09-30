@@ -25,6 +25,7 @@ ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-refresh = { path = "../ctx-history-refresh" }
+ctx-history-sharing = { path = "../ctx-history-sharing" }
 ctx-semantic-index = { path = "../ctx-semantic-index" }
 ctx-semantic-model = { path = "../ctx-semantic-model" }
 ctx-upgrade-engine = { path = "../ctx-upgrade-engine" }
