@@ -1,12 +1,12 @@
 //! Hosted transaction entry points with one installation-lock owner.
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
-use super::super::lock::{OwnerFileLock, installation_lock_path};
+use super::super::lock::{installation_lock_path, OwnerFileLock};
 use super::{
-    HostedTransactionAction, HostedTransactionArgs, install, uninstall_arm, uninstall_commit,
-    uninstall_prepare, validate_install_path,
+    install, uninstall_arm, uninstall_commit, uninstall_prepare, validate_install_path,
+    HostedTransactionAction, HostedTransactionArgs,
 };
 
 pub fn run(args: HostedTransactionArgs) -> Result<()> {

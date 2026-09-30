@@ -94,6 +94,7 @@ ignored-paths = [
     "crates/ctx-history-index-format/src/verification/logical_identity.rs",
     "crates/ctx-history-provider-claude-cursor/src/tests/runtime.rs",
     "crates/ctx-history-refresh/src/explicit_source_catalog/codex_union.rs",
+    "crates/ctx-upgrade-engine/tests/contracts/hosted_migration_retry.rs",
     "crates/ctx-upgrade-engine/tests/contracts/support.rs",
     "crates/ctx-upgrade-engine/tests/contracts/upgrade.rs",
 ]

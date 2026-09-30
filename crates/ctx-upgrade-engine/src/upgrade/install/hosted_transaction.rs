@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::marker::{install_marker_path, is_valid_install_attempt_id};
 use super::path_identity::managed_install_path_identity_matches;
 use crate::upgrade::{platform_key, sha256_hex};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use ctx_managed_pair_engine::ManagedPairVerifier;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 mod entry;
 mod filesystem;
@@ -34,7 +34,7 @@ const MAX_MARKER_BYTES: u64 = 64 * 1024;
 const MAX_OWNERSHIP_BYTES: u64 = 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 const UNINSTALL_RECEIPT_SCHEMA_VERSION: u32 = 2;
-pub use post_exit::{HOSTED_UNINSTALL_POST_EXIT_READY, run_hosted_uninstall_after_parent_exit};
+pub use post_exit::{run_hosted_uninstall_after_parent_exit, HOSTED_UNINSTALL_POST_EXIT_READY};
 #[cfg(not(test))]
 static HOSTED_UNINSTALL_FENCE_OBSERVED: AtomicBool = AtomicBool::new(false);
 
