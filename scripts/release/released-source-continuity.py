@@ -62,7 +62,7 @@ def check_continuity(repo, commit, tips, policy, tag_objects=None):
     if not COMMIT.fullmatch(commit):
         raise ValueError("candidate source must be an exact commit")
     fields = {"minimum_release", "required_patches", "dispositions"}
-    if set(policy) not in (fields, fields | {"maintenance_bridge"}):
+    if not fields <= set(policy) <= fields | {"maintenance_bridge", "compatibility_bridge"}:
         raise ValueError("release continuity policy has unexpected fields")
     bridge = policy.get("maintenance_bridge")
     if "maintenance_bridge" in policy and (
@@ -72,6 +72,14 @@ def check_continuity(repo, commit, tips, policy, tag_objects=None):
             or any(not isinstance(bridge[key], str) or not COMMIT.fullmatch(bridge[key])
                    for key in ("candidate", "base", "base_tag_object"))):
         raise ValueError("invalid exact maintenance bridge admission")
+    compatibility = policy.get("compatibility_bridge")
+    if "compatibility_bridge" in policy and (
+            not isinstance(compatibility, dict)
+            or set(compatibility) != {"version", "candidate", "current", "current_tag", "current_tag_object"}
+            or compatibility["version"] != "2.2.1" or compatibility["current_tag"] != "refs/tags/v2.2.2"
+            or any(not isinstance(compatibility[key], str) or not COMMIT.fullmatch(compatibility[key])
+                   for key in ("candidate", "current", "current_tag_object"))):
+        raise ValueError("invalid exact compatibility bridge admission")
     exceptions = policy["dispositions"]
     required = policy["required_patches"]
     if (not isinstance(exceptions, dict) or not isinstance(required, list)
@@ -96,6 +104,22 @@ def check_continuity(repo, commit, tips, policy, tag_objects=None):
         bridge_tip = tips.get("refs/tags/v1.6.5")
         if bridge_tip is not None and bridge_tip != commit:
             raise ValueError("published maintenance bridge differs from admitted candidate")
+    compatible = compatibility is not None and commit == compatibility["candidate"]
+    if compatible:
+        if version_text != compatibility["version"]:
+            raise ValueError("compatibility bridge version differs from admission")
+        if (tag_objects is None or tag_objects.get(compatibility["current_tag"]) != compatibility["current_tag_object"]
+                or tips.get(compatibility["current_tag"]) != compatibility["current"]):
+            raise ValueError("compatibility bridge requires the exact published annotated current tag")
+        current_version = tomllib.loads(git(
+            repo, "show", f"{compatibility['current']}:Cargo.toml").stdout.decode())["workspace"]["package"]["version"]
+        if f"refs/tags/v{current_version}" != compatibility["current_tag"]:
+            raise ValueError("compatibility bridge current source version differs from its tag")
+        if git(repo, "merge-base", "--is-ancestor", commit, compatibility["current"], check=False).returncode:
+            raise ValueError("compatibility bridge candidate must be an ancestor of current")
+        bridge_tip = tips.get("refs/tags/v2.2.1")
+        if bridge_tip is not None and bridge_tip != commit:
+            raise ValueError("published compatibility bridge differs from admitted candidate")
     missing = set(required)
     excluded = {}
     for ref, tip in tips.items():
@@ -107,7 +131,9 @@ def check_continuity(repo, commit, tips, policy, tag_objects=None):
         if admitted and int(match[1]) == 2:
             excluded[ref] = tip
             continue
-        if tuple(map(int, match.groups()[:3])) > version:
+        # Admit only this exact newer tip, then account for all its changes below.
+        retained_current = compatible and ref == compatibility["current_tag"] and tip == compatibility["current"]
+        if tuple(map(int, match.groups()[:3])) > version and not retained_current:
             raise ValueError(f"candidate is older than published release {ref}")
         missing.update(git(repo, "rev-list", f"{commit}..{tip}").stdout.decode().splitlines())
     results, failures = [], []
@@ -135,6 +161,8 @@ def check_continuity(repo, commit, tips, policy, tag_objects=None):
                "non_ancestor_or_required_changes": results}
     if admitted:
         receipt.update(bridge_admission=bridge, excluded_published_releases=excluded)
+    if compatible:
+        receipt["compatibility_bridge_admission"] = compatibility
     return receipt
 
 
