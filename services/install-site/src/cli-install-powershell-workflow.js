@@ -315,10 +315,11 @@ ${renderCliInstallPowerShellReleasePreparation()}    $skillAgents = @()
                 Fail "ctx 0.25 recovery did not publish the signed managed identity"
             }
         } elseif ($releasePhase -ceq "final" -and -not $managedPair -and
-                  (Compare-ReleaseVersion $existingManagedInstall.version "1.6.3") -le 0 -and
-                  (Get-Item -LiteralPath $downloadPath).Length -gt 128MB) {
-            # The released updater cannot fetch this candidate. Its authenticated
-            # installer download uses the candidate's daemon-safe migration.
+                  (Compare-ReleaseVersion $version "2.0.0") -ge 0 -and
+                  ($existingManagedInstall.version -cne $version -or
+                   $existingManagedInstall.sha256.ToLowerInvariant() -cne $actualChecksum.ToLowerInvariant())) {
+            # Modern candidates own changed-target replacement; installed
+            # updaters can be pinned to an older feed or download limit.
             Invoke-HostedInstallTransaction -Migrate
         } else {
             Invoke-ManagedCoreUpgrade

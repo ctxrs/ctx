@@ -271,7 +271,7 @@ test("rendered Windows CLI installer defaults to cli.ctx.rs release metadata", (
   assert.match(body, /function Invoke-HostedInstallTransaction/);
   assert.match(body, /\$hostedAction = if \(\$Migrate\) \{ "migrate" \} else \{ "install" \}/);
   assert.match(body, /\$pendingHostedMigration = Test-Path -LiteralPath \(Join-Path \$BinDir "\.ctx\.exe\.hosted-install-transaction\.json"\) -PathType Leaf/);
-  assert.match(body, /\(Get-Item -LiteralPath \$downloadPath\)\.Length -gt 128MB[\s\S]*Invoke-HostedInstallTransaction -Migrate/);
+  assert.match(body, /\(Compare-ReleaseVersion \$version "2\.0\.0"\) -ge 0[\s\S]*Invoke-HostedInstallTransaction -Migrate/);
   assert.match(
     body,
     /"upgrade", "--hosted-transaction", \$hostedAction,\s+"--install-path", \$installPath,/,
@@ -853,7 +853,7 @@ test("rendered Windows managed rerun delegates lifecycle before executable mutat
   assert.doesNotMatch(
     body.slice(managedHandoff, body.indexOf('} elseif ($managedPair)', managedHandoff)),
     /Invoke-ManagedPairApply/,
-    "reinstalls outside the exact-0.25 recovery must keep the installed Core as the replacement owner",
+    "retained installed-owned reruns must not invoke candidate pair publication",
   );
   assert.doesNotMatch(
     body.match(/function Invoke-ManagedCoreUpgrade \{[\s\S]*?^\}/m)?.[0] ?? "",

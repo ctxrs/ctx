@@ -33,6 +33,12 @@ Options:
   --jobs N                 Cargo jobs per target (default: 2)
   --build-parallelism N    Concurrent target builds (default: 2)
   --diagnostic-unsigned    Build and inspect, but do not sign or emit releasable manifests
+  --legacy-compatible     Size-optimized full-feature bridge with compact grammars/tokenizer
+
+--legacy-compatible retains all languages and features but trades grammar parsing
+speed and tokenizer initialization time/memory for a binary below the legacy
+128 MiB limit. Normal releases keep upstream tables, raw tokenizer assets, and
+their normal optimization profile.
 
 Official mode requires CTX_OSV_SCANNER, CTX_OSV_DATABASE_DIR,
 CTX_OSV_DATABASE_METADATA, and the Ubuntu 24.04 x86_64 host declared in
@@ -91,6 +97,7 @@ cargo_jobs="${CTX_RELEASE_CARGO_JOBS:-2}"
 build_parallelism="${CTX_RELEASE_BUILD_PARALLELISM:-2}"
 target_specs=()
 official=1
+legacy_compatible=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source-commit) shift; source_commit="${1:-}" ;;
@@ -106,11 +113,16 @@ while [[ $# -gt 0 ]]; do
     --jobs) shift; cargo_jobs="${1:-}" ;;
     --build-parallelism) shift; build_parallelism="${1:-}" ;;
     --diagnostic-unsigned) official=0 ;;
+    --legacy-compatible) legacy_compatible=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
   shift
 done
+cargo_feature_args=()
+if [[ "${legacy_compatible}" == "1" ]]; then
+  cargo_feature_args=(--features ctx/compact-tokenizer)
+fi
 [[ "${cargo_jobs}" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be positive"
 [[ "${build_parallelism}" =~ ^[1-9][0-9]*$ ]] || die "--build-parallelism must be positive"
 
@@ -376,6 +388,23 @@ if [[ "${needs_macos}" == "1" ]]; then
   notify_source="$(python3 scripts/release/notify_source.py \
     --archive "${notify_archive}" --output "${stage_dir}/notify")"
 fi
+compact_grammar_source=""
+if [[ "${legacy_compatible}" == "1" ]]; then
+  grammar_archives="${stage_dir}/grammar-archives"
+  mkdir -p "${grammar_archives}"
+  grammar_archive_pins="$(python3 -B scripts/release/compact_grammar_source.py archives)"
+  while read -r crate checksum; do
+    download_verified "https://static.crates.io/crates/${crate%-*}/${crate}.crate" \
+      "${checksum}" "${grammar_archives}/${crate}.crate"
+  done <<<"${grammar_archive_pins}"
+  grammar_prepare_args=()
+  [[ -z "${notify_source}" ]] || grammar_prepare_args=(--notify-source "${notify_source}")
+  compact_grammar_source="$(python3 -B scripts/release/compact_grammar_source.py prepare \
+    --archives "${grammar_archives}" --lock-file Cargo.lock \
+    --output "${stage_dir}/compact-grammars" "${grammar_prepare_args[@]}")"
+  install -m 0644 "${compact_grammar_source}/provenance.json" \
+    "${artifact_stage}/ctx-compact-grammar-provenance.json"
+fi
 cargo_lock_sha256="$(sha256_file Cargo.lock)"
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(p["version"] for p in d["packages"] if p["name"]=="ctx"))')"
 
@@ -413,6 +442,13 @@ build_target() {
     encoded_flags+=$'\x1f'"--remap-path-prefix=${notify_source}=/ctx/deps/notify-9.0.0-rc.4"
     notify_args=(--config "${stage_dir}/notify/config.toml")
   fi
+  if [[ "${legacy_compatible:-0}" == "1" ]]; then
+    encoded_flags+=$'\x1f'"--remap-path-prefix=${compact_grammar_source}=/ctx/deps"
+    notify_args=(--config "${compact_grammar_source}/config.toml")
+    if [[ "${target_id}" == macos-* ]]; then
+      notify_args=(--config "${compact_grammar_source}/config-notify.toml")
+    fi
+  fi
   build_env=(
     # Build locked lzma sources; the host library can exceed the target ABI.
     "LZMA_API_STATIC=1"
@@ -422,11 +458,16 @@ build_target() {
     "CTX_RELEASE_BUILD_CARGO_LOCK_SHA256=${cargo_lock_sha256}"
     "CTX_RELEASE_BUILD_TARGET=${triple}"
   )
+  if [[ "${legacy_compatible:-0}" == "1" ]]; then
+    build_env+=("CARGO_PROFILE_RELEASE_OPT_LEVEL=s" "CARGO_PROFILE_RELEASE_LTO=thin"
+      "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1")
+  fi
   if [[ "${target_id}" == macos-* ]]; then
     build_env+=("SDKROOT=${macos_sdk_root}" "MACOSX_DEPLOYMENT_TARGET=13.0")
   fi
   env "${build_env[@]}" \
     "${cargo_zigbuild_bin}" zigbuild --manifest-path "${repo_root}/Cargo.toml" \
+      "${cargo_feature_args[@]}" \
       "${notify_args[@]}" \
       -p ctx --bin ctx --release --locked --target "${build_triple}" -j "${cargo_jobs}"
   if [[ "${target_id}" == macos-* ]]; then
@@ -479,6 +520,10 @@ for target_id in "${target_ids[@]}"; do
   platform="${CTX_PUBLIC_TARGET_PLATFORM}"
   binary="${CTX_PUBLIC_TARGET_BINARY}"
   artifact="${artifact_stage}/${binary}"
+  if [[ "${legacy_compatible}" == "1" ]]; then
+    [[ "$(stat -c '%s' "${artifact}")" -lt 134217728 ]] || \
+      die "legacy-compatible ${target_id} artifact must be smaller than 128 MiB"
+  fi
   sha256_file "${artifact}" >"${artifact}.sha256"
   llvm_args=()
   if [[ "${platform}" == "macos-x64" ]]; then
@@ -489,7 +534,7 @@ for target_id in "${target_ids[@]}"; do
   fi
   CTX_PUBLIC_CLI_EXPECTED_VERSION="${version}" \
     scripts/check-public-cli-artifact.sh "${platform}" "${artifact_stage}" "${llvm_args[@]}"
-  if [[ "${official}" == "1" ]]; then
+  if [[ "${official}" == "1" || "${legacy_compatible}" == "1" ]]; then
     inventory="${stage_dir}/${target_id}.cargo-inventory.json"
     materials="${stage_dir}/${target_id}.cargo-materials.json"
     material_root="${stage_dir}/${target_id}.cargo-materials"
@@ -497,11 +542,18 @@ for target_id in "${target_ids[@]}"; do
     if [[ "${target_id}" == macos-* ]]; then
       notify_inventory_args=(--notify-source "${notify_source}")
     fi
+    if [[ "${legacy_compatible}" == "1" ]]; then
+      notify_inventory_args+=(--compact-grammar-source "${compact_grammar_source}")
+      inventory="${artifact}.cargo-inventory.json"
+    fi
     python3 scripts/release/cargo-release-inventory.py \
+      "${cargo_feature_args[@]}" \
       "${notify_inventory_args[@]}" \
       --repo "${repo_root}" --target "${CTX_PUBLIC_TARGET_TRIPLE}" \
       --target-output "${inventory}" --materials-output "${materials}" \
       --material-root "${material_root}"
+  fi
+  if [[ "${official}" == "1" ]]; then
     build_info_args=(
       --artifact "${artifact}" --cargo-lock Cargo.lock \
       --matrix contracts/release-targets-v1.json \

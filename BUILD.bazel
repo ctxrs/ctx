@@ -1123,6 +1123,30 @@ py_test(
 )
 
 py_test(
+    name = "compact_grammar_tests",
+    srcs = [
+        "scripts/release/cargo-release-inventory.py",
+        "scripts/release/compact_grammar.py",
+        "scripts/release/compact_grammar_source.py",
+        "scripts/release/compact_grammar_verify.py",
+        "scripts/release/notify_source.py",
+        "scripts/tests/compact-grammar-test.py",
+    ],
+    data = [
+        "Cargo.lock",
+        "contracts/release-targets-v1.json",
+        "scripts/check-release-target-matrix.py",
+        "scripts/public-cli-release-targets.py",
+        "scripts/release/build-public-candidate-on-linux.sh",
+        "scripts/release/compact_grammar_pins.json",
+    ],
+    imports = ["scripts/release"],
+    main = "scripts/tests/compact-grammar-test.py",
+    tags = ["release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+py_test(
     name = "notify_source_tests",
     srcs = [
         "scripts/release/cargo-release-inventory.py",

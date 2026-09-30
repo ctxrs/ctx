@@ -1,11 +1,13 @@
 //! Completion and recovery of the hosted migration scheduler record.
 use super::*;
 
-/// A hosted journal permits retry only of its own interrupted migration.
+/// A hosted journal or a verified complete installation permits the explicit
+/// migration owner to retry only its own interrupted scheduler record.
 pub(in crate::upgrade) fn ensure_hosted_install_scheduler_available(
     install_path: &Path,
     hosted_retry: bool,
-) -> Result<()> {
+    same_candidate: bool,
+) -> Result<Option<UpgradeAttempt>> {
     let Some(bytes) = super::super::install::read_stable_file(
         &state_path(install_path),
         "ctx upgrade scheduler state",
@@ -13,16 +15,14 @@ pub(in crate::upgrade) fn ensure_hosted_install_scheduler_available(
         super::super::install::StableFileKind::Data,
     )?
     else {
-        return Ok(());
+        return Ok(None);
     };
     let state: UpgradeState = serde_json::from_slice(&bytes)?;
-    let own_retry = hosted_retry
-        && state.status == "quiescing"
-        && state.attempt_source.as_deref() == Some("hosted_migration")
-        && state
-            .attempt_id
-            .as_deref()
-            .is_some_and(is_valid_upgrade_attempt_id);
+    let own_attempt = state.attempt_id.as_deref().filter(|id| {
+        state.attempt_source.as_deref() == Some("hosted_migration")
+            && is_valid_upgrade_attempt_id(id)
+    });
+    let own_retry = hosted_retry && state.status == "quiescing" && own_attempt.is_some();
     if state.schema_version != STATE_SCHEMA_VERSION
         || (is_active_upgrade_status(&state.status) && !own_retry)
     {
@@ -30,9 +30,13 @@ pub(in crate::upgrade) fn ensure_hosted_install_scheduler_available(
             "finish the pending upgrade before changing the installation"
         ));
     }
-    // Terminal publication no longer consumes legacy files. A stale daemon
-    // restart record is not a second installation fence.
-    Ok(())
+    // Acknowledged daemon roots are bound to this identity. Reuse it for an
+    // interrupted migration, including the same candidate after publication
+    // became terminal but before every acknowledged root resumed. A completed
+    // migration to a different candidate starts a new attempt.
+    Ok(own_attempt
+        .filter(|_| own_retry || (same_candidate && state.status == "applied"))
+        .map(|id| UpgradeAttempt { id: id.to_owned() }))
 }
 
 pub(in crate::upgrade) fn finish_hosted_migration_locked(

@@ -10,10 +10,46 @@ import { CLI_INSTALL_POWERSHELL_PROCESS_HELPERS } from "../cli-install-powershel
 import { CLI_INSTALL_POWERSHELL_MANAGED_INSTALL } from "../cli-install-powershell-managed-install.js";
 import { renderCliInstallPowerShellManagedPairPublication } from "../cli-install-powershell-managed-pair.js";
 import { renderCliInstallPowerShellScript } from "../cli-install-powershell-script.js";
+import { powerShellPublicationRouteFixture } from "./cli-install-powershell-fixture-helpers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const powershell = ["pwsh", "powershell"].find((command) =>
   spawnSync(command, ["-NoProfile", "-NonInteractive", "-Command", "exit 0"]).status === 0);
+
+test("PowerShell publication selects modern candidate migration and retains exact-target and legacy owners", {
+  skip: powershell ? false : "PowerShell is not installed",
+}, () => {
+  const defaults = {
+    pending: false, managed: true, pair: false, releasedPair: false,
+    phase: "final", target: "2.2.1", prior: "2.0.2", sameDigest: false,
+  };
+  const cases = [
+    ["frozen-v2", {}, ["migrate"]],
+    ["old-download-limit", { prior: "1.6.3" }, ["migrate"]],
+    ["beyond-incident-range", { prior: "2.0.5" }, ["migrate"]],
+    ["exact-target", { prior: "2.2.1", sameDigest: true }, ["installed-upgrade"]],
+    ["pending-exact-target", { pending: true, prior: "2.2.1", sameDigest: true }, ["migrate"]],
+    ["pre-migration-protocol", { prior: "1.6.3", target: "1.6.5" }, ["installed-upgrade"]],
+    ["bridge", { phase: "bridge", prior: "1.3.0", target: "1.3.2" }, ["installed-upgrade"]],
+    ["retained-pair", { pair: true, prior: "1.4.11", target: "1.4.12" }, ["installed-upgrade"]],
+    ["pinned-legacy-pair", { pair: true, prior: "0.25.0", target: "1.3.2" }, ["candidate-pair"]],
+    ["fresh", { managed: false }, ["install"]],
+  ];
+  const root = mkdtempSync(path.join(tmpdir(), "ctx-installer-routing-"));
+  try {
+    const script = path.join(root, "routing.ps1");
+    const input = path.join(root, "cases.json");
+    writeFileSync(script, powerShellPublicationRouteFixture());
+    writeFileSync(input, JSON.stringify(cases.map(([name, overrides]) => ({ ...defaults, ...overrides, name }))));
+    const result = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-File", script, "-CasesPath", input], {
+      encoding: "utf8", timeout: 30_000,
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim()), cases.map(([name, , calls]) => ({ name, calls })));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 
 test("PowerShell candidate apply uses the native Windows disk root", { skip: !powershell }, () => {
@@ -68,7 +104,7 @@ test("released 1.3.1 pair compatibility is selected before execution, not after 
   assert.doesNotMatch(current, /ReleasedManagedPair|hosted-pair-install|AllowPrettyJson/u);
 });
 
-test("hosted transaction accepts the released CLI's bounded pretty JSON proof", {
+test("hosted transaction binds fresh and retained pretty JSON proof to the published marker", {
   skip: powershell ? false : "PowerShell is not installed",
 }, () => {
   const root = mkdtempSync(path.join(tmpdir(), "ctx-hosted-receipt-"));
@@ -79,7 +115,7 @@ test("hosted transaction accepts the released CLI's bounded pretty JSON proof", 
       path.join(here, "hosted-install-receipt-fixture.ps1"), "-HelperPath", helpers, "-WorkRoot", root],
     { encoding: "utf8", timeout: 30_000 });
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.equal(JSON.parse(result.stdout.trim()).passed, 5);
+    assert.equal(JSON.parse(result.stdout.trim()).passed, 10);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

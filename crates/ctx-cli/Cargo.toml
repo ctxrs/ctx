@@ -20,6 +20,9 @@ ignored = ["base64", "flate2", "ring", "rusqlite", "tar"]
 name = "ctx"
 path = "src/main.rs"
 
+[features]
+compact-tokenizer = ["sift/compact-tokenizer"]
+
 [dependencies]
 anyhow.workspace = true
 anstream.workspace = true

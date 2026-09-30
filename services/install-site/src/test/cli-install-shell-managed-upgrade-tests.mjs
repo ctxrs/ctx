@@ -21,7 +21,127 @@ import {
   writeFileSync,
 } from "./cli-install-test-helpers.mjs";
 
+function stageUnifiedTarget(fixture, priorVersion, version, size = null) {
+  const priorDigest = sha256(readFileSync(fixture.artifactPath));
+  writeFileSync(fixture.artifactPath, readFileSync(fixture.artifactPath, "utf8")
+    .replace(`fixture_version=${priorVersion}`, `fixture_version=${version}`));
+  if (size !== null) truncateSync(fixture.artifactPath, size);
+  const digest = execFileSync("sha256sum", [fixture.artifactPath], {
+    encoding: "utf8",
+  }).split(" ")[0];
+  const metadata = readFileSync(fixture.childEnv.CTX_FAKE_METADATA, "utf8")
+    .replace(`CTX_RELEASE_VERSION=${priorVersion}`, `CTX_RELEASE_VERSION=${version}`)
+    .replaceAll(priorDigest, digest);
+  writeFileSync(fixture.childEnv.CTX_FAKE_METADATA, metadata);
+  writeFileSync(fixture.childEnv.CTX_FAKE_METADATA_SIGNATURE,
+    `${signMetadataBase64(metadata, fixture.metadataPrivateKeyPem)}\n`);
+  return digest;
+}
+
 export function registerCliInstallShellManagedUpgradeTests() {
+  test("verified modern candidate recovers the complete wrong-target 2.0.2 lifecycle receipt", () => {
+    const fixture = runRenderedCliInstaller({
+      releaseVersion: "2.0.2",
+      compressedArtifact: "missing",
+      rawConfig: '[indexing]\nmode = "manual"\n[analytics]\nenabled = false\n[upgrade]\nauto = false\n[unknown]\nkeep = "value"\n',
+    });
+    const binaryPath = path.join(fixture.installBin, "ctx");
+    const markerPath = `${binaryPath}.install.json`;
+    try {
+      assert.equal(fixture.result.status, 0, fixture.result.stderr);
+      const priorBinary = readFileSync(binaryPath);
+      const priorMarker = readFileSync(markerPath);
+      const priorRecords = readOwnershipRecords(fixture.installBin);
+      const priorConfig = readFileSync(fixture.configPath);
+      const priorProfile = readFileSync(path.join(fixture.homeDir, ".bashrc"));
+      const targetDigest = stageUnifiedTarget(fixture, "2.0.2", "2.2.1");
+      assert.ok(statSync(fixture.artifactPath).size < 134217728);
+      // Model the complete released v2 receipt, including its frozen latest
+      // version. Malformed JSON does not reproduce the discovery mismatch.
+      const frozenReceipt = {
+        schema_version: 1, command: "upgrade", ok: true, status: "up_to_date",
+        message: "ctx is up to date", current_version: "2.0.2", latest_version: "1.6.5",
+        update_available: false, update_was_available: false, channel: "stable",
+        platform: "linux-x64",
+        metadata_url: "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env",
+        artifact_url: "https://example.test/releases/ctx-linux-x64", install_path: binaryPath,
+        managed: true, applied: false, dry_run: false, warnings: [], upgrade_attempt_id: null,
+      };
+      const env = { CTX_FAKE_MANAGED_UPGRADE_RESULT: JSON.stringify(frozenReceipt) };
+      const oldAttempt = spawnSync(binaryPath, ["upgrade", "--channel", "stable", "--format=json"], {
+        encoding: "utf8", env: { ...fixture.childEnv, ...env },
+      });
+      assert.equal(oldAttempt.status, 0, oldAttempt.stderr);
+      assert.deepEqual(JSON.parse(oldAttempt.stdout), frozenReceipt);
+      assert.deepEqual(readFileSync(binaryPath), priorBinary);
+      assert.deepEqual(readFileSync(markerPath), priorMarker);
+      const commandsBefore = readOrderedCtxCommands(fixture).length;
+      const signaturePath = fixture.childEnv.CTX_FAKE_METADATA_SIGNATURE;
+      const signature = readFileSync(signaturePath);
+      writeFileSync(signaturePath, "AAAA\n");
+      const unauthenticated = fixture.rerun(["--no-setup", "--no-skill", "--no-modify-path"], env);
+      assert.notEqual(unauthenticated.status, 0);
+      assert.match(unauthenticated.stderr, /signature/u);
+      assert.deepEqual(readFileSync(binaryPath), priorBinary);
+      assert.deepEqual(readFileSync(markerPath), priorMarker);
+      assert.equal(readOrderedCtxCommands(fixture).length, commandsBefore,
+        "neither candidate nor installed owner may run before authentication");
+      writeFileSync(signaturePath, signature);
+      const recovered = fixture.rerun(["--no-setup", "--no-skill", "--no-modify-path"], {
+        ...env, CTX_FAKE_LOG_MUTATIONS: "1", CTX_INSTALL_NO_DAEMON: "1",
+      });
+      assert.equal(recovered.status, 0, recovered.stderr);
+      assert.equal(sha256(readFileSync(binaryPath)), targetDigest);
+      const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+      assert.equal(marker.version, "2.2.1");
+      assert.equal(marker.sha256, targetDigest);
+      assert.deepEqual(marker.man_pages, JSON.parse(priorMarker).man_pages);
+      assert.deepEqual(readOwnershipRecords(fixture.installBin), priorRecords);
+      // This authored CLI does not migrate schemas; real-binary checks compare
+      // effective opt-outs and unknown values rather than config byte identity.
+      assert.deepEqual(readFileSync(fixture.configPath), priorConfig);
+      assert.deepEqual(readFileSync(path.join(fixture.homeDir, ".bashrc")), priorProfile);
+      const commands = readOrderedCtxCommands(fixture).slice(commandsBefore);
+      assert.match(commands[0], /^upgrade --hosted-transaction migrate --install-path /u);
+      assert.deepEqual(commands.slice(1), [MANAGED_PAIR_RECONCILE_COMMAND]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("modern candidate stages --no-man only for an existing receipt", () => {
+    for (const priorReceipt of ["installed", "disabled", "absent"]) {
+      const fixture = runRenderedCliInstaller({ releaseVersion: "2.0.5", compressedArtifact: "missing" });
+      const binaryPath = path.join(fixture.installBin, "ctx");
+      const markerPath = `${binaryPath}.install.json`;
+      try {
+        assert.equal(fixture.result.status, 0, fixture.result.stderr);
+        const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+        const pagePath = path.join(fixture.manDir, "ctx.1");
+        writeFileSync(pagePath, "user-edited manual page\n");
+        if (priorReceipt === "absent") delete marker.man_pages;
+        if (priorReceipt === "disabled") marker.man_pages = { schema_version: 1, status: "disabled" };
+        writeFileSync(markerPath, `${JSON.stringify(marker, null, 2)}\n`);
+        stageUnifiedTarget(fixture, "2.0.5", "2.2.1");
+        const commandsBefore = readOrderedCtxCommands(fixture).length;
+        const recovered = fixture.rerun(["--no-man", "--no-setup", "--no-skill", "--no-modify-path"], {
+          CTX_FAKE_LOG_MUTATIONS: "1",
+          CTX_FAKE_MANAGED_UPGRADE_STATUS: "73",
+        });
+        assert.equal(recovered.status, 0, recovered.stderr);
+        const after = JSON.parse(readFileSync(markerPath, "utf8"));
+        assert.deepEqual(after.man_pages, priorReceipt === "absent"
+          ? undefined : { schema_version: 1, status: "disabled" });
+        assert.equal(readFileSync(pagePath, "utf8"), "user-edited manual page\n");
+        const commands = readOrderedCtxCommands(fixture).slice(commandsBefore);
+        assert.match(commands[0], /^upgrade --hosted-transaction migrate --install-path /u);
+        assert.deepEqual(commands.slice(1), [MANAGED_PAIR_RECONCILE_COMMAND]);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  });
+
   test("installer retry retains prior integration ownership after binary publication fault", () => {
     const fixture = runRenderedCliInstaller({
       releaseVersion: "1.6.3",
@@ -33,22 +153,8 @@ export function registerCliInstallShellManagedUpgradeTests() {
       const priorRecords = readOwnershipRecords(fixture.installBin);
       assert.ok(priorRecords.length > 0);
       const smallDigest = sha256(readFileSync(fixture.artifactPath));
-      const candidate = readFileSync(fixture.artifactPath, "utf8")
-        .replace("fixture_version=1.6.3", "fixture_version=1.7.0");
-      writeFileSync(fixture.artifactPath, candidate, { mode: 0o755 });
-      truncateSync(fixture.artifactPath, 134217729);
-      const largeDigest = execFileSync("sha256sum", [fixture.artifactPath], {
-        encoding: "utf8",
-      }).split(" ")[0];
+      const largeDigest = stageUnifiedTarget(fixture, "1.6.3", "2.2.1", 134217729);
       assert.ok(statSync(fixture.artifactPath).size > 134217728);
-      const metadataPath = fixture.childEnv.CTX_FAKE_METADATA;
-      const signaturePath = fixture.childEnv.CTX_FAKE_METADATA_SIGNATURE;
-      const metadata = readFileSync(metadataPath, "utf8")
-        .replace("CTX_RELEASE_VERSION=1.6.3", "CTX_RELEASE_VERSION=1.7.0")
-        .replaceAll(smallDigest, largeDigest);
-      writeFileSync(metadataPath, metadata);
-      writeFileSync(signaturePath,
-        `${signMetadataBase64(metadata, fixture.metadataPrivateKeyPem)}\n`);
 
       const args = ["--no-setup", "--no-skill", "--no-man"];
       const fault = fixture.rerun(args, {
@@ -59,13 +165,17 @@ export function registerCliInstallShellManagedUpgradeTests() {
       assert.equal(sha256(readFileSync(binaryPath)), largeDigest);
       assert.equal(JSON.parse(readFileSync(`${binaryPath}.install.json`, "utf8")).sha256,
         smallDigest);
+      assert.equal(JSON.parse(readFileSync(`${binaryPath}.install.json`, "utf8")).man_pages.status,
+        "installed", "--no-man must remain staged until the transaction commits");
       assert.ok(statSync(path.join(fixture.installBin,
         ".ctx.hosted-install-transaction.json")).isFile());
-      const retry = fixture.rerun(args, { CTX_INSTALL_NO_DAEMON: "1" });
+      const retry = fixture.rerun(["--no-setup", "--no-skill"], { CTX_INSTALL_NO_DAEMON: "1" });
       assert.equal(retry.status, 0, retry.stderr);
       assert.equal(JSON.parse(readFileSync(`${binaryPath}.install.json`, "utf8")).sha256,
         largeDigest);
       assert.deepEqual(readOwnershipRecords(fixture.installBin), priorRecords);
+      assert.equal(JSON.parse(readFileSync(`${binaryPath}.install.json`, "utf8")).man_pages.status,
+        "disabled", "retry retains the original attempt's opt-out");
     } finally {
       fixture.cleanup();
     }
@@ -82,22 +192,7 @@ export function registerCliInstallShellManagedUpgradeTests() {
       assert.equal(fixture.result.status, 0, fixture.result.stderr);
       const oldBinary = readFileSync(binaryPath);
       const oldMarker = readFileSync(markerPath);
-      const smallDigest = sha256(readFileSync(fixture.artifactPath));
-      const candidate = readFileSync(fixture.artifactPath, "utf8")
-        .replace("fixture_version=1.6.3", "fixture_version=1.7.0");
-      writeFileSync(fixture.artifactPath, candidate, { mode: 0o755 });
-      truncateSync(fixture.artifactPath, 134217729);
-      const largeDigest = execFileSync("sha256sum", [fixture.artifactPath], {
-        encoding: "utf8",
-      }).split(" ")[0];
-      const metadataPath = fixture.childEnv.CTX_FAKE_METADATA;
-      const signaturePath = fixture.childEnv.CTX_FAKE_METADATA_SIGNATURE;
-      const metadata = readFileSync(metadataPath, "utf8")
-        .replace("CTX_RELEASE_VERSION=1.6.3", "CTX_RELEASE_VERSION=1.7.0")
-        .replaceAll(smallDigest, largeDigest);
-      writeFileSync(metadataPath, metadata);
-      writeFileSync(signaturePath,
-        `${signMetadataBase64(metadata, fixture.metadataPrivateKeyPem)}\n`);
+      const largeDigest = stageUnifiedTarget(fixture, "1.6.3", "2.2.1", 134217729);
 
       const oldAttempt = spawnSync(binaryPath,
         ["upgrade", "--channel", "stable", "--format=json"], {

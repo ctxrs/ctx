@@ -363,11 +363,13 @@ fn single_binary_probe() -> Result<()> {
 struct MigrationDaemon {
     install: PathBuf,
     calls: Arc<Mutex<Vec<&'static str>>>,
+    fail_resume: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct MigrationLease {
     install: PathBuf,
     calls: Arc<Mutex<Vec<&'static str>>>,
+    fail_resume: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DaemonUpgradeLease for MigrationLease {
@@ -388,6 +390,12 @@ impl DaemonUpgradeLease for MigrationLease {
             Some("applied" | "error")
         ));
         self.calls.lock().unwrap().push("resume");
+        if self
+            .fail_resume
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            bail!("injected migration resume failure");
+        }
         Ok(())
     }
     fn transfer_to_replacement_helper(self, _: u32) -> Result<()> {
@@ -414,6 +422,7 @@ impl DaemonUpgradePort for MigrationDaemon {
         Ok(MigrationLease {
             install: self.install.clone(),
             calls: self.calls.clone(),
+            fail_resume: self.fail_resume.clone(),
         })
     }
     fn begin_current(&self, _: &Path, _: &str, _: &str, _: Option<u64>) -> Result<Self::Lease> {
@@ -438,128 +447,213 @@ impl DaemonUpgradePort for MigrationDaemon {
 
 #[test]
 fn hosted_migration_quiesces_installed_image_and_keeps_prior_on_bad_digest() -> Result<()> {
-    for (bad_digest, fault_after_binary) in [(true, false), (false, false), (false, true)] {
-        let temp = tempfile::tempdir()?;
-        let install = temp.path().join("install/bin/ctx");
-        let data = temp.path().join("data");
-        create_private_directory_all(install.parent().unwrap())?;
-        create_private_directory_all(&data)?;
-        fs::write(&install, CORE)?;
-        fs::set_permissions(&install, fs::Permissions::from_mode(0o700))?;
-        let prior_marker = json!({"schema_version":1,"manager":"ctx-hosted-installer",
+    for (bad_digest, fault) in [
+        (true, None),
+        (false, None),
+        (false, Some("binary_replaced")),
+    ] {
+        hosted_migration_case(bad_digest, fault, false, None)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn hosted_migration_retains_retry_until_scheduler_is_terminal() -> Result<()> {
+    for fault in ["committed", "scheduler_finishing", "scheduler_finished"] {
+        hosted_migration_case(false, Some(fault), false, None)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn hosted_migration_resume_failure_leaves_terminal_installation_retryable() -> Result<()> {
+    hosted_migration_case(false, None, true, None)
+}
+
+#[test]
+fn hosted_migration_recovers_released_no_journal_state() -> Result<()> {
+    // Retry both an interrupted published target and a complete prior install.
+    for published in [true, false] {
+        hosted_migration_case(false, None, false, Some(published))?;
+    }
+    Ok(())
+}
+
+fn hosted_migration_case(
+    bad_digest: bool,
+    fault: Option<&'static str>,
+    fail_resume: bool,
+    stranded: Option<bool>,
+) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let install = temp.path().join("install/bin/ctx");
+    let data = temp.path().join("data");
+    create_private_directory_all(install.parent().unwrap())?;
+    create_private_directory_all(&data)?;
+    fs::write(&install, CORE)?;
+    fs::set_permissions(&install, fs::Permissions::from_mode(0o700))?;
+    let prior_marker = json!({"schema_version":1,"manager":"ctx-hosted-installer",
             "install_path":install,"platform":platform_key()?,"channel":"stable",
             "version":"1.6.3","sha256":sha256_hex(CORE)});
-        fs::write(
-            install_marker_path(&install),
-            serde_json::to_vec(&prior_marker)?,
-        )?;
-        restrict_private_file(&install_marker_path(&install))?;
-        let source = fs::canonicalize(std::env::current_exe()?)?;
-        let digest = sha256_hex(&fs::read(&source)?);
-        let candidate_marker = temp.path().join("candidate-marker.json");
-        fs::write(
-            &candidate_marker,
-            serde_json::to_vec(&json!({
-                "schema_version":1,"manager":"ctx-hosted-installer","install_path":install,
-                "platform":platform_key()?,"channel":"stable","version":"1.7.0",
-                "sha256":digest,
-            }))?,
-        )?;
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let daemon = MigrationDaemon {
-            install: install.clone(),
-            calls: calls.clone(),
-        };
-        let transport = Transport {
-            url: String::new(),
-            bytes: Vec::new(),
-            log: Arc::new(Mutex::new(Vec::new())),
-        };
-        let engine = UpgradeEngine::new(
-            ProductBuildIdentity::new("1.7.0"),
-            &transport,
-            &TEST_RELEASE_PROCESS,
-            &TEST_SEMANTIC_LAYOUT,
-            &daemon,
-        );
-        let args = || crate::HostedTransactionArgs {
-            action: crate::HostedTransactionAction::Install,
-            install_path: install.clone(),
-            attempt_id: Some("ia_12345678".into()),
-            marker_source: Some(candidate_marker.clone()),
-            ownership_source: None,
-            binary_sha256: Some(if bad_digest {
-                "0".repeat(64)
-            } else {
-                digest.clone()
-            }),
-        };
-        if fault_after_binary {
-            crate::upgrade::install::set_hosted_install_fault_for_test(Some("binary_replaced"));
-        }
-        let result = engine.migrate_hosted_install(&data, args());
-        if bad_digest {
-            assert_eq!(*calls.lock().unwrap(), ["begin", "resume"]);
-            assert!(result.is_err());
-            assert_eq!(fs::read(&install)?, CORE);
-            assert_eq!(
-                serde_json::from_slice::<Value>(&fs::read(install_marker_path(&install))?)?,
-                prior_marker
-            );
-        } else if fault_after_binary {
-            assert!(result.is_err());
-            assert_eq!(*calls.lock().unwrap(), ["begin"]);
-            assert_eq!(sha256_hex(&fs::read(&install)?), digest);
-            assert_eq!(
-                serde_json::from_slice::<Value>(&fs::read(install_marker_path(&install))?)?,
-                prior_marker
-            );
-            let state: Value = serde_json::from_slice(&fs::read(
-                install.with_file_name(".ctx.upgrade-state.json"),
-            )?)?;
-            assert_eq!(state["status"], "quiescing");
-            assert!(install
-                .with_file_name(".ctx.hosted-install-transaction.json")
-                .exists());
-            let paths = [
-                install.clone(),
-                install_marker_path(&install),
-                install.with_file_name(".ctx.upgrade-state.json"),
-                install.with_file_name(".ctx.hosted-install-transaction.json"),
-            ];
-            let before = paths
-                .iter()
-                .map(fs::read)
-                .collect::<std::io::Result<Vec<_>>>()?;
-            let mut mismatched_retry = args();
-            mismatched_retry.binary_sha256 = Some("0".repeat(64));
-            let error = engine
-                .migrate_hosted_install(&data, mismatched_retry)
-                .unwrap_err();
-            assert!(
-                error.to_string().contains("different signed candidate"),
-                "{error:#}"
-            );
-            assert_eq!(*calls.lock().unwrap(), ["begin"]);
-            for (path, bytes) in paths.iter().zip(before) {
-                assert_eq!(fs::read(path)?, bytes);
-            }
-            engine.migrate_hosted_install(&data, args())?;
-            assert_eq!(*calls.lock().unwrap(), ["begin", "begin", "resume"]);
-            assert!(!install
-                .with_file_name(".ctx.hosted-install-transaction.json")
-                .exists());
-            assert_eq!(sha256_hex(&fs::read(&install)?), digest);
-            let marker: Value = serde_json::from_slice(&fs::read(install_marker_path(&install))?)?;
-            assert_eq!(marker["sha256"], digest);
+    fs::write(
+        install_marker_path(&install),
+        serde_json::to_vec(&prior_marker)?,
+    )?;
+    restrict_private_file(&install_marker_path(&install))?;
+    let source = fs::canonicalize(std::env::current_exe()?)?;
+    let digest = sha256_hex(&fs::read(&source)?);
+    let candidate_marker = temp.path().join("candidate-marker.json");
+    fs::write(
+        &candidate_marker,
+        serde_json::to_vec(&json!({
+            "schema_version":1,"manager":"ctx-hosted-installer","install_path":install,
+            "platform":platform_key()?,"channel":"stable","version":"1.7.0",
+            "sha256":digest,
+        }))?,
+    )?;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let daemon = MigrationDaemon {
+        install: install.clone(),
+        calls: calls.clone(),
+        fail_resume: Arc::new(std::sync::atomic::AtomicBool::new(fail_resume)),
+    };
+    let transport = Transport {
+        url: String::new(),
+        bytes: Vec::new(),
+        log: Arc::new(Mutex::new(Vec::new())),
+    };
+    let engine = UpgradeEngine::new(
+        ProductBuildIdentity::new("1.7.0"),
+        &transport,
+        &TEST_RELEASE_PROCESS,
+        &TEST_SEMANTIC_LAYOUT,
+        &daemon,
+    );
+    let args = || crate::HostedTransactionArgs {
+        action: crate::HostedTransactionAction::Install,
+        install_path: install.clone(),
+        attempt_id: Some("ia_12345678".into()),
+        marker_source: Some(candidate_marker.clone()),
+        ownership_source: None,
+        binary_sha256: Some(if bad_digest {
+            "0".repeat(64)
         } else {
-            assert_eq!(*calls.lock().unwrap(), ["begin", "resume"]);
-            result?;
-            assert_eq!(sha256_hex(&fs::read(&install)?), digest);
-            let marker: Value = serde_json::from_slice(&fs::read(install_marker_path(&install))?)?;
-            assert_eq!(marker["version"], "1.7.0");
+            digest.clone()
+        }),
+    };
+    if let Some(published) = stranded {
+        if published {
+            fs::copy(&source, &install)?;
+            fs::copy(&candidate_marker, install_marker_path(&install))?;
+            restrict_private_file(&install_marker_path(&install))?;
+        }
+        let lock = UpgradeLock::acquire_for_installation(&install)?;
+        let attempt = begin_manual_attempt_locked(&data, &lock, "hosted_migration")?;
+        write_state_phase_locked(&lock, &attempt, "quiescing")?;
+        assert!(!install
+            .with_file_name(".ctx.hosted-install-transaction.json")
+            .exists());
+    }
+    crate::upgrade::install::set_hosted_install_fault_for_test(fault);
+    let result = engine.migrate_hosted_install(&data, args());
+    crate::upgrade::install::set_hosted_install_fault_for_test(None);
+    let journal_path = install.with_file_name(".ctx.hosted-install-transaction.json");
+    let state_path = install.with_file_name(".ctx.upgrade-state.json");
+    if bad_digest {
+        assert_eq!(*calls.lock().unwrap(), ["begin", "resume"]);
+        assert!(result.is_err());
+        assert_eq!(fs::read(&install)?, CORE);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(install_marker_path(&install))?)?,
+            prior_marker
+        );
+    } else if let Some(point) = fault {
+        let error = result.unwrap_err();
+        assert!(format!("{error:#}").contains(point), "{error:#}");
+        assert_eq!(*calls.lock().unwrap(), ["begin"], "{point}");
+        assert_eq!(sha256_hex(&fs::read(&install)?), digest);
+        let marker: Value = serde_json::from_slice(&fs::read(install_marker_path(&install))?)?;
+        if point == "binary_replaced" {
+            assert_eq!(marker, prior_marker);
+        } else {
             assert_eq!(marker["sha256"], digest);
         }
+        let state: Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+        assert_eq!(
+            state["status"],
+            if point == "scheduler_finished" {
+                "applied"
+            } else {
+                "quiescing"
+            },
+            "{point}"
+        );
+        assert!(
+            journal_path.exists(),
+            "{point}: retry witness must survive scheduler failure"
+        );
+        let journal: Value = serde_json::from_slice(&fs::read(&journal_path)?)?;
+        if point != "binary_replaced" {
+            assert_eq!(journal["phase"], "committed", "{point}");
+        }
+        let paths = [
+            install.clone(),
+            install_marker_path(&install),
+            install.with_file_name(".ctx.upgrade-state.json"),
+            install.with_file_name(".ctx.hosted-install-transaction.json"),
+        ];
+        let before = paths
+            .iter()
+            .map(fs::read)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let mut mismatched_retry = args();
+        mismatched_retry.binary_sha256 = Some("0".repeat(64));
+        let error = engine
+            .migrate_hosted_install(&data, mismatched_retry)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("different signed candidate"),
+            "{error:#}"
+        );
+        assert_eq!(*calls.lock().unwrap(), ["begin"]);
+        for (path, bytes) in paths.iter().zip(before) {
+            assert_eq!(fs::read(path)?, bytes);
+        }
+        let mut retry = args();
+        retry.attempt_id = Some("ia_retry_87654321".into());
+        engine.migrate_hosted_install(&data, retry)?;
+        assert_eq!(*calls.lock().unwrap(), ["begin", "begin", "resume"]);
+        assert!(!install
+            .with_file_name(".ctx.hosted-install-transaction.json")
+            .exists());
+        assert_eq!(sha256_hex(&fs::read(&install)?), digest);
+        let marker: Value = serde_json::from_slice(&fs::read(install_marker_path(&install))?)?;
+        assert_eq!(marker["sha256"], digest);
+    } else if fail_resume {
+        let error = result.unwrap_err();
+        assert!(format!("{error:#}").contains("resume failure"), "{error:#}");
+        assert_eq!(*calls.lock().unwrap(), ["begin", "resume"]);
+        assert!(!journal_path.exists());
+        let state: Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+        assert_eq!(state["status"], "applied");
+        engine.migrate_hosted_install(&data, args())?;
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["begin", "resume", "begin", "resume"]
+        );
+    } else {
+        assert_eq!(*calls.lock().unwrap(), ["begin", "resume"]);
+        result?;
+        assert_eq!(sha256_hex(&fs::read(&install)?), digest);
+        let marker: Value = serde_json::from_slice(&fs::read(install_marker_path(&install))?)?;
+        assert_eq!(marker["version"], "1.7.0");
+        assert_eq!(marker["sha256"], digest);
     }
+    assert!(!journal_path.exists());
+    let state: Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert_eq!(
+        state["status"],
+        if bad_digest { "error" } else { "applied" }
+    );
     Ok(())
 }

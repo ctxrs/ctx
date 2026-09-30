@@ -57,6 +57,42 @@ Get-ExistingInstallPairState
 `;
 }
 
+export function powerShellPublicationRouteFixture() {
+  const body = renderCliInstallPowerShellScript();
+  const selection = section(body,
+    "    if ($pendingHostedMigration) {\n        Invoke-HostedInstallTransaction -Migrate",
+    '    Send-InstallStage -Stage "binary_install" -Status "completed"');
+  return `param([string]$CasesPath)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+${renderedFunction(body, "Compare-ReleaseVersion")}
+function Invoke-HostedInstallTransaction([switch]$Migrate) {
+    $script:calls += $(if ($Migrate) { 'migrate' } else { 'install' })
+}
+function Invoke-ManagedCoreUpgrade { $script:calls += 'installed-upgrade' }
+function Invoke-ReleasedManagedPairInstall { $script:calls += 'released-pair' }
+function Invoke-ManagedPairApply { param($MarkerSource, $Required) $script:calls += 'candidate-pair'; return $true }
+function Test-InstalledTargetIdentity { return $true }
+$markerSourcePath = 'inert-marker'
+$results = @(foreach ($case in ([IO.File]::ReadAllText($CasesPath) | ConvertFrom-Json)) {
+    $script:calls = @()
+    $pendingHostedMigration = $case.pending
+    $managedReinstall = $case.managed
+    $managedPair = $case.pair
+    $releasedPairInstall = $case.releasedPair
+    $releasePhase = $case.phase
+    $version = $case.target
+    $actualChecksum = 'b' * 64
+    $existingManagedInstall = [pscustomobject]@{
+        version = $case.prior; sha256 = $(if ($case.sameDigest) { $actualChecksum } else { 'a' * 64 })
+    }
+${selection}
+    [ordered]@{ name = $case.name; calls = @($script:calls) }
+})
+ConvertTo-Json -InputObject $results -Depth 4 -Compress
+`;
+}
+
 export function powerShellStageFixture() {
   const body = renderCliInstallPowerShellScript();
   return `Set-StrictMode -Version Latest

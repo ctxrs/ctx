@@ -682,7 +682,7 @@ fn read_state_object(install_path: &Path) -> UpgradeState {
 
 /// Cleanup cannot discard the image while a released updater still expects it.
 pub(in crate::upgrade) fn ensure_legacy_pair_scheduler_terminal(install_path: &Path) -> Result<()> {
-    ensure_hosted_install_scheduler_available(install_path, false)
+    ensure_hosted_install_scheduler_available(install_path, false, false).map(|_| ())
 }
 
 fn read_state_object_bounded(install_path: &Path) -> Option<UpgradeState> {

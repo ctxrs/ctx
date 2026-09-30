@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """Opt-in Unix smoke of the published stable updater; no builds or feed writes.
 
-From the repository root (Python 3, curl and OpenSSL required):
+From the repository root (Python 3.11+, curl and OpenSSL required):
   python3 scripts/release/upgrade-walk.py 1.6.3 1.6.5 2.0.5 --timeout 240
-Supply the exact intended sequence, including 1.6.3, for the feed under test.
+  python3 scripts/release/upgrade-walk.py 2.0.2 2.2.0 --installer-recovery
+Supply the exact intended sequence, starting at 1.6.3 or 2.0.2, for the feed under test.
 The example is an expectation, not a claim that the live feed supports it.
-The installer runs ONCE with signed versioned 1.6.3 metadata. Thereafter only
+By default the installer runs ONCE with signed versioned starting metadata. Thereafter only
 the installed `ctx upgrade --format json` may replace the executable. Its
 compiled production URL decides each hop; no fake feed, channel override,
 version forcing, reinstall, due-marker edits, or automatic-cadence claim.
+
+--installer-recovery is a separate two-version scenario starting at 2.0.2:
+record its wrong-target v2 up_to_date receipt and unchanged binary, then rerun
+the installer and verify the expected signed target, history and persisted opt-outs.
+Rerun once more to check device/inode and marker identity,
+allowing integration ownership augmentation. This never rescues an ordinary walk.
+--installer PATH uses reviewed local script bytes only for those recovery reruns;
+otherwise the downloaded hosted installer is used. Neither rerun overrides its feed.
 
 Every subprocess has a timeout (seconds, default 240, maximum 900). A private
 temporary directory retains result.json, command logs, signed metadata and the
@@ -36,6 +45,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +55,7 @@ FIXTURE = ROOT / "tests/fixtures/custom-history-jsonl/basic.jsonl"
 KEY_SOURCE = ROOT / "services/install-site/src/cli-install-script.js"
 QUERY = "parser test"
 TEXT = "Add a parser test."
+INTEGRATION_FIELDS = ("integrations_path", "integrations_sha256")
 
 
 def require(condition, message):
@@ -109,8 +120,9 @@ def parse_metadata(text):
 
 
 class Walk:
-    def __init__(self, root, versions, timeout):
+    def __init__(self, root, versions, timeout, installer_recovery=False, installer=None):
         self.root, self.versions, self.timeout = root, versions, timeout
+        self.installer_recovery, self.installer = installer_recovery, installer
         self.env = isolated_environment(root)
         # 1.6.3 does not forward daemon-enabled environment overrides to its
         # finite import worker. Persist the same configuration for both processes.
@@ -120,11 +132,13 @@ class Walk:
             '[daemon]\nenabled = false\nmode = "source-refresh-only"\n'
         )
         self.binary = Path(self.env["HOME"]) / ".local/bin/ctx"
+        self.marker = Path(str(self.binary) + ".install.json")
         self.key = root / "metadata-public.pem"
         self.platform = platform_key()
         self.metadata = {}
         self.report = {
-            "status": "failed", "kind": "manual-released-upgrade-walk",
+            "status": "failed",
+            "kind": "released-installer-recovery" if installer_recovery else "manual-released-upgrade-walk",
             "expected_versions": versions, "observed_versions": [],
             "platform": self.platform, "automatic_cadence_tested": False,
             "commands": [], "snapshots": [],
@@ -234,8 +248,104 @@ class Walk:
         retrieval = output.get("retrieval", {})
         require(retrieval.get("requested_mode") == "lexical"
                 and retrieval.get("effective_mode") == "lexical", "search did not remain lexical")
-        require(any(TEXT in hit.get("snippet", "") for hit in output.get("results", [])),
-                "imported synthetic history is no longer searchable")
+        hits = [hit for hit in output.get("results", []) if TEXT in hit.get("snippet", "")]
+        require(hits, "imported synthetic history is no longer searchable")
+        return [hit.get("citations") for hit in hits]
+
+    def check_preferences(self, label):
+        config = tomllib.loads((Path(self.env["CTX_DATA_ROOT"]) / "config.toml").read_text())
+        indexing = config.get("indexing", {}).get("mode")
+        if indexing is None and config.get("daemon", {}).get("enabled") is False:
+            indexing = "manual"
+        preferences = {
+            "analytics": config.get("analytics", {}).get("enabled"),
+            "auto_upgrade": config.get("upgrade", {}).get("auto"),
+            "semantic": config.get("search", {}).get("semantic"),
+            "indexing": indexing,
+        }
+        self.report.setdefault("preferences", []).append({"stage": label, **preferences})
+        require(preferences == {"analytics": False, "auto_upgrade": "off",
+                                "semantic": False, "indexing": "manual"},
+                f"{label}: persisted opt-outs changed: {preferences}")
+
+    def installation_witness(self, label, version, digest):
+        stat = self.binary.stat()
+        marker = json.loads(self.marker.read_text())
+        witness = {"stage": label, "device": stat.st_dev, "inode": stat.st_ino, "marker": marker}
+        self.report.setdefault("installation_witnesses", []).append(witness)
+        require(isinstance(marker, dict), f"{label}: managed marker is not an object")
+        # The installer marker uses hyphens; signed metadata field suffixes use underscores.
+        expected = {"schema_version": 1, "manager": "ctx-hosted-installer", "channel": "stable",
+                    "install_path": str(self.binary), "platform": self.platform.replace("_", "-"),
+                    "version": version, "sha256": digest}
+        require(all(marker.get(key) == value for key, value in expected.items()),
+                f"{label}: managed marker differs from installed identity")
+        require(all(isinstance(marker.get(key), str) and marker[key]
+                    for key in ("install_attempt_id", "installed_at")),
+                f"{label}: managed marker lacks install attribution")
+        require("man_pages" not in marker or marker["man_pages"] == {"schema_version": 1, "status": "disabled"},
+                f"{label}: man receipt must be absent or disabled")
+        if any(key in marker for key in INTEGRATION_FIELDS):
+            ownership, checksum = (marker.get(key) for key in INTEGRATION_FIELDS)
+            require(isinstance(checksum, str) and re.fullmatch(r"[0-9a-f]{64}", checksum)
+                    and ownership in (str(self.binary) + ".install-integrations",
+                                      str(self.binary) + ".install-integrations." + checksum),
+                    f"{label}: invalid integration ownership binding")
+            require(sha256(Path(ownership)) == checksum, f"{label}: integration ownership checksum differs")
+        return witness
+
+    def recover_with_installer(self, installer, citations):
+        before = sha256(self.binary)
+        outcome = json.loads(self.run("discovery", [str(self.binary), "upgrade", "--format", "json"]))
+        self.report["discovery_receipt"] = outcome
+        require(outcome.get("ok") is True and outcome.get("status") == "up_to_date"
+                and outcome.get("applied") is False and outcome.get("update_available") is False
+                and outcome.get("current_version") == self.versions[0]
+                and isinstance(outcome.get("latest_version"), str)
+                and outcome["latest_version"] != self.versions[-1]
+                and outcome.get("metadata_url") ==
+                "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env",
+                "installer-recovery requires a stranded v2 discovery receipt; use an ordinary walk otherwise")
+        require(self.snapshot(self.versions[0], "discovery-retained") == before,
+                "stranded discovery changed the executable")
+        require(citations and all(citations), "initial synthetic history has no citations")
+        require(self.search("discovery-search") == citations, "stranded discovery changed history citations")
+        self.check_preferences("before-recovery")
+        previous = self.installation_witness("before-recovery", self.versions[0], before)
+        if self.installer is not None:
+            installer = self.root / "recovery-installer.sh"
+            shutil.copyfile(self.installer, installer)
+        self.report["recovery_installer"] = {
+            "source": "local" if self.installer is not None else "hosted",
+            "sha256": sha256(installer),
+        }
+        for label in ("installer-recovery", "installer-repeat"):
+            before = sha256(self.binary)
+            self.run(label, ["sh", str(installer), "--no-setup", "--no-skill",
+                             "--no-man", "--no-modify-path"])
+            digest = self.snapshot(self.versions[-1], label)
+            require(self.search(label + "-search") == citations, "installer changed history citations")
+            self.check_preferences(label)
+            status = json.loads(self.run(label + "-daemon", [str(self.binary), "daemon",
+                                         "status", "--format", "json"]))
+            daemon = status.get("daemon", {})
+            require(daemon.get("enabled") is False and daemon.get("running") is False,
+                    "installer enabled or started the isolated daemon")
+            current = self.installation_witness(label, self.versions[-1], digest)
+            require(not any(key in previous["marker"] for key in INTEGRATION_FIELDS)
+                    or all(key in current["marker"] for key in INTEGRATION_FIELDS),
+                    f"{label}: installer discarded integration ownership binding")
+            require(("man_pages" in current["marker"], current["marker"].get("man_pages")) ==
+                    ("man_pages" in previous["marker"], previous["marker"].get("man_pages")),
+                    f"{label}: installer changed man receipt presence or policy")
+            if label == "installer-repeat":
+                require(digest == before, "repeat installer changed the executable")
+                require((current["device"], current["inode"]) == (previous["device"], previous["inode"]),
+                        "repeat installer replaced the executable device/inode")
+                require({key: value for key, value in current["marker"].items() if key not in INTEGRATION_FIELDS} ==
+                        {key: value for key, value in previous["marker"].items() if key not in INTEGRATION_FIELDS},
+                        "repeat installer changed stable marker identity or attribution")
+            previous = current
 
     def import_history(self, fixture):
         try:
@@ -269,7 +379,7 @@ class Walk:
         self.report["installer_sha256"] = sha256(installer)
         # Scope versioned metadata to the bootstrap shell only. Released ctx
         # compiles out qualification-only feed overrides; never pass them to it.
-        self.run("install-1.6.3", ["sh", str(installer), "--no-setup", "--no-skill",
+        self.run(f"install-{self.versions[0]}", ["sh", str(installer), "--no-setup", "--no-skill",
                                   "--no-man", "--no-modify-path"],
                  env={**self.env, "CTX_RELEASE_METADATA_URL": initial["url"]})
         self.snapshot(self.versions[0], "initial")
@@ -279,7 +389,11 @@ class Walk:
         # worker in 1.6.3 and prevent the initial import from publishing history.
         # Lift the spawn veto only here; persistent indexing remains disabled.
         self.import_history(fixture)
-        self.search("initial-search")
+        citations = self.search("initial-search")
+        if self.installer_recovery:
+            self.recover_with_installer(installer, citations)
+            self.report["status"] = "passed"
+            return
         for number, version in enumerate(self.versions[1:], 1):
             label = f"hop-{number}"
             # Apply before checking the expected next version: a real download
@@ -307,15 +421,23 @@ class Walk:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("versions", nargs="+", help="exact ordered stable versions, starting with 1.6.3")
+    parser.add_argument("versions", nargs="+", help="exact ordered stable versions, starting with 1.6.3 or 2.0.2")
+    parser.add_argument("--installer-recovery", action="store_true",
+                        help="record stranded 2.0.2 discovery, then recover and repeat with the installer")
+    parser.add_argument("--installer", type=Path,
+                        help="reviewed local installer for recovery reruns only (default: hosted script)")
     parser.add_argument("--timeout", type=int, default=240, help="per-command timeout in seconds (1..900)")
     parser.add_argument("--output-dir", type=Path, help="new private evidence/install directory (retained)")
     args = parser.parse_args(argv)
-    if (len(args.versions) < 2 or args.versions[0] != "1.6.3"
+    if (len(args.versions) < 2 or args.versions[0] not in ("1.6.3", "2.0.2")
             or any(not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", v)
                    for v in args.versions)
             or len(set(args.versions)) != len(args.versions)):
-        parser.error("supply distinct stable versions in expected order, beginning with 1.6.3")
+        parser.error("supply distinct stable versions in expected order, beginning with 1.6.3 or 2.0.2")
+    if args.installer_recovery and (args.versions[0] != "2.0.2" or len(args.versions) != 2):
+        parser.error("--installer-recovery requires 2.0.2 and one expected destination")
+    if args.installer is not None and not args.installer_recovery:
+        parser.error("--installer is only valid with --installer-recovery")
     if not 1 <= args.timeout <= 900:
         parser.error("--timeout must be between 1 and 900 seconds")
     os.umask(0o077)
@@ -324,7 +446,8 @@ def main(argv=None):
         root = args.output_dir.resolve()
     else:
         root = Path(tempfile.mkdtemp(prefix="ctx-upgrade-walk-")).resolve()
-    walk = Walk(root, args.versions, args.timeout)
+    walk = Walk(root, args.versions, args.timeout, args.installer_recovery,
+                args.installer.resolve() if args.installer is not None else None)
     print(f"Evidence and isolated installation: {root}", flush=True)
     try:
         walk.execute()

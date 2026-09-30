@@ -196,20 +196,6 @@ sorted_lines() {
   sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u
 }
 
-assert_exact_lines() {
-  local label="$1"
-  local actual="$2"
-  local expected="$3"
-  local actual_sorted expected_sorted
-  actual_sorted="$(printf '%s\n' "${actual}" | sorted_lines)"
-  expected_sorted="$(printf '%s\n' "${expected}" | sorted_lines)"
-  if [[ "${actual_sorted}" != "${expected_sorted}" ]]; then
-    printf 'expected %s:\n%s\nactual %s:\n%s\n' \
-      "${label}" "${expected_sorted}" "${label}" "${actual_sorted}" >&2
-    fail "unexpected ${label}"
-  fi
-}
-
 assert_allowed_required_lines() {
   local label="$1"
   local actual="$2"
@@ -574,12 +560,11 @@ check_windows() {
   version_le "${os_version}" 10.0 || fail "Windows header OS version ${os_version} is newer than 10.0"
   version_le "${subsystem_version}" 10.0 || fail "Windows subsystem version ${subsystem_version} is newer than 10.0"
 
-  # The locked platform TLS verifier uses the native Windows certificate store,
-  # which imports crypt32.dll. Keep every DLL exact so unrelated imports fail.
-  # Current releases no longer import the retired pre-bridge Process Status
-  # and Restart Manager helpers (psapi.dll and rstrtmgr.dll).
-  # Graph DNS and native Windows APIs add these exact system imports.
-  assert_exact_lines "PE imported DLLs" "$(pe_imports)" "advapi32.dll
+  # Keep the reviewed system DLL boundary. Size optimization removes unused
+  # WinRT-error and KTM paths; requiring those imports would reject a compatible
+  # executable. Every other current import remains required.
+  local allowed_imports required_imports
+  allowed_imports="advapi32.dll
 api-ms-win-core-winrt-error-l1-1-0.dll
 api-ms-win-crt-convert-l1-1-0.dll
 api-ms-win-crt-environment-l1-1-0.dll
@@ -606,6 +591,10 @@ oleaut32.dll
 shell32.dll
 userenv.dll
 ws2_32.dll"
+  required_imports="$(printf '%s\n' "${allowed_imports}" | sed \
+    -e '/^api-ms-win-core-winrt-error-l1-1-0\.dll$/d' -e '/^ktmw32\.dll$/d')"
+  assert_allowed_required_lines "PE imported DLLs" "$(pe_imports)" \
+    "${allowed_imports}" "${required_imports}"
 }
 
 if [[ "${declared_macos_llvm}" != "1" ]]; then

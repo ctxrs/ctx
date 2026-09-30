@@ -61,13 +61,32 @@ try {
     ["--promotion", "bridge"],
     ["--promotion", "bridge", "--expected-legacy-sha256", "a".repeat(64)],
     ["--promotion", "stage"],
+    ["--promotion", "compatible"],
+    ["--promotion", "compatible", "--expected-legacy-sha256", "A".repeat(64)],
+    ["--promotion", "compatible", "--expected-legacy-sha256", "short"],
     ["--expected-legacy-sha256", "a".repeat(64)],
   ]) {
-    await assert.rejects(run([...prepare, ...options], environment, fetch));
+    for (const operation of [prepare, ["publish", ...common, "--metadata", output,
+      "--signature", "must-not-read-signature", "--evidence-out", "must-not-write-evidence"]]) {
+      await assert.rejects(run([...operation, ...options], environment, fetch));
+    }
     assert.equal(credentials.length, 0);
     assert.equal(fs.existsSync(path.join(root, "invalid-promotion")), false);
   }
   const { HOSTED_MANAGED_PAIR_TARGETS } = hosted;
+  for (const { id } of HOSTED_MANAGED_PAIR_TARGETS) loaded.targets.get(id).core.artifact.body = Buffer.from("final executable");
+  const compatibleOptions = ["--promotion", "compatible", "--expected-legacy-sha256", "a".repeat(64)];
+  const compatibleOutput = path.join(root, "compatible-metadata.env");
+  assert.equal((await run(["prepare", ...common, "--metadata-out", compatibleOutput,
+    "--published-at", "2026-09-05T00:00:00.000Z", ...compatibleOptions], environment, fetch)).status, "prepared");
+  // A successful prepare cannot qualify a later load of larger final signed
+  // bytes. The handoff is prebound here; publish must repeat its own size check.
+  loaded.targets.get(HOSTED_MANAGED_PAIR_TARGETS.at(-1).id).core.artifact.body = { length: 128 * 1024 * 1024 + 1 };
+  for (const operation of [prepare, ["publish", ...common, "--metadata", compatibleOutput,
+    "--signature", "must-not-read-signature", "--evidence-out", "must-not-write-evidence"]]) {
+    await assert.rejects(run([...operation, ...compatibleOptions], environment, fetch), /download limit/u);
+    assert.equal(credentials.length, 0);
+  }
   loaded.version = "1.6.5";
   for (const { id } of HOSTED_MANAGED_PAIR_TARGETS) loaded.targets.get(id).core.artifact.body = { length: 128 * 1024 * 1024 };
   loaded.targets.get(HOSTED_MANAGED_PAIR_TARGETS.at(-1).id).core.artifact.body.length += 1;

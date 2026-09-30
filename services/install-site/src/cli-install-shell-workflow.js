@@ -40,6 +40,7 @@ else`
   stage_install_marker "$tmp_dir/install-marker.XXXXXX"
   publish_fresh_or_legacy_binary migrate
   verify_installed_target_identity
+  preserve_core_man_pages=1
   # The journal supplied the first attempt's authenticated sidecar. Restore
   # its records before later integration reconciliation uses our manifest.
   load_previous_integration_ownership
@@ -47,21 +48,26 @@ else`
 elif [ "$managed_reinstall" = "1" ] &&
    ! previous_install_predates_persistent_daemon; then
   managed_core_handoff=1
-  if [ "$install_man" != "1" ] && [ "$release_phase" != "bridge" ]; then
-    # Core serializes the opt-out with runtime refresh and upgrade publication.
-    disable_core_man_pages_before_upgrade
-  fi
   if [ "$release_phase" = "final" ] &&
-     [ "$(compare_release_versions "$previous_version" "1.6.3")" != "1" ] &&
-     [ "$(path_size_bytes "$artifact_path")" -gt 134217728 ]; then
-    # Released 1.6.3 cannot download this signed executable. The candidate
-    # fences the installed daemon before its hosted replacement transaction.
+     [ "$(compare_release_versions "$version" "2.0.0")" != "-1" ] &&
+     { [ "$previous_version" != "$version" ] ||
+       [ "$previous_binary_digest" != "$(printf '%s' "$actual_checksum" | tr 'A-F' 'a-f')" ]; }; then
+    # Modern candidates own replacement: installed updaters may use an older
+    # release feed or download limit. Authentication precedes this transaction.
     load_previous_man_page_receipt "$previous_marker"
+    if [ "$install_man" != "1" ] && [ "$man_pages_receipt_present" = "1" ]; then
+      man_pages_json='{"schema_version":1,"status":"disabled"}'
+    fi
     stage_integration_ownership
     stage_install_marker "$tmp_dir/install-marker.XXXXXX"
     publish_fresh_or_legacy_binary migrate
     verify_installed_target_identity
   else
+    # Preserve the installed owner's exact-target no-op and pending-state checks,
+    # and the upgrade protocol used by historical targets and bridge releases.
+    if [ "$install_man" != "1" ] && [ "$release_phase" != "bridge" ]; then
+      disable_core_man_pages_before_upgrade
+    fi
     run_managed_core_upgrade
   fi
 else

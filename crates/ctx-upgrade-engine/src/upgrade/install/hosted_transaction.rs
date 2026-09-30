@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::marker::{install_marker_path, is_valid_install_attempt_id};
 use super::path_identity::managed_install_path_identity_matches;
 use crate::upgrade::{platform_key, sha256_hex};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use ctx_managed_pair_engine::ManagedPairVerifier;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 mod entry;
 mod filesystem;
@@ -16,7 +16,7 @@ mod managed_pair;
 mod migration;
 mod post_exit;
 pub use entry::run;
-use entry::run_locked;
+use entry::{reject_unexpected_inputs, run_locked};
 use filesystem::*;
 pub use managed_pair::ensure_hosted_transaction_inactive_under_installation_lock;
 use managed_pair::*;
@@ -34,7 +34,7 @@ const MAX_MARKER_BYTES: u64 = 64 * 1024;
 const MAX_OWNERSHIP_BYTES: u64 = 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 const UNINSTALL_RECEIPT_SCHEMA_VERSION: u32 = 2;
-pub use post_exit::{run_hosted_uninstall_after_parent_exit, HOSTED_UNINSTALL_POST_EXIT_READY};
+pub use post_exit::{HOSTED_UNINSTALL_POST_EXIT_READY, run_hosted_uninstall_after_parent_exit};
 #[cfg(not(test))]
 static HOSTED_UNINSTALL_FENCE_OBSERVED: AtomicBool = AtomicBool::new(false);
 
@@ -195,43 +195,12 @@ fn uninstall_install_path_for_helper(helper_path: &Path) -> Option<PathBuf> {
     (uninstall_helper_path(&install_path) == helper_path).then_some(install_path)
 }
 
-fn reject_unexpected_inputs(args: &HostedTransactionArgs) -> Result<()> {
-    match args.action {
-        HostedTransactionAction::Install => {
-            if args.attempt_id.is_none()
-                || args.marker_source.is_none()
-                || args.binary_sha256.is_none()
-            {
-                bail!("hosted install transaction is missing required inputs");
-            }
-        }
-        HostedTransactionAction::UninstallPrepare => {
-            if args.attempt_id.is_none()
-                || args.marker_source.is_some()
-                || args.ownership_source.is_some()
-                || args.binary_sha256.is_some()
-            {
-                bail!("hosted uninstall preparation has invalid inputs");
-            }
-        }
-        HostedTransactionAction::UninstallArm | HostedTransactionAction::UninstallCommit => {
-            if args.attempt_id.is_some()
-                || args.marker_source.is_some()
-                || args.ownership_source.is_some()
-                || args.binary_sha256.is_some()
-            {
-                bail!("hosted uninstall continuation has invalid inputs");
-            }
-        }
-    }
-    Ok(())
-}
-
 fn install(
     args: HostedTransactionArgs,
     install_path: PathBuf,
-    migration_owns_state: bool,
+    finish_migration: Option<&mut dyn FnMut() -> Result<()>>,
 ) -> Result<()> {
+    let migration_owns_state = finish_migration.is_some();
     let supplied_digest = normalized_sha256(
         args.binary_sha256
             .as_deref()
@@ -321,7 +290,7 @@ fn install(
             journal
         }
     };
-    complete_install(&source, &journal_path, &mut journal)?;
+    complete_install(&source, &journal_path, &mut journal, finish_migration)?;
     if !migration_owns_state {
         super::cleanup_legacy_managed_pair_under_installation_lock(&install_path)?;
     }
@@ -336,6 +305,7 @@ fn complete_install_with_fault(
     source: &Path,
     journal_path: &Path,
     journal: &mut Journal,
+    finish_migration: Option<&mut dyn FnMut() -> Result<()>>,
     fault: &mut dyn FnMut(&'static str) -> Result<()>,
 ) -> Result<()> {
     fault("journal_prepared")?;
@@ -393,7 +363,9 @@ fn complete_install_with_fault(
                     "prior hosted integration ownership",
                 )?;
                 if journal.prior_ownership_sha256.as_deref() != Some(current.as_str()) {
-                    bail!("refusing to replace integration ownership outside the recorded transaction");
+                    bail!(
+                        "refusing to replace integration ownership outside the recorded transaction"
+                    );
                 }
             }
             stage_bytes(body, &staged, false)?;
@@ -452,10 +424,17 @@ fn complete_install_with_fault(
     journal.phase = Phase::Committed;
     write_journal(journal_path, journal)?;
     fault("committed")?;
+    // File publication is proved above. Keep its retry witness until the
+    // migration's scheduler record is durably terminal under the same lock.
+    if let Some(finish) = finish_migration {
+        finish()?;
+        fault("scheduler_finished")?;
+    }
     remove_if_present(&binary_staged)?;
     remove_if_present(&staged_marker_path(journal))?;
     remove_if_present(&staged_ownership_path(journal))?;
-    remove_journal(journal_path)
+    remove_journal(journal_path)?;
+    fault("journal_removed")
 }
 
 fn uninstall_prepare(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {

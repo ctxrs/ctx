@@ -164,6 +164,62 @@ fn foreign_scheduler_rejects_migration_even_with_a_valid_hosted_journal() -> Res
 }
 
 #[test]
+fn no_journal_retry_requires_complete_pair_and_own_quiescing_identity() -> Result<()> {
+    for case in ["binary", "ownership", "phase", "attempt", "schema"] {
+        let temp = tempfile::tempdir()?;
+        let install = temp.path().join("install/bin/ctx");
+        let data = temp.path().join("data");
+        create_private_directory_all(install.parent().unwrap())?;
+        create_private_directory_all(&data)?;
+        fs::write(&install, b"old executable")?;
+        restrict_private_file(&install)?;
+        let mut value: Value =
+            serde_json::from_str(&marker(&install, &sha256_hex(b"old executable")))?;
+        let mut witnesses = Vec::new();
+        if case == "ownership" {
+            let ownership = ownership_path(&install);
+            value["integrations_path"] = json!(ownership);
+            value["integrations_sha256"] = json!(sha256_hex(b"recorded ownership"));
+            fs::write(&ownership, b"substituted ownership")?;
+            restrict_private_file(&ownership)?;
+            witnesses.push(ownership);
+        }
+        fs::write(install_marker_path(&install), serde_json::to_vec(&value)?)?;
+        restrict_private_file(&install_marker_path(&install))?;
+        {
+            let lock = UpgradeLock::acquire_for_installation(&install)?;
+            let attempt = begin_manual_attempt_locked(&data, &lock, "hosted_migration")?;
+            write_state_phase_locked(
+                &lock,
+                &attempt,
+                if case == "phase" {
+                    "applying"
+                } else {
+                    "quiescing"
+                },
+            )?;
+        }
+        if case == "binary" {
+            fs::write(&install, b"substituted executable")?;
+        }
+        if matches!(case, "attempt" | "schema") {
+            let path = install.with_file_name(".ctx.upgrade-state.json");
+            let mut state: Value = serde_json::from_slice(&fs::read(&path)?)?;
+            if case == "attempt" {
+                state["attempt_id"] = json!("invalid/attempt");
+            } else {
+                state["schema_version"] = json!(999);
+            }
+            fs::write(path, serde_json::to_vec(&state)?)?;
+        }
+        assert!(!journal_path(&install).exists());
+        assert_migration_refused_without_changes(&data, &install, &witnesses, "pending upgrade")?;
+        assert!(!journal_path(&install).exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn pending_uninstall_rejects_migration_without_poisoning_reinstall() -> Result<()> {
     // Direct retry, rejected intervening install, and state stranded by a released installer.
     for case in ["direct", "rejected_install", "stranded"] {

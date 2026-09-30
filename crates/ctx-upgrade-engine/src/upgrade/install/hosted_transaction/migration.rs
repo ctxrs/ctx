@@ -5,6 +5,8 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
 
+use crate::upgrade::state::{finish_hosted_migration_locked, UpgradeAttempt, UpgradeLock};
+
 use super::{
     complete_install_with_fault, ensure_legacy_pair_transaction_inactive_with_state, journal_path,
     managed_install_path_identity_matches, normalized_sha256, read_journal,
@@ -24,14 +26,22 @@ pub(in crate::upgrade) fn set_hosted_install_fault_for_test(point: Option<&'stat
 
 pub(in crate::upgrade) fn run_under_upgrade_lock(
     args: HostedTransactionArgs,
-    lock: &crate::upgrade::state::UpgradeLock,
+    lock: &UpgradeLock,
+    attempt: &UpgradeAttempt,
 ) -> Result<()> {
     reject_unexpected_inputs(&args)?;
     let install_path = validate_install_path(&args.install_path)?;
     if !managed_install_path_identity_matches(&install_path, lock.install_path()) {
         bail!("hosted transaction lock does not own the install path");
     }
-    run_locked(args, install_path, true)
+    run_locked(
+        args,
+        install_path,
+        Some(&mut || {
+            hosted_install_fault("scheduler_finishing")?;
+            finish_hosted_migration_locked(lock, attempt)
+        }),
+    )
 }
 
 pub(in crate::upgrade) fn hosted_install_journal_exists(install_path: &Path) -> Result<bool> {
@@ -41,7 +51,7 @@ pub(in crate::upgrade) fn hosted_install_journal_exists(install_path: &Path) -> 
 
 pub(in crate::upgrade) fn validate_hosted_migration_under_installation_lock(
     args: &HostedTransactionArgs,
-) -> Result<()> {
+) -> Result<Option<UpgradeAttempt>> {
     reject_unexpected_inputs(args)?;
     let install_path = validate_install_path(&args.install_path)?;
     let journal = pending_hosted_install(&install_path)?;
@@ -54,9 +64,25 @@ pub(in crate::upgrade) fn validate_hosted_migration_under_installation_lock(
     // Check filesystem transaction ownership even when a hosted retry exists.
     // Its scheduler exception is narrower than the post-admission bypass.
     ensure_legacy_pair_transaction_inactive_with_state(&install_path, true)?;
+    // Released migrations could remove their journal before terminalizing the
+    // scheduler. With no competing transaction, a complete verified pair is
+    // also safe for this owner to retry. This does not clear scheduler state:
+    // admission still requires its exact source, phase, and attempt identity.
+    let complete_digest = if journal.is_none() {
+        validated_hosted_pair_digest(&install_path).ok()
+    } else {
+        None
+    };
+    let same_candidate = journal.is_some()
+        || complete_digest.as_deref().is_some_and(|digest| {
+            args.binary_sha256
+                .as_deref()
+                .is_some_and(|supplied| digest.eq_ignore_ascii_case(supplied))
+        });
     crate::upgrade::state::ensure_hosted_install_scheduler_available(
         &install_path,
-        journal.is_some(),
+        journal.is_some() || complete_digest.is_some(),
+        same_candidate,
     )
 }
 
@@ -81,23 +107,32 @@ pub(super) fn complete_install(
     source: &Path,
     journal_path: &Path,
     journal: &mut Journal,
+    finish_migration: Option<&mut dyn FnMut() -> Result<()>>,
 ) -> Result<()> {
-    complete_install_with_fault(source, journal_path, journal, &mut |point| {
-        if crate::upgrade::test_harness_enabled()
-            && std::env::var("CTX_HOSTED_INSTALL_FAIL_AFTER_FOR_TESTS").as_deref() == Ok(point)
-        {
+    complete_install_with_fault(
+        source,
+        journal_path,
+        journal,
+        finish_migration,
+        &mut hosted_install_fault,
+    )
+}
+
+fn hosted_install_fault(point: &'static str) -> Result<()> {
+    if crate::upgrade::test_harness_enabled()
+        && std::env::var("CTX_HOSTED_INSTALL_FAIL_AFTER_FOR_TESTS").as_deref() == Ok(point)
+    {
+        bail!("injected hosted install fault after {point}");
+    }
+    #[cfg(test)]
+    HOSTED_INSTALL_FAULT.with(|fault| {
+        if fault.get() == Some(point) {
+            fault.set(None);
             bail!("injected hosted install fault after {point}");
         }
-        #[cfg(test)]
-        HOSTED_INSTALL_FAULT.with(|fault| {
-            if fault.get() == Some(point) {
-                fault.set(None);
-                bail!("injected hosted install fault after {point}");
-            }
-            Ok(())
-        })?;
         Ok(())
-    })
+    })?;
+    Ok(())
 }
 
 #[cfg(all(test, windows))]
@@ -105,7 +140,7 @@ mod tests {
     use super::*;
     use crate::upgrade::{
         install::{path_identity::windows_disk_path_identity, HostedTransactionAction},
-        state::UpgradeLock,
+        state::begin_manual_attempt_locked,
     };
     use ctx_history_platform::platform_security::{
         create_private_directory_all, restrict_private_directory,
@@ -125,6 +160,7 @@ mod tests {
         let original = b"synthetic installed executable";
         std::fs::write(&certified, original)?;
         let lock = UpgradeLock::acquire_for_installation(&ordinary)?;
+        let attempt = begin_manual_attempt_locked(temp.path(), &lock, "hosted_migration")?;
         let args = |install_path| HostedTransactionArgs {
             action: HostedTransactionAction::Install,
             install_path,
@@ -136,10 +172,11 @@ mod tests {
         // Both certified and ordinary installer spellings must pass ownership
         // and reach the transaction's normal digest validation.
         for path in [&ordinary, &certified] {
-            let error = run_under_upgrade_lock(args(path.clone()), &lock).unwrap_err();
+            let error = run_under_upgrade_lock(args(path.clone()), &lock, &attempt).unwrap_err();
             assert!(error.to_string().contains("SHA-256"), "{error:#}");
         }
-        let error = run_under_upgrade_lock(args(parent.join("other.exe")), &lock).unwrap_err();
+        let error =
+            run_under_upgrade_lock(args(parent.join("other.exe")), &lock, &attempt).unwrap_err();
         assert!(error.to_string().contains("lock does not own"), "{error:#}");
         assert_eq!(std::fs::read(&certified)?, original);
         Ok(())
