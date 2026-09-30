@@ -7,6 +7,13 @@
     "base_tag": "refs/tags/v1.6.4",
     "base_tag_object": "adf753882f00a00813a12714b4a49afa7655ef81"
   },
+  "compatibility_bridge": {
+    "version": "2.2.1",
+    "candidate": "a06d03606efd020c22882243bc6f9cc8f677eeae",
+    "current": "d8d23fe88bc7610943fe779e453f24bd3ac3c327",
+    "current_tag": "refs/tags/v2.2.2",
+    "current_tag_object": "028494b12574cf4807b7235a81272a2d40bdcfb2"
+  },
   "required_patches": [
     "22ae223ebb4a0c909861e3a7e1e98d4bd5b2d523"
   ],
@@ -26,6 +33,7 @@
     "9c20b7e027256423087e855ccb286515d1fe11ea": "B preserves the released status and agent-history-v1 locality fields. The explicitly approved 1.4 migration versions the CLI JSON schemas and introduces agent-history-v2 before removing those fields; do not restore the old contract into that new version.",
     "b2deb7ed73f01745a4acbd9982b72a1df3c9081f": "The 1.6.4 maintenance release raises its former 128 MiB limits to 512 MiB and carries branch-specific version and generated metadata. Unified 2.x instead uses the shared 256 MiB MAX_EXECUTABLE_BYTES contract in crates/ctx-upgrade-engine/src/upgrade.rs for incoming executables, managed pairs and installed-marker validation. lock_marker_tests.rs independently verifies acceptance above 128 MiB with the correct digest, rejection with the wrong digest, and rejection above 256 MiB; single_binary_tests.rs asserts the incoming bound. The old duplicated 512 MiB constants and 1.6.4 version metadata are deliberately superseded, not restored into the unified contract.",
     "cfcb6cb849b9a7f00294ac54bc1c89c36f7312ec": "The native smoke schema-3 validators, consent-scoped outbox fixture, real-writer serialization test, and all six shell/PowerShell negative cases remain present via ca4840a63c3089d0aa8d36ee173de1daa704b35d. Public PR968 (37afd7233fc3b5321bfcb81fa4cfcb371e9660b0) moved unrelated companion subprocess tests to their integration target and removed the unit target's unused :ctx runtime data. That adjacent BUILD.bazel context prevents reversing this released patch, but its native-candidate-outbox.json compile_data entry and test behavior are unchanged.",
+    "d8d23fe88bc7610943fe779e453f24bd3ac3c327": "The ten-file 2.2.2 release preparation changes only Cargo, Bazel and plugin version metadata, regenerated Cargo/Bazel lock metadata, and the changelog. The 2.2.1 compatibility bridge intentionally retains its own version identity; no behavioral code or recovery fix differs between these sources. Required released patches remain subject to ordinary reverse-patch verification.",
     "e85947a9c2c26a098c070b7485b285d65dea9634": "This truth table tests the fixed B branch routing removed from current-source CI. The retained bridge pipeline remains unchanged; current release routing rejects reconstructing B.",
     "ebb7a3ecfe47f43213622953c838f8a98d05703e": "The 1.6.5 maintenance bridge switches the compiled stable feed to /functions/v3/releases/stable while retaining v1 nonstable feeds and signature authority. Current source retains these URLs and endpoint/authority regression assertions in crates/ctx-upgrade-engine/src/upgrade/metadata.rs and the v3 URL in docs/upgrade.md. MODULE.bazel retains the unicode-ident 1.0.24, unicode-properties 0.1.4 and libssh2-sys 0.3.3 devtool pins and corrected header paths. Current 2.0.5 Cargo, Bazel, plugin and generated lock metadata supersede the branch-specific 1.6.5 values; the renamed endpoint test and changed lock context prevent reversing the whole commit. This bridge changes no size limit: current unified source retains its separately reviewed 256 MiB executable bound. No product fix from this commit is dropped.",
     "eeddf161e6928e92b908934f56bedf03d9906919": "The released fake-systemd helper is retained in tests/contracts/support/setup_sources_import/lifecycle_helpers.rs, including restart handling, isolated supervisor-environment loading, lock-derived PID handling and readiness waits. Current lifecycle tests deliberately retain the stricter assert_empty_catalog_default_background_setup assertions instead of the maintenance branch's relaxed recovered-setup oracle. PostgreSQL tests retain the socket-path repair using a private short /tmp cluster directory with startup-failure cleanup. No shipped daemon or database implementation changed in this commit.",

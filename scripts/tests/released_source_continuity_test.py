@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Small, offline Git histories reproduce the dropped-release-branch failure."""
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -291,11 +294,201 @@ class ContinuityTest(unittest.TestCase):
         self.assertEqual({row["commit"]: row["disposition"] for row in result["non_ancestor_or_required_changes"]},
                          {self.fix: "patch_present", bridge: "reviewed"})
 
+    def compatibility_bridge(self, carry_fix=True):
+        if carry_fix:
+            self.carry_fix()
+        (self.repo / "Cargo.toml").write_text('[workspace.package]\nversion = "2.2.1"\n')
+        self.candidate = self.commit("reviewed compatibility bridge")
+        (self.repo / "Cargo.toml").write_text('[workspace.package]\nversion = "2.2.2"\n')
+        self.newer = self.commit("current release version metadata")
+        self.tips["refs/tags/v2.2.2"] = self.newer
+        self.tag_objects = {}
+        for ref, tip in self.tips.items():
+            self.git("tag", "-a", ref.removeprefix("refs/tags/"), tip, "-m", "release fixture")
+            self.tag_objects[ref] = self.git("rev-parse", ref)
+        self.policy["compatibility_bridge"] = {
+            "version": "2.2.1", "candidate": self.candidate, "current": self.newer,
+            "current_tag": "refs/tags/v2.2.2", "current_tag_object": self.tag_objects["refs/tags/v2.2.2"],
+        }
+        self.policy["dispositions"][self.newer] = "Current release metadata; bridge retains its version."
+        self.git("checkout", "--detach", self.candidate)
+
+    def test_checked_in_compatibility_bridge_pins_only_the_reviewed_pair(self):
+        policy = json.loads(continuity.POLICY.read_bytes())
+        self.assertEqual(policy["compatibility_bridge"], {
+            "version": "2.2.1", "candidate": "a06d03606efd020c22882243bc6f9cc8f677eeae",
+            "current": "d8d23fe88bc7610943fe779e453f24bd3ac3c327", "current_tag": "refs/tags/v2.2.2",
+            "current_tag_object": "028494b12574cf4807b7235a81272a2d40bdcfb2",
+        })
+        self.assertIn(policy["compatibility_bridge"]["current"], policy["dispositions"])
+
+    def test_compatibility_bridge_accounts_for_current_and_required_patches(self):
+        self.compatibility_bridge()
+        # Both optional policies may coexist without widening either admission.
+        self.policy["maintenance_bridge"] = json.loads(continuity.POLICY.read_bytes())["maintenance_bridge"]
+        for published in (False, True):
+            with self.subTest(published=published):
+                if published:
+                    self.tips["refs/tags/v2.2.1"] = self.candidate
+                result = self.check()
+                self.assertEqual(result["compatibility_bridge_admission"], self.policy["compatibility_bridge"])
+                self.assertEqual(result["published_releases"], self.tips)
+                self.assertNotIn("excluded_published_releases", result)
+                self.assertEqual({row["commit"]: row["disposition"]
+                                  for row in result["non_ancestor_or_required_changes"]},
+                                 {self.fix: "patch_present", self.newer: "reviewed"})
+
+    def test_compatibility_admission_requires_exact_fields_and_versions(self):
+        self.compatibility_bridge()
+        original = self.policy["compatibility_bridge"]
+        malformed = [None, [], {**original, "extra": True}]
+        malformed += [{k: v for k, v in original.items() if k != field} for field in original]
+        malformed += [{**original, key: value} for key, value in (
+            ("version", "2.2.0"), ("current_tag", "refs/tags/v2.2.3"),
+            ("candidate", "HEAD"), ("current", "abcd"), ("current_tag_object", None))]
+        for admission in malformed:
+            with self.subTest(admission=admission):
+                self.policy["compatibility_bridge"] = admission
+                with self.assertRaisesRegex(ValueError, "invalid exact compatibility bridge admission"):
+                    self.check()
+        self.policy["compatibility_bridge"] = original
+        for policy in ({**self.policy, "skip": True},
+                       {key: value for key, value in self.policy.items() if key != "required_patches"}):
+            with self.assertRaisesRegex(ValueError, "unexpected fields"):
+                continuity.check_continuity(self.repo, self.candidate, self.tips, policy, self.tag_objects)
+
+    def test_compatibility_requires_exact_remote_current_identity(self):
+        self.compatibility_bridge()
+        ref = "refs/tags/v2.2.2"
+        for objects, tips in (
+                (None, self.tips), ({}, self.tips),
+                ({**self.tag_objects, ref: self.tag_objects["refs/tags/v1.3.2"]}, self.tips),
+                (self.tag_objects, {key: value for key, value in self.tips.items() if key != ref}),
+                (self.tag_objects, {**self.tips, ref: self.candidate})):
+            with self.subTest(objects=objects, tips=tips):
+                with self.assertRaisesRegex(ValueError, "exact published annotated current tag"):
+                    continuity.check_continuity(self.repo, self.candidate, tips, self.policy, objects)
+
+    def test_compatibility_requires_the_candidate_version(self):
+        self.compatibility_bridge()
+        self.candidate = self.fix
+        self.policy["compatibility_bridge"]["candidate"] = self.candidate
+        with self.assertRaisesRegex(ValueError, "compatibility bridge version differs"):
+            self.check()
+
+    def test_compatibility_requires_current_version_and_descendant(self):
+        self.compatibility_bridge()
+        for version in ("2.2.3", "2.2.2"):
+            with self.subTest(version=version):
+                self.git("checkout", "--detach", self.base)
+                (self.repo / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
+                current = self.commit("unrelated current source")
+                self.git("tag", "-f", "-a", "v2.2.2", current, "-m", "release fixture")
+                self.tips["refs/tags/v2.2.2"] = current
+                self.tag_objects["refs/tags/v2.2.2"] = self.git("rev-parse", "refs/tags/v2.2.2")
+                self.policy["compatibility_bridge"].update(
+                    current=current, current_tag_object=self.tag_objects["refs/tags/v2.2.2"])
+                error = "current source version differs" if version == "2.2.3" else "must be an ancestor of current"
+                with self.assertRaisesRegex(ValueError, error):
+                    self.check()
+
+    def test_compatibility_conflicting_bridge_tag_is_rejected(self):
+        self.compatibility_bridge()
+        self.tips["refs/tags/v2.2.1"] = self.fix
+        with self.assertRaisesRegex(ValueError, "published compatibility bridge differs"):
+            self.check()
+
+    def test_compatibility_does_not_admit_other_newer_refs(self):
+        self.compatibility_bridge()
+        for version in ("2.2.3", "2.3.0", "3.0.0"):
+            ref = f"refs/tags/v{version}"
+            with self.subTest(version=version):
+                # Even the identical source under another higher tag is not admitted.
+                self.tips[ref] = self.newer
+                with self.assertRaisesRegex(ValueError, f"older than published release {ref}"):
+                    self.check()
+                del self.tips[ref]
+
+    def test_compatibility_is_optional_and_unrelated_candidate_still_fails(self):
+        self.compatibility_bridge()
+        admission = self.policy.pop("compatibility_bridge")
+        with self.assertRaisesRegex(ValueError, "older than published release refs/tags/v2.2.2"):
+            self.check()
+        self.policy["compatibility_bridge"] = admission
+        (self.repo / "other").write_text("unreviewed source\n")
+        self.candidate = self.commit("unrelated candidate with same bridge version")
+        with self.assertRaisesRegex(ValueError, "older than published release refs/tags/v2.2.2"):
+            self.check()
+
+    def test_compatibility_current_commit_still_needs_patch_accounting(self):
+        self.compatibility_bridge()
+        self.policy["dispositions"].clear()
+        with self.assertRaisesRegex(ValueError, self.newer):
+            self.check()
+
+    def test_compatibility_required_patch_cannot_be_missing_or_waived(self):
+        self.compatibility_bridge(carry_fix=False)
+        del self.tips["refs/tags/v1.3.2"]  # Required independently of published ancestry.
+        with self.assertRaisesRegex(ValueError, self.fix):
+            self.check()
+        self.policy["dispositions"][self.fix] = "attempted waiver"
+        with self.assertRaisesRegex(ValueError, "cannot be waived"):
+            self.check()
+
+    def test_executor_policy_checks_frozen_candidate_and_authenticates_current_tag(self):
+        self.compatibility_bridge()
+        self.assertFalse((self.repo / "scripts").exists())
+        index = (self.repo / ".git/index").read_bytes()
+        real_git = continuity.git
+        listing = b""
+
+        def remote(*args, **kwargs):
+            if args[1] == "ls-remote":
+                self.assertEqual(args[1:], ("ls-remote", "--tags", "https://github.com/ctxrs/ctx.git"))
+                return subprocess.CompletedProcess(args, 0, listing, b"")
+            return real_git(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as executor:
+            policy = Path(executor) / "released-source-continuity.json"
+            policy.write_text(json.dumps(self.policy))
+            for corruption in (None, "peel", "lightweight", "missing"):
+                with self.subTest(corruption=corruption):
+                    objects, tips = dict(self.tag_objects), dict(self.tips)
+                    if corruption == "peel":
+                        tips["refs/tags/v2.2.2"] = self.candidate
+                    elif corruption == "lightweight":
+                        objects["refs/tags/v2.2.2"] = self.newer
+                    elif corruption == "missing":
+                        del tips["refs/tags/v2.2.2"]
+                    listing = ("\n".join([f"{value}\t{ref}" for ref, value in objects.items()]
+                                          + [f"{value}\t{ref}^{{}}" for ref, value in tips.items()]) + "\n").encode()
+                    output = io.StringIO()
+                    with mock.patch.object(continuity, "POLICY", policy), \
+                            mock.patch.object(continuity, "git", side_effect=remote), \
+                            mock.patch.object(sys, "argv", [str(SPEC.origin), "--public-repo", str(self.repo),
+                                                           "--source-commit", self.candidate]), \
+                            contextlib.redirect_stdout(output):
+                        if corruption:
+                            with self.assertRaisesRegex(ValueError, "tag identity differs|not annotated"):
+                                continuity.main()
+                        else:
+                            continuity.main()
+                            result = json.loads(output.getvalue())
+                            self.assertEqual(result["candidate"], self.candidate)
+                            self.assertEqual(result["version"], "2.2.1")
+                            self.assertEqual(result["compatibility_bridge_admission"], self.policy["compatibility_bridge"])
+        self.assertEqual((self.repo / ".git/index").read_bytes(), index)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
     def test_release_entry_points_enforce_check_before_signing(self):
         constructor = (ROOT / "scripts/release/release-manifest.mjs").read_text()
         main = constructor.split("async function main() {", 1)[1]
         self.assertLess(main.index("prepareManagedPairRelease("), main.index("await readPrivateKey()"))
+        self.assertIn('publicRepo: args.get("--public-ctx-repo")', main)
         loader = (ROOT / "scripts/release/unified-release-inputs.mjs").read_text()
+        self.assertIn('const ROOT = fileURLToPath(new URL("../../", import.meta.url))', loader)
+        self.assertIn('const sourceRepo = path.resolve(publicRepo)', loader)
+        self.assertIn('path.join(ROOT, "scripts", script), ...args', loader)
         self.assertIn('run("release/released-source-continuity.py", ["--public-repo", sourceRepo, "--source-commit", sourceCommit])', loader)
         self.assertLess(loader.index('run("release/released-source-continuity.py"'),
                         loader.index("return projectUnifiedReleaseInputs("))
@@ -303,7 +496,7 @@ class ContinuityTest(unittest.TestCase):
         self.assertLess(publisher.index('"${prepare_args[@]}"'), publisher.index('metadata_key="$(secret'))
         verifier = (ROOT / "scripts/release/release-candidate-manifest-contract.cjs").read_text()
         self.assertIn('path.join(__dirname, "released-source-continuity.py")', verifier)
-        self.assertIn('"--source-commit", sourceCommit', verifier)
+        self.assertIn('"--public-repo", resolved, "--source-commit", sourceCommit', verifier)
 
 
 
