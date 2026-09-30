@@ -164,3 +164,22 @@ ctx_binary_contract_test(
     ],
     rustc_env_files = ["//crates/ctx-cli:cargo_toml_env_vars"],
 )
+
+# Cross-owner retry proof uses the daemon's actual acknowledgement selector.
+ctx_rust_test(
+    name = "hosted_migration_retry_tests",
+    srcs = ["tests/contracts/hosted_migration_retry.rs"],
+    crate_root = "tests/contracts/hosted_migration_retry.rs",
+    edition = crate_edition(),
+    deps = crate_deps([
+        "anyhow",
+        "serde_json",
+        "sha2",
+        "tempfile",
+    ]) + [
+        ":test_support_lib",
+        "//crates/ctx-daemon-runtime:lib",
+        "//crates/ctx-history-platform:lib",
+    ],
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

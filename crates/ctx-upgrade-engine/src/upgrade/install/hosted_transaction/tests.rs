@@ -228,7 +228,7 @@ fn commit_install(source: &Path, journal: &mut Journal) {
     validate_journal(journal, &journal.install_path, TransactionKind::Install).unwrap();
     let path = journal_path(&journal.install_path);
     write_initial_journal(&path, journal).unwrap();
-    complete_install(source, &path, journal).unwrap();
+    complete_install(source, &path, journal, None).unwrap();
 }
 
 fn arm_uninstall(install: &Path, source: &Path) -> (PathBuf, PathBuf, Journal) {
@@ -694,23 +694,84 @@ fn install_retry_converges_from_every_durable_phase() {
         let path = journal_path(&install);
         write_initial_journal(&path, &journal).unwrap();
         let mut injected = false;
-        let error = complete_install_with_fault(&source, &path, &mut journal, &mut |observed| {
-            if !injected && observed == *point {
-                injected = true;
-                bail!("injected interruption after {observed}");
-            }
-            Ok(())
-        })
-        .unwrap_err();
+        let error =
+            complete_install_with_fault(&source, &path, &mut journal, None, &mut |observed| {
+                if !injected && observed == *point {
+                    injected = true;
+                    bail!("injected interruption after {observed}");
+                }
+                Ok(())
+            })
+            .unwrap_err();
         assert!(
             error.to_string().contains("injected interruption"),
             "{point}"
         );
         let mut recovered = read_journal(&path).unwrap().unwrap();
         validate_journal(&recovered, &install, TransactionKind::Install).unwrap();
-        complete_install(&source, &path, &mut recovered).unwrap();
+        complete_install(&source, &path, &mut recovered, None).unwrap();
         assert_installed(&install, OLD_OWNERSHIP, point);
     }
+}
+
+#[test]
+fn migration_interruption_after_journal_removal_requires_terminal_scheduler() -> Result<()> {
+    use crate::upgrade::state::{
+        begin_manual_attempt_locked, ensure_hosted_install_scheduler_available,
+        finish_hosted_migration_locked, write_state_phase_locked, UpgradeLock,
+    };
+
+    // The released ordering completed files without a scheduler callback,
+    // then wrote terminal state afterward. Interrupt both orders at that gap.
+    for finish_before_removal in [false, true] {
+        let (temp, install, digest, source) = fixture();
+        // UpgradeLock requires an installed executable, as the migration does.
+        fs::copy(&source, &install)?;
+        let lock = UpgradeLock::acquire_for_installation(&install)?;
+        let attempt = begin_manual_attempt_locked(temp.path(), &lock, "hosted_migration")?;
+        write_state_phase_locked(&lock, &attempt, "quiescing")?;
+        let mut journal = owned_install_journal(&install, &digest, OLD_OWNERSHIP, "ia_12345678");
+        let path = journal_path(&install);
+        write_initial_journal(&path, &journal)?;
+        let mut finish = || finish_hosted_migration_locked(&lock, &attempt);
+        let error = complete_install_with_fault(
+            &source,
+            &path,
+            &mut journal,
+            if finish_before_removal {
+                Some(&mut finish)
+            } else {
+                None
+            },
+            &mut |point| {
+                if point == "journal_removed" {
+                    bail!("interrupted immediately after journal removal");
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("immediately after journal removal"));
+        assert_installed(&install, OLD_OWNERSHIP, "journal_removed");
+        assert!(!path.exists());
+        let state: Value = serde_json::from_slice(&fs::read(
+            install.with_file_name(".ctx.upgrade-state.json"),
+        )?)?;
+        let admission = ensure_hosted_install_scheduler_available(&install, false, false);
+        if finish_before_removal {
+            assert_eq!(state["status"], "applied");
+            admission?;
+        } else {
+            assert_eq!(state["status"], "quiescing");
+            assert!(admission
+                .unwrap_err()
+                .to_string()
+                .contains("pending upgrade"));
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -1133,7 +1194,7 @@ fn install_refuses_unowned_dangling_sidecar_and_retains_journal() {
     let path = journal_path(&install);
     write_initial_journal(&path, &journal).unwrap();
 
-    assert!(complete_install(&source, &path, &mut journal).is_err());
+    assert!(complete_install(&source, &path, &mut journal, None).is_err());
     assert!(fs::symlink_metadata(&owned_path)
         .unwrap()
         .file_type()

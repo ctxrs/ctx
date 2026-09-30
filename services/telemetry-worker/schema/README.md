@@ -1,10 +1,10 @@
 # Telemetry schema sources
 
-These selected existing migrations own the Worker-facing receipt, diagnostic,
-retention, and reporting definitions. They were transferred as source, with no
-production data or private repository history. They are historical migrations,
-not a new 1.5 database migration and not an instruction to replay them against
-a deployed database. Ordinary 1.5 Blame needs no new table or SQL constraint.
+These migrations own the Worker-facing receipt, diagnostic, retention, and
+reporting definitions. The historical definitions were transferred as source,
+with no production data or private repository history. They are not an
+instruction to replay established migrations against a deployed database.
+Ordinary 1.5 Blame needs no new table or SQL constraint.
 
 | Files | Retained ownership |
 | --- | --- |
@@ -14,8 +14,10 @@ a deployed database. Ordinary 1.5 Blame needs no new table or SQL constraint.
 | `0046`, `0050`, `0051` | Received-date materialization, indexes, and serialized maintenance |
 | `0047` | Event collision receipts |
 | `0049` | Existing daemon-storage analytics |
+| `0052` | Daily materializer sort memory |
+| `0053` | Bounded occurrence-time rollout aggregates |
 
-The current production schema already supplies these objects. This directory
+These migrations target the established telemetry schema. This directory
 does not bootstrap unrelated business/account tables or reproduce the entire
 historical database. SQL migrations retain their role/ownership preconditions.
 Deploying the unchanged adapter against the established schema remains an
@@ -32,3 +34,29 @@ Legacy signed Blame summaries exclude the new ordinary CLI/MCP events. The
 [service reporting guidance](../README.md#compatibility-and-reporting) describes
 the required dashboard labels and ordinary-event source; there is no identity
 crosswalk or license check for the new producer.
+
+`0053` adds `ctx.analytics_rollout_window(environment, from, until, versions)`
+against the established restricted `ctx.analytics_canonical_telemetry_events`
+view. Apply it as `ctx_migration`; only `ctx_analytics_readonly` receives
+EXECUTE. It changes no event rows, classification rules, reader table grants,
+materialization, or Worker behavior. Its isolated `rollout_postgres_test` uses
+the retained canonical definition with authored synthetic inputs and verifies
+that timestamp bounds reach the index scan before classification.
+
+The half-open occurrence window must be positive, finite and at most 24 hours.
+A null version array includes all versions; an empty array matches none. Retain
+the caller's statement timeout. `version` rows count observed profiles and data
+roots per producer version across the requested window. `event` rows break down
+the same population by outcomes and optional upgrade/refresh fields; their
+distinct counts overlap. Neither count describes unique machines or all
+installations, and neither should be summed across versions or time slices to
+deduplicate identities. Legacy installation counts remain separate.
+
+Explicit `upgrade_status='applied'` with `upgrade_applied=true` differs from
+`up_to_date`, successful checks and missing old-producer fields. The version is
+the producer's version, not the upgrade destination. Missing diagnostics remain
+null. Refresh source failures can accompany successful partial refreshes;
+terminal failure reason coverage must use the appropriate failure denominator.
+Delivery observations are outside the canonical view and this aggregate.
+Late commits and current classification overrides can change a past window;
+results are not a completeness watermark or proof of fleet-wide recovery.

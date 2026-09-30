@@ -75,11 +75,12 @@ export function parseArgs(argv) {
   }
   {
     const promotion = args.get("--promotion") ?? "current";
-    if (!["current", "transition", "stage", "bridge"].includes(promotion)) fail("invalid promotion mode");
+    if (!["current", "transition", "stage", "bridge", "compatible"].includes(promotion)) fail("invalid promotion mode");
     const expected = args.get("--expected-legacy-sha256");
-    if ((promotion === "bridge" && !/^[0-9a-f]{64}$/u.test(expected ?? ""))
-        || (promotion !== "bridge" && expected !== undefined)) {
-      fail("bridge promotion requires the expected legacy pointer SHA-256 only");
+    const legacyPromotion = promotion === "bridge" || promotion === "compatible";
+    if ((legacyPromotion && !/^[0-9a-f]{64}$/u.test(expected ?? ""))
+        || (!legacyPromotion && expected !== undefined)) {
+      fail("bridge/compatible promotion requires the expected legacy pointer SHA-256 only");
     }
   }
   return { args, command };
@@ -242,7 +243,7 @@ export async function promoteCurrentPointer(request, loaded, body) {
   return promotePointer(request, loaded.version, body, CURRENT_POINTER, true);
 }
 
-async function promotePointer(request, version, body, key, initialize = false) {
+async function promotePointer(request, version, body, key, initialize = false, expectedLegacySha256) {
   if (pointerVersion(body) !== version) fail("current pointer differs from the selected release");
   await assertFrozenBridgePromotion(version);
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -253,8 +254,12 @@ async function promotePointer(request, version, body, key, initialize = false) {
         key, body, contentType: "application/json; charset=utf-8",
       });
     }
-    if (key === LEGACY_POINTER && !["2.0.4", TRANSITION_VERSION].includes(pointerVersion(current.body))) {
-      fail("legacy feed is not in the 2.0.4 to 2.0.5 transition");
+    if (key === LEGACY_POINTER) {
+      if (expectedLegacySha256 !== undefined) {
+        assertCompatibleLegacy(current, version, body, expectedLegacySha256);
+      } else if (!["2.0.4", TRANSITION_VERSION].includes(pointerVersion(current.body))) {
+        fail("legacy feed is not in the 2.0.4 to 2.0.5 transition");
+      }
     }
     if (current.body.equals(body)) return "existing-identical";
     if (compareStableVersions(pointerVersion(current.body), version) >= 0) {
@@ -281,7 +286,7 @@ async function promotePointer(request, version, body, key, initialize = false) {
 }
 
 export function validatePromotion(loaded, promotion) {
-  if (promotion === "current" || promotion === "transition") {
+  if (promotion === "current" || promotion === "transition" || promotion === "compatible") {
     if (compareStableVersions(loaded.version, TRANSITION_VERSION) < 0) {
       fail("current feed requires a release that uses the v3 feed");
     }
@@ -290,17 +295,19 @@ export function validatePromotion(loaded, promotion) {
     }
   } else if (promotion === "bridge" || promotion === "stage") {
     if (loaded.version !== BRIDGE_VERSION) fail("bridge staging/promotion is only for 1.6.5");
+  } else fail("invalid promotion mode");
+  if (["bridge", "stage", "compatible"].includes(promotion)) {
     for (const target of HOSTED_MANAGED_PAIR_TARGETS) {
-      const bytes = loaded.targets.get(target.id)?.core.artifact.body.length;
+      const bytes = loaded.targets.get(target.id)?.core.artifact.body?.length;
       if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > 128 * 1024 * 1024) {
-        fail(`bridge executable must fit the 1.6.3 download limit: ${target.id}`);
+        fail(`compatible executable must fit the 1.6.3 download limit: ${target.id}`);
       }
     }
-  } else fail("invalid promotion mode");
+  }
 }
 
-// v2 cannot distinguish pre-bridge clients from 2.x clients. Mirror only the
-// transition release, then perform one explicitly reviewed replacement by 1.6.5.
+// Retain the historical transition; later compatible cutovers have their own
+// size gate and expected-v2 identity. Ordinary current releases only move v3.
 export async function promoteTransitionPointer(request, loaded, body) {
   validatePromotion(loaded, "transition");
   const legacy = await getR2Object(request, STABLE_BUCKET, LEGACY_POINTER, 16 * 1024);
@@ -312,10 +319,10 @@ export async function promoteTransitionPointer(request, loaded, body) {
   return { current: state, legacy: legacyState };
 }
 
-async function verifyCurrentDestination(request) {
+async function verifyCurrentDestination(request, minimumVersion = TRANSITION_VERSION) {
   const current = await getR2Object(request, STABLE_BUCKET, CURRENT_POINTER, 16 * 1024);
-  if (current == null || compareStableVersions(pointerVersion(current.body), TRANSITION_VERSION) < 0) {
-    fail("bridge requires the v3 destination to be published first");
+  if (current == null || compareStableVersions(pointerVersion(current.body), minimumVersion) < 0) {
+    fail(`promotion requires a published v3 destination at or above ${minimumVersion}`);
   }
   const pointer = JSON.parse(current.body.toString("utf8"));
   const metadata = await getR2Object(request, STABLE_BUCKET, pointer.metadata_object, 128 * 1024);
@@ -330,6 +337,37 @@ async function verifyCurrentDestination(request) {
   if (values.CTX_RELEASE_VERSION !== pointer.version || values.CTX_RELEASE_CHANNEL !== "stable") {
     fail("v3 destination metadata version/channel does not match its pointer");
   }
+  return current;
+}
+
+function assertCompatibleLegacy(current, version, body, expectedSha256) {
+  if (current?.body.equals(body)) return;
+  if (current == null || sha256(current.body) !== expectedSha256
+      || compareStableVersions(pointerVersion(current.body), version) >= 0) {
+    fail("compatible promotion requires the expected older legacy pointer or identical target");
+  }
+}
+
+export async function promoteCompatiblePointer(request, loaded, body, expectedSha256) {
+  validatePromotion(loaded, "compatible");
+  if (pointerVersion(body) !== loaded.version || !/^[0-9a-f]{64}$/u.test(expectedSha256 ?? "")) {
+    fail("compatible promotion requires its exact pointer and the expected legacy SHA-256");
+  }
+  await assertFrozenBridgePromotion(loaded.version);
+  assertCompatibleLegacy(await getR2Object(request, STABLE_BUCKET, LEGACY_POINTER, 16 * 1024),
+    loaded.version, body, expectedSha256);
+  const current = await getR2Object(request, STABLE_BUCKET, CURRENT_POINTER, 16 * 1024);
+  const state = current != null && compareStableVersions(pointerVersion(current.body), loaded.version) > 0
+    ? "existing-newer" : await promoteCurrentPointer(request, loaded, body);
+  // A resumed promotion may find v3 has advanced. Authenticate that destination,
+  // never downgrade it, and only then expose the bounded recovery target on v2.
+  const destination = await verifyCurrentDestination(request, loaded.version);
+  const currentVersion = pointerVersion(destination.body);
+  if (currentVersion === loaded.version && !destination.body.equals(body)) {
+    fail("v3 destination differs from the selected compatible release");
+  }
+  const legacy = await promotePointer(request, loaded.version, body, LEGACY_POINTER, false, expectedSha256);
+  return { current: state, legacy, current_version: currentVersion, current_sha256: sha256(destination.body) };
 }
 
 export async function cutOverLegacyPointer(request, loaded, body, expectedSha256) {
@@ -461,6 +499,9 @@ export async function run(argv, environment = process.env, fetchImplementation =
   if (promotion === "bridge") pointerState = await cutOverLegacyPointer(
     request, loaded, pointer, args.get("--expected-legacy-sha256"),
   );
+  if (promotion === "compatible") pointerState = await promoteCompatiblePointer(
+    request, loaded, pointer, args.get("--expected-legacy-sha256"),
+  );
   const frozenBridge = await assertFrozenBridgePromotion(loaded.version);
   const evidence = {
     channel: "stable",
@@ -472,6 +513,7 @@ export async function run(argv, environment = process.env, fetchImplementation =
     promotion,
     current_pointer_key: promotion === "stage" ? null
       : promotion === "bridge" ? LEGACY_POINTER : CURRENT_POINTER,
+    ...(promotion === "compatible" ? { legacy_pointer_key: LEGACY_POINTER } : {}),
     frozen_bridge: frozenBridge,
     private_commit: loaded.privateCommit,
     public_commit: loaded.publicCommit,

@@ -38,7 +38,13 @@ def canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
 
 
-def run_metadata(repo: Path, target: str, patched_notify: Path | None = None) -> dict[str, Any]:
+def run_metadata(repo: Path, target: str, patched_notify: Path | None = None,
+                 compact_grammar_source: Path | None = None,
+                 features: list[str] | None = None) -> dict[str, Any]:
+    config = patched_notify.parent / "config.toml" if patched_notify is not None else None
+    if compact_grammar_source is not None:
+        import compact_grammar_source as grammars
+        config = grammars.config_path(compact_grammar_source, patched_notify)
     result = subprocess.run(
         [
             "cargo",
@@ -48,8 +54,8 @@ def run_metadata(repo: Path, target: str, patched_notify: Path | None = None) ->
             "1",
             "--filter-platform",
             target,
-            *(["--config", os.fspath(patched_notify.parent / "config.toml")]
-              if patched_notify is not None else []),
+            *[arg for feature in features or [] for arg in ("--features", feature)],
+            *(["--config", os.fspath(config)] if config is not None else []),
         ],
         cwd=repo,
         check=False,
@@ -66,6 +72,8 @@ def run_metadata(repo: Path, target: str, patched_notify: Path | None = None) ->
         raise ValueError("cargo metadata returned an invalid package graph")
     if patched_notify is not None:
         notify_source.bind_metadata(value, patched_notify)
+    if compact_grammar_source is not None:
+        grammars.bind_metadata(value, compact_grammar_source)
     return value
 
 
@@ -230,10 +238,14 @@ def main() -> int:
     parser.add_argument("--materials-output", required=True, type=Path)
     parser.add_argument("--material-root", required=True, type=Path)
     parser.add_argument("--notify-source", type=Path)
+    parser.add_argument("--compact-grammar-source", type=Path)
+    parser.add_argument("--features", action="append", default=[], metavar="FEATURE_SPEC",
+                        help="Cargo feature selection used by the release build (repeatable)")
     args = parser.parse_args()
     try:
         repo = args.repo.resolve(strict=True)
-        metadata = run_metadata(repo, args.target, args.notify_source)
+        metadata = run_metadata(repo, args.target, args.notify_source,
+                                args.compact_grammar_source, args.features)
         selected = selected_package_ids(metadata)
         packages = [item for item in metadata["packages"] if item["id"] in selected]
         package_records = sorted([
@@ -255,6 +267,8 @@ def main() -> int:
         }
         if "source_patches" in metadata:
             target_document["source_patches"] = metadata["source_patches"]
+        if "source_transforms" in metadata:
+            target_document["source_transforms"] = metadata["source_transforms"]
         material_records = sorted([
             {
                 "kind": "main",

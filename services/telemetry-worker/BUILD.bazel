@@ -187,3 +187,22 @@ sh_test(
     env = {"CTX_TEST_POSTGRES_BIN": "/usr/lib/postgresql/16/bin"},
     tags = ["external", "postgresql", "requires-pnpm", "telemetry-worker"],
 )
+
+sh_test(
+    name = "rollout_postgres_test",
+    srcs = ["//:scripts/bazel/package-action.sh"],
+    args = [
+        "$(rootpath @pnpm//:pnpm)",
+        "services/telemetry-worker",
+        "test:rollout:postgres",
+    ],
+    data = [
+        "@pnpm//:pnpm",
+        ":node_modules/@neondatabase/serverless",
+        ":postgres_schema",
+        ":deploy_config",
+        ":test_sources",
+    ],
+    env = {"CTX_TEST_POSTGRES_BIN": "/usr/lib/postgresql/16/bin"},
+    tags = ["external", "postgresql", "requires-pnpm", "telemetry-worker"],
+)

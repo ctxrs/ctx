@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 import childProcess from "node:child_process";
-import { promoteCurrentPointer } from "../publish-hosted-managed-pair-stable.mjs";
+import { promoteCurrentPointer, promoteCompatiblePointer } from "../publish-hosted-managed-pair-stable.mjs";
+import { HOSTED_MANAGED_PAIR_TARGETS } from "../hosted-managed-pair-release.mjs";
 import { assertCurrentReleaseVersion, assertFrozenBridgePromotion, verifyFrozenBridgeSnapshot } from "../frozen-cli-bridge.cjs";
 import { readBoundedResponse } from "../managed-pair-release-io.mjs";
 
@@ -25,6 +26,10 @@ test("post-B construction rejects B and a failed frozen readback prevents storag
   let reads = 0;
   const request = () => { reads += 1; throw new Error("unexpected storage"); };
   await assert.rejects(promoteCurrentPointer(request, { version: "2.0.5" }, pointer("2.0.5")), /frozen bridge readback failed: HTTP 503/u);
+  const loaded = { version: "2.2.1", targets: new Map(HOSTED_MANAGED_PAIR_TARGETS.map(({ id }) =>
+    [id, { core: { artifact: { body: Buffer.from("candidate") } } }])) };
+  await assert.rejects(promoteCompatiblePointer(request, loaded, pointer("2.2.1"), "a".repeat(64)),
+    /frozen bridge readback failed: HTTP 503/u);
   assert.equal(reads, 0);
 });
 

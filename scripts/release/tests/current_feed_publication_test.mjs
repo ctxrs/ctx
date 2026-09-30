@@ -14,7 +14,7 @@ const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", { modulusLen
 mock.module(new URL("../../../services/install-site/src/cli-install-script.js", import.meta.url).href, {
   namedExports: { CLI_METADATA_PUBLIC_KEY_PEM: publicKey.export({ format: "pem", type: "spki" }) },
 });
-const { promoteCurrentPointer, promoteTransitionPointer, cutOverLegacyPointer, validatePromotion, pointerBytes } = await import("../publish-hosted-managed-pair-stable.mjs");
+const { promoteCurrentPointer, promoteTransitionPointer, promoteCompatiblePointer, cutOverLegacyPointer, validatePromotion, pointerBytes } = await import("../publish-hosted-managed-pair-stable.mjs");
 const OLD = "releases/stable/current.json";
 const CURRENT = "releases/stable/current-v3.json";
 function pointer(version = "1.3.2", extra = {}) {
@@ -256,4 +256,192 @@ try {
   assert.throws(() => validatePromotion({ version: "2.0.6" }, "transition"), /only for/u);
   assert.throws(() => validatePromotion({ version: "1.6.5" }, "current"), /v3 feed/u);
 
+  const compatible = { ...bridgeLoaded, version: "2.2.1" };
+  const signedRelease = (version, metadata = Buffer.from(`CTX_RELEASE_VERSION=${version}\nCTX_RELEASE_CHANNEL=stable\n`)) => {
+    const signature = Buffer.from(`${crypto.sign("RSA-SHA256", metadata, privateKey).toString("base64")}\n`);
+    return { body: pointerBytes({ version }, metadata, signature), objects: [
+      [`releases/stable/${version}/ctx-release-metadata.env`, metadata],
+      [`releases/stable/${version}/ctx-release-metadata.env.sig`, signature],
+    ] };
+  };
+  const recovery = signedRelease("2.2.1");
+  const latest = signedRelease("2.2.2");
+  const expectedLegacy = digest(bridgePointer);
+  const compatibleEntries = [[OLD, pointer()], ["releases/stable/latest.json", legacy],
+    [LEGACY, bridgePointer], [CURRENT, pointer("2.2.0")], ...recovery.objects, ...latest.objects];
+  const promote = (s, expected = expectedLegacy) => promoteCompatiblePointer(s.request, compatible, recovery.body, expected);
+  const completed = { current: "promoted", legacy: "promoted", current_version: "2.2.1",
+    current_sha256: digest(recovery.body) };
+
+  const recovering = storage(compatibleEntries);
+  assert.deepEqual(await promote(recovering), completed);
+  assert.deepEqual(recovering.puts, [CURRENT, LEGACY]);
+  assert.deepEqual(recovering.objects.get(CURRENT), recovery.body);
+  assert.deepEqual(recovering.objects.get(LEGACY), recovery.body);
+  assert.deepEqual(recovering.objects.get(OLD), pointer());
+  assert.deepEqual(recovering.objects.get("releases/stable/latest.json"), legacy);
+  recovering.puts.length = 0;
+  assert.deepEqual(await promote(recovering), { ...completed, current: "existing-identical", legacy: "existing-identical" });
+  assert.deepEqual(recovering.puts, []);
+
+  // Normal full-size releases advance v3 alone. Repeating the compatible cutover
+  // authenticates that newer destination and never rewinds it to the v2 target.
+  const fullSize = { ...compatible, version: "2.2.2", targets: new Map(compatible.targets) };
+  fullSize.targets.set(HOSTED_MANAGED_PAIR_TARGETS[0].id, { core: { artifact: { body: { length: 200 * 1024 * 1024 } } } });
+  validatePromotion(fullSize, "current");
+  await promoteCurrentPointer(recovering.request, fullSize, latest.body);
+  assert.deepEqual(recovering.puts, [CURRENT]);
+  assert.deepEqual(recovering.objects.get(LEGACY), recovery.body);
+  recovering.puts.length = 0;
+  assert.deepEqual(await promote(recovering), { current: "existing-newer", legacy: "existing-identical",
+    current_version: "2.2.2", current_sha256: digest(latest.body) });
+  assert.deepEqual(recovering.puts, []);
+  await assert.rejects(promoteTransitionPointer(recovering.request, { version: "2.0.5" }, destination), /not in.*transition/u);
+  await assert.rejects(cutOverLegacyPointer(recovering.request, bridgeLoaded, bridgePointer, digest(recovery.body)), /changed/u);
+  assert.deepEqual(recovering.puts, []);
+
+  const initializeCurrent = storage(compatibleEntries.filter(([key]) => key !== CURRENT));
+  assert.equal((await promote(initializeCurrent)).current, "created");
+  assert.deepEqual(initializeCurrent.puts, [CURRENT, LEGACY]);
+
+  // Every accepted partial write is resumable without changing immutable inputs
+  // or the caller's expected-old-v2 digest, even after a lost PUT response.
+  for (const failedAt of [CURRENT, LEGACY, "after-legacy"]) {
+    const interrupted = storage(compatibleEntries, failedAt);
+    const request = async (method, bucket, key, ...args) => {
+      const response = await interrupted.request(method, bucket, key, ...args);
+      return failedAt === "after-legacy" && method === "PUT" && key === LEGACY
+        ? new Response(null, { status: 503 }) : response;
+    };
+    await assert.rejects(promote({ request }), /PUT failed/u);
+    assert.deepEqual(interrupted.objects.get(LEGACY), failedAt === "after-legacy" ? recovery.body : bridgePointer);
+    assert.deepEqual(interrupted.objects.get(CURRENT), failedAt === CURRENT ? pointer("2.2.0") : recovery.body);
+    const retry = storage([...interrupted.objects]);
+    await promote(retry);
+    assert.deepEqual(retry.puts, failedAt === CURRENT ? [CURRENT, LEGACY] : failedAt === LEGACY ? [LEGACY] : []);
+  }
+  const newerResume = storage([...compatibleEntries, [CURRENT, latest.body]]);
+  assert.deepEqual(await promote(newerResume), { current: "existing-newer", legacy: "promoted",
+    current_version: "2.2.2", current_sha256: digest(latest.body) });
+  assert.deepEqual(newerResume.puts, [LEGACY]);
+
+  for (const legacyBody of [null, Buffer.from("bad-json"), pointer("2.2.2"),
+    pointer("2.2.1", { metadata_sha256: "c".repeat(64) })]) {
+    const invalid = storage(compatibleEntries);
+    if (legacyBody === null) invalid.objects.delete(LEGACY);
+    else invalid.objects.set(LEGACY, legacyBody);
+    await assert.rejects(promote(invalid, legacyBody === null ? expectedLegacy : digest(legacyBody)));
+    assert.deepEqual(invalid.puts, []);
+  }
+  for (const expected of ["a".repeat(64), "invalid"]) {
+    const invalid = storage(compatibleEntries);
+    await assert.rejects(promote(invalid, expected), /expected/u);
+    assert.deepEqual(invalid.puts, []);
+  }
+  const wrongCandidate = storage(compatibleEntries);
+  await assert.rejects(promoteCompatiblePointer(wrongCandidate.request, compatible, latest.body, expectedLegacy), /exact pointer/u);
+  assert.deepEqual(wrongCandidate.puts, []);
+
+  const legacyChanged = storage(compatibleEntries);
+  let compatibleLegacyReads = 0;
+  const changeBeforeCas = async (method, bucket, key, ...args) => {
+    if (method === "GET" && key === LEGACY && ++compatibleLegacyReads === 2) legacyChanged.objects.set(LEGACY, pointer("1.6.6"));
+    return legacyChanged.request(method, bucket, key, ...args);
+  };
+  await assert.rejects(promote({ request: changeBeforeCas }), /expected older legacy pointer/u);
+  assert.deepEqual(legacyChanged.puts, [CURRENT]);
+  assert.deepEqual(legacyChanged.objects.get(LEGACY), pointer("1.6.6"));
+
+  for (const winner of [pointer("1.6.6"), recovery.body]) {
+    const racedLegacy = storage(compatibleEntries);
+    let attempts = 0;
+    const request = async (method, bucket, key, body, headers) => {
+      if (method === "PUT" && key === LEGACY) {
+        attempts += 1;
+        assert.equal(headers["if-match"], '"stored"');
+        racedLegacy.objects.set(LEGACY, winner);
+        return new Response(null, { status: 412 });
+      }
+      return racedLegacy.request(method, bucket, key, body, headers);
+    };
+    if (winner === recovery.body) assert.equal((await promote({ request })).legacy, "existing-identical");
+    else await assert.rejects(promote({ request }), /expected older legacy pointer/u);
+    assert.equal(attempts, 1);
+    assert.deepEqual(racedLegacy.objects.get(LEGACY), winner);
+  }
+
+  const advancedCurrent = storage(compatibleEntries);
+  const advanceDuringCas = async (method, bucket, key, body, headers) => {
+    if (method === "PUT" && key === CURRENT) {
+      assert.equal(headers["if-match"], '"stored"');
+      advancedCurrent.objects.set(CURRENT, latest.body);
+      return new Response(null, { status: 412 });
+    }
+    return advancedCurrent.request(method, bucket, key, body, headers);
+  };
+  await assert.rejects(promote({ request: advanceDuringCas }), /cannot be replaced/u);
+  assert.deepEqual(advancedCurrent.objects.get(LEGACY), bridgePointer);
+  assert.equal((await promote(advancedCurrent)).current, "existing-newer");
+  assert.deepEqual(advancedCurrent.puts, [LEGACY]);
+
+  for (const alter of [
+    (s) => s.objects.delete(latest.objects[0][0]),
+    (s) => s.objects.set(latest.objects[0][0], Buffer.from("changed")),
+    (s) => {
+      const wrong = signedRelease("2.2.2", Buffer.from("CTX_RELEASE_VERSION=2.2.1\nCTX_RELEASE_CHANNEL=stable\n"));
+      s.objects.set(CURRENT, wrong.body);
+      for (const [key, bytes] of wrong.objects) s.objects.set(key, bytes);
+    },
+    (s) => {
+      const signature = Buffer.from(`${crypto.sign("RSA-SHA256", Buffer.from("other"), privateKey).toString("base64")}\n`);
+      s.objects.set(CURRENT, pointerBytes({ version: "2.2.2" }, latest.objects[0][1], signature));
+      s.objects.set(latest.objects[1][0], signature);
+    },
+  ]) {
+    const invalid = storage([...compatibleEntries, [CURRENT, latest.body]]);
+    alter(invalid);
+    await assert.rejects(promote(invalid), /metadata|verify/u);
+    assert.deepEqual(invalid.puts, []);
+    assert.deepEqual(invalid.objects.get(LEGACY), bridgePointer);
+  }
+
+  for (const changedDestination of [signedRelease("2.0.5"),
+    signedRelease("2.2.1", Buffer.from("CTX_RELEASE_VERSION=2.2.1\nCTX_RELEASE_CHANNEL=stable\nCHANGED=1\n"))]) {
+    const changed = storage([...compatibleEntries, [CURRENT, recovery.body], ...changedDestination.objects]);
+    let currentReads = 0;
+    const request = async (method, bucket, key, ...args) => {
+      if (method === "GET" && key === CURRENT && ++currentReads === 3) changed.objects.set(CURRENT, changedDestination.body);
+      return changed.request(method, bucket, key, ...args);
+    };
+    await assert.rejects(promote({ request }), /at or above|differs from the selected compatible/u);
+    assert.deepEqual(changed.puts, []);
+  }
+  const badLegacyReadback = storage(compatibleEntries);
+  let legacyWritten = false;
+  const corruptLegacyReadback = async (method, bucket, key, ...args) => {
+    if (method === "GET" && key === LEGACY && legacyWritten) return new Response(bridgePointer);
+    const response = await badLegacyReadback.request(method, bucket, key, ...args);
+    if (method === "PUT" && key === LEGACY) legacyWritten = true;
+    return response;
+  };
+  await assert.rejects(promote({ request: corruptLegacyReadback }), /readback failed/u);
+  assert.deepEqual(badLegacyReadback.objects.get(CURRENT), recovery.body);
+  assert.deepEqual(badLegacyReadback.objects.get(LEGACY), recovery.body);
+  assert.equal((await promote(badLegacyReadback)).legacy, "existing-identical");
+
+  const boundary = { ...compatible, targets: new Map(HOSTED_MANAGED_PAIR_TARGETS.map(({ id }) =>
+    [id, { core: { artifact: { body: { length: 128 * 1024 * 1024 } } } }])) };
+  validatePromotion(boundary, "compatible");
+  validatePromotion({ ...boundary, version: "2.0.5" }, "compatible");
+  for (const version of ["1.6.5", "2.0.4", "2.2.1-rc.1"]) {
+    assert.throws(() => validatePromotion({ ...boundary, version }, "compatible"), /v3 feed|canonical SemVer/u);
+  }
+  for (const { id } of HOSTED_MANAGED_PAIR_TARGETS) {
+    for (const length of [undefined, 0, 128 * 1024 * 1024 + 1]) {
+      const invalid = { ...boundary, targets: new Map(boundary.targets) };
+      if (length === undefined) invalid.targets.delete(id);
+      else invalid.targets.set(id, { core: { artifact: { body: { length } } } });
+      assert.throws(() => validatePromotion(invalid, "compatible"), /download limit/u);
+    }
+  }
 } finally { mock.restoreAll(); }

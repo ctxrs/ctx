@@ -11,8 +11,8 @@ use crate::upgrade::{
         HostedTransactionAction, HostedTransactionArgs,
     },
     state::{
-        begin_manual_attempt_locked, finish_hosted_migration_locked, write_state_error_locked,
-        write_state_phase_locked, UpgradeLock,
+        begin_manual_attempt_locked, write_state_error_locked, write_state_phase_locked,
+        UpgradeLock,
     },
     DaemonUpgradeLease, DaemonUpgradePort, UpgradeEngine,
 };
@@ -34,8 +34,10 @@ impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
         let upgrade_lock = UpgradeLock::acquire_for_installation(&args.install_path)?;
         // The lock excludes a running writer; interrupted transactions still
         // own their installation and scheduler until their owner recovers.
-        validate_hosted_migration_under_installation_lock(&args)?;
-        let attempt = begin_manual_attempt_locked(data_root, &upgrade_lock, "hosted_migration")?;
+        let attempt = match validate_hosted_migration_under_installation_lock(&args)? {
+            Some(attempt) => attempt,
+            None => begin_manual_attempt_locked(data_root, &upgrade_lock, "hosted_migration")?,
+        };
         let install_path = args.install_path.clone();
         write_state_phase_locked(&upgrade_lock, &attempt, "quiescing")?;
         let handoff =
@@ -57,9 +59,8 @@ impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
                     return Err(error);
                 }
             };
-        match run_hosted_transaction_under_upgrade_lock(args, &upgrade_lock) {
+        match run_hosted_transaction_under_upgrade_lock(args, &upgrade_lock, &attempt) {
             Ok(()) => {
-                finish_hosted_migration_locked(&upgrade_lock, &attempt)?;
                 cleanup_legacy_managed_pair_under_installation_lock(&install_path)?;
                 handoff.resume_with(&install_path)
             }

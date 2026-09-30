@@ -98,6 +98,10 @@ fn main() {
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data).unwrap();
     rkyv::access::<data::ArchivedData, rkyv::rancor::Error>(&bytes)
         .expect("valid generated count tables");
+    #[cfg(feature = "compact-tokenizer")]
+    let count_len = bytes.len();
+    #[cfg(feature = "compact-tokenizer")]
+    write_compressed(&dir, "count.rkyv", &bytes);
     std::fs::write(dir.join("count.rkyv"), bytes).unwrap();
     use regex_automata::dfa::{Automaton, StartKind, dense};
     let dfa = dense::Builder::new()
@@ -132,10 +136,39 @@ fn main() {
     assert_eq!(checked.start_kind(), StartKind::Anchored);
     assert_eq!(checked.pattern_len(), 3);
     assert!(checked.is_utf8() && !checked.has_empty());
+    #[cfg(feature = "compact-tokenizer")]
+    {
+        write_compressed(&dir, "pre.dense", serialized);
+        let pre_len = serialized.len();
+        let pre_offset = count_len.next_multiple_of(16);
+        let total_len = pre_offset + pre_len;
+        std::fs::write(
+            dir.join("tokenizer_sizes.rs"),
+            format!(
+                "const COUNT_LEN: usize = {count_len};\n\
+                 const PRE_LEN: usize = {pre_len};\n\
+                 const PRE_OFFSET: usize = {pre_offset};\n\
+                 const TOTAL_LEN: usize = {total_len};\n"
+            ),
+        )
+        .unwrap();
+    }
     std::fs::write(dir.join("pre.dense"), serialized).unwrap();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/tokenizer_data.rs");
 }
+
+#[cfg(feature = "compact-tokenizer")]
+fn write_compressed(dir: &std::path::Path, name: &str, bytes: &[u8]) {
+    let compressed = zstd::bulk::compress(bytes, 3).expect("compress tokenizer asset");
+    let mut decoded = vec![0; bytes.len()];
+    let len = zstd::bulk::decompress_to_buffer(&compressed, &mut decoded)
+        .expect("verify compressed tokenizer asset");
+    assert_eq!(len, bytes.len());
+    assert_eq!(decoded.as_slice(), bytes);
+    std::fs::write(dir.join(format!("{name}.zst")), compressed).unwrap();
+}
+
 fn patterns() -> [String; 3] {
     let pattern=[
             r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?",

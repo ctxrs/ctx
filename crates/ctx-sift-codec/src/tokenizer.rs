@@ -7,10 +7,16 @@ use regex_automata::{
 };
 #[path = "tokenizer_data.rs"]
 mod data;
+#[cfg(feature = "compact-tokenizer")]
+#[path = "tokenizer_storage.rs"]
+mod storage;
+#[cfg(not(feature = "compact-tokenizer"))]
 #[repr(C, align(16))]
 struct Aligned<const N: usize>([u8; N]);
+#[cfg(not(feature = "compact-tokenizer"))]
 static COUNT_DATA: Aligned<{ include_bytes!(concat!(env!("OUT_DIR"), "/count.rkyv")).len() }> =
     Aligned(*include_bytes!(concat!(env!("OUT_DIR"), "/count.rkyv")));
+#[cfg(not(feature = "compact-tokenizer"))]
 static PRE_DATA: Aligned<{ include_bytes!(concat!(env!("OUT_DIR"), "/pre.dense")).len() }> =
     Aligned(*include_bytes!(concat!(env!("OUT_DIR"), "/pre.dense")));
 struct CountTables {
@@ -19,6 +25,10 @@ struct CountTables {
 impl CountTables {
     fn new() -> Self {
         Self {
+            #[cfg(feature = "compact-tokenizer")]
+            data: rkyv::access::<data::ArchivedData, rkyv::rancor::Error>(storage::count_bytes())
+                .expect("valid decompressed count tables"),
+            #[cfg(not(feature = "compact-tokenizer"))]
             // SAFETY: build.rs validates these exact bytes with the shared schema
             // and pinned LE/aligned/32-bit rkyv format. This immutable static is
             // 16-byte aligned, covering every archived type in the schema. The
@@ -217,6 +227,14 @@ impl CountTokenizer {
     pub(crate) fn new() -> Self {
         Self {
             tables: CountTables::new(),
+            #[cfg(feature = "compact-tokenizer")]
+            pre: {
+                let bytes = storage::pre_bytes();
+                let (dfa, consumed) = DFA::from_bytes(bytes).expect("valid decompressed pre-tokenizer");
+                assert_eq!(consumed, bytes.len());
+                dfa
+            },
+            #[cfg(not(feature = "compact-tokenizer"))]
             // SAFETY: build.rs validates these exact, padding-stripped bytes
             // with the same pinned DFA format and matching host/target endian.
             // PRE_DATA is immutable and aligned beyond the required u32 boundary.
@@ -274,7 +292,11 @@ pub(crate) fn o200k_base() -> &'static CountTokenizer {
 #[cfg(test)]
 #[test]
 fn embedded_count_archive_is_valid() {
-    let checked = rkyv::access::<data::ArchivedData, rkyv::rancor::Error>(&COUNT_DATA.0)
+    #[cfg(not(feature = "compact-tokenizer"))]
+    let bytes = &COUNT_DATA.0[..];
+    #[cfg(feature = "compact-tokenizer")]
+    let bytes = storage::count_bytes();
+    let checked = rkyv::access::<data::ArchivedData, rkyv::rancor::Error>(bytes)
         .expect("valid embedded count tables");
     assert!(std::ptr::eq(checked, CountTables::new().data));
 }
@@ -282,8 +304,12 @@ fn embedded_count_archive_is_valid() {
 #[cfg(test)]
 #[test]
 fn embedded_pre_tokenizer_is_valid() {
-    let (checked, consumed) = DFA::from_bytes(&PRE_DATA.0).unwrap();
-    assert_eq!(consumed, PRE_DATA.0.len());
+    #[cfg(not(feature = "compact-tokenizer"))]
+    let bytes = &PRE_DATA.0[..];
+    #[cfg(feature = "compact-tokenizer")]
+    let bytes = storage::pre_bytes();
+    let (checked, consumed) = DFA::from_bytes(bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
     assert_eq!(
         checked.start_kind(),
         regex_automata::dfa::StartKind::Anchored

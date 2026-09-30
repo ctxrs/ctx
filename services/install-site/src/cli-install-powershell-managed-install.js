@@ -179,7 +179,7 @@ function Assert-LegacyManagedUpgradeResult([object]$Result, [string]$PriorVersio
     return [string]$Result.status
 }
 
-function Test-InstalledTargetIdentity {
+function Test-InstalledTargetIdentity([object]$HostedReceipt = $null) {
     try {
         $binaryGuard = [CtxInstallerPathGuard]::AcquireLeaf($installPath)
         $markerGuard = [CtxInstallerPathGuard]::AcquireLeaf($markerPath)
@@ -197,6 +197,16 @@ function Test-InstalledTargetIdentity {
             }
             $installedMarker = [IO.File]::ReadAllText($markerPath) |
                 ConvertFrom-Json
+            if ($null -ne $HostedReceipt) {
+                # A verified retained journal publishes its original attempt's
+                # marker, even when this installer was fetched with a new ID.
+                $markerDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $markerPath).Hash.ToLowerInvariant()
+                if ($installedMarker.install_attempt_id -isnot [string] -or
+                    $installedMarker.install_attempt_id -cne $HostedReceipt.attempt_id -or
+                    $markerDigest -cne $HostedReceipt.marker_sha256) {
+                    return $false
+                }
+            }
             return (
                 ($releasePhase -cne "final" -or -not $managedPair -or $installedMarker.managed_pair -eq $true) -and
                 $installedMarker.schema_version -eq 1 -and
@@ -251,7 +261,7 @@ function Invoke-HostedInstallTransaction([switch]$Migrate) {
         $result.status -isnot [string] -or
         $result.status -cne "committed" -or
         $result.attempt_id -isnot [string] -or
-        $result.attempt_id -cne $installAttemptId -or
+        [string]::IsNullOrWhiteSpace($result.attempt_id) -or
         $result.install_path -isnot [string] -or
         -not (Test-ManagedInstallPathIdentity -Candidate $result.install_path -Expected $installPath) -or
         $result.binary_sha256 -isnot [string] -or
@@ -260,7 +270,7 @@ function Invoke-HostedInstallTransaction([switch]$Migrate) {
         $result.marker_sha256 -cnotmatch '^[0-9a-f]{64}$') {
         Fail "ctx returned invalid hosted install transaction proof"
     }
-    if (-not (Test-InstalledTargetIdentity)) {
+    if (-not (Test-InstalledTargetIdentity -HostedReceipt $result)) {
         Fail "ctx hosted install transaction did not publish the signed managed identity"
     }
     Write-SuccessReceiptWarnings -Warnings $hostedProof.Warnings

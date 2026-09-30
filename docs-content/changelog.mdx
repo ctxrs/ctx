@@ -8,6 +8,20 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.2.1
+
+Released: 2026-09-30
+
+### Fixed
+
+- Rerunning the installer can recover early 2.x installations that were checking an older update channel. Existing history, settings and disabled integrations are preserved.
+- Interrupted upgrades finish their installation transaction before clearing recovery state, and retain the daemon restart acknowledgements needed to resume other data roots.
+- PowerShell installer retries use the original verified installation attempt.
+
+### Upgrade compatibility
+
+- This release is a full-feature compatibility bridge for older updaters with a 128 MiB executable limit. It uses compact parser tables and compressed tokenizer data. Graph parsing can be slower, and the first Sift operation initializes the tokenizer in memory. Subsequent upgrades use the current release channel and return to the normal build.
+
 ## 2.2.0
 
 Released: 2026-09-30
