@@ -58,7 +58,7 @@ fn remove_retired_upgrade_fake_ip_key(path: &Path, text: &str) -> Result<Option<
         return Ok(None);
     };
     let updated = remove_config_line(text, retired.line)?;
-    validated_persisted_config(path, &updated)
+    AppConfig::from_saved_text(path, &updated)
         .with_context(|| format!("validate migrated {}", path.display()))?;
     Ok((updated != text).then_some(updated))
 }
@@ -558,7 +558,15 @@ fn config_path_for_mutation(data_root: &Path) -> Result<PathBuf> {
 }
 
 fn read_config_text(path: &Path) -> Result<String> {
-    Ok(read_config_text_migrating_retired_controls_lock_held(path)?.unwrap_or_default())
+    let text = read_optional_config_text(path)?.unwrap_or_default();
+    let Some(updated) = remove_retired_upgrade_fake_ip_key(path, &text)? else {
+        return Ok(text);
+    };
+    // Explicit mutations must validate source availability before even the
+    // compatibility rewrite; ordinary loads use the read validator above.
+    validated_persisted_config(path, &updated)?;
+    let _ = write_config_durably(path, updated.as_bytes());
+    Ok(updated)
 }
 
 fn validated_persisted_config(path: &Path, text: &str) -> Result<AppConfig> {

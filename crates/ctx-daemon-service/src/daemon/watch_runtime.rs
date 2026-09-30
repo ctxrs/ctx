@@ -70,6 +70,8 @@ pub(super) struct DaemonWatchRuntime {
     pub(super) catalog: DaemonWatchCatalog,
     pub(super) file_watcher: Option<DaemonFileWatcher>,
     catalog_refresh_pending: bool,
+    // A configuration change awaiting submission, including changes arriving
+    // while an older refresh still owns the queue.
     provider_root_refresh_pending: bool,
     config: &'static dyn crate::DaemonConfigPort,
 }
@@ -92,6 +94,60 @@ impl DaemonWatchRuntime {
     #[cfg(test)]
     pub(super) fn provider_root_refresh_pending_for_test(&self) -> bool {
         self.provider_root_refresh_pending
+    }
+
+    pub(super) fn enqueue_pending_provider_root_refresh(
+        &mut self,
+        data_root: &Path,
+        source_refresh: Option<&CoreRefreshEngine>,
+        now_ms: u64,
+    ) {
+        let Some(source_refresh) = source_refresh else {
+            return;
+        };
+        if source_refresh.has_pending_request()
+            || (!self.provider_root_refresh_pending
+                && source_refresh.next_dirty_route_due_in_ms(now_ms) != Some(0))
+        {
+            return;
+        }
+        let Some(desired_digest) = self
+            .catalog
+            .snapshot()
+            .and_then(|catalog| catalog.provider_root_config_digest().map(str::to_owned))
+        else {
+            return;
+        };
+        let published_matches = match pin_published_generation(data_root) {
+            Ok(Some(published)) => {
+                published
+                    .verified_index()
+                    .manifest()
+                    .provider_root_config_digest()
+                    == desired_digest
+            }
+            Ok(None) => false,
+            Err(error) => {
+                let _ = write_degraded_wakeup_receipt(data_root, &error);
+                false
+            }
+        };
+        if published_matches {
+            self.provider_root_refresh_pending = false;
+        } else {
+            match source_refresh.enqueue_provider_root_refresh(data_root, now_ms) {
+                Ok(true) => {
+                    // Submission consumes this configuration demand. A failed
+                    // replacement may retain the old digest; only a new config
+                    // demand or eligible route work may retry that cohort.
+                    self.provider_root_refresh_pending = false;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let _ = write_degraded_wakeup_receipt(data_root, &error);
+                }
+            }
+        }
     }
 
     fn schedule_pending_missing_routes(&self, data_root: &Path, refresh: &CoreRefreshEngine) {
@@ -205,38 +261,6 @@ impl DaemonWatchRuntime {
                     catalog_published = true;
                 }
                 Err(error) => {
-                    let _ = write_degraded_wakeup_receipt(data_root, &error);
-                }
-            }
-        }
-
-        if self.provider_root_refresh_pending {
-            let desired_digest = self
-                .catalog
-                .snapshot()
-                .and_then(|catalog| catalog.provider_root_config_digest().map(str::to_owned));
-            let published_matches = desired_digest.as_deref().is_some_and(|desired| {
-                match pin_published_generation(data_root) {
-                    Ok(Some(published)) => {
-                        published
-                            .verified_index()
-                            .manifest()
-                            .provider_root_config_digest()
-                            == desired
-                    }
-                    Ok(None) => false,
-                    Err(error) => {
-                        let _ = write_degraded_wakeup_receipt(data_root, &error);
-                        false
-                    }
-                }
-            });
-            let refresh_pending =
-                source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
-            if published_matches && !refresh_pending {
-                self.provider_root_refresh_pending = false;
-            } else if let Some(source_refresh) = source_refresh {
-                if let Err(error) = source_refresh.enqueue_periodic(data_root) {
                     let _ = write_degraded_wakeup_receipt(data_root, &error);
                 }
             }
@@ -369,6 +393,11 @@ impl DaemonWatchRuntime {
                 pending_missing_schedules = pending_missing_schedules.saturating_add(1);
             }
         }
+        self.enqueue_pending_provider_root_refresh(
+            data_root,
+            source_refresh,
+            source_route_ledger_now_ms(),
+        );
         pending_missing_schedules
     }
 }

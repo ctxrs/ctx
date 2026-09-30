@@ -333,6 +333,25 @@ impl DirtySourceRoutes {
             .collect()
     }
 
+    /// Full-catalog maintenance may include clean routes, but must not turn
+    /// a peer's event into permission to retry blocked or deferred work.
+    pub(super) fn all_routes_ready(&self, now_ms: u64) -> bool {
+        self.dirty.values().all(|state| {
+            !state.permanently_blocked && state.in_flight.is_none() && state.due_at_ms() <= now_ms
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn elapse_retry_backoff_for_test(
+        &mut self,
+        route: &SourceRouteIdentity,
+        now_ms: u64,
+    ) -> Option<u64> {
+        let state = self.dirty.get_mut(route)?;
+        let remaining = state.retry_not_before_ms.take()?.saturating_sub(now_ms);
+        Some(remaining)
+    }
+
     /// Admits one eligible route, preferring the oldest dirty route first.
     #[cfg(test)]
     pub(super) fn admit_next(&mut self, now_ms: u64) -> Option<DirtySourceRouteAdmission> {

@@ -1,5 +1,7 @@
 use super::*;
 
+mod previous_recovery;
+
 enum BaseGenerationExpectation<'a> {
     Unchecked,
     Exact(Option<&'a str>),
@@ -87,7 +89,7 @@ impl GenerationWriter {
             ctx_history_index_format::clear_manifest_cache_for_root(&root)?;
         }
 
-        let (active_authority, mut pointer_requires_rebuild, incompatible_active_present) =
+        let (mut active_authority, mut pointer_requires_rebuild, incompatible_active_present) =
             match load_active_publication_authority(&root) {
                 Ok(pointer) => (pointer, false, false),
                 Err(error) if generation_incompatibility_requires_rebuild(&error) => {
@@ -121,7 +123,7 @@ impl GenerationWriter {
                 }
             }
         }
-        let active_pointer_fence =
+        let mut active_pointer_fence =
             ctx_history_index_generation::ActiveGenerationPointerFence::capture(
                 &root,
                 active_authority
@@ -130,31 +132,54 @@ impl GenerationWriter {
             )?;
         let mut retained_generation_directories = Default::default();
         if !pointer_requires_rebuild {
-            let active_pointer_ref = active_authority
-                .as_ref()
-                .map(ActivePublicationAuthority::pointer);
-            let retention_lease = load_generation_retention_lease(&root)?;
-            retained_generation_directories = reclaim_inactive_generation_directories(
-                &root,
-                active_pointer_ref,
-                retention_lease.as_ref(),
-            )?;
-            let mut retained_generation_ids = active_pointer_ref
-                .into_iter()
-                .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
-                .map(|slot| slot.generation_id().to_owned())
-                .collect::<Vec<_>>();
-            retained_generation_ids.extend(
-                retention_lease
+            loop {
+                let active_pointer_ref = active_authority
                     .as_ref()
-                    .map(|lease| lease.generation_id().to_owned()),
-            );
-            reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
-            reclaim_unreferenced_certifications(
-                &root,
-                active_pointer_ref,
-                retention_lease.as_ref(),
-            )?;
+                    .map(ActivePublicationAuthority::pointer);
+                let retention_lease = load_generation_retention_lease(&root)?;
+                retained_generation_directories = reclaim_inactive_generation_directories(
+                    &root,
+                    active_pointer_ref,
+                    retention_lease.as_ref(),
+                )?;
+                let mut retained_generation_ids = active_pointer_ref
+                    .into_iter()
+                    .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
+                    .map(|slot| slot.generation_id().to_owned())
+                    .collect::<Vec<_>>();
+                retained_generation_ids.extend(
+                    retention_lease
+                        .as_ref()
+                        .map(|lease| lease.generation_id().to_owned()),
+                );
+                if let Err(error) = reclaim_unreferenced_manifests(&root, &retained_generation_ids)
+                {
+                    previous_recovery::retire_missing_previous_base(
+                        &root,
+                        active_authority.as_ref(),
+                        &mut active_pointer_fence,
+                        retention_lease.as_ref(),
+                        error.into(),
+                    )?;
+                    active_authority = load_active_publication_authority(&root)?;
+                    active_pointer_fence =
+                        ctx_history_index_generation::ActiveGenerationPointerFence::capture(
+                            &root,
+                            active_authority
+                                .as_ref()
+                                .map(ActivePublicationAuthority::pointer),
+                        )?;
+                    // Retirement removes the only eligible previous slot, so this
+                    // can recover once. Resume ordinary lease-aware reclamation.
+                    continue;
+                }
+                reclaim_unreferenced_certifications(
+                    &root,
+                    active_pointer_ref,
+                    retention_lease.as_ref(),
+                )?;
+                break;
+            }
         }
 
         let writer = (|| -> Result<Self> {

@@ -42,27 +42,19 @@ pub(super) fn discover<B: ProviderRuntimeBinding>(
     adapter: &ClaudeJsonlAdapter<B>,
     root: &Path,
 ) -> Result<ProviderJsonlInventory> {
-    match fs::symlink_metadata(root) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => {
-            return Err(CaptureError::InvalidProviderTranscriptPath {
-                path: root.to_path_buf(),
-                reason: "Claude source-backed discovery requires a projects directory",
-            });
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let authority = match ProviderSourceRoot::open(root) {
+        Ok(authority) => Arc::new(authority),
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return ProviderJsonlInventory::missing(adapter.provider(), root);
         }
-        Err(error) => return Err(error.into()),
-    }
-    let canonical_root = fs::canonicalize(root)?;
-    let projects_root = claude_projects_root(&canonical_root);
+        Err(error) => return Err(error),
+    };
+    let projects_root = claude_projects_root(authority.named_path());
     let source_root_lineage = adapter.source_root_lineage;
-    let authority = Arc::new(ProviderSourceRoot::open(&canonical_root)?);
     let mut observed = Vec::new();
     let mut unreadable = Vec::new();
     visit_bounded_tree_files_frozen::<CaptureError, _>(
-        &canonical_root,
+        authority.named_path(),
         &mut |candidate| {
             candidate
                 .path()

@@ -104,7 +104,7 @@ fn pi_session_env_replaces_agent_config_and_default_without_trimming() {
 
 #[cfg(unix)]
 #[test]
-fn pi_selected_link_is_manual_and_does_not_restore_default() {
+fn pi_selected_directory_relocation_wins_and_file_link_does_not_restore_default() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
@@ -115,6 +115,17 @@ fn pi_selected_link_is_manual_and_does_not_restore_default() {
     fs::create_dir_all(&cwd).unwrap();
     symlink(&target, cwd.join("linked")).unwrap();
     write(&home.join(".pi/agent/sessions/default.jsonl"), "{}\n");
+    let report = resolve(
+        &context(&home, &cwd).with_env("PI_CODING_AGENT_SESSION_DIR", "linked"),
+        spec(CaptureProvider::Pi),
+    );
+    assert_eq!(source_paths(&report), vec![cwd.join("linked")]);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Empty);
+    assert!(report.issues.is_empty());
+
+    fs::remove_file(cwd.join("linked")).unwrap();
+    write(&target.join("session.jsonl"), "{}\n");
+    symlink(target.join("session.jsonl"), cwd.join("linked")).unwrap();
     let report = resolve(
         &context(&home, &cwd).with_env("PI_CODING_AGENT_SESSION_DIR", "linked"),
         spec(CaptureProvider::Pi),

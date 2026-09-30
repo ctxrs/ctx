@@ -419,7 +419,7 @@ fn warp_database_failures_keep_cli_classification() {
 #[test]
 fn unsafe_default_source_is_rejected_before_inventory() {
     let temp = daemon_test_root();
-    write_symlinked_claude_inventory_source(&temp);
+    write_file_link_claude_root(&temp);
 
     let error = source_refresh_failure(ctx(&temp).args([
         "import",
@@ -463,7 +463,7 @@ fn doctor_reports_a_rejected_root_before_an_import_is_attempted() {
     let before = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(before["ok"], true, "{before:#}");
 
-    write_symlinked_claude_inventory_source(&temp);
+    write_file_link_claude_root(&temp);
 
     let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(doctor["ok"], false, "{doctor:#}");
@@ -493,14 +493,9 @@ fn doctor_reports_a_rejected_root_before_an_import_is_attempted() {
 }
 
 #[cfg(unix)]
-fn write_symlinked_claude_inventory_source(temp: &TempDir) {
-    let target = temp.path().join("claude-projects-target");
-    fs::create_dir_all(&target).unwrap();
-    fs::write(
-        target.join("symlinked-session.jsonl"),
-        r#"{"sessionId":"symlinked","type":"user","message":{"role":"user","content":"inventory failure"}}"#,
-    )
-    .unwrap();
+fn write_file_link_claude_root(temp: &TempDir) {
+    let projects = write_native_claude_fixture(temp, "rejected file link");
+    let target = Path::new(&projects).join("-workspace/claude-cli-native.jsonl");
     let claude = temp.path().join(".claude");
     fs::create_dir_all(&claude).unwrap();
     std::os::unix::fs::symlink(target, claude.join("projects")).unwrap();

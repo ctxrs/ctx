@@ -685,7 +685,7 @@ fn naming_a_failing_automatic_home_carries_it_while_named_peer_advances() {
 
 #[cfg(unix)]
 #[test]
-fn unchanged_symlinked_configured_root_retains_history_while_peer_advances() {
+fn relocated_configured_root_preserves_routes_and_advances_with_peer() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().unwrap();
@@ -772,6 +772,23 @@ fn unchanged_symlinked_configured_root_retains_history_while_peer_advances() {
     fs::rename(&retained_home, &displaced_home).unwrap();
     symlink(&displaced_home, &retained_home).unwrap();
     fs::write(
+        &retained_session,
+        format!(
+            "{}{}",
+            claude_message(
+                "019fb710-0000-7000-8000-000000000717",
+                "019fb700-0000-7000-8000-000000000717",
+                "retainedsymlinkfixture",
+            ),
+            claude_message(
+                "019fb710-0000-7000-8000-000000000720",
+                "019fb700-0000-7000-8000-000000000717",
+                "advancedrelocatedfixture",
+            )
+        ),
+    )
+    .unwrap();
+    fs::write(
         &peer_session,
         format!(
             "{}{}",
@@ -789,10 +806,7 @@ fn unchanged_symlinked_configured_root_retains_history_while_peer_advances() {
     )
     .unwrap();
     let report = ctx_history_capture::discover_provider_sources_with_context(&discovery);
-    assert!(report.issues.iter().any(|issue| {
-        issue.provider == CaptureProvider::Claude
-            && issue.kind == DiscoveryIssueKind::SelectorUnreconstructible
-    }));
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
     let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
     refresh_all_provider_sources(
         &discovery,
@@ -817,6 +831,13 @@ fn unchanged_symlinked_configured_root_retains_history_while_peer_advances() {
     assert_eq!(
         published
             .complete_lexical_search("retainedsymlinkfixture", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        published
+            .complete_lexical_search("advancedrelocatedfixture", 10)
             .unwrap()
             .len(),
         1

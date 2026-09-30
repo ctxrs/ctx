@@ -835,7 +835,7 @@ fn fixed_leaf_discovery_is_bounded() {
 
 #[cfg(unix)]
 #[test]
-fn automatic_sources_do_not_follow_symlink_roots() {
+fn automatic_sources_follow_relocated_directory_roots() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
@@ -849,7 +849,7 @@ fn automatic_sources_do_not_follow_symlink_roots() {
     fs::create_dir_all(root.parent().unwrap()).unwrap();
     symlink(&target, &root).unwrap();
     let report = provider_report(&context, CaptureProvider::Antigravity);
-    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unsupported);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Available);
     assert_automatic_role(&report.sources[0], &[b"surface", b"cli"]);
 }
 

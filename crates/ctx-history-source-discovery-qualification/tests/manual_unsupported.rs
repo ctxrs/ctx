@@ -362,7 +362,7 @@ fn firebender_nearest_project_marker_suppresses_outer_project_store() {
 
 #[cfg(unix)]
 #[test]
-fn firebender_linked_idea_marker_fails_closed_and_does_not_touch_target() {
+fn firebender_relocated_idea_directory_preserves_the_store_and_rejects_a_linked_database() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
@@ -374,9 +374,24 @@ fn firebender_linked_idea_marker_fails_closed_and_does_not_touch_target() {
     symlink(&outside, context.cwd().unwrap().join(".idea")).unwrap();
 
     let report = resolve(&context, spec(CaptureProvider::Firebender));
-    assert!(report.sources.is_empty());
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Available);
+    assert_eq!(
+        report.sources[0].path,
+        context
+            .cwd()
+            .unwrap()
+            .join(".idea/firebender/chat_history.db")
+    );
     assert!(report.issues.is_empty());
     assert_eq!(fs::read(&db).unwrap(), before);
+
+    let original = db.with_extension("original");
+    fs::rename(&db, &original).unwrap();
+    symlink(&original, &db).unwrap();
+    let rejected = resolve(&context, spec(CaptureProvider::Firebender));
+    assert_ne!(rejected.sources[0].status, ProviderSourceStatus::Available);
+    assert_eq!(fs::read(&original).unwrap(), before);
 }
 
 #[cfg(unix)]
@@ -483,7 +498,7 @@ fn deepagents_selects_current_over_legacy_and_legacy_only_when_present() {
 
 #[cfg(unix)]
 #[test]
-fn linked_selected_paths_are_not_followed_or_replaced_by_stale_fallbacks() {
+fn relocated_directories_are_admitted_but_file_links_do_not_unlock_stale_fallbacks() {
     use std::os::unix::fs::symlink;
     let temp = tempdir();
     let context = context(temp.path(), DiscoveryPlatform::Linux);
@@ -493,7 +508,7 @@ fn linked_selected_paths_are_not_followed_or_replaced_by_stale_fallbacks() {
     symlink(&outside, context.home().join(".augment/sessions")).unwrap();
     assert_eq!(
         resolve(&context, spec(CaptureProvider::Auggie)).sources[0].status,
-        ProviderSourceStatus::Unknown
+        ProviderSourceStatus::Available
     );
     let target = temp.path().join("current.db");
     write(&target, b"current");

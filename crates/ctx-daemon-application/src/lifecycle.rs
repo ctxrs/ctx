@@ -32,6 +32,7 @@ pub use owner_observation::{active_daemon_matches_current_executable, observe_re
 #[cfg(all(test, target_os = "linux"))]
 mod owner_inspection_tests;
 mod readiness_receipt;
+mod startup_activity;
 #[cfg(test)]
 mod tests;
 use autostart_request::*;
@@ -550,6 +551,7 @@ fn start_daemon_profile_and_wait(
             }
         };
         let expected_failure_pid = child.as_ref().map(Child::id);
+        let child_unreaped = Cell::new(child.is_some());
         let deadline = Cell::new(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT);
         let handoff = wait_for_daemon_handoff_with_cancellation(
             DAEMON_SETUP_HANDOFF_STALL_POLL_ATTEMPTS,
@@ -560,7 +562,7 @@ fn start_daemon_profile_and_wait(
                 {
                     DaemonHandoffObservation::Pending
                 } else {
-                    daemon_handoff_observation(
+                    let observation = daemon_handoff_observation(
                         host,
                         data_root,
                         expected_failure_pid,
@@ -570,7 +572,8 @@ fn start_daemon_profile_and_wait(
                             .get()
                             .saturating_duration_since(Instant::now())
                             .min(DAEMON_HEALTH_TIMEOUT),
-                    )
+                    );
+                    startup_activity::observe(observation, data_root, child_unreaped.get(), config)
                 }
             },
             || {
@@ -580,6 +583,7 @@ fn start_daemon_profile_and_wait(
                 let Some(exit) = child.try_wait()? else {
                     return Ok(None);
                 };
+                child_unreaped.set(false);
                 if exit.success() && daemon_lock_is_active(data_root) {
                     let executable = daemon_autostart_exe()?;
                     if daemon_lock_matches_executable(data_root, &executable)? {

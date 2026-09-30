@@ -150,6 +150,23 @@ fn open_absolute_native(path: &CStr) -> io::Result<File> {
 }
 
 #[cfg(target_os = "linux")]
+pub(super) fn open_directory_relocation(path: &Path) -> Result<OpenedPath, AuthorityOpenError> {
+    let mut named = validated_absolute_path(path)?.into_bytes();
+    if std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        // Resolve a directory link as an ancestor while keeping O_NOFOLLOW on
+        // file leaves. The kernel still resolves the original named route.
+        named.extend_from_slice(b"/.");
+    }
+    let named = CString::new(named).expect("validated pathname contains no NUL bytes");
+    // NO_MAGICLINKS also rejects capabilities reached through ordinary links.
+    // If openat2 is unavailable, only relocated paths fail closed; ordinary
+    // no-follow paths retain open_absolute_handle's component fallback.
+    let file = open_native(libc::AT_FDCWD, &named, libc::RESOLVE_NO_MAGICLINKS)
+        .map_err(|error| classify_open_component_error(libc::AT_FDCWD, &named, None, error))?;
+    classify_opened(file)
+}
+
+#[cfg(target_os = "linux")]
 fn open_native(parent: libc::c_int, path: &CStr, resolve: u64) -> io::Result<File> {
     #[cfg(test)]
     open_tests::before_native_open(path)?;

@@ -78,8 +78,16 @@ pub(super) fn build_automatic_source_backed_registry_from_parts_with_probes(
         if let Err(error) =
             validate_provider_source_roots_outside_data_root(data_root, std::iter::once(&source))
         {
-            let reason = SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap {
-                detail: error.to_string(),
+            let reason = if error.is_source_unavailable() {
+                SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+                    diagnostic: None,
+                    kind: SourceBackedRouteErrorKind::Unavailable,
+                    detail: error.to_string(),
+                }
+            } else {
+                SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap {
+                    detail: error.to_string(),
+                }
             };
             registry.register(SourceBackedRoute::unsupported(
                 source.clone(),

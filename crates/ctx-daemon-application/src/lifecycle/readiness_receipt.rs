@@ -127,7 +127,10 @@ fn daemon_applied_config_matches(status: &Value, expected: &DaemonConfigSnapshot
     daemon_config_value_matches(applied, expected)
 }
 
-fn daemon_requested_config_matches(status: &Value, expected: &DaemonConfigSnapshot) -> bool {
+pub(super) fn daemon_requested_config_matches(
+    status: &Value,
+    expected: &DaemonConfigSnapshot,
+) -> bool {
     let Some(requested) = status
         .get("config_reload")
         .and_then(|reload| reload.get("requested"))

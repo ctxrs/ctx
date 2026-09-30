@@ -144,9 +144,7 @@ fn pinned_generation_rejects_a_pointer_payload_generation_mismatch() {
     let error = pinned_generation_open_error(temp.path(), &expected);
     assert!(matches!(
         error,
-        IndexError::GenerationRetentionLeaseTargetNotRetained {
-            requested_generation_id,
-        } if requested_generation_id == expected
+        IndexError::MissingManifest(generation_id) if generation_id == expected
     ));
     assert_ne!(expected, actual.generation_id);
 }

@@ -52,7 +52,13 @@ fn rejected_filesystems_keep_their_reason_across_root_selection() {
             &base.clone().with_env(variable, "/proc"),
             provider,
         );
-        assert!(report.sources.is_empty(), "{report:?}");
+        assert!(
+            report
+                .sources
+                .iter()
+                .all(|source| source.status == ProviderSourceStatus::Unsupported),
+            "{report:?}"
+        );
         assert_eq!(report.issues.len(), 1, "{report:?}");
         assert_eq!(report.issues[0].reason, reason);
     }

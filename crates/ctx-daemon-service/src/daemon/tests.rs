@@ -1,6 +1,8 @@
 #[path = "semantic_activation_backoff_tests.rs"]
 mod semantic_activation_backoff;
 
+#[path = "tests/provider_root_refresh.rs"]
+mod provider_root_refresh;
 #[path = "tests/semantic_maintenance.rs"]
 mod semantic_maintenance;
 #[path = "tests/startup_recovery.rs"]
@@ -182,7 +184,7 @@ fn daemon_watch_test_catalog_with_provider_root_group(
 }
 
 #[test]
-fn provider_root_config_reload_enqueues_one_full_refresh_even_when_routes_are_unchanged(
+fn pending_root_replacement_config_reload_enqueues_one_full_refresh_even_when_routes_are_unchanged(
 ) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let data_root = temp.path().join("data");
@@ -251,13 +253,14 @@ fn provider_root_config_reload_enqueues_one_full_refresh_even_when_routes_are_un
         },
     );
 
+    watch_runtime.enqueue_pending_provider_root_refresh(&data_root, Some(&coordinator), u64::MAX);
     assert!(
         coordinator.has_pending_request(),
         "exact watch reconciliation cannot publish changed root aliases or source_groups"
     );
     assert!(
-        watch_runtime.provider_root_refresh_pending_for_test(),
-        "enqueue may coalesce into an older running full refresh, so digest demand must stay latched"
+        !watch_runtime.provider_root_refresh_pending_for_test(),
+        "submission consumes this configuration demand; route outcomes own retries"
     );
 
     watch_runtime.reconcile_catalog_and_route_authority_with(

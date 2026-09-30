@@ -300,6 +300,15 @@ impl CoreRefreshEngine {
         self.lock_state().dirty_routes.next_due_at_ms().is_some()
     }
 
+    /// Advances only the retry deadline, preserving the state admission and
+    /// failure finalization must carry across consecutive physical attempts.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn elapse_route_retry_backoff_for_test(&self, route: &SourceRouteIdentity) -> Option<u64> {
+        self.lock_state()
+            .dirty_routes
+            .elapse_retry_backoff_for_test(route, source_route_ledger_now_ms())
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn scheduled_route_ids_for_test(&self) -> BTreeSet<SourceRouteIdentity> {
         self.lock_state().dirty_routes.route_ids()

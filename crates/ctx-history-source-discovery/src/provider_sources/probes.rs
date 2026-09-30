@@ -720,16 +720,14 @@ enum PathProbe {
 }
 
 fn path_metadata_probe(path: &Path) -> PathProbe {
-    if ctx_history_source_io::ensure_provider_path_parents_are_not_symlinks(path).is_err() {
-        return PathProbe::IoError;
-    }
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if provider_metadata_is_link_like(&metadata) => PathProbe::Other,
-        Ok(metadata) if metadata.is_file() => PathProbe::File,
-        Ok(metadata) if metadata.is_dir() => PathProbe::Dir,
-        Ok(_) => PathProbe::Other,
-        Err(err) if err.kind() == ErrorKind::NotFound => PathProbe::Missing,
-        Err(_) => PathProbe::IoError,
+    use super::selectors::{source_path_kind, SourcePathError, SourcePathKind};
+
+    match source_path_kind(path) {
+        Ok(SourcePathKind::File) => PathProbe::File,
+        Ok(SourcePathKind::Directory) => PathProbe::Dir,
+        Err(SourcePathError::Missing) => PathProbe::Missing,
+        Err(SourcePathError::Unsupported(_)) => PathProbe::Other,
+        Err(SourcePathError::Unavailable(_)) => PathProbe::IoError,
     }
 }
 

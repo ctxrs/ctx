@@ -79,8 +79,9 @@ pub use discovery::{
     discover_provider_sources_for_provider_with_projects, discover_provider_sources_report,
     discover_provider_sources_with_context, discover_provider_sources_with_context_and_work_budget,
     discover_provider_sources_with_projects, provider_source_for_path,
-    provider_source_for_path_with_data_root, validate_provider_source_roots_outside_data_root,
-    ProviderSourceRootBoundaryError,
+    provider_source_for_path_with_data_root,
+    validate_automatic_provider_source_roots_outside_data_root,
+    validate_provider_source_roots_outside_data_root, ProviderSourceRootBoundaryError,
 };
 pub use lingma::{
     discover_lingma_inventory_with_authority, resolve_lingma_discovery_authority,

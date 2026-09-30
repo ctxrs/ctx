@@ -310,7 +310,7 @@ impl ProviderSourceRoot {
         if current != self.inner.opened {
             return Err(changed_path(&self.inner.named_path));
         }
-        let reopened = platform::open_absolute(&self.inner.named_path)
+        let reopened = open_named_source(&self.inner.named_path)
             .map_err(|error| map_changed_open_error(&self.inner.named_path, error))?;
         let platform::OpenedPath::Directory { file, metadata, .. } = reopened else {
             return Err(changed_path(&self.inner.named_path));
@@ -344,7 +344,7 @@ impl ProviderSourceRoot {
         if !platform::same_object(&current, &self.inner.opened) {
             return Err(changed_path(&self.inner.named_path));
         }
-        let reopened = platform::open_absolute(&self.inner.named_path)
+        let reopened = open_named_source(&self.inner.named_path)
             .map_err(|error| map_changed_open_error(&self.inner.named_path, error))?;
         let platform::OpenedPath::Directory { file, metadata, .. } = reopened else {
             return Err(changed_path(&self.inner.named_path));
@@ -426,8 +426,8 @@ impl OpenedProviderSourceFile {
     pub fn reopen_same_object(&self) -> Result<File> {
         match &self.route {
             ProviderSourceFileRoute::Absolute(path) => {
-                let reopened = platform::open_absolute(path)
-                    .map_err(|error| map_changed_open_error(path, error))?;
+                let reopened =
+                    open_named_source(path).map_err(|error| map_changed_open_error(path, error))?;
                 let platform::OpenedPath::File { file, metadata, .. } = reopened else {
                     return Err(changed_path(path));
                 };
@@ -583,8 +583,9 @@ impl OpenedProviderSourceFile {
             return Err(changed_path(self.display_path()));
         }
         let reopened = match &self.route {
-            ProviderSourceFileRoute::Absolute(path) => platform::open_absolute(path)
-                .map_err(|error| map_changed_open_error(path, error))?,
+            ProviderSourceFileRoute::Absolute(path) => {
+                open_named_source(path).map_err(|error| map_changed_open_error(path, error))?
+            }
             ProviderSourceFileRoute::Relative {
                 root,
                 relative_path,
@@ -629,8 +630,9 @@ impl OpenedProviderSourceFile {
             return Err(changed_path(self.display_path()));
         }
         let reopened = match &self.route {
-            ProviderSourceFileRoute::Absolute(path) => platform::open_absolute(path)
-                .map_err(|error| map_changed_open_error(path, error))?,
+            ProviderSourceFileRoute::Absolute(path) => {
+                open_named_source(path).map_err(|error| map_changed_open_error(path, error))?
+            }
             ProviderSourceFileRoute::Relative {
                 root,
                 relative_path,
@@ -768,7 +770,68 @@ pub(crate) fn retained_ordinary_file_v2_identity(
     )
 }
 
-/// Opens an ordinary provider file with a no-follow component walk and retains
+/// Open a directory relocation without admitting descriptor links or file links.
+/// Keep the named route in the retained authority so retargeting is detected by
+/// the same object checks used for ordinary directory replacement.
+fn open_named_source(path: &Path) -> std::result::Result<platform::OpenedPath, AuthorityOpenError> {
+    #[cfg(not(target_os = "linux"))]
+    use ctx_history_platform::platform_security::resolve_provider_source_path;
+
+    match platform::open_absolute(path) {
+        Ok(opened) => Ok(opened),
+        #[cfg(target_os = "linux")]
+        Err(AuthorityOpenError::Rejected(reason)) if reason == SYMLINK_PROVIDER_SOURCE_REASON => {
+            match platform::open_directory_relocation(path) {
+                Err(AuthorityOpenError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                    // ENOENT through a dangling directory link is not evidence
+                    // that a selected source is absent and a fallback is safe.
+                    match ctx_history_platform::platform_security::resolve_provider_source_path(
+                        path,
+                    ) {
+                        Err(resolution)
+                            if resolution.raw_os_error().is_none()
+                                && resolution.kind() != io::ErrorKind::NotFound =>
+                        {
+                            Err(AuthorityOpenError::Rejected(reason))
+                        }
+                        _ => Err(AuthorityOpenError::Io(error)),
+                    }
+                }
+                result => result,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err(AuthorityOpenError::Rejected(reason)) if reason == SYMLINK_PROVIDER_SOURCE_REASON => {
+            // Keep the existing platform storage checks before resolving links.
+            for ancestor in path.ancestors() {
+                if std::fs::symlink_metadata(ancestor)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    if let Some(parent) = ancestor.parent() {
+                        platform::open_absolute(&resolve_provider_source_path(parent)?)?;
+                    }
+                }
+            }
+            let resolved = resolve_provider_source_path(path).map_err(|error| {
+                if error.raw_os_error().is_some() || error.kind() == io::ErrorKind::NotFound {
+                    AuthorityOpenError::Io(error)
+                } else {
+                    AuthorityOpenError::Rejected(reason)
+                }
+            })?;
+            let opened = platform::open_absolute(&resolved)?;
+            if resolve_provider_source_path(path)? != resolved {
+                return Err(AuthorityOpenError::Rejected(
+                    "provider source directory route changed during open",
+                ));
+            }
+            Ok(opened)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Opens an ordinary provider file beneath resolved directories and retains
 /// the exact opened handle for reads and final revalidation.
 pub fn open_provider_source_file(path: &Path) -> Result<OpenedProviderSourceFile> {
     match open_provider_source_path(path)? {
@@ -783,7 +846,7 @@ pub fn open_provider_source_file(path: &Path) -> Result<OpenedProviderSourceFile
 pub fn open_provider_source_path(path: &Path) -> Result<OpenedProviderSourcePath> {
     let path = platform::normalize_authority_path(path);
     ensure_absolute_traversal_free(&path)?;
-    let opened = platform::open_absolute(&path).map_err(|error| map_open_error(&path, error))?;
+    let opened = open_named_source(&path).map_err(|error| map_open_error(&path, error))?;
     match opened {
         platform::OpenedPath::File {
             file,

@@ -142,7 +142,13 @@ fn default_source_probe_reports_unreadable_directory_as_unknown() {
     let report = discover_provider_sources_for_provider_report(temp.path(), CaptureProvider::Codex);
     std::fs::set_permissions(&sessions, original_permissions).unwrap();
 
-    assert!(!report.sources.iter().any(|source| source.path == sessions));
+    let source = report
+        .sources
+        .iter()
+        .find(|source| source.path == sessions)
+        .unwrap();
+    assert!(source.exists);
+    assert_eq!(source.status, ProviderSourceStatus::Unknown);
     assert!(report.issues.iter().any(|issue| {
         issue.provider == CaptureProvider::Codex
             && issue.path.as_deref() == Some(sessions.as_path())

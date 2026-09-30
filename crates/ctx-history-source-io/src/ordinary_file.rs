@@ -571,7 +571,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn observation_rejects_a_symlinked_parent_component() {
+    fn observation_preserves_identity_through_a_relocated_parent() {
         use std::os::unix::fs::symlink;
 
         let temp = crate::test_support_paths::tempdir().unwrap();
@@ -581,7 +581,10 @@ mod tests {
         std::fs::write(target_parent.join("source.jsonl"), b"content\n").unwrap();
         symlink(&target_parent, &link_parent).unwrap();
 
-        assert!(observe_ordinary_file(link_parent.join("source.jsonl")).is_err());
+        assert_eq!(
+            observe_ordinary_file(link_parent.join("source.jsonl")).unwrap(),
+            observe_ordinary_file(target_parent.join("source.jsonl")).unwrap(),
+        );
     }
 
     #[cfg(unix)]

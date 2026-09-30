@@ -105,13 +105,26 @@ impl CoreRefreshEngine {
                     .and_modify(|current| *current = (*current).max(watermark))
                     .or_insert(watermark);
             }
-            state.dirty_routes.seed_exact_routes(
-                exact_routes.iter().cloned(),
-                watermark,
-                // Logical admission is explicit authority, so its exact first
-                // attempt bypasses watcher debounce without admitting any peer.
-                now_ms.saturating_sub(1_000),
-            );
+            if intent == RefreshIntent::AutomaticMaintenance
+                && find_attempt(&state, request_id)
+                    .is_some_and(|attempt| attempt.preserve_route_retry_state)
+            {
+                // Promotion already checked eligibility. Only clean peers need
+                // seeding; reseeding a due retry would erase its failure count.
+                state.dirty_routes.seed_clean_exact_routes(
+                    exact_routes.iter().cloned(),
+                    watermark,
+                    now_ms.saturating_sub(1_000),
+                );
+            } else {
+                state.dirty_routes.seed_exact_routes(
+                    exact_routes.iter().cloned(),
+                    watermark,
+                    // Explicit demand bypasses watcher debounce and rearms
+                    // selected routes, unlike a scheduled config promotion.
+                    now_ms.saturating_sub(1_000),
+                );
+            }
         }
         let admissions = if exact_routes.is_empty() {
             Vec::new()

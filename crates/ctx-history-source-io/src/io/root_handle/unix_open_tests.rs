@@ -407,6 +407,23 @@ fn both_strategies_reject_ancestor_final_and_procfd_symlinks() {
 }
 
 #[test]
+fn directory_relocation_requires_native_magic_link_protection() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let linked = temp.path().join("linked");
+    let ordinary = temp.path().join("ordinary");
+    fs::create_dir(&ordinary).unwrap();
+    symlink(&ordinary, &linked).unwrap();
+    for errno in [libc::ENOSYS, libc::EPERM] {
+        let _guard = NativeErrorGuard::new(Some(errno));
+        assert!(ProviderSourceRoot::open(&ordinary).is_ok());
+        assert!(matches!(
+            ProviderSourceRoot::open(&linked),
+            Err(SourceIoError::Io(error)) if error.raw_os_error() == Some(errno)
+        ));
+    }
+}
+
+#[test]
 fn both_strategies_reject_special_files_and_preserve_not_a_directory() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let fifo = temp.path().join("fifo.jsonl");

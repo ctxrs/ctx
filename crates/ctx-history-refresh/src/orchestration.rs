@@ -187,7 +187,7 @@ pub(super) fn source_backed_route_admission_fence(
     let discovery_started = StdInstant::now();
     let report = discover_provider_sources_with_context_and_work_budget(&discovery, work_budget);
     let discovery_duration = discovery_started.elapsed();
-    validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
+    validate_automatic_provider_source_roots_outside_data_root(data_root, report.sources.iter())
         .context("validate provider roots before admitting source refresh demand")?;
     prepare_generation_control_state(data_root)?;
     let published_state = RetainedPublishedState { journal };

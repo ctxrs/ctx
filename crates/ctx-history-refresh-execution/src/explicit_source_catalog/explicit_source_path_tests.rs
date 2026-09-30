@@ -68,7 +68,7 @@ fn assert_catalog_revalidation_rejects_links_or_reparse_points(paths: &[&Path]) 
 
 #[cfg(unix)]
 #[test]
-fn catalog_revalidation_rejects_live_and_dangling_file_and_directory_symlinks_on_unix() {
+fn catalog_revalidation_rejects_file_links_and_dangling_directory_links_on_unix() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().unwrap();
@@ -89,10 +89,49 @@ fn catalog_revalidation_rejects_live_and_dangling_file_and_directory_symlinks_on
 
     assert_catalog_revalidation_rejects_links_or_reparse_points(&[
         &live_file_link,
-        &live_dir_link,
         &dangling_file_link,
         &dangling_dir_link,
     ]);
+    reject_symlinked_explicit_source_root(
+        &live_dir_link,
+        &fs::symlink_metadata(&live_dir_link).unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_directory_relocation_retains_named_path_and_catalog_revalidation() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let real = temp.path().join("real-sessions");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("session.jsonl"), b"{}\n").unwrap();
+    let selected = temp.path().join("sessions");
+    symlink(&real, &selected).unwrap();
+    let source =
+        explicit_source_for_path(&data, &selected, Some(CaptureProvider::Codex), false).unwrap();
+    assert_eq!(source.path, selected);
+    assert_eq!(source.status, ProviderSourceStatus::Available);
+    let entry = CatalogEntry {
+        provider: "codex".to_owned(),
+        source_format: source.source_format.to_owned(),
+        path: selected.clone(),
+        catalog_lineage: encode_hex(&[0x11; 32]),
+        route_identity: None,
+        relocate_from: None,
+        enabled: true,
+    };
+    let revalidated = source_from_catalog_entry(&data, &entry).unwrap();
+    assert_eq!(revalidated.path, selected);
+    assert_eq!(revalidated.status, ProviderSourceStatus::Available);
+
+    // Physical overlap remains fatal even when its directory is linked.
+    assert!(
+        explicit_source_for_path(&real, &selected, Some(CaptureProvider::Codex), false).is_err()
+    );
 }
 
 #[cfg(target_os = "windows")]

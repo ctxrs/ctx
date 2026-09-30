@@ -88,6 +88,29 @@ fn canonical_identity_hex(identity: ctx_history_core::StableEntityId) -> String 
     hex
 }
 
+#[cfg(unix)]
+#[test]
+fn relocated_claude_root_retains_named_authority_and_rejects_retargeting() {
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real-projects");
+    std::fs::create_dir_all(real.join("project")).unwrap();
+    std::fs::write(real.join("project/session.jsonl"), b"{\"type\":\"user\"}\n").unwrap();
+    let selected = temp.path().join("projects");
+    symlink(&real, &selected).unwrap();
+    let inventory = super::claude_jsonl_adapter::<runtime::LowerTestRuntimeBinding>()
+        .discover(&selected)
+        .unwrap();
+    let leaf = inventory.accepted_leaves().next().unwrap();
+    assert_eq!(leaf.authority().named_path(), selected);
+    leaf.authority().revalidate_same_object().unwrap();
+
+    let replacement = temp.path().join("replacement");
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::remove_file(&selected).unwrap();
+    symlink(replacement, &selected).unwrap();
+    assert!(leaf.authority().revalidate_same_object().is_err());
+}
+
 #[test]
 fn unreadable_leaf_scope_accepts_only_stable_leaf_local_open_failures() {
     let permission = ctx_history_provider_runtime::CaptureError::Io(std::io::Error::new(

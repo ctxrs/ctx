@@ -684,6 +684,13 @@ where
                 break;
             }
             ctx_daemon_runtime::block_daemon_main_after_ready_for_test(data_root)?;
+            if let Some(watch_runtime) = watch_runtime.as_mut() {
+                watch_runtime.enqueue_pending_provider_root_refresh(
+                    data_root,
+                    source_refresh,
+                    source_route_ledger_now_ms(),
+                );
+            }
             let mut iteration = run_daemon_scheduler_cycle_with_activity(
                 &args,
                 data_root,

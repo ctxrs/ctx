@@ -716,7 +716,7 @@ fn every_enabled_root_rejects_the_wrong_no_follow_file_kind() {
 
 #[cfg(unix)]
 #[test]
-fn every_expander_family_rejects_symlinked_configured_roots() {
+fn every_expander_family_admits_directory_links_but_rejects_file_links() {
     use std::os::unix::fs::symlink;
 
     for provider in [
@@ -730,17 +730,44 @@ fn every_expander_family_rejects_symlinked_configured_roots() {
     ] {
         let temp = tempdir();
         let target = temp.path().join("target");
-        match configured_root_capability(provider)
+        let kind = configured_root_capability(provider)
             .unwrap()
             .state
             .expected_path_kind()
-            .unwrap()
-        {
+            .unwrap();
+        match kind {
             ConfiguredRootPathKind::Directory => fs::create_dir_all(&target).unwrap(),
             ConfiguredRootPathKind::File => write(&target, b"file"),
         }
         let selected = temp.path().join("selected");
         symlink(&target, &selected).unwrap();
+        let report = configured_report(
+            context(&temp),
+            vec![root("linked", provider, selected.clone())],
+            provider,
+        );
+        if kind == ConfiguredRootPathKind::Directory {
+            let ordinary = configured_report(
+                context(&temp),
+                vec![root("linked", provider, target.clone())],
+                provider,
+            );
+            assert!(!report.sources.is_empty(), "{provider:?}: {report:?}");
+            assert!(
+                report.issues.is_empty(),
+                "{provider:?}: {:?}",
+                report.issues
+            );
+            assert_eq!(report.sources.len(), ordinary.sources.len(), "{provider:?}");
+            for (linked, real) in report.sources.iter().zip(&ordinary.sources) {
+                assert_eq!(linked.status, real.status, "{provider:?}");
+                assert_eq!(linked.source_format, real.source_format, "{provider:?}");
+            }
+            fs::remove_file(&selected).unwrap();
+            let file = temp.path().join("outside-file");
+            write(&file, b"file");
+            symlink(file, &selected).unwrap();
+        }
         let report = configured_report(
             context(&temp),
             vec![root("linked", provider, selected)],

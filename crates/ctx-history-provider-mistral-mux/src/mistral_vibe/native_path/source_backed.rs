@@ -150,13 +150,7 @@ where
         {
             return JsonlFamilyInventory::missing(self.provider(), root);
         }
-        let mut discovered = Vec::new();
-        visit_mistral_vibe_session_sources(root, &mut |source| {
-            discovered.push(source);
-            Ok(())
-        })?;
-        discovered.sort_by(|left, right| left.messages_path.cmp(&right.messages_path));
-        let selected = fs::canonicalize(root)?;
+        let selected = std::path::absolute(root)?;
         let authority_path = if fs::symlink_metadata(root)?.is_file() {
             selected
                 .parent()
@@ -169,6 +163,12 @@ where
             selected
         };
         let authority = Arc::new(ProviderSourceRoot::open(&authority_path)?);
+        let mut discovered = Vec::new();
+        visit_mistral_vibe_session_sources(root, &mut |source| {
+            discovered.push(source);
+            Ok(())
+        })?;
+        discovered.sort_by(|left, right| left.messages_path.cmp(&right.messages_path));
         let mut drafts = Vec::with_capacity(discovered.len());
         let mut sessions = HashSet::with_capacity(discovered.len());
         for native in discovered {
@@ -666,8 +666,7 @@ fn decode_binding(leaf: &JsonlFamilyLeaf<CaptureError>) -> Result<Binding> {
 }
 
 fn relative_to_authority(authority: &ProviderSourceRoot, path: &Path) -> Result<PathBuf> {
-    fs::canonicalize(path)?
-        .strip_prefix(authority.named_path())
+    path.strip_prefix(authority.named_path())
         .map(Path::to_path_buf)
         .map_err(|_| CaptureError::InvalidProviderTranscriptPath {
             path: path.to_path_buf(),

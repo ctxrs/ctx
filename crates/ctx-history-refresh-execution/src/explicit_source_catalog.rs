@@ -358,20 +358,30 @@ pub fn explicit_source_for_path(
     let metadata = explicit_source_path_symlink_metadata(path)
         .with_context(|| format!("approve explicit source path {}", path.display()))?;
     reject_symlinked_explicit_source_root(path, &metadata)?;
-    let canonical = canonicalize_explicit_source_path(path)
-        .with_context(|| format!("approve explicit source path {}", path.display()))?;
-    validate_approved_path(&canonical)?;
+    let approved =
+        match ctx_history_source_io::open_provider_source_path(&std::path::absolute(path)?)
+            .with_context(|| format!("approve explicit source path {}", path.display()))?
+        {
+            ctx_history_source_io::OpenedProviderSourcePath::Directory(directory) => {
+                directory.authority_root().named_path().to_path_buf()
+            }
+            ctx_history_source_io::OpenedProviderSourcePath::File(_) => {
+                canonicalize_explicit_source_path(path)
+                    .with_context(|| format!("approve explicit source path {}", path.display()))?
+            }
+        };
+    validate_approved_path(&approved)?;
     ctx_history_platform::platform_security::validate_provider_source_outside_data_root(
-        data_root, &canonical,
+        data_root, &approved,
     )
     .context("validate explicit provider root before bounded SQLite admission")?;
 
     let source = if custom_history_jsonl {
-        custom_provider_source(canonical, true)?
+        custom_provider_source(approved, true)?
     } else {
         let provider = provider
             .context("ctx import --path requires --provider for native provider history")?;
-        provider_source_for_path_with_data_root(provider, canonical, data_root)
+        provider_source_for_path_with_data_root(provider, approved, data_root)
     };
     let metadata = explicit_source_path_symlink_metadata(path)
         .with_context(|| format!("revalidate explicit source path {}", path.display()))?;
@@ -828,6 +838,10 @@ fn validate_enabled_source(source: &ProviderSource) -> Result<()> {
 
 fn reject_symlinked_explicit_source_root(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     if explicit_source_path_is_symlink_or_reparse_point(metadata) {
+        #[cfg(unix)]
+        if ctx_history_source_io::ProviderSourceRoot::open(&std::path::absolute(path)?).is_ok() {
+            return Ok(());
+        }
         bail!(
             "symlinked explicit provider source roots are rejected: {} (Windows reparse points are treated as symlinks)",
             path.display(),
