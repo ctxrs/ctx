@@ -645,7 +645,7 @@
           "REPO_MAPPING:rules_rust+,bazel_tools bazel_tools",
           "REPO_MAPPING:rules_rust+,rules_cc rules_cc+",
           "FILE:@@//Cargo.lock 6104b8471b8ddaa14106d528b78800ca8215d1f92170f346c15683dbc7711d0a",
-          "FILE:@@//Cargo.toml 510b1525f52aa1a46e16247c7fd5251787ff15d8faf639504769e8a206f0803f",
+          "FILE:@@//Cargo.toml 47b68c09ffa3d511f39242883299cce9557958ebac34ced696572998b3f7ccc1",
           "FILE:@@//crates/ctx-app-config/Cargo.toml 913dd0096afbd431ce8d3a42f3ed6b7566ebbe06a1526e57c383cb4c68e80396",
           "FILE:@@//crates/ctx-history-capture-model/Cargo.toml 273f1943466052bde8841b92e7d546f302ebfb39a821b9c2f800420cb4a1f281",
           "FILE:@@//crates/ctx-history-core/Cargo.toml ed31e49b5327c0921ca022becff686d8689541f7085dc84edd0737398f1204a1",
