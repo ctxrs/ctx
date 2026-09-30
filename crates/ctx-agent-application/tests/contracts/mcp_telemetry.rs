@@ -12,9 +12,18 @@ fn telemetry_roundtrip(
     events_path: &std::path::Path,
     stdin: Vec<u8>,
 ) -> Vec<Value> {
+    let state = temp.path().join("telemetry-state");
+    let launch_hint =
+        expected_device_path(temp.path(), &state).with_file_name("analytics-launch-v1.json");
+    fs::create_dir_all(launch_hint.parent().unwrap()).unwrap();
+    // Defer only the delivery child so foreground queue assertions cannot race a drain.
+    fs::write(&launch_hint, br#"{"schema_version":2,"next_allowed_at":0}"#).unwrap();
+
     let output = ctx(temp)
         .args(["mcp", "serve"])
         .env("CTX_DATA_ROOT", data_root)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
         .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(events_path))
         .env("CTX_DAEMON_ENABLED", "false")
@@ -25,6 +34,21 @@ fn telemetry_roundtrip(
         .get_output()
         .stdout
         .clone();
+
+    assert!(
+        !events_path.exists(),
+        "MCP foreground must not upload while automatic delivery is deferred"
+    );
+    let queued: Value = serde_json::from_slice(
+        &fs::read(launch_hint.with_file_name("analytics-outbox-v1.json")).unwrap(),
+    )
+    .unwrap();
+    for entry in queued["entries"].as_array().unwrap() {
+        assert_eq!(
+            entry["attempts"], 0,
+            "foreground telemetry must only enqueue"
+        );
+    }
 
     String::from_utf8(output)
         .unwrap()

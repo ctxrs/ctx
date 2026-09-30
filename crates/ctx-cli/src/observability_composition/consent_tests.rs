@@ -16,7 +16,7 @@ use super::{
 use crate::analytics_outbox::{AnalyticsOutbox, DeliveryDisposition};
 use std::fs;
 
-pub(super) fn isolate_analytics_environment(root: &Path) -> Vec<RestoreEnvironment> {
+pub(crate) fn isolate_analytics_environment(root: &Path) -> Vec<RestoreEnvironment> {
     let mut guards = [
         "HOME",
         "XDG_CONFIG_HOME",
@@ -48,7 +48,7 @@ pub(super) fn isolate_analytics_environment(root: &Path) -> Vec<RestoreEnvironme
     guards
 }
 
-pub(super) fn configure(root: &Path, enabled: bool, endpoint: &str) {
+pub(crate) fn configure(root: &Path, enabled: bool, endpoint: &str) {
     // Create the fixture through the real config writer, retaining its private permissions.
     ctx_app_config::set_auto_upgrade_mode(root, ctx_app_config::AutoUpgradeMode::Off).unwrap();
     let endpoint = serde_json::to_string(endpoint).unwrap();
@@ -259,6 +259,45 @@ fn opt_out_purges_only_its_owner_at_the_response_barrier() {
 }
 
 #[test]
+fn scheduled_child_observes_opt_out_without_uploading_or_purging_other_owners() {
+    let _env_lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let sandbox = tempfile::tempdir().unwrap();
+    let _environment = isolate_analytics_environment(sandbox.path());
+    let a = sandbox.path().join("a");
+    let b = sandbox.path().join("b");
+    let id_a = crate::identity::installation_id(&a).unwrap();
+    let id_b = crate::identity::installation_id(&b).unwrap();
+    let sink = sandbox.path().join("deliveries.jsonl");
+    let endpoint = url::Url::from_file_path(&sink).unwrap().to_string();
+    configure(&a, true, &endpoint);
+    configure(&b, true, &endpoint);
+    append_analytics_batch(&a, &[daemon_event()]).unwrap();
+    append_analytics_batch(&b, &[daemon_event()]).unwrap();
+    let path = crate::identity::device_state_path(ANALYTICS_OUTBOX_FILE, &a).unwrap();
+    let b_outbox = AnalyticsOutbox::open(path.clone(), &id_b).unwrap();
+    let before = b_outbox.snapshot(&endpoint).unwrap().remove(0);
+    configure(&a, false, &endpoint);
+    let arguments = vec![
+        std::ffi::OsString::from("ctx"),
+        std::ffi::OsString::from("--ctx-analytics-drain-v1"),
+        a.as_os_str().to_owned(),
+        std::ffi::OsString::from(&id_a),
+    ];
+    assert_eq!(
+        crate::analytics_delivery::intercept(&arguments),
+        Some(std::process::ExitCode::SUCCESS)
+    );
+    let a_outbox = AnalyticsOutbox::open(path.clone(), &id_a).unwrap();
+    assert!(a_outbox.snapshot(&endpoint).unwrap().is_empty());
+    let after = b_outbox.snapshot(&endpoint).unwrap().remove(0);
+    assert!(b_outbox.contains_snapshot(&before).unwrap());
+    assert_eq!(before.payload(), after.payload());
+    assert!(!sink.exists());
+}
+
+#[test]
 fn opt_out_without_original_identity_preserves_other_owners_and_creates_no_identity() {
     let _env_lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()
@@ -409,7 +448,8 @@ fn analytics_suppresses_unsafe_config_without_repairing_it() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(resolve_analytics_policy(&root).is_err());
     assert!(append_analytics_batch(&root, &[daemon_event()]).is_err());
-    assert!(drain_analytics_outbox(&root, Duration::from_secs(1)).is_err());
+    // No owner exists, so draining has nothing to send and must create nothing.
+    drain_analytics_outbox(&root, Duration::from_secs(1)).unwrap();
     assert_eq!(fs::read(&path).unwrap(), original);
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,

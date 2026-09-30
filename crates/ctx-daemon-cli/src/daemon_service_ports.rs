@@ -286,6 +286,10 @@ impl CoreGenerationPublishedPort for CliCoreGenerationPublishedPort {
 pub(crate) struct CliDaemonObservationPort;
 
 impl DaemonObservationPort for CliDaemonObservationPort {
+    fn sharing_observer(&self, data_root: &Path) -> Option<ctx_daemon_service::SharingObserver> {
+        crate::composition::host().sharing_observer(data_root)
+    }
+
     fn analytics_enabled(&self, data_root: &Path) -> bool {
         ctx_app_config::AppConfig::load(data_root).is_ok_and(|config| {
             config.analytics.enabled

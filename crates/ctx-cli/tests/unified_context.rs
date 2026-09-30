@@ -22,6 +22,8 @@ use history_fixture::import_synthetic_history;
 mod managed_root;
 #[path = "unified_context/output_hooks.rs"]
 mod output_hooks;
+#[path = "unified_context/telemetry.rs"]
+mod telemetry;
 
 const PYTHON_SOURCE: &str = "def kernel():\n    return 41\n\ndef launch():\n    return kernel()\n\ndef idle():\n    return 0\n";
 const RUNS_HEADER: &str = "sift:text-runs-v1 counts repeat exact JSON strings; concatenate\n";
@@ -645,173 +647,18 @@ fn health_reports_show_independent_components_even_when_history_is_malformed() {
 
 #[test]
 fn mcp_output_lifecycle_preserves_authorized_default_telemetry_without_history_setup() {
-    assert_mcp_output_lifecycle(false, true);
+    telemetry::assert_mcp_output_lifecycle(false, true);
 }
 
 #[test]
 fn mcp_output_lifecycle_with_default_observability_preserves_malformed_history() {
-    assert_mcp_output_lifecycle(true, true);
+    telemetry::assert_mcp_output_lifecycle(true, true);
 }
 
 #[test]
 fn mcp_output_lifecycle_with_opt_out_preserves_empty_and_malformed_trees() {
     for malformed in [false, true] {
-        assert_mcp_output_lifecycle(malformed, false);
-    }
-}
-
-fn assert_mcp_output_lifecycle(malformed: bool, default_observability: bool) {
-    let sandbox = Sandbox::new();
-    if malformed {
-        sandbox.write("history/config.toml", b"[broken history configuration\n");
-    }
-    let original = "mcp synthetic complete diagnostic\n".repeat(120);
-    let frame = format!("{RUNS_HEADER}[[3,\"preserved\\r\\n\"],[1,\"tail\"]]");
-    let messages = [
-        json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
-                "protocolVersion":"2025-11-25", "capabilities":{},
-                "clientInfo":{"name":"synthetic-acceptance", "version":"0"}}}),
-        json!({"jsonrpc":"2.0", "method":"notifications/initialized"}),
-        json!({"jsonrpc":"2.0", "id":2, "method":"tools/list"}),
-        json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{
-                "name":"output_compact", "arguments":{"text":original}}}),
-        json!({"jsonrpc":"2.0", "id":4, "method":"tools/call", "params":{
-                "name":"output_restore", "arguments":{"encoding":"text-runs-v1", "text":frame}}}),
-    ];
-    let input = messages
-        .iter()
-        .map(|message| format!("{message}\n"))
-        .collect::<String>();
-    let before = sandbox.protected_state();
-    // Keep default observability policy: redirect delivery to the tripwire,
-    // but do not opt out, dry-run, or skip real product MCP lifecycle setup.
-    let mut command = sandbox.command();
-    if default_observability {
-        command
-            .env_remove("CTX_ANALYTICS_ENABLED")
-            .env_remove("CTX_LOCAL_USAGE_ENABLED");
-    }
-    let output = command
-        .args(["mcp", "serve", "--graph-db", "absent.db"])
-        .write_stdin(input)
-        .output()
-        .unwrap(); // Closing stdin exercises EOF shutdown.
-    assert_success(&output);
-    let text = std::str::from_utf8(&output.stdout).unwrap();
-    let responses = text
-        .lines()
-        .map(|line| {
-            serde_json::from_str::<Value>(line).expect("MCP stdout must contain only JSON-RPC")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(responses.len(), 4, "{text}");
-    for (index, response) in responses.iter().enumerate() {
-        assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], index + 1);
-        assert!(response.get("error").is_none(), "{response}");
-        assert_ne!(response["result"]["isError"], true, "{response}");
-    }
-    assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
-    let tools = responses[1]["result"]["tools"].as_array().unwrap();
-    for name in ["output_compact", "output_restore"] {
-        assert!(tools.iter().any(|tool| tool["name"] == name));
-    }
-    let compact = &responses[2]["result"]["structuredContent"];
-    assert_eq!(compact["encoding"], "text-runs-v1");
-    assert!(compact["output_tokens"].as_u64().unwrap() < compact["input_tokens"].as_u64().unwrap());
-    let runs: Vec<(usize, String)> = serde_json::from_str(
-        compact["text"]
-            .as_str()
-            .unwrap()
-            .strip_prefix(RUNS_HEADER)
-            .expect("documented run framing"),
-    )
-    .unwrap();
-    let expanded = runs
-        .iter()
-        .map(|(count, text)| text.repeat(*count))
-        .collect::<String>();
-    assert_eq!(expanded, original);
-    let restored = &responses[3]["result"]["structuredContent"];
-    assert_eq!(restored["encoding"], "raw");
-    assert_eq!(
-        restored["text"],
-        "preserved\r\npreserved\r\npreserved\r\ntail"
-    );
-    sandbox.assert_no_connection();
-    let after = sandbox.protected_state();
-    if default_observability && !malformed {
-        let device = Path::new(if cfg!(windows) {
-            "localappdata/ctx"
-        } else if cfg!(target_os = "macos") {
-            "home/Library/Application Support/ctx"
-        } else {
-            "state/ctx"
-        });
-        let permitted = [
-            PathBuf::from("history/install.json"),
-            device.join("device.json"),
-            device.join("analytics-outbox-v1.json"),
-            device.join("analytics-outbox-v1.lock"),
-            device.join("execution-capabilities-v1.claim"),
-            device.join("execution-capabilities-v1.reported"),
-        ];
-        for (path, bytes) in &before {
-            assert_eq!(
-                after.get(path),
-                Some(bytes),
-                "existing MCP state changed: {path:?}"
-            );
-        }
-        for (path, bytes) in &after {
-            assert!(
-                before.contains_key(path)
-                    || permitted
-                        .iter()
-                        .any(|allowed| path == allowed
-                            || (bytes.is_none() && allowed.starts_with(path))),
-                "MCP created non-lifecycle state: {path:?}"
-            );
-        }
-        let outbox: Value = serde_json::from_slice(
-            &fs::read(sandbox.root.join(device).join("analytics-outbox-v1.json"))
-                .expect("authorized lifecycle outbox"),
-        )
-        .unwrap();
-        let mut phases = Vec::new();
-        for entry in outbox["entries"].as_array().unwrap() {
-            let payload: Value = serde_json::from_str(entry["payload"].as_str().unwrap()).unwrap();
-            for event in payload["events"].as_array().unwrap() {
-                assert_eq!(
-                    event["event_name"], "runtime_observation",
-                    "Unified tool recorded as history: {event}"
-                );
-                assert_eq!(event["surface"], "mcp");
-                assert_eq!(event["properties"]["tool_request_count_bucket"], "0");
-                phases.push(event["operation"].as_str().unwrap().to_owned());
-            }
-        }
-        phases.sort();
-        assert_eq!(phases, ["initialized", "stopped"]);
-    } else {
-        assert_eq!(
-            after, before,
-            "opt-out/malformed MCP lifecycle mutated isolated state"
-        );
-    }
-    assert!(
-        !sandbox.root.join("output").exists(),
-        "pure MCP output created output state"
-    );
-    assert!(
-        !sandbox.repo().join(".graf").exists(),
-        "MCP created a graph"
-    );
-    if !malformed && !default_observability {
-        assert!(
-            !sandbox.root.join("history").exists(),
-            "MCP created the history root"
-        );
+        telemetry::assert_mcp_output_lifecycle(malformed, false);
     }
 }
 

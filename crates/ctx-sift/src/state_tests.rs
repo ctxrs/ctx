@@ -1121,3 +1121,37 @@ fn semantic_cli_rejects_a_config_symlink_without_touching_its_target() {
     );
     assert_eq!(fs::read(&target).unwrap(), original);
 }
+
+#[test]
+fn observed_local_record_distinguishes_disabled_busy_and_recorded() {
+    use crate::observation::LocalRecordOutcome;
+    let root = Temp::new();
+    let dir = root.path().join("records");
+    let disabled = Settings {
+        record_usage: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        state::record_project_observed_at(&dir, &disabled, event(), None, None).unwrap(),
+        LocalRecordOutcome::Disabled
+    );
+    assert!(!dir.exists());
+    let enabled = Settings::default();
+    assert_eq!(
+        state::record_project_observed_at(&dir, &enabled, event(), None, None).unwrap(),
+        LocalRecordOutcome::Recorded
+    );
+    let before = fs::read(dir.join("metrics.jsonl")).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("state.lock"))
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lock).unwrap();
+    assert_eq!(
+        state::record_project_observed_at(&dir, &enabled, event(), None, None).unwrap(),
+        LocalRecordOutcome::Busy
+    );
+    assert_eq!(fs::read(dir.join("metrics.jsonl")).unwrap(), before);
+    fs2::FileExt::unlock(&lock).unwrap();
+}

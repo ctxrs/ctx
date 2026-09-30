@@ -63,6 +63,12 @@ fn authored_commit_has_identical_native_cli_mcp_results_citations_and_one_termin
         ctx_attribution::presentation::mcp_text::render_blame_tool(&result, Some(&previews));
     let sink = temp.path().join("never-uploaded.jsonl");
     let endpoint = file_url(&sink);
+    let state = temp.path().join("telemetry-state");
+    let launch_hint =
+        expected_device_path(temp.path(), &state).with_file_name("analytics-launch-v1.json");
+    fs::create_dir_all(launch_hint.parent().unwrap()).unwrap();
+    // Defer only the delivery child so foreground queue assertions cannot race a drain.
+    fs::write(&launch_hint, br#"{"schema_version":2,"next_allowed_at":0}"#).unwrap();
     for args in [
         vec![
             "blame",
@@ -82,6 +88,8 @@ fn authored_commit_has_identical_native_cli_mcp_results_citations_and_one_termin
         let response = json_output(
             ctx(&temp)
                 .args(args)
+                .env("XDG_STATE_HOME", &state)
+                .env("LOCALAPPDATA", &state)
                 .env("CTX_ANALYTICS_ENABLED", "true")
                 .env("CTX_ANALYTICS_ENDPOINT", &endpoint),
         );
@@ -95,6 +103,8 @@ fn authored_commit_has_identical_native_cli_mcp_results_citations_and_one_termin
             json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"blame","arguments":{"target":{"kind":"commit","oid":seed.oid},"limit":8}}}),
         ],
         &[
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("LOCALAPPDATA", state.to_str().unwrap()),
             ("CTX_ANALYTICS_ENABLED", "true"),
             ("CTX_ANALYTICS_ENDPOINT", endpoint.as_str()),
         ],
@@ -105,7 +115,13 @@ fn authored_commit_has_identical_native_cli_mcp_results_citations_and_one_termin
         responses[1]["result"]["content"][0]["text"],
         expected_mcp_text
     );
+    // With automatic child delivery deferred, a sink write is a foreground regression.
     assert!(!sink.exists(), "Blame foreground must not upload");
+    let outbox = launch_hint.with_file_name("analytics-outbox-v1.json");
+    let queued: Value = serde_json::from_slice(&fs::read(outbox).unwrap()).unwrap();
+    for entry in queued["entries"].as_array().unwrap() {
+        assert_eq!(entry["attempts"], 0, "foreground upload");
+    }
 
     let events = read_queued_analytics_events(temp.path())
         .into_iter()
@@ -119,20 +135,13 @@ fn authored_commit_has_identical_native_cli_mcp_results_citations_and_one_termin
         3,
         "one ordinary terminal per actual call: {events:#?}"
     );
-    assert_eq!(
+    let surface_counts = ["cli", "mcp"].map(|surface| {
         events
             .iter()
-            .filter(|event| event["surface"] == "cli")
-            .count(),
-        2
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event["surface"] == "mcp")
-            .count(),
-        1
-    );
+            .filter(|event| event["surface"] == surface)
+            .count()
+    });
+    assert_eq!(surface_counts, [2, 1]);
     for event in events {
         assert_eq!(event["outcome"], "success");
         let properties = event["properties"].as_object().unwrap();

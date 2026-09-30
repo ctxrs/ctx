@@ -470,3 +470,32 @@ pub(crate) struct Registry {
     pub(crate) version: u32,
     pub(crate) entries: Vec<Registration>,
 }
+
+impl Command {
+    pub(crate) fn operation(&self) -> crate::observation::GraphOperation {
+        use crate::observation::GraphOperation as O;
+        match self {
+            Self::Analyze(_) => O::Analyze,
+            Self::Communities(_) => O::Communities,
+            Self::Hubs(_) => O::Hubs,
+            Self::Diagnose(_) => O::Diagnose,
+            Self::Benchmark(_) => O::Benchmark,
+            Self::Label(_) => O::Label,
+            Self::Tree(_) => O::Tree,
+            Self::Report(_) => O::Report,
+            Self::Export(_) => O::Export,
+            Self::Merge(_) => O::Merge,
+            Self::SaveResult(_) => O::SaveResult,
+            Self::Reflect(_) => O::Reflect,
+            Self::Prs(_) => O::Prs,
+            Self::Global(args) => match args.command {
+                GlobalCommand::Add { .. } => O::GlobalAdd,
+                GlobalCommand::Remove { .. } => O::GlobalRemove,
+                GlobalCommand::List => O::GlobalList,
+                GlobalCommand::Refresh => O::GlobalRefresh,
+                GlobalCommand::Query(_) => O::GlobalSearch,
+                GlobalCommand::Path => O::GlobalPath,
+            },
+        }
+    }
+}

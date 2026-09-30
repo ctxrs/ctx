@@ -501,7 +501,9 @@ where
                 ports.installation,
                 !finite_worker,
             )?;
-        sharing_workers = sharing::start_workers(data_root, args.profile, lifecycle_ready);
+        sharing_workers = sharing::start_workers(data_root, args.profile, lifecycle_ready, || {
+            observation.sharing_observer(data_root)
+        });
         // The ready persistent daemon is the automatic-check driver; foreground commands never are.
         if lifecycle_ready
             && !finite_worker

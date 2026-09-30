@@ -81,6 +81,20 @@ fn device_state(sandbox: &Sandbox) -> PathBuf {
     }
 }
 
+fn foreground_enqueue_only(sandbox: &Sandbox) {
+    use std::io::Write;
+    let state = device_state(sandbox);
+    ctx_history_platform::platform_security::create_private_directory_all(&state).unwrap();
+    let mut hint = ctx_history_platform::platform_security::create_private_file_new(
+        &state.join("analytics-launch-v1.json"),
+    )
+    .unwrap();
+    // An unfamiliar private launch hint defers only the delivery child, so the
+    // foreground outbox assertions cannot race a drain. Daemon startup stays unmasked.
+    hint.write_all(br#"{"schema_version":2,"next_allowed_at":0}"#)
+        .unwrap();
+}
+
 fn assert_private_values_absent(value: &Value, forbidden: &[&str]) {
     match value {
         Value::String(text) => {
@@ -144,6 +158,29 @@ fn assert_event(event: &Value, operation: &str, outcome: &str, properties: Value
     assert_eq!(event["operation"], operation);
     assert_eq!(event["outcome"], outcome);
     let mut actual = event["properties"].as_object().unwrap().clone();
+    // Timing varies across processes; the wire value must be a closed bucket.
+    let native_duration = actual
+        .remove("native_total_duration_bucket")
+        .expect("missing native duration bucket");
+    assert!(matches!(
+        native_duration.as_str(),
+        Some(
+            "lt_1ms"
+                | "1ms-5ms"
+                | "5ms-10ms"
+                | "10ms-25ms"
+                | "25ms-50ms"
+                | "50ms-100ms"
+                | "100ms-250ms"
+                | "250ms-1s"
+                | "1s-5s"
+                | "5s-30s"
+                | "30s-2m"
+                | "2m-10m"
+                | "10m-1h"
+                | "1h+"
+        )
+    ));
     // The shared sender may attach one complete, content-free capability snapshot.
     if let Some(schema) = actual.remove("capability_snapshot_schema") {
         assert_eq!(schema, json!(1));
@@ -196,9 +233,202 @@ fn assert_no_daemon(sandbox: &Sandbox) {
     assert_eq!(fs::read_dir(sandbox.path("runtime")).unwrap().count(), 0);
 }
 
+fn archive_fixture(sandbox: &Sandbox) -> PathBuf {
+    seed_history(sandbox);
+    let archive = sandbox.path("snapshot");
+    success(
+        sandbox
+            .command()
+            .args(["archive", "export", "--origin", USER, "--output"])
+            .arg(&archive)
+            .arg("--format=json"),
+    );
+    archive
+}
+
+fn checkpoint_fixture(sandbox: &Sandbox) -> PathBuf {
+    sandbox.init();
+    let checkpoint = sandbox.path("checkpoint");
+    success(
+        sandbox
+            .server()
+            .args(["backup", "--output"])
+            .arg(&checkpoint)
+            .arg("--format=json"),
+    );
+    checkpoint
+}
+
+#[test]
+fn malformed_archive_with_analytics_leaves_absent_and_empty_targets_retryable() {
+    let source = Sandbox::new();
+    let archive = archive_fixture(&source);
+    let malformed = source.path("malformed");
+    fs::create_dir(&malformed).unwrap();
+    fs::write(malformed.join("manifest.json"), b"{}").unwrap();
+    let telemetry = listener();
+    for empty in [false, true] {
+        let destination = Sandbox::new();
+        foreground_enqueue_only(&destination);
+        let root = destination.path("history");
+        if empty {
+            ctx_history_platform::platform_security::create_private_directory_all(&root).unwrap();
+        }
+        let rejected = failure(
+            command(&destination, &telemetry)
+                .args(["archive", "restore"])
+                .arg(&malformed)
+                .arg("--format=json"),
+        );
+        // The absent members directory is an archive I/O failure, before JSON parsing.
+        assert_eq!(rejected["error"]["code"], "archive_io");
+        assert_eq!(root.exists(), empty);
+        if empty {
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        }
+        assert!(!device_state(&destination)
+            .join("analytics-outbox-v1.json")
+            .exists());
+        let restored = success(
+            command(&destination, &telemetry)
+                .args(["archive", "restore"])
+                .arg(&archive)
+                .arg("--format=json"),
+        );
+        assert_eq!(restored["receipt"]["imported_members"], 1);
+        let recorded = events(&destination, &[&source.root().to_string_lossy()]);
+        assert_eq!(recorded.len(), 1);
+        assert_event(
+            &recorded[0],
+            "archive_restore",
+            "success",
+            json!({"output": "json", "output_delivery": "known_complete"}),
+        );
+        // Once owned, the same malformed input can record a failure without
+        // damaging the installed identity or the restored generation.
+        let identity = fs::read(root.join("install.json")).unwrap();
+        failure(
+            command(&destination, &telemetry)
+                .args(["archive", "restore"])
+                .arg(&malformed)
+                .arg("--format=json"),
+        );
+        assert_eq!(fs::read(root.join("install.json")).unwrap(), identity);
+        let retried = success(
+            command(&destination, &telemetry)
+                .args(["archive", "restore"])
+                .arg(&archive)
+                .arg("--format=json"),
+        );
+        assert_eq!(retried["receipt"]["imported_members"], 0);
+        assert_eq!(retried["receipt"]["unchanged_members"], 1);
+        let after = events(&destination, &[]);
+        assert_eq!(after.len(), 3);
+        assert_eq!(after[0], recorded[0]);
+        assert_event(
+            &after[1],
+            "archive_restore",
+            "failure",
+            json!({
+                "output": "json", "output_delivery": "unknown",
+                "hosted_failure_stage": "operation", "failure_type": "io"
+            }),
+        );
+        assert_event(
+            &after[2],
+            "archive_restore",
+            "success",
+            json!({"output": "json", "output_delivery": "known_complete"}),
+        );
+        assert_no_daemon(&destination);
+    }
+    assert_no_daemon(&source);
+    assert_no_connection(&telemetry);
+}
+
+#[test]
+fn server_restore_with_analytics_supports_shared_history_root_and_malformed_retry() {
+    let source = Sandbox::new();
+    let checkpoint = checkpoint_fixture(&source);
+    let malformed = source.path("malformed-checkpoint");
+    fs::create_dir(&malformed).unwrap();
+    fs::write(malformed.join("checkpoint.json"), b"{malformed checkpoint").unwrap();
+    let telemetry = listener();
+    for same_root in [true, false] {
+        for malformed_first in [false, true] {
+            let destination = Sandbox::new();
+            foreground_enqueue_only(&destination);
+            let root = destination.path(if same_root { "history" } else { "server" });
+            let restore = |input: &std::path::Path| {
+                let mut cmd = command(&destination, &telemetry);
+                cmd.arg("--data-root")
+                    .arg(destination.path("history"))
+                    .args(["server", "--root"])
+                    .arg(&root)
+                    .arg("restore")
+                    .arg(input)
+                    .arg("--format=json");
+                cmd
+            };
+            if malformed_first {
+                let rejected = failure(&mut restore(&malformed));
+                assert_eq!(rejected["error"]["code"], "server_error");
+                assert!(!root.exists());
+                assert!(!destination.path("history").exists());
+                assert!(!device_state(&destination)
+                    .join("analytics-outbox-v1.json")
+                    .exists());
+            }
+            let restored = success(&mut restore(&checkpoint));
+            assert_eq!(restored["operation"], "server_restore");
+            assert_eq!(restored["root"], json!(root));
+            assert_eq!(restored["previous_access_revoked"], true);
+            let credentials = fs::read(root.join("operator.json")).unwrap();
+            let credential: Value = serde_json::from_slice(&credentials).unwrap();
+            let secret = credential["credential"]["secret"].as_str().unwrap();
+            let recorded = events(&destination, &[secret, &source.root().to_string_lossy()]);
+            assert_eq!(recorded.len(), 1);
+            assert_event(
+                &recorded[0],
+                "server_restore",
+                "success",
+                json!({"output": "json", "output_delivery": "known_complete"}),
+            );
+            let catalog = fs::read(root.join("authority.sqlite")).unwrap();
+            let identity = fs::read(destination.path("history/install.json")).unwrap();
+            let rejected = failure(&mut restore(&checkpoint));
+            assert_eq!(rejected["error"]["code"], "conflict");
+            assert_eq!(fs::read(root.join("authority.sqlite")).unwrap(), catalog);
+            assert_eq!(fs::read(root.join("operator.json")).unwrap(), credentials);
+            assert_eq!(
+                fs::read(destination.path("history/install.json")).unwrap(),
+                identity
+            );
+            let after = events(&destination, &[secret]);
+            assert_eq!(after.len(), 2);
+            assert_eq!(after[0], recorded[0]);
+            assert_event(
+                &after[1],
+                "server_restore",
+                "failure",
+                json!({
+                    "output": "json", "output_delivery": "unknown",
+                    "hosted_failure_stage": "operation", "failure_type": "conflict"
+                }),
+            );
+            destination.assert_no_local_index();
+            assert_no_daemon(&destination);
+        }
+    }
+    source.assert_no_local_index();
+    assert_no_daemon(&source);
+    assert_no_connection(&telemetry);
+}
+
 #[test]
 fn successful_init_connect_and_archives_append_one_terminal_each_without_network() {
     let sandbox = Sandbox::new();
+    foreground_enqueue_only(&sandbox);
     let telemetry = listener();
     let remote = listener();
     let url = endpoint(&remote);
@@ -214,7 +444,7 @@ fn successful_init_connect_and_archives_append_one_terminal_each_without_network
         &first[0],
         "server_init",
         "success",
-        json!({"output": "json"}),
+        json!({"output": "json", "output_delivery": "known_complete"}),
     );
 
     let connected = success(&mut connect_command(&sandbox, &telemetry, &url));
@@ -227,7 +457,7 @@ fn successful_init_connect_and_archives_append_one_terminal_each_without_network
         &second[1],
         "remote_connect",
         "success",
-        json!({"output": "json"}),
+        json!({"output": "json", "output_delivery": "known_complete"}),
     );
     sandbox.assert_no_local_index();
 
@@ -253,7 +483,7 @@ fn successful_init_connect_and_archives_append_one_terminal_each_without_network
         &third[2],
         "archive_export",
         "success",
-        json!({"output": "json"}),
+        json!({"output": "json", "output_delivery": "known_complete"}),
     );
     success(
         command(&sandbox, &telemetry)
@@ -261,13 +491,18 @@ fn successful_init_connect_and_archives_append_one_terminal_each_without_network
             .arg(&archive)
             .arg("--format=json"),
     );
-    assert_eq!(
-        events(&sandbox, &canaries),
-        third,
-        "verification is not a new terminal"
+    let fourth = events(&sandbox, &canaries);
+    assert_eq!(fourth.len(), 4);
+    assert_eq!(&fourth[..3], &third);
+    assert_event(
+        &fourth[3],
+        "archive_verify",
+        "success",
+        json!({"output": "json", "output_delivery": "known_complete"}),
     );
 
     let destination = Sandbox::new();
+    foreground_enqueue_only(&destination);
     let restored = success(
         command(&destination, &telemetry)
             .args(["archive", "restore"])
@@ -281,7 +516,7 @@ fn successful_init_connect_and_archives_append_one_terminal_each_without_network
         &restored_events[0],
         "archive_restore",
         "success",
-        json!({"output": "json"}),
+        json!({"output": "json", "output_delivery": "known_complete"}),
     );
     let verified =
         ctx_history_index::VerifiedIndex::open_pinned(destination.path("history/search/lexical"))
@@ -312,6 +547,7 @@ fn successful_init_connect_and_archives_append_one_terminal_each_without_network
 #[test]
 fn invalid_endpoint_records_typed_failure_without_copying_arguments() {
     let sandbox = Sandbox::new();
+    foreground_enqueue_only(&sandbox);
     let telemetry = listener();
     let rejected = failure(&mut connect_command(&sandbox, &telemetry, INVALID_URL));
     assert_eq!(rejected["error"]["code"], "invalid_request");
@@ -322,7 +558,8 @@ fn invalid_endpoint_records_typed_failure_without_copying_arguments() {
         "remote_connect",
         "failure",
         json!({
-            "output": "json", "hosted_failure_stage": "operation", "failure_type": "invalid_request"
+            "output": "json", "output_delivery": "unknown",
+            "hosted_failure_stage": "operation", "failure_type": "invalid_request"
         }),
     );
     // The nearest valid input succeeds with the same token and consent settings.
@@ -339,7 +576,7 @@ fn invalid_endpoint_records_typed_failure_without_copying_arguments() {
         &recovered[1],
         "remote_connect",
         "success",
-        json!({"output": "json"}),
+        json!({"output": "json", "output_delivery": "known_complete"}),
     );
     sandbox.assert_no_local_index();
     assert_no_daemon(&sandbox);
@@ -367,6 +604,7 @@ fn ordinary_member_invite_is_forbidden_but_operator_invite_succeeds() {
             .arg(sandbox.path("operator.json"))
             .arg("--format=json"),
     );
+    foreground_enqueue_only(&sandbox);
     let invitation = sandbox.path("canary-private-path-invitation.json");
     let invited = success(
         command(&sandbox, &telemetry)
@@ -382,7 +620,7 @@ fn ordinary_member_invite_is_forbidden_but_operator_invite_succeeds() {
         &first[0],
         "server_invite",
         "success",
-        json!({"output": "json"}),
+        json!({"output": "json", "output_delivery": "known_complete"}),
     );
     success(
         command(&sandbox, &telemetry)
@@ -404,7 +642,7 @@ fn ordinary_member_invite_is_forbidden_but_operator_invite_succeeds() {
         &second[1],
         "remote_connect",
         "success",
-        json!({"output": "json"}),
+        json!({"output": "json", "output_delivery": "known_complete"}),
     );
     let rejected = failure(
         command(&sandbox, &telemetry)
@@ -422,7 +660,8 @@ fn ordinary_member_invite_is_forbidden_but_operator_invite_succeeds() {
         "server_invite",
         "failure",
         json!({
-            "output": "json", "hosted_failure_stage": "operation", "failure_type": "forbidden"
+            "output": "json", "output_delivery": "unknown",
+            "hosted_failure_stage": "operation", "failure_type": "forbidden"
         }),
     );
     sandbox.assert_no_local_index();
@@ -519,7 +758,7 @@ fn disabled_or_unreadable_consent_creates_no_analytics_state_and_hosted_still_wo
 }
 
 #[cfg(target_os = "linux")]
-fn output_failure(format: &str) {
+fn fail_stdout(command: &mut std::process::Command) {
     use std::{
         os::unix::fs::FileTypeExt,
         process::Stdio,
@@ -532,29 +771,18 @@ fn output_failure(format: &str) {
             let _ = self.0.wait();
         }
     }
-    let sandbox = Sandbox::new();
-    let telemetry = listener();
     // Never create or replace a path in /dev. Only open the existing full device.
     let full = fs::OpenOptions::new()
         .write(true)
         .open("/dev/full")
         .unwrap();
     assert!(full.metadata().unwrap().file_type().is_char_device());
-    let mut child = sandbox.std_command();
-    child
-        .env("CTX_ANALYTICS_ENABLED", "true")
-        .env("CTX_ANALYTICS_ENDPOINT", endpoint(&telemetry))
-        .env_remove("CTX_DAEMON_AUTOSTART_OFF")
-        .args(["server", "--root"])
-        .arg(sandbox.path("server"))
-        .args(["init", USER, "--credentials-out"])
-        .arg(sandbox.path("operator.json"))
-        .args(["--format", format])
+    command
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .stdout(Stdio::from(full));
     // assert_cmd replaces stdout with a pipe; use a bounded raw child here.
-    let mut child = Child(child.spawn().unwrap());
+    let mut child = Child(command.spawn().unwrap());
     let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
         if let Some(status) = child.0.try_wait().unwrap() {
@@ -564,6 +792,25 @@ fn output_failure(format: &str) {
         std::thread::sleep(Duration::from_millis(10));
     };
     assert!(!status.success());
+}
+
+#[cfg(target_os = "linux")]
+fn output_failure(format: &str) {
+    let sandbox = Sandbox::new();
+    foreground_enqueue_only(&sandbox);
+    let telemetry = listener();
+    fail_stdout(
+        sandbox
+            .std_command()
+            .env("CTX_ANALYTICS_ENABLED", "true")
+            .env("CTX_ANALYTICS_ENDPOINT", endpoint(&telemetry))
+            .env_remove("CTX_DAEMON_AUTOSTART_OFF")
+            .args(["server", "--root"])
+            .arg(sandbox.path("server"))
+            .args(["init", USER, "--credentials-out"])
+            .arg(sandbox.path("operator.json"))
+            .args(["--format", format]),
+    );
     assert!(
         sandbox.path("operator.json").is_file(),
         "operation should succeed before output fails"
@@ -576,6 +823,7 @@ fn output_failure(format: &str) {
         "failure",
         json!({
             "output": if format == "json" { "json" } else { "human" },
+            "output_delivery": "failed",
             "hosted_failure_stage": "output", "failure_type": "io"
         }),
     );
@@ -589,7 +837,7 @@ fn output_failure(format: &str) {
         &after[1],
         "server_init",
         "success",
-        json!({"output": "json"}),
+        json!({"output": "json", "output_delivery": "known_complete"}),
     );
     sandbox.assert_no_local_index();
     assert_no_daemon(&sandbox);
@@ -606,4 +854,116 @@ fn human_output_failure_is_a_terminal_not_a_success() {
 #[test]
 fn json_output_failure_is_a_terminal_not_a_success() {
     output_failure("json");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn archive_restore_output_failure_records_after_ownership_and_allows_retry() {
+    let source = Sandbox::new();
+    let archive = archive_fixture(&source);
+    let telemetry = listener();
+    for format in ["text", "json"] {
+        let destination = Sandbox::new();
+        foreground_enqueue_only(&destination);
+        fail_stdout(
+            destination
+                .std_command()
+                .env("CTX_ANALYTICS_ENABLED", "true")
+                .env("CTX_ANALYTICS_ENDPOINT", endpoint(&telemetry))
+                .env_remove("CTX_DAEMON_AUTOSTART_OFF")
+                .args(["archive", "restore"])
+                .arg(&archive)
+                .args(["--format", format]),
+        );
+        assert!(destination.path("history/archive-root.json").is_file());
+        let recorded = events(&destination, &[]);
+        assert_eq!(recorded.len(), 1);
+        assert_event(
+            &recorded[0],
+            "archive_restore",
+            "failure",
+            json!({
+                "output": if format == "json" { "json" } else { "human" },
+                "output_delivery": "failed", "hosted_failure_stage": "output", "failure_type": "io"
+            }),
+        );
+        let retried = success(
+            command(&destination, &telemetry)
+                .args(["archive", "restore"])
+                .arg(&archive)
+                .arg("--format=json"),
+        );
+        assert_eq!(retried["receipt"]["imported_members"], 0);
+        assert_eq!(retried["receipt"]["unchanged_members"], 1);
+        let after = events(&destination, &[]);
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0], recorded[0]);
+        assert_event(
+            &after[1],
+            "archive_restore",
+            "success",
+            json!({"output": "json", "output_delivery": "known_complete"}),
+        );
+        assert_no_daemon(&destination);
+    }
+    assert_no_connection(&telemetry);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn server_restore_output_failure_records_after_shared_or_separate_root_ownership() {
+    let source = Sandbox::new();
+    let checkpoint = checkpoint_fixture(&source);
+    let telemetry = listener();
+    for same_root in [true, false] {
+        let destination = Sandbox::new();
+        foreground_enqueue_only(&destination);
+        let root = destination.path(if same_root { "history" } else { "server" });
+        fail_stdout(
+            destination
+                .std_command()
+                .env("CTX_ANALYTICS_ENABLED", "true")
+                .env("CTX_ANALYTICS_ENDPOINT", endpoint(&telemetry))
+                .env_remove("CTX_DAEMON_AUTOSTART_OFF")
+                .arg("--data-root")
+                .arg(destination.path("history"))
+                .args(["server", "--root"])
+                .arg(&root)
+                .arg("restore")
+                .arg(&checkpoint)
+                .arg("--format=json"),
+        );
+        assert!(root.join("authority.sqlite").is_file());
+        assert!(root.join("operator.json").is_file());
+        let recorded = events(&destination, &[]);
+        assert_eq!(recorded.len(), 1);
+        assert_event(
+            &recorded[0],
+            "server_restore",
+            "failure",
+            json!({
+                "output": "json", "output_delivery": "failed",
+                "hosted_failure_stage": "output", "failure_type": "io"
+            }),
+        );
+        let status = success(
+            command(&destination, &telemetry)
+                .args(["server", "--root"])
+                .arg(&root)
+                .args(["status", "--format=json"]),
+        );
+        assert_eq!(status["health"]["collections"], 1);
+        let after = events(&destination, &[]);
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0], recorded[0]);
+        assert_event(
+            &after[1],
+            "server_status",
+            "success",
+            json!({"output": "json", "output_delivery": "known_complete"}),
+        );
+        destination.assert_no_local_index();
+        assert_no_daemon(&destination);
+    }
+    assert_no_connection(&telemetry);
 }

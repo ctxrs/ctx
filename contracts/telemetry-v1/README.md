@@ -132,11 +132,14 @@ serialized; unavailable runtime dimensions are omitted rather than inferred.
 Foreground CLI and MCP producers perform no telemetry network I/O. They
 serialize each eligible event once, preserving its UUIDv4 event ID in the exact
 batch body, and durably append that body to an owner-private,
-cross-process-locked local outbox. If the persistent daemon is disabled or
-absent, entries remain local until later delivery or bounded expiry.
+cross-process-locked local outbox. Entries remain local until a permitted
+bounded drain or expiry. Short-lived Sift observations use bounded optional
+cohort summaries as described in [engine observations](engines.md).
 
-The enabled persistent daemon is the sole network uploader. On startup, active
-wakes, and periodic cycles it briefly locks and snapshots at most 10 entries,
+The enabled persistent daemon uploads on startup, active wakes and periodic
+cycles. Running Server/Graph runtimes and a throttled outbox-only one-shot sender
+may also drain the same outbox under the [engine uploader contract](engines.md);
+none starts the history daemon implicitly. A drain briefly snapshots bounded entries,
 releases the state lock before HTTP, then re-locks to reconcile exact outbox
 entry IDs. Only a final 2xx response removes an accepted entry. A crash after
 server acceptance therefore replays the unchanged event IDs, which the server

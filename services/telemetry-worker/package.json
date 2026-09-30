@@ -21,7 +21,8 @@
     "deploy:prod": "wrangler deploy --env prod",
     "test:maintenance:postgres": "node --test --test-name-pattern='telemetry maintenance catch-up' test/maintenance-postgres.integration.mjs",
     "test:blame:postgres": "vitest run --config vitest.postgres.config.ts",
-    "test:rollout:postgres": "node --test test/rollout-postgres.integration.mjs"
+    "test:rollout:postgres": "node --test test/rollout-postgres.integration.mjs",
+    "test:product:postgres": "vitest run --config vitest.product-postgres.config.ts"
   },
   "pnpm": {
     "overrides": {

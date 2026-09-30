@@ -350,20 +350,33 @@ pub enum CacheCommand {
     Remove { directory: PathBuf, key: String },
 }
 
-pub fn cache(args: &CacheArgs) -> Result<serde_json::Value> {
+pub(crate) fn cache_observed(
+    args: &CacheArgs,
+    facts: &mut crate::GraphObservation,
+) -> Result<serde_json::Value> {
     match &args.command {
         CacheCommand::Inspect {
             directory,
             limit,
             max_entry_bytes,
-        } => Ok(serde_json::json!({
-            "directory": directory,
-            "entries": ingest::inspect_semantic_cache(directory, *limit as usize, *max_entry_bytes as usize)?,
-            "limit": limit,
-        })),
-        CacheCommand::Remove { directory, key } => Ok(serde_json::json!({
-            "directory":directory,"key":key,"removed":ingest::remove_semantic_cache_entry(directory,key)?,
-        })),
+        } => {
+            let entries = ingest::inspect_semantic_cache(
+                directory,
+                *limit as usize,
+                *max_entry_bytes as usize,
+            )?;
+            facts.result_count = Some(entries.len() as u64);
+            // The inspector rejects exhaustion rather than returning a partial list.
+            facts.truncated = Some(false);
+            facts.execution_succeeded = Some(true);
+            Ok(serde_json::json!({ "directory": directory, "entries": entries, "limit": limit }))
+        }
+        CacheCommand::Remove { directory, key } => {
+            let removed = ingest::remove_semantic_cache_entry(directory, key)?;
+            facts.result_count = Some(u64::from(removed));
+            facts.execution_succeeded = Some(true);
+            Ok(serde_json::json!({ "directory": directory, "key": key, "removed": removed }))
+        }
     }
 }
 

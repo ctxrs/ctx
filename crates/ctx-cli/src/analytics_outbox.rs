@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
+mod optional;
 mod private_file;
 mod reason_metadata;
 use ctx_client_observability::analytics::AnalyticsDeliveryFailureReason;
@@ -211,7 +212,13 @@ impl OutboxState {
     }
 
     fn drop_oldest_for_bound(&mut self) {
-        let entry = self.entries.remove(0);
+        // Optional summaries never displace ordinary user-operation receipts.
+        let index = self
+            .entries
+            .iter()
+            .position(optional::is_summary)
+            .unwrap_or(0);
+        let entry = self.entries.remove(index);
         if entry.kind == OutboxEntryKind::Ordinary {
             self.root_mut(&entry.data_root_id).record_ordinary_drop(
                 AnalyticsDeliveryFailureClass::LocalIo,
@@ -283,6 +290,7 @@ pub(crate) enum DeliveryDisposition {
 pub(crate) struct AnalyticsOutbox {
     path: PathBuf,
     data_root_id: String,
+    nonblocking: bool,
 }
 
 pub(crate) struct UploaderLease {
@@ -304,6 +312,7 @@ impl AnalyticsOutbox {
         let outbox = Self {
             path,
             data_root_id: data_root_id.to_owned(),
+            nonblocking: false,
         };
         let _lock = OutboxLock::acquire(&outbox.state_lock_path())?;
         if cleanup_orphan_temps(&parent)? {
@@ -317,6 +326,18 @@ impl AnalyticsOutbox {
     }
 
     pub(crate) fn purge(path: &Path, data_root_id: Option<&str>) -> Result<()> {
+        Self::purge_with_lock_mode(path, data_root_id, false)
+    }
+
+    pub(crate) fn try_purge(path: &Path, data_root_id: Option<&str>) -> Result<()> {
+        Self::purge_with_lock_mode(path, data_root_id, true)
+    }
+
+    fn purge_with_lock_mode(
+        path: &Path,
+        data_root_id: Option<&str>,
+        nonblocking: bool,
+    ) -> Result<()> {
         let Some(parent) = path.parent() else {
             bail!("analytics outbox path has no parent");
         };
@@ -326,23 +347,33 @@ impl AnalyticsOutbox {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error).context("inspect analytics outbox directory"),
         }
-        let _lock = OutboxLock::acquire(&path.with_extension("lock"))?;
-        reason_metadata::discard(path);
+        let _lock = if nonblocking {
+            let Some(lock) = OutboxLock::try_acquire(&path.with_extension("lock"))? else {
+                return Ok(());
+            };
+            lock
+        } else {
+            OutboxLock::acquire(&path.with_extension("lock"))?
+        };
         let mut changed = cleanup_orphan_temps(parent)?;
-        if let StoredOutbox::State(mut state, _) = read_state(path)? {
+        if let StoredOutbox::State(mut state, migrated) = read_state(path)? {
             if validate_state(&state).is_ok() {
+                let previous_entries = state.entries.len();
                 state
                     .entries
                     .retain(|entry| Some(entry.data_root_id.as_str()) != data_root_id);
-                if let Some(id) = data_root_id {
-                    state.roots.remove(id);
+                let removed_root = data_root_id.and_then(|id| state.roots.remove(id)).is_some();
+                if !migrated && state.entries.len() == previous_entries && !removed_root {
+                    return if changed { sync_parent(parent) } else { Ok(()) };
                 }
+                reason_metadata::discard(path);
                 if !state.entries.is_empty() || !state.roots.is_empty() {
                     let body = serde_json::to_vec(&state).context("serialize analytics outbox")?;
                     return write_private_file_durably(path, &body);
                 }
             }
         }
+        reason_metadata::discard(path);
         match fs::remove_file(path) {
             Ok(()) => changed = true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -368,7 +399,7 @@ impl AnalyticsOutbox {
 
     fn append_at(&self, endpoint: &str, body: &[u8], now_epoch_seconds: i64) -> Result<()> {
         let payload = validate_payload(body)?;
-        let _lock = OutboxLock::acquire(&self.state_lock_path())?;
+        let _lock = self.lock_state()?;
         let mut loaded = self.load_normalized(now_epoch_seconds)?;
         if body.len() > OUTBOX_MAX_BODY_BYTES {
             loaded
@@ -402,7 +433,7 @@ impl AnalyticsOutbox {
     }
 
     fn snapshot_at(&self, endpoint: &str, now_epoch_seconds: i64) -> Result<Vec<SnapshotEntry>> {
-        let _lock = OutboxLock::acquire(&self.state_lock_path())?;
+        let _lock = self.lock_state()?;
         let loaded = self.load_normalized(now_epoch_seconds)?;
         if loaded.dirty {
             self.persist(&loaded.state)?;
@@ -440,7 +471,7 @@ impl AnalyticsOutbox {
         if snapshot.data_root_id != self.data_root_id {
             return Ok(false);
         }
-        let _lock = OutboxLock::acquire(&self.state_lock_path())?;
+        let _lock = self.lock_state()?;
         let loaded = self.load_normalized(utc_now().timestamp())?;
         if loaded.dirty {
             self.persist(&loaded.state)?;
@@ -461,7 +492,7 @@ impl AnalyticsOutbox {
         if attempts.is_empty() {
             return Ok(());
         }
-        let _lock = OutboxLock::acquire(&self.state_lock_path())?;
+        let _lock = self.lock_state()?;
         let mut loaded = self.load_normalized(now_epoch_seconds)?;
         if loaded.missing {
             return Ok(());
@@ -526,7 +557,7 @@ impl AnalyticsOutbox {
     }
 
     fn pending_observation_at(&self, now_epoch_seconds: i64) -> Result<Option<OutboxObservation>> {
-        let _lock = OutboxLock::acquire(&self.state_lock_path())?;
+        let _lock = self.lock_state()?;
         let loaded = self.load_normalized(now_epoch_seconds)?;
         let health_pending = loaded.state.entries.iter().any(|entry| {
             entry.data_root_id == self.data_root_id
@@ -601,7 +632,7 @@ impl AnalyticsOutbox {
         if body.len() > OUTBOX_MAX_BODY_BYTES {
             bail!("analytics delivery observation exceeds the outbox body bound");
         }
-        let _lock = OutboxLock::acquire(&self.state_lock_path())?;
+        let _lock = self.lock_state()?;
         let mut loaded = self.load_normalized(now_epoch_seconds)?;
         let root = loaded.state.root(&self.data_root_id);
         if !root.observation_due
@@ -719,7 +750,7 @@ fn retry_delay(entry_id: &str, attempts: u16, retry_after: Option<Duration>) -> 
     Duration::from_secs(backoff.max(retry_after))
 }
 
-fn endpoint_fingerprint(endpoint: &str) -> String {
+pub(crate) fn endpoint_fingerprint(endpoint: &str) -> String {
     format!("{:x}", Sha256::digest(endpoint.as_bytes()))
 }
 

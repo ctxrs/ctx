@@ -233,6 +233,11 @@ pub struct ToolUsageFacts {
     pub blame: Option<BlameTerminalFacts>,
     pub search: Option<ToolSearchUsageFacts>,
     pub search_execution: Option<ToolSearchTerminalFacts>,
+    /// Closed, content-free native-engine facts. The transport owns the final
+    /// response-delivery result; execution completion alone does not establish it.
+    pub graph: Option<ctx_client_observability::analytics::GraphCompletedV1>,
+    pub sift: Option<ctx_client_observability::analytics::SiftSummaryV1>,
+    pub remote: Option<ctx_client_observability::analytics::RemoteCompletedV1>,
 }
 
 impl ToolUsageFacts {
@@ -255,6 +260,15 @@ impl ToolUsageFacts {
         }
         if additional.search_execution.is_some() {
             self.search_execution = additional.search_execution;
+        }
+        if additional.graph.is_some() {
+            self.graph = additional.graph;
+        }
+        if additional.sift.is_some() {
+            self.sift = additional.sift;
+        }
+        if additional.remote.is_some() {
+            self.remote = additional.remote;
         }
     }
 }

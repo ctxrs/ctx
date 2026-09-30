@@ -1,4 +1,5 @@
 // Adapted from Sift, MIT; source revision and license are in this crate’s NOTICE.
+use crate::observation::ProviderOutcome;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -62,7 +63,7 @@ struct ProviderResponse {
 
 #[derive(Clone, Debug)]
 pub struct Judgment {
-    pub status: &'static str,
+    pub status: ProviderOutcome,
     pub http_status: Option<u16>,
     pub usage: Option<Usage>,
     pub latency_ms: u64,
@@ -71,7 +72,7 @@ pub struct Judgment {
 }
 
 impl Judgment {
-    fn failed(status: &'static str, http_status: Option<u16>, started: Instant) -> Self {
+    fn failed(status: ProviderOutcome, http_status: Option<u16>, started: Instant) -> Self {
         Self {
             status,
             http_status,
@@ -115,21 +116,21 @@ impl Client {
         };
         let body = match serde_json::to_vec(&request) {
             Ok(body) if body.len() <= REQUEST_LIMIT => body,
-            _ => return Judgment::failed("oversize", None, started),
+            _ => return Judgment::failed(ProviderOutcome::Oversized, None, started),
         };
         let key: [u8; 32] = Sha256::digest([POLICY.as_bytes(), &body].concat()).into();
         if let Some(value) = self.memo.get(&key) {
             let mut value = value.clone();
-            value.status = "memoized";
+            value.status = ProviderOutcome::Memoized;
             value.latency_ms = elapsed_ms(started);
             value.memoized = true;
             return value;
         }
         let Some(api_key) = std::env::var_os("TYPESAFE_API_KEY").filter(|v| !v.is_empty()) else {
-            return Judgment::failed("disabled", None, started);
+            return Judgment::failed(ProviderOutcome::MissingCredential, None, started);
         };
         let Some(api_key) = api_key.to_str() else {
-            return Judgment::failed("disabled", None, started);
+            return Judgment::failed(ProviderOutcome::MissingCredential, None, started);
         };
         let response = self
             .agent
@@ -139,11 +140,11 @@ impl Client {
             .send(body.as_slice());
         let mut response = match response {
             Ok(response) => response,
-            Err(_) => return Judgment::failed("unavailable", None, started),
+            Err(_) => return Judgment::failed(ProviderOutcome::Unavailable, None, started),
         };
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            return Judgment::failed("http", Some(status), started);
+            return Judgment::failed(ProviderOutcome::HttpFailure, Some(status), started);
         }
         let value: ProviderResponse = match response
             .body_mut()
@@ -152,7 +153,9 @@ impl Client {
             .read_json()
         {
             Ok(value) => value,
-            Err(_) => return Judgment::failed("invalid_response", Some(status), started),
+            Err(_) => {
+                return Judgment::failed(ProviderOutcome::InvalidResponse, Some(status), started);
+            }
         };
         let expected = request.questions.len();
         if value.model != MODEL
@@ -160,26 +163,26 @@ impl Client {
             || value.usage.input_tokens > 9_007_199_254_740_991
             || value.usage.output_tokens > 9_007_199_254_740_991
         {
-            return Judgment::failed("invalid_response", Some(status), started);
+            return Judgment::failed(ProviderOutcome::InvalidResponse, Some(status), started);
         }
         let mut scores = Vec::with_capacity(expected / 2);
         for index in 0..expected / 2 {
             let relevant = value.answers.get(&format!("relevant_{index}"));
             let counter = value.answers.get(&format!("counter_{index}"));
             let (Some(relevant), Some(counter)) = (relevant, counter) else {
-                return Judgment::failed("invalid_response", Some(status), started);
+                return Judgment::failed(ProviderOutcome::InvalidResponse, Some(status), started);
             };
             if relevant.kind != "noul"
                 || counter.kind != "noul"
                 || !probability(relevant.noul)
                 || !probability(counter.noul)
             {
-                return Judgment::failed("invalid_response", Some(status), started);
+                return Judgment::failed(ProviderOutcome::InvalidResponse, Some(status), started);
             }
             scores.push((relevant.noul, counter.noul));
         }
         let result = Judgment {
-            status: "ok",
+            status: ProviderOutcome::Success,
             http_status: Some(status),
             usage: Some(value.usage),
             latency_ms: elapsed_ms(started),

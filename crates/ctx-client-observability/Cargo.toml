@@ -19,6 +19,7 @@ anyhow.workspace = true
 chrono.workspace = true
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-platform = { path = "../ctx-history-platform" }
+fs2.workspace = true
 libc.workspace = true
 rusqlite = { workspace = true, optional = true }
 serde.workspace = true

@@ -41,6 +41,23 @@ impl HistoryServer {
         collection: &str,
         maximum_operations: u64,
     ) -> Result<CollectionStatus> {
+        let started = std::time::Instant::now();
+        let mut facts = ServerIndexFacts::default();
+        let result = self.index_pending_observed(collection, maximum_operations, &mut facts);
+        self.observe(ServerObservation::Index {
+            duration: started.elapsed(),
+            failure: result.as_ref().err().map(ServerFailure::from),
+            facts,
+        });
+        result
+    }
+
+    fn index_pending_observed(
+        &self,
+        collection: &str,
+        maximum_operations: u64,
+        facts: &mut ServerIndexFacts,
+    ) -> Result<CollectionStatus> {
         collection_id(collection)?;
         if maximum_operations == 0 || maximum_operations > 256 {
             return Err(Error::Invalid("index operation budget must be 1..256"));
@@ -48,11 +65,18 @@ impl HistoryServer {
         let _writer = self.projection.lock().map_err(|_| Error::Unavailable)?;
         let connection = self.lock()?;
         let status = self.status_locked(&connection, collection)?;
+        facts.coverage_lag = status
+            .stored_sequence
+            .checked_sub(status.searchable_sequence);
+        facts.reads_available = Some(status.reads_available);
         if status.searchable_sequence == status.stored_sequence {
             connection.execute(
                 "DELETE FROM pending WHERE collection=?1 AND sequence<=?2",
                 params![collection, status.searchable_sequence],
             )?;
+            facts.processed_operations = Some(0);
+            facts.records = Some(0);
+            facts.bytes = Some(0);
             return Ok(status);
         }
         let target = status.stored_sequence.min(
@@ -64,6 +88,8 @@ impl HistoryServer {
         // transition history, including A -> B -> A; immutable revision rows
         // and event locators are reused rather than assigned one lifetime.
         let work = revision_work(&connection, collection, status.searchable_sequence, target)?;
+        facts.records = Some(0);
+        facts.bytes = Some(0);
         drop(connection);
         #[cfg(test)]
         self.hooks.run(crate::tests::repair::Stage::Projection);
@@ -109,14 +135,20 @@ impl HistoryServer {
                     .collection_root(collection)
                     .join("payloads")
                     .join(&payload.sha256);
-                visit_payload(&path, &descriptor.member, |record| {
+                let visited = visit_payload(&path, &descriptor.member, |record| {
                     writer.add_core_record(ctx_history_archive::map_record(
                         &descriptor.binding,
                         &descriptor.member,
                         record,
                     )?)?;
+                    facts.records = facts.records.map(|count| count.saturating_add(1));
                     Ok(())
-                })?;
+                });
+                if visited.is_err() {
+                    facts.bytes = None;
+                }
+                visited?;
+                facts.bytes = facts.bytes.map(|bytes| bytes.saturating_add(payload.bytes));
                 let digest: [u8; 32] = hex::decode(&payload.sha256)
                     .map_err(|_| Error::Unavailable)?
                     .try_into()
@@ -150,6 +182,8 @@ impl HistoryServer {
         // this generation until coverage includes that withdrawal. No writer
         // can race another activation/rebuild through the projection lock.
         writer.commit_with_generation_state(|_| true, |_| true, |_| Ok(state), |_| Ok(()))?;
+        facts.activated = true;
+        facts.processed_operations = target.checked_sub(status.searchable_sequence);
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
         tx.execute(
@@ -157,7 +191,12 @@ impl HistoryServer {
             params![collection, target],
         )?;
         tx.commit()?;
-        self.status_locked(&connection, collection)
+        let status = self.status_locked(&connection, collection)?;
+        facts.coverage_lag = status
+            .stored_sequence
+            .checked_sub(status.searchable_sequence);
+        facts.reads_available = Some(status.reads_available);
+        Ok(status)
     }
 
     /// Rebuild only derived Core state. Accepted payloads, byte locators,

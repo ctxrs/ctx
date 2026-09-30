@@ -3,9 +3,7 @@ use super::*;
 /// Select an explicit path or the nearest ancestor's existing `.graf/index.db`.
 /// This only discovers a path: it never creates, opens, or migrates a database.
 pub fn discover_database(explicit: Option<&Path>) -> Result<PathBuf> {
-    optional_database(explicit)?.context(
-        "no .graf/index.db found in this directory or its ancestors; run ctx graph index or pass --db",
-    )
+    optional_database(explicit)?.ok_or_else(|| MissingIndex.into())
 }
 
 pub fn optional_database(explicit: Option<&Path>) -> Result<Option<PathBuf>> {
@@ -33,3 +31,12 @@ pub(crate) fn database(cli: &GraphArgs) -> Result<PathBuf> {
         _ => discover_database(None),
     }
 }
+
+#[derive(Debug)]
+pub(crate) struct MissingIndex;
+impl std::fmt::Display for MissingIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("no .graf/index.db found in this directory or its ancestors; run ctx graph index or pass --db")
+    }
+}
+impl std::error::Error for MissingIndex {}

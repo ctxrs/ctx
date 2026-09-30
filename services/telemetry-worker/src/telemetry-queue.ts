@@ -488,7 +488,7 @@ function validateTypedProperties(row: TelemetryRow): boolean {
       parsed = parseProviderRefreshProperties(raw, row.status, row.surface);
     } else if (row.event_name === "runtime_observation") {
       validateRuntimeOperation(row.surface, operation);
-      parsed = parseRuntimeProperties(raw, row.surface, operation);
+      parsed = parseRuntimeProperties(raw, row.surface, operation, row.status);
     } else {
       return false;
     }

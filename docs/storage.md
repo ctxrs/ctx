@@ -985,14 +985,14 @@ authorizes selected retained normalized sessions to the configured endpoint.
 The persistent daemon or explicit `remote sync` sends those sessions and retries
 under the current policy. `--server NAME` sends lexical queries and retrieves
 authorized results from that named server, without local fallback. Connections
-require HTTPS except numeric loopback HTTP. The server runtime and remote
-search/show/MCP add no first-party telemetry. Explicit archive, connection,
-sharing, sync and administration commands can queue content-free completion
-events under the normal analytics consent settings: operation, output format,
-duration bucket and a fixed failure category. No history, queries, credentials,
-server addresses, collection IDs or file paths enter those events. These commands
-do not start a daemon or send telemetry; the existing local daemon delivers the
-queue when enabled. Standalone server operators may therefore never send it.
+require HTTPS except numeric loopback HTTP. Server runtime, remote reads,
+archive, connection, sharing, sync and administration report content-free
+operation or aggregate observations under the normal analytics consent settings.
+They distinguish completed work, response handoff, failures, publication
+acceptance and indexing. No history, queries, credentials, server addresses,
+collection IDs or file paths enter those events. Foreground commands never send
+telemetry HTTP or start a history daemon. A throttled delivery child or an
+existing daemon/server runtime delivers the queue when enabled.
 See [hosted-history.md](hosted-history.md) for storage, permissions, withdrawal
 and backup recovery.
 
@@ -1046,8 +1046,11 @@ long-lived daemon surfaces.
 Terminal refresh failures also carry a closed `failure_code` copied from the
 structured Core receipt and a boolean `retryable` value. Neither field contains
 an error message, source coordinate, route, path, or retry instruction.
-`runtime_observation@1` is for low-frequency daemon or MCP lifecycle and
-liveness observations, not per-loop or per-request tracing.
+`runtime_observation@1` covers daemon, MCP and server lifecycle and bounded
+aggregate windows for Sift, server requests and sharing. Aggregate receipts
+describe measured and unmeasured populations separately; they are not an exact
+invocation count. Graph and remote operation completions retain independent
+work and output evidence. See the [engine contract](../contracts/telemetry-v1/engines.md).
 `analytics_delivery_observation@1` reports only bucketed queue depth, retry
 attempts, drops, oldest queued age, and a closed delivery failure class. It is
 the receipt that distinguishes "the product succeeded" from "the analytics
@@ -1095,11 +1098,15 @@ entry belongs to the existing random data-root identifier. Enqueue, delivery,
 purge, and delivery counters use that same owner: an enabled root cannot upload
 another root's entries. Older shared outboxes without this ownership are
 discarded, including their counters, rather than replayed under another root's
-consent. If the persistent daemon is disabled or absent, entries remain local until a later
-daemon run delivers them or the bounds below expire them.
+consent. High-frequency Sift observations first update bounded best-effort
+counters outside the history root. Materializing a window retires those counters
+even if the queue is busy or full; telemetry must not block the tool. Optional
+summary batches never evict ordinary operation events.
 
-The enabled persistent daemon is the sole telemetry network uploader. It drains
-on startup, active wakes, and periodic cycles. Each drain briefly locks and
+The enabled persistent daemon drains on startup, active wakes, and periodic
+cycles. A running server can use its existing delivery tick. Standalone commands
+may schedule one short-lived delivery child, with a shared launch interval of
+60 seconds; the parent neither waits nor sends HTTP. Each drain briefly locks and
 snapshots up to 10 entries, releases the state lock while HTTP executes under
 one approximately two-second deadline, then re-locks to reconcile exact outbox
 entry IDs. Foreground writers therefore never wait behind a slow request. Only

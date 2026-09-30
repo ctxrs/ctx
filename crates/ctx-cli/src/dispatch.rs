@@ -202,14 +202,49 @@ pub(crate) fn run_cli() -> Result<()> {
         anyhow::bail!("--server is supported by search, show, and mcp serve");
     }
     if let Some(name) = &cli.server {
-        return crate::remote_history::run(cli.command, cli.data_root, name, cli.color.into());
+        let observer: Option<crate::remote_history::RemoteObserver> =
+            if matches!(&cli.command, CommandRoot::Mcp(_)) {
+                None // The MCP finalizer owns its delivered tool terminals.
+            } else {
+                crate::engine_telemetry::EngineTelemetry::optional(cli.data_root.clone()).map(
+                    |owner| {
+                        let owner = std::sync::Mutex::new(owner);
+                        std::sync::Arc::new(move |terminal| {
+                            if let Ok(mut owner) = owner.try_lock() {
+                                owner
+                                    .record(&[crate::engine_telemetry::remote(terminal, false)
+                                        .into_event()]);
+                            }
+                        }) as crate::remote_history::RemoteObserver
+                    },
+                )
+            };
+        return crate::remote_history::run_with_observer(
+            cli.command,
+            cli.data_root,
+            name,
+            cli.color.into(),
+            observer,
+        );
     }
     cli.command = match cli.command {
         CommandRoot::Hosted(command) => {
-            return crate::hosted::run(&command, cli.data_root.as_deref(), cli.color.into());
+            let observers = if command.needs_live_observers() {
+                crate::product_runtime::hosted(cli.data_root.as_deref())
+            } else {
+                crate::product_runtime::hosted_after_completion(cli.data_root.as_deref(), &command)
+            };
+            let result = crate::hosted::run_with_observers(
+                &command,
+                cli.data_root.as_deref(),
+                cli.color.into(),
+                observers.clone(),
+            );
+            crate::product_runtime::finish(&observers);
+            return result;
         }
         CommandRoot::Unified(command) => {
-            let status = command.run();
+            let status = command.run(cli.data_root);
             if status == 0 {
                 return Ok(());
             }

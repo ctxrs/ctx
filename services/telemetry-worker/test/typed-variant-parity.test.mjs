@@ -22,6 +22,11 @@ const NATIVEPATH_PROTOCOL = JSON.parse(readFileSync(
   ),
   "utf8",
 ));
+const ENGINE_OPERATION_FIXTURES = ["graph_completed", "remote_completed"].map((name) => (
+  JSON.parse(readFileSync(new URL(
+    `../../../contracts/telemetry-v1/fixtures/${name}.valid.json`, import.meta.url,
+  ), "utf8"))
+));
 const NOW = new Date("2026-07-25T22:35:00.000Z");
 const OCCURRED_AT = "2026-07-25T22:34:00Z";
 const ENV = {
@@ -45,12 +50,16 @@ describe("exhaustive public typed telemetry parity", () => {
       "sources", "import", "show", "locate", "search", "docs", "integration", "upgrade",
       "doctor",
     ]);
-    // Preserve the released matrix; Blame and finite hosted terminals have
-    // separate shared producer fixtures and HTTP/Queue parity coverage.
+    // Preserve the released matrix; engine, Blame and finite hosted terminals
+    // have separate shared producer fixtures and HTTP/Queue parity coverage.
     expect([...CURRENT_CLI_OPERATIONS]).toEqual([
-      "archive_export", "archive_restore", "remote_connect", "remote_share", "remote_sync",
+      "graph", "remote",
+      "archive_export", "archive_restore", "archive_verify", "remote_connect", "remote_share", "remote_sync",
+      "remote_pause", "remote_resume", "remote_status", "remote_remove",
       "server_init", "server_invite", "server_grant", "server_revoke", "server_withdraw",
       "server_backup", "server_restore",
+      "server_collection_create", "server_user_list", "server_user_credentials",
+      "server_user_create", "server_user_credential", "server_publications", "server_status",
       ...unique(MATRIX.operations.cli.map(({ operation }) => operation)), "blame",
     ]);
     expect(unique(MATRIX.operations.daemon.map(({ operation }) => operation))).toEqual([
@@ -60,9 +69,17 @@ describe("exhaustive public typed telemetry parity", () => {
       "status", "sources", "search", "show_session", "show_event", "query_events", "blame", "pro_status",
       "unknown", "missing",
     ]);
-    expect([...CURRENT_MCP_OPERATIONS]).toEqual(
-      unique(MATRIX.operations.mcp.map(({ operation }) => operation)),
-    );
+    expect([...CURRENT_MCP_OPERATIONS]).toEqual([
+      "graph", "remote", ...unique(MATRIX.operations.mcp.map(({ operation }) => operation)),
+    ]);
+    expect(ENGINE_OPERATION_FIXTURES.map(({ operation, properties }) => ({
+      operation,
+      discriminators: Object.fromEntries(Object.entries(properties)
+        .filter(([key]) => key.endsWith("_operation"))),
+    }))).toEqual([
+      { operation: "graph", discriminators: { graph_operation: "index" } },
+      { operation: "remote", discriminators: { remote_operation: "search" } },
+    ]);
     expect(MATRIX.pro_host.operations).toEqual([
       "lifecycle", "materialize", "status", "blame",
     ]);

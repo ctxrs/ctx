@@ -62,7 +62,7 @@ dependencies = set(manifest.get("dependencies", {}))
 for target in manifest.get("target", {}).values():
     dependencies.update(target.get("dependencies", {}))
 allowed = {
-    "anyhow", "chrono", "ctx-history-core", "ctx-history-platform", "libc", "rusqlite", "same-file",
+    "anyhow", "chrono", "ctx-history-core", "ctx-history-platform", "fs2", "libc", "rusqlite", "same-file",
     "serde", "serde_json", "thiserror", "uuid", "windows-sys",
 }
 if dependencies != allowed:

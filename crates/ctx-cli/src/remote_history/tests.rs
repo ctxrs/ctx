@@ -438,3 +438,91 @@ fn mcp_text_retains_evidence_and_exact_citations_for_text_only_clients() {
     assert!(rendered.contains("session_citation: immutable-session"));
     assert!(rendered.contains("page-two"));
 }
+
+#[test]
+fn remote_facts_keep_unknown_counts_and_classify_before_tool_error_flattening() {
+    let (result, terminal) = remote_backend().execute_with_facts(ToolOperation::Sources);
+    assert!(result.is_err());
+    assert_eq!(terminal.operation, RemoteOperation::Unsupported);
+    assert_eq!(terminal.failure, Some(RemoteFailure::Validation));
+    assert_eq!(terminal.facts.returned, None);
+    assert_eq!(terminal.facts.request_duration, None);
+    assert_eq!(terminal.facts.output_flushed, None);
+    let mut observed = Observation::new(RemoteOperation::Search);
+    let result = observed.request::<()>(|| Err(ctx_history_sharing::Error::Forbidden));
+    let terminal = observed.completion(result.as_ref().err());
+    assert_eq!(
+        terminal.failure,
+        Some(RemoteFailure::Sharing(
+            ctx_history_sharing::SharingFailure::Forbidden
+        ))
+    );
+    assert_eq!(terminal.facts.requests, 1);
+    assert_eq!(terminal.facts.returned, None);
+    assert!(terminal.facts.request_duration.is_some());
+}
+
+#[test]
+fn remote_cli_flush_failure_preserves_returned_and_rendered_counts() {
+    struct FlushFailure;
+    impl Write for FlushFailure {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "synthetic flush failure",
+            ))
+        }
+    }
+    for fail in [false, true] {
+        let out: Box<dyn Write + Send> = if fail {
+            Box::new(FlushFailure)
+        } else {
+            Box::new(io::sink())
+        };
+        let mut ui = Ui::with_writers(
+            out,
+            crate::ui::RenderContext::canonical_human_measurement(),
+            io::sink(),
+            crate::ui::RenderContext::canonical_human_measurement(),
+        );
+        let mut observed = Observation::new(RemoteOperation::Event);
+        observed.facts.returned = Some(1);
+        render::event(&mut ui, "synthetic-name", &fixture()).unwrap();
+        observed.rendered(1);
+        let result = finish_output(&mut ui, &mut observed);
+        let terminal = observed.completion(result.as_ref().err());
+        assert_eq!(terminal.facts.returned, Some(1));
+        assert_eq!(terminal.facts.rendered, Some(1));
+        assert_eq!(terminal.facts.output_flushed, Some(!fail));
+        assert_eq!(terminal.failure, fail.then_some(RemoteFailure::Output));
+        assert!(!format!("{terminal:?}").contains("synthetic-name"));
+    }
+}
+
+#[test]
+fn remote_page_facts_do_not_guess_search_completeness() {
+    let mut observed = Observation::new(RemoteOperation::Session);
+    observed.page(
+        &ctx_history_server::SessionPage {
+            events: vec![fixture()],
+            next_cursor: Some("synthetic-next".into()),
+        },
+        false,
+    );
+    observed.page(
+        &ctx_history_server::SessionPage {
+            events: vec![],
+            next_cursor: None,
+        },
+        true,
+    );
+    assert_eq!(observed.facts.returned, Some(1));
+    assert_eq!(observed.facts.pages, 2);
+    assert!(observed.facts.continuation_requested);
+    assert_eq!(observed.facts.has_more, Some(false));
+    assert_eq!(observed.facts.complete, None);
+    assert_eq!(observed.facts.exhaustive, None);
+}

@@ -64,6 +64,13 @@ impl HistoryServer {
             &fingerprint,
             "publish",
         )? {
+            drop(connection);
+            self.observe(ServerObservation::Publication(ServerPublicationFacts {
+                kind: ServerPublicationKind::Published,
+                replay: true,
+                bytes: receipt.payload.as_ref().map(|payload| payload.bytes),
+                records: Some(request.member.records),
+            }));
             return Ok(receipt);
         }
         let identity = serde_json::to_string(&(&request.identity, &request.member.path))?;
@@ -117,6 +124,13 @@ impl HistoryServer {
             &fingerprint,
             "publish",
         )? {
+            drop(connection);
+            self.observe(ServerObservation::Publication(ServerPublicationFacts {
+                kind: ServerPublicationKind::Published,
+                replay: true,
+                bytes: receipt.payload.as_ref().map(|payload| payload.bytes),
+                records: Some(request.member.records),
+            }));
             return Ok(receipt);
         }
         check_owner(
@@ -208,11 +222,22 @@ impl HistoryServer {
                 let _ = catalog::sync_directory(&root.join("payloads"));
             }
         }
-        if connection
+        let detached = connection
             .execute_batch("DETACH DATABASE validated")
-            .is_err()
-        {
+            .is_ok();
+        if !detached {
             self.authority_unavailable.store(true, Ordering::Release);
+        }
+        drop(connection);
+        if let Ok(receipt) = &result {
+            self.observe(ServerObservation::Publication(ServerPublicationFacts {
+                kind: ServerPublicationKind::Published,
+                replay: false,
+                bytes: receipt.payload.as_ref().map(|payload| payload.bytes),
+                records: Some(request.member.records),
+            }));
+        }
+        if !detached {
             return Err(Error::Unavailable);
         }
         let receipt = result?;
@@ -244,6 +269,13 @@ impl HistoryServer {
             &fingerprint,
             "withdraw",
         )? {
+            drop(connection);
+            self.observe(ServerObservation::Publication(ServerPublicationFacts {
+                kind: ServerPublicationKind::Withdrawn,
+                replay: true,
+                bytes: None,
+                records: None,
+            }));
             return Ok(receipt);
         }
         if request.operation.expected_revision.is_none() {
@@ -276,6 +308,13 @@ impl HistoryServer {
         // at acceptance, as on the publish path.
         authorize(&tx, token, collection, Access::Publish)?;
         tx.commit()?;
+        drop(connection);
+        self.observe(ServerObservation::Publication(ServerPublicationFacts {
+            kind: ServerPublicationKind::Withdrawn,
+            replay: false,
+            bytes: None,
+            records: None,
+        }));
         Ok(receipt)
     }
 
@@ -299,6 +338,13 @@ impl HistoryServer {
             &fingerprint,
             "remove",
         )? {
+            drop(connection);
+            self.observe(ServerObservation::Publication(ServerPublicationFacts {
+                kind: ServerPublicationKind::Removed,
+                replay: true,
+                bytes: None,
+                records: None,
+            }));
             return Ok(receipt);
         }
         let current: (String,u64,bool,u64) = connection.query_row("SELECT revision,epoch,withdrawn,sequence FROM publications WHERE collection=?1 AND publication=?2",
@@ -326,6 +372,13 @@ impl HistoryServer {
         catalog::audit(&tx, "remove", Some(&principal), Some(collection))?;
         authorize(&tx, token, collection, Access::Manage)?;
         tx.commit()?;
+        drop(connection);
+        self.observe(ServerObservation::Publication(ServerPublicationFacts {
+            kind: ServerPublicationKind::Removed,
+            replay: false,
+            bytes: None,
+            records: None,
+        }));
         Ok(receipt)
     }
 }

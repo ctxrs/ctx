@@ -349,6 +349,11 @@ pub trait CoreGenerationPublishedPort: Sync {
 }
 
 pub trait DaemonObservationPort: Sync {
+    /// Optional, bounded in-memory sharing observations; the host owns consent
+    /// and delivery through the existing daemon uploader.
+    fn sharing_observer(&self, _data_root: &Path) -> Option<crate::SharingObserver> {
+        None
+    }
     /// Effective consent decision used before collecting optional observations.
     fn analytics_enabled(&self, data_root: &Path) -> bool;
     fn provider_refresh_event(&self, job: &Value, successor_pending: bool)

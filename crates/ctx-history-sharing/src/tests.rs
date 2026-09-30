@@ -18,6 +18,7 @@ pub(crate) mod mock;
 mod observation;
 mod recovery;
 mod settlement;
+mod telemetry;
 use mock::{Mock, Response};
 
 pub(crate) fn publishing_mock(

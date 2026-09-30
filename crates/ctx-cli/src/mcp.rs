@@ -25,11 +25,7 @@ pub(crate) mod text;
 #[cfg(test)]
 mod unified_tests;
 
-use crate::{
-    analytics::PublicEventV1, operation_descriptor::observed_mcp_product_operation,
-    tool_backend::LocalToolBackend,
-};
-use ctx_app_config as config;
+use crate::{operation_descriptor::observed_mcp_product_operation, tool_backend::LocalToolBackend};
 
 #[derive(Debug, Args)]
 pub(crate) struct McpArgs {
@@ -62,6 +58,7 @@ pub(crate) fn run(args: McpArgs, data_root: PathBuf) -> Result<()> {
 pub(crate) fn run_remote(
     args: McpArgs,
     backend: crate::remote_history::RemoteBackend,
+    data_root: PathBuf,
 ) -> Result<()> {
     let McpCommand::Serve(args) = args.command;
     anyhow::ensure!(
@@ -70,16 +67,34 @@ pub(crate) fn run_remote(
     );
     let stdin = io::stdin();
     let stdout = io::stdout();
-    serve_remote_stdio(&mut stdin.lock(), &mut stdout.lock(), &backend)
+    serve_remote_stdio_with_telemetry(
+        &mut stdin.lock(),
+        &mut stdout.lock(),
+        &backend,
+        crate::engine_telemetry::mcp(&data_root, true),
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn serve_remote_stdio(
     input: &mut impl io::BufRead,
     output: &mut impl io::Write,
     backend: &impl ToolBackend,
 ) -> Result<()> {
-    // An explicit remote reader has no local index, configuration, usage store,
-    // daemon, provider discovery or client analytics initialization.
+    serve_remote_stdio_with_telemetry(
+        input,
+        output,
+        backend,
+        McpTelemetry::start(false, |_| Ok(())).for_remote(),
+    )
+}
+
+fn serve_remote_stdio_with_telemetry(
+    input: &mut impl io::BufRead,
+    output: &mut impl io::Write,
+    backend: &impl ToolBackend,
+    telemetry: McpTelemetry,
+) -> Result<()> {
     serve_mcp_stdio(
         input,
         output,
@@ -90,7 +105,7 @@ pub(crate) fn serve_remote_stdio(
         backend,
         &ctx_agent_application::mcp::render_generic_tool_text,
         &mut RemoteUsage,
-        McpTelemetry::start(false, |_| Ok(())),
+        telemetry,
     )
     .map_err(|failure| failure.into_error())
 }
@@ -176,27 +191,7 @@ impl McpUsagePort for LocalUsagePort {
 }
 
 fn product_telemetry(data_root: PathBuf) -> McpTelemetry {
-    let initial_config = config::AppConfig::load(&data_root).ok();
-    let enabled = initial_config
-        .as_ref()
-        .is_some_and(|config| config.analytics.enabled);
-    if initial_config
-        .as_ref()
-        .is_some_and(|config| !config.analytics.enabled)
-    {
-        crate::analytics::send_batch(&data_root, &[]);
-    }
-    McpTelemetry::start(enabled, move |events: &[PublicEventV1]| {
-        let Ok(config) = config::AppConfig::load(&data_root) else {
-            return Ok(());
-        };
-        if !config.analytics.enabled {
-            crate::analytics::send_batch(&data_root, &[]);
-            return Ok(());
-        }
-        crate::analytics::send_batch(&data_root, events);
-        Ok(())
-    })
+    crate::engine_telemetry::mcp(&data_root, false)
 }
 
 #[cfg(test)]

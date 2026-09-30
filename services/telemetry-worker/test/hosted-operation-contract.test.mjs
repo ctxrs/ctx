@@ -20,6 +20,7 @@ const operations = [
   "archive_export", "archive_restore", "remote_connect", "remote_share", "remote_sync",
   "server_init", "server_invite", "server_grant", "server_revoke", "server_withdraw",
   "server_backup", "server_restore",
+  "archive_verify", "remote_pause", "remote_resume", "remote_status", "remote_remove", "server_collection_create", "server_user_list", "server_user_credentials", "server_user_create", "server_user_credential", "server_publications", "server_status",
 ];
 const failureTypes = [
   "invalid_request", "unauthorized", "forbidden", "not_found", "conflict", "credentials",
@@ -165,5 +166,24 @@ test("does not widen ordinary operation properties", async () => {
       ...ordinary, properties: { ...ordinary.properties, [key]: key === "failure_type" ? "io" : "operation" },
     };
     await expect(buildTelemetryIngestPlan(batch(event), INGEST_OPTIONS)).rejects.toThrow();
+  }
+});
+
+
+test("expanded hosted terminals retain both failure tuples through HTTP and Queue", async () => {
+  const additions = ["archive_verify", "remote_pause", "remote_resume", "remote_status", "remote_remove",
+    "server_collection_create", "server_user_create", "server_user_list", "server_user_credentials",
+    "server_user_credential", "server_publications", "server_status"];
+  for (const operation of additions) {
+    for (const tuple of [null, ["operation", "forbidden"], ["output", "io"]]) {
+      const event = { ...fixtures[0], operation, outcome: tuple ? "failure" : "success",
+        properties: tuple ? { output: "json", hosted_failure_stage: tuple[0], failure_type: tuple[1] } : { output: "json" } };
+      const harness = workerHarness();
+      const response = await harness.worker.fetch(jsonRequest("/functions/v1/analytics", batch(event)), ENV);
+      expect(response.status, await response.text()).toBe(204);
+      const [message] = await harness.queueMessages();
+      expect(message.row.properties).toEqual({ ...event.properties, operation, outcome: event.outcome });
+      await expect(decodeTelemetryQueueMessage(await encodeTelemetryQueueMessage(message))).resolves.toEqual(message);
+    }
   }
 });

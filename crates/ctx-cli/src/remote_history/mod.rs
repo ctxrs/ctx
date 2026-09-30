@@ -1,6 +1,7 @@
 //! Explicit remote reads. This adapter never initializes local history storage.
 
 mod backend;
+mod observation;
 #[cfg(test)]
 mod protocol_tests;
 mod render;
@@ -23,12 +24,48 @@ use crate::{
 };
 
 pub(crate) use backend::RemoteBackend;
+use observation::Observation;
+#[cfg(test)]
+pub(crate) use observation::RemoteReadFacts;
+pub(crate) use observation::{
+    RemoteCompletion, RemoteFailure, RemoteObserver, RemoteOperation, RemoteStage,
+};
 
-pub(crate) fn run(
+pub(crate) fn run_with_observer(
+    command: CommandRoot,
+    data_root: Option<PathBuf>,
+    name: &str,
+    color: ColorMode,
+    observer: Option<RemoteObserver>,
+) -> Result<()> {
+    let operation = match &command {
+        CommandRoot::Search(_) => RemoteOperation::Search,
+        CommandRoot::Show(ShowArgs {
+            target: ShowTarget::Event(_),
+        }) => RemoteOperation::Event,
+        CommandRoot::Show(ShowArgs {
+            target: ShowTarget::Session(_),
+        }) => RemoteOperation::Session,
+        _ => RemoteOperation::Unsupported,
+    };
+    // The MCP carrier owns tool terminals and its final writer outcome.
+    let emit = !matches!(&command, CommandRoot::Mcp(_));
+    let mut observed = Observation::new(operation);
+    let result = run_observed(command, data_root, name, color, &mut observed);
+    if emit {
+        if let Some(observer) = observer {
+            observer(observed.completion(result.as_ref().err()));
+        }
+    }
+    result
+}
+
+fn run_observed(
     mut command: CommandRoot,
     data_root: Option<PathBuf>,
     name: &str,
     color: ColorMode,
+    observed: &mut Observation,
 ) -> Result<()> {
     if let CommandRoot::Show(args) = &mut command {
         if matches!(args.target, ShowTarget::Session(_)) {
@@ -42,6 +79,7 @@ pub(crate) fn run(
         CommandRoot::Mcp(_) => {}
         _ => bail!("--server is supported by search, show, and mcp serve"),
     }
+    observed.stage = RemoteStage::Setup;
     let root = data_root
         .map(Ok)
         .unwrap_or_else(ctx_history_platform::default_data_root)?;
@@ -49,22 +87,43 @@ pub(crate) fn run(
     let mut ui = Ui::stdio(color);
     match command {
         CommandRoot::Search(args) => {
-            let response = client.search(args.query.as_deref().unwrap_or_default(), args.limit)?;
+            let response = observed
+                .request(|| client.search(args.query.as_deref().unwrap_or_default(), args.limit))?;
+            observed.search(&response, args.limit);
+            observed.stage = RemoteStage::Render;
             if args.format.is_json() {
                 render::json(&mut ui, &response)?;
             } else {
                 render::search(&mut ui, name, &response)?;
             }
+            observed.rendered(response.results.len() as u64);
         }
-        CommandRoot::Show(args) => show(&client, name, args, &mut ui)?,
-        CommandRoot::Mcp(args) => return crate::mcp::run_remote(args, RemoteBackend::new(client)),
+        CommandRoot::Show(args) => show_observed(&client, name, args, &mut ui, observed)?,
+        CommandRoot::Mcp(args) => {
+            return crate::mcp::run_remote(args, RemoteBackend::new(client), root);
+        }
         _ => unreachable!("remote operation was validated"),
     }
-    ui.flush()?;
+    finish_output(&mut ui, observed)
+}
+
+fn finish_output(ui: &mut Ui, observed: &mut Observation) -> Result<()> {
+    observed.stage = RemoteStage::Flush;
+    let result = ui.flush();
+    observed.facts.output_flushed = Some(result.is_ok());
+    result?;
+    observed.stage = RemoteStage::Complete;
     Ok(())
 }
 
-fn show(client: &RemoteClient, name: &str, args: ShowArgs, ui: &mut Ui) -> Result<()> {
+fn show_observed(
+    client: &RemoteClient,
+    name: &str,
+    args: ShowArgs,
+    ui: &mut Ui,
+    observed: &mut Observation,
+) -> Result<()> {
+    observed.stage = RemoteStage::Validation;
     match args.target {
         ShowTarget::Event(args) => {
             validation::citation(
@@ -72,12 +131,15 @@ fn show(client: &RemoteClient, name: &str, args: ShowArgs, ui: &mut Ui) -> Resul
                 CitationKind::Event,
                 &client.connection().collection,
             )?;
-            let event = client.event(&args.id)?;
+            let event = observed.request(|| client.event(&args.id))?;
+            observed.facts.returned = Some(1);
+            observed.stage = RemoteStage::Render;
             if matches!(args.format, OutputFormat::Json | OutputFormat::Jsonl) {
                 render::json(ui, &event)?;
             } else {
                 render::event(ui, name, &event)?;
             }
+            observed.rendered(1);
         }
         ShowTarget::Session(args) => {
             let citation = args
@@ -89,6 +151,8 @@ fn show(client: &RemoteClient, name: &str, args: ShowArgs, ui: &mut Ui) -> Resul
                 CitationKind::Session,
                 &client.connection().collection,
             )?;
+            observed.facts.limit = args.max_events.map(|limit| limit as u64);
+            observed.stage = RemoteStage::Render;
             let mut cursor = None;
             let mut returned = 0_usize;
             let mut first = true;
@@ -111,7 +175,10 @@ fn show(client: &RemoteClient, name: &str, args: ShowArgs, ui: &mut Ui) -> Resul
                 if remaining == 0 {
                     break;
                 }
-                let page = client.session(citation, cursor.as_deref(), remaining)?;
+                let page =
+                    observed.request(|| client.session(citation, cursor.as_deref(), remaining))?;
+                observed.page(&page, cursor.is_some());
+                observed.stage = RemoteStage::Render;
                 let next = page.next_cursor;
                 ensure!(
                     next.is_none() || next != cursor,
@@ -131,6 +198,7 @@ fn show(client: &RemoteClient, name: &str, args: ShowArgs, ui: &mut Ui) -> Resul
                         OutputFormat::Markdown => unreachable!("validated output format"),
                     }
                     returned += 1;
+                    observed.rendered(1);
                 }
                 cursor = next;
                 if cursor.is_none() {

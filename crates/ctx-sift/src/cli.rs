@@ -3,11 +3,14 @@ use crate::{
     discover, execute::execute, filter, hooks, pre_hooks, protocol::protocol, rewrite, state,
     usage, views,
 };
+use crate::{
+    observation::{Entry, Mode, Operation, Phase, SiftObservation, Terminal},
+    observe::Observed,
+};
 use anyhow::{Context, Result, bail, ensure};
-use sift::{Compactor, Encoding};
+use sift::Encoding;
 use std::ffi::OsString;
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Write};
 
 const HELP: &str = "ctx sift — token-counted command output and recovery
 
@@ -67,17 +70,23 @@ fn parse_encoding(value: &str) -> Result<Encoding> {
     }
 }
 
-pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
+pub(crate) fn run(
+    args: impl IntoIterator<Item = OsString>,
+    observed: &mut Observed,
+    callback: &mut dyn FnMut(SiftObservation),
+) -> Result<i32> {
     let mut args = args.into_iter().collect::<Vec<_>>().into_iter();
     let Some(command) = args.next() else {
-        io::stdout().write_all(HELP.as_bytes())?;
+        help(observed, HELP)?;
         return Ok(0);
     };
+    observed.facts.operation = operation(command.to_str());
     if command == "--help" || command == "-h" {
-        io::stdout().write_all(HELP.as_bytes())?;
+        help(observed, HELP)?;
         return Ok(0);
     }
     if command == "--version" {
+        observed.phase = Phase::Output;
         writeln!(
             io::stdout(),
             "ctx sift {}",
@@ -89,7 +98,7 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
         && args.as_slice().len() == 1
         && matches!(args.as_slice()[0].to_str(), Some("--help" | "-h"))
     {
-        io::stdout().write_all(HELP.as_bytes())?;
+        help(observed, HELP)?;
         return Ok(0);
     }
     if command == "hook" {
@@ -106,14 +115,17 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
                 && args.next().is_none(),
             "hook requires a supported agent name"
         );
+        observed.facts.host = Some(crate::observe::host(&host));
         if !matches!(host.as_str(), "claude" | "copilot" | "hermes") {
-            return pre_hooks::run(&host);
+            observed.facts.entry = Entry::PreHook;
+            return pre_hooks::run_observed(&host, observed);
         }
-        hooks::run(&host)?;
+        observed.facts.entry = Entry::CompletionHook;
+        hooks::run_observed(&host, observed)?;
         return Ok(0);
     }
     if command == "rewrite" {
-        return rewrite::run(&args.collect::<Vec<_>>());
+        return rewrite::run_observed(&args.collect::<Vec<_>>(), observed);
     }
     if command == "filter" {
         let remaining: Vec<_> = args.collect();
@@ -121,11 +133,13 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
             remaining.is_empty() || remaining == [OsString::from("--capture")],
             "filter accepts only --capture"
         );
-        filter::run(!remaining.is_empty())?;
+        filter::run(!remaining.is_empty(), observed)?;
         return Ok(0);
     }
     if command == "gain" || command == "config" || command == "recall" || command == "semantic" {
         let remaining: Vec<_> = args.collect();
+        observed.facts.mode = Mode::Control;
+        observed.phase = Phase::Other;
         match command.to_str().unwrap() {
             "gain" => state::gain(&remaining)?,
             "config" => state::config(&remaining)?,
@@ -135,10 +149,12 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
         return Ok(0);
     }
     if command == "discover" {
+        observed.phase = Phase::Other;
         discover::run(&args.collect::<Vec<_>>())?;
         return Ok(0);
     }
     if command == "ccusage" {
+        observed.phase = Phase::Other;
         usage::run(&args.collect::<Vec<_>>())?;
         return Ok(0);
     }
@@ -148,7 +164,7 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
     ) {
         match views::parse(command.to_str().unwrap(), &args.collect::<Vec<_>>())? {
             views::Action::Help => {
-                io::stdout().write_all(views::HELP.as_bytes())?;
+                help(observed, views::HELP)?;
                 return Ok(0);
             }
             views::Action::Input { path, view }
@@ -160,11 +176,11 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
                     .into_iter();
             }
             views::Action::Input { path, view } => {
-                views::run_input(path.as_deref(), &view)?;
+                views::run_input(path.as_deref(), &view, observed)?;
                 return Ok(0);
             }
             views::Action::Command { argv, view } => {
-                return execute(&argv, false, true, Some(&view));
+                return execute(&argv, false, true, Some(&view), observed);
             }
         }
     }
@@ -190,13 +206,13 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
                 .first()
                 .is_some_and(|arg| arg == "--help" || arg == "-h")
             {
-                io::stdout().write_all(HELP.as_bytes())?;
+                help(observed, HELP)?;
                 return Ok(0);
             }
             if remaining.first().is_some_and(|arg| arg == "--") {
                 remaining.remove(0);
             }
-            return execute(&remaining, raw, capture, None);
+            return execute(&remaining, raw, capture, None, observed);
         }
         bail!(
             "unknown sift command {}; use 'ctx sift --help'",
@@ -216,7 +232,7 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
         if !positional && value == Some("--") {
             positional = true;
         } else if !positional && matches!(value, Some("--help" | "-h")) {
-            io::stdout().write_all(HELP.as_bytes())?;
+            help(observed, HELP)?;
             return Ok(0);
         } else if !positional
             && value.is_some_and(|v| v == "--record-source" || v.starts_with("--record-source="))
@@ -280,7 +296,7 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
         }
     }
     let stdout = io::stdout();
-    let mut output = BufWriter::new(stdout.lock());
+    let output = BufWriter::new(stdout.lock());
     ensure!(
         record_tool.is_none() || record_source.is_some(),
         "--record-tool requires --record-source"
@@ -294,12 +310,21 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
                         || (session == 2 && record_tool.as_deref() == Some("pi")))),
             "session-v1 requires Pi Bash and session-v2 requires Pi recording context"
         );
+        observed.facts.entry = match session {
+            1 => Entry::PiSessionV1,
+            2 => Entry::PiSessionV2,
+            _ => Entry::JsonProtocol,
+        };
+        observed.facts.terminal = Terminal::ProtocolSession;
+        observed.facts.host = record_source.as_deref().map(crate::observe::host);
         return protocol(
             io::stdin().lock(),
             output,
             record_source.as_deref(),
             record_tool.as_deref(),
             session,
+            observed,
+            callback,
         )
         .map(i32::from);
     }
@@ -310,32 +335,42 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> Result<i32> {
     if command == "restore" {
         ensure!(encoding.is_some(), "restore requires --encoding");
     }
-    let mut input: Box<dyn Read> = match file {
-        Some(path) if path != "-" => Box::new(BufReader::new(
-            File::open(path).context("cannot open input file")?,
-        )),
-        _ => Box::new(io::stdin().lock()),
-    };
-    if encoding == Some(Encoding::Raw) {
-        io::copy(&mut input, &mut output)?;
-    } else {
-        let mut bytes = Vec::new();
-        input.read_to_end(&mut bytes).context("cannot read input")?;
-        match (encoding, std::str::from_utf8(&bytes)) {
-            (None, Err(_)) => output.write_all(&bytes)?,
-            (None, Ok(text)) => {
-                output.write_all(Compactor::new()?.compact(text).text.as_bytes())?
-            }
-            (Some(encoding), Ok(text)) => {
-                output.write_all(sift::restore(encoding, text)?.as_bytes())?
-            }
-            (Some(_), Err(_)) => {
-                bail!("encoded input must be UTF-8; raw mode accepts arbitrary bytes")
-            }
-        }
-    }
-    output.flush()?;
+    drop(output);
+    crate::input::run(file, encoding, observed)?;
     Ok(0)
+}
+
+fn help(observed: &mut Observed, text: &str) -> Result<()> {
+    observed.facts.operation = Operation::Help;
+    observed.phase = Phase::Output;
+    io::stdout().write_all(text.as_bytes())?;
+    Ok(())
+}
+
+fn operation(command: Option<&str>) -> Operation {
+    match command {
+        Some("--help" | "-h") => Operation::Help,
+        Some("--version") => Operation::Version,
+        Some("run") => Operation::Run,
+        Some("proxy") => Operation::Proxy,
+        Some("compact" | "pipe") => Operation::Compact,
+        Some("restore") => Operation::Restore,
+        Some("filter") => Operation::Filter,
+        Some("read") => Operation::Read,
+        Some("json") => Operation::Json,
+        Some("summary") => Operation::Summary,
+        Some("err") => Operation::Errors,
+        Some("test") => Operation::Test,
+        Some("recall") => Operation::Recall,
+        Some("gain") => Operation::Gain,
+        Some("config") => Operation::Config,
+        Some("semantic") => Operation::Semantic,
+        Some("discover") => Operation::Discover,
+        Some("ccusage") => Operation::Usage,
+        Some("rewrite") => Operation::Rewrite,
+        Some("hook") => Operation::Hook,
+        _ => Operation::Unknown,
+    }
 }
 
 fn option_value(arg: &str, args: &mut impl Iterator<Item = OsString>) -> Result<String> {

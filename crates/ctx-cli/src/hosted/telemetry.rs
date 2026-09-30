@@ -20,6 +20,19 @@ impl std::fmt::Display for OutputFailure {
 
 impl std::error::Error for OutputFailure {}
 
+pub(super) fn operation(command: &HostedCommand) -> Option<super::HostedOperation> {
+    use super::HostedOperation as Operation;
+    match command {
+        HostedCommand::Archive(args) => Some(
+            args.telemetry_operation()
+                .map(Operation::Existing)
+                .unwrap_or(Operation::ArchiveVerify),
+        ),
+        HostedCommand::Server(args) => args.observed_operation(),
+        HostedCommand::Remote(args) => Some(args.observed_operation()),
+    }
+}
+
 pub(super) fn record(
     command: &HostedCommand,
     root: Option<&Path>,
@@ -50,7 +63,7 @@ pub(super) fn record(
     let _ = crate::observability_composition::append_analytics_batch(&root, &[event]);
 }
 
-fn classify(error: &anyhow::Error) -> Failure {
+pub(super) fn classify(error: &anyhow::Error) -> Failure {
     if error.is::<OutputFailure>() {
         return Failure::Output;
     }
@@ -75,27 +88,4 @@ fn classify(error: &anyhow::Error) -> Failure {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn failure_classification_uses_types_never_error_text() {
-        let secret = "private-token-example https://private.example/alice /private/history";
-        assert_eq!(
-            classify(&anyhow::anyhow!("{secret}")),
-            Failure::Operation(FailureType::Other)
-        );
-        assert_eq!(
-            classify(&anyhow::Error::new(ctx_history_sharing::Error::Forbidden).context(secret)),
-            Failure::Operation(FailureType::Forbidden)
-        );
-        assert_eq!(
-            classify(&anyhow::Error::new(std::io::Error::other(secret))),
-            Failure::Operation(FailureType::Io)
-        );
-        assert_eq!(
-            classify(&anyhow::anyhow!("{secret}").context(OutputFailure)),
-            Failure::Output
-        );
-    }
-}
+mod tests;

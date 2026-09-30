@@ -3,6 +3,7 @@
 //! their output. The first clauses are short-circuited; only the wrappers run.
 //! Unsupported syntax is left to the host shell. Pipeline producers and file writes never
 //! receive encoded output.
+use crate::{observation::*, observe::Observed};
 use anyhow::{Context, Result, ensure};
 use std::ffi::OsString;
 use std::io::Write;
@@ -240,6 +241,7 @@ fn finite(name: &str, args: &[Token]) -> bool {
     }
 }
 
+#[allow(dead_code)] // Retained convenience entry point.
 pub fn command(
     input: &str,
     executable: &Path,
@@ -247,6 +249,28 @@ pub fn command(
     exclusions: &[String],
 ) -> Option<String> {
     command_with_namespace(input, executable, shell, exclusions, Some("sift"))
+}
+
+pub(crate) fn command_observed(
+    input: &str,
+    executable: &Path,
+    shell: Shell,
+    exclusions: &[String],
+    observed: &mut Observed,
+) -> Option<String> {
+    let mut reason = SkipReason::UnsupportedSyntax;
+    let result = command_with_reason(
+        input,
+        executable,
+        shell,
+        exclusions,
+        Some("sift"),
+        &mut reason,
+    );
+    if result.is_none() {
+        observed.skip(reason);
+    }
+    result
 }
 
 // History discovery also verifies the exact wrappers emitted by released Sift.
@@ -257,7 +281,30 @@ pub(crate) fn command_with_namespace(
     exclusions: &[String],
     namespace: Option<&str>,
 ) -> Option<String> {
-    if input.len() > 64 * 1024 || shell == Shell::PowerShell {
+    command_with_reason(
+        input,
+        executable,
+        shell,
+        exclusions,
+        namespace,
+        &mut SkipReason::UnsupportedSyntax,
+    )
+}
+
+fn command_with_reason(
+    input: &str,
+    executable: &Path,
+    shell: Shell,
+    exclusions: &[String],
+    namespace: Option<&str>,
+    reason: &mut SkipReason,
+) -> Option<String> {
+    if input.len() > 64 * 1024 {
+        *reason = SkipReason::EnvelopeLimit;
+        return None;
+    }
+    if shell == Shell::PowerShell {
+        *reason = SkipReason::UnsupportedShell;
         return None;
     }
     let tokens = lex(input, shell)?;
@@ -293,6 +340,7 @@ pub(crate) fn command_with_namespace(
     let wrapper = format!("command {} {prefix}", quote(executable, shell));
     let mut checks = String::new();
     let mut insertions = Vec::new();
+    let mut excluded = false;
     let mut start = 0;
     for end in 0..=tokens.len() {
         if end < tokens.len() && tokens[end].operator.is_none() {
@@ -317,6 +365,7 @@ pub(crate) fn command_with_namespace(
             {
                 return None;
             }
+            excluded |= supported(name) && exclusions.iter().any(|e| e == name);
             if supported(name) && !exclusions.iter().any(|e| e == name) {
                 let complete = if finite(name, &segment[1..]) {
                     " --capture"
@@ -333,6 +382,11 @@ pub(crate) fn command_with_namespace(
         start = end + 1;
     }
     if insertions.is_empty() {
+        *reason = if excluded {
+            SkipReason::Excluded
+        } else {
+            SkipReason::NoSelection
+        };
         return None;
     }
     let mut output = input.to_owned();
@@ -342,7 +396,8 @@ pub(crate) fn command_with_namespace(
     Some(format!("{checks}{output}"))
 }
 
-pub fn run(args: &[OsString]) -> Result<i32> {
+pub fn run_observed(args: &[OsString], observed: &mut Observed) -> Result<i32> {
+    observed.facts.mode = Mode::Rewrite;
     let mut shell = Shell::native();
     let mut json = false;
     let mut iter = args.iter();
@@ -372,18 +427,24 @@ pub fn run(args: &[OsString]) -> Result<i32> {
         }
     }
     let input = input.context("rewrite requires one shell command string")?;
+    observed.phase = Phase::Settings;
     let settings = crate::state::Settings::load()?;
+    if !settings.enabled {
+        observed.skip(SkipReason::Disabled);
+    }
     let rewritten = settings
         .enabled
         .then(|| {
-            command(
+            command_observed(
                 input,
                 &std::env::current_exe().ok()?,
                 shell,
                 &settings.exclude_commands,
+                observed,
             )
         })
         .flatten();
+    observed.phase = Phase::Output;
     let mut output = std::io::stdout().lock();
     if json {
         writeln!(
@@ -394,5 +455,11 @@ pub fn run(args: &[OsString]) -> Result<i32> {
     } else if let Some(text) = &rewritten {
         writeln!(output, "{text}")?;
     }
+    output.flush()?;
+    observed.facts.delivery = if rewritten.is_some() {
+        Delivery::Flushed
+    } else {
+        Delivery::Unchanged
+    };
     Ok(if rewritten.is_some() { 0 } else { 1 })
 }

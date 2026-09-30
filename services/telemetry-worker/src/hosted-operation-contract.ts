@@ -1,3 +1,6 @@
+import { parseHostedMeasurements } from "./product-operation-contract";
+import { HOSTED_OPERATIONS, HOSTED_MEASUREMENT_KEYS } from "./product-keys";
+export { HOSTED_OPERATIONS } from "./product-keys";
 import {
   rejectUnknownKeys,
   requireEnum,
@@ -7,12 +10,8 @@ import {
   validateSharedProperties,
 } from "./telemetry-contract";
 
-export const HOSTED_OPERATIONS = new Set([
-  "archive_export", "archive_restore", "remote_connect", "remote_share", "remote_sync",
-  "server_init", "server_invite", "server_grant", "server_revoke", "server_withdraw",
-  "server_backup", "server_restore",
-]);
-export const HOSTED_PROPERTY_KEYS = new Set(["output", "hosted_failure_stage", "failure_type"]);
+
+export const HOSTED_PROPERTY_KEYS = new Set(["output", "hosted_failure_stage", "failure_type", ...HOSTED_MEASUREMENT_KEYS]);
 const FAILURE_TYPES = new Set([
   "invalid_request", "unauthorized", "forbidden", "not_found", "conflict", "credentials",
   "policy_denied", "unavailable", "capacity", "io", "invalid_archive", "other",
@@ -43,5 +42,5 @@ export function parseHostedProperties(
       throw schemaError("invalid_hosted_output_failure");
     }
   }
-  return out;
+  return { ...out, ...parseHostedMeasurements(properties, outcome) };
 }

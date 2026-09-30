@@ -40,7 +40,7 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use crate::{ImpactArgs, PathArgs, QueryArgs, ReadCommand, SymbolArgs, read};
+use crate::{ImpactArgs, PathArgs, QueryArgs, ReadCommand, SymbolArgs};
 
 const MAX_MESSAGE: usize = 1024 * 1024;
 const MAX_PROJECTS: usize = 32;
@@ -52,49 +52,89 @@ const MAX_SNAPSHOT_EDGES: usize = 1_000_000;
 const DEFAULT_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 
 mod args;
+mod observation;
 mod resources;
+use crate::observation::{
+    self as graph_facts, GraphFailureKind, GraphInvocation, GraphObservation, GraphOperation,
+    GraphPhase,
+};
+use observation::RequestObservation;
 mod transport;
 pub use args::ServeArgs;
 use args::*;
-pub use transport::serve;
+pub use transport::serve_observed;
+
+struct CachedAnalysisFailure {
+    kind: GraphFailureKind,
+    message: String,
+}
 
 struct CachedSnapshot {
     snapshot: GraphSnapshot,
     preserved: Vec<PreservedCommunity>,
-    analysis: OnceLock<std::result::Result<AnalysisReport, String>>,
+    analysis: OnceLock<std::result::Result<AnalysisReport, CachedAnalysisFailure>>,
     report: OnceLock<std::result::Result<String, String>>,
 }
 
 impl CachedSnapshot {
-    fn check_analysis_limits(&self) -> Result<()> {
+    fn check_analysis_limits(&self, facts: &mut GraphObservation) -> Result<()> {
         let references = self
             .snapshot
             .metadata
             .get("graf_unresolved_references")
             .and_then(Value::as_array)
             .map_or(0, Vec::len);
+        if self.snapshot.nodes.len() > MAX_ANALYSIS_NODES
+            || self.snapshot.edges.len() > MAX_ANALYSIS_EDGES
+            || references > MAX_ANALYSIS_EDGES
+        {
+            facts.fail(GraphFailureKind::WorkLimit);
+        }
         ensure!(
             self.snapshot.nodes.len() <= MAX_ANALYSIS_NODES
                 && self.snapshot.edges.len() <= MAX_ANALYSIS_EDGES
                 && references <= MAX_ANALYSIS_EDGES,
             "MCP analysis limit is 5000 nodes, 20000 edges and 20000 unresolved references; preserved community reads do not require analysis"
         );
+        let fits = serde_json::to_vec(&self.snapshot)?.len() <= MAX_ANALYSIS_BYTES;
+        if !fits {
+            facts.fail(GraphFailureKind::WorkLimit);
+        }
         ensure!(
-            serde_json::to_vec(&self.snapshot)?.len() <= MAX_ANALYSIS_BYTES,
+            fits,
             "MCP analysis snapshot limit is 8 MiB; preserved community reads do not require analysis"
         );
         Ok(())
     }
 
-    fn analysis(&self) -> Result<&AnalysisReport> {
-        self.analysis
+    fn analysis(&self, facts: &mut GraphObservation) -> Result<&AnalysisReport> {
+        facts.phase = GraphPhase::Analysis;
+        graph_facts::analysis_options(facts, &AnalysisOptions::default());
+        facts.analysis_cache_hit = Some(self.analysis.get().is_some());
+        let started = std::time::Instant::now();
+        let result = self
+            .analysis
             .get_or_init(|| {
-                self.check_analysis_limits()
+                self.check_analysis_limits(facts)
                     .and_then(|()| analysis::analyze(&self.snapshot, &AnalysisOptions::default()))
-                    .map_err(|error| format!("{error:#}"))
+                    .map_err(|error| CachedAnalysisFailure {
+                        kind: facts
+                            .failure
+                            .map(|failure| failure.kind)
+                            .unwrap_or_else(|| graph_facts::failure_kind(&error)),
+                        message: format!("{error:#}"),
+                    })
             })
             .as_ref()
-            .map_err(|error| anyhow::anyhow!(error.clone()))
+            .map_err(|error| {
+                facts.fail(error.kind);
+                anyhow::anyhow!(error.message.clone())
+            });
+        facts.analysis_duration = Some(started.elapsed());
+        if let Ok(report) = &result {
+            graph_facts::analysis(facts, report);
+        }
+        result
     }
 }
 
@@ -106,10 +146,18 @@ struct Project {
 }
 
 impl Project {
-    fn learned_result(&self, result: SearchResult, budget: Option<usize>) -> Result<Value> {
+    fn learned_result(
+        &self,
+        result: SearchResult,
+        budget: Option<usize>,
+        facts: &mut GraphObservation,
+    ) -> Result<Value> {
+        graph_facts::search(facts, &result);
         let mut value = serde_json::to_value(&result)?;
         if let Some(memory_dir) = &self.memory_dir {
-            let cached = self.snapshot().ok();
+            let mut learning_facts = *facts;
+            let cached = self.snapshot(&mut learning_facts).ok();
+            facts.snapshot_cache_hit = learning_facts.snapshot_cache_hit;
             let annotation = crate::learning_annotations(
                 memory_dir,
                 &result.graph,
@@ -124,7 +172,8 @@ impl Project {
         Ok(value)
     }
 
-    fn snapshot(&self) -> Result<Arc<CachedSnapshot>> {
+    fn snapshot(&self, facts: &mut GraphObservation) -> Result<Arc<CachedSnapshot>> {
+        facts.phase = GraphPhase::Snapshot;
         // SQL queries load this only for explicitly configured learning annotations.
         let mut cache = self
             .cache
@@ -132,12 +181,15 @@ impl Project {
             .map_err(|_| anyhow::anyhow!("snapshot worker failed"))?;
         let store = Store::open_read_only(&self.db)?;
         let stats = store.stats()?;
+        facts.stats(&stats);
         if let Some(value) = cache
             .as_ref()
             .filter(|v| v.snapshot.generation == stats.generation)
         {
+            facts.snapshot_cache_hit = Some(true);
             return Ok(value.clone());
         }
+        facts.snapshot_cache_hit = Some(false);
         // Store checks record/payload limits in the same transaction before loading.
         // Index size on disk is not a proxy for the in-memory graph payload.
         let snapshot = store.snapshot_bounded(
@@ -174,6 +226,7 @@ struct Graf {
     github_repo: Option<String>,
     workers: Arc<Semaphore>,
     tool_router: ToolRouter<Self>,
+    observation: Option<RequestObservation>,
 }
 
 impl Graf {
@@ -198,18 +251,20 @@ impl Graf {
         })();
         let repo = match configured {
             Ok(repo) => repo,
-            Err(error) => return tool_result(Err(error)),
+            Err(error) => return self.tool_result(Err(error)),
         };
         // A request can never select the working directory or infer its origin.
         args.repo = Some(repo);
-        tool_result(
-            self.run(project, move |p| {
+        self.tool_result(
+            self.run(project, move |p, facts| {
                 let derived = if include_graph {
-                    Some(p.snapshot()?)
+                    Some(p.snapshot(facts)?)
                 } else {
                     None
                 };
                 let report = prs::run(&args, derived.as_ref().map(|d| &d.snapshot))?;
+                facts.result_count = Some(report.entries.len() as u64);
+                facts.truncated = (!report.list_may_be_truncated).then_some(false);
                 Ok(serde_json::to_value(report)?)
             })
             .await,
@@ -219,28 +274,72 @@ impl Graf {
     async fn run<T: Send + 'static>(
         &self,
         name: Option<String>,
-        operation: impl FnOnce(&Project) -> Result<T> + Send + 'static,
+        operation: impl FnOnce(&Project, &mut GraphObservation) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let project = self
-            .projects
-            .get(name.as_deref().unwrap_or("default"))
-            .context("unknown project; use a name registered with --project NAME=DB")?
-            .clone();
-        let permit = self.workers.clone().try_acquire_owned().context(
-            "MCP query capacity reached (4 workers); retry after an active query completes",
-        )?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            operation(&project)
-        })
-        .await
-        .context("query worker failed")?
+        let mut facts = self
+            .observation
+            .as_ref()
+            .and_then(RequestObservation::snapshot)
+            .unwrap_or_else(|| {
+                GraphObservation::new(GraphOperation::Protocol, GraphInvocation::Library)
+            });
+        facts.phase = GraphPhase::Admission;
+        let result = async {
+            let project = self.projects.get(name.as_deref().unwrap_or("default"));
+            if project.is_none() {
+                facts.fail(GraphFailureKind::UnknownProject);
+            }
+            let project = project
+                .context("unknown project; use a name registered with --project NAME=DB")?
+                .clone();
+            let permit = self.workers.clone().try_acquire_owned();
+            if permit.is_err() {
+                facts.fail(GraphFailureKind::Capacity);
+            }
+            let permit = permit.context(
+                "MCP query capacity reached (4 workers); retry after an active query completes",
+            )?;
+            let mut worker_facts = facts;
+            let joined = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let started = std::time::Instant::now();
+                worker_facts.phase = GraphPhase::Query;
+                let result = operation(&project, &mut worker_facts);
+                if worker_facts.query_duration.is_none() {
+                    worker_facts.query_duration = Some(started.elapsed());
+                }
+                match &result {
+                    Ok(_) => worker_facts.execution_succeeded = Some(true),
+                    Err(error) => graph_facts::failed(&mut worker_facts, error),
+                }
+                (result, worker_facts)
+            })
+            .await;
+            match joined {
+                Ok((result, observed)) => {
+                    facts = observed;
+                    result
+                }
+                Err(error) => {
+                    facts.phase = GraphPhase::Worker;
+                    facts.fail(GraphFailureKind::Worker);
+                    Err(error.into())
+                }
+            }
+        }
+        .await;
+        if let Some(observation) = &self.observation {
+            observation.update(|value| *value = facts);
+        }
+        result
     }
 
     async fn execute(&self, name: Option<String>, command: ReadCommand) -> CallToolResult {
-        tool_result(
-            self.run(name, move |p| {
-                Ok(serde_json::to_value(read(&p.db, command)?)?)
+        self.tool_result(
+            self.run(name, move |p, facts| {
+                Ok(serde_json::to_value(crate::read::read_observed(
+                    &p.db, command, facts,
+                )?)?)
             })
             .await,
         )
@@ -255,46 +354,65 @@ fn validate_tokens(budget: usize) -> Result<()> {
     Ok(())
 }
 
-fn tool_result(result: Result<Value>) -> CallToolResult {
-    match result.and_then(|value| {
-        ensure!(
-            serde_json::to_vec(&value)?.len() <= MAX_MESSAGE / 2,
-            "tool response exceeds 512 KiB; reduce the result limit or use CLI export"
-        );
-        Ok(value)
-    }) {
-        Ok(value) => CallToolResult::structured(value),
-        Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
-    }
-}
-
-fn learning_tool_result(result: Result<Value>) -> CallToolResult {
-    let mut external_notice = None;
-    let result = result.and_then(|mut value| {
-        if (value.get("learning").is_some() || value.get("learning_notice").is_some())
-            && serde_json::to_vec(&value)?.len() > MAX_MESSAGE / 2
-        {
-            let fields = value.as_object_mut().unwrap();
-            fields.remove("learning");
-            fields.insert(
-                "learning_notice".into(),
-                json!("Learning omitted: response size limit."),
+impl Graf {
+    fn tool_result(&self, result: Result<Value>) -> CallToolResult {
+        match result.and_then(|value| {
+            let fits = serde_json::to_vec(&value)?.len() <= MAX_MESSAGE / 2;
+            if !fits && let Some(observation) = &self.observation {
+                observation.update(|f| {
+                    f.phase = GraphPhase::Render;
+                    f.fail(GraphFailureKind::ResponseLimit);
+                });
+            }
+            ensure!(
+                fits,
+                "tool response exceeds 512 KiB; reduce the result limit or use CLI export"
             );
-            if serde_json::to_vec(&value)?.len() > MAX_MESSAGE / 2 {
-                external_notice = value.as_object_mut().unwrap().remove("learning_notice");
+            Ok(value)
+        }) {
+            Ok(value) => CallToolResult::structured(value),
+            Err(error) => {
+                if let Some(observation) = &self.observation {
+                    observation.update(|facts| {
+                        if facts.execution_succeeded == Some(true) {
+                            facts.phase = GraphPhase::Render;
+                        }
+                        graph_facts::failed(facts, &error);
+                    });
+                }
+                CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))])
             }
         }
-        Ok(value)
-    });
-    let mut response = tool_result(result);
-    if let Some(notice) = external_notice.and_then(|value| value.as_str().map(str::to_owned)) {
-        response.content.push(ContentBlock::text(notice));
     }
-    response
+
+    fn learning_tool_result(&self, result: Result<Value>) -> CallToolResult {
+        let mut external_notice = None;
+        let result = result.and_then(|mut value| {
+            if (value.get("learning").is_some() || value.get("learning_notice").is_some())
+                && serde_json::to_vec(&value)?.len() > MAX_MESSAGE / 2
+            {
+                let fields = value.as_object_mut().unwrap();
+                fields.remove("learning");
+                fields.insert(
+                    "learning_notice".into(),
+                    json!("Learning omitted: response size limit."),
+                );
+                if serde_json::to_vec(&value)?.len() > MAX_MESSAGE / 2 {
+                    external_notice = value.as_object_mut().unwrap().remove("learning_notice");
+                }
+            }
+            Ok(value)
+        });
+        let mut response = self.tool_result(result);
+        if let Some(notice) = external_notice.and_then(|value| value.as_str().map(str::to_owned)) {
+            response.content.push(ContentBlock::text(notice));
+        }
+        response
+    }
 }
 
-fn graph_stats(derived: &CachedSnapshot) -> Result<Value> {
-    let a = derived.analysis()?;
+fn graph_stats(derived: &CachedSnapshot, facts: &mut GraphObservation) -> Result<Value> {
+    let a = derived.analysis(facts)?;
     let total = derived.snapshot.edges.len();
     let percentages: BTreeMap<_, _> = a
         .confidence_counts
@@ -318,9 +436,14 @@ fn graph_stats(derived: &CachedSnapshot) -> Result<Value> {
     )
 }
 
-fn hubs(derived: &CachedSnapshot, top: usize, percentile: Option<f64>) -> Result<Value> {
+fn hubs(
+    derived: &CachedSnapshot,
+    top: usize,
+    percentile: Option<f64>,
+    facts: &mut GraphObservation,
+) -> Result<Value> {
     ensure!((1..=500).contains(&top), "top_n must be between 1 and 500");
-    let metrics = &derived.analysis()?.nodes;
+    let metrics = &derived.analysis(facts)?.nodes;
     let cutoff = if let Some(p) = percentile {
         ensure!(
             p.is_finite() && (0.0..=100.0).contains(&p),
@@ -344,6 +467,8 @@ fn hubs(derived: &CachedSnapshot, top: usize, percentile: Option<f64>) -> Result
     nodes.sort_by(|a, b| b.degree.cmp(&a.degree).then(a.id.cmp(&b.id)));
     let truncated = nodes.len() > top;
     nodes.truncate(top);
+    facts.result_count = Some(nodes.len() as u64);
+    facts.truncated = Some(truncated);
     Ok(json!({"schema_version": derived.snapshot.schema_version,
         "generation": derived.snapshot.generation, "nodes": nodes, "truncated": truncated,
         "methodology": "Edge incidences; parallel edges counted separately, self edges count twice. Degree is not proof of architectural importance."}))
@@ -428,8 +553,8 @@ impl Graf {
         )
     )]
     async fn query_graph(&self, Parameters(a): Parameters<GraphQueryArgs>) -> CallToolResult {
-        learning_tool_result(
-            self.run(a.project, move |p| {
+        self.learning_tool_result(
+            self.run(a.project, move |p, facts| {
                 crate::nonempty(&a.question, "question")?;
                 validate_tokens(a.token_budget)?;
                 let options = SearchOptions {
@@ -453,6 +578,7 @@ impl Graf {
                 p.learned_result(
                     Store::open_read_only(&p.db)?.query_extended(&a.question, &options)?,
                     Some(a.token_budget),
+                    facts,
                 )
             })
             .await,
@@ -468,8 +594,8 @@ impl Graf {
         )
     )]
     async fn get_node(&self, Parameters(a): Parameters<NodeArgs>) -> CallToolResult {
-        learning_tool_result(
-            self.run(a.project, move |p| {
+        self.learning_tool_result(
+            self.run(a.project, move |p, facts| {
                 crate::nonempty(&a.label, "label")?;
                 let options = SearchOptions {
                     graph: QueryOptions {
@@ -481,6 +607,7 @@ impl Graf {
                 p.learned_result(
                     Store::open_read_only(&p.db)?.neighbors_resolved(&a.label, &options)?,
                     None,
+                    facts,
                 )
             })
             .await,
@@ -496,8 +623,8 @@ impl Graf {
         )
     )]
     async fn get_neighbors(&self, Parameters(a): Parameters<NeighborArgs>) -> CallToolResult {
-        learning_tool_result(
-            self.run(a.project, move |p| {
+        self.learning_tool_result(
+            self.run(a.project, move |p, facts| {
                 crate::nonempty(&a.label, "label")?;
                 validate_tokens(a.token_budget)?;
                 let options = SearchOptions {
@@ -513,6 +640,7 @@ impl Graf {
                 p.learned_result(
                     Store::open_read_only(&p.db)?.neighbors_resolved(&a.label, &options)?,
                     Some(a.token_budget),
+                    facts,
                 )
             })
             .await,
@@ -528,8 +656,8 @@ impl Graf {
         )
     )]
     async fn shortest_path(&self, Parameters(a): Parameters<ShortestPathArgs>) -> CallToolResult {
-        tool_result(
-            self.run(a.project, move |p| {
+        self.tool_result(
+            self.run(a.project, move |p, facts| {
                 crate::nonempty(&a.source, "source")?;
                 crate::nonempty(&a.target, "target")?;
                 validate_tokens(a.token_budget)?;
@@ -547,9 +675,10 @@ impl Graf {
                     token_budget: Some(a.token_budget),
                     ..Default::default()
                 };
-                Ok(serde_json::to_value(
-                    Store::open_read_only(&p.db)?.path_extended(&a.source, &a.target, &options)?,
-                )?)
+                let result =
+                    Store::open_read_only(&p.db)?.path_extended(&a.source, &a.target, &options)?;
+                graph_facts::path(facts, &result);
+                Ok(serde_json::to_value(result)?)
             })
             .await,
         )
@@ -649,9 +778,11 @@ impl Graf {
         )
     )]
     async fn graph_stats(&self, Parameters(a): Parameters<ProjectArgs>) -> CallToolResult {
-        tool_result(
-            self.run(a.project, |p| graph_stats(p.snapshot()?.as_ref()))
-                .await,
+        self.tool_result(
+            self.run(a.project, |p, facts| {
+                graph_stats(p.snapshot(facts)?.as_ref(), facts)
+            })
+            .await,
         )
     }
     #[tool(
@@ -664,9 +795,14 @@ impl Graf {
         )
     )]
     async fn god_nodes(&self, Parameters(a): Parameters<HubArgs>) -> CallToolResult {
-        tool_result(
-            self.run(a.project, move |p| {
-                hubs(p.snapshot()?.as_ref(), a.top_n, a.exclude_hubs_percentile)
+        self.tool_result(
+            self.run(a.project, move |p, facts| {
+                hubs(
+                    p.snapshot(facts)?.as_ref(),
+                    a.top_n,
+                    a.exclude_hubs_percentile,
+                    facts,
+                )
             })
             .await,
         )
@@ -681,9 +817,9 @@ impl Graf {
         )
     )]
     async fn get_community(&self, Parameters(a): Parameters<CommunityArgs>) -> CallToolResult {
-        tool_result(self.run(a.project, move |p| {
+        self.tool_result(self.run(a.project, move |p, facts| {
             ensure!((1..=500).contains(&a.limit), "limit must be between 1 and 500");
-            let d = p.snapshot()?;
+            let d = p.snapshot(facts)?;
             validate_tokens(a.token_budget)?;
             let requested = a.community_id.value();
             ensure!(requested.as_str().is_none_or(|s| !s.is_empty() && s.len() <= 1024), "community_id string must be nonempty and at most 1024 bytes");
@@ -704,7 +840,7 @@ impl Graf {
             } else {
                 ensure!(a.community_project.is_none(), "community_project applies only to preserved communities");
                 let id = requested.as_u64().and_then(|n| usize::try_from(n).ok()).context("computed community_id must be a nonnegative integer")?;
-                let community = d.analysis()?.communities.iter().find(|c| c.id == id)
+                let community = d.analysis(facts)?.communities.iter().find(|c| c.id == id)
                     .context("unknown computed community_id; read the communities resource for this generation")?;
                 (&community.nodes, json!({"community_source":"computed", "cohesion":community.cohesion}))
             };
@@ -724,7 +860,10 @@ impl Graf {
                     break;
                 }
             }
-            output["truncated"] = json!(output["nodes"].as_array().unwrap().len() < ids.len());
+            let returned = output["nodes"].as_array().unwrap().len();
+            facts.result_count = Some(returned as u64);
+            facts.truncated = Some(returned < ids.len());
+            output["truncated"] = json!(returned < ids.len());
             Ok(output)
         }).await)
     }

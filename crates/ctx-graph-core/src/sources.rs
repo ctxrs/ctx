@@ -20,9 +20,61 @@ pub fn add_and_index(
     options: &index::IndexOptions,
     capture: &ingest::CaptureMetadata,
 ) -> Result<(SourceRecord, IndexReport)> {
+    add_and_index_observed(
+        root,
+        db,
+        source,
+        name,
+        options,
+        capture,
+        &mut crate::observation::GraphObservation::new(
+            crate::observation::GraphOperation::Add,
+            crate::observation::GraphInvocation::Library,
+        ),
+    )
+}
+
+pub fn add_and_index_observed(
+    root: &Path,
+    db: &Path,
+    source: &str,
+    name: Option<&str>,
+    options: &index::IndexOptions,
+    capture: &ingest::CaptureMetadata,
+    observation: &mut crate::observation::GraphObservation,
+) -> Result<(SourceRecord, IndexReport)> {
+    let started = std::time::Instant::now();
     let prepared = index::prepare_semantic_budget(options);
-    add_and_index_prepared(root, db, source, name, &prepared, capture)
-        .map_err(|error| index::retain_semantic_usage(error, &prepared))
+    observation.semantic.configured = Some(prepared.ingest.semantic.is_some());
+    let result = add_and_index_prepared(root, db, source, name, &prepared, capture, observation)
+        .map_err(|error| index::retain_semantic_usage(error, &prepared));
+    if result.is_err()
+        && observation.semantic.receipts.is_none()
+        && let Some(semantic) = &prepared.ingest.semantic
+    {
+        let reserved = semantic
+            .runtime_budget
+            .as_ref()
+            .map(|budget| budget.usage())
+            .transpose();
+        let receipts = semantic
+            .runtime_usage
+            .as_ref()
+            .map(|recorder| recorder.snapshot())
+            .transpose();
+        observation.semantic.usage_unavailable = reserved.is_err() || receipts.is_err();
+        observation
+            .semantic
+            .record(reserved.ok().flatten(), receipts.ok().flatten().as_deref());
+    }
+    observation.duration = Some(started.elapsed());
+    if observation.phase == crate::observation::GraphPhase::Capture {
+        observation.capture_duration = Some(started.elapsed());
+    }
+    if let Err(error) = &result {
+        crate::observation::failed(observation, error);
+    }
+    result
 }
 
 fn add_and_index_prepared(
@@ -32,7 +84,9 @@ fn add_and_index_prepared(
     name: Option<&str>,
     options: &index::IndexOptions,
     capture: &ingest::CaptureMetadata,
+    observation: &mut crate::observation::GraphObservation,
 ) -> Result<(SourceRecord, IndexReport)> {
+    observation.phase = crate::observation::GraphPhase::Capture;
     let capture_started = std::time::Instant::now();
     let reserved = usize::from(options.ingest.semantic.is_some());
     ensure!(
@@ -77,7 +131,9 @@ fn add_and_index_prepared(
     let record = save(root, source, record.facts)?;
     drop(store);
     let capture_ms = capture_started.elapsed().as_secs_f64() * 1000.0;
-    let mut report = index::run_with_reserved_semantic_files(root, db, options, reserved)?;
+    observation.capture_duration = Some(capture_started.elapsed());
+    let mut report =
+        index::run_with_reserved_semantic_files_observed(root, db, options, reserved, observation)?;
     if let Some(timings) = &mut report.timings {
         timings.capture_ms = Some(capture_ms);
         timings.total_ms += capture_ms;

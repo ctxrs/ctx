@@ -358,7 +358,7 @@ pub fn handle_protocol_message<B: ToolBackend>(
         ))),
     };
     let response_id = id.clone();
-    let handled = match result {
+    let mut handled = match result {
         Ok(handled) => McpHandled {
             value: success_response(id, handled.value),
             usage: handled.usage,
@@ -381,6 +381,23 @@ pub fn handle_protocol_message<B: ToolBackend>(
             }
         }
     };
+    // These remote operations share the released show response limiter. Observe
+    // its actual size predicate, never infer replacement from payload error text.
+    if handled
+        .usage
+        .as_ref()
+        .is_some_and(|usage| usage.facts.remote.is_some())
+        && matches!(
+            tool_operation,
+            Some(McpToolKind::ShowSession | McpToolKind::ShowEvent)
+        )
+        && !response_bound::serialized_json_line_bytes(&handled.value)
+            .is_ok_and(|bytes| bytes <= MCP_PRESENTATION_MAX_OUTPUT_BYTES)
+    {
+        if let Some(usage) = handled.usage.as_mut() {
+            unified::response_replaced(&mut usage.facts);
+        }
+    }
     let response = match tool_operation {
         Some(McpToolKind::ShowSession | McpToolKind::ShowEvent) => bound_show_mcp_response(
             handled.value,
@@ -392,7 +409,9 @@ pub fn handle_protocol_message<B: ToolBackend>(
             response_id,
             MCP_PRESENTATION_MAX_OUTPUT_BYTES,
         ),
-        Some(McpToolKind::Unified(_)) => unified::bound_response(handled.value, response_id),
+        Some(McpToolKind::Unified(_)) => {
+            unified::bound_response(handled.value, response_id, &mut handled.usage)
+        }
         _ => handled.value,
     };
     McpHandled {
@@ -467,7 +486,9 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
     };
     let mut usage = McpUsage {
         operation,
-        facts: if operation == McpToolKind::Search {
+        facts: if operation == McpToolKind::Search
+            && backend.history_tool_surface() == HistoryToolSurface::Local
+        {
             ToolUsageFacts::search_preparation()
         } else {
             ToolUsageFacts::default()
@@ -478,13 +499,16 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
         .cloned()
         .unwrap_or_else(|| json!({}));
     if !arguments.is_object() {
+        if let McpToolKind::Unified(kind) = operation {
+            usage = unified::parse_failure_usage(kind, std::time::Duration::ZERO);
+        }
         return Err(McpHandled {
             value: json_rpc_error(
                 -32602,
                 "Invalid params",
                 Some(json!({ "error": "tools/call params.arguments must be an object" })),
             ),
-            usage: (!matches!(operation, McpToolKind::Unified(_))).then_some(usage),
+            usage: Some(usage),
         });
     }
     if let McpToolKind::Unified(kind) = operation {

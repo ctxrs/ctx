@@ -12,10 +12,24 @@ pub(crate) fn execute(
     raw: bool,
     capture: bool,
     view: Option<&views::View>,
+    observed: &mut crate::observe::Observed,
 ) -> Result<i32> {
+    use crate::observation::{Mode, Outcome, Phase, SkipReason};
+    observed.facts.mode = if raw {
+        Mode::Raw
+    } else if view.is_some() {
+        Mode::ExplicitView
+    } else if capture {
+        Mode::Capture
+    } else {
+        Mode::Automatic
+    };
+    observed.phase = Phase::Settings;
     let settings = match state::Settings::load() {
         Ok(settings) => settings,
         Err(error) => {
+            observed.skip(SkipReason::SettingsUnavailable);
+            observed.facts.outcome = Outcome::FailOpen;
             let _ = writeln!(
                 io::stderr(),
                 "ctx sift: {error:#}; passing command output through"
@@ -30,6 +44,13 @@ pub(crate) fn execute(
     let excluded = args
         .first()
         .is_some_and(|arg| settings.excludes(&arg.to_string_lossy()));
+    if raw {
+        observed.skip(SkipReason::ExplicitRaw);
+    } else if observed.facts.skip.is_none() && !settings.enabled {
+        observed.skip(SkipReason::Disabled);
+    } else if observed.facts.skip.is_none() && excluded {
+        observed.skip(SkipReason::Excluded);
+    }
     let command = args
         .first()
         .map(|arg| {
@@ -50,7 +71,9 @@ pub(crate) fn execute(
         "external".into()
     };
     let mut semantic_compactor = None;
-    runner::run_presented(
+    let mut local_record = None;
+    let mut view_failure = None;
+    let result = runner::run_presented(
         args,
         runner::Options {
             raw: raw || !settings.enabled || excluded,
@@ -58,9 +81,13 @@ pub(crate) fn execute(
         },
         |bytes, stderr| {
             if let Some(view) = view {
-                return views::render(view, bytes)
-                    .ok()
-                    .map(runner::Presentation::Bytes);
+                return match views::render(view, bytes) {
+                    Ok(bytes) => Some(runner::Presentation::Bytes(bytes)),
+                    Err(error) => {
+                        view_failure = Some(crate::observe::failure(Phase::Render, &error));
+                        None
+                    }
+                };
             }
             let text = std::str::from_utf8(bytes).ok()?;
             let proposal = command_view::candidate(args, text, stderr)?;
@@ -143,7 +170,17 @@ pub(crate) fn execute(
             };
             let originals = observation.stdout.original.zip(observation.stderr.original);
             // Usage storage is optional and cannot turn a successful command into a failure.
-            let _ = state::record(event, originals);
+            local_record = Some(
+                state::record_observed(event, originals)
+                    .unwrap_or(crate::observation::LocalRecordOutcome::Unavailable),
+            );
         },
-    )
+        observed,
+    );
+    observed.facts.local_record = local_record;
+    if result.is_ok() && observed.facts.failure.is_none() && view_failure.is_some() {
+        observed.facts.failure = view_failure;
+        observed.facts.outcome = Outcome::FailOpen;
+    }
+    result
 }

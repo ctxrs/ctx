@@ -12,6 +12,7 @@ mod http;
 mod identity;
 mod inventory;
 mod migration;
+mod observation;
 mod operations;
 mod projection;
 mod publication;
@@ -27,9 +28,13 @@ pub use auth::{
     write_token_file, BootstrapInfo, EnrollRequest, EnrollmentFile, GrantRequest, InviteRequest,
     PublicationState, TokenFile,
 };
-pub use http::{router, serve, serve_blocking, serve_blocking_with_ready};
+pub use http::{
+    router, serve, serve_blocking, serve_blocking_with_hooks, serve_blocking_with_ready,
+    serve_with_hooks,
+};
 pub use identity::ConnectionIdentity;
 pub use inventory::{PublicationEntry, PublicationListRequest, PublicationPage};
+pub use observation::*;
 pub use operations::{
     publish_fingerprint, CancelPublishOutcome, CancelPublishRequest, CancelPublishResponse,
 };
@@ -50,6 +55,7 @@ use std::{
 
 pub struct HistoryServer {
     config: ServerConfig,
+    observer: Option<ServerObserver>,
     // Authority changes serialize; validation and derived index construction
     // run outside this lock against immutable input.
     authority: Mutex<Connection>,
@@ -63,11 +69,40 @@ pub struct HistoryServer {
 
 impl HistoryServer {
     pub fn open(config: ServerConfig) -> Result<Self> {
-        config.validate()?;
-        let (connection, owner) = catalog::open(&config.root)?;
-        admission::clean_scratch(&config.root, &connection)?;
+        Self::open_with_observer(config, None)
+    }
+
+    pub fn open_with_observer(
+        config: ServerConfig,
+        observer: Option<ServerObserver>,
+    ) -> Result<Self> {
+        let started = std::time::Instant::now();
+        let mut stage = ServerStage::Configuration;
+        let result: Result<_> = (|| {
+            config.validate()?;
+            stage = ServerStage::AuthorityOpen;
+            let (connection, owner) = catalog::open(&config.root)?;
+            admission::clean_scratch(&config.root, &connection)?;
+            Ok((connection, owner))
+        })();
+        let (connection, owner) = match result {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(observer) = &observer {
+                    observer(ServerObservation::Lifecycle {
+                        kind: ServerLifecycle::Failed,
+                        stage,
+                        duration: started.elapsed(),
+                        failure: Some(ServerFailure::from(&error)),
+                        backlog: None,
+                    });
+                }
+                return Err(error);
+            }
+        };
         Ok(Self {
             config,
+            observer,
             authority: Mutex::new(connection),
             projection: Mutex::new(()),
             authority_unavailable: AtomicBool::new(false),

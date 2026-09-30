@@ -27,6 +27,7 @@ pub(crate) mod repair;
 mod revisions;
 mod search;
 mod startup;
+mod telemetry;
 
 struct Fixture {
     identity: ArchiveIdentity,

@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -82,30 +82,141 @@ fn purge_analytics_outbox(data_root: &Path, outbox_path: &Path) -> anyhow::Resul
     crate::analytics_outbox::AnalyticsOutbox::purge(outbox_path, data_root_id.as_deref())
 }
 
+pub(crate) fn optional_analytics_enabled(data_root: &Path) -> bool {
+    matches!(
+        resolve_analytics_policy(data_root),
+        Ok(ResolvedAnalyticsPolicy::Active(_))
+    )
+}
+
+pub(crate) fn optional_analytics_endpoint(data_root: &Path) -> Option<String> {
+    match resolve_analytics_policy(data_root).ok()? {
+        ResolvedAnalyticsPolicy::Active(config) => Some(config.analytics.endpoint),
+        ResolvedAnalyticsPolicy::Purge | ResolvedAnalyticsPolicy::DryRun => None,
+    }
+}
+
+fn optional_policy_for_owner(
+    data_root: &Path,
+    owner: &str,
+) -> anyhow::Result<ResolvedAnalyticsPolicy> {
+    let policy = resolve_analytics_policy(data_root)?;
+    if crate::identity::try_existing_installation_id(data_root)?.as_deref() != Some(owner) {
+        anyhow::bail!("optional analytics consent owner is unavailable");
+    }
+    Ok(policy)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppendMode {
+    Ordinary,
+    Optional,
+    Summary,
+}
+
+pub(crate) fn append_optional_analytics_batch(
+    data_root: &Path,
+    events: &[PublicEventV1],
+) -> anyhow::Result<()> {
+    append_batch(data_root, events, AppendMode::Optional, None)
+}
+
+pub(crate) fn append_optional_analytics_batch_for_owner(
+    data_root: &Path,
+    owner: &str,
+    endpoint: &str,
+    events: &[PublicEventV1],
+) -> anyhow::Result<()> {
+    append_batch(
+        data_root,
+        events,
+        AppendMode::Optional,
+        Some((owner, endpoint)),
+    )
+}
+
+pub(crate) fn append_analytics_summary_for_owner(
+    data_root: &Path,
+    owner: &str,
+    endpoint: &str,
+    events: &[PublicEventV1],
+) -> anyhow::Result<()> {
+    append_batch(
+        data_root,
+        events,
+        AppendMode::Summary,
+        Some((owner, endpoint)),
+    )
+}
+
 pub(crate) fn append_analytics_batch(
     data_root: &Path,
     events: &[PublicEventV1],
 ) -> anyhow::Result<()> {
+    append_batch(data_root, events, AppendMode::Ordinary, None)
+}
+
+fn append_batch(
+    data_root: &Path,
+    events: &[PublicEventV1],
+    mode: AppendMode,
+    expected: Option<(&str, &str)>,
+) -> anyhow::Result<()> {
+    let optional = mode != AppendMode::Ordinary;
     let outbox_path = crate::identity::device_state_path(ANALYTICS_OUTBOX_FILE, data_root)?;
     match resolve_analytics_policy(data_root)? {
+        ResolvedAnalyticsPolicy::Purge if optional => {
+            let owner = match expected {
+                Some((owner, _)) => Some(owner.to_owned()),
+                None => crate::identity::try_existing_installation_id(data_root)?,
+            };
+            return crate::analytics_outbox::AnalyticsOutbox::try_purge(
+                &outbox_path,
+                owner.as_deref(),
+            );
+        }
         ResolvedAnalyticsPolicy::Purge => return purge_analytics_outbox(data_root, &outbox_path),
         ResolvedAnalyticsPolicy::DryRun => return Ok(()),
         ResolvedAnalyticsPolicy::Active(_) if events.is_empty() => return Ok(()),
         ResolvedAnalyticsPolicy::Active(_) => {}
     }
-    let client_profile_id = crate::identity::device_id(data_root)?;
-    let data_root_id = crate::identity::installation_id(data_root)?;
-    let capability_authority =
-        crate::execution_capabilities::ExecutionCapabilityStorageAuthority::new(
-            crate::identity::device_state_path(CAPABILITY_CLAIM_FILE, data_root)?,
-            crate::identity::device_state_path(CAPABILITY_REPORTED_FILE, data_root)?,
-        );
-    let capability_snapshot = crate::execution_capabilities::pending(
-        &capability_authority,
-        crate::identity::create_private_file,
-    )
-    .ok()
-    .flatten();
+    let (client_profile_id, data_root_id) = if optional {
+        let owner = if expected.is_some() {
+            crate::identity::try_existing_installation_id(data_root)?
+        } else {
+            crate::identity::try_installation_id(data_root)?
+        };
+        let Some(owner) = owner else {
+            return Ok(());
+        };
+        if expected.is_some_and(|(wanted, _)| wanted != owner) {
+            return Ok(());
+        }
+        let Some(profile) = crate::identity::try_device_id(data_root)? else {
+            return Ok(());
+        };
+        (profile, owner)
+    } else {
+        (
+            crate::identity::device_id(data_root)?,
+            crate::identity::installation_id(data_root)?,
+        )
+    };
+    let capability_snapshot = if optional {
+        None
+    } else {
+        let capability_authority =
+            crate::execution_capabilities::ExecutionCapabilityStorageAuthority::new(
+                crate::identity::device_state_path(CAPABILITY_CLAIM_FILE, data_root)?,
+                crate::identity::device_state_path(CAPABILITY_REPORTED_FILE, data_root)?,
+            );
+        crate::execution_capabilities::pending(
+            &capability_authority,
+            crate::identity::create_private_file,
+        )
+        .ok()
+        .flatten()
+    };
     let install_marker = ctx_upgrade_engine::current_exe_install_marker();
     let mut authority = AnalyticsDeliveryAuthority {
         app_version: env!("CARGO_PKG_VERSION"),
@@ -116,45 +227,104 @@ pub(crate) fn append_analytics_batch(
             .map(|marker| marker.install_attempt_id.as_str()),
         capability_snapshot,
     };
-    let outbox =
-        crate::analytics_outbox::AnalyticsOutbox::open(outbox_path.clone(), &data_root_id)?;
+    let outbox = if optional {
+        let Some(outbox) =
+            crate::analytics_outbox::AnalyticsOutbox::try_open(outbox_path.clone(), &data_root_id)?
+        else {
+            return Ok(());
+        };
+        outbox
+    } else {
+        crate::analytics_outbox::AnalyticsOutbox::open(outbox_path.clone(), &data_root_id)?
+    };
     ctx_client_observability::analytics::deliver_batch(&mut authority, events, |body| {
-        match resolve_analytics_policy_for_owner(data_root, &data_root_id)? {
+        let policy = if optional {
+            optional_policy_for_owner(data_root, &data_root_id)?
+        } else {
+            resolve_analytics_policy_for_owner(data_root, &data_root_id)?
+        };
+        match policy {
             ResolvedAnalyticsPolicy::Purge => {
-                crate::analytics_outbox::AnalyticsOutbox::purge(&outbox_path, Some(&data_root_id))?;
+                if optional {
+                    crate::analytics_outbox::AnalyticsOutbox::try_purge(
+                        &outbox_path,
+                        Some(&data_root_id),
+                    )?;
+                } else {
+                    crate::analytics_outbox::AnalyticsOutbox::purge(
+                        &outbox_path,
+                        Some(&data_root_id),
+                    )?;
+                }
                 anyhow::bail!("analytics was disabled before durable append")
             }
             ResolvedAnalyticsPolicy::DryRun => {
                 anyhow::bail!("analytics dry-run was enabled before durable append")
             }
             ResolvedAnalyticsPolicy::Active(current) => {
-                outbox.append(&current.analytics.endpoint, body)
+                if expected.is_some_and(|(_, endpoint)| endpoint != current.analytics.endpoint) {
+                    return Ok(());
+                }
+                if mode == AppendMode::Summary {
+                    let _admitted = outbox.append_summary(&current.analytics.endpoint, body)?;
+                    Ok(())
+                } else {
+                    outbox.append(&current.analytics.endpoint, body)
+                }
             }
         }
     })
 }
 
 pub(crate) fn drain_analytics_outbox(data_root: &Path, timeout: Duration) -> anyhow::Result<()> {
+    let started = Instant::now();
+    let Some(owner) = crate::identity::try_existing_installation_id(data_root)? else {
+        return Ok(());
+    };
+    drain_for_owner(data_root, &owner, timeout, started)
+}
+
+pub(crate) fn drain_analytics_outbox_for_owner(
+    data_root: &Path,
+    owner: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    drain_for_owner(data_root, owner, timeout, Instant::now())
+}
+
+fn drain_for_owner(
+    data_root: &Path,
+    data_root_id: &str,
+    timeout: Duration,
+    started: Instant,
+) -> anyhow::Result<()> {
     let outbox_path = crate::identity::device_state_path(ANALYTICS_OUTBOX_FILE, data_root)?;
-    let config = match resolve_analytics_policy(data_root)? {
-        ResolvedAnalyticsPolicy::Purge => return purge_analytics_outbox(data_root, &outbox_path),
+    let config = match optional_policy_for_owner(data_root, data_root_id)? {
+        ResolvedAnalyticsPolicy::Purge => {
+            return crate::analytics_outbox::AnalyticsOutbox::try_purge(
+                &outbox_path,
+                Some(data_root_id),
+            )
+        }
         ResolvedAnalyticsPolicy::DryRun => return Ok(()),
         ResolvedAnalyticsPolicy::Active(config) => config,
     };
-    let data_root_id = crate::identity::installation_id(data_root)?;
-    let outbox =
-        crate::analytics_outbox::AnalyticsOutbox::open(outbox_path.clone(), &data_root_id)?;
+    let Some(outbox) =
+        crate::analytics_outbox::AnalyticsOutbox::try_open(outbox_path.clone(), data_root_id)?
+    else {
+        return Ok(());
+    };
     let Some(_uploader) = outbox.try_begin_upload()? else {
         return Ok(());
     };
     let snapshot = outbox.snapshot(&config.analytics.endpoint)?;
     let mut attempted = Vec::with_capacity(snapshot.len());
     for entry in snapshot {
-        let current = match resolve_analytics_policy_for_owner(data_root, &data_root_id)? {
+        let current = match optional_policy_for_owner(data_root, data_root_id)? {
             ResolvedAnalyticsPolicy::Purge => {
-                return crate::analytics_outbox::AnalyticsOutbox::purge(
+                return crate::analytics_outbox::AnalyticsOutbox::try_purge(
                     &outbox_path,
-                    Some(&data_root_id),
+                    Some(data_root_id),
                 )
             }
             ResolvedAnalyticsPolicy::DryRun => return Ok(()),
@@ -165,10 +335,16 @@ pub(crate) fn drain_analytics_outbox(data_root: &Path, timeout: Duration) -> any
         {
             break;
         }
+        let Some(remaining) = timeout
+            .checked_sub(started.elapsed())
+            .filter(|value| !value.is_zero())
+        else {
+            break;
+        };
         let disposition = match crate::net::post_telemetry_json_with_timeout(
             &current.analytics.endpoint,
             entry.payload(),
-            timeout,
+            remaining,
         ) {
             Ok(()) => crate::analytics_outbox::DeliveryDisposition::Accepted,
             Err(error) if error.retryable() => {
@@ -192,18 +368,21 @@ pub(crate) fn drain_analytics_outbox(data_root: &Path, timeout: Duration) -> any
             break;
         }
     }
-    let config = match resolve_analytics_policy_for_owner(data_root, &data_root_id)? {
+    let config = match optional_policy_for_owner(data_root, data_root_id)? {
         ResolvedAnalyticsPolicy::Purge => {
-            return crate::analytics_outbox::AnalyticsOutbox::purge(
+            return crate::analytics_outbox::AnalyticsOutbox::try_purge(
                 &outbox_path,
-                Some(&data_root_id),
+                Some(data_root_id),
             )
         }
         ResolvedAnalyticsPolicy::DryRun => return Ok(()),
         ResolvedAnalyticsPolicy::Active(current) => current,
     };
     outbox.reconcile(&attempted)?;
-    queue_pending_delivery_observation(data_root, &data_root_id, &config, &outbox)
+    if started.elapsed() >= timeout {
+        return Ok(());
+    }
+    queue_pending_delivery_observation(data_root, data_root_id, &config, &outbox)
 }
 
 fn queue_pending_delivery_observation(
@@ -215,7 +394,9 @@ fn queue_pending_delivery_observation(
     let Some(observation) = outbox.pending_observation()? else {
         return Ok(());
     };
-    let client_profile_id = crate::identity::device_id(data_root)?;
+    let Some(client_profile_id) = crate::identity::try_device_id(data_root)? else {
+        return Ok(());
+    };
     let authority = AnalyticsDeliveryAuthority {
         app_version: env!("CARGO_PKG_VERSION"),
         client_profile_id: &client_profile_id,
@@ -226,10 +407,10 @@ fn queue_pending_delivery_observation(
     ctx_client_observability::analytics::deliver_delivery_observation(
         &authority,
         observation.event,
-        |body| match resolve_analytics_policy_for_owner(data_root, data_root_id)? {
+        |body| match optional_policy_for_owner(data_root, data_root_id)? {
             ResolvedAnalyticsPolicy::Purge => {
                 let path = crate::identity::device_state_path(ANALYTICS_OUTBOX_FILE, data_root)?;
-                crate::analytics_outbox::AnalyticsOutbox::purge(&path, Some(data_root_id))?;
+                crate::analytics_outbox::AnalyticsOutbox::try_purge(&path, Some(data_root_id))?;
                 anyhow::bail!("analytics was disabled before recovery observation append")
             }
             ResolvedAnalyticsPolicy::DryRun => {
@@ -337,174 +518,8 @@ impl LocalUsageControlAuthority {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{ffi::OsString, fs, net::TcpListener};
-
-    use crate::analytics::{DaemonOperationV1, OperationCompletedV1, Outcome};
-
-    use super::{consent_tests::isolate_analytics_environment, *};
-
-    pub(super) struct RestoreEnvironment {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl RestoreEnvironment {
-        pub(super) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-
-        pub(super) fn remove(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::remove_var(key);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for RestoreEnvironment {
-        fn drop(&mut self) {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-
-    pub(super) fn daemon_event() -> PublicEventV1 {
-        PublicEventV1::OperationCompleted(OperationCompletedV1::for_daemon(
-            DaemonOperationV1::Status,
-            Outcome::Success,
-            Duration::ZERO,
-        ))
-    }
-
-    #[test]
-    fn enabled_root_cannot_deliver_a_disabled_roots_queued_batch() {
-        let _env_lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let sandbox = tempfile::tempdir().unwrap();
-        let _environment = isolate_analytics_environment(sandbox.path());
-        let root_a = sandbox.path().join("root-a");
-        let root_b = sandbox.path().join("root-b");
-        let received = sandbox.path().join("received.jsonl");
-        let endpoint = url::Url::from_file_path(&received).unwrap().to_string();
-        let _endpoint = RestoreEnvironment::set("CTX_ANALYTICS_ENDPOINT", &endpoint);
-
-        append_analytics_batch(&root_a, &[daemon_event()]).unwrap();
-        append_analytics_batch(&root_b, &[daemon_event()]).unwrap();
-        let id_a = crate::identity::installation_id(&root_a).unwrap();
-        let id_b = crate::identity::installation_id(&root_b).unwrap();
-        assert_ne!(id_a, id_b);
-        let path = crate::identity::device_state_path(ANALYTICS_OUTBOX_FILE, &root_a).unwrap();
-        assert!(!path.starts_with(&root_a) && !path.starts_with(&root_b));
-        ctx_history_platform::platform_security::verify_private_file(&path).unwrap();
-        let outbox_b = crate::analytics_outbox::AnalyticsOutbox::open(path.clone(), &id_b).unwrap();
-        let queued_b = outbox_b.snapshot(&endpoint).unwrap().remove(0);
-        consent_tests::configure(&root_a, false, &endpoint);
-
-        // The file transport exercises the production drain without a daemon or network.
-        drain_analytics_outbox(&root_b, Duration::from_secs(1)).unwrap();
-        let bodies = fs::read_to_string(&received).unwrap();
-        assert!(
-            !bodies.contains(&id_a),
-            "enabled B uploaded opted-out A's batch"
-        );
-        assert!(
-            bodies.contains(&id_b),
-            "enabled B must deliver its own batch"
-        );
-        assert_eq!(bodies.trim_end().as_bytes(), queued_b.payload());
-        assert!(!bodies.contains(&sandbox.path().to_string_lossy().to_string()));
-
-        append_analytics_batch(&root_b, &[daemon_event()]).unwrap();
-        let next_b = outbox_b.snapshot(&endpoint).unwrap().remove(0);
-        drain_analytics_outbox(&root_a, Duration::from_secs(1)).unwrap();
-        assert_eq!(bodies, fs::read_to_string(&received).unwrap());
-        assert_eq!(
-            outbox_b.snapshot(&endpoint).unwrap()[0].payload(),
-            next_b.payload()
-        );
-        let outbox_a = crate::analytics_outbox::AnalyticsOutbox::open(path, &id_a).unwrap();
-        assert!(outbox_a.snapshot(&endpoint).unwrap().is_empty());
-        assert_eq!(
-            crate::identity::existing_installation_id(&root_a)
-                .unwrap()
-                .as_deref(),
-            Some(id_a.as_str())
-        );
-
-        let absent_root = sandbox.path().join("absent-root");
-        let _disabled = RestoreEnvironment::set("CTX_ANALYTICS_ENABLED", "false");
-        drain_analytics_outbox(&absent_root, Duration::from_secs(1)).unwrap();
-        assert!(
-            !absent_root.exists(),
-            "opt-out must not create a root identity"
-        );
-        assert_eq!(
-            outbox_b.snapshot(&endpoint).unwrap()[0].payload(),
-            next_b.payload()
-        );
-    }
-
-    #[test]
-    fn storage_authority_grants_only_the_exact_legacy_database_path() {
-        let root = Path::new("/tmp/ctx-observability-authority-test");
-        assert_eq!(
-            local_usage_storage_authority(root).database_path(),
-            root.join("usage.sqlite")
-        );
-    }
-
-    #[test]
-    fn opt_out_precedes_dry_run_policy() {
-        assert_eq!(analytics_policy_for(false, true), AnalyticsPolicy::Purge);
-        assert_eq!(analytics_policy_for(true, true), AnalyticsPolicy::DryRun);
-        assert_eq!(analytics_policy_for(true, false), AnalyticsPolicy::Active);
-    }
-
-    #[test]
-    fn foreground_append_opens_no_network_connection_and_dry_run_creates_no_backlog() {
-        let _env_lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let data_root = tempfile::tempdir().unwrap();
-        let device_root = tempfile::tempdir().unwrap();
-        let _environment = isolate_analytics_environment(device_root.path());
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let endpoint = format!("http://{}/events", listener.local_addr().unwrap());
-        let _endpoint = RestoreEnvironment::set("CTX_ANALYTICS_ENDPOINT", &endpoint);
-        append_analytics_batch(data_root.path(), &[daemon_event()]).unwrap();
-
-        assert_eq!(
-            listener.accept().unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
-        let path =
-            crate::identity::device_state_path(ANALYTICS_OUTBOX_FILE, data_root.path()).unwrap();
-        let outbox = crate::analytics_outbox::AnalyticsOutbox::open(
-            path.clone(),
-            &crate::identity::installation_id(data_root.path()).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(outbox.snapshot(&endpoint).unwrap().len(), 1);
-
-        let _dry_run = RestoreEnvironment::set("CTX_ANALYTICS_DRY_RUN", "1");
-        purge_analytics_outbox(data_root.path(), &path).unwrap();
-        append_analytics_batch(data_root.path(), &[daemon_event()]).unwrap();
-        assert!(!path.exists());
-
-        let _disabled = RestoreEnvironment::set("CTX_ANALYTICS_ENABLED", "false");
-        crate::identity::write_private_file(&path, b"must be purged").unwrap();
-        append_analytics_batch(data_root.path(), &[daemon_event()]).unwrap();
-        assert!(!path.exists(), "opt-out must purge even during dry-run");
-    }
-}
+mod tests;
 
 #[cfg(test)]
 #[path = "observability_composition/consent_tests.rs"]
-mod consent_tests;
+pub(crate) mod consent_tests;

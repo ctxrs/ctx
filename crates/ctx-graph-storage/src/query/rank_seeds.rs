@@ -33,14 +33,24 @@ pub(super) fn rank_seeds(
         while let Some(row) = rows.next()? {
             ensure!(
                 examined < MAX_RANK_POSTINGS && start.elapsed() < Duration::from_secs(2),
-                "search candidate enumeration exceeded its work/time budget; use a more specific query or a smaller file/kind scope"
+                QueryFailure {
+                    kind: QueryFailureKind::WorkLimit,
+                    error: anyhow::anyhow!(
+                        "search candidate enumeration exceeded its work/time budget; use a more specific query or a smaller file/kind scope"
+                    )
+                }
             );
             examined += 1;
             let payload = row.get_ref(0)?.as_str()?;
             bytes += payload.len();
             ensure!(
                 payload.len() <= MAX_SEARCH_BYTES && bytes <= MAX_RANK_BYTES,
-                "search candidate enumeration exceeded its byte budget; use a more specific query or a smaller file/kind scope"
+                QueryFailure {
+                    kind: QueryFailureKind::WorkLimit,
+                    error: anyhow::anyhow!(
+                        "search candidate enumeration exceeded its byte budget; use a more specific query or a smaller file/kind scope"
+                    )
+                }
             );
             let node: Node = serde_json::from_str(payload)?;
             let label = normalize(&node.label);
@@ -112,7 +122,12 @@ pub(super) fn rank_seeds(
     });
     ensure!(
         start.elapsed() < Duration::from_secs(2),
-        "search ranking exceeded its time budget; use a more specific query or a smaller file/kind scope"
+        QueryFailure {
+            kind: QueryFailureKind::WorkLimit,
+            error: anyhow::anyhow!(
+                "search ranking exceeded its time budget; use a more specific query or a smaller file/kind scope"
+            )
+        }
     );
     let Some((_, _, top_score)) = ranked.first() else {
         return Ok(Vec::new());

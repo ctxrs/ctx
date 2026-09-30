@@ -1,6 +1,11 @@
 use super::*;
 
-pub(crate) fn diagnose(args: &DiagnoseArgs, db: Option<&Path>, json_output: bool) -> Result<()> {
+pub(crate) fn diagnose(
+    args: &DiagnoseArgs,
+    db: Option<&Path>,
+    json_output: bool,
+    facts: &mut GraphObservation,
+) -> Result<()> {
     let source = SourceArgs {
         snapshot: args.snapshot.clone(),
         analysis: AnalysisArgs {
@@ -15,7 +20,15 @@ pub(crate) fn diagnose(args: &DiagnoseArgs, db: Option<&Path>, json_output: bool
             include_noise: false,
         },
     };
+    facts.phase = GraphPhase::Snapshot;
     let (graph, _) = load(&source, db)?;
+    facts.nodes = Some(graph.nodes.len() as u64);
+    facts.edges = Some(graph.edges.len() as u64);
+    facts.unresolved = graph
+        .metadata
+        .get("graf_unresolved_references")
+        .and_then(Value::as_array)
+        .map(|refs| refs.len() as u64);
     let mut ordered = BTreeMap::<(&str, &str), usize>::new();
     let mut pairs = BTreeMap::<(&str, &str), Vec<&Edge>>::new();
     let mut parallel = BTreeMap::<(bool, &str, &str), usize>::new();
@@ -69,6 +82,9 @@ pub(crate) fn diagnose(args: &DiagnoseArgs, db: Option<&Path>, json_output: bool
             "samples_truncated":samples.len()<edges.len()})
         })
         .collect();
+    facts.result_count = Some(examples.len() as u64);
+    facts.truncated = Some(examples.len() < risks.len());
+    facts.execution_succeeded = Some(true);
     print(
         &json!({
             "generation":graph.generation,"node_count":graph.nodes.len(),"edge_count":graph.edges.len(),
@@ -97,7 +113,12 @@ pub(crate) fn diagnose(args: &DiagnoseArgs, db: Option<&Path>, json_output: bool
     )
 }
 
-pub(crate) fn benchmark(args: &BenchmarkArgs, db: Option<&Path>, json_output: bool) -> Result<()> {
+pub(crate) fn benchmark(
+    args: &BenchmarkArgs,
+    db: Option<&Path>,
+    json_output: bool,
+    facts: &mut GraphObservation,
+) -> Result<()> {
     ensure!(
         args.query.len() <= 32,
         "benchmark accepts at most 32 explicit queries"
@@ -116,6 +137,11 @@ pub(crate) fn benchmark(args: &BenchmarkArgs, db: Option<&Path>, json_output: bo
     regular(&path)?;
     let store = Store::open_read_only(&path)?;
     let stats = store.stats()?;
+    facts.stats(&stats);
+    facts.phase = GraphPhase::Query;
+    facts.result_count = Some(0);
+    facts.query_duration = Some(std::time::Duration::ZERO);
+    facts.truncated = Some(false);
     let options = QueryOptions {
         depth: args.depth,
         limit: args.limit as usize,
@@ -137,7 +163,15 @@ pub(crate) fn benchmark(args: &BenchmarkArgs, db: Option<&Path>, json_output: bo
         for _ in 0..args.iterations {
             let start = Instant::now();
             let result = store.query(query, &options)?;
-            samples.push(start.elapsed().as_secs_f64() * 1000.0);
+            let elapsed = start.elapsed();
+            samples.push(elapsed.as_secs_f64() * 1000.0);
+            facts.result_count = facts.result_count.map(|count| count + 1);
+            facts.query_duration = facts
+                .query_duration
+                .and_then(|duration| duration.checked_add(elapsed));
+            facts.truncated = facts
+                .truncated
+                .map(|truncated| truncated || result.truncated);
             ensure!(
                 result.generation == stats.generation,
                 "graph generation changed during benchmark; retry"
@@ -159,6 +193,7 @@ pub(crate) fn benchmark(args: &BenchmarkArgs, db: Option<&Path>, json_output: bo
             "result":{"nodes":warmup.nodes.len(),"edges":warmup.edges.len(),"unresolved":warmup.unresolved.len(),"truncated":warmup.truncated},
             "measured_totals":{"nodes":nodes,"edges":edges,"unresolved":unresolved,"any_truncated":truncated}}));
     }
+    facts.execution_succeeded = Some(true);
     print(
         &json!({"schema_version":1,"ctx_version":env!("CARGO_PKG_VERSION"),"graf_version":"0.6.0","generation":stats.generation,
         "graph":{"kind":stats.kind,"nodes":stats.nodes,"edges":stats.edges},"options":options,

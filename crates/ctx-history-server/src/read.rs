@@ -174,6 +174,16 @@ impl HistoryServer {
         collection: &str,
         request: SearchRequest,
     ) -> Result<SearchResponse> {
+        self.search_with_facts(token, collection, request)
+            .map(|(result, _)| result)
+    }
+
+    pub fn search_with_facts(
+        &self,
+        token: &str,
+        collection: &str,
+        request: SearchRequest,
+    ) -> Result<(SearchResponse, ServerReadFacts)> {
         if request.limit == 0 || request.limit > 100 || request.q.trim().is_empty() {
             return Err(Error::Invalid(
                 "nonempty lexical query and limit 1..100 required",
@@ -184,16 +194,35 @@ impl HistoryServer {
         let mut status = self.status_locked(&connection, collection)?;
         status.principal = principal;
         if status.stored_sequence == 0 {
-            return Ok(SearchResponse {
-                status,
-                results: vec![],
-                complete: true,
-                exhaustive: true,
+            let facts = ServerReadFacts {
+                returned: 0,
+                limit: Some(request.limit as u64),
+                complete: Some(true),
+                exhaustive: Some(true),
+                response_limited: Some(false),
+                snippets_truncated: Some(0),
+                coverage_lag: Some(0),
+                ..Default::default()
+            };
+            drop(connection);
+            self.observe(ServerObservation::Read {
+                operation: ServerOperation::Search,
+                facts,
             });
+            return Ok((
+                SearchResponse {
+                    status,
+                    results: vec![],
+                    complete: true,
+                    exhaustive: true,
+                },
+                facts,
+            ));
         }
         let index = self.safe_index(&connection, collection)?;
         let filter = CompiledSearchFilter::compile(EventSearchFilters::default())?;
         let query = [request.q.as_str()];
+        let query_started = std::time::Instant::now();
         let batch = index
             .execute_lexical(LexicalExecution::new(
                 LexicalMode::Search(&query),
@@ -202,6 +231,7 @@ impl HistoryServer {
             ))
             .map_err(|failure| Error::Index(failure.error))?
             .batch;
+        let query_duration = query_started.elapsed();
         let caught_up = status.searchable_sequence == status.stored_sequence;
         let mut response = SearchResponse {
             status,
@@ -241,10 +271,48 @@ impl HistoryServer {
         }
         response.complete = caught_up && batch.complete && !bounded;
         response.exhaustive = caught_up && batch.candidate_set_exhaustive && !bounded;
-        Ok(response)
+        let facts = ServerReadFacts {
+            returned: response.results.len() as u64,
+            limit: Some(request.limit as u64),
+            bytes: Some(
+                (bytes - usize::from(response.complete) - usize::from(response.exhaustive)) as u64,
+            ),
+            complete: Some(response.complete),
+            exhaustive: Some(response.exhaustive),
+            response_limited: Some(bounded),
+            snippets_truncated: Some(
+                response
+                    .results
+                    .iter()
+                    .filter(|hit| hit.snippet_truncated)
+                    .count() as u64,
+            ),
+            coverage_lag: response
+                .status
+                .stored_sequence
+                .checked_sub(response.status.searchable_sequence),
+            query_duration: Some(query_duration),
+            ..Default::default()
+        };
+        drop(connection);
+        self.observe(ServerObservation::Read {
+            operation: ServerOperation::Search,
+            facts,
+        });
+        Ok((response, facts))
     }
 
     pub fn read_event(&self, token: &str, collection: &str, value: &str) -> Result<HostedEvent> {
+        self.read_event_with_facts(token, collection, value)
+            .map(|(result, _)| result)
+    }
+
+    pub fn read_event_with_facts(
+        &self,
+        token: &str,
+        collection: &str,
+        value: &str,
+    ) -> Result<(HostedEvent, ServerReadFacts)> {
         let connection = self.lock()?;
         authorize(&connection, token, collection, Access::Read)?;
         self.read_gate(&connection, collection)?;
@@ -252,7 +320,20 @@ impl HistoryServer {
         let (descriptor, payload) = retained_revision(&connection, &citation)?;
         let reference=connection.query_row("SELECT event,sequence,offset,bytes,digest FROM event_refs WHERE collection=?1 AND publication=?2 AND revision=?3 AND event=?4",
             params![collection,citation.publication,citation.revision,citation.id],event_ref).optional()?.ok_or(Error::NotFound)?;
-        self.read_reference(collection, &citation, descriptor, &payload, reference)
+        let bytes = reference.bytes as u64;
+        let event = self.read_reference(collection, &citation, descriptor, &payload, reference)?;
+        drop(connection);
+        let facts = ServerReadFacts {
+            returned: 1,
+            bytes: Some(bytes),
+            has_more: Some(false),
+            ..Default::default()
+        };
+        self.observe(ServerObservation::Read {
+            operation: ServerOperation::Event,
+            facts,
+        });
+        Ok((event, facts))
     }
 
     pub fn read_session(
@@ -262,6 +343,17 @@ impl HistoryServer {
         value: &str,
         request: SessionRequest,
     ) -> Result<SessionPage> {
+        self.read_session_with_facts(token, collection, value, request)
+            .map(|(result, _)| result)
+    }
+
+    pub fn read_session_with_facts(
+        &self,
+        token: &str,
+        collection: &str,
+        value: &str,
+        request: SessionRequest,
+    ) -> Result<(SessionPage, ServerReadFacts)> {
         if request.limit == 0 || request.limit > 100 {
             return Err(Error::Invalid("session page limit must be 1..100"));
         }
@@ -338,10 +430,29 @@ impl HistoryServer {
         } else {
             None
         };
-        Ok(SessionPage {
-            events,
-            next_cursor,
-        })
+        let facts = ServerReadFacts {
+            returned: events.len() as u64,
+            bytes: Some(bytes as u64),
+            limit: Some(request.limit as u64),
+            continuation_requested: request.cursor.is_some(),
+            has_more: Some(next_cursor.is_some()),
+            response_limited: Some(has_more && events.len() < request.limit),
+            ..Default::default()
+        };
+        drop(rows);
+        drop(statement);
+        drop(connection);
+        self.observe(ServerObservation::Read {
+            operation: ServerOperation::Session,
+            facts,
+        });
+        Ok((
+            SessionPage {
+                events,
+                next_cursor,
+            },
+            facts,
+        ))
     }
 
     fn read_reference(

@@ -9,7 +9,7 @@ use serde_json::value::RawValue;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 
 pub const HELP: &str = "Explicit views (selection can omit information):
   ctx sift read [FILE|-] [--from N] [--lines N] [--grep LITERAL]
@@ -181,7 +181,14 @@ fn number(value: &str) -> Result<usize> {
 }
 
 /// File/stdin path, independent of execution and usage accounting.
-pub fn run_input(path: Option<&OsStr>, view: &View) -> Result<()> {
+pub fn run_input(
+    path: Option<&OsStr>,
+    view: &View,
+    observed: &mut crate::observe::Observed,
+) -> Result<()> {
+    use crate::observation::*;
+    observed.facts.mode = Mode::ExplicitView;
+    observed.phase = Phase::Input;
     let input: Box<dyn Read> = match path {
         Some(path) if path != "-" => {
             Box::new(std::fs::File::open(path).context("cannot open input file")?)
@@ -189,12 +196,33 @@ pub fn run_input(path: Option<&OsStr>, view: &View) -> Result<()> {
         _ => Box::new(io::stdin().lock()),
     };
     let mut bytes = Vec::new();
-    input
-        .take(MAX_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .context("cannot read input")?;
+    let read = input.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes);
+    observed.facts.streams[0] = Some(StreamFacts {
+        input_bytes: Some(bytes.len() as u64),
+        input_complete: read.is_ok() && bytes.len() <= MAX_BYTES,
+        missing: Some(Missingness::ViewNotTokenized),
+        presentation: Presentation::ExplicitView,
+        ..Default::default()
+    });
+    read.context("cannot read input")?;
+    observed.phase = Phase::Render;
+    let start = std::time::Instant::now();
     let output = render(view, &bytes)?;
-    io::stdout().lock().write_all(&output)?;
+    observed.facts.transform_duration = Some(start.elapsed());
+    observed.phase = Phase::Output;
+    let start = std::time::Instant::now();
+    let result = crate::observe::write_stream(
+        &mut io::stdout().lock(),
+        &output,
+        observed.facts.streams[0].get_or_insert_default(),
+    );
+    observed.facts.output_duration = Some(start.elapsed());
+    observed.facts.delivery = if result.is_ok() {
+        Delivery::Flushed
+    } else {
+        Delivery::Failed
+    };
+    result?;
     Ok(())
 }
 

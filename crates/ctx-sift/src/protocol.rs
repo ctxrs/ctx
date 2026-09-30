@@ -1,5 +1,9 @@
 // Adapted from Sift, MIT; source revision and license are in this crate’s NOTICE.
 use crate::{command_view, hooks, jev, semantic, state};
+use crate::{
+    observation::*,
+    observe::{self, Observed},
+};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sift::{CompactResult, Compactor, Encoding};
@@ -61,8 +65,19 @@ pub(crate) fn protocol(
     source: Option<&str>,
     tool: Option<&str>,
     session: u8,
+    observed: &mut Observed,
+    callback: &mut dyn FnMut(SiftObservation),
 ) -> Result<bool> {
+    observed.facts.terminal = Terminal::ProtocolSession;
+    observed.facts.entry = match session {
+        1 => Entry::PiSessionV1,
+        2 => Entry::PiSessionV2,
+        _ => Entry::JsonProtocol,
+    };
+    observed.facts.host = source.map(observe::host);
+    observed.phase = Phase::Codec;
     let compactor = Compactor::new().context("cannot initialize tokenizer")?;
+    observed.phase = Phase::Settings;
     let settings = source
         .filter(|_| session == 0)
         .map(|_| state::Settings::load())
@@ -76,6 +91,7 @@ pub(crate) fn protocol(
         .flatten();
     let mut jev = jev::Client::new();
     if session != 0 {
+        observed.phase = Phase::Output;
         serde_json::to_writer(
             &mut output,
             &serde_json::json!({"version":1,"session":session}),
@@ -88,24 +104,43 @@ pub(crate) fn protocol(
     let mut failed = false;
     let mut last_id = 0;
     loop {
+        observed.phase = Phase::Input;
         line.clear();
-        let read = if session != 0 {
-            // JSON escaping can expand an 8 MiB text by six; bound framing too.
-            let read = input
-                .by_ref()
-                .take(48 * 1024 * 1024 + 1025)
-                .read_until(b'\n', &mut line)?;
-            ensure!(
-                line.len() <= 48 * 1024 * 1024 + 1024,
-                "session request too large"
-            );
-            read
-        } else {
-            input.read_until(b'\n', &mut line)?
+        let read = (|| -> Result<usize> {
+            Ok(if session != 0 {
+                // JSON escaping can expand an 8 MiB text by six; bound framing too.
+                let read = input
+                    .by_ref()
+                    .take(48 * 1024 * 1024 + 1025)
+                    .read_until(b'\n', &mut line)?;
+                ensure!(
+                    line.len() <= 48 * 1024 * 1024 + 1024,
+                    "session request too large"
+                );
+                read
+            } else {
+                input.read_until(b'\n', &mut line)?
+            })
+        })();
+        let read = match read {
+            Ok(read) => read,
+            Err(error) => {
+                if !line.is_empty() {
+                    let mut request = observed.request();
+                    request.phase = Phase::Input;
+                    if line.len() > 48 * 1024 * 1024 + 1024 {
+                        request.facts.skip = Some(SkipReason::EnvelopeLimit);
+                    }
+                    request.finish(Some(&error), callback);
+                }
+                return Err(error);
+            }
         };
         if read == 0 {
             break;
         }
+        let mut request_observed = observed.request();
+        request_observed.phase = Phase::Protocol;
         let mut id = None;
         let mut semantic = false;
         let result = (|| -> Result<(Response, ProtocolRecord)> {
@@ -160,6 +195,7 @@ pub(crate) fn protocol(
             } else {
                 serde_json::from_slice(&line).map_err(invalid)?
             };
+            request_observed.phase = Phase::Settings;
             let fresh_settings = if session != 0 {
                 source.map(|_| state::Settings::load()).transpose()?
             } else {
@@ -170,6 +206,7 @@ pub(crate) fn protocol(
             } else {
                 &settings
             };
+            request_observed.phase = Phase::Protocol;
             ensure!(
                 request.version == 1,
                 "unsupported protocol version; expected 1"
@@ -184,6 +221,18 @@ pub(crate) fn protocol(
             // Error/completion flags never authorize omissions or establish an
             // exit status. Only the explicit Pi session contract permits a view.
             let _ = (request.is_error, request.complete);
+            if raw {
+                request_observed.facts.mode = Mode::Raw;
+                request_observed.skip(SkipReason::ExplicitRaw);
+            } else if settings.as_ref().is_some_and(|s| !s.enabled) {
+                request_observed.skip(SkipReason::Disabled);
+            } else if settings
+                .as_ref()
+                .is_some_and(|s| request_tool.as_deref().is_some_and(|name| s.excludes(name)))
+            {
+                request_observed.skip(SkipReason::Excluded);
+            }
+            request_observed.phase = Phase::Codec;
             let started = std::time::Instant::now();
             let mut result = if !raw
                 && settings.as_ref().is_none_or(|s| {
@@ -229,12 +278,26 @@ pub(crate) fn protocol(
                     project.as_deref(),
                     &compactor,
                     &mut jev,
+                    &mut request_observed.facts.semantic,
                 )
             {
                 result = selected;
                 semantic = true;
                 jev_selected = true;
             }
+            request_observed.facts.transform_duration = Some(started.elapsed());
+            let mut stream = observe::compacted(&result, request.text.len());
+            // Pending content counts become deliverable only after response flush.
+            stream.emitted_bytes = Some(result.text.len() as u64);
+            stream.skip = request_observed.facts.skip.or(stream.skip);
+            if semantic {
+                stream.presentation = if jev_selected {
+                    Presentation::SemanticSelection
+                } else {
+                    Presentation::CommandView
+                };
+            }
+            request_observed.facts.streams[0] = Some(stream);
             let accounted = if jev_selected { &ordinary } else { &result };
             let record = source.filter(|_| !raw).map(|source| {
                 let event = state::Event {
@@ -257,49 +320,91 @@ pub(crate) fn protocol(
             });
             Ok((Response { version: 1, result }, record))
         })();
-        let record = match result {
-            Ok((response, record)) => {
-                if let Some(id) = id {
+        let processing_phase = request_observed.phase;
+        let write_started = std::time::Instant::now();
+        let delivered = (|| -> Result<()> {
+            request_observed.phase = Phase::Output;
+            let record = match result {
+                Ok((response, record)) => {
+                    if let Some(id) = id {
+                        serde_json::to_writer(
+                            &mut output,
+                            &SessionResponse {
+                                id,
+                                semantic: semantic.then_some(true),
+                                response,
+                            },
+                        )?;
+                    } else {
+                        serde_json::to_writer(&mut output, &response)?;
+                    }
+                    record
+                }
+                Err(error) => {
+                    failed = true;
+                    // Processing phase is retained separately from error-envelope output.
+                    request_observed.facts.outcome = Outcome::Failure;
+                    if request_observed.facts.failure.is_none() {
+                        request_observed.facts.failure =
+                            Some(observe::failure(processing_phase, &error));
+                    }
                     serde_json::to_writer(
                         &mut output,
-                        &SessionResponse {
-                            id,
-                            semantic: semantic.then_some(true),
-                            response,
-                        },
+                        &serde_json::json!({"version": 1, "error": error.to_string()}),
                     )?;
-                } else {
-                    serde_json::to_writer(&mut output, &response)?;
+                    None
                 }
-                record
-            }
-            Err(error) => {
-                failed = true;
-                serde_json::to_writer(
-                    &mut output,
-                    &serde_json::json!({"version": 1, "error": error.to_string()}),
-                )?;
-                None
-            }
-        };
-        output.write_all(b"\n")?;
-        output.flush()?;
-        if let Some((event, original, jev_selected)) = record {
-            // Count only successfully delivered responses. Optional storage
-            // cannot replace output or turn successful delivery into failure.
-            let _ = state::record(event, (!jev_selected).then_some((original.as_bytes(), &[])));
-        }
-        if session != 0 {
-            // Completion acknowledges the recording attempt, never storage or
-            // provider delivery. Errors retire the session before another request.
-            ensure!(!failed, "session request failed");
-            serde_json::to_writer(
-                &mut output,
-                &serde_json::json!({"version":1,"id":id,"done":true}),
-            )?;
+            };
             output.write_all(b"\n")?;
             output.flush()?;
+            request_observed.facts.output_duration = Some(write_started.elapsed());
+            observe::envelope_delivery(&mut request_observed, &Ok(()), true);
+            if let Some((event, original, jev_selected)) = record {
+                request_observed.facts.local_record = Some(
+                    state::record_observed(
+                        event,
+                        (!jev_selected).then_some((original.as_bytes(), &[])),
+                    )
+                    .unwrap_or(LocalRecordOutcome::Unavailable),
+                );
+            }
+            if session != 0 {
+                // This completion frame acknowledges the recording attempt,
+                // not host application. Response facts survive a failed done frame.
+                request_observed.phase = Phase::Protocol;
+                ensure!(!failed, "session request failed");
+                serde_json::to_writer(
+                    &mut output,
+                    &serde_json::json!({"version":1,"id":id,"done":true}),
+                )?;
+                output.write_all(b"\n")?;
+                output.flush()?;
+            }
+            Ok(())
+        })();
+        if delivered.is_err() && request_observed.facts.delivery != Delivery::Flushed {
+            let stream = request_observed.facts.streams[0].as_mut();
+            if let Some(stream) = stream {
+                stream.tokens = None;
+                stream.emitted_bytes = None;
+                stream.output_complete = false;
+                stream.missing = Some(Missingness::Incomplete);
+            }
+            request_observed.facts.delivery = Delivery::Failed;
+            request_observed.facts.output_duration = Some(write_started.elapsed());
         }
+        // Avoid replacing an already classified request failure with the generic
+        // session-retirement error after its error envelope has been written.
+        if request_observed.facts.failure.is_none() {
+            request_observed.finish(delivered.as_ref().err(), callback);
+        } else {
+            request_observed.finish(None, callback);
+        }
+        observed.phase = request_observed.phase;
+        delivered?;
+    }
+    if failed {
+        observed.facts.outcome = Outcome::Failure;
     }
     Ok(failed)
 }

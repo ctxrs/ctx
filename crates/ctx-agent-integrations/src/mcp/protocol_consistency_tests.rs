@@ -39,10 +39,15 @@ fn request(backend: &RecordingBackend, method: &str, params: Value) -> Value {
         Value::to_string,
     );
     if params["name"] == "graph_stats" {
-        assert!(
-            handled.usage.is_none(),
-            "graph calls have no history usage authority"
-        );
+        if let Some(usage) = &handled.usage {
+            assert!(matches!(usage.operation, McpToolKind::Unified(_)));
+            assert!(
+                usage.facts.search.is_none()
+                    && usage.facts.search_execution.is_none()
+                    && usage.facts.blame.is_none(),
+                "graph carriers have no history usage authority"
+            );
+        }
     }
     let encoded = encode_response_line(&handled.value.unwrap()).unwrap();
     let response: Value = serde_json::from_str(&encoded).unwrap();

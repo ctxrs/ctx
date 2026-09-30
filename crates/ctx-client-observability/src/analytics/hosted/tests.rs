@@ -18,16 +18,22 @@ fn hosted_terminals_match_shared_wire_fixtures() {
                 Ok(()),
                 Duration::from_millis(25),
             ),
-            include_str!("../../../../../contracts/telemetry-v1/fixtures/hosted_operation_completed.valid.json"),
+            include_str!(
+                "../../../../../contracts/telemetry-v1/fixtures/hosted_operation_completed.valid.json"
+            ),
         ),
         (
             hosted_operation_completed(
                 HostedOperationV1::ServerInvite,
                 OutputKind::Human,
-                Err(HostedFailureV1::Operation(HostedFailureTypeV1::Unauthorized)),
+                Err(HostedFailureV1::Operation(
+                    HostedFailureTypeV1::Unauthorized,
+                )),
                 Duration::from_millis(300),
             ),
-            include_str!("../../../../../contracts/telemetry-v1/fixtures/hosted_operation_failure.valid.json"),
+            include_str!(
+                "../../../../../contracts/telemetry-v1/fixtures/hosted_operation_failure.valid.json"
+            ),
         ),
         (
             hosted_operation_completed(
@@ -36,7 +42,9 @@ fn hosted_terminals_match_shared_wire_fixtures() {
                 Err(HostedFailureV1::Output),
                 Duration::from_secs(3600),
             ),
-            include_str!("../../../../../contracts/telemetry-v1/fixtures/hosted_output_failure.valid.json"),
+            include_str!(
+                "../../../../../contracts/telemetry-v1/fixtures/hosted_output_failure.valid.json"
+            ),
         ),
     ] {
         let expected: Value = serde_json::from_str(fixture).unwrap();
@@ -62,6 +70,27 @@ fn hosted_wire_is_closed_and_success_omits_failure_facts() {
         (HostedOperationV1::ServerWithdraw, "server_withdraw"),
         (HostedOperationV1::ServerBackup, "server_backup"),
         (HostedOperationV1::ServerRestore, "server_restore"),
+        (HostedOperationV1::ArchiveVerify, "archive_verify"),
+        (HostedOperationV1::RemotePause, "remote_pause"),
+        (HostedOperationV1::RemoteResume, "remote_resume"),
+        (HostedOperationV1::RemoteStatus, "remote_status"),
+        (HostedOperationV1::RemoteRemove, "remote_remove"),
+        (
+            HostedOperationV1::ServerCollectionCreate,
+            "server_collection_create",
+        ),
+        (HostedOperationV1::ServerUserList, "server_user_list"),
+        (
+            HostedOperationV1::ServerUserCredentials,
+            "server_user_credentials",
+        ),
+        (HostedOperationV1::ServerUserCreate, "server_user_create"),
+        (
+            HostedOperationV1::ServerUserCredential,
+            "server_user_credential",
+        ),
+        (HostedOperationV1::ServerPublications, "server_publications"),
+        (HostedOperationV1::ServerStatus, "server_status"),
     ] {
         let event = serialized(hosted_operation_completed(
             operation,
@@ -105,4 +134,43 @@ fn hosted_wire_is_closed_and_success_omits_failure_facts() {
     let excluded = crate::operation_descriptor::CliOperation::Hosted;
     assert!(!excluded.emits_client_analytics());
     assert_eq!(excluded.local_usage_operation(), None);
+}
+
+#[test]
+fn new_hosted_terminals_preserve_operation_and_output_failures() {
+    for operation in [
+        HostedOperationV1::ArchiveVerify,
+        HostedOperationV1::RemotePause,
+        HostedOperationV1::RemoteResume,
+        HostedOperationV1::RemoteStatus,
+        HostedOperationV1::RemoteRemove,
+        HostedOperationV1::ServerCollectionCreate,
+        HostedOperationV1::ServerUserCreate,
+        HostedOperationV1::ServerUserList,
+        HostedOperationV1::ServerUserCredentials,
+        HostedOperationV1::ServerUserCredential,
+        HostedOperationV1::ServerPublications,
+        HostedOperationV1::ServerStatus,
+    ] {
+        for (failure, stage, kind) in [
+            (
+                HostedFailureV1::Operation(HostedFailureTypeV1::Forbidden),
+                "operation",
+                "forbidden",
+            ),
+            (HostedFailureV1::Output, "output", "io"),
+        ] {
+            let event = serialized(hosted_operation_completed(
+                operation,
+                OutputKind::Json,
+                Err(failure),
+                Duration::from_millis(1),
+            ));
+            assert_eq!(event["outcome"], "failure");
+            assert_eq!(
+                event["properties"],
+                json!({"output":"json","hosted_failure_stage":stage,"failure_type":kind})
+            );
+        }
+    }
 }

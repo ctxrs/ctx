@@ -1,6 +1,7 @@
 use super::{
-    HostedOperationCompletedV1, OperationCompletedV1, ProviderRefreshCompletedV1,
-    RuntimeObservationV1,
+    GraphCompletedV1, HostedOperationCompletedV1, OperationCompletedV1, ProductRuntimeV1,
+    ProviderRefreshCompletedV1, RemoteCompletedV1, RuntimeObservationV1, ServerRequestCompletedV1,
+    ServerSummaryV1, SharingSummaryV1, SiftSummaryV1,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,6 +9,7 @@ pub enum Surface {
     Cli,
     Mcp,
     Daemon,
+    Server,
 }
 
 impl Surface {
@@ -16,6 +18,7 @@ impl Surface {
             Self::Cli => "cli",
             Self::Mcp => "mcp",
             Self::Daemon => "daemon",
+            Self::Server => "server",
         }
     }
 }
@@ -60,6 +63,13 @@ impl OutputKind {
 
 #[derive(Debug)]
 pub enum PublicEventV1 {
+    GraphCompleted(GraphCompletedV1),
+    RemoteCompleted(RemoteCompletedV1),
+    ServerRequestCompleted(ServerRequestCompletedV1),
+    ProductRuntime(ProductRuntimeV1),
+    SiftSummary(SiftSummaryV1),
+    ServerSummary(ServerSummaryV1),
+    SharingSummary(SharingSummaryV1),
     OperationCompleted(OperationCompletedV1),
     /// A finite hosted command, serialized as ordinary `operation_completed@1`.
     HostedOperationCompleted(HostedOperationCompletedV1),

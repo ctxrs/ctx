@@ -249,7 +249,9 @@ where
             mark_search_output_completed(&mut delivered_usage, output_started.elapsed());
             let duration = request_started.elapsed();
             let telemetry_usage = delivered_usage.as_ref().map(|usage| usage.facts);
-            if let Some(McpUsage { operation, facts }) = delivered_usage {
+            if let Some(McpUsage { operation, facts }) = delivered_usage.filter(|usage| {
+                !matches!(usage.operation, McpToolKind::Unified(_)) && usage.facts.remote.is_none()
+            }) {
                 usage_port.record_delivered(operation, facts, &response, encoded.len(), duration);
             }
             telemetry.record_delivered(

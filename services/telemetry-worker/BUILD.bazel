@@ -61,6 +61,7 @@ filegroup(
         "tsconfig.json",
         "vitest.config.ts",
         "vitest.postgres.config.ts",
+        "vitest.product-postgres.config.ts",
         "wrangler.toml",
     ],
 )
@@ -202,6 +203,32 @@ sh_test(
         ":postgres_schema",
         ":deploy_config",
         ":test_sources",
+    ],
+    env = {"CTX_TEST_POSTGRES_BIN": "/usr/lib/postgresql/16/bin"},
+    tags = ["external", "postgresql", "requires-pnpm", "telemetry-worker"],
+)
+
+# Isolated synthetic engine producer/collector/aggregate contract.
+sh_test(
+    name = "product_postgres_test",
+    srcs = ["//:scripts/bazel/package-action.sh"],
+    args = [
+        "$(rootpath @pnpm//:pnpm)",
+        "services/telemetry-worker",
+        "test:product:postgres",
+    ],
+    data = [
+        "@pnpm//:pnpm",
+        ":node_modules/@cloudflare/workers-types",
+        ":node_modules/@neondatabase/serverless",
+        ":node_modules/typescript",
+        ":node_modules/vitest",
+        "//:telemetry_contract_fixtures",
+        ":contracts",
+        ":deploy_config",
+        ":postgres_schema",
+        ":test_sources",
+        ":worker_sources",
     ],
     env = {"CTX_TEST_POSTGRES_BIN": "/usr/lib/postgresql/16/bin"},
     tags = ["external", "postgresql", "requires-pnpm", "telemetry-worker"],

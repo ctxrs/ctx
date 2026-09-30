@@ -4,12 +4,30 @@ pub(crate) fn export_graph(
     source: &SourceArgs,
     db: Option<&Path>,
     format: Format,
-    output: Option<&Path>,
-    json_output: bool,
+    (output, json_output): (Option<&Path>, bool),
     view: &ViewArgs,
     report: Option<bool>,
+    facts: &mut GraphObservation,
 ) -> Result<()> {
+    facts.phase = GraphPhase::Snapshot;
     let (graph, path) = load(source, db)?;
+    facts.nodes = Some(graph.nodes.len() as u64);
+    facts.edges = Some(graph.edges.len() as u64);
+    facts.export_format = Some(match format {
+        Format::SnapshotJson => observation::GraphExportFormat::SnapshotJson,
+        Format::GraphifyJson => observation::GraphExportFormat::GraphifyJson,
+        Format::GraphMl => observation::GraphExportFormat::GraphMl,
+        Format::Cypher => observation::GraphExportFormat::Cypher,
+        Format::Mermaid => observation::GraphExportFormat::Mermaid,
+        Format::Svg => observation::GraphExportFormat::Svg,
+        Format::Html => observation::GraphExportFormat::Html,
+        Format::Markdown => observation::GraphExportFormat::Markdown,
+        Format::Canvas => observation::GraphExportFormat::Canvas,
+        Format::CallflowHtml => observation::GraphExportFormat::CallflowHtml,
+        Format::TreeHtml => observation::GraphExportFormat::TreeHtml,
+        Format::Wiki => observation::GraphExportFormat::Wiki,
+        Format::Obsidian => observation::GraphExportFormat::Obsidian,
+    });
     let graph_json = matches!(format, Format::SnapshotJson | Format::GraphifyJson);
     ensure!(
         !view.allow_shrink || graph_json,
@@ -42,7 +60,9 @@ pub(crate) fn export_graph(
     let Some(single) = format.single() else {
         let parent =
             output.context("wiki/obsidian require --output pointing to an existing directory")?;
+        facts.phase = GraphPhase::ArtifactWrite;
         let vault = export::write_vault_with_options(&graph, parent, &options)?;
+        facts.artifact_committed = Some(true);
         let mut result = serde_json::to_value(&vault)?;
         if let Some(context) = context {
             let report = vault.directory.join("report.md");
@@ -51,8 +71,10 @@ pub(crate) fn export_graph(
             write_atomic(&report, content.as_bytes(), std::slice::from_ref(&path))?;
             result["source_context"] = context;
         }
+        facts.execution_succeeded = Some(true);
         return print(&result, json_output);
     };
+    facts.phase = GraphPhase::Render;
     let mut content = export::render_with_options(&graph, single, &options)?;
     if let Some(context) = &context {
         content = contextual_report(content, format, context)?;
@@ -81,20 +103,32 @@ pub(crate) fn export_graph(
                 graph.edges.len()
             );
         }
+        facts.phase = GraphPhase::ArtifactWrite;
         write_atomic(output, content.as_bytes(), &[path])?;
+        facts.artifact_committed = Some(true);
+        facts.artifact_bytes = Some(content.len() as u64);
         let mut result = json!({"output":output,"format":format,"bytes":content.len(),"nodes":graph.nodes.len(),"edges":graph.edges.len()});
         if let Some(context) = context {
             result["source_context"] = context;
         }
+        facts.execution_succeeded = Some(true);
         print(&result, json_output)
     } else if json_output {
         let mut result = json!({"format":format,"content":content});
         if let Some(context) = context {
             result["source_context"] = context;
         }
+        facts.execution_succeeded = Some(true);
         print(&result, true)
     } else {
-        std::io::stdout().lock().write_all(content.as_bytes())?;
+        facts.execution_succeeded = Some(true);
+        facts.phase = GraphPhase::OutputWrite;
+        crate::output::output_result(
+            std::io::stdout()
+                .lock()
+                .write_all(content.as_bytes())
+                .map_err(Into::into),
+        )?;
         Ok(())
     }
 }

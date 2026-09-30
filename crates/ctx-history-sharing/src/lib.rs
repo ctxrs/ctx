@@ -9,6 +9,7 @@ mod client;
 mod collector;
 mod config;
 mod error;
+mod observation;
 mod private_file;
 mod queue;
 mod selection;
@@ -19,6 +20,7 @@ pub use client::{RemoteClient, REQUEST_TIMEOUT, UPLOAD_CHUNK_BYTES};
 pub use collector::{Collector, TickOutcome};
 pub use config::{Connection, Credentials, Endpoint, SharingStore};
 pub use error::{Error, Result};
+pub use observation::*;
 pub use queue::SharingStatus;
 pub use selection::{
     Backfill, PublicationMode, SelectionDecision, SelectionObservation, SessionScope,

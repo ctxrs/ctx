@@ -1,3 +1,4 @@
+import { parseProductOperation, parseProductRuntime } from "./product-operation-contract";
 import {
   BYTE_BUCKETS,
   COUNT_BUCKETS,
@@ -240,6 +241,7 @@ export function parseSurfaceOperationProperties(
   appVersion: string,
 ): Record<string, TelemetryScalar> {
   const properties = requireRecord(value, "invalid_properties");
+  if (operation === "graph" || operation === "server_request" || operation === "remote") return parseProductOperation(properties, surface, operation, outcome);
   if (surface === "daemon") return parseDaemonOperationProperties(properties, operation);
   if (surface === "mcp") return parseMcpOperationProperties(properties, operation, outcome);
   if (surface === "pro_host") {
@@ -474,8 +476,10 @@ export function parseRuntimeProperties(
   value: unknown,
   surface: string,
   operation: string,
+  outcome: string,
 ): Record<string, TelemetryScalar> {
   const properties = requireRecord(value, "invalid_properties");
+  if (operation === "product_runtime" || operation === "sift_summary" || operation === "server_summary" || operation === "sharing_summary") return parseProductRuntime(properties, surface, operation, outcome);
   if (surface === "daemon") return parseDaemonRuntimeProperties(properties, operation);
   if (surface === "mcp") return parseMcpRuntimeProperties(properties, operation);
   throw schemaError("invalid_runtime_surface");

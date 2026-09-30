@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ctx_history_sharing::SharingWorker;
+use ctx_history_sharing::{SharingObserver, SharingWorker};
 
 use crate::DaemonRunProfile;
 
@@ -16,6 +16,7 @@ pub(super) struct Workers {
     enabled: bool,
     next_discovery: Instant,
     handles: BTreeMap<PathBuf, SharingWorker>,
+    observer: Option<SharingObserver>,
 }
 
 impl Workers {
@@ -34,9 +35,11 @@ impl Workers {
             if let std::collections::btree_map::Entry::Vacant(slot) =
                 self.handles.entry(entry.path())
             {
-                if let Ok(Some(worker)) =
-                    SharingWorker::start(data_root.to_path_buf(), entry.path())
-                {
+                if let Ok(Some(worker)) = SharingWorker::start_with_observer(
+                    data_root.to_path_buf(),
+                    entry.path(),
+                    self.observer.clone(),
+                ) {
                     slot.insert(worker);
                 }
             }
@@ -68,13 +71,16 @@ pub(super) fn start_workers(
     data_root: &Path,
     profile: DaemonRunProfile,
     lifecycle_ready: bool,
+    observer: impl FnOnce() -> Option<SharingObserver>,
 ) -> Workers {
     // Sharing owns config validation, failure isolation, cancellation and the
     // independent retry timer. Local refresh and queries never wait on a tick.
+    let enabled = profile == DaemonRunProfile::Persistent && lifecycle_ready;
     let mut workers = Workers {
-        enabled: profile == DaemonRunProfile::Persistent && lifecycle_ready,
+        enabled,
         next_discovery: Instant::now(),
         handles: BTreeMap::new(),
+        observer: enabled.then(observer).flatten(),
     };
     workers.reconcile(data_root);
     workers

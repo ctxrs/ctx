@@ -16,6 +16,7 @@ ctx-history-platform = { path = "../ctx-history-platform" }
 ctx-history-read-application = { path = "../ctx-history-read-application" }
 fs2.workspace = true
 hex.workspace = true
+http-body = "1.0.1"
 ring.workspace = true
 rusqlite = { workspace = true, features = ["backup"] }
 serde.workspace = true

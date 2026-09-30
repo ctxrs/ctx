@@ -63,7 +63,12 @@ pub(crate) fn create_database(path: &Path, graph: ImportedGraph) -> Result<Stats
     Ok(stats)
 }
 
-pub(crate) fn merge(args: &MergeArgs, db: Option<&Path>, json_output: bool) -> Result<()> {
+pub(crate) fn merge(
+    args: &MergeArgs,
+    db: Option<&Path>,
+    json_output: bool,
+    facts: &mut GraphObservation,
+) -> Result<()> {
     ensure!(db.is_none(), "merge requires --output; omit --db");
     ensure!(
         args.project.len() + args.snapshot.len() >= 2,
@@ -89,7 +94,11 @@ pub(crate) fn merge(args: &MergeArgs, db: Option<&Path>, json_output: bool) -> R
     } else {
         0
     };
+    facts.phase = GraphPhase::Commit;
     let stats = create_database(&args.output, graph)?;
+    facts.index = Some(observation::GraphIndexDisposition::Committed);
+    facts.stats(&stats);
+    facts.execution_succeeded = Some(true);
     print(
         &json!({"output":args.output,"projects":entries,"package_links":package_links,"reference_links":reference_links,"stats":stats}),
         json_output,
@@ -192,7 +201,12 @@ pub(crate) fn aggregate_fingerprint(graph: &ImportedGraph) -> Result<String> {
     ))
 }
 
-pub(crate) fn global(args: &GlobalArgs, db: Option<&Path>, json_output: bool) -> Result<()> {
+pub(crate) fn global(
+    args: &GlobalArgs,
+    db: Option<&Path>,
+    json_output: bool,
+    facts: &mut GraphObservation,
+) -> Result<()> {
     let path = global_path(db)?;
     if matches!(args.command, GlobalCommand::Path) {
         return print(&json!({"database":path}), json_output);
@@ -218,6 +232,7 @@ pub(crate) fn global(args: &GlobalArgs, db: Option<&Path>, json_output: bool) ->
     };
     match &args.command {
         GlobalCommand::List => {
+            facts.result_count = Some(registry.entries.len() as u64);
             return print(
                 &json!({"database":path,"entries":registry.entries,"generation":store.as_ref().map(Store::stats).transpose()?.map(|s|s.generation)}),
                 json_output,
@@ -228,18 +243,22 @@ pub(crate) fn global(args: &GlobalArgs, db: Option<&Path>, json_output: bool) ->
             let store = store
                 .as_ref()
                 .context("no global aggregate exists; run ctx graph global add first")?;
-            return print(
-                &store.query(
-                    &args.text,
-                    &QueryOptions {
-                        depth: args.depth,
-                        limit: args.limit as usize,
-                        direction: args.direction.into(),
-                        relation: args.relation.clone(),
-                    },
-                )?,
-                json_output,
+            facts.phase = GraphPhase::Query;
+            let started = Instant::now();
+            let result = store.query(
+                &args.text,
+                &QueryOptions {
+                    depth: args.depth,
+                    limit: args.limit as usize,
+                    direction: args.direction.into(),
+                    relation: args.relation.clone(),
+                },
             );
+            facts.query_duration = Some(started.elapsed());
+            let result = result?;
+            facts.graph(&result);
+            facts.execution_succeeded = Some(true);
+            return print(&result, json_output);
         }
         GlobalCommand::Add {
             name,
@@ -283,18 +302,26 @@ pub(crate) fn global(args: &GlobalArgs, db: Option<&Path>, json_output: bool) ->
     if let Some(store) = &store
         && store.graph_metadata()?[REGISTRY_FINGERPRINT].as_str() == Some(&fingerprint)
     {
+        let stats = store.stats()?;
+        facts.stats(&stats);
+        facts.index = Some(observation::GraphIndexDisposition::NoOp);
+        facts.execution_succeeded = Some(true);
         return print(
-            &json!({"database":path,"entries":registry.entries,"stats":store.stats()?,
+            &json!({"database":path,"entries":registry.entries,"stats":stats,
                 "unchanged":true,"package_links":package_links,"reference_links":reference_links}),
             json_output,
         );
     }
     graph.metadata[REGISTRY_FINGERPRINT] = json!(fingerprint);
+    facts.phase = GraphPhase::Commit;
     let stats = if let Some(store) = &mut store {
         store.refresh_import(graph)?
     } else {
         create_database(&path, graph)?
     };
+    facts.stats(&stats);
+    facts.index = Some(observation::GraphIndexDisposition::Committed);
+    facts.execution_succeeded = Some(true);
     print(
         &json!({"database":path,"entries":registry.entries,"stats":stats,"unchanged":false,"package_links":package_links,"reference_links":reference_links}),
         json_output,

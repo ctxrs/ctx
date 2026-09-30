@@ -10,6 +10,32 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Typed classification at a query failure boundary. The original diagnostic stays local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryFailureKind {
+    InvalidInput,
+    EndpointNotFound,
+    EndpointAmbiguous,
+    WorkLimit,
+}
+
+#[derive(Debug)]
+pub struct QueryFailure {
+    pub kind: QueryFailureKind,
+    error: anyhow::Error,
+}
+impl QueryFailure {
+    fn wrap(kind: QueryFailureKind, error: anyhow::Error) -> anyhow::Error {
+        Self { kind, error }.into()
+    }
+}
+impl std::fmt::Display for QueryFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)
+    }
+}
+impl std::error::Error for QueryFailure {}
+
 const MAX_SEEDS: usize = 20;
 const MAX_EXAMINED: usize = 5_000;
 // Ranking and endpoint lookup inspect the catalog; traversal admits neighbors.
