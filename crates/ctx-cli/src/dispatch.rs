@@ -1,4 +1,4 @@
-use std::{env, io, process::ExitCode, time::Instant};
+use std::{env, io, path::PathBuf, process::ExitCode, time::Instant};
 
 use anyhow::{Context, Result};
 use clap::CommandFactory as _;
@@ -181,6 +181,16 @@ fn render_unhandled_command_error(error: &anyhow::Error) -> Result<()> {
     ui.flush().context("flush pre-dispatch error")
 }
 
+pub(crate) fn resolve_history_data_root(command_root: Option<PathBuf>) -> Result<PathBuf> {
+    if env::var_os("CTX_DATA_ROOT").is_some() {
+        ctx_history_platform::managed_data_root().context("resolve managed ctx data root")?;
+    }
+    command_root
+        .map(Ok)
+        .unwrap_or_else(default_data_root)
+        .context("resolve ctx data root")
+}
+
 pub(crate) fn run_cli() -> Result<()> {
     let mut cli = parse_cli_from(env::args_os())?;
     if cli.server.is_some()
@@ -229,7 +239,7 @@ pub(crate) fn run_cli() -> Result<()> {
     semantic::initialize()?;
     cli.command = match cli.command {
         CommandRoot::Mcp(args) => {
-            let data_root = cli.data_root.map(Ok).unwrap_or_else(default_data_root)?;
+            let data_root = resolve_history_data_root(cli.data_root)?;
             return mcp::run(args, data_root);
         }
         command => command,
@@ -271,13 +281,7 @@ pub(crate) fn run_cli() -> Result<()> {
         CommandRoot::Status(args) if args.usage.is_some()
     );
     let quiet = quiet_output(cli.quiet);
-    let data_root = cli
-        .data_root
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(default_data_root)
-        .context("resolve ctx data root");
-    let data_root = data_root?;
+    let data_root = resolve_history_data_root(cli.data_root.clone())?;
     if let CommandRoot::Search(args) = &mut cli.command {
         if ctx_history_archive::is_archive_root(&data_root)? {
             // Archive generations are refreshed by restore, not native capture.

@@ -105,21 +105,12 @@ pub fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()>
 
 #[cfg(windows)]
 pub fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
 
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let target = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let source = windows_replacement_path(source)?;
+    let target = windows_replacement_path(target)?;
     retry_windows_private_file_replacement(
         || {
             let moved = unsafe {
@@ -137,6 +128,35 @@ pub fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()>
         },
         || std::thread::sleep(PRIVATE_FILE_REPLACE_RETRY),
     )
+}
+
+#[cfg(windows)]
+fn windows_replacement_path(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::{
+        os::windows::ffi::OsStrExt,
+        path::{Component, Prefix},
+    };
+
+    // Normalize with Win32 rules before adding a verbatim prefix. Unlike
+    // canonicalize, this neither follows aliases nor requires the target to exist.
+    let absolute = std::path::absolute(path)?;
+    let mut wide: Vec<_> = absolute.as_os_str().encode_wide().collect();
+    // MAX_PATH includes the terminating NUL. Preserve ordinary short-path semantics.
+    if wide.len() >= 260 {
+        if let Some(Component::Prefix(prefix)) = absolute.components().next() {
+            match prefix.kind() {
+                Prefix::Disk(_) => {
+                    wide.splice(..0, r"\\?\".encode_utf16());
+                }
+                Prefix::UNC(..) => {
+                    wide.splice(..2, r"\\?\UNC\".encode_utf16());
+                }
+                _ => {}
+            }
+        }
+    }
+    wide.push(0);
+    Ok(wide)
 }
 
 pub fn retry_windows_private_file_replacement(

@@ -172,7 +172,8 @@ One scheduler state, `.ctx.upgrade-state.json`, and one replacement transaction
 journal live beside the managed executable. The executable-adjacent
 `.ctx.install.lock` coordinates all data roots sharing that installation.
 Daemon lifecycle and supervisor coordination is separate and unified under the
-canonical `~/.ctx` root. `ctx upgrade status` reads the scheduler state and
-shows failed-check details.
+managed root selected by `CTX_DATA_ROOT`, defaulting to `~/.ctx`. Run upgrades
+with the same environment used by your ctx clients. `ctx upgrade status` reads
+the scheduler state and shows failed-check details.
 Upgrade metadata checks do not send provider transcript text, search queries,
 result snippets, source paths, repository names, or command output.

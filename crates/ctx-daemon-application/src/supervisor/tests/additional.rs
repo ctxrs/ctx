@@ -954,17 +954,50 @@ fn native_disable_failure_does_not_claim_an_unavailable_launch_probe_is_healthy(
 }
 
 #[test]
-fn canonical_supervisor_root_is_independent_of_ctx_data_root_override() {
+fn selected_managed_supervisor_root_excludes_command_overrides() {
     let _env_lock = crate::test_environment_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let _restore = RestoreTestEnvironment::capture(&["CTX_DATA_ROOT"]);
-    let canonical = ctx_history_platform::managed_data_root().unwrap();
-    let custom = canonical.with_file_name("ctx-custom-supervisor-test");
-    env::set_var("CTX_DATA_ROOT", &custom);
+    env::remove_var("CTX_DATA_ROOT");
+    let default = ctx_history_platform::managed_data_root().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let selected = temp.path().join("managed");
+    let command_override = temp.path().join("override");
+    assert!(is_canonical_managed_data_root(&default).unwrap());
+    assert!(!is_canonical_managed_data_root(&command_override).unwrap());
+    env::set_var("CTX_DATA_ROOT", &selected);
 
-    assert!(is_canonical_managed_data_root(&canonical).unwrap());
-    assert!(!is_canonical_managed_data_root(&custom).unwrap());
+    assert!(is_canonical_managed_data_root(&selected).unwrap());
+    assert!(!is_canonical_managed_data_root(&default).unwrap());
+    assert!(!is_canonical_managed_data_root(&command_override).unwrap());
+    // Even a receipt claiming native ownership cannot let an override root
+    // alter the singleton supervisor.
+    write_supervisor_receipt(
+        &command_override,
+        &SupervisorReceipt {
+            kind: native_supervisor_kind().to_owned(),
+            status: "installed",
+            autostart_supported: true,
+            restart_supported: true,
+            registration_verified: true,
+            live_owner_verified: false,
+            owner_pid: None,
+            artifact_path: None,
+            executable_path: None,
+            limitation: None,
+            last_error: None,
+        },
+    )
+    .unwrap();
+    disable_daemon_supervisor(&TestHost, &command_override).unwrap();
+    assert_eq!(
+        stored_supervisor_report(&command_override)["kind"],
+        "cli_self_heal"
+    );
+    assert!(!selected.exists());
+    env::set_var("CTX_DATA_ROOT", "relative");
+    assert!(is_canonical_managed_data_root(&command_override).is_err());
 }
 
 #[test]

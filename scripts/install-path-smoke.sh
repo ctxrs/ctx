@@ -333,16 +333,19 @@ metadata_runtime="${tmp_dir}/metadata-runtime.env"
 cp "${metadata_runtime_missing_version}" "${metadata_runtime}"
 printf 'CTX_RELEASE_ONNXRUNTIME_VERSION=1.27.0\n' >> "${metadata_runtime}"
 CURL_CA_BUNDLE="${tmp_dir}/cert.pem" HOME="${tmp_dir}/home-runtime-dry-run" \
+  CTX_DATA_ROOT="${tmp_dir}/selected data root" CTX_RUNTIME_DIR= \
   bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
   --metadata "${metadata_runtime}" --platform linux-x64 --dry-run --no-setup --no-skill \
   > "${tmp_dir}/runtime-dry-run.out"
-grep -F 'onnxruntime: ' "${tmp_dir}/runtime-dry-run.out" | grep -F '/onnxruntime/1.27.0/linux-x64' >/dev/null
+grep -F 'onnxruntime: ' "${tmp_dir}/runtime-dry-run.out" | \
+  grep -F "${tmp_dir}/selected data root/runtime/onnxruntime/1.27.0/linux-x64" >/dev/null
 
 runtime_home="${tmp_dir}/home-runtime-install"
 runtime_bin="${tmp_dir}/runtime-install-bin"
 runtime_dir="${tmp_dir}/runtime-install-root"
 mkdir -p "${runtime_home}"
 CURL_CA_BUNDLE="${tmp_dir}/cert.pem" HOME="${runtime_home}" PATH="/usr/bin:/bin" \
+  CTX_DATA_ROOT="${tmp_dir}/selected data root" \
   bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
     --metadata "${metadata_runtime}" --platform linux-x64 \
     --bin-dir "${runtime_bin}" --runtime-dir "${runtime_dir}" \

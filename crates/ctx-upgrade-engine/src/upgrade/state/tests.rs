@@ -755,3 +755,32 @@ fn finalization_failure_after_new_marker_remains_visible_with_the_old_attempt_bi
     assert_eq!(fs::read(state_path(&install))?, before);
     Ok(())
 }
+
+#[test]
+fn daemon_coordination_uses_the_selected_managed_root() -> Result<()> {
+    const CHILD: &str = "CTX_TEST_MANAGED_COORDINATION_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let root = ctx_history_platform::managed_data_root()?;
+        assert_eq!(ctx_history_platform::default_data_root()?, root);
+        let (lock, acknowledgements) =
+            installation_daemon_coordination_paths_for(&std::env::current_exe()?)?;
+        assert!(lock.starts_with(root.join("daemon-installations")));
+        assert_eq!(lock.parent(), acknowledgements.parent());
+        assert!(
+            !root.exists(),
+            "resolving lifecycle paths must not create state"
+        );
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "upgrade::state::tests::daemon_coordination_uses_the_selected_managed_root",
+        ])
+        .env(CHILD, "1")
+        .env("CTX_DATA_ROOT", temp.path().join("managed"))
+        .status()?;
+    assert!(status.success());
+    Ok(())
+}

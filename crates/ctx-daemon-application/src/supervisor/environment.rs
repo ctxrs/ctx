@@ -19,6 +19,7 @@ const SUPERVISOR_DAEMON_POLICY_ENV_ALLOWLIST: &[&str] = &[
     "CTX_ANALYTICS_ENABLED",
     "CTX_DAEMON_ENABLED",
     "CTX_DAEMON_MODE",
+    "CTX_DATA_ROOT",
     "CTX_LOCAL_USAGE_ENABLED",
     "CTX_SEARCH_SEMANTIC",
     SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
@@ -230,6 +231,15 @@ pub(super) fn supervisor_environment_snapshot(
         values.remove(SEMANTIC_EMBEDDING_TOKEN_ENV);
         values.remove(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV);
     }
+    // Pin the selection, including the default, before a service manager
+    // launches us with a sanitized environment. Never use a command override.
+    values.insert(
+        "CTX_DATA_ROOT".to_owned(),
+        validated_supervisor_environment_value(
+            "CTX_DATA_ROOT",
+            ctx_history_platform::managed_data_root()?.into_os_string(),
+        )?,
+    );
     values.insert("PATH".to_owned(), SUPERVISOR_DAEMON_FIXED_PATH.to_owned());
     #[cfg(unix)]
     if !values.contains_key("HOME") {
@@ -478,6 +488,7 @@ mod tests {
             "DSH_HOME",
             "GROK_HOME",
             "XDG_CONFIG_HOME",
+            "CTX_DATA_ROOT",
             "CTX_LOCAL_USAGE_ENABLED",
             "CTX_ANALYTICS_ENABLED",
             "CTX_SEARCH_SEMANTIC",

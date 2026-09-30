@@ -60,8 +60,67 @@ Default root:
         <platform>/
 ```
 
-`CTX_DATA_ROOT` or `--data-root` may point ctx somewhere else. The configured
-root is used directly; ctx does not append another directory.
+`CTX_DATA_ROOT` selects the complete managed history root, including
+`config.toml`, installation identity, indexes, and default runtime assets.
+The CLI, daemon, supervisor, upgrades, and uninstall use this selection.
+With the variable unset or empty, the root is `~/.ctx`. The configured root is used
+directly; ctx does not append another directory.
+
+```bash
+export CTX_DATA_ROOT=/mnt/history/ctx
+```
+
+Use an absolute path and set the variable in the environment that launches
+ctx, including your agents, MCP servers, and installer or uninstaller.
+For PowerShell, use `$env:CTX_DATA_ROOT = 'D:\History\ctx'`. Set it in your
+shell or launcher configuration to keep using it in future sessions.
+Native supervision captures the selection when enabled with
+`ctx index mode auto`; it does not depend on a later interactive shell.
+Changing an environment variable does not update an already running process.
+
+`--data-root` remains a history-root override for one command. It does not
+change which root owns the managed installation's supervisor. Graph databases,
+output state, the executable, and explicitly overridden runtime/model caches
+have separate locations.
+
+## Moving The Managed Root
+
+Upgrade ctx before migrating. Make sure the destination filesystem is mounted
+and supports private permissions, file locking, and atomic file replacement.
+The destination must be outside provider-owned history directories. Keep the
+same ownership and private permissions; replacing the root with a symlink or
+Windows junction is not supported.
+
+1. With the old root still selected, run `ctx index mode manual` and wait for
+   it to succeed. This stops background maintenance and removes its supervisor.
+   Close other ctx commands and MCP sessions before copying.
+2. Copy the entire root, including hidden files, `config.toml`, and installation
+   identity, to a new destination. Preserve permissions. For example, if the
+   current root is `~/.ctx` and `/mnt/history/ctx` does not exist:
+
+   ```bash
+   cp -a "$HOME/.ctx" /mnt/history/ctx
+   export CTX_DATA_ROOT=/mnt/history/ctx
+   ```
+
+3. Set the same `CTX_DATA_ROOT` in the environments used to launch your agents
+   and other ctx clients. Restart those clients. Run `ctx status` and a known
+   search with `--refresh off` to verify the copied history.
+4. If you want automatic indexing, run `ctx index mode auto` from the new
+   environment. This registers the supervisor for the new root and captures
+   its launch environment. Otherwise leave manual mode enabled.
+
+Keep the original copy until verification succeeds, then remove it when you
+no longer need it. Do not run both copies as the same managed installation.
+If copying fails, leave the old root selected and resume automatic mode there
+if desired. The copy operation itself does not change ctx's selected root.
+
+There is no remembered relocation: a process without `CTX_DATA_ROOT` uses
+`~/.ctx`. Ensure the destination volume is mounted before starting ctx; a path
+alone cannot distinguish a new empty root from an empty mountpoint. Older ctx
+versions do not apply the variable consistently to the managed lifecycle.
+
+## Installation Files
 
 Official installer-managed binaries also have a sidecar next to the installed
 binary, for example:

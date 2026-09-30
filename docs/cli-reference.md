@@ -19,10 +19,14 @@ ctx --quiet setup
 CTX_QUIET=1 ctx status
 ```
 
-`--data-root` overrides the default agent-history root only. The environment
-variable `CTX_DATA_ROOT` provides the same value. The root is used directly; ctx
-does not append another product directory. Graph databases use `ctx graph --db`;
-output config and state use `CTX_OUTPUT_CONFIG_DIR` and `CTX_OUTPUT_STATE_DIR`.
+`CTX_DATA_ROOT` selects the managed agent-history root, including `config.toml`,
+for the CLI, daemon, and installation lifecycle. It defaults to `~/.ctx`.
+`--data-root` overrides the history root for that command; it does not change
+the managed installation root. The root is used directly; ctx does not append
+another product directory. Graph databases use `ctx graph --db`; output config
+and state use `CTX_OUTPUT_CONFIG_DIR` and `CTX_OUTPUT_STATE_DIR`.
+See [Moving The Managed Root](storage.md#moving-the-managed-root) before moving
+an existing installation.
 
 `--server NAME` selects a saved connection for `search`, `show` and `mcp serve`.
 It requires no local index and never falls back to local results. Without this

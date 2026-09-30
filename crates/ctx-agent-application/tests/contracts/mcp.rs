@@ -700,7 +700,8 @@ fn mcp_search_matches_cli_results_without_refresh() {
             "ctx_session_id:",
             "ctx_event_id:",
             "snippet:",
-            "next: ctx --data-root",
+            "next: ctx show session",
+            "next: ctx show event",
         ],
     );
     let first_result = &search["results"][0];

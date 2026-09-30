@@ -36,9 +36,10 @@ This hidden compatibility command is reserved for the installation-wide
 uninstall handoff; it is not the public indexing-mode control. Use
 `ctx index mode auto` or `ctx index mode manual` for normal indexing
 configuration. Daemon lifecycle and supervisor coordination is unified under
-the canonical `~/.ctx` root. The handoff applies even when `CTX_DATA_ROOT` or
-`--data-root` selects a custom history root. It disables and quiesces every
-registered daemon root, removes the singleton native supervisor, releases
+the managed root selected by `CTX_DATA_ROOT`, defaulting to `~/.ctx`. Run the
+handoff with the same environment used by your ctx clients. It also applies
+when `--data-root` selects a different command history root. It disables and
+quiesces every registered daemon root, removes the singleton native supervisor, releases
 owner locks and endpoints, and retains the executable and history data. Do not
 replace or remove the executable unless the command exits successfully and its
 JSON receipt reports all of these fields:

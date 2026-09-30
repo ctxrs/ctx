@@ -468,7 +468,12 @@ if ([string]::IsNullOrWhiteSpace($BinDir)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($RuntimeDir)) {
-    $RuntimeDir = Join-Path $HOME ".ctx\runtime"
+    $dataRoot = if ([string]::IsNullOrWhiteSpace($env:CTX_DATA_ROOT)) {
+        Join-Path $HOME ".ctx"
+    } else {
+        $env:CTX_DATA_ROOT
+    }
+    $RuntimeDir = Join-Path $dataRoot "runtime"
 }
 if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
     if (-not (Test-Path -LiteralPath $ArtifactDir -PathType Container)) {

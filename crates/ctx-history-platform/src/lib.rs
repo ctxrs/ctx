@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum PlatformError {
     #[error("could not determine a home directory for the default ctx data root")]
     MissingHome,
+    #[error("CTX_DATA_ROOT {0}")]
+    InvalidDataRoot(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, PlatformError>;
