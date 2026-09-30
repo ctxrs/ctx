@@ -210,7 +210,7 @@ fn ordinary_unselected_child_open_failure_is_fatal() {
 fn root_failure_is_never_downgraded_to_a_selected_file_failure() {
     let directory = tempfile::tempdir().unwrap();
     let target = directory.path().join("target");
-    fs::create_dir_all(&target).unwrap();
+    fs::write(&target, b"{}\n").unwrap();
     let root = directory.path().join("root.jsonl");
     symlink(&target, &root).unwrap();
     let mut isolated = 0;

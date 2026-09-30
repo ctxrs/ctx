@@ -2,28 +2,40 @@ use super::*;
 
 impl CoreRefreshEngine {
     pub fn enqueue_next_scheduled_refresh(&self, data_root: &Path, now_ms: u64) -> Result<bool> {
-        self.enqueue_next_dirty_route_with_cold_all(data_root, now_ms, true)
+        self.enqueue_scheduled_refresh(data_root, now_ms, true, false)
+            .map(|scope| scope.is_some())
+    }
+
+    /// Tries the full publication needed for root metadata. Checkpoint repair
+    /// and route eligibility precede promotion. Healthy exact work can still
+    /// run while peers are blocked; only a full submission consumes demand.
+    pub fn enqueue_provider_root_refresh(&self, data_root: &Path, now_ms: u64) -> Result<bool> {
+        self.enqueue_scheduled_refresh(data_root, now_ms, true, true)
+            .map(|scope| scope == Some(SourceBackedRefreshScope::All))
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn enqueue_next_dirty_route(&self, data_root: &Path, now_ms: u64) -> Result<bool> {
-        self.enqueue_next_dirty_route_with_cold_all(data_root, now_ms, false)
+        self.enqueue_scheduled_refresh(data_root, now_ms, false, false)
+            .map(|scope| scope.is_some())
     }
 
-    fn enqueue_next_dirty_route_with_cold_all(
+    fn enqueue_scheduled_refresh(
         &self,
         data_root: &Path,
         now_ms: u64,
         cold_all: bool,
-    ) -> Result<bool> {
+        provider_root_refresh: bool,
+    ) -> Result<Option<SourceBackedRefreshScope>> {
         let observed_generation = self.observed_published_generation(data_root)?;
         let automatic_split_pending = self.automatic_split_pending_for_watch(data_root)?;
-        let all_scope_widening_possible =
-            automatic_split_pending || (cold_all && observed_generation.is_none());
+        let all_scope_widening_possible = provider_root_refresh
+            || automatic_split_pending
+            || (cold_all && observed_generation.is_none());
         let (sampled_routes, observation_routes, catalog, catalog_revision) = {
             let state = self.lock_state();
             if durable_queue_entry_count(&state) != 0 {
-                return Ok(false);
+                return Ok(None);
             }
             let sampled_routes = state
                 .dirty_routes
@@ -39,20 +51,20 @@ impl CoreRefreshEngine {
                 state.watch_catalog_revision,
             )
         };
-        if sampled_routes.is_empty() {
-            return Ok(false);
+        if sampled_routes.is_empty() && !provider_root_refresh {
+            return Ok(None);
         }
         // Route certification may touch provider files. Keep it outside the
         // engine-state mutex, then reject the sample if catalog authority moved.
         let sampled_observations = catalog.as_ref().map(|catalog| {
             source_backed_requested_route_observations(catalog, &observation_routes)
         });
-        let request_id = {
+        let (request_id, refresh_scope) = {
             let mut state = self.lock_state();
             if durable_queue_entry_count(&state) != 0
                 || state.watch_catalog_revision != catalog_revision
             {
-                return Ok(false);
+                return Ok(None);
             }
             let currently_due = state
                 .dirty_routes
@@ -61,16 +73,16 @@ impl CoreRefreshEngine {
                 .intersection(&currently_due)
                 .cloned()
                 .collect::<BTreeSet<_>>();
-            if routes.is_empty() {
-                return Ok(false);
+            if routes.is_empty() && !provider_root_refresh {
+                return Ok(None);
             }
             let paused_routes_present = reconcile_due_automatic_retry_routes(
                 &mut state,
                 &mut routes,
                 sampled_observations.as_ref(),
             );
-            if routes.is_empty() {
-                return Ok(false);
+            if routes.is_empty() && !provider_root_refresh {
+                return Ok(None);
             }
             let retry_intent = routes
                 .iter()
@@ -95,7 +107,20 @@ impl CoreRefreshEngine {
                         .routes_requiring_exhaustive_reconciliation
                         .contains(route)
             });
-            let refresh_scope = if automatic_split_pending && !paused_routes_present {
+            let provider_root_all = provider_root_refresh
+                && retry_intent.is_none()
+                && !paused_routes_present
+                && state.dirty_routes.all_routes_ready(now_ms);
+            let refresh_scope = if provider_root_all {
+                SourceBackedRefreshScope::All
+            } else if provider_root_refresh {
+                // A full config publication must wait for every withheld peer.
+                // Preserve those ledger entries and admit only eligible work.
+                if routes.is_empty() {
+                    return Ok(None);
+                }
+                SourceBackedRefreshScope::Exact(routes)
+            } else if automatic_split_pending && !paused_routes_present {
                 // A released collapsed identity is still active. Exact watch
                 // work cannot establish the complete role cohort required to
                 // bridge or retire it, so retain the event as the trigger but
@@ -123,11 +148,11 @@ impl CoreRefreshEngine {
                     .as_deref()
                     .cloned()
                     .unwrap_or(RefreshIntent::AutomaticMaintenance),
-                refresh_scope,
+                refresh_scope.clone(),
             );
             attempt.state = SourceBackedRefreshState::AdmissionPending;
             attempt.progress.phase = "admission_pending".to_owned();
-            if requires_exhaustive_recovery || automatic_split_pending {
+            if requires_exhaustive_recovery || automatic_split_pending || provider_root_all {
                 attempt.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
             }
             attempt.automatic_retry_checkpoints = state.automatic_retry_checkpoints.clone();
@@ -135,10 +160,10 @@ impl CoreRefreshEngine {
             state.active_request_id = Some(request_id.clone());
             state.attempts.push_back(attempt);
             trim_terminal_attempt_history(&mut state);
-            request_id
+            (request_id, refresh_scope)
         };
         self.persist_job_status(data_root, &request_id)?;
-        Ok(true)
+        Ok(Some(refresh_scope))
     }
 
     fn automatic_split_pending_for_watch(&self, data_root: &Path) -> Result<bool> {

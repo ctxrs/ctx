@@ -4,8 +4,8 @@ use anyhow::{anyhow, Result};
 use ctx_history_core::CaptureProvider;
 use ctx_history_refresh::{ExplicitSourceCatalogUpsert, RefreshSelection};
 use ctx_history_source_discovery::{
-    validate_provider_source_roots_outside_data_root, DiscoveryIssueKind, DiscoveryReport,
-    ProviderSource, ProviderSourceStatus,
+    validate_automatic_provider_source_roots_outside_data_root, DiscoveryIssueKind,
+    DiscoveryReport, ProviderSource, ProviderSourceStatus,
 };
 
 use crate::{HistorySourcePluginSource, IngestPublication, SourceStats};
@@ -82,7 +82,7 @@ pub fn automatic_source_preflight(
     data_root: &Path,
 ) -> Result<AutomaticSourcePreflight> {
     let snapshot = discovery.discover_all()?;
-    validate_provider_source_roots_outside_data_root(data_root, snapshot.sources.iter())?;
+    validate_automatic_provider_source_roots_outside_data_root(data_root, snapshot.sources.iter())?;
     Ok(AutomaticSourcePreflight {
         sources: snapshot.sources,
     })

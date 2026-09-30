@@ -3,6 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use ctx_history_source_io::ProviderSourceRoot;
 use serde_json::{Map, Value};
 
 use super::super::automatic_roles::{
@@ -10,12 +11,11 @@ use super::super::automatic_roles::{
 };
 use super::{
     absolute_from_cwd, env_text, expand_leading_tilde, issue_limit, issue_manual, issue_selector,
-    ordinary_file, path_presence, push_source_candidate, push_unsupported_existing,
-    select_current_or_legacy, selected_path_is_safe, source_from_parts,
-    source_from_parts_with_data_root, DiscoveryContext, DiscoveryReport, ProviderSourceKind,
-    ProviderSourceSpec, ProviderSourceStatus, SelectorDocument, SelectorFormat,
-    SelectorIncludeBudget, SelectorReadError, SelectorReader, StaticProviderProbeCatalog,
-    MAX_FINITE_SELECTOR_ENTRIES, OPENCLAW_UNSUPPORTED_REASON,
+    path_presence, push_source_candidate, push_unsupported_existing, select_current_or_legacy,
+    selected_path_is_safe, source_from_parts, source_from_parts_with_data_root, DiscoveryContext,
+    DiscoveryReport, ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
+    SelectorDocument, SelectorFormat, SelectorIncludeBudget, SelectorReadError, SelectorReader,
+    StaticProviderProbeCatalog, MAX_FINITE_SELECTOR_ENTRIES, OPENCLAW_UNSUPPORTED_REASON,
 };
 use crate::provider_sources::probes::{has_openclaw_agent_sqlite, BoundedProbe};
 
@@ -192,21 +192,27 @@ fn selected_openclaw_config_path(state_root: &Path) -> Option<PathBuf> {
 }
 
 fn read_openclaw_agent_ids(path: &Path) -> Result<(Vec<String>, bool), OpenClawConfigError> {
+    let config_root = path.parent().ok_or(OpenClawConfigError::Invalid)?;
+    let config_root =
+        ProviderSourceRoot::open(config_root).map_err(|_| OpenClawConfigError::Invalid)?;
     let mut reader = SelectorReader::default();
     let document = reader
-        .read(path, SelectorFormat::Json5)
+        .read_relative(
+            &config_root,
+            Path::new(path.file_name().ok_or(OpenClawConfigError::Invalid)?),
+            SelectorFormat::Json5,
+        )
         .map_err(map_openclaw_error)?;
     let SelectorDocument::Structured(value) = document else {
         return Err(OpenClawConfigError::Invalid);
     };
-    let config_root = path.parent().ok_or(OpenClawConfigError::Invalid)?;
     let mut budget = SelectorIncludeBudget::default();
     let canonical_path = lexical_normalize(path);
     let mut visited = HashSet::from([canonical_path]);
     let value = resolve_openclaw_includes(
         value,
         path,
-        config_root,
+        &config_root,
         &mut reader,
         &mut budget,
         &mut visited,
@@ -313,7 +319,7 @@ fn lexical_normalize(path: impl AsRef<Path>) -> PathBuf {
 fn resolve_openclaw_includes(
     value: Value,
     current_path: &Path,
-    config_root: &Path,
+    config_root: &ProviderSourceRoot,
     reader: &mut SelectorReader,
     budget: &mut SelectorIncludeBudget,
     visited: &mut HashSet<PathBuf>,
@@ -358,10 +364,7 @@ fn resolve_openclaw_includes(
                     } else {
                         parent.join(include)
                     });
-                    if !ordinary_file(&include_path) {
-                        return Err(OpenClawConfigError::Invalid);
-                    }
-                    let canonical_root = lexical_normalize(config_root);
+                    let canonical_root = lexical_normalize(config_root.named_path());
                     let canonical_include = include_path;
                     if !canonical_include.starts_with(&canonical_root)
                         || !visited.insert(canonical_include.clone())
@@ -369,7 +372,13 @@ fn resolve_openclaw_includes(
                         return Err(OpenClawConfigError::Invalid);
                     }
                     let document = reader
-                        .read(&canonical_include, SelectorFormat::Json5)
+                        .read_relative(
+                            config_root,
+                            canonical_include
+                                .strip_prefix(&canonical_root)
+                                .map_err(|_| OpenClawConfigError::Invalid)?,
+                            SelectorFormat::Json5,
+                        )
                         .map_err(map_openclaw_error)?;
                     let SelectorDocument::Structured(included_value) = document else {
                         return Err(OpenClawConfigError::Invalid);

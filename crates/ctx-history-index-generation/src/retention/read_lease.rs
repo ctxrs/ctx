@@ -341,8 +341,11 @@ fn validate_leased_target(root: &GenerationReadRoot, target: &GenerationSlot) ->
     target.validate()?;
     root.opened()
         .open_directory(&Path::new(INDEX_GENERATIONS_DIRECTORY).join(target.directory()))
-        .map_err(|_| IndexError::GenerationRetentionLeaseTargetNotRetained {
-            requested_generation_id: target.generation_id().to_owned(),
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => IndexError::GenerationRetentionLeaseTargetNotRetained {
+                requested_generation_id: target.generation_id().to_owned(),
+            },
+            _ => IndexError::Io(error),
         })?;
     validate_leased_manifest(root, target.generation_id())?;
     Ok(())
@@ -351,8 +354,9 @@ fn validate_leased_target(root: &GenerationReadRoot, target: &GenerationSlot) ->
 fn validate_leased_manifest(root: &GenerationReadRoot, generation_id: &str) -> Result<()> {
     root.open_file(&manifest_relative_path(generation_id))
         .map(|_| ())
-        .map_err(|_| IndexError::GenerationRetentionLeaseTargetNotRetained {
-            requested_generation_id: generation_id.to_owned(),
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => IndexError::MissingManifest(generation_id.to_owned()),
+            _ => IndexError::Io(error),
         })
 }
 

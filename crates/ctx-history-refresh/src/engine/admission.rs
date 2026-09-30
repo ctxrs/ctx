@@ -491,7 +491,7 @@ impl CoreRefreshEngine {
                 started.elapsed(),
                 catalog,
             )?;
-        validate_provider_source_roots_outside_data_root(
+        validate_automatic_provider_source_roots_outside_data_root(
             data_root,
             admitted.discovery().report().sources.iter(),
         )
@@ -549,8 +549,11 @@ impl CoreRefreshEngine {
                 }
             }
         }
-        validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
-            .context("validate provider roots before scoped source refresh admission")?;
+        validate_automatic_provider_source_roots_outside_data_root(
+            data_root,
+            report.sources.iter(),
+        )
+        .context("validate provider roots before scoped source refresh admission")?;
         prepare_generation_control_state(data_root)?;
         let published_state = crate::orchestration::RetainedPublishedState {
             journal: self.journal.as_ref(),

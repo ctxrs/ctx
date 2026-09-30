@@ -543,7 +543,7 @@ fn nanoclaw_systemd_registry_ignores_unrelated_symlinks_and_reads_valid_unit() {
 
 #[cfg(unix)]
 #[test]
-fn nanoclaw_unsafe_registry_reports_selector_issue_at_registry_directory() {
+fn nanoclaw_relocated_empty_registry_is_an_ordinary_absent_registration() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
@@ -558,13 +558,7 @@ fn nanoclaw_unsafe_registry_reports_selector_issue_at_registry_directory() {
 
     let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
     assert!(report.sources.is_empty());
-    assert_eq!(report.issues.len(), 1);
-    assert_eq!(report.issues[0].path.as_deref(), Some(registry.as_path()));
-    assert_eq!(
-        report.issues[0].kind,
-        DiscoveryIssueKind::SelectorUnreconstructible
-    );
-    assert_eq!(report.issues[0].reason, NANOCLAW_SERVICE_REGISTRY_REASON);
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
 }
 
 #[test]
@@ -613,7 +607,7 @@ fn nanoclaw_registration_to_missing_checkout_fails_closed() {
 
 #[cfg(unix)]
 #[test]
-fn nanoclaw_registration_to_symlink_checkout_fails_closed() {
+fn nanoclaw_registration_accepts_a_relocated_checkout() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
@@ -624,12 +618,11 @@ fn nanoclaw_registration_to_symlink_checkout_fails_closed() {
     fs::create_dir_all(&cwd).unwrap();
     write_nanoclaw_project(&project);
     symlink(&project, &linked).unwrap();
-    let unit = write_nanoclaw_systemd_unit(&home, &linked);
+    write_nanoclaw_systemd_unit(&home, &linked);
 
     let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
-    assert!(report.sources.is_empty());
-    assert_eq!(report.issues.len(), 1);
-    assert_eq!(report.issues[0].path.as_deref(), Some(unit.as_path()));
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
+    assert!(!report.sources.is_empty());
 }
 
 #[test]
@@ -938,6 +931,30 @@ fn openclaw_include_escape_is_manual_and_does_not_scan_agents() {
         DiscoveryIssueKind::SelectorUnreconstructible
     );
     assert!(!report.issues[0].reason.contains("secret"));
+}
+
+#[cfg(unix)]
+#[test]
+fn openclaw_includes_remain_readable_under_a_relocated_state_root() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let state = temp.path().join("state");
+    let relocated = temp.path().join("relocated");
+    write(
+        &relocated.join("openclaw.json"),
+        "{$include: './selectors/agents.json5'}",
+    );
+    write(
+        &relocated.join("selectors/agents.json5"),
+        "{agents:{list:[{id:'included'}]}}",
+    );
+    symlink(&relocated, &state).unwrap();
+
+    assert_eq!(
+        openclaw_agent_ids_for_state_root(&state).unwrap(),
+        (vec!["included".to_owned()], false)
+    );
 }
 
 #[cfg(unix)]
@@ -1420,7 +1437,7 @@ fn exact_selected_paths_keep_the_same_explicit_formats() {
 
 #[cfg(unix)]
 #[test]
-fn selected_symlink_roots_are_manual_instead_of_followed() {
+fn selected_directory_relocation_retains_provider_discovery() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
@@ -1433,6 +1450,6 @@ fn selected_symlink_roots_are_manual_instead_of_followed() {
     symlink(&target, &link).unwrap();
     let context = context(&home, &cwd).with_env("ASTRBOT_ROOT", link.as_os_str().to_owned());
     let report = report(&context, CaptureProvider::AstrBot);
-    assert!(report.sources.is_empty());
-    assert_eq!(report.issues.len(), 1);
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
+    assert!(!report.sources.is_empty());
 }

@@ -169,8 +169,11 @@ where
     let publication_scope = execution.admitted_refresh().publication_scope();
     let physical_scope =
         SourceBackedRefreshScope::Exact(execution.admitted_refresh().exact_routes().clone());
-    validate_provider_source_roots_outside_data_root(execution.data_root, report.sources.iter())
-        .context("validate provider roots before source-refresh state writes")?;
+    validate_automatic_provider_source_roots_outside_data_root(
+        execution.data_root,
+        report.sources.iter(),
+    )
+    .context("validate provider roots before source-refresh state writes")?;
     if let Some(authority) = execution.explicit_source_catalog {
         authority
             .validate_source_roots(execution.data_root)

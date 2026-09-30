@@ -43,10 +43,20 @@ struct FileIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity;
 
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderSourceBoundaryError {
+    #[error("{0}")]
+    DataRoot(io::Error),
+    #[error("{0}")]
+    SourceRoot(io::Error),
+    #[error("provider source root overlaps or contains the ctx data root")]
+    Overlap,
+}
+
 pub(super) fn validate_provider_source_outside_data_root(
     data_root: &Path,
     source_root: &Path,
-) -> io::Result<()> {
+) -> Result<(), ProviderSourceBoundaryError> {
     validate_provider_source_outside_data_root_with(data_root, source_root, || {})
 }
 
@@ -54,20 +64,24 @@ fn validate_provider_source_outside_data_root_with(
     data_root: &Path,
     source_root: &Path,
     after_source_observation: impl FnOnce(),
-) -> io::Result<()> {
-    let data_root = absolute_data_root_path(data_root)?;
-    validate_absolute_path(source_root, "provider source root")?;
-    let source_root = normalize_platform_namespace_alias(source_root);
+) -> Result<(), ProviderSourceBoundaryError> {
+    use ProviderSourceBoundaryError::{DataRoot, SourceRoot};
 
-    let source_before = inspect_named_endpoint(&source_root, false)?;
+    let data_root = absolute_data_root_path(data_root).map_err(DataRoot)?;
+    let data = resolve_path(&data_root, true).map_err(DataRoot)?;
+    validate_absolute_path(source_root, "provider source root").map_err(SourceRoot)?;
+    let source_root = normalize_platform_namespace_alias(source_root);
+    let source = resolve_path(&source_root, false).map_err(SourceRoot)?;
     after_source_observation();
-    let data = resolve_path(&data_root, true)?;
-    let source = resolve_path(&source_root, false)?;
-    let source_after = inspect_named_endpoint(&source_root, false)?;
-    if source_before != source_after {
-        return Err(overlap_error(
+    if data != resolve_path(&data_root, true).map_err(DataRoot)? {
+        return Err(DataRoot(overlap_error(
+            "ctx data root changed during overlap validation",
+        )));
+    }
+    if source != resolve_path(&source_root, false).map_err(SourceRoot)? {
+        return Err(SourceRoot(overlap_error(
             "provider source root changed during overlap validation",
-        ));
+        )));
     }
 
     let lexical_overlap = data.canonical == source.canonical
@@ -80,11 +94,51 @@ fn validate_provider_source_outside_data_root_with(
             .terminal_identity
             .is_some_and(|identity| source.existing_identities.contains(&identity));
     if lexical_overlap || identity_overlap {
-        return Err(overlap_error(
-            "provider source root overlaps or contains the ctx data root",
-        ));
+        return Err(ProviderSourceBoundaryError::Overlap);
     }
     Ok(())
+}
+
+/// Resolves Unix directory relocations only. File links, dangling links and unknown
+/// reparse kinds are not provider source authority. The caller must open the
+/// result without following links and revalidate the original named route.
+pub fn resolve_provider_source_path(path: &Path) -> io::Result<PathBuf> {
+    validate_absolute_path(path, "provider source root")?;
+    let path = normalize_platform_namespace_alias(path);
+    let mut ancestors = path.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        let metadata = fs::symlink_metadata(ancestor)?;
+        if cfg!(unix) && metadata.file_type().is_symlink() {
+            if !fs::metadata(ancestor).is_ok_and(|target| target.is_dir()) {
+                return Err(overlap_error(
+                    "provider source links must resolve to directories",
+                ));
+            }
+        } else {
+            reject_reparse_or_symlink(&metadata)?;
+        }
+    }
+    // Resolve a file's parent, never its leaf: a concurrent file-to-link swap
+    // must still reach the caller's no-follow open as a link.
+    let metadata = fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() || metadata.is_dir() {
+        let resolved = fs::canonicalize(&path)?;
+        if !fs::symlink_metadata(&resolved)?.is_dir() {
+            return Err(overlap_error(
+                "provider source links must resolve to directories",
+            ));
+        }
+        Ok(resolved)
+    } else {
+        let parent = path
+            .parent()
+            .ok_or_else(|| overlap_error("provider file has no parent"))?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| overlap_error("provider file has no name"))?;
+        Ok(fs::canonicalize(parent)?.join(name))
+    }
 }
 
 pub(super) fn absolute_data_root_path(path: &Path) -> io::Result<PathBuf> {
@@ -158,9 +212,9 @@ fn validate_absolute_path(path: &Path, label: &str) -> io::Result<()> {
 fn resolve_path(path: &Path, require_directory: bool) -> io::Result<ResolvedPath> {
     let mut existing = path.to_path_buf();
     let mut missing = Vec::new();
-    let endpoint = loop {
+    loop {
         match fs::symlink_metadata(&existing) {
-            Ok(metadata) => break Some(metadata),
+            Ok(_) => break,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let name = existing.file_name().ok_or_else(|| {
                     io::Error::new(
@@ -175,28 +229,23 @@ fn resolve_path(path: &Path, require_directory: bool) -> io::Result<ResolvedPath
             }
             Err(error) => return Err(error),
         }
+    }
+    let existing_path = if require_directory {
+        reject_intermediate_links(&existing)?;
+        fs::canonicalize(&existing)?
+    } else {
+        resolve_provider_source_path(&existing)?
     };
-    let endpoint = endpoint.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "path has no existing canonical ancestor",
-        )
-    })?;
+    let endpoint = fs::symlink_metadata(&existing_path)?;
     reject_reparse_or_symlink(&endpoint)?;
-    reject_intermediate_links(&existing)?;
     if missing.is_empty() && require_directory && !endpoint.is_dir() {
         return Err(overlap_error("ctx data root is not a directory"));
     }
 
-    let mut canonical = fs::canonicalize(&existing)?;
+    let mut canonical = existing_path.clone();
     for component in missing.iter().rev() {
         canonical.push(component);
     }
-    let existing_path = if missing.is_empty() {
-        canonical.clone()
-    } else {
-        fs::canonicalize(&existing)?
-    };
     let existing_identities = identity_chain(&existing_path)?;
     let terminal_identity = if missing.is_empty() {
         file_identity(&existing_path, &endpoint)?
@@ -219,23 +268,6 @@ fn reject_intermediate_links(path: &Path) -> io::Result<()> {
         reject_reparse_or_symlink(&metadata)?;
     }
     Ok(())
-}
-
-fn inspect_named_endpoint(
-    path: &Path,
-    require_directory: bool,
-) -> io::Result<Option<FileIdentity>> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            reject_reparse_or_symlink(&metadata)?;
-            if require_directory && !metadata.is_dir() {
-                return Err(overlap_error("ctx data root is not a directory"));
-            }
-            file_identity(path, &metadata)
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
 }
 
 fn identity_chain(path: &Path) -> io::Result<Vec<FileIdentity>> {
@@ -423,7 +455,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn source_symlink_is_rejected_even_when_target_is_disjoint() {
+    fn directory_relocation_is_accepted_when_target_is_disjoint() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().unwrap();
@@ -434,7 +466,69 @@ mod tests {
         fs::create_dir(&target).unwrap();
         symlink(&target, &source).unwrap();
 
-        assert!(validate_provider_source_outside_data_root(&data, &source).is_err());
+        validate_provider_source_outside_data_root(&data, &source).unwrap();
+        assert!(validate_provider_source_outside_data_root(&target.join("ctx"), &source).is_err());
+        assert!(
+            validate_provider_source_outside_data_root(&target, &source.join("child")).is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relocated_ancestor_allows_absent_provider_but_not_data_aliases_or_file_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("ctx");
+        let target = temp.path().join("relocated-local");
+        let local = temp.path().join(".local");
+        fs::create_dir(&data).unwrap();
+        fs::create_dir(&target).unwrap();
+        symlink(&target, &local).unwrap();
+        validate_provider_source_outside_data_root(
+            &data,
+            &local.join("share/kiro-cli/data.sqlite3"),
+        )
+        .unwrap();
+        symlink(&data, target.join("ctx-alias")).unwrap();
+        assert!(matches!(
+            validate_provider_source_outside_data_root(&data, &local.join("ctx-alias/history")),
+            Err(ProviderSourceBoundaryError::Overlap)
+        ));
+        fs::write(target.join("history.jsonl"), b"{}\n").unwrap();
+        symlink(target.join("history.jsonl"), target.join("file-link")).unwrap();
+        assert!(resolve_provider_source_path(&local.join("file-link")).is_err());
+        symlink(temp.path().join("absent"), target.join("dangling")).unwrap();
+        assert!(resolve_provider_source_path(&local.join("dangling/child")).is_err());
+        // Provider relocation must not weaken ctx's own private-state policy.
+        assert!(matches!(
+            validate_provider_source_outside_data_root(&local, &data),
+            Err(ProviderSourceBoundaryError::DataRoot(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retargeted_directory_link_during_validation_is_source_unavailable() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("ctx");
+        let original = temp.path().join("original");
+        let replacement = temp.path().join("replacement");
+        let source = temp.path().join("provider");
+        for path in [&data, &original, &replacement] {
+            fs::create_dir(path).unwrap();
+        }
+        symlink(&original, &source).unwrap();
+        let result = validate_provider_source_outside_data_root_with(&data, &source, || {
+            fs::remove_file(&source).unwrap();
+            symlink(&replacement, &source).unwrap();
+        });
+        assert!(matches!(
+            result,
+            Err(ProviderSourceBoundaryError::SourceRoot(_))
+        ));
     }
 
     #[cfg(any(unix, windows))]

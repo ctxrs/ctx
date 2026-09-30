@@ -28,8 +28,9 @@ use ctx_history_capture::{
     automatic_provider_root_coexistence_source_lineage, automatic_source_backed_route_identity,
     build_automatic_source_backed_registry_from_report_with_retained_roots,
     discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
-    source_backed_refresh_writer_options, validate_provider_source_roots_outside_data_root,
-    DiscoveryContext, SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
+    source_backed_refresh_writer_options,
+    validate_automatic_provider_source_roots_outside_data_root, DiscoveryContext,
+    SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
     SourceBackedCoordinatorError,
     SourceBackedDetailedRefreshProgress as CaptureSourceBackedDetailedRefreshProgress,
     SourceBackedFailedRoute, SourceBackedFailedRouteOutcome, SourceBackedLogicalSourceFailures,
@@ -293,7 +294,7 @@ pub fn source_backed_watch_catalog(
     let discovery_started = StdInstant::now();
     let report = discover_provider_sources_with_context_and_work_budget(&discovery, work_budget);
     let discovery_duration = discovery_started.elapsed();
-    validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
+    validate_automatic_provider_source_roots_outside_data_root(data_root, report.sources.iter())
         .context("validate provider roots before deriving source watch catalog")?;
     let index_root = source_backed_index_root(data_root);
     let retained_generation = match VerifiedIndex::open_pinned(&index_root) {

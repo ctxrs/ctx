@@ -804,7 +804,6 @@ fn add_source_inner(
                 DiscoveryIssueKind::SelectorUnreconstructible,
                 path_presence_unknown_reason(kind),
             );
-            return;
         }
         Err(SourcePathError::Unsupported(reason)) => {
             push_issue_once(
@@ -818,7 +817,6 @@ fn add_source_inner(
                     reason
                 },
             );
-            return;
         }
         Err(SourcePathError::Missing) | Ok(_) => {}
     }

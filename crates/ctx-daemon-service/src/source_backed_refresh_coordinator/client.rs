@@ -2,7 +2,6 @@ use super::*;
 
 #[path = "client_observation_recovery.rs"]
 mod observation_recovery;
-mod progress_deadline;
 #[path = "client_request_policy.rs"]
 mod request_policy;
 mod response;
@@ -592,7 +591,6 @@ fn wait_for_published_generation_inner(
     let mut forgotten_request_replayed = false;
     let mut last_reported_status = None;
     let mut last_reported_at = None;
-    let mut progress_deadline = progress_deadline::ProgressDeadline::default();
     loop {
         availability.checkpoint()?;
         let status_request = compact_json(json!({
@@ -690,19 +688,20 @@ fn wait_for_published_generation_inner(
         let status = source_refresh_progress_status(response.clone())?;
         let protocol = status.kind()?;
         let protocol_state = protocol.request_state();
+        let observed_at = now();
         if let Some(report_progress) = report_progress.as_deref_mut() {
             if should_report_progress(
                 last_reported_status.as_ref(),
                 last_reported_at,
                 &status,
                 protocol_state,
-                StdInstant::now(),
+                observed_at,
             ) {
                 availability.checkpoint()?;
                 report_progress(&status).context("render daemon-owned source refresh progress")?;
                 availability.checkpoint()?;
                 last_reported_status = Some(status.clone());
-                last_reported_at = Some(StdInstant::now());
+                last_reported_at = Some(observed_at);
             }
         }
         match protocol_state {
@@ -722,7 +721,10 @@ fn wait_for_published_generation_inner(
             RefreshRequestState::AdmissionPending
             | RefreshRequestState::Queued
             | RefreshRequestState::Running => {
-                progress_deadline.observe(&status, now())?;
+                // A responsive owner can be parsing, merging, or syncing with
+                // unchanged counters for any duration. Only its terminal
+                // receipt decides the result; transport outages remain bounded
+                // above, and every poll/pause remains cancellable.
                 availability.pause(SOURCE_REFRESH_POLL_INTERVAL)?;
             }
         }

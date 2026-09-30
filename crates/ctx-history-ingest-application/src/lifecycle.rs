@@ -51,7 +51,7 @@ where
     let selection = if let Some(provider) = request.provider {
         let report = host.discover_provider(provider)?;
         validate_selected_provider(host, provider, &report)?;
-        ctx_history_source_discovery::validate_provider_source_roots_outside_data_root(
+        ctx_history_source_discovery::validate_automatic_provider_source_roots_outside_data_root(
             data_root,
             report.sources.iter(),
         )

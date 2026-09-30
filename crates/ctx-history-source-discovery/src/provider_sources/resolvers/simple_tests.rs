@@ -275,7 +275,7 @@ fn naming_the_automatic_home_through_a_symlink_deduplicates_the_physical_source(
         ctx_history_capture_model::ProviderRootDefinition {
             id: "personal".to_owned(),
             provider: CaptureProvider::Claude,
-            path: alias,
+            path: alias.clone(),
             group: Some("personal".to_owned()),
             kind: None,
         },
@@ -287,7 +287,12 @@ fn naming_the_automatic_home_through_a_symlink_deduplicates_the_physical_source(
         CaptureProvider::Claude,
     );
 
-    assert_eq!(paths(&report), vec![home.join("projects")]);
+    assert_eq!(paths(&report), vec![alias.join("projects")]);
+    assert_eq!(
+        report.sources[0].route_provenance.configured_root(),
+        Some(("personal", alias.as_path()))
+    );
+    assert!(report.issues.is_empty());
 }
 
 #[cfg(unix)]
@@ -529,7 +534,7 @@ fn deepseek_harness_probe_requires_exact_nested_session_leaf() {
 
 #[cfg(unix)]
 #[test]
-fn codex_and_other_selected_root_symlinks_require_manual_paths() {
+fn codex_and_other_selected_roots_allow_directory_relocation() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
@@ -543,21 +548,23 @@ fn codex_and_other_selected_root_symlinks_require_manual_paths() {
         &base.clone().with_env("CODEX_HOME", alias.as_os_str()),
         CaptureProvider::Codex,
     );
-    assert!(codex.sources.is_empty());
-    assert!(codex.issues.iter().any(|issue| {
-        issue.kind == DiscoveryIssueKind::SelectorUnreconstructible
-            && issue.reason == SYMLINK_REASON
-    }));
+    assert!(codex.issues.is_empty(), "{:?}", codex.issues);
+    assert!(codex
+        .sources
+        .iter()
+        .any(|source| source.path == alias.join("sessions")
+            && source.status == ProviderSourceStatus::Empty));
 
     let continue_report = resolve_provider(
         &base.with_env("CONTINUE_GLOBAL_DIR", alias.as_os_str()),
         CaptureProvider::Continue,
     );
-    assert!(continue_report.sources.is_empty());
-    assert!(continue_report
-        .issues
-        .iter()
-        .any(|issue| { issue.kind == DiscoveryIssueKind::SelectorUnreconstructible }));
+    assert!(
+        continue_report.issues.is_empty(),
+        "{:?}",
+        continue_report.issues
+    );
+    assert!(!continue_report.sources.is_empty());
 }
 
 #[test]
@@ -665,7 +672,9 @@ fn kilo_unknown_current_presence_suppresses_readable_legacy() {
     );
     fs::set_permissions(&data, original).unwrap();
 
-    assert!(report.sources.is_empty());
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].path, data.join("kilo.db"));
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
     assert_eq!(report.issues.len(), 1);
     assert!(report.issues[0].reason.contains("fallback was suppressed"));
     assert_eq!(report.issues[0].path, Some(data.join("kilo.db")));

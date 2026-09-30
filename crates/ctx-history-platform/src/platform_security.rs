@@ -9,6 +9,7 @@ use std::{
 use std::fs;
 
 mod path_overlap;
+pub use path_overlap::{resolve_provider_source_path, ProviderSourceBoundaryError};
 #[cfg(unix)]
 mod unix_install_directory;
 #[cfg(unix)]
@@ -20,14 +21,15 @@ mod unix_private_file;
 #[cfg(windows)]
 mod windows_acl;
 
-/// Rejects equal, ancestor, descendant, symlink/reparse, and native-identity
-/// aliases between one provider source root and the selected ctx data root.
+/// Rejects equal, ancestor, descendant and native-identity aliases between a
+/// resolved provider source and ctx state. Provider directory relocations are
+/// allowed; ctx data-root links and provider file links remain rejected.
 ///
 /// This inspection is read-only and does not create either path.
 pub fn validate_provider_source_outside_data_root(
     data_root: &Path,
     source_root: &Path,
-) -> io::Result<()> {
+) -> Result<(), ProviderSourceBoundaryError> {
     path_overlap::validate_provider_source_outside_data_root(data_root, source_root)
 }
 

@@ -8,6 +8,17 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.2.3
+
+Released: 2026-09-30
+
+### Fixed
+
+- History imports can finish long-running phases without failing because progress counters have not changed. Startup waits for the worker to become ready, with cancellation and worker-exit handling preserved.
+- History stored behind directory symlinks works on Unix. An unreadable provider no longer prevents other providers from refreshing, and previously indexed history is retained.
+- Failed provider configuration changes no longer repeatedly refresh unchanged sources. Source and configuration changes can still trigger another attempt.
+- Imports can recover when a previous index generation has lost a required manifest but the active index is intact. Missing manifests report the missing generation directly.
+
 ## 2.2.2
 
 Released: 2026-09-30

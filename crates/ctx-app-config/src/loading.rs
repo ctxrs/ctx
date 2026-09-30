@@ -1,4 +1,6 @@
 //! Shared configuration parsing with explicit read or migration ownership.
+use ctx_history_platform::platform_security::ProviderSourceBoundaryError;
+
 use super::*;
 
 impl AppConfig {
@@ -33,17 +35,38 @@ impl AppConfig {
 
     fn load_using(data_root: &Path, read: fn(&Path) -> Result<Option<String>>) -> Result<Self> {
         observe_app_config_load();
-        let mut config = Self::default();
         let path = data_root.join(CONFIG_FILE);
-        if let Some(text) = read(&path)? {
-            let parsed =
-                parse_toml_subset(&text).with_context(|| format!("parse {}", path.display()))?;
-            config
-                .apply_values(&parsed)
-                .with_context(|| format!("load {}", path.display()))?;
-            config
-                .validate_provider_root_data_root(data_root)
-                .with_context(|| format!("load {}", path.display()))?;
+        match read(&path)? {
+            Some(text) => Self::from_saved_text(&path, &text),
+            None => Ok(Self::default()),
+        }
+    }
+
+    pub(super) fn from_saved_text(path: &Path, text: &str) -> Result<Self> {
+        let parsed =
+            parse_toml_subset(text).with_context(|| format!("parse {}", path.display()))?;
+        let mut config = Self::default();
+        config
+            .apply_values(&parsed)
+            .with_context(|| format!("load {}", path.display()))?;
+        let data_root = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no data-root parent"))?;
+        for root in config.provider_roots.values() {
+            validate_provider_source_outside_data_root(data_root, &root.path)
+                .or_else(|error| match error {
+                    // Saved roots can be temporarily unavailable. Discovery
+                    // retains that source failure while healthy peers run.
+                    ProviderSourceBoundaryError::SourceRoot(_) => Ok(()),
+                    error => Err(error),
+                })
+                .with_context(|| {
+                    format!(
+                        "load {}: configured provider root `{}` must not overlap the ctx data root",
+                        path.display(),
+                        root.id
+                    )
+                })?;
         }
         Ok(config)
     }

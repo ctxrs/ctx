@@ -10,7 +10,9 @@ use std::{
 };
 
 use ctx_history_core::CaptureProvider;
-use ctx_history_platform::platform_security::validate_provider_source_outside_data_root;
+use ctx_history_platform::platform_security::{
+    validate_provider_source_outside_data_root, ProviderSourceBoundaryError,
+};
 use thiserror::Error;
 
 use super::{
@@ -35,7 +37,13 @@ const OPENHANDS_AUTOMATIC_CONFIGURED_OVERLAP_REASON: &str =
 pub struct ProviderSourceRootBoundaryError {
     pub data_root: PathBuf,
     pub source_root: PathBuf,
-    pub detail: String,
+    pub detail: ProviderSourceBoundaryError,
+}
+
+impl ProviderSourceRootBoundaryError {
+    pub fn is_source_unavailable(&self) -> bool {
+        matches!(self.detail, ProviderSourceBoundaryError::SourceRoot(_))
+    }
 }
 
 /// Read-only preflight for provider roots before route handles, watchers, or
@@ -50,9 +58,34 @@ pub fn validate_provider_source_roots_outside_data_root<'a>(
             ProviderSourceRootBoundaryError {
                 data_root: data_root.to_path_buf(),
                 source_root: source.path.clone(),
-                detail: error.to_string(),
+                detail: error,
             }
         })?;
+    }
+    Ok(())
+}
+
+/// Global automatic admission rejects state-integrity failures. A provider that
+/// cannot be inspected is diagnosed by per-route admission, which preserves its
+/// prior records and lets independent sources refresh.
+pub fn validate_automatic_provider_source_roots_outside_data_root<'a>(
+    data_root: &Path,
+    sources: impl IntoIterator<Item = &'a ProviderSource>,
+) -> Result<(), ProviderSourceRootBoundaryError> {
+    for source in sources {
+        match validate_provider_source_outside_data_root(
+            data_root,
+            provider_source_boundary_root(source),
+        ) {
+            Ok(()) | Err(ProviderSourceBoundaryError::SourceRoot(_)) => {}
+            Err(error) => {
+                return Err(ProviderSourceRootBoundaryError {
+                    data_root: data_root.to_path_buf(),
+                    source_root: source.path.clone(),
+                    detail: error,
+                })
+            }
+        }
     }
     Ok(())
 }
@@ -462,7 +495,7 @@ mod boundary_error_tests {
         let error = ProviderSourceRootBoundaryError {
             data_root: PathBuf::from("/ctx-data"),
             source_root: PathBuf::from("/provider"),
-            detail: "the roots overlap".to_owned(),
+            detail: ProviderSourceBoundaryError::Overlap,
         };
         let rendered = error.to_string();
         assert!(rendered.contains("choose or move ctx --data-root"));
@@ -484,6 +517,87 @@ mod boundary_error_tests {
             validate_provider_source_roots_outside_data_root(&nested_data, [&source]).is_err(),
             "configured-home fallback must still reject a nested ctx data root"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_optional_default_and_unreadable_provider_do_not_veto_healthy_sources() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let local = temp.path().join("relocated-local");
+        let healthy = home.join(".codex/sessions");
+        std::fs::create_dir_all(&healthy).unwrap();
+        std::fs::create_dir(&local).unwrap();
+        std::fs::write(healthy.join("session.jsonl"), b"{}\n").unwrap();
+        symlink(&local, home.join(".local")).unwrap();
+        let context = DiscoveryContext::new(
+            &home,
+            temp.path(),
+            crate::provider_sources::DiscoveryPlatform::Linux,
+            crate::provider_sources::DiscoveryPlatformDirs::default(),
+        );
+        let data = temp.path().join("ctx");
+        let probes = &crate::provider_sources::TEST_PROVIDER_PROBES;
+        let report = discover_provider_sources_with_context(probes, &context);
+        let kiro = report
+            .sources
+            .iter()
+            .find(|source| source.provider == CaptureProvider::KiroCli)
+            .unwrap();
+        assert_eq!(kiro.status, ProviderSourceStatus::Missing);
+        assert!(!kiro.exists);
+        assert!(report.sources.iter().any(
+            |source| source.path == healthy && source.status == ProviderSourceStatus::Available
+        ));
+        validate_automatic_provider_source_roots_outside_data_root(&data, &report.sources).unwrap();
+        assert!(!data.exists());
+
+        let locked = home.join(".claude");
+        std::fs::create_dir_all(locked.join("projects")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let report = discover_provider_sources_with_context(probes, &context);
+        let admission =
+            validate_automatic_provider_source_roots_outside_data_root(&data, &report.sources);
+        let explicit = validate_provider_source_roots_outside_data_root(
+            &data,
+            report
+                .sources
+                .iter()
+                .filter(|source| source.provider == CaptureProvider::Claude),
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(explicit.unwrap_err().is_source_unavailable());
+        let claude = report
+            .sources
+            .iter()
+            .find(|source| source.provider == CaptureProvider::Claude)
+            .unwrap();
+        assert_eq!(claude.status, ProviderSourceStatus::Unknown);
+        assert!(claude.exists, "an unreadable source is not a deletion");
+        admission.unwrap();
+        assert!(!data.exists());
+    }
+
+    #[test]
+    fn automatic_admission_keeps_concrete_overlap_and_state_failures_fatal() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let home = temp.path().join("claude");
+        std::fs::create_dir(&home).unwrap();
+        let source = unknown_configured_claude_source(&home);
+        assert!(validate_automatic_provider_source_roots_outside_data_root(
+            &home.join("ctx"),
+            [&source]
+        )
+        .is_err());
+        let data_file = temp.path().join("not-a-directory");
+        std::fs::write(&data_file, b"preserved").unwrap();
+        assert!(
+            validate_automatic_provider_source_roots_outside_data_root(&data_file, [&source])
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&data_file).unwrap(), b"preserved");
     }
 
     #[test]

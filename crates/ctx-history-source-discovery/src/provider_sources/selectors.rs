@@ -12,7 +12,8 @@ use thiserror::Error;
 use ctx_history_capture_model::provider_root_path_within_limit;
 
 use ctx_history_source_io::{
-    open_provider_source_file, open_provider_source_path, OpenedProviderSourcePath, SourceIoError,
+    open_provider_source_file, open_provider_source_path, OpenedProviderSourceFile,
+    OpenedProviderSourcePath, ProviderSourceRoot, SourceIoError,
 };
 
 pub(super) const MAX_SELECTOR_FILE_BYTES: usize = 1024 * 1024;
@@ -194,12 +195,29 @@ impl SelectorReader {
         path: &Path,
         format: SelectorFormat,
     ) -> Result<SelectorDocument, SelectorReadError> {
+        self.read_with(format, || open_provider_source_file(path))
+    }
+
+    pub(super) fn read_relative(
+        &mut self,
+        root: &ProviderSourceRoot,
+        path: &Path,
+        format: SelectorFormat,
+    ) -> Result<SelectorDocument, SelectorReadError> {
+        self.read_with(format, || root.open_file(path))
+    }
+
+    fn read_with(
+        &mut self,
+        format: SelectorFormat,
+        open: impl FnOnce() -> Result<OpenedProviderSourceFile, SourceIoError>,
+    ) -> Result<SelectorDocument, SelectorReadError> {
         if self.files_read >= MAX_SELECTOR_FILES_PER_PROVIDER {
             return Err(SelectorReadError::FileLimit);
         }
         self.files_read += 1;
 
-        let text = read_selector_text(path)?;
+        let text = read_selector_text(open().map_err(selector_open_error)?)?;
         let document = match format {
             SelectorFormat::Json => SelectorDocument::Structured(
                 serde_json::from_str(&text).map_err(|_| SelectorReadError::Parse)?,
@@ -233,8 +251,7 @@ impl SelectorReader {
     }
 }
 
-fn read_selector_text(path: &Path) -> Result<String, SelectorReadError> {
-    let file = open_provider_source_file(path).map_err(selector_open_error)?;
+fn read_selector_text(file: OpenedProviderSourceFile) -> Result<String, SelectorReadError> {
     #[cfg(test)]
     SELECTOR_FILE_OPEN_HOOK.with(|hook| {
         if let Some(hook) = hook.borrow_mut().take() {

@@ -619,7 +619,7 @@ fn codex_session_probe_preserves_missing_empty_and_direct_file_results() {
 
 #[cfg(unix)]
 #[test]
-fn codex_session_probe_does_not_admit_symlinked_files_or_directories() {
+fn codex_session_probe_accepts_relocated_selection_but_does_not_follow_descendant_links() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
@@ -631,8 +631,16 @@ fn codex_session_probe_does_not_admit_symlinked_files_or_directories() {
 
     assert_eq!(has_codex_session_file(temp.path()), BoundedProbe::NotFound);
     assert_eq!(
+        has_codex_session_file(&temp.path().join("session.jsonl")),
+        BoundedProbe::NotFound
+    );
+    assert_eq!(
+        has_codex_session_file(&temp.path().join("linked")),
+        BoundedProbe::Found
+    );
+    assert_eq!(
         has_codex_session_file(&temp.path().join("linked/session.jsonl")),
-        BoundedProbe::IoError
+        BoundedProbe::Found
     );
 }
 

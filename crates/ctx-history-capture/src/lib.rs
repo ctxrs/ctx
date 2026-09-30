@@ -12,6 +12,7 @@ pub use provider_sources::{
     provider_source_for_path, provider_source_for_path_with_data_root, provider_source_spec,
     provider_source_specs, provider_source_status_reason, released_provider_home,
     resolve_lingma_discovery_authority, resolve_warp_discovery_authority,
+    validate_automatic_provider_source_roots_outside_data_root,
     validate_provider_source_roots_outside_data_root, ConfiguredRootCapability,
     ConfiguredRootCapabilityState, ConfiguredRootExpander, ConfiguredRootPathKind,
     DiscoveredLingmaDatabase, DiscoveredWarpSource, DiscoveryContext, DiscoveryIssue,

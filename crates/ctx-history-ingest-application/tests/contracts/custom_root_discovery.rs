@@ -552,3 +552,327 @@ fn current_kiro_blocks_unqualified_all_provider_publication_without_dispatching_
     assert_eq!(search["freshness"]["source_count"], 0);
     assert!(search["results"].as_array().unwrap().is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+fn import_all_survives_absent_kiro_and_relocated_codex_with_stable_replay() {
+    use std::os::unix::fs::symlink;
+
+    // Authored path-layout regression; native format support is covered by the
+    // existing provider fixtures.
+    let temp = tempdir();
+    let local = temp.path().join("relocated-local");
+    fs::create_dir(&local).unwrap();
+    symlink(&local, temp.path().join(".local")).unwrap();
+    let codex = temp.path().join(".codex");
+    fs::create_dir_all(codex.join("sessions")).unwrap();
+    let original = codex_rollout("relocated-session", "relocationoriginalmarker");
+    fs::write(codex.join("sessions/session.jsonl"), &original).unwrap();
+    let state = temp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let _daemon = start_source_refresh_daemon(&temp, &data_root(&temp), temp.path(), &state);
+    let import = || {
+        json_output(ctx(&temp).args([
+            "import",
+            "--all",
+            "--no-blame",
+            "--no-daemon",
+            "--progress",
+            "none",
+            "--format=json",
+        ]))
+    };
+    let search = |query: &str| {
+        json_output(ctx(&temp).args(["search", query, "--refresh", "off", "--format=json"]))
+    };
+    let initial = import();
+    assert_eq!(initial["outcome"], "success", "{initial:#}");
+    assert!(!local.join("share/kiro-cli/data.sqlite3").exists());
+    let before = search("relocationoriginalmarker");
+    assert_eq!(before["results"].as_array().unwrap().len(), 1);
+    assert!(before["results"][0]["citations"]
+        .as_array()
+        .is_some_and(|citations| !citations.is_empty()));
+
+    let relocated = temp.path().join("relocated-codex");
+    fs::rename(&codex, &relocated).unwrap();
+    symlink(&relocated, &codex).unwrap();
+    let replay = import();
+    assert_eq!(replay["outcome"], "success", "{replay:#}");
+    assert_eq!(
+        replay["totals"]["current_indexed_documents"],
+        initial["totals"]["current_indexed_documents"]
+    );
+    let after = search("relocationoriginalmarker");
+    assert_eq!(after["results"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        before["results"][0]["citations"],
+        after["results"][0]["citations"]
+    );
+    assert_eq!(
+        fs::read(relocated.join("sessions/session.jsonl")).unwrap(),
+        original
+    );
+
+    let appended = json!({
+        "timestamp": "2026-08-18T01:00:02Z", "type": "response_item",
+        "payload": {"type": "message", "id": "later-message", "role": "user",
+            "content": [{"type": "input_text", "text": "relocationappendedmarker"}]}
+    });
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(codex.join("sessions/session.jsonl"))
+            .unwrap(),
+        "{appended}"
+    )
+    .unwrap();
+    let appended_import = import();
+    assert_eq!(appended_import["outcome"], "success", "{appended_import:#}");
+    assert_eq!(
+        search("relocationappendedmarker")["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        search("relocationoriginalmarker")["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_automatic_provider_retains_history_while_healthy_provider_refreshes() {
+    unreadable_provider_retains_history(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn saved_root_with_unreadable_ancestor_retains_history_and_recovers_while_peer_advances() {
+    unreadable_provider_retains_history(true);
+}
+
+#[cfg(unix)]
+fn unreadable_provider_retains_history(saved: bool) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir();
+    let blocked = temp.path().join(if saved {
+        "saved-provider-parent"
+    } else {
+        ".claude"
+    });
+    let claude = if saved {
+        blocked.join("claude")
+    } else {
+        blocked.clone()
+    };
+    let projects = claude.join("projects/project");
+    fs::create_dir_all(&projects).unwrap();
+    fs::write(
+        projects.join("retained-session.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "type": "user", "uuid": "retained-message", "sessionId": "retained-session",
+                "timestamp": "2026-08-18T01:00:00Z", "cwd": "/workspace/project",
+                "message": {"role": "user", "content": "unreadableretainedmarker"}
+            })
+        ),
+    )
+    .unwrap();
+    let codex = temp.path().join(".codex/sessions");
+    fs::create_dir_all(&codex).unwrap();
+    fs::write(
+        codex.join("first.jsonl"),
+        codex_rollout("healthy-first", "healthyoriginalmarker"),
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let _daemon = start_source_refresh_daemon(&temp, &data_root(&temp), temp.path(), &state);
+    if saved {
+        ctx(&temp)
+            .args([
+                "sources",
+                "add",
+                "retained",
+                "--provider",
+                "claude",
+                "--root",
+            ])
+            .arg(&claude)
+            .assert()
+            .success();
+    }
+    let config_path = data_root(&temp).join("config.toml");
+    let config_before = fs::read(&config_path).unwrap();
+    let import = || {
+        ctx(&temp)
+            .args([
+                "import",
+                "--all",
+                "--no-blame",
+                "--no-daemon",
+                "--progress",
+                "none",
+                "--format=json",
+            ])
+            .output()
+            .unwrap()
+    };
+    let initial = import();
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let retained = json_output(ctx(&temp).args([
+        "search",
+        "unreadableretainedmarker",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(
+        retained["results"].as_array().unwrap().len(),
+        1,
+        "{retained:#}"
+    );
+    assert!(!retained["results"][0]["citations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let permissions = fs::metadata(&blocked).unwrap().permissions();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+    let blocked_read = fs::File::open(projects.join("retained-session.jsonl"));
+    let blocked_resolution = fs::canonicalize(&claude);
+    let unavailable_sources = saved.then(|| {
+        ctx(&temp)
+            .args(["sources", "--provider", "claude", "--all", "--format=json"])
+            .output()
+            .unwrap()
+    });
+    fs::write(
+        codex.join("second.jsonl"),
+        codex_rollout("healthy-second", "healthynewmarker"),
+    )
+    .unwrap();
+    let partial = import();
+    fs::set_permissions(&blocked, permissions).unwrap();
+    assert_eq!(
+        blocked_read.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    if let Some(listing) = unavailable_sources {
+        // Resolving this saved root used to abort config loading before import
+        // admission. The CLI must now load it and diagnose its unreadability.
+        assert_eq!(
+            blocked_resolution.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            listing.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listing.stderr)
+        );
+        let sources: Value = serde_json::from_slice(&listing.stdout).unwrap();
+        assert!(
+            sources["sources"].as_array().unwrap().iter().any(|source| {
+                source["path"] == claude.join("projects").display().to_string()
+                    && source["status"] == "unknown"
+                    && source["selection"]["root"] == "retained"
+            }),
+            "{sources:#}"
+        );
+        assert!(
+            sources["issues"].as_array().unwrap().iter().any(|issue| {
+                issue["path"] == claude.display().to_string()
+                    && issue["code"] == "selector_unreconstructible"
+                    && issue["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("access was denied"))
+            }),
+            "{sources:#}"
+        );
+    }
+    let report: Value = serde_json::from_slice(&partial.stdout).unwrap();
+    if saved {
+        // Unavailable saved routes retain their prior ownership outside the
+        // executable watch catalog. The discovery diagnostic above owns this
+        // condition; import reports the healthy routes it actually attempted.
+        assert_eq!(report["outcome"], "success", "{report:#}");
+        assert_eq!(report["totals"]["failed_sources"], 0, "{report:#}");
+        assert_eq!(report["totals"]["current_source_count"], 3, "{report:#}");
+        assert_eq!(report["totals"]["removed_source_count"], 0, "{report:#}");
+        assert_eq!(
+            report["totals"]["index_delta"]["searchable_events"], 1,
+            "{report:#}"
+        );
+    } else {
+        assert!(
+            report["totals"]["failed_sources"]
+                .as_u64()
+                .is_some_and(|count| count > 0),
+            "{report:#}"
+        );
+    }
+    for query in [
+        "unreadableretainedmarker",
+        "healthyoriginalmarker",
+        "healthynewmarker",
+    ] {
+        let search =
+            json_output(ctx(&temp).args(["search", query, "--refresh", "off", "--format=json"]));
+        assert_eq!(search["results"].as_array().unwrap().len(), 1, "{search:#}");
+        if query == "unreadableretainedmarker" {
+            assert_eq!(
+                search["results"][0]["citations"],
+                retained["results"][0]["citations"]
+            );
+        }
+    }
+
+    let restored_message = json!({
+        "type": "user", "uuid": "restored-message", "sessionId": "retained-session",
+        "timestamp": "2026-08-18T01:00:02Z", "cwd": "/workspace/project",
+        "message": {"role": "user", "content": "restoredprovidermarker"}
+    });
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(projects.join("retained-session.jsonl"))
+            .unwrap(),
+        "{restored_message}"
+    )
+    .unwrap();
+    let restored = import();
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let report: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(report["totals"]["failed_sources"], 0, "{report:#}");
+    for query in [
+        "unreadableretainedmarker",
+        "restoredprovidermarker",
+        "healthynewmarker",
+    ] {
+        let search =
+            json_output(ctx(&temp).args(["search", query, "--refresh", "off", "--format=json"]));
+        assert_eq!(search["results"].as_array().unwrap().len(), 1, "{search:#}");
+        if query == "unreadableretainedmarker" {
+            assert_eq!(
+                search["results"][0]["citations"],
+                retained["results"][0]["citations"]
+            );
+        }
+    }
+    assert_eq!(fs::read(config_path).unwrap(), config_before);
+}

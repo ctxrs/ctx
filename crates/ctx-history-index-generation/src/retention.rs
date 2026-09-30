@@ -353,6 +353,8 @@ fn remove_lease_file(root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod read_lease_errors;
+
     use std::{process::Command, thread, time::Duration};
 
     #[cfg(windows)]

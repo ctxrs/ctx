@@ -142,7 +142,7 @@ fn replaced_descendant_symlink_cannot_escape_retained_root() {
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 #[test]
-fn symlinked_ancestor_is_classified_as_a_rejected_provider_path() {
+fn relocated_directory_is_readable_and_retargeting_invalidates_authority() {
     use std::os::unix::fs::symlink;
 
     let temp = crate::test_support_paths::tempdir().unwrap();
@@ -152,13 +152,17 @@ fn symlinked_ancestor_is_classified_as_a_rejected_provider_path() {
     fs::write(target.join("source.jsonl"), b"inside\n").unwrap();
     symlink(&target, &linked).unwrap();
 
-    let error = open_provider_source_file(&linked.join("source.jsonl")).unwrap_err();
-
-    assert!(matches!(
-        error,
-        SourceIoError::InvalidProviderTranscriptPath { reason, .. }
-            if reason.contains("symlinked provider source path components")
-    ));
+    let file = open_provider_source_file(&linked.join("source.jsonl")).unwrap();
+    assert_eq!(file.read_all_bounded(100).unwrap(), b"inside\n");
+    let root = ProviderSourceRoot::open(&linked).unwrap();
+    root.revalidate().unwrap();
+    let replacement = temp.path().join("replacement");
+    fs::create_dir(&replacement).unwrap();
+    fs::write(replacement.join("source.jsonl"), b"outside\n").unwrap();
+    fs::remove_file(&linked).unwrap();
+    symlink(&replacement, &linked).unwrap();
+    assert!(root.revalidate().is_err());
+    assert!(file.revalidate().is_err());
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
@@ -350,4 +354,37 @@ fn source_size_limit_is_readable_and_does_not_suggest_freeing_disk() {
         "invalid capture payload: source exceeds the size limit (1.0 KiB)"
     );
     assert_eq!(source.read_all_bounded(2048).unwrap(), vec![b'a'; 2048]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn directory_descriptor_links_do_not_become_provider_roots() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::symlink;
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    fs::write(temp.path().join("source.jsonl"), b"local bytes\n").unwrap();
+    let directory = fs::File::open(temp.path()).unwrap();
+    let descriptor = PathBuf::from(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        directory.as_raw_fd()
+    ));
+    let indirect = temp.path().join("indirect-descriptor");
+    symlink(&descriptor, &indirect).unwrap();
+    for path in [&descriptor, &indirect] {
+        assert!(ProviderSourceRoot::open(path).is_err());
+        assert!(open_provider_source_file(&path.join("source.jsonl")).is_err());
+    }
+    let ordinary = temp.path().join("ordinary-directory-link");
+    symlink(temp.path(), &ordinary).unwrap();
+    ProviderSourceRoot::open(&ordinary).unwrap();
+    assert_eq!(
+        open_provider_source_file(&ordinary.join("source.jsonl"))
+            .unwrap()
+            .read_all_bounded(100)
+            .unwrap(),
+        b"local bytes\n"
+    );
+    ProviderSourceRoot::open(temp.path()).unwrap();
 }
