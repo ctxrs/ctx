@@ -24,6 +24,7 @@ ctx-history-capture-runtime = { path = "../ctx-history-capture-runtime" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-platform = { path = "../ctx-history-platform" }
+ctx-history-source-io = { path = "../ctx-history-source-io" }
 
 [dev-dependencies]
 ctx-history-index-format = { path = "../ctx-history-index-format", features = ["test-support"] }

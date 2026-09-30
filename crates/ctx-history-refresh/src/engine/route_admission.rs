@@ -152,6 +152,7 @@ impl CoreRefreshEngine {
             );
             attempt.state = SourceBackedRefreshState::AdmissionPending;
             attempt.progress.phase = "admission_pending".to_owned();
+            attempt.preserve_route_retry_state = provider_root_all;
             if requires_exhaustive_recovery || automatic_split_pending || provider_root_all {
                 attempt.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
             }

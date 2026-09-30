@@ -578,13 +578,13 @@ fn import_path_requires_provider_before_initializing_source_epoch() {
 
 #[cfg(unix)]
 #[test]
-fn import_rejects_symlinked_provider_root() {
+fn import_rejects_symlinked_provider_file_leaf() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
-    let target = temp.path().join("pi-sessions");
-    fs::create_dir_all(&target).unwrap();
-    let path = temp.path().join("pi-sessions-link");
+    let target = temp.path().join("pi-session.jsonl");
+    fs::write(&target, b"{}\n").unwrap();
+    let path = temp.path().join("pi-session-link.jsonl");
     symlink(&target, &path).unwrap();
 
     ctx(&temp)
@@ -725,11 +725,8 @@ fn import_rejects_unreadable_directory_with_path_context() {
     ]));
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
 
-    assert!(stderr.contains("is not importable"), "{stderr}");
-    assert!(
-        stderr.contains("provider path or format is not supported"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("approve explicit source path"), "{stderr}");
+    assert!(stderr.contains("Permission denied"), "{stderr}");
     assert!(stderr.contains(path.to_str().unwrap()), "{stderr}");
 }
 

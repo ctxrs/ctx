@@ -149,12 +149,6 @@ where
             }
             Err(error) => return Err(error.into()),
         };
-        if metadata.file_type().is_symlink() {
-            return Err(CaptureError::InvalidProviderTranscriptPath {
-                path: root.to_path_buf(),
-                reason: "Mux transcript roots must not be symbolic links",
-            });
-        }
         let absolute = std::path::absolute(root)?;
         let authority_path = if metadata.is_file() {
             absolute

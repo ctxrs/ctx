@@ -28,6 +28,7 @@ CTX_HISTORY_REFRESH_EXECUTION_DEPS = [
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-index:lib",
     "//crates/ctx-history-platform:lib",
+    "//crates/ctx-history-source-io:lib",
 ]
 
 CTX_HISTORY_REFRESH_EXECUTION_TEST_DEPS = CTX_HISTORY_REFRESH_EXECUTION_DEPS + [

@@ -210,6 +210,9 @@ pub(super) struct SourceBackedRefreshAttempt {
     /// never passed to physical execution.
     pub(super) refresh_scope: SourceBackedRefreshScope,
     pub(super) reconciliation_demand: SourceBackedReconciliationDemand,
+    /// Process-local scheduled promotion, bound to the current route ledger.
+    /// Its existing dirty observations are retries, not new explicit demand.
+    pub(super) preserve_route_retry_state: bool,
     /// Attempt-local authority resolved from the logical intent. Durable state
     /// persists the intent and admitted target; recovery re-admits both through
     /// the same resolver before execution.

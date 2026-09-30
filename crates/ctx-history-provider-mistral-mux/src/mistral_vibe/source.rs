@@ -7,7 +7,8 @@ use std::{
 use ctx_history_capture_model::fnv1a64;
 use ctx_history_provider_runtime::{
     source_io::{
-        ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
+        ensure_regular_provider_transcript_file, open_provider_source_path,
+        OpenedProviderSourcePath, ProviderSourceRoot,
     },
     CaptureError, Result,
 };
@@ -129,12 +130,44 @@ pub(super) fn visit_mistral_vibe_session_sources(
     root: &Path,
     visit: &mut dyn FnMut(MistralVibeSessionSource) -> Result<()>,
 ) -> Result<usize> {
+    let root = std::path::absolute(root)?;
+    let (authority, root) = match open_provider_source_path(&root)? {
+        OpenedProviderSourcePath::Directory(directory) => {
+            let authority = directory.authority_root();
+            let named = authority.named_path().to_path_buf();
+            (authority, named)
+        }
+        OpenedProviderSourcePath::File(_) => {
+            let authority = ProviderSourceRoot::open(root.parent().ok_or(
+                CaptureError::InvalidProviderTranscriptPath {
+                    path: root.clone(),
+                    reason: "selected transcript has no authority directory",
+                },
+            )?)?;
+            let named = authority.named_path().join(root.file_name().ok_or(
+                CaptureError::InvalidProviderTranscriptPath {
+                    path: root.clone(),
+                    reason: "selected transcript has no filename",
+                },
+            )?);
+            (authority, named)
+        }
+    };
     let mut remaining_entries = MISTRAL_VIBE_MAX_TRAVERSAL_ENTRIES;
-    visit_mistral_vibe_session_sources_at_depth(root, visit, 0, &mut remaining_entries)
+    let count = visit_mistral_vibe_session_sources_at_depth(
+        &root,
+        &authority,
+        visit,
+        0,
+        &mut remaining_entries,
+    )?;
+    authority.revalidate()?;
+    Ok(count)
 }
 
 fn visit_mistral_vibe_session_sources_at_depth(
     root: &Path,
+    authority: &ProviderSourceRoot,
     visit: &mut dyn FnMut(MistralVibeSessionSource) -> Result<()>,
     depth: usize,
     remaining_entries: &mut usize,
@@ -145,15 +178,20 @@ fn visit_mistral_vibe_session_sources_at_depth(
             reason: "Mistral Vibe session directory nesting exceeds the supported limit",
         });
     }
-    let metadata = fs::symlink_metadata(root)?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
+    let relative = root.strip_prefix(authority.named_path()).map_err(|_| {
+        CaptureError::InvalidProviderTranscriptPath {
             path: root.to_path_buf(),
-            reason: "symlinked provider transcript roots are rejected",
-        });
-    }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
+            reason: "session path escaped its selected authority",
+        }
+    })?;
+    // Only the selected root may be relocated; descendants stay no-follow.
+    let metadata = match authority.open_path(relative)? {
+        OpenedProviderSourcePath::File(file) => file.metadata().clone(),
+        OpenedProviderSourcePath::Directory(directory) => {
+            directory.try_clone_authority_handle()?.metadata()?
+        }
+    };
+    let file_type = metadata.file_type();
     if file_type.is_file() {
         ensure_regular_provider_transcript_file(root)?;
         if root.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl") {
@@ -194,6 +232,7 @@ fn visit_mistral_vibe_session_sources_at_depth(
     for entry in directories {
         visited = visited.saturating_add(visit_mistral_vibe_session_sources_at_depth(
             &entry.path(),
+            authority,
             visit,
             depth.saturating_add(1),
             remaining_entries,

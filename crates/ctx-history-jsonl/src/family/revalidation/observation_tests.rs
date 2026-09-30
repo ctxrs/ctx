@@ -182,11 +182,36 @@ fn closing_observation_fence_rejects_symlink_leaf_and_root_substitution() {
             set_after_observation(move || {
                 let original = swapped.with_extension("old");
                 fs::rename(&swapped, &original).unwrap();
-                symlink(&original, &swapped).unwrap();
+                if swap_root {
+                    let replacement = swapped.with_extension("replacement");
+                    fs::create_dir(&replacement).unwrap();
+                    fs::write(replacement.join("source.jsonl"), b"original\n").unwrap();
+                    symlink(replacement, &swapped).unwrap();
+                } else {
+                    symlink(&original, &swapped).unwrap();
+                }
             });
             assert!(observe(&path, &opened).is_err());
+            if swap_root {
+                // The retained leaf is unchanged; the named root was substituted.
+                opened.revalidate_leaf().unwrap();
+            }
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn leaf_observation_accepts_root_relocation_to_the_same_directory() {
+    let (_temp, path, opened) = fixture();
+    let root = path.parent().unwrap().to_path_buf();
+    let before = observe_opened_file_leaf(&path, &opened).unwrap();
+    set_after_observation(move || {
+        let original = root.with_extension("moved");
+        fs::rename(&root, &original).unwrap();
+        std::os::unix::fs::symlink(original, root).unwrap();
+    });
+    assert_eq!(observe_opened_file_leaf(&path, &opened).unwrap(), before);
 }
 
 #[cfg(unix)]

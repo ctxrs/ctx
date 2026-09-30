@@ -5,7 +5,8 @@ use std::{
 
 use ctx_history_provider_runtime::{
     source_io::{
-        ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
+        ensure_regular_provider_transcript_file, open_provider_source_path,
+        OpenedProviderSourcePath, ProviderSourceRoot,
     },
     CaptureError, Result,
 };
@@ -148,12 +149,36 @@ fn visit_mux_session_sources_bounded(
     visit: &mut dyn FnMut(MuxSessionSource) -> Result<()>,
     budget: &mut MuxTraversalBudget,
 ) -> Result<usize> {
+    let root = std::path::absolute(root)?;
+    let (authority, root) = match open_provider_source_path(&root)? {
+        OpenedProviderSourcePath::Directory(directory) => {
+            let authority = directory.authority_root();
+            let named = authority.named_path().to_path_buf();
+            (authority, named)
+        }
+        OpenedProviderSourcePath::File(_) => {
+            let authority = ProviderSourceRoot::open(root.parent().ok_or(
+                CaptureError::InvalidProviderTranscriptPath {
+                    path: root.clone(),
+                    reason: "selected transcript has no authority directory",
+                },
+            )?)?;
+            let named = authority.named_path().join(root.file_name().ok_or(
+                CaptureError::InvalidProviderTranscriptPath {
+                    path: root.clone(),
+                    reason: "selected transcript has no filename",
+                },
+            )?);
+            (authority, named)
+        }
+    };
     // Complete bounded traversal before exposing any source to inventory
     // accumulation. An over-limit tree therefore fails closed with no partial
     // inventory, while the source vector itself is bounded by claim_source.
     let mut sources = Vec::new();
     visit_mux_session_sources_at_depth(
-        root,
+        &root,
+        &authority,
         &mut |source| {
             sources.push(source);
             Ok(())
@@ -161,6 +186,7 @@ fn visit_mux_session_sources_bounded(
         0,
         budget,
     )?;
+    authority.revalidate()?;
     let source_count = sources.len();
     for source in sources {
         visit(source)?;
@@ -170,6 +196,7 @@ fn visit_mux_session_sources_bounded(
 
 fn visit_mux_session_sources_at_depth(
     root: &Path,
+    authority: &ProviderSourceRoot,
     visit: &mut dyn FnMut(MuxSessionSource) -> Result<()>,
     depth: usize,
     budget: &mut MuxTraversalBudget,
@@ -180,15 +207,20 @@ fn visit_mux_session_sources_at_depth(
             reason: "Mux session directory nesting exceeds the supported limit",
         });
     }
-    let metadata = fs::symlink_metadata(root)?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
+    let relative = root.strip_prefix(authority.named_path()).map_err(|_| {
+        CaptureError::InvalidProviderTranscriptPath {
             path: root.to_path_buf(),
-            reason: "symlinked provider transcript roots are rejected",
-        });
-    }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
+            reason: "session path escaped its selected authority",
+        }
+    })?;
+    // Only the selected root may be relocated; descendants stay no-follow.
+    let metadata = match authority.open_path(relative)? {
+        OpenedProviderSourcePath::File(file) => file.metadata().clone(),
+        OpenedProviderSourcePath::Directory(directory) => {
+            directory.try_clone_authority_handle()?.metadata()?
+        }
+    };
+    let file_type = metadata.file_type();
     if file_type.is_file() {
         ensure_regular_provider_transcript_file(root)?;
         if matches!(
@@ -227,6 +259,7 @@ fn visit_mux_session_sources_at_depth(
     for entry in directories {
         visited = visited.saturating_add(visit_mux_session_sources_at_depth(
             &entry.path(),
+            authority,
             visit,
             depth.saturating_add(1),
             budget,

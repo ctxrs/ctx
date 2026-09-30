@@ -419,7 +419,7 @@ fn warp_database_failures_keep_cli_classification() {
 #[test]
 fn unsafe_default_source_is_rejected_before_inventory() {
     let temp = daemon_test_root();
-    write_symlinked_claude_inventory_source(&temp);
+    write_file_link_claude_root(&temp);
 
     let error = source_refresh_failure(ctx(&temp).args([
         "import",
@@ -463,7 +463,7 @@ fn doctor_reports_a_rejected_root_before_an_import_is_attempted() {
     let before = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(before["ok"], true, "{before:#}");
 
-    write_symlinked_claude_inventory_source(&temp);
+    write_file_link_claude_root(&temp);
 
     let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(doctor["ok"], false, "{doctor:#}");
@@ -493,15 +493,179 @@ fn doctor_reports_a_rejected_root_before_an_import_is_attempted() {
 }
 
 #[cfg(unix)]
-fn write_symlinked_claude_inventory_source(temp: &TempDir) {
-    let target = temp.path().join("claude-projects-target");
-    fs::create_dir_all(&target).unwrap();
-    fs::write(
-        target.join("symlinked-session.jsonl"),
-        r#"{"sessionId":"symlinked","type":"user","message":{"role":"user","content":"inventory failure"}}"#,
-    )
-    .unwrap();
+fn write_file_link_claude_root(temp: &TempDir) {
+    let projects = write_native_claude_fixture(temp, "rejected file link");
+    let target = Path::new(&projects).join("-workspace/claude-cli-native.jsonl");
     let claude = temp.path().join(".claude");
     fs::create_dir_all(&claude).unwrap();
     std::os::unix::fs::symlink(target, claude.join("projects")).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn relocated_default_claude_projects_import_replay_and_remain_healthy() {
+    let temp = daemon_test_root();
+    let query = "relocated Claude projects oracle";
+    let projects = write_native_claude_fixture(&temp, query);
+    let relocated = temp.path().join("relocated-projects");
+    fs::rename(projects, &relocated).unwrap();
+    let claude = temp.path().join(".claude");
+    fs::create_dir(&claude).unwrap();
+    std::os::unix::fs::symlink(&relocated, claude.join("projects")).unwrap();
+
+    for _ in 0..2 {
+        let report = json_output(ctx(&temp).args([
+            "import",
+            "--all",
+            "--no-blame",
+            "--format=json",
+            "--progress",
+            "none",
+        ]));
+        assert_eq!(
+            report["totals"]["failed_sources"], 0,
+            "{}",
+            report["totals"]
+        );
+        wait_for_projection(&temp, &report);
+        assert_eq!(provider_core_counts(&data_root(&temp), "claude"), (1, 2));
+        let search = json_output(ctx(&temp).args([
+            "search",
+            query,
+            "--provider",
+            "claude",
+            "--refresh",
+            "off",
+            "--format=json",
+        ]));
+        assert_search_provider_oracle(&search, "claude", query, 1, "message");
+    }
+    json_output(ctx(&temp).args(["daemon", "disable", "--format=json"]));
+    let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
+    assert_eq!(doctor["ok"], true, "{}", doctor["findings"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_directory_roots_preserve_history_through_relocation() {
+    for (provider, stored_provider, fixture) in [
+        (
+            "claude",
+            "claude",
+            write_native_claude_fixture as fn(&TempDir, &str) -> String,
+        ),
+        (
+            "cursor",
+            "cursor",
+            write_native_cursor_fixture as fn(&TempDir, &str) -> String,
+        ),
+        ("gemini", "gemini", write_native_gemini_fixture),
+        ("mux", "mux", write_native_mux_fixture),
+        (
+            "mistral-vibe",
+            "mistral_vibe",
+            write_native_mistral_vibe_fixture,
+        ),
+    ] {
+        let temp = daemon_test_root();
+        let query = format!("{provider} relocated root oracle");
+        let root = PathBuf::from(fixture(&temp, &query));
+        assert!(root.is_dir(), "{provider}: directory fixture");
+        let import = || {
+            json_output(ctx(&temp).args([
+                "import",
+                "--provider",
+                provider,
+                "--path",
+                root.to_str().unwrap(),
+                "--no-blame",
+                "--format=json",
+                "--progress",
+                "none",
+            ]))
+        };
+        let first = import();
+        wait_for_projection(&temp, &first);
+        let counts = provider_core_counts(&data_root(&temp), stored_provider);
+        assert!(counts.0 > 0 && counts.1 > 0, "{provider}: {counts:?}");
+        let moved = temp.path().join("relocated");
+        fs::rename(&root, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &root).unwrap();
+        let replay = import();
+        wait_for_projection(&temp, &replay);
+        assert_eq!(
+            replay["totals"]["failed_sources"], 0,
+            "{provider}: {}",
+            replay["totals"]
+        );
+        assert_eq!(
+            provider_core_counts(&data_root(&temp), stored_provider),
+            counts,
+            "{provider}"
+        );
+        let search = json_output(ctx(&temp).args([
+            "search",
+            &query,
+            "--provider",
+            provider,
+            "--refresh",
+            "off",
+            "--limit",
+            "1",
+            "--format=json",
+        ]));
+        assert_search_provider_oracle(&search, stored_provider, &query, 1, "message");
+        if matches!(provider, "mux" | "mistral-vibe") {
+            let leaf = moved.join(if provider == "mux" {
+                "mux-cli-native/chat.jsonl"
+            } else {
+                "session_20260704_160000_vibecli/messages.jsonl"
+            });
+            let original = temp.path().join("outside-transcript.jsonl");
+            fs::rename(&leaf, &original).unwrap();
+            std::os::unix::fs::symlink(&original, &leaf).unwrap();
+            let output = ctx(&temp)
+                .args([
+                    "import",
+                    "--provider",
+                    provider,
+                    "--path",
+                    root.to_str().unwrap(),
+                    "--no-blame",
+                    "--format=json",
+                    "--progress",
+                    "none",
+                ])
+                .output()
+                .unwrap();
+            if output.status.success() {
+                let rejected: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(rejected["outcome"], "completed_with_source_failures");
+                assert!(rejected["totals"]["failed_sources"].as_u64().unwrap() > 0);
+            } else {
+                let failure = String::from_utf8(output.stderr).unwrap();
+                assert!(
+                    failure.contains("symlink") || failure.contains("is not importable"),
+                    "{provider}: {failure}"
+                );
+                assert!(output.stdout.is_empty());
+            }
+            assert_eq!(
+                provider_core_counts(&data_root(&temp), stored_provider),
+                counts,
+                "{provider}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_projection(temp: &TempDir, report: &Value) {
+    let generation = report["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|source| source["published_generation"].as_str())
+        .unwrap();
+    wait_for_test_lexical_projection(temp, generation);
 }

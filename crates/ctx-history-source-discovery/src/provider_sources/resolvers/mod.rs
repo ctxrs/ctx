@@ -467,12 +467,7 @@ mod tests {
         let dangling = temp.path().join("dangling");
         symlink(temp.path().join("absent-target"), &dangling).unwrap();
         assert_eq!(path_presence(&dangling), PathPresence::Unsupported);
-        // A path routed through a symlinked ancestor is rejected the same
-        // way regardless of what lies beyond it: both `dangling` itself and
-        // `dangling/child` resolve to `Unsupported`. `suppresses_fallback`
-        // treats this identically to `Unknown(_)` (anything but `Missing`
-        // suppresses the legacy fallback), so this assertion only pins the
-        // more accurate diagnostic classification, not a behavior change.
+        // A dangling ancestor does not prove that the selected child is absent.
         assert_eq!(
             path_presence(&dangling.join("child")),
             PathPresence::Unsupported
@@ -483,8 +478,25 @@ mod tests {
         let legacy = temp.path().join("legacy");
         fs::write(&legacy, b"legacy").unwrap();
         assert_eq!(
-            select_current_or_legacy(loop_link.join("child"), legacy),
+            select_current_or_legacy(dangling.join("child"), legacy.clone()),
+            dangling.join("child")
+        );
+        assert_eq!(
+            select_current_or_legacy(loop_link.join("child"), legacy.clone()),
             loop_link.join("child")
+        );
+
+        let real = temp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let relocated = temp.path().join("relocated");
+        symlink(&real, &relocated).unwrap();
+        assert_eq!(
+            path_presence(&relocated.join("child")),
+            PathPresence::Missing
+        );
+        assert_eq!(
+            select_current_or_legacy(relocated.join("child"), legacy.clone()),
+            legacy
         );
     }
 

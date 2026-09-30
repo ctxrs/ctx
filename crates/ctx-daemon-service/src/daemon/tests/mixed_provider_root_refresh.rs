@@ -129,6 +129,15 @@ impl MixedFixture {
             if selected.contains(&executor_routes[0]) && fault == 2 {
                 anyhow::bail!("stable internal fixture failure");
             }
+            if selected.contains(&executor_routes[0]) && fault == 4 {
+                return Err(
+                    ctx_history_index::IndexError::CurrentRepublishInsufficientHeadroom {
+                        required: 1024,
+                        available: 512,
+                    }
+                    .into(),
+                );
+            }
             publish_mixed(
                 execution.index_root,
                 &executor_routes,
@@ -345,7 +354,49 @@ fn pending_root_replacement_backoff_a_keeps_deadline_while_b_is_due() -> Result<
         SourceBackedRefreshScope::exact([fixture.routes[1].clone()])
     );
     assert_eq!(fixture.engine.next_dirty_route_due_in_ms(0), Some(deadline));
+    assert_promoted_retry_backoff(&mut fixture, false)?;
     Ok(())
+}
+
+fn assert_promoted_retry_backoff(fixture: &mut MixedFixture, resource_failure: bool) -> Result<()> {
+    let first_delay = fixture
+        .engine
+        .elapse_route_retry_backoff_for_test(&fixture.routes[0])
+        .unwrap();
+    assert!(
+        (8_000..=10_000).contains(&first_delay),
+        "first retry delay: {first_delay}"
+    );
+    fixture.watch.enqueue_pending_provider_root_refresh(
+        &fixture.data_root,
+        Some(&fixture.engine),
+        source_route_ledger_now_ms(),
+    );
+    let run = fixture.run_scheduled()?;
+    assert_eq!(run.scope, SourceBackedRefreshScope::All);
+    assert_eq!(run.failed, resource_failure, "{:#}", run.job);
+    assert_eq!(run.job["structured_outcome"]["retryable"], true);
+    if resource_failure {
+        assert_eq!(run.job["error_code"], "resource_unavailable");
+    }
+    let second_delay = fixture
+        .engine
+        .elapse_route_retry_backoff_for_test(&fixture.routes[0])
+        .unwrap();
+    assert!(
+        (18_000..=20_000).contains(&second_delay),
+        "second retry delay: {second_delay}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pending_root_replacement_promoted_resource_retry_keeps_backoff_history() -> Result<()> {
+    let mut fixture = MixedFixture::new()?;
+    let failed = fixture.fail_a(4)?;
+    assert_eq!(failed["error_code"], "resource_unavailable");
+    fixture.pending_config();
+    assert_promoted_retry_backoff(&mut fixture, true)
 }
 
 #[test]

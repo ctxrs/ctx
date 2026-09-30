@@ -677,6 +677,7 @@ pub(super) fn new_refresh_attempt(
         intent,
         refresh_scope,
         reconciliation_demand,
+        preserve_route_retry_state: false,
         admitted_authority: None,
         request_fingerprint: None,
         admission_durability_indeterminate: false,

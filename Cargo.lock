@@ -2130,6 +2130,7 @@ dependencies = [
  "ctx-history-index",
  "ctx-history-index-format",
  "ctx-history-platform",
+ "ctx-history-source-io",
  "rusqlite",
  "serde",
  "serde_json",

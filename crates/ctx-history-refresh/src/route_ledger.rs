@@ -341,6 +341,17 @@ impl DirtySourceRoutes {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn elapse_retry_backoff_for_test(
+        &mut self,
+        route: &SourceRouteIdentity,
+        now_ms: u64,
+    ) -> Option<u64> {
+        let state = self.dirty.get_mut(route)?;
+        let remaining = state.retry_not_before_ms.take()?.saturating_sub(now_ms);
+        Some(remaining)
+    }
+
     /// Admits one eligible route, preferring the oldest dirty route first.
     #[cfg(test)]
     pub(super) fn admit_next(&mut self, now_ms: u64) -> Option<DirtySourceRouteAdmission> {

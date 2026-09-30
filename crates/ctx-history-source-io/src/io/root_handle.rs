@@ -781,7 +781,24 @@ fn open_named_source(path: &Path) -> std::result::Result<platform::OpenedPath, A
         Ok(opened) => Ok(opened),
         #[cfg(target_os = "linux")]
         Err(AuthorityOpenError::Rejected(reason)) if reason == SYMLINK_PROVIDER_SOURCE_REASON => {
-            platform::open_directory_relocation(path)
+            match platform::open_directory_relocation(path) {
+                Err(AuthorityOpenError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                    // ENOENT through a dangling directory link is not evidence
+                    // that a selected source is absent and a fallback is safe.
+                    match ctx_history_platform::platform_security::resolve_provider_source_path(
+                        path,
+                    ) {
+                        Err(resolution)
+                            if resolution.raw_os_error().is_none()
+                                && resolution.kind() != io::ErrorKind::NotFound =>
+                        {
+                            Err(AuthorityOpenError::Rejected(reason))
+                        }
+                        _ => Err(AuthorityOpenError::Io(error)),
+                    }
+                }
+                result => result,
+            }
         }
         #[cfg(not(target_os = "linux"))]
         Err(AuthorityOpenError::Rejected(reason)) if reason == SYMLINK_PROVIDER_SOURCE_REASON => {

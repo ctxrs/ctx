@@ -329,9 +329,13 @@ fn pending_root_replacement_source_repair_waits_until_route_is_due() -> Result<(
     fs::write(&fixture.source_file, b"repaired source")?;
     fixture.engine.record_watch_routes(
         [(fixture.route.clone(), EventWatermark::new(u64::MAX, 2))],
-        u64::MAX - 1_000,
+        0,
     );
-    fixture.reconcile(WatchCatalogReconcileTrigger::Filesystem, true);
+    fixture.watch.enqueue_pending_provider_root_refresh(
+        &fixture.data_root,
+        Some(&fixture.engine),
+        0,
+    );
     assert!(fixture.engine.run_next(&fixture.data_root).is_none());
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     let due_at = fixture.engine.next_dirty_route_due_in_ms(0).unwrap();

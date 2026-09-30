@@ -177,7 +177,7 @@ fn exact_fx_roots_preserve_missing_and_budget_statuses() {
 
 #[cfg(unix)]
 #[test]
-fn exact_fx_roots_map_io_to_unknown_and_links_to_unsupported() {
+fn exact_fx_roots_admit_directory_relocation_and_reject_file_links() {
     use std::os::unix::{fs::symlink, fs::PermissionsExt};
 
     let temp = tempdir();
@@ -192,10 +192,33 @@ fn exact_fx_roots_map_io_to_unknown_and_links_to_unsupported() {
     let real = temp.path().join("real-fx-sessions");
     std::fs::create_dir(&real).unwrap();
     let linked = temp.path().join("linked-fx-sessions");
-    symlink(real, &linked).unwrap();
-    let source = provider_source_for_path(CaptureProvider::Fx, linked);
-    assert_eq!(source.status, ProviderSourceStatus::Unsupported);
+    symlink(&real, &linked).unwrap();
+    let source = provider_source_for_path(CaptureProvider::Fx, linked.clone());
+    assert_eq!(source.status, ProviderSourceStatus::Empty);
     assert_eq!(source.source_format, "fx_sessions_tree");
+
+    write_committed_fx_v3_session(&real.join("session"), "session");
+    assert_eq!(
+        provider_source_for_path(CaptureProvider::Fx, linked.clone()).status,
+        ProviderSourceStatus::Available
+    );
+
+    let outside = temp.path().join("outside.json");
+    std::fs::write(&outside, fx_legacy_session(2, "outside")).unwrap();
+    let file_link = temp.path().join("file-link");
+    symlink(&outside, &file_link).unwrap();
+    assert_eq!(
+        provider_source_for_path(CaptureProvider::Fx, file_link).status,
+        ProviderSourceStatus::Unsupported
+    );
+    std::fs::remove_dir_all(real.join("session")).unwrap();
+    let outside_session = temp.path().join("outside-session");
+    write_committed_fx_v3_session(&outside_session, "outside");
+    symlink(&outside_session, real.join("session-link")).unwrap();
+    assert_eq!(
+        provider_source_for_path(CaptureProvider::Fx, linked).status,
+        ProviderSourceStatus::Empty
+    );
 }
 
 #[test]

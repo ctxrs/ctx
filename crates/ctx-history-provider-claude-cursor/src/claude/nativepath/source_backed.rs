@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs, io,
+    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
