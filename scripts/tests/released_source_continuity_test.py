@@ -114,6 +114,44 @@ class ContinuityTest(unittest.TestCase):
         result = self.check()
         self.assertEqual(result["non_ancestor_or_required_changes"][0]["disposition"], "reviewed")
 
+    def test_reviewed_lock_context_preserves_every_required_change_and_the_real_index(self):
+        self.git("checkout", "-b", "context-base", self.base)
+        old_lock = "    lock_original();\n"
+        new_lock = "    lock_optional();\n"
+        (self.repo / "client").write_text("fn recovery() {\n" + old_lock + "    no_final_recovery();\n}\n")
+        self.commit("original lock context")
+        (self.repo / "client").write_text("fn recovery() {\n" + old_lock + "    report_final_recovery();\n}\n")
+        (self.repo / "test").write_text("assert final recovery after restart\n")
+        fix = self.commit("required recovery with lock context")
+        self.git("checkout", "-b", "context-candidate")
+        (self.repo / "client").write_text("fn recovery() {\n" + new_lock + "    report_final_recovery();\n}\n")
+        self.candidate = self.commit("only unchanged lock context refactored")
+        self.tips = {"refs/tags/v1.3.2": fix}
+        self.policy["required_patches"] = [fix]
+        index = (self.repo / ".git/index").read_bytes()
+        with mock.patch.dict(continuity.REVIEWED_PATCH_CONTEXT,
+                             {fix: (b" " + old_lock.encode(), b" " + new_lock.encode())}):
+            self.assertEqual(self.check()["non_ancestor_or_required_changes"],
+                             [{"commit": fix, "disposition": "patch_present"}])
+            self.assertEqual((self.repo / ".git/index").read_bytes(), index)
+            for field, body in (("client", "regressed recovery\n"),
+                                ("test", "removed regression test\n")):
+                with self.subTest(field=field):
+                    self.git("checkout", "-B", "bad-context-" + field, self.candidate)
+                    (self.repo / field).write_text(body)
+                    candidate = self.commit("remove required " + field)
+                    with self.assertRaisesRegex(ValueError, fix):
+                        continuity.check_continuity(self.repo, candidate, self.tips, self.policy)
+
+    def test_context_adaptation_is_one_exact_unchanged_line_for_the_required_repair(self):
+        self.assertEqual(continuity.REVIEWED_PATCH_CONTEXT, {
+            "22ae223ebb4a0c909861e3a7e1e98d4bd5b2d523": (
+                b"         let _lock = OutboxLock::acquire(&self.state_lock_path())?;\n",
+                b"         let _lock = self.lock_state()?;\n",
+            )})
+        self.assertFalse(any(line[:1] in (b"+", b"-")
+                             for pair in continuity.REVIEWED_PATCH_CONTEXT.values() for line in pair))
+
     def test_older_candidate_is_rejected(self):
         self.tips["refs/tags/v1.5.0"] = self.fix
         with self.assertRaisesRegex(ValueError, "older than published"):

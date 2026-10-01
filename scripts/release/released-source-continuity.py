@@ -21,6 +21,15 @@ POLICY = Path(__file__).with_name("released-source-continuity.json")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 TAG = re.compile(r"refs/tags/v(\d+)\.(\d+)\.(\d+)(\^\{\})?\Z")
 
+# Optional telemetry admission changed only the lock call surrounding this
+# required repair. Adapt that exact unchanged context, never its changed lines.
+REVIEWED_PATCH_CONTEXT = {
+    "22ae223ebb4a0c909861e3a7e1e98d4bd5b2d523": (
+        b"         let _lock = OutboxLock::acquire(&self.state_lock_path())?;\n",
+        b"         let _lock = self.lock_state()?;\n",
+    ),
+}
+
 
 def git(repo, *args, index=None, data=None, check=True):
     environment = {key: value for key, value in os.environ.items()
@@ -145,9 +154,14 @@ def check_continuity(repo, commit, tips, policy, tag_objects=None):
             present = False
             if len(parents) == 1:
                 patch = git(repo, "diff", "--binary", "--no-ext-diff", parents[0], released).stdout
-                present = bool(patch) and git(
+                candidates = [patch]
+                context = REVIEWED_PATCH_CONTEXT.get(released)
+                if context is not None and patch.count(context[0]) == 1:
+                    candidates.append(patch.replace(*context))
+                present = bool(patch) and any(git(
                     repo, "apply", "--cached", "--reverse", "--check", "--whitespace=nowarn",
-                    index=index, data=patch, check=False).returncode == 0
+                    index=index, data=candidate, check=False).returncode == 0
+                    for candidate in candidates)
             if present:
                 results.append({"commit": released, "disposition": "patch_present"})
             elif released in exceptions:
