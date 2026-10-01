@@ -7,6 +7,8 @@ use support::*;
 const CURRENT_BUNDLED_SKILL: &[u8] = include_bytes!("../../../../skills/ctx/SKILL.md");
 const RELEASED_LEGACY_SKILL: &[u8] =
     include_bytes!("../../../ctx-agent-integrations/src/skill/testdata/legacy_skill_v0_17_0.md");
+const RELEASED_CURRENT_SKILL: &[u8] =
+    include_bytes!("../../../ctx-agent-integrations/src/skill/testdata/released_skill_v2_2_4.md");
 const METADATA_FILE: &str = ".ctx-skill.json";
 
 #[derive(Debug)]
@@ -71,13 +73,13 @@ fn isolated_ctx(temp: &TempDir, binary: &Path, roots: &IsolatedAgentRoots) -> Co
 }
 
 fn write_stale_managed_skill(skill_dir: &Path) -> SkillSnapshot {
-    let body = b"stale metadata-owned ctx skill\n".to_vec();
+    let body = RELEASED_CURRENT_SKILL.to_vec();
     let metadata = serde_json::to_vec_pretty(&json!({
         "schema_version": 1,
         "installer": "ctx-cli",
         "skill_name": "ctx",
         "skill_hash": format!("sha256:{}", sha256_hex(&body)),
-        "ctx_cli_version": "0.9.0",
+        "ctx_cli_version": "2.2.4",
         "installed_at": "2026-01-01T00:00:00Z",
     }))
     .unwrap();

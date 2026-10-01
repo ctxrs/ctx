@@ -126,6 +126,7 @@ ctx_cli_contract_test(
     binary = "//crates/ctx-cli:ctx_managed_test_binary",
     extra_compile_data = [
         "//crates/ctx-agent-integrations:src/skill/testdata/legacy_skill_v0_17_0.md",
+        "//crates/ctx-agent-integrations:src/skill/testdata/released_skill_v2_2_4.md",
     ],
     tags = ["cli-contract"],
     test_support = [
