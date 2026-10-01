@@ -96,6 +96,7 @@ impl HistoryServer {
         {
             return Err(Error::Forbidden);
         }
+        let replay = stored.is_some();
         let outcome = if let Some(stored) = stored {
             stored.outcome
         } else {
@@ -110,6 +111,20 @@ impl HistoryServer {
         };
         authorize(&tx, token, collection, Access::Publish)?;
         tx.commit()?;
+        drop(connection);
+        let (kind, bytes) = match &outcome {
+            CancelPublishOutcome::Accepted { receipt } => (
+                ServerPublicationKind::AlreadyAccepted,
+                receipt.payload.as_ref().map(|payload| payload.bytes),
+            ),
+            CancelPublishOutcome::Cancelled { .. } => (ServerPublicationKind::Cancelled, None),
+        };
+        self.observe(ServerObservation::Publication(ServerPublicationFacts {
+            kind,
+            replay,
+            bytes,
+            records: None,
+        }));
         Ok(CancelPublishResponse {
             outcome,
             publication,

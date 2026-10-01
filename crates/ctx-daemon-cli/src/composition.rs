@@ -201,6 +201,9 @@ pub trait DaemonCliHost: Send + Sync {
     ) -> Result<()>;
     fn deliver_daemon_events(&self, data_root: &Path, events: &[PublicEventV1]);
     fn upload_daemon_events(&self, data_root: &Path, events: &[PublicEventV1]);
+    fn sharing_observer(&self, _data_root: &Path) -> Option<ctx_daemon_service::SharingObserver> {
+        None
+    }
     fn fetch_to_writer(
         &self,
         endpoint: &str,

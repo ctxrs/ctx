@@ -5,8 +5,10 @@ pub(super) fn run_prepared(
     db: &Path,
     options: &IndexOptions,
     reserved: usize,
+    observation: &mut GraphObservation,
 ) -> Result<IndexReport> {
     let started = std::time::Instant::now();
+    observation.phase = GraphPhase::Prepare;
     for source_root in &options.python_source_roots {
         ensure!(
             source_root.is_empty()
@@ -34,6 +36,7 @@ pub(super) fn run_prepared(
         .context("cannot canonicalize index root")?;
     ensure!(root.is_dir(), "index root must be a directory");
     let root_text = root.to_str().context("index root must be UTF-8")?;
+    observation.phase = GraphPhase::Open;
     let mut store = Store::create(db)?;
     let stats = store.stats()?;
     ensure!(
@@ -67,6 +70,7 @@ pub(super) fn run_prepared(
             &ingest_fingerprint,
         )
     });
+    observation.phase = GraphPhase::Detect;
     let scan = prepare_scan(&root, &db, options, true, reusable, None)?;
     if !options.force
         && let Some(proof) = &scan.proof
@@ -85,10 +89,18 @@ pub(super) fn run_prepared(
             scan: proof.clone(),
         };
         if manifest_matches(&manifest_path, &current) {
+            observation.index = Some(GraphIndexDisposition::NoOp);
+            observation.detect_duration = Some(started.elapsed());
+            observation.extract_duration = Some(std::time::Duration::ZERO);
+            observation.commit_duration = Some(std::time::Duration::ZERO);
             return unchanged_report(&stats, options, started);
         }
         if reusable.is_some_and(|previous| scan_content_matches(previous, proof)) {
             write_manifest(&manifest_path, &current)?;
+            observation.index = Some(GraphIndexDisposition::NoOp);
+            observation.detect_duration = Some(started.elapsed());
+            observation.extract_duration = Some(std::time::Duration::ZERO);
+            observation.commit_duration = Some(std::time::Duration::ZERO);
             return unchanged_report(&stats, options, started);
         }
     }
@@ -110,6 +122,8 @@ pub(super) fn run_prepared(
     #[cfg(test)]
     tests::after_python_inventory();
     let detect_ms = started.elapsed().as_secs_f64() * 1000.0;
+    observation.detect_duration = Some(started.elapsed());
+    observation.phase = GraphPhase::Extract;
     let extracting = std::time::Instant::now();
     let mut changed = vec![];
     let mut rejected = BTreeSet::new();
@@ -291,6 +305,8 @@ pub(super) fn run_prepared(
         );
     }
     let extract_ms = extracting.elapsed().as_secs_f64() * 1000.0;
+    observation.extract_duration = Some(extracting.elapsed());
+    observation.phase = GraphPhase::Commit;
     let committing = std::time::Instant::now();
     // Invalid local syntax is authoritative absence of current facts. Successful
     // extraction still needs the semantic-loss guard, and operational errors above
@@ -319,6 +335,16 @@ pub(super) fn run_prepared(
         coverage,
         index_options.clone(),
     );
+    observation.commit_duration = Some(committing.elapsed());
+    if let Ok(report) = &applied {
+        observation.index = Some(GraphIndexDisposition::Committed);
+        observation.index_report(report);
+        observation.rejected_files = Some(rejected.len() as u64);
+        observation.parsed_files = Some((report.parsed_files - rejected.len()) as u64);
+        observation.phase = GraphPhase::PostCommit;
+        #[cfg(test)]
+        crate::observation::tests::after_index_commit(&db);
+    }
     let mut report = if prepared_native_write {
         store.finish_native_index_write(applied)?
     } else {

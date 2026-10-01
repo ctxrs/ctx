@@ -34,7 +34,13 @@ pub(crate) fn send_batch(data_root: &std::path::Path, events: &[PublicEventV1]) 
     ));
 }
 
-pub(crate) fn send_daemon_batch(data_root: &std::path::Path, events: &[PublicEventV1]) {
+pub(crate) fn send_daemon_batch(
+    data_root: &std::path::Path,
+    events: &[PublicEventV1],
+    runtime: &crate::product_runtime::DaemonCollector,
+) {
+    // Called even for an empty ordinary batch by the existing periodic owner.
+    flush_daemon_summaries(data_root, runtime);
     report_delivery_failure(crate::observability_composition::append_analytics_batch(
         data_root, events,
     ));
@@ -42,6 +48,17 @@ pub(crate) fn send_daemon_batch(data_root: &std::path::Path, events: &[PublicEve
         data_root,
         crate::net::DAEMON_TELEMETRY_HTTP_TIMEOUT,
     ));
+}
+
+pub(crate) fn flush_daemon_summaries(
+    data_root: &std::path::Path,
+    runtime: &crate::product_runtime::DaemonCollector,
+) {
+    if !runtime.flush(data_root) {
+        if let Ok(Some(owner)) = crate::identity::try_existing_installation_id(data_root) {
+            crate::analytics_summary::flush(data_root, &owner);
+        }
+    }
 }
 
 fn report_delivery_failure(result: anyhow::Result<()>) {

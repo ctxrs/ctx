@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     capture, private_file,
     queue::{Enqueued, Pending},
-    Error, RemoteClient, Result, SelectionDecision, SelectionObservation, SharingStore,
-    UPLOAD_CHUNK_BYTES,
+    Error, RemoteClient, Result, SelectionDecision, SelectionObservation, SharingObservation,
+    SharingObserver, SharingPhase, SharingStore, UPLOAD_CHUNK_BYTES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,8 @@ pub enum TickOutcome {
 pub struct Collector {
     data_root: PathBuf,
     store: SharingStore,
+    observer: Option<SharingObserver>,
+    failure_active: AtomicBool,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +71,19 @@ impl Collector {
         Self {
             data_root,
             store: SharingStore::new(sharing_root),
+            observer: None,
+            failure_active: AtomicBool::new(false),
+        }
+    }
+
+    pub fn with_observer(mut self, observer: Option<SharingObserver>) -> Self {
+        self.observer = observer;
+        self
+    }
+
+    fn observe(&self, fact: SharingObservation) {
+        if let Some(observer) = &self.observer {
+            observer(fact);
         }
     }
 
@@ -80,7 +95,9 @@ impl Collector {
     }
 
     pub(crate) fn tick_with_stop(&self, stop: &AtomicBool) -> TickOutcome {
-        match self.try_tick(stop) {
+        let started = std::time::Instant::now();
+        let mut phase = SharingPhase::Settings;
+        let outcome = match self.try_tick(stop, &mut phase) {
             Ok(outcome) => outcome,
             Err(error) => {
                 // An error writing sharing diagnostics is optional too.
@@ -89,10 +106,30 @@ impl Collector {
                 }
                 TickOutcome::Failed(error)
             }
-        }
+        };
+        let failure = match outcome {
+            TickOutcome::Failed(error) => Some(error.into()),
+            _ => None,
+        };
+        let progress_after_failure = if failure.is_some() {
+            self.failure_active.store(true, Ordering::Relaxed);
+            false
+        } else if outcome == TickOutcome::Progress {
+            self.failure_active.swap(false, Ordering::Relaxed)
+        } else {
+            false
+        };
+        self.observe(SharingObservation::Tick {
+            phase,
+            outcome: outcome.into(),
+            duration: started.elapsed(),
+            failure,
+            progress_after_failure,
+        });
+        outcome
     }
 
-    fn try_tick(&self, stop: &AtomicBool) -> Result<TickOutcome> {
+    fn try_tick(&self, stop: &AtomicBool, phase: &mut SharingPhase) -> Result<TickOutcome> {
         let Some(settings) = self.store.settings()? else {
             return Ok(TickOutcome::Disabled);
         };
@@ -105,6 +142,7 @@ impl Collector {
         if stop.load(Ordering::Acquire) {
             return Ok(TickOutcome::Idle);
         }
+        *phase = SharingPhase::Admission;
         let _owner = self.store.lock("uploader.lock", true)?;
         // Interrupted cleanup is outside the live namespace and must not hold
         // up either retries or capture of a later committed generation.
@@ -120,7 +158,7 @@ impl Collector {
             if pending.retry_at > now {
                 continue;
             }
-            match self.step(&path, &mut pending, stop, settle) {
+            match self.step_observed(&path, &mut pending, stop, settle, phase) {
                 Ok(()) => {
                     if pending.failures > 0 && path.try_exists().map_err(|_| Error::State)? {
                         // Preserve the failure count across staging recreation:
@@ -135,12 +173,19 @@ impl Collector {
                 Err(Error::PolicyDenied) => return Ok(TickOutcome::Idle),
                 Err(error) => {
                     pending.failed(&path, error, now)?;
+                    self.observe(SharingObservation::Retry {
+                        phase: *phase,
+                        failure: error.into(),
+                        attempts: pending.failures,
+                        delay: std::time::Duration::from_secs(pending.retry_at.saturating_sub(now)),
+                    });
                     return Err(error);
                 }
             }
         }
         // Backoff is per publication. New sessions still need a durable copy
         // while older operations wait for the server to recover.
+        *phase = SharingPhase::Capture;
         self.capture(stop)
     }
 
@@ -207,6 +252,12 @@ impl Collector {
                             .enqueue(&archive, member, scope, &current_policy, stop)?;
                     stamp.complete &= enqueued != Enqueued::Pending;
                     queued |= enqueued == Enqueued::New;
+                    if enqueued == Enqueued::New {
+                        self.observe(SharingObservation::Queued {
+                            bytes: member.bytes,
+                            records: member.records,
+                        });
+                    }
                 }
                 Ok(())
             },
@@ -216,6 +267,15 @@ impl Collector {
         // a selected successor. Only a complete capture can skip a later scan.
         stamp.counts = Some(counts);
         private_file::write(&stamp_path, &stamp)?;
+        if let Some(counts) = &stamp.counts {
+            for (&decision, &count) in counts {
+                self.observe(SharingObservation::Selection {
+                    decision,
+                    count,
+                    complete: stamp.complete,
+                });
+            }
+        }
         Ok(if queued {
             TickOutcome::Progress
         } else {
@@ -248,12 +308,40 @@ impl Collector {
         RemoteClient::new(settings.connection, settings.credentials)
     }
 
+    #[cfg(test)]
     fn step(
         &self,
         path: &Path,
         pending: &mut Pending,
         stop: &AtomicBool,
         settle: bool,
+    ) -> Result<()> {
+        self.step_observed(path, pending, stop, settle, &mut SharingPhase::Admission)
+    }
+
+    fn accept(
+        &self,
+        path: &Path,
+        pending: &Pending,
+        receipt: ctx_history_server::Receipt,
+        recovered_receipt: bool,
+    ) -> Result<()> {
+        self.store.accepted(path, pending, receipt)?;
+        self.observe(SharingObservation::Accepted {
+            bytes: pending.member.bytes,
+            records: pending.member.records,
+            recovered_receipt,
+        });
+        Ok(())
+    }
+
+    fn step_observed(
+        &self,
+        path: &Path,
+        pending: &mut Pending,
+        stop: &AtomicBool,
+        settle: bool,
+        phase: &mut SharingPhase,
     ) -> Result<()> {
         if settle {
             let publisher = pending.publisher.clone().ok_or(Error::Protocol)?;
@@ -271,15 +359,28 @@ impl Collector {
             let client = self.admit_receipt(stop)?;
             pending.settlement_started = true;
             pending.save(path)?;
+            *phase = SharingPhase::Settlement;
             let response = client.cancel_publish(&request)?;
-            return self.store.settled(path, pending, &request, &response);
+            *phase = SharingPhase::Checkpoint;
+            self.store.settled(path, pending, &request, &response)?;
+            self.observe(SharingObservation::Settled {
+                already_accepted: matches!(
+                    response.outcome,
+                    ctx_history_server::CancelPublishOutcome::Accepted { .. }
+                ),
+            });
+            return Ok(());
         }
         if pending.lookup_receipt {
+            *phase = SharingPhase::Receipt;
             match self
                 .admit_receipt(stop)?
                 .receipt(&pending.operation.idempotency_key)
             {
-                Ok(receipt) => return self.store.accepted(path, pending, receipt),
+                Ok(receipt) => {
+                    *phase = SharingPhase::Checkpoint;
+                    return self.accept(path, pending, receipt, true);
+                }
                 Err(Error::NotFound) => {
                     pending.lookup_receipt = false;
                     pending.save(path)?;
@@ -293,6 +394,7 @@ impl Collector {
                 sha256: pending.member.sha256.clone(),
                 bytes: pending.member.bytes,
             };
+            *phase = SharingPhase::BeginUpload;
             let upload = self.admit(pending, stop)?.begin_upload(&spec)?;
             validate_upload(
                 &upload,
@@ -315,6 +417,7 @@ impl Collector {
             return Err(Error::Protocol);
         }
         if pending.reconcile_offset {
+            *phase = SharingPhase::UploadStatus;
             match self.admit(pending, stop)?.upload_status(&upload.id) {
                 Ok(status) => {
                     validate_upload(
@@ -337,6 +440,7 @@ impl Collector {
             return pending.save(path);
         }
         if upload.received_bytes < pending.member.bytes {
+            *phase = SharingPhase::UploadChunk;
             let id = upload.id.clone();
             let offset = upload.received_bytes;
             let mut file = private_file::open(&path.join("payload"))?;
@@ -358,6 +462,7 @@ impl Collector {
                     if status.received_bytes != offset + size as u64 {
                         return Err(Error::Protocol);
                     }
+                    self.observe(SharingObservation::Transfer { bytes: size as u64 });
                     pending.upload = Some(status);
                     pending.reconcile_offset = false;
                 }
@@ -383,8 +488,12 @@ impl Collector {
         pending.publish_attempted = true;
         pending.lookup_receipt = true;
         pending.save(path)?;
+        *phase = SharingPhase::Publish;
         match client.publish(&request) {
-            Ok(receipt) => self.store.accepted(path, pending, receipt),
+            Ok(receipt) => {
+                *phase = SharingPhase::Checkpoint;
+                self.accept(path, pending, receipt, false)
+            }
             Err(Error::NotFound | Error::StagingExpired) => {
                 pending.upload = None;
                 pending.lookup_receipt = false;

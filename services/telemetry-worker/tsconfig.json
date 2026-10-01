@@ -9,5 +9,5 @@
     "types": ["@cloudflare/workers-types", "vitest/globals"],
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "vitest.postgres.config.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "vitest.postgres.config.ts", "vitest.product-postgres.config.ts"]
 }

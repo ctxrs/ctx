@@ -66,6 +66,7 @@ use source_backed_refresh_coordinator::SourceBackedRefreshPublication;
 #[cfg(test)]
 mod query_service_transport_tests;
 
+pub use ctx_history_sharing::SharingObserver;
 pub use daemon::run_daemon;
 pub use daemon_retry::{classify_semantic_failure, SemanticFailureClass};
 pub use daemon_wakeup::daemon_wakeup_report;

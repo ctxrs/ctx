@@ -104,19 +104,27 @@ pub fn unix_millis() -> u64 {
 /// record_usage governs all storage; enabled remains a caller output decision.
 /// Originals are independently gated by the persisted keep_originals setting.
 /// Recording is best effort: a busy state lock skips this event and its originals.
+#[allow(dead_code)] // Retained convenience entry point.
 pub fn record(event: Event, originals: Option<(&[u8], &[u8])>) -> Result<()> {
+    record_observed(event, originals).map(|_| ())
+}
+
+pub(crate) fn record_observed(
+    event: Event,
+    originals: Option<(&[u8], &[u8])>,
+) -> Result<crate::observation::LocalRecordOutcome> {
     let settings = Settings::load()?;
     if !settings.record_usage {
-        return Ok(());
+        return Ok(crate::observation::LocalRecordOutcome::Disabled);
     }
     let project = std::env::current_dir()
         .ok()
         .and_then(|p| project_at(&p).ok());
     match project {
         Some(project) => {
-            record_project_at(&state_dir()?, &settings, event, originals, Some(&project))
+            record_project_observed_at(&state_dir()?, &settings, event, originals, Some(&project))
         }
-        None => record_at(&state_dir()?, &settings, event, originals),
+        None => record_project_observed_at(&state_dir()?, &settings, event, originals, None),
     }
 }
 
@@ -236,6 +244,7 @@ fn append_jsonl(
     file.flush()?;
     Ok(())
 }
+#[allow(dead_code)] // Retained convenience entry point.
 pub fn record_at(
     dir: &Path,
     settings: &Settings,
@@ -246,15 +255,26 @@ pub fn record_at(
 }
 /// Explicit project identity for callers whose command ran outside Sift's cwd.
 /// Use project_at to normalize an existing directory before recording/querying.
+#[allow(dead_code)] // Retained convenience entry point.
 pub fn record_project_at(
+    dir: &Path,
+    settings: &Settings,
+    event: Event,
+    originals: Option<(&[u8], &[u8])>,
+    project: Option<&str>,
+) -> Result<()> {
+    record_project_observed_at(dir, settings, event, originals, project).map(|_| ())
+}
+
+pub(crate) fn record_project_observed_at(
     dir: &Path,
     settings: &Settings,
     mut event: Event,
     originals: Option<(&[u8], &[u8])>,
     project: Option<&str>,
-) -> Result<()> {
+) -> Result<crate::observation::LocalRecordOutcome> {
     if !settings.record_usage {
-        return Ok(());
+        return Ok(crate::observation::LocalRecordOutcome::Disabled);
     }
     settings.validate()?;
     ensure!(
@@ -263,7 +283,7 @@ pub fn record_project_at(
     );
     validate(&event)?;
     let Some(_lock) = try_lock(dir)? else {
-        return Ok(());
+        return Ok(crate::observation::LocalRecordOutcome::Busy);
     };
     // IDs are assigned here only after both streams have been saved successfully.
     event.original_id = None;
@@ -284,7 +304,8 @@ pub fn record_project_at(
         project: project.map(str::to_owned),
     })?;
     bytes.push(b'\n');
-    append_jsonl(dir, "metrics.jsonl", "metrics.1.jsonl", "metrics", &bytes)
+    append_jsonl(dir, "metrics.jsonl", "metrics.1.jsonl", "metrics", &bytes)?;
+    Ok(crate::observation::LocalRecordOutcome::Recorded)
 }
 fn private_dir(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();

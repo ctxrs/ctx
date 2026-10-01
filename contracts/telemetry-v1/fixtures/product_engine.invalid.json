@@ -1,0 +1,128 @@
+[
+  {
+    "fixture": "graph_completed",
+    "properties": {
+      "graph_bound_work": 1
+    }
+  },
+  {
+    "fixture": "graph_completed",
+    "remove": [
+      "graph_bound_seed"
+    ]
+  },
+  {
+    "fixture": "graph_completed",
+    "properties": {
+      "graph_semantic_input_reporters_count_bucket": "0"
+    }
+  },
+  {
+    "fixture": "graph_completed",
+    "properties": {
+      "graph_semantic_receipts_count_bucket": "0"
+    }
+  },
+  {
+    "fixture": "graph_completed",
+    "properties": {
+      "graph_index_parsed_count_bucket": 42
+    }
+  },
+  {
+    "fixture": "graph_completed",
+    "properties": {
+      "graph_operation": "private://project/label"
+    }
+  },
+  {
+    "fixture": "sift_summary",
+    "properties": {
+      "sift_entry": "mcp"
+    }
+  },
+  {
+    "fixture": "sift_summary",
+    "remove": [
+      "sift_failure_kind"
+    ]
+  },
+  {
+    "fixture": "sift_summary",
+    "properties": {
+      "complete_measurement_count_bucket": "0"
+    }
+  },
+  {
+    "fixture": "sift_summary",
+    "properties": {
+      "sift_tokens_savings_fraction_bucket": "unchanged"
+    }
+  },
+  {
+    "fixture": "sift_summary",
+    "properties": {
+      "observed_count_bucket": "1"
+    }
+  },
+  {
+    "fixture": "sift_summary",
+    "remove": [
+      "sift_latency_0_count_bucket"
+    ]
+  },
+  {
+    "fixture": "server_summary",
+    "properties": {
+      "handoff_complete_count_bucket": "1m+"
+    }
+  },
+  {
+    "fixture": "server_summary",
+    "properties": {
+      "server_population": "execution"
+    }
+  },
+  {
+    "fixture": "server_summary",
+    "properties": {
+      "read_bytes_bucket": "lt_100kb"
+    }
+  },
+  {
+    "fixture": "sharing_summary",
+    "properties": {
+      "sharing_tick": "failed"
+    }
+  },
+  {
+    "fixture": "remote_completed",
+    "properties": {
+      "remote_complete": "true"
+    }
+  },
+  {
+    "fixture": "remote_completed",
+    "properties": {
+      "result_empty": true
+    }
+  },
+  {
+    "fixture": "product_runtime",
+    "properties": {
+      "runtime_kind": "graph_serve"
+    }
+  },
+  {
+    "fixture": "server_summary",
+    "properties": {
+      "server_body_outcome": "head-status-raw"
+    }
+  },
+  {
+    "fixture": "server_summary",
+    "remove": [
+      "response_bytes_measured_count_bucket"
+    ]
+  }
+]

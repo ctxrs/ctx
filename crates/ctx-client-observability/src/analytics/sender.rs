@@ -163,6 +163,13 @@ pub(super) fn serialize_event(
     install_attempt_id: Option<&str>,
 ) -> Value {
     let (event_name, surface, operation, outcome, duration, mut properties) = match event {
+        PublicEventV1::RemoteCompleted(event) => super::engines::remote_wire(event),
+        PublicEventV1::GraphCompleted(event) => super::engines::graph_wire(event),
+        PublicEventV1::ServerRequestCompleted(event) => super::engines::server_wire(event),
+        PublicEventV1::ProductRuntime(event) => super::engines::runtime_wire(event),
+        PublicEventV1::SiftSummary(event) => super::engines::summary_wire(event),
+        PublicEventV1::ServerSummary(event) => super::engines::server_summary_wire(event),
+        PublicEventV1::SharingSummary(event) => super::engines::sharing_summary_wire(event),
         PublicEventV1::OperationCompleted(event) => {
             let mut properties = operation_properties(event);
             if let Some(output) = event.output {

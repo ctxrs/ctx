@@ -108,12 +108,12 @@ fn enable(store: &SharingStore, listener: TcpListener) -> Result<()> {
 fn no_configuration_or_connection_without_policy_starts_no_worker() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let data_root = temp.path().join("data");
-    assert!(start_workers(&data_root, DaemonRunProfile::Persistent, true).is_empty());
+    assert!(start_workers(&data_root, DaemonRunProfile::Persistent, true, || None).is_empty());
     assert!(!data_root.exists(), "default startup must remain read-only");
 
     let (store, _listener) = connect(&data_root, "connected-only")?;
     let settings_before = fs::read(store.root().join("settings.json"))?;
-    assert!(start_workers(&data_root, DaemonRunProfile::Persistent, true).is_empty());
+    assert!(start_workers(&data_root, DaemonRunProfile::Persistent, true, || None).is_empty());
     assert_eq!(
         fs::read(store.root().join("settings.json"))?,
         settings_before
@@ -135,7 +135,7 @@ fn finite_workers_and_unready_daemons_do_not_start_configured_sharing() -> Resul
         (DaemonRunProfile::FiniteCoreWorker, false),
         (DaemonRunProfile::Persistent, false),
     ] {
-        assert!(start_workers(&data_root, profile, ready).is_empty());
+        assert!(start_workers(&data_root, profile, ready, || None).is_empty());
     }
     assert!(!store.root().join("uploader.lock").exists());
     assert!(!data_root.join("search").exists());
@@ -158,7 +158,7 @@ fn configured_destinations_start_despite_broken_and_unconfigured_neighbors() -> 
         b"ignored",
     )?;
 
-    let workers = start_workers(&data_root, DaemonRunProfile::Persistent, true);
+    let workers = start_workers(&data_root, DaemonRunProfile::Persistent, true, || None);
     assert_eq!(workers.len(), 2);
     drop(workers);
     assert_eq!(fs::read(broken.root().join("settings.json"))?, b"{");
@@ -170,7 +170,7 @@ fn configured_destinations_start_despite_broken_and_unconfigured_neighbors() -> 
 fn live_enable_discovers_new_policy_once_without_restarting_local_daemon() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("data");
-    let mut workers = start_workers(&root, DaemonRunProfile::Persistent, true);
+    let mut workers = start_workers(&root, DaemonRunProfile::Persistent, true, || None);
     let (store, listener) = connect(&root, "later")?;
     workers.next_discovery = Instant::now();
     workers.reconcile(&root);
@@ -200,10 +200,16 @@ fn worker_handles_stop_on_success_and_error_without_waiting_for_retry_timer() ->
         let data_root = temp.path().join("data");
         let (store, listener) = connect(&data_root, "enabled")?;
         enable(&store, listener)?;
+        let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = observations.clone();
+        let observer: SharingObserver =
+            std::sync::Arc::new(move |fact| capture.lock().unwrap().push(fact));
         let (finished, completion) = std::sync::mpsc::sync_channel(1);
         let owner = thread::spawn(move || {
             let result = (|| -> Result<()> {
-                let workers = start_workers(&data_root, DaemonRunProfile::Persistent, true);
+                let workers = start_workers(&data_root, DaemonRunProfile::Persistent, true, || {
+                    Some(observer)
+                });
                 assert_eq!(workers.len(), 1);
                 let deadline = Instant::now() + Duration::from_secs(2);
                 while !data_root.join("sharing/enabled/uploader.lock").exists() {
@@ -220,6 +226,58 @@ fn worker_handles_stop_on_success_and_error_without_waiting_for_retry_timer() ->
         });
         assert_eq!(completion.recv_timeout(Duration::from_secs(5))?, fail);
         owner.join().expect("worker owner exits cleanly");
+        let observations = observations.lock().unwrap();
+        assert_eq!(
+            observations.first(),
+            Some(&ctx_history_sharing::SharingObservation::WorkerStarted)
+        );
+        assert_eq!(
+            observations.last(),
+            Some(&ctx_history_sharing::SharingObservation::WorkerStopped)
+        );
     }
+    Ok(())
+}
+
+#[test]
+fn observer_is_forwarded_on_startup_and_later_discovery_without_starting_extra_workers(
+) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("data");
+    let broken = root.join("sharing/broken");
+    fs::create_dir_all(&broken)?;
+    fs::write(broken.join("settings.json"), b"{")?;
+    let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = observations.clone();
+    let observer: SharingObserver =
+        std::sync::Arc::new(move |fact| capture.lock().unwrap().push(fact));
+    let mut workers = start_workers(&root, DaemonRunProfile::Persistent, true, || {
+        Some(observer.clone())
+    });
+    assert!(workers.is_empty());
+    assert!(matches!(
+        observations.lock().unwrap().as_slice(),
+        [ctx_history_sharing::SharingObservation::WorkerStartFailed(
+            _
+        )]
+    ));
+    workers.next_discovery = Instant::now();
+    workers.reconcile(&root);
+    assert_eq!(observations.lock().unwrap().len(), 2);
+    for (profile, ready) in [
+        (DaemonRunProfile::FiniteCoreWorker, true),
+        (DaemonRunProfile::Persistent, false),
+    ] {
+        assert!(start_workers(&root, profile, ready, || panic!(
+            "disabled workers must not capture analytics"
+        ))
+        .is_empty());
+    }
+    assert_eq!(
+        observations.lock().unwrap().len(),
+        2,
+        "unready and finite runs never start sharing for analytics"
+    );
+    assert!(!root.join("search").exists());
     Ok(())
 }

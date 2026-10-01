@@ -467,8 +467,9 @@ ctx_cli_integration_test(
         "tests/unified_context/history_fixture.rs",
         "tests/unified_context/managed_root.rs",
         "tests/unified_context/output_hooks.rs",
+        "tests/unified_context/telemetry.rs",
     ],
-    extra_crates = ["assert_cmd", "serde_json", "tempfile"],
+    extra_crates = ["assert_cmd", "serde_json", "tempfile", "url"],
     test_support = [],
 )
 

@@ -60,6 +60,7 @@ fn registered(db: PathBuf, args: &ServeArgs) -> Result<Graf> {
         github_repo: args.github_repo.clone(),
         workers: Arc::new(Semaphore::new(4)),
         tool_router,
+        observation: None,
     })
 }
 
@@ -84,7 +85,39 @@ async fn authorize(
     Ok(next.run(request).await)
 }
 
-pub async fn serve(db: PathBuf, args: ServeArgs) -> Result<()> {
+pub async fn serve_observed(
+    db: PathBuf,
+    args: ServeArgs,
+    facts: &mut crate::GraphObservation,
+    observer: Option<crate::GraphObserver>,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let result = serve_inner(db, args, facts, observer).await;
+    facts.duration = Some(started.elapsed());
+    if let Err(error) = &result {
+        if error.is::<crate::output::OutputFailure>() {
+            facts.output_served = Some(false);
+            facts.output_failure = Some(crate::observation::failure_kind(error));
+        } else {
+            crate::observation::failed(facts, error);
+        }
+    }
+    facts.lifecycle = Some(if result.is_err() && facts.lifecycle.is_none() {
+        crate::observation::GraphLifecycle::StartFailed
+    } else {
+        crate::observation::GraphLifecycle::Stopped
+    });
+    result
+}
+
+async fn serve_inner(
+    db: PathBuf,
+    args: ServeArgs,
+    facts: &mut crate::GraphObservation,
+    observer: Option<crate::GraphObserver>,
+) -> Result<()> {
+    let startup = std::time::Instant::now();
+    facts.phase = crate::observation::GraphPhase::Registration;
     let server = registered(db, &args)?;
     if args.transport == Transport::Stdio {
         ensure!(
@@ -92,17 +125,37 @@ pub async fn serve(db: PathBuf, args: ServeArgs) -> Result<()> {
             "HTTP authentication/host options require --transport http"
         );
         // Use the SDK codec so oversized lines terminate the transport without unbounded buffering.
+        let requests = observation::StdioObservations::default();
+        let input_requests = requests.clone();
+        let input_observer = observer.clone();
+        let observer_for_input = observer.clone();
         let input = FramedRead::new(
             tokio::io::stdin(),
             JsonRpcMessageCodec::<ClientJsonRpcMessage>::new_with_max_length(MAX_MESSAGE),
         )
+        .inspect(move |result| {
+            if result.is_err() {
+                observation::protocol_failure(&input_observer);
+            }
+        })
         .take_while(|result| std::future::ready(result.is_ok()))
-        .map(|result| result.expect("codec errors terminate input"));
+        .map(move |result| {
+            let mut message = result.expect("codec errors terminate input");
+            input_requests.input(&mut message, &observer_for_input);
+            message
+        });
         let output = FramedWrite::new(
             tokio::io::stdout(),
             JsonRpcMessageCodec::<ServerJsonRpcMessage>::default(),
         );
-        server.serve((output, input)).await?.waiting().await?;
+        facts.phase = crate::observation::GraphPhase::Protocol;
+        let output = observation::ObservedSink::new(output, requests);
+        let running = server.serve((output, input)).await?;
+        facts.lifecycle = Some(crate::observation::GraphLifecycle::Ready);
+        facts.duration = Some(startup.elapsed());
+        crate::observation::emit(&observer, *facts);
+        facts.phase = crate::observation::GraphPhase::Shutdown;
+        running.waiting().await?;
         return Ok(());
     }
     ensure!(
@@ -143,17 +196,26 @@ pub async fn serve(db: PathBuf, args: ServeArgs) -> Result<()> {
         Arc::new(LocalSessionManager::default()),
         config,
     );
+    let http_observer = observer.clone();
     let app = axum::Router::new()
         .route_service(&args.path, service)
         .layer(axum::middleware::from_fn(move |request, next| {
             authorize(bearer, request, next)
+        }))
+        .layer(axum::middleware::from_fn(move |request, next| {
+            observation::http(http_observer.clone(), request, next)
         }));
+    facts.phase = crate::observation::GraphPhase::Bind;
     let listener = tokio::net::TcpListener::bind((args.host, args.port)).await?;
-    eprintln!(
+    crate::output::stderr(format_args!(
         "ctx graph MCP listening on http://{}{}",
         listener.local_addr()?,
         args.path
-    );
+    ))?;
+    facts.lifecycle = Some(crate::observation::GraphLifecycle::Ready);
+    facts.duration = Some(startup.elapsed());
+    crate::observation::emit(&observer, *facts);
+    facts.phase = crate::observation::GraphPhase::Shutdown;
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

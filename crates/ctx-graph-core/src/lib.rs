@@ -7,6 +7,7 @@ pub mod index;
 pub use ctx_graph_ingest as ingest;
 pub use ctx_graph_languages as languages;
 pub mod memory;
+pub mod observation;
 pub use ctx_graph_python::parser;
 pub use ctx_graph_types as model;
 mod project_context;

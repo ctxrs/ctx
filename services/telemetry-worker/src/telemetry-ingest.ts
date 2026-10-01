@@ -435,7 +435,7 @@ async function parseV1Event(
     providerId = typeof properties.provider === "string" ? properties.provider : null;
   } else {
     validateRuntimeOperation(surface, operation);
-    properties = parseRuntimeProperties(event.properties, surface, operation);
+    properties = parseRuntimeProperties(event.properties, surface, operation, outcome);
   }
   validateSharedPropertyConsistency(properties, installAttemptId !== null);
   if (typeof properties.upgrade_attempt_id === "string") {

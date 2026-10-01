@@ -144,6 +144,13 @@ impl McpObservation {
         self.sender.try_submit(event);
     }
 
+    /// Engine tools use their own typed terminal while sharing the transport's
+    /// lifecycle and bounded sender. Do not also count them as history tools.
+    pub fn record_engine_request(&mut self) {
+        self.lifecycle
+            .count_descriptor(McpRequestObservation::ToolCall(McpObservedTool::Missing));
+    }
+
     pub fn stop(mut self, reason: McpStopReasonV1, outcome: Outcome, duration: Duration) {
         self.lifecycle.counts.telemetry_dropped = self.sender.dropped_count();
         self.sender.try_submit(PublicEventV1::RuntimeObservation(
@@ -302,7 +309,7 @@ enum SenderMessage {
 }
 
 struct AsyncMcpSender {
-    tx: Option<SyncSender<SenderMessage>>,
+    tx: Option<Arc<SyncSender<SenderMessage>>>,
     dropped: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
 }
@@ -316,7 +323,7 @@ impl AsyncMcpSender {
             .spawn(move || sender_loop(&rx, &dispatch))
             .ok();
         Self {
-            tx: worker.as_ref().map(|_| tx),
+            tx: worker.as_ref().map(|_| Arc::new(tx)),
             dropped,
             worker,
         }
@@ -351,6 +358,47 @@ impl AsyncMcpSender {
         if worker.is_finished() {
             let _ = worker.join();
         }
+    }
+}
+
+/// The same bounded sender without history-specific lifecycle observations.
+/// Construction requires caller-resolved consent; callback clones do not keep
+/// the channel alive after shutdown and never perform IO on the SDK task.
+pub struct ProductEventSender {
+    sender: AsyncMcpSender,
+}
+
+impl ProductEventSender {
+    pub fn start(
+        dispatch: impl Fn(&[PublicEventV1]) -> Result<(), ()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            sender: AsyncMcpSender::start(MCP_TELEMETRY_QUEUE_CAPACITY, Arc::new(dispatch)),
+        }
+    }
+
+    pub fn event_callback(&self) -> Arc<dyn Fn(PublicEventV1) + Send + Sync> {
+        let tx = self.sender.tx.as_ref().map(Arc::downgrade);
+        let dropped = self.sender.dropped.clone();
+        Arc::new(move |event| {
+            let sent = tx
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|tx| tx.try_send(SenderMessage::Event(event)).is_ok());
+            if !sent {
+                dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+    }
+
+    pub fn shutdown(mut self) {
+        self.sender.shutdown(MCP_TELEMETRY_SHUTDOWN_TIMEOUT);
+    }
+}
+
+impl Drop for ProductEventSender {
+    fn drop(&mut self) {
+        self.sender.shutdown(MCP_TELEMETRY_SHUTDOWN_TIMEOUT);
     }
 }
 
@@ -556,5 +604,49 @@ mod tests {
         }
         sender.shutdown(Duration::from_secs(1));
         assert_eq!(sender.dropped_count(), 1);
+    }
+
+    #[test]
+    fn retained_product_callbacks_never_wait_or_keep_worker_alive_after_shutdown() {
+        struct Finished(mpsc::Sender<()>);
+        impl Drop for Finished {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let (entered, arrival) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let (finished, exit) = mpsc::channel();
+        let finished = Finished(finished);
+        let gate = Mutex::new(Some(gate));
+        let mut sender = ProductEventSender::start(move |_| {
+            let _keep_until_worker_exit = &finished;
+            if let Some(gate) = gate.lock().unwrap().take() {
+                entered.send(()).unwrap();
+                gate.recv().unwrap();
+            }
+            Ok(())
+        });
+        let callback = sender.event_callback();
+        let retained = callback.clone();
+        callback(test_event());
+        arrival.recv_timeout(Duration::from_secs(1)).unwrap();
+        let started = Instant::now();
+        for _ in 0..MCP_TELEMETRY_QUEUE_CAPACITY + 1 {
+            callback(test_event());
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(sender.sender.dropped_count(), 1);
+        sender.sender.shutdown(Duration::from_millis(25));
+        let dropped = sender.sender.dropped.clone();
+        retained(test_event());
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        let started = Instant::now();
+        sender.shutdown();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        release.send(()).unwrap();
+        exit.recv_timeout(Duration::from_secs(2)).unwrap();
+        retained(test_event());
+        assert_eq!(dropped.load(Ordering::Relaxed), 3);
     }
 }

@@ -9,7 +9,9 @@ use std::{
     time::Duration,
 };
 
-use crate::{Collector, Error, Result, SharingStore, TickOutcome};
+use crate::{
+    Collector, Error, Result, SharingObservation, SharingObserver, SharingStore, TickOutcome,
+};
 
 pub const RETRY_CADENCE: Duration = Duration::from_secs(30);
 
@@ -23,6 +25,26 @@ pub struct SharingWorker {
 
 impl SharingWorker {
     pub fn start(data_root: PathBuf, sharing_root: PathBuf) -> Result<Option<Self>> {
+        Self::start_with_observer(data_root, sharing_root, None)
+    }
+
+    pub fn start_with_observer(
+        data_root: PathBuf,
+        sharing_root: PathBuf,
+        observer: Option<SharingObserver>,
+    ) -> Result<Option<Self>> {
+        let result = Self::start_observed(data_root, sharing_root, observer.clone());
+        if let (Some(observer), Err(error)) = (observer, &result) {
+            observer(SharingObservation::WorkerStartFailed((*error).into()));
+        }
+        result
+    }
+
+    fn start_observed(
+        data_root: PathBuf,
+        sharing_root: PathBuf,
+        observer: Option<SharingObserver>,
+    ) -> Result<Option<Self>> {
         let store = SharingStore::new(sharing_root.clone());
         if store
             .settings()?
@@ -30,13 +52,16 @@ impl SharingWorker {
         {
             return Ok(None);
         }
-        let collector = Collector::new(data_root, sharing_root);
+        let collector = Collector::new(data_root, sharing_root).with_observer(observer.clone());
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let (wake, receiver) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("ctx-history-sharing".into())
             .spawn(move || {
+                if let Some(observer) = &observer {
+                    observer(SharingObservation::WorkerStarted);
+                }
                 while !worker_stop.load(Ordering::Acquire) {
                     match collector.tick_with_stop(&worker_stop) {
                         TickOutcome::Progress => continue,
@@ -49,6 +74,9 @@ impl SharingWorker {
                             }
                         }
                     }
+                }
+                if let Some(observer) = &observer {
+                    observer(SharingObservation::WorkerStopped);
                 }
             })
             .map_err(|_| Error::State)?;

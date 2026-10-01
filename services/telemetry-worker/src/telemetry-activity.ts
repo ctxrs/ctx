@@ -19,8 +19,21 @@ export function classifyActivity(
     return "automatic";
   }
   if (eventName === "runtime_observation") {
-    return operation === "liveness" ? "liveness" : "operational";
+    return operation === "liveness" || properties.runtime_phase === "liveness" ? "liveness" : "operational";
   }
+  if (operation === "graph") {
+    if (new Set(["install", "uninstall", "hook", "provider", "switch"]).has(String(properties.graph_operation))) return "setup";
+    if (new Set(["stats", "check_update", "diagnose", "benchmark"]).has(String(properties.graph_operation))) return "status";
+    if (properties.graph_operation === "watch") return "automatic";
+    return outcome === "success" && properties.output_delivery === "known_complete" && properties.result_empty === false ? "product_value" : "product_activity";
+  }
+  if (operation === "remote") {
+    if (properties.remote_operation === "status") return "status";
+    return outcome === "success" && properties.output_delivery === "known_complete" && properties.result_empty === false ? "product_value" : "product_activity";
+  }
+  if (surface === "server") return "operational";
+  if (new Set(["remote_status", "archive_verify", "server_status", "server_publications", "server_user_list", "server_user_credentials"]).has(operation)) return "status";
+  if (new Set(["remote_pause", "remote_resume", "remote_remove", "server_collection_create", "server_user_create", "server_user_credential"]).has(operation)) return "setup";
   if (surface === "daemon") {
     if (operation === "status") return "status";
     if (operation === "enable" || operation === "disable") return "setup";

@@ -29,12 +29,16 @@ macro_rules! eprintln {
 }
 
 mod analytics;
+mod analytics_delivery;
 mod analytics_outbox;
+use ctx_client_observability::analytics::state as analytics_state;
+mod analytics_summary;
 mod cli;
 mod commands;
 mod core_capability;
 mod dispatch;
 mod docs;
+mod engine_telemetry;
 mod execution_capabilities;
 mod foreground_interrupt;
 mod history_config;
@@ -54,6 +58,7 @@ mod presentation_limit {
     pub(crate) use ctx_terminal::presentation_limit::*;
 }
 mod process_environment;
+mod product_runtime;
 mod progress;
 mod provider_args;
 mod provider_sources;
@@ -92,6 +97,9 @@ pub(crate) use value_parsers::parse_event_window_limit;
 
 fn main() -> ExitCode {
     let arguments = std::env::args_os().collect::<Vec<_>>();
+    if let Some(exit) = analytics_delivery::intercept(&arguments) {
+        return exit;
+    }
     if let Some(status) = unified::intercept(&arguments) {
         // The host owns process termination; preserve the child's full Windows
         // status as well as Unix shell statuses, rather than narrowing to u8.

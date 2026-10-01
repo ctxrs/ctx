@@ -8,6 +8,13 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
+use crate::{
+    observation::{
+        self as facts, ChildOutcome, Delivery, Missingness, Phase, SkipReason, StreamFacts,
+        TokenCounts,
+    },
+    observe::{self, Observed},
+};
 use sift::{CompactResult, Compactor};
 use std::sync::{
     Arc,
@@ -124,6 +131,7 @@ pub fn run_transformed(
         options,
         |bytes, stderr| transform(bytes, stderr).map(Presentation::Bytes),
         observer,
+        &mut Observed::new(),
     )
 }
 
@@ -134,13 +142,30 @@ pub fn run_presented(
     options: Options,
     mut transform: impl FnMut(&[u8], bool) -> Option<Presentation>,
     observer: impl FnOnce(Observation<'_>),
+    observed: &mut Observed,
 ) -> anyhow::Result<i32> {
     let started = Instant::now();
+    observed.facts.child = ChildOutcome::Unknown;
+    observed.phase = Phase::Arguments;
     let (program, args) = args
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("missing command"))?;
     let interactive = io::stdin().is_terminal() || io::stdout().is_terminal();
     let capture = !options.raw && (options.capture || !interactive);
+    if !capture {
+        observed.facts.streams = [Some(StreamFacts {
+            missing: Some(Missingness::Inherited),
+            ..Default::default()
+        }); 2];
+        if observed.facts.skip.is_none() {
+            observed.skip(if options.raw {
+                SkipReason::ExplicitRaw
+            } else {
+                SkipReason::Interactive
+            });
+        }
+    }
+    observed.phase = Phase::ProcessSetup;
     #[cfg(unix)]
     let signals = Signals::new()?;
     #[cfg(windows)]
@@ -167,10 +192,15 @@ pub fn run_presented(
         use std::os::windows::process::CommandExt;
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
     }
+    observed.phase = Phase::Spawn;
     let child = match command.spawn() {
         Ok(child) => child,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             eprintln!("ctx sift: {}: {error}", program.to_string_lossy());
+            observed.facts.child = ChildOutcome::SpawnNotFound;
+            observed.facts.failure =
+                Some(observe::failure(Phase::Spawn, &anyhow::Error::from(error)));
+            observed.facts.outcome = facts::Outcome::Failure;
             observer(Observation {
                 stdout: Default::default(),
                 stderr: Default::default(),
@@ -181,6 +211,10 @@ pub fn run_presented(
         }
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
             eprintln!("ctx sift: {}: {error}", program.to_string_lossy());
+            observed.facts.child = ChildOutcome::SpawnDenied;
+            observed.facts.failure =
+                Some(observe::failure(Phase::Spawn, &anyhow::Error::from(error)));
+            observed.facts.outcome = facts::Outcome::Failure;
             observer(Observation {
                 stdout: Default::default(),
                 stderr: Default::default(),
@@ -189,14 +223,23 @@ pub fn run_presented(
             });
             return Ok(126);
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            observed.facts.child = ChildOutcome::SpawnFailed;
+            return Err(error.into());
+        }
     };
     let read_bytes: [Arc<AtomicU64>; 2] = Default::default();
     let emitted_bytes: [Arc<AtomicU64>; 2] = Default::default();
     let mut originals: Option<[Vec<u8>; 2]> = None;
     let mut compacted: [Option<CompactResult>; 2] = [None, None];
     let mut presented_tokens = [None, None];
+    let mut stream_facts = [StreamFacts::default(); 2];
+    let mut transform_duration = None;
+    let mut streaming_reason = None;
+    let mut child_outcome = ChildOutcome::Unknown;
     let mut process = Process {
+        output_duration: None,
+        phase: Phase::ProcessSetup,
         emitted_bytes: emitted_bytes.clone(),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         exit_notification: exit_notification(&child),
@@ -211,6 +254,7 @@ pub fn run_presented(
         reaped: false,
         complete: false,
     };
+    observed.phase = Phase::ProcessSetup;
     #[cfg(windows)]
     process.windows.assign_and_resume(&process.child)?;
     let result = (|| -> anyhow::Result<i32> {
@@ -239,7 +283,11 @@ pub fn run_presented(
         loop {
             process.check()?;
             if status.is_none() {
+                process.phase = Phase::ChildWait;
                 status = process.child.try_wait()?;
+                if let Some(status) = status {
+                    child_outcome = observed_exit(status);
+                }
                 process.reaped = status.is_some();
             }
             if status.is_some() && eof {
@@ -251,10 +299,12 @@ pub fn run_presented(
             {
                 // A descendant can keep the pipes open after the direct child exits.
                 // The same deadline applies until both pipes close.
+                streaming_reason = Some(SkipReason::StreamingDeadline);
                 flush_pending(&mut process, &mut pending)?;
                 passthrough = true;
             }
             if !capture || eof {
+                process.phase = Phase::ChildWait;
                 process.wait_for_exit()?;
                 continue;
             }
@@ -267,9 +317,11 @@ pub fn run_presented(
             };
             match rx.recv_timeout(timeout) {
                 Ok((stderr, bytes)) => {
+                    process.phase = Phase::ChildRead;
                     let bytes = bytes?;
                     first.get_or_insert_with(Instant::now);
                     if !passthrough && size + bytes.len() >= LIMIT {
+                        streaming_reason = Some(SkipReason::CaptureLimit);
                         flush_pending(&mut process, &mut pending)?;
                         passthrough = true;
                     }
@@ -286,42 +338,94 @@ pub fn run_presented(
         }
         if !passthrough {
             originals = Some(pending);
+            for stream in &mut stream_facts {
+                stream.input_complete = true;
+            }
             let mut compactor = None;
             for (index, bytes) in originals.as_ref().unwrap().iter().enumerate() {
                 process.check()?;
-                if let Some(output) = transform(bytes, index == 1) {
+                process.phase = Phase::Render;
+                let transform_started = Instant::now();
+                let presented = transform(bytes, index == 1);
+                *transform_duration.get_or_insert(Duration::ZERO) += transform_started.elapsed();
+                stream_facts[index].input_complete = true;
+                if let Some(output) = presented {
                     match output {
-                        Presentation::Bytes(bytes) => process.write(index == 1, &bytes)?,
+                        Presentation::Bytes(bytes) => {
+                            stream_facts[index].presentation = facts::Presentation::ExplicitView;
+                            stream_facts[index].missing = Some(Missingness::ViewNotTokenized);
+                            process.write(index == 1, &bytes)?;
+                        }
                         Presentation::Compacted(result) => {
+                            stream_facts[index] = observe::compacted(&result, bytes.len());
                             process.write(index == 1, result.text.as_bytes())?;
                             compacted[index] = Some(result);
                         }
                         Presentation::Semantic { bytes, tokens } => {
+                            stream_facts[index].presentation = facts::Presentation::CommandView;
+                            stream_facts[index].tokens = Some(TokenCounts {
+                                input: tokens.0 as u64,
+                                emitted: tokens.1 as u64,
+                            });
+                            stream_facts[index].missing = None;
                             process.write(index == 1, &bytes)?;
                             presented_tokens[index] = Some(tokens);
                         }
                     }
+                    stream_facts[index].output_complete = true;
                     process.check()?;
                     continue;
                 }
                 // Tiny responses cannot amortize tokenizer startup or framing.
-                let candidate = if bytes.len() >= 256 {
-                    std::str::from_utf8(bytes).ok().and_then(|text| {
-                        compactor
-                            .get_or_insert_with(Compactor::new)
-                            .as_ref()
-                            .ok()
-                            .map(|compactor| compactor.compact(text))
-                    })
-                } else {
-                    None
-                };
+                process.phase = Phase::Codec;
+                let transform_started = Instant::now();
+                let text = (bytes.len() >= 256).then(|| std::str::from_utf8(bytes));
+                let candidate =
+                    text.as_ref()
+                        .and_then(|text| text.as_ref().ok())
+                        .and_then(|text| {
+                            compactor
+                                .get_or_insert_with(Compactor::new)
+                                .as_ref()
+                                .ok()
+                                .map(|compactor| compactor.compact(text))
+                        });
+                *transform_duration.get_or_insert(Duration::ZERO) += transform_started.elapsed();
+                stream_facts[index] = candidate.as_ref().map_or_else(
+                    || {
+                        let (missing, skip) = if bytes.len() < 256 {
+                            (Missingness::Small, SkipReason::Small)
+                        } else if text.as_ref().is_some_and(|text| text.is_err()) {
+                            (Missingness::Binary, SkipReason::Binary)
+                        } else {
+                            (
+                                Missingness::TokenizerUnavailable,
+                                SkipReason::TokenizerUnavailable,
+                            )
+                        };
+                        StreamFacts {
+                            input_complete: true,
+                            missing: Some(missing),
+                            skip: Some(skip),
+                            tokens: bytes.is_empty().then_some(TokenCounts {
+                                input: 0,
+                                emitted: 0,
+                            }),
+                            ..Default::default()
+                        }
+                    },
+                    |result| observe::compacted(result, bytes.len()),
+                );
+                if bytes.is_empty() {
+                    stream_facts[index].missing = None;
+                }
                 process.write(
                     index == 1,
                     candidate
                         .as_ref()
                         .map_or(bytes.as_slice(), |result| result.text.as_bytes()),
                 )?;
+                stream_facts[index].output_complete = true;
                 compacted[index] = candidate;
                 // Tokenizer work and empty output must not hide a pending signal.
                 process.check()?;
@@ -342,6 +446,50 @@ pub fn run_presented(
     let result = process
         .cancelled
         .map_or(result, |(signal, _)| Ok(128 + signal));
+    observed.phase = process.phase;
+    observed.facts.child = if process.cancelled.is_some() {
+        ChildOutcome::Cancelled
+    } else {
+        child_outcome
+    };
+    observed.facts.transform_duration = transform_duration;
+    observed.facts.output_duration = process.output_duration;
+    if capture {
+        for index in 0..2 {
+            let stream = &mut stream_facts[index];
+            stream.input_bytes = Some(read_bytes[index].load(Ordering::Relaxed));
+            stream.emitted_bytes = Some(emitted_bytes[index].load(Ordering::Relaxed));
+            if let Some(reason) = streaming_reason {
+                stream.skip = Some(reason);
+                stream.missing = Some(Missingness::Streaming);
+                stream.input_complete = result.is_ok() && process.cancelled.is_none();
+                stream.output_complete = stream.input_complete;
+            }
+            if !stream.output_complete {
+                stream.tokens = None;
+                stream.missing = Some(Missingness::Incomplete);
+            }
+        }
+        if stream_facts
+            .iter()
+            .any(|s| s.missing == Some(Missingness::TokenizerUnavailable))
+        {
+            observed.facts.outcome = facts::Outcome::FailOpen;
+            observed.facts.failure = Some(facts::Failure {
+                phase: Phase::Codec,
+                kind: facts::FailureKind::Tokenizer,
+            });
+        }
+        observed.facts.streams = stream_facts.map(Some);
+        observed.facts.delivery = if stream_facts.iter().all(|s| s.output_complete) {
+            Delivery::Flushed
+        } else {
+            Delivery::Failed
+        };
+        if let Some(reason) = streaming_reason {
+            observed.skip(reason);
+        }
+    }
     // Reap/terminate before invoking application code, which may itself do I/O.
     drop(process);
     let status = result?;
@@ -396,6 +544,21 @@ fn flush_pending(process: &mut Process, pending: &mut [Vec<u8>; 2]) -> io::Resul
     Ok(())
 }
 
+fn observed_exit(status: ExitStatus) -> ChildOutcome {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if status.signal().is_some() {
+            return ChildOutcome::Signalled;
+        }
+    }
+    if status.success() {
+        ChildOutcome::ExitedZero
+    } else {
+        ChildOutcome::ExitedNonzero
+    }
+}
+
 fn exit_code(status: ExitStatus) -> i32 {
     #[cfg(unix)]
     {
@@ -411,6 +574,8 @@ fn exit_code(status: ExitStatus) -> i32 {
 }
 
 struct Process {
+    output_duration: Option<Duration>,
+    phase: Phase,
     emitted_bytes: [Arc<AtomicU64>; 2],
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     exit_notification: Option<std::os::fd::OwnedFd>,
@@ -521,6 +686,7 @@ impl Process {
                 if result >= 0
                     && poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
                 {
+                    self.phase = Phase::Output;
                     return Err(io::Error::new(
                         io::ErrorKind::BrokenPipe,
                         "output consumer closed",
@@ -547,7 +713,15 @@ impl Process {
             libc::kill(if self.group { -pid } else { pid }, signal);
         }
     }
-    fn write(&mut self, stderr: bool, mut bytes: &[u8]) -> io::Result<()> {
+    fn write(&mut self, stderr: bool, bytes: &[u8]) -> io::Result<()> {
+        let start = Instant::now();
+        let result = self.write_inner(stderr, bytes);
+        *self.output_duration.get_or_insert(Duration::ZERO) += start.elapsed();
+        result
+    }
+
+    fn write_inner(&mut self, stderr: bool, mut bytes: &[u8]) -> io::Result<()> {
+        self.phase = Phase::Output;
         while !bytes.is_empty() {
             self.check()?;
             if self

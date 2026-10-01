@@ -36,7 +36,8 @@ fn ctx_root_command(cwd: &Path) -> Command {
         .env("XDG_STATE_HOME", cwd.join(".test-home/state"))
         .env("XDG_RUNTIME_DIR", cwd.join(".test-home/runtime"))
         .env("PATH", cwd.join(".test-home/bin"))
-        .env("CTX_DATA_ROOT", cwd.join(".test-history"));
+        .env("CTX_DATA_ROOT", cwd.join(".test-history"))
+        .env("CTX_ANALYTICS_ENABLED", "false");
     command
 }
 

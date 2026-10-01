@@ -56,7 +56,12 @@ pub(crate) fn read_labels(path: &Path) -> Result<LabelFile> {
     Ok(file)
 }
 
-pub(crate) fn label(args: &LabelArgs, db: Option<&Path>, json_output: bool) -> Result<()> {
+pub(crate) fn label(
+    args: &LabelArgs,
+    db: Option<&Path>,
+    json_output: bool,
+    facts: &mut GraphObservation,
+) -> Result<()> {
     let (graph, source) = load(&args.source, db)?;
     let exists = destination(&args.output, std::slice::from_ref(&source))?;
     let input = args
@@ -64,7 +69,7 @@ pub(crate) fn label(args: &LabelArgs, db: Option<&Path>, json_output: bool) -> R
         .as_deref()
         .or_else(|| exists.then_some(args.output.as_path()));
     let previous = input.map(read_labels).transpose()?;
-    let report = analysis::analyze(&graph, &args.source.analysis.options())?;
+    let report = analyze_observed(&graph, &args.source.analysis.options(), facts)?;
     let mut labels = BTreeMap::new();
     let mut reused = 0;
     for community in report.communities {
@@ -102,7 +107,12 @@ pub(crate) fn label(args: &LabelArgs, db: Option<&Path>, json_output: bool) -> R
         bytes.len() as u64 <= LABEL_BYTES,
         "label output exceeds 8 MiB"
     );
+    facts.phase = GraphPhase::ArtifactWrite;
     write_atomic(&args.output, &bytes, &[source])?;
+    facts.artifact_committed = Some(true);
+    facts.artifact_bytes = Some(bytes.len() as u64);
+    facts.result_count = Some(count as u64);
+    facts.execution_succeeded = Some(true);
     print(
         &json!({"output":args.output,"generation":graph.generation,"communities":count,
         "reused":reused,"generated":count-reused,"signature_algorithm":LABEL_SIGNATURE}),

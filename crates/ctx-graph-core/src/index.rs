@@ -16,6 +16,9 @@ use anyhow::{Context, Result, bail, ensure};
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 
+use crate::observation::{
+    GraphIndexDisposition, GraphInvocation, GraphObservation, GraphOperation, GraphPhase,
+};
 use ctx_graph_types::EXTRACTOR_REVISION;
 const SCAN_MANIFEST_VERSION: u32 = 3;
 const MAX_SCAN_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -251,9 +254,76 @@ pub(crate) fn run_with_reserved_semantic_files(
     options: &IndexOptions,
     reserved: usize,
 ) -> Result<IndexReport> {
+    run_with_reserved_semantic_files_observed(
+        root,
+        db,
+        options,
+        reserved,
+        &mut GraphObservation::new(GraphOperation::Index, GraphInvocation::Library),
+    )
+}
+
+/// Index with caller-owned facts, including partial work retained on failure.
+pub fn run_with_options_observed(
+    root: &Path,
+    db: &Path,
+    options: &IndexOptions,
+    facts: &mut GraphObservation,
+) -> Result<IndexReport> {
+    run_with_reserved_semantic_files_observed(root, db, options, 0, facts)
+}
+
+pub fn run_observed(root: &Path, db: &Path, facts: &mut GraphObservation) -> Result<IndexReport> {
+    let started = std::time::Instant::now();
+    facts.phase = GraphPhase::Open;
+    let result =
+        stored_options(db).and_then(|options| run_with_options_observed(root, db, &options, facts));
+    facts.duration = Some(started.elapsed());
+    if let Err(error) = &result {
+        crate::observation::failed(facts, error);
+    }
+    result
+}
+
+pub(crate) fn run_with_reserved_semantic_files_observed(
+    root: &Path,
+    db: &Path,
+    options: &IndexOptions,
+    reserved: usize,
+    facts: &mut GraphObservation,
+) -> Result<IndexReport> {
+    let started = std::time::Instant::now();
     let prepared = prepare_semantic_budget(options);
-    run_prepared(root, db, &prepared, reserved)
-        .map_err(|error| retain_semantic_usage(error, &prepared))
+    facts.semantic.configured = Some(prepared.ingest.semantic.is_some());
+    let result = run_prepared(root, db, &prepared, reserved, facts)
+        .map_err(|error| retain_semantic_usage(error, &prepared));
+    if result.is_err()
+        && let Some(semantic) = &prepared.ingest.semantic
+    {
+        let reserved = semantic
+            .runtime_budget
+            .as_ref()
+            .map(|b| b.usage())
+            .transpose();
+        let receipts = semantic
+            .runtime_usage
+            .as_ref()
+            .map(|r| r.snapshot())
+            .transpose();
+        facts.semantic.usage_unavailable = reserved.is_err() || receipts.is_err();
+        facts
+            .semantic
+            .record(reserved.ok().flatten(), receipts.ok().flatten().as_deref());
+    }
+    facts.duration = Some(started.elapsed());
+    match &result {
+        Ok(report) => {
+            facts.index_report(report);
+            facts.execution_succeeded = Some(true);
+        }
+        Err(error) => crate::observation::failed(facts, error),
+    }
+    result
 }
 
 pub(crate) fn prepare_semantic_budget(options: &IndexOptions) -> IndexOptions {

@@ -110,7 +110,12 @@ pub(super) fn scan_endpoint_rows(
     while let Some(row) = rows.next()? {
         ensure!(
             examined < MAX_RANK_POSTINGS && start.elapsed() < Duration::from_secs(2),
-            "endpoint lookup exceeded its work/time budget; use an exact ID or a smaller file/kind scope"
+            QueryFailure {
+                kind: QueryFailureKind::WorkLimit,
+                error: anyhow::anyhow!(
+                    "endpoint lookup exceeded its work/time budget; use an exact ID or a smaller file/kind scope"
+                )
+            }
         );
         examined += 1;
         let id: &str = row.get_ref(0)?.as_str()?;
@@ -122,7 +127,12 @@ pub(super) fn scan_endpoint_rows(
         bytes += record_bytes;
         ensure!(
             record_bytes <= MAX_SEARCH_BYTES && bytes <= MAX_RANK_BYTES,
-            "endpoint lookup exceeded its normalization byte budget; use an exact ID or a smaller file/kind scope"
+            QueryFailure {
+                kind: QueryFailureKind::WorkLimit,
+                error: anyhow::anyhow!(
+                    "endpoint lookup exceeded its normalization byte budget; use an exact ID or a smaller file/kind scope"
+                )
+            }
         );
         if let Some(tier) = endpoint_tier(id, label, qualified, term, callable, qualified_tail)
             && tiers[tier].len() < 2
@@ -214,7 +224,12 @@ pub(super) fn unique_filtered(
 }
 
 pub(super) fn require_unique(nodes: Vec<Node>, text: &str) -> Result<Node> {
-    match nodes.len() {
+    let kind = if nodes.is_empty() {
+        QueryFailureKind::EndpointNotFound
+    } else {
+        QueryFailureKind::EndpointAmbiguous
+    };
+    let result = (|| match nodes.len() {
         0 => bail!("no symbol matches {text:?} within the requested scope"),
         1 => Ok(nodes.into_iter().next().unwrap()),
         _ => bail!(
@@ -230,7 +245,8 @@ pub(super) fn require_unique(nodes: Vec<Node>, text: &str) -> Result<Node> {
                 ""
             }
         ),
-    }
+    })();
+    result.map_err(|error| QueryFailure::wrap(kind, error))
 }
 
 pub(super) fn resolve_relation(
@@ -305,13 +321,23 @@ pub(super) fn resolve_relation(
         while let Some(name) = relation {
             ensure!(
                 examined < MAX_EXAMINED && start.elapsed() < Duration::from_secs(2),
-                "relation lookup exceeded its work/time budget; use an exact relation"
+                QueryFailure {
+                    kind: QueryFailureKind::WorkLimit,
+                    error: anyhow::anyhow!(
+                        "relation lookup exceeded its work/time budget; use an exact relation"
+                    )
+                }
             );
             examined += 1;
             bytes += name.len();
             ensure!(
                 bytes <= MAX_SEARCH_BYTES,
-                "relation lookup exceeded its byte budget; use an exact relation"
+                QueryFailure {
+                    kind: QueryFailureKind::WorkLimit,
+                    error: anyhow::anyhow!(
+                        "relation lookup exceeded its byte budget; use an exact relation"
+                    )
+                }
             );
             let folded = normalize(&name);
             let tier = if folded == term {

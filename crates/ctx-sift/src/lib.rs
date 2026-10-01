@@ -10,7 +10,10 @@ mod discover;
 mod execute;
 mod filter;
 mod hooks;
+mod input;
 mod jev;
+pub mod observation;
+mod observe;
 mod pre_hooks;
 mod protocol;
 mod rewrite;
@@ -30,14 +33,29 @@ use std::{
 /// cancellation 128 + signal. A closed output consumer is a quiet success.
 /// Child argv and input file paths retain their native OS representation.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
-    match cli::run(args) {
-        Ok(status) => status,
-        Err(error) if is_broken_pipe(&error) => 0,
+    run_observed(args, |_| {})
+}
+
+/// Observe content-free terminal facts after output completes or fails.
+/// Protocols emit a terminal for each request and a separate session terminal;
+/// session terminals carry no stream savings. Callbacks must remain lightweight
+/// and must not change output or start network work on the calling thread.
+pub fn run_observed(
+    args: impl IntoIterator<Item = OsString>,
+    mut callback: impl FnMut(observation::SiftObservation),
+) -> i32 {
+    let mut observed = observe::Observed::new();
+    let result = cli::run(args, &mut observed, &mut callback);
+    let status = match &result {
+        Ok(status) => *status,
+        Err(error) if is_broken_pipe(error) => 0,
         Err(error) => {
             let _ = writeln!(io::stderr().lock(), "ctx sift: {error:#}");
             1
         }
-    }
+    };
+    observed.finish(result.as_ref().err(), &mut callback);
+    status
 }
 
 fn is_broken_pipe(error: &anyhow::Error) -> bool {
@@ -79,3 +97,6 @@ mod usage_tests;
 mod views_tests;
 #[cfg(test)]
 mod workflow_tests;
+
+#[cfg(test)]
+mod observation_tests;

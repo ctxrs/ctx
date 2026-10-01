@@ -60,3 +60,21 @@ terminal failure reason coverage must use the appropriate failure denominator.
 Delivery observations are outside the canonical view and this aggregate.
 Late commits and current classification overrides can change a past window;
 results are not a completeness watermark or proof of fleet-wide recovery.
+
+
+`0054_product_telemetry_windows.sql` adds reader-only
+`ctx.analytics_product_health_window` and
+`ctx.analytics_product_measurements_window`. Both take environment, finite
+positive half-open occurrence bounds of at most 24 hours, and an optional version
+array. Null versions means all; an empty array matches none. Production uses
+canonical eligible public traffic; staging uses explicitly labelled synthetic
+qualification. These functions expose no identity keys or arbitrary properties.
+`cohort` contains only fixed closed diagnostic fields. Profile/root counts are
+observed grains, not machine counts. Summary receipts and measured bucket
+frequencies cannot be summed as exact invocation/token totals or dollar savings.
+Use `count_unit`, eligible/measured counts and each summary's denominator buckets.
+
+Apply as `ctx_migration` after the canonical telemetry view and reader role
+exist; preserve the existing `0053` contract. The migration adds functions and
+ACLs only. The isolated `//services/telemetry-worker:product_postgres_test`
+exercises HTTP, Queue, PostgreSQL writes and these restricted reads.

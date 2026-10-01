@@ -59,6 +59,7 @@ fn request_observation(descriptor: RequestDescriptor) -> McpRequestObservation {
 
 pub struct McpTelemetry {
     observation: Option<McpObservation>,
+    remote: bool,
 }
 
 impl McpTelemetry {
@@ -70,7 +71,15 @@ impl McpTelemetry {
     ) -> Self {
         Self {
             observation: authorized.then(|| McpObservation::start(dispatch)),
+            remote: false,
         }
+    }
+
+    /// A remote reader has no local-history tool executions, including rejected
+    /// requests that never reached its backend and therefore have no carrier.
+    pub fn for_remote(mut self) -> Self {
+        self.remote = true;
+        self
     }
 
     pub fn record_delivered(
@@ -80,17 +89,17 @@ impl McpTelemetry {
         usage: Option<&ToolUsageFacts>,
         duration: Duration,
     ) {
-        if matches!(
-            descriptor,
-            RequestDescriptor::ToolCall {
-                operation: McpToolKind::Unified(_)
-            }
-        ) {
-            return;
-        }
+        let engine = self.engine_request(descriptor, usage);
         let Some(observation) = &mut self.observation else {
             return;
         };
+        if engine {
+            observation.record_engine_request();
+            if response.is_some() {
+                submit_engine(observation, usage, duration, None);
+            }
+            return;
+        }
         let delivered = response.map(|response| delivered_response(descriptor, response, usage));
         observation.record_delivered(request_observation(descriptor), delivered, duration);
     }
@@ -102,15 +111,13 @@ impl McpTelemetry {
         class: McpErrorClassV1,
         usage: Option<&ToolUsageFacts>,
     ) {
-        if matches!(
-            descriptor,
-            RequestDescriptor::ToolCall {
-                operation: McpToolKind::Unified(_)
-            }
-        ) {
-            return;
-        }
+        let engine = self.engine_request(descriptor, usage);
         if let Some(observation) = &mut self.observation {
+            if engine {
+                observation.record_engine_request();
+                submit_engine(observation, usage, duration, Some(class));
+                return;
+            }
             observation.record_response_failure_with_result(
                 request_observation(descriptor),
                 duration,
@@ -120,9 +127,99 @@ impl McpTelemetry {
         }
     }
 
+    fn engine_request(
+        &self,
+        descriptor: RequestDescriptor,
+        usage: Option<&ToolUsageFacts>,
+    ) -> bool {
+        matches!(
+            descriptor,
+            RequestDescriptor::ToolCall {
+                operation: McpToolKind::Unified(_)
+            }
+        ) || (self.remote && matches!(descriptor, RequestDescriptor::ToolCall { .. }))
+            || usage.is_some_and(|u| u.graph.is_some() || u.sift.is_some() || u.remote.is_some())
+    }
+
     pub fn stop(mut self, reason: McpStopReasonV1, outcome: Outcome, duration: Duration) {
         if let Some(observation) = self.observation.take() {
             observation.stop(reason, outcome, duration);
+        }
+    }
+}
+
+/// Called only at the existing response encode/write/flush finalizer. Carriers
+/// preserve work facts even when the response is an error or the writer fails.
+fn submit_engine(
+    observation: &McpObservation,
+    usage: Option<&ToolUsageFacts>,
+    duration: Duration,
+    failure: Option<McpErrorClassV1>,
+) {
+    use ctx_client_observability::analytics::{
+        DeliveryEvidence, GraphOutputBoundary, SiftDelivery, SiftFailureKind, SiftMissingness,
+        SiftPhase,
+    };
+    let Some(usage) = usage else { return };
+    let delivery = if failure.is_some() {
+        DeliveryEvidence::Failed
+    } else {
+        DeliveryEvidence::KnownComplete
+    };
+    if let Some(mut graph) = usage.graph {
+        graph.completion.elapsed = duration;
+        if graph.completion.delivery != DeliveryEvidence::Failed {
+            graph.completion.delivery = delivery;
+        }
+        graph.details.output_boundary =
+            Some(if failure == Some(McpErrorClassV1::ResponseSerialize) {
+                GraphOutputBoundary::Unobserved
+            } else {
+                GraphOutputBoundary::StdioFlush
+            });
+        observation.submit_post_flush_event(graph.into_event());
+    }
+    if let Some(mut remote) = usage.remote {
+        remote.completion.elapsed = duration;
+        if remote.completion.delivery != DeliveryEvidence::Failed {
+            remote.completion.delivery = delivery;
+        }
+        observation.submit_post_flush_event(remote.into_event());
+    }
+    if let Some(mut sift) = usage.sift {
+        let mut latency = [0; 14];
+        latency[ctx_client_observability::analytics::native_duration_index(duration)] = 1;
+        sift.latency = Some(latency);
+        sift.cohort.delivery = Some(if failure.is_some() || sift.output_failed > 0 {
+            SiftDelivery::Failed
+        } else {
+            SiftDelivery::Flushed
+        });
+        if let Some(failure) = failure {
+            sift.output_failed = 1;
+            if sift.complete > 0 {
+                sift.complete = 0;
+                sift.partial = 1;
+            }
+            sift.bytes = None;
+            sift.tokens = None;
+            sift.cohort.missingness = Some(SiftMissingness::Incomplete);
+            if sift.cohort.failure_phase.is_none() {
+                sift.cohort.failure_phase =
+                    Some(if failure == McpErrorClassV1::ResponseSerialize {
+                        SiftPhase::Render
+                    } else {
+                        SiftPhase::Output
+                    });
+                sift.cohort.failure_kind = Some(if failure == McpErrorClassV1::ResponseSerialize {
+                    SiftFailureKind::Other
+                } else {
+                    SiftFailureKind::Io
+                });
+            }
+        }
+        if let Some(event) = sift.into_event() {
+            observation.submit_post_flush_event(event);
         }
     }
 }
@@ -339,3 +436,6 @@ const fn search_failure_phase(phase: ToolSearchFailurePhase) -> SearchFailurePha
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod engine_tests;

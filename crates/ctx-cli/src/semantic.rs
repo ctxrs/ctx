@@ -137,9 +137,13 @@ fn wait_for_import_daemon_semantic_completion(
     }
 }
 
-struct CtxDaemonCliHost;
+struct CtxDaemonCliHost {
+    telemetry: crate::product_runtime::DaemonCollector,
+}
 
-static HOST: CtxDaemonCliHost = CtxDaemonCliHost;
+static HOST: CtxDaemonCliHost = CtxDaemonCliHost {
+    telemetry: crate::product_runtime::DaemonCollector::new(),
+};
 const ATTRIBUTION_MAINTENANCE_WAKE_RUNNING: u8 = 1;
 const ATTRIBUTION_MAINTENANCE_WAKE_PENDING: u8 = 2;
 static ATTRIBUTION_MAINTENANCE_WAKE_STATE: AtomicU8 = AtomicU8::new(0);
@@ -676,6 +680,8 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
         // The daemon owns the maintenance worker. Cancel and join it before
         // returning so attribution work cannot outlive the owning daemon.
         stop_attribution_maintenance_worker();
+        // Service return has joined sharing workers, including error exits.
+        self.telemetry.finish(data_root);
         result
     }
 
@@ -684,7 +690,11 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
     }
 
     fn upload_daemon_events(&self, data_root: &Path, events: &[PublicEventV1]) {
-        crate::analytics::send_daemon_batch(data_root, events);
+        crate::analytics::send_daemon_batch(data_root, events, &self.telemetry);
+    }
+
+    fn sharing_observer(&self, data_root: &Path) -> Option<ctx_history_sharing::SharingObserver> {
+        self.telemetry.sharing_observer(data_root)
     }
 
     fn fetch_to_writer(

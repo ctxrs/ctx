@@ -2,7 +2,7 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use clap::{Args, Subcommand};
@@ -28,16 +28,18 @@ impl UnifiedCommand {
         matches!(self, Self::Graph(_))
     }
 
-    pub(crate) fn run(self) -> i32 {
+    pub(crate) fn run(self, data_root: Option<PathBuf>) -> i32 {
         let args = match self {
             Self::Graph(args) => {
-                return ctx_graph::run_parsed_exit(*args);
+                return crate::engine_telemetry::observe_graph(data_root, |observer| {
+                    ctx_graph::run_parsed_exit_observed(*args, observer)
+                });
             }
             Self::Sift(args) => args,
         };
         let original = std::env::args_os().collect::<Vec<_>>();
         let arguments = preserved_output_arguments(&original, "sift").unwrap_or(args.arguments);
-        run_sift(&arguments)
+        run_sift(&arguments, data_root)
     }
 }
 
@@ -112,14 +114,25 @@ pub(crate) fn intercept(arguments: &[OsString]) -> Option<i32> {
 
 fn run_engine(name: &str, arguments: &[OsString]) -> i32 {
     if name == "graph" {
-        return ctx_graph::run(arguments.iter().cloned());
+        return crate::engine_telemetry::observe_graph(None, |observer| {
+            ctx_graph::run_observed(arguments.iter().cloned(), observer)
+        });
     }
-    run_sift(arguments)
+    run_sift(arguments, None)
 }
 
-fn run_sift(arguments: &[OsString]) -> i32 {
+fn run_sift(arguments: &[OsString], data_root: Option<PathBuf>) -> i32 {
+    let mut telemetry = crate::engine_telemetry::EngineTelemetry::optional(data_root);
+    ctx_sift::run_observed(sift_arguments(arguments), move |facts| {
+        if let Some(telemetry) = telemetry.as_mut() {
+            telemetry.record_sift(facts);
+        }
+    })
+}
+
+fn sift_arguments(arguments: &[OsString]) -> Vec<OsString> {
     let Some(first) = arguments.first().and_then(|argument| argument.to_str()) else {
-        return ctx_sift::run([OsString::from("--help")]);
+        return vec![OsString::from("--help")];
     };
     if matches!(
         first,
@@ -145,7 +158,7 @@ fn run_sift(arguments: &[OsString]) -> i32 {
             | "restore"
             | "recall"
     ) {
-        return ctx_sift::run(arguments.iter().cloned());
+        return arguments.to_vec();
     }
     let mut forwarded = vec![OsString::from("run"), OsString::from("--capture")];
     if first == "--" {
@@ -157,7 +170,7 @@ fn run_sift(arguments: &[OsString]) -> i32 {
     } else {
         forwarded.extend(arguments.iter().cloned());
     }
-    ctx_sift::run(forwarded)
+    forwarded
 }
 
 #[cfg(test)]
@@ -208,5 +221,19 @@ mod tests {
             ),
             ["--raw", "echo", "--color", "always", "--quiet"]
         );
+    }
+
+    #[test]
+    fn sift_forwarding_keeps_explicit_operations_and_child_arguments() {
+        let argv = |args: &[&str]| args.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            sift_arguments(&argv(&["filter", "--raw"])),
+            argv(&["filter", "--raw"])
+        );
+        assert_eq!(
+            sift_arguments(&argv(&["--", "--help"])),
+            argv(&["run", "--capture", "--help"])
+        );
+        assert_eq!(sift_arguments(&[]), argv(&["--help"]));
     }
 }

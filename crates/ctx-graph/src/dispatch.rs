@@ -1,4 +1,5 @@
 use super::*;
+use crate::observation::{GraphLifecycle, GraphPhase};
 use ctx_history_platform::resource_format::format_bytes;
 
 pub(crate) fn native_root(db: &Path) -> Result<PathBuf> {
@@ -19,6 +20,44 @@ pub(crate) fn retryable_update(error: &anyhow::Error) -> bool {
 }
 
 pub fn run_parsed(cli: GraphArgs) -> Result<()> {
+    let mut facts = GraphObservation::new(
+        observation::operation(&cli.command),
+        GraphInvocation::Library,
+    );
+    run_parsed_observed(cli, &mut facts, None)
+}
+
+/// Execute with caller-owned facts, retaining them on Err. Does not finalize host output.
+pub fn run_parsed_observed(
+    cli: GraphArgs,
+    facts: &mut GraphObservation,
+    observer: Option<GraphObserver>,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    facts.operation = observation::operation(&cli.command);
+    let result = run_inner(cli, facts, observer);
+    facts.duration = Some(started.elapsed());
+    if let Err(error) = &result {
+        if error.is::<output::OutputFailure>() {
+            facts.phase = GraphPhase::OutputWrite;
+            facts.output_failure = Some(observation::failure_kind(error));
+        } else {
+            observation::failed(facts, error);
+        }
+    } else {
+        facts.execution_succeeded = Some(true);
+    }
+    if facts.operation == GraphOperation::Watch && result.is_err() && facts.lifecycle.is_none() {
+        facts.lifecycle = Some(GraphLifecycle::StartFailed);
+    }
+    result
+}
+
+fn run_inner(
+    cli: GraphArgs,
+    facts: &mut GraphObservation,
+    observer: Option<GraphObserver>,
+) -> Result<()> {
     if let Command::HookGuard(args) = &cli.command {
         if let Some(value) = crate::hook_context(
             args.platform,
@@ -28,7 +67,10 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
         ) {
             // Hook output is independent of normal CLI formatting and notices.
             // A closed host pipe must not turn optional context into a denial.
-            let _ = writeln!(io::stdout().lock(), "{value}");
+            if let Err(error) = writeln!(io::stdout().lock(), "{value}") {
+                facts.output_served = Some(false);
+                facts.output_failure = Some(observation::failure_kind(&error.into()));
+            }
         }
         return Ok(());
     }
@@ -150,19 +192,28 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
                     .db
                     .clone()
                     .unwrap_or_else(|| output.join(".graf/index.db"));
-                Some(ctx_graph_core::index::run(&output, &db)?)
+                Some(ctx_graph_core::index::run_observed(&output, &db, facts)?)
             } else {
                 None
             };
+            facts.execution_succeeded = Some(true);
             return print_value(
                 &serde_json::json!({"status":if reused { if *refresh { "refreshed" } else { "reused" } } else { "cloned" },"path":output,"index":report}),
                 cli.json,
             );
         }
-        Command::Extended(args) => return commands::run(args, cli.db.as_deref(), cli.json),
+        Command::Extended(args) => {
+            return commands::run_observed(args, cli.db.as_deref(), cli.json, facts);
+        }
         Command::Connect(args) => return connect::run(args, cli.db.as_deref(), cli.json),
-        Command::Provider(args) => return print_value(&extraction::provider(args)?, cli.json),
-        Command::Cache(args) => return print_value(&extraction::cache(args)?, cli.json),
+        Command::Provider(args) => {
+            let value = extraction::provider(args)?;
+            facts.execution_succeeded = Some(true);
+            return print_value(&value, cli.json);
+        }
+        Command::Cache(args) => {
+            return print_value(&extraction::cache_observed(args, facts)?, cli.json);
+        }
         Command::Install(args) => {
             ensure!(cli.db.is_none(), "install selects a project; omit --db");
             return print_value(&agent_setup::install(args)?, cli.json);
@@ -184,30 +235,35 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
             "switch uses the project's .graf/index.db; omit --db"
         );
         let report = switch::run(args)?;
+        facts.nodes = Some(report.nodes as u64);
+        facts.edges = Some(report.edges as u64);
+        facts.execution_succeeded = Some(true);
         if cli.json {
-            println!("{}", serde_json::to_string(&report)?);
+            crate::output::stdout(format_args!("{}", serde_json::to_string(&report)?))?;
         } else {
-            println!(
+            crate::output::stdout(format_args!(
                 "{}: {} nodes, {} edges.\nMCP config: {}\nDatabase: {}",
                 report.status,
                 report.nodes,
                 report.edges,
                 human(&report.config.display().to_string()),
                 human(&report.database.display().to_string())
-            );
+            ))?;
             if report.status != "undone" {
-                println!(
+                crate::output::stdout(format_args!(
                     "Verified ctx graph MCP. Restart your client to load graph tools.\nImported graphs are snapshots; Graphify generation remains available.\nUndo: ctx graph switch --undo (use the same --project and --config, if supplied)"
-                );
+                ))?;
             } else {
-                println!(
+                crate::output::stdout(format_args!(
                     "Restored the MCP configuration; the imported database was retained. Restart your client."
-                );
+                ))?;
             }
         }
         return Ok(());
     }
+    facts.phase = GraphPhase::Discover;
     let db = database(&cli)?;
+    facts.phase = GraphPhase::Prepare;
     let show_learning = match &cli.command {
         Command::Show(args) => args
             .memory_dir
@@ -229,7 +285,9 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
         Command::Index { path, extraction } => {
             let options = extraction.configure(index::stored_options(&db)?, &path, &db)?;
             return print_output(
-                Output::Index(index::run_with_options(&path, &db, &options)?),
+                Output::Index(index::run_with_options_observed(
+                    &path, &db, &options, facts,
+                )?),
                 cli.json,
             );
         }
@@ -255,13 +313,14 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
                 contributor,
                 captured_at_unix_secs,
             };
-            let (record, report) = ctx_graph_core::sources::add_and_index(
+            let (record, report) = ctx_graph_core::sources::add_and_index_observed(
                 &root,
                 &db,
                 &source,
                 name.as_deref(),
                 &options,
                 &capture,
+                facts,
             )?;
             return print_value(
                 &serde_json::json!({"source":record.source,"path":record.facts.path,"index":report}),
@@ -269,20 +328,27 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
             );
         }
         Command::CheckUpdate => {
-            return print_value(&index::check_update(&native_root(&db)?, &db)?, cli.json);
+            facts.phase = GraphPhase::Detect;
+            let report = index::check_update(&native_root(&db)?, &db)?;
+            facts.fresh = Some(report.fresh);
+            facts.execution_succeeded = Some(true);
+            return print_value(&report, cli.json);
         }
         Command::Compact => {
             let report = Store::open(&db)?.compact()?;
+            facts.execution_succeeded = Some(true);
             if cli.json {
                 return print_value(&report, true);
             }
-            println!(
+            crate::output::stdout(format_args!(
                 "Compacted database: {} -> {} of database pages.",
                 format_bytes(report.pages_before * report.page_size),
                 format_bytes(report.pages_after * report.page_size)
-            );
+            ))?;
             if report.checkpoint_busy {
-                println!("Another connection is delaying disk-space reclamation.");
+                crate::output::stdout(format_args!(
+                    "Another connection is delaying disk-space reclamation."
+                ))?;
             }
             return Ok(());
         }
@@ -290,27 +356,66 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
             interval_ms,
             iterations,
         } => {
+            let startup = std::time::Instant::now();
             let root = native_root(&db)?;
-            let mut polls = 0;
+            facts.lifecycle = Some(GraphLifecycle::Ready);
+            facts.duration = Some(startup.elapsed());
+            facts.polls = Some(0);
+            facts.retries = Some(0);
+            observation::emit(&observer, *facts);
             loop {
+                let started = std::time::Instant::now();
+                let mut tick = GraphObservation::new(GraphOperation::Update, facts.invocation);
+                tick.phase = GraphPhase::Detect;
+                let mut attempted = false;
                 let result = (|| -> Result<()> {
-                    if !index::check_update(&root, &db)?.fresh {
-                        print_output(Output::Index(index::run(&root, &db)?), cli.json)?;
+                    let fresh = index::check_update(&root, &db)?.fresh;
+                    tick.fresh = Some(fresh);
+                    tick.detect_duration = Some(started.elapsed());
+                    if !fresh {
+                        attempted = true;
+                        let report = index::run_observed(&root, &db, &mut tick)?;
+                        print_output(Output::Index(report), cli.json)?;
+                        output::output_result(io::stdout().lock().flush().map_err(Into::into))?;
+                        tick.output_boundary = observation::GraphOutputBoundary::CliFlush;
+                        tick.output_served = Some(true);
                     }
                     Ok(())
                 })();
+                if let Err(error) = &result {
+                    if error.is::<output::OutputFailure>() {
+                        tick.output_served = Some(false);
+                        tick.output_failure = Some(observation::failure_kind(error));
+                        tick.output_boundary = observation::GraphOutputBoundary::CliFlush;
+                    } else {
+                        observation::failed(&mut tick, error);
+                    }
+                } else {
+                    tick.execution_succeeded = Some(true);
+                }
+                tick.duration = Some(started.elapsed());
+                if attempted || result.is_err() {
+                    observation::emit(&observer, tick);
+                }
+                facts.polls = facts.polls.map(|n| n.saturating_add(1));
                 let pending = match result {
                     Err(error) if retryable_update(&error) => {
-                        eprintln!(
+                        facts.retries = facts.retries.map(|n| n.saturating_add(1));
+                        crate::output::stderr(format_args!(
                             "index is busy or changed concurrently; retrying at the next watch poll"
-                        );
+                        ))?;
                         Some(error)
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        facts.lifecycle = Some(GraphLifecycle::Stopped);
+                        return Err(error);
+                    }
                     Ok(()) => None,
                 };
-                polls += 1;
-                if iterations.is_some_and(|limit| polls >= limit) {
+                if iterations
+                    .is_some_and(|limit| facts.polls.is_some_and(|polls| polls >= u64::from(limit)))
+                {
+                    facts.lifecycle = Some(GraphLifecycle::Stopped);
                     return pending.map_or(Ok(()), Err);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(interval_ms));
@@ -337,7 +442,12 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
             options.ingest.force_cache_refresh = refresh_cache;
             options.allow_semantic_shrink = allow_semantic_shrink;
             return print_output(
-                Output::Index(index::run_with_options(Path::new(&root), &db, &options)?),
+                Output::Index(index::run_with_options_observed(
+                    Path::new(&root),
+                    &db,
+                    &options,
+                    facts,
+                )?),
                 cli.json,
             );
         }
@@ -367,13 +477,16 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
             } else {
                 store.import_graph(graph)?
             };
+            facts.stats(&stats);
+            facts.index = Some(observation::GraphIndexDisposition::Committed);
+            facts.execution_succeeded = Some(true);
             return print_output(Output::Stats(stats), cli.json);
         }
         Command::Serve(args) => {
             return tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
-                .block_on(mcp::serve(db, args));
+                .block_on(mcp::serve_observed(db, args, facts, observer));
         }
         Command::Query(a) => ReadCommand::Query(a),
         Command::Show(a) => ReadCommand::Show(a.symbol),
@@ -393,7 +506,7 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
         ReadCommand::Stats => ("stats", String::new()),
     };
     let start = std::time::Instant::now();
-    let output = read(&db, command)?;
+    let output = read_observed(&db, command, facts)?;
     if let Some(path) = cli.query_log.as_deref() {
         let response = serde_json::to_value(&output)?;
         let graph = response.get("result").unwrap_or(&response);
@@ -409,7 +522,9 @@ pub fn run_parsed(cli: GraphArgs) -> Result<()> {
             record["response"] = response;
         }
         if append_query_log(path, &record).is_err() {
-            eprintln!("ctx graph: query log could not be written; query result is still available");
+            crate::output::stderr(format_args!(
+                "ctx graph: query log could not be written; query result is still available"
+            ))?;
         }
     }
     if let Some((memory_dir, budget)) = show_learning {

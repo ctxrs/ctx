@@ -3,6 +3,7 @@
 use std::{
     ops::Deref,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::{bail, ensure, Context, Result};
@@ -11,6 +12,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::commands::search::{SearchArgs, SearchBackendArg};
+use ctx_graph::ctx_graph_core::observation::{
+    self, GraphFailureKind, GraphInvocation, GraphObservation, GraphOperation, GraphOutputBoundary,
+    GraphPhase,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -132,6 +137,9 @@ pub(crate) fn run(
     data_root: Option<PathBuf>,
     color: crate::ui::ColorMode,
 ) -> Result<()> {
+    let started = Instant::now();
+    let mut telemetry = crate::engine_telemetry::EngineTelemetry::optional(data_root.clone());
+    let mut facts = GraphObservation::new(GraphOperation::Search, GraphInvocation::ScopedSearch);
     let query = args.history.query.clone().unwrap_or_default();
     ensure!(!query.trim().is_empty(), "provide a search query");
     let scope = args.scope;
@@ -140,7 +148,7 @@ pub(crate) fn run(
     let verbose = args.history.verbose;
     let ui = crate::ui::Ui::stdio(color);
     let graph = ScopeResult::from_result(
-        graph_query(&query, limit, args.graph_db.as_deref()),
+        graph_query(&query, limit, args.graph_db.as_deref(), &mut facts),
         "Run ctx graph index in the repository or pass --graph-db PATH.",
     );
     let history = if scope == SearchScope::All {
@@ -166,41 +174,96 @@ pub(crate) fn run(
         history,
         graph,
     };
-    crate::output::with_stdout_writer(|out| -> Result<()> {
-        if json {
-            serde_json::to_writer(&mut *out, &result)?;
-            writeln!(out)?;
-        } else {
-            if let Some(history) = &result.history {
-                render_scope(out, "History", history, verbose, ui.stdout_context())?;
-            }
-            render_scope(out, "Graph", &result.graph, verbose, ui.stdout_context())?;
-            if partial {
-                writeln!(out, "Partial results: one search scope is unavailable.")?;
-            }
-        }
-        Ok(())
-    })?;
+    let output = crate::output::with_stdout_writer(|out| {
+        write_results(out, &result, json, verbose, ui.stdout_context(), &mut facts)
+    });
+    facts.duration = Some(started.elapsed());
+    if let (Some(telemetry), Some(event)) =
+        (telemetry.as_mut(), crate::engine_telemetry::graph(facts))
+    {
+        telemetry.record(&[event]);
+    }
+    output?;
     if !available {
         bail!("no requested search scope is available");
     }
     Ok(())
 }
 
-fn graph_query(query: &str, limit: usize, explicit: Option<&Path>) -> Result<Value> {
-    use ctx_graph::ctx_graph_core::{model::QueryOptions, query::SearchOptions, store::Store};
-    let db = ctx_graph::discover_database(explicit)?;
-    let store = Store::open_read_only(&db)?;
-    let options = SearchOptions {
-        graph: QueryOptions {
-            limit,
-            ..QueryOptions::default()
-        },
-        ..SearchOptions::default()
+fn graph_query(
+    query: &str,
+    limit: usize,
+    explicit: Option<&Path>,
+    facts: &mut GraphObservation,
+) -> Result<Value> {
+    use ctx_graph::ctx_graph_core::{model::QueryOptions, query::SearchOptions};
+    facts.phase = GraphPhase::Discover;
+    let result = (|| {
+        // optional_database preserves the missing-index distinction without
+        // parsing the discovery error's user-facing text.
+        let db = match ctx_graph::optional_database(explicit)? {
+            Some(db) => db,
+            None => {
+                facts.fail(GraphFailureKind::MissingIndex);
+                bail!("no .graf/index.db found in this directory or its ancestors; run ctx graph index or pass --db");
+            }
+        };
+        let options = SearchOptions {
+            graph: QueryOptions {
+                limit,
+                ..QueryOptions::default()
+            },
+            ..SearchOptions::default()
+        };
+        let result = ctx_graph::search_observed(&db, query, &options, facts)?;
+        facts.phase = GraphPhase::Render;
+        Ok(serde_json::to_value(result)?)
+    })();
+    if let Err(error) = &result {
+        observation::failed(facts, error);
+    }
+    result
+}
+
+fn write_results(
+    out: &mut dyn std::io::Write,
+    result: &ScopedResults,
+    json: bool,
+    verbose: bool,
+    context: &crate::ui::RenderContext,
+    facts: &mut GraphObservation,
+) -> Result<()> {
+    let started = Instant::now();
+    let written = (|| -> Result<()> {
+        if json {
+            serde_json::to_writer(&mut *out, result)?;
+            writeln!(out)?;
+        } else {
+            if let Some(history) = &result.history {
+                render_scope(out, "History", history, verbose, context)?;
+            }
+            render_scope(out, "Graph", &result.graph, verbose, context)?;
+            if result.partial {
+                writeln!(out, "Partial results: one search scope is unavailable.")?;
+            }
+        }
+        Ok(())
+    })();
+    let flushed = out.flush().map_err(anyhow::Error::from);
+    let phase = if written.is_err() {
+        GraphPhase::OutputWrite
+    } else {
+        GraphPhase::OutputFlush
     };
-    Ok(serde_json::to_value(
-        store.query_extended(query, &options)?,
-    )?)
+    let output = written.and(flushed);
+    facts.output_served = Some(output.is_ok());
+    facts.output_boundary = GraphOutputBoundary::CliFlush;
+    facts.output_duration = Some(started.elapsed());
+    if let Err(error) = &output {
+        facts.phase = phase;
+        facts.output_failure = Some(observation::failure_kind(error));
+    }
+    output
 }
 
 fn history_query(args: SearchArgs, data_root: Option<PathBuf>) -> Result<Value> {
@@ -256,3 +319,6 @@ fn render_scope(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod telemetry_tests;

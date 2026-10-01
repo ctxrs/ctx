@@ -19,6 +19,32 @@ pub(crate) struct RemoteArgs {
 }
 
 impl RemoteArgs {
+    pub(super) fn needs_live_observers(&self) -> bool {
+        matches!(self.command, RemoteCommand::Sync { .. })
+    }
+
+    pub(super) fn observed_operation(&self) -> super::HostedOperation {
+        use super::HostedOperation as Operation;
+        if let Some(operation) = self.telemetry_operation() {
+            return Operation::Existing(operation);
+        }
+        match &self.command {
+            RemoteCommand::Pause { resume: true, .. } => Operation::RemoteResume,
+            RemoteCommand::Pause { .. } => Operation::RemotePause,
+            RemoteCommand::Status { .. } => Operation::RemoteStatus,
+            RemoteCommand::Remove { .. } => Operation::RemoteRemove,
+            RemoteCommand::Connect { .. } => Operation::Existing(
+                ctx_client_observability::analytics::HostedOperationV1::RemoteConnect,
+            ),
+            RemoteCommand::Share(_) => Operation::Existing(
+                ctx_client_observability::analytics::HostedOperationV1::RemoteShare,
+            ),
+            RemoteCommand::Sync { .. } => Operation::Existing(
+                ctx_client_observability::analytics::HostedOperationV1::RemoteSync,
+            ),
+        }
+    }
+
     pub(super) fn telemetry_operation(
         &self,
     ) -> Option<ctx_client_observability::analytics::HostedOperationV1> {
@@ -132,7 +158,12 @@ pub(crate) fn store(data_root: &Path, name: &str) -> Result<SharingStore> {
     Ok(SharingStore::new(data_root.join("sharing").join(name)))
 }
 
-pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result<()> {
+pub(super) fn run(
+    args: &RemoteArgs,
+    root: Option<&Path>,
+    ui: &mut Ui,
+    observer: Option<ctx_history_sharing::SharingObserver>,
+) -> Result<()> {
     let root = super::data_root(root)?;
     let name = match &args.command {
         RemoteCommand::Connect { name, .. }
@@ -247,7 +278,8 @@ pub(super) fn run(args: &RemoteArgs, root: Option<&Path>, ui: &mut Ui) -> Result
         }
         RemoteCommand::Share(selection) => share(selection, &root, &store, args.format, ui),
         RemoteCommand::Sync { .. } => {
-            let collector = Collector::new(root, store.root().to_path_buf());
+            let collector =
+                Collector::new(root, store.root().to_path_buf()).with_observer(observer);
             let mut steps = 0;
             while steps < 64 {
                 match collector.tick() {

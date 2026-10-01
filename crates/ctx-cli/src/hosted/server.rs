@@ -28,6 +28,46 @@ pub(crate) struct ServerArgs {
 }
 
 impl ServerArgs {
+    pub(super) fn needs_live_observers(&self) -> bool {
+        matches!(self.command, ServerCommand::Run { .. })
+    }
+
+    fn local_root(&self, data_root: Option<&Path>) -> Result<PathBuf> {
+        match &self.root {
+            Some(root) => Ok(root.clone()),
+            None => Ok(super::data_root(data_root)?.join("server")),
+        }
+    }
+
+    pub(super) fn restore_ownership_marker(&self, data_root: Option<&Path>) -> Option<PathBuf> {
+        if self.remote.is_some() || !matches!(self.command, ServerCommand::Restore { .. }) {
+            return None;
+        }
+        self.local_root(data_root)
+            .ok()
+            .map(|root| root.join("authority.sqlite"))
+    }
+
+    pub(super) fn observed_operation(&self) -> Option<super::HostedOperation> {
+        use super::HostedOperation as Operation;
+        if let Some(operation) = self.telemetry_operation() {
+            return Some(Operation::Existing(operation));
+        }
+        Some(match &self.command {
+            ServerCommand::Run { .. } => return None,
+            ServerCommand::Collection { .. } => Operation::ServerCollectionCreate,
+            ServerCommand::User { command } => match command {
+                UserCommand::Create { .. } => Operation::ServerUserCreate,
+                UserCommand::List { .. } => Operation::ServerUserList,
+                UserCommand::Credentials { .. } => Operation::ServerUserCredentials,
+                UserCommand::Credential { .. } => Operation::ServerUserCredential,
+            },
+            ServerCommand::Publications { .. } => Operation::ServerPublications,
+            ServerCommand::Status => Operation::ServerStatus,
+            _ => return None,
+        })
+    }
+
     pub(super) fn telemetry_operation(
         &self,
     ) -> Option<ctx_client_observability::analytics::HostedOperationV1> {
@@ -245,7 +285,66 @@ impl From<Rights> for Grants {
     }
 }
 
-pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> Result<()> {
+pub(super) fn run(
+    args: &ServerArgs,
+    data_root: Option<&Path>,
+    ui: &mut Ui,
+    observers: &super::HostedObservers,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let mut startup_covered = false;
+    let result = run_inner(args, data_root, ui, observers, &mut startup_covered);
+    if matches!(args.command, ServerCommand::Run { .. }) && !startup_covered {
+        if let Err(error) = &result {
+            startup_failed(
+                observers,
+                started.elapsed(),
+                ctx_history_server::ServerStage::Configuration,
+                error,
+            );
+        }
+    }
+    result
+}
+
+fn startup_failed(
+    observers: &super::HostedObservers,
+    duration: std::time::Duration,
+    stage: ctx_history_server::ServerStage,
+    error: &anyhow::Error,
+) {
+    use ctx_history_server::{
+        ServerFailure, ServerLifecycle, ServerObservation, ServerRuntimeTick,
+    };
+    if let Some(observer) = &observers.server {
+        let failure = error
+            .downcast_ref::<ctx_history_server::Error>()
+            .map(ServerFailure::from)
+            .unwrap_or(if error.is::<std::io::Error>() {
+                ServerFailure::Io
+            } else {
+                ServerFailure::Invalid
+            });
+        observer(ServerObservation::Lifecycle {
+            kind: ServerLifecycle::Failed,
+            stage,
+            duration,
+            failure: Some(failure),
+            backlog: None,
+        });
+    }
+    if let Some(hook) = &observers.runtime {
+        hook(ServerRuntimeTick::Failed);
+    }
+}
+
+fn run_inner(
+    args: &ServerArgs,
+    data_root: Option<&Path>,
+    ui: &mut Ui,
+    observers: &super::HostedObservers,
+    startup_covered: &mut bool,
+) -> Result<()> {
     if let Some(name) = &args.remote {
         return run_remote(
             args,
@@ -254,10 +353,7 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
             ui,
         );
     }
-    let root = match &args.root {
-        Some(root) => root.clone(),
-        None => super::data_root(data_root)?.join("server"),
-    };
+    let root = args.local_root(data_root)?;
     let root = root.as_path();
     if matches!(
         args.command,
@@ -320,7 +416,19 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
         config.bind = *bind;
         config.trusted_ingress = *trusted_ingress;
     }
-    let server = match HistoryServer::open(config) {
+    *startup_covered = true;
+    let server_observer = if matches!(args.command, ServerCommand::Run { .. }) {
+        observers.server.clone()
+    } else {
+        None
+    };
+    let opened = HistoryServer::open_with_observer(config, server_observer);
+    if opened.is_err() && matches!(args.command, ServerCommand::Run { .. }) {
+        if let Some(hook) = &observers.runtime {
+            hook(ctx_history_server::ServerRuntimeTick::Failed);
+        }
+    }
+    let server = match opened {
         Ok(server) => server,
         // An active listener holds the server root lock. Reuse its saved
         // authenticated client for operations supported both online and offline.
@@ -395,31 +503,43 @@ pub(super) fn run(args: &ServerArgs, data_root: Option<&Path>, ui: &mut Ui) -> R
             ), ui)
         }
         ServerCommand::Run { .. } => {
-            let file = operator_file(root, None)?;
-            ctx_history_server::serve_blocking_with_ready(std::sync::Arc::new(server), |bound| {
-                if bound.ip().is_loopback() || bound.ip().is_unspecified() {
-                    let ip = if bound.ip().is_unspecified() {
-                        if bound.is_ipv4() {
-                            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-                        } else {
-                            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
-                        }
-                    } else {
-                        bound.ip()
-                    };
-                    let endpoint = format!("http://{}", SocketAddr::new(ip, bound.port()));
-                    save_admin(root, &file, &endpoint).map_err(|error| {
-                        ctx_history_server::Error::Io(std::io::Error::other(error))
-                    })?;
-                } else {
-                    use std::io::Write;
-                    admin_store(root).remove().map_err(|error| {
-                        ctx_history_server::Error::Io(std::io::Error::other(error))
-                    })?;
-                    writeln!(ctx_terminal::output::stderr_writer(), "Local plaintext administration is unavailable for this bind. Connect an HTTPS admin endpoint with ctx remote connect, then use ctx server --remote NAME invite.")?;
-                }
-                Ok(())
+            let prepared = std::time::Instant::now();
+            let file = operator_file(root, None).inspect_err(|error| {
+                startup_failed(
+                    observers,
+                    prepared.elapsed(),
+                    ctx_history_server::ServerStage::ReadyCallback,
+                    error,
+                );
             })?;
+            ctx_history_server::serve_blocking_with_hooks(
+                std::sync::Arc::new(server),
+                |bound| {
+                    if bound.ip().is_loopback() || bound.ip().is_unspecified() {
+                        let ip = if bound.ip().is_unspecified() {
+                            if bound.is_ipv4() {
+                                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                            } else {
+                                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+                            }
+                        } else {
+                            bound.ip()
+                        };
+                        let endpoint = format!("http://{}", SocketAddr::new(ip, bound.port()));
+                        save_admin(root, &file, &endpoint).map_err(|error| {
+                            ctx_history_server::Error::Io(std::io::Error::other(error))
+                        })?;
+                    } else {
+                        use std::io::Write;
+                        admin_store(root).remove().map_err(|error| {
+                            ctx_history_server::Error::Io(std::io::Error::other(error))
+                        })?;
+                        writeln!(ctx_terminal::output::stderr_writer(), "Local plaintext administration is unavailable for this bind. Connect an HTTPS admin endpoint with ctx remote connect, then use ctx server --remote NAME invite.")?;
+                    }
+                    Ok(())
+                },
+                observers.runtime.clone(),
+            )?;
             Ok(())
         }
         ServerCommand::Collection {

@@ -49,15 +49,37 @@ pub(crate) fn nonempty(value: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn read(db: &Path, command: ReadCommand) -> Result<Output> {
+pub(crate) fn read_observed(
+    db: &Path,
+    command: ReadCommand,
+    facts: &mut GraphObservation,
+) -> Result<Output> {
+    let started = std::time::Instant::now();
+    let result = read_inner(db, command, facts);
+    facts.query_duration = Some(started.elapsed());
+    match &result {
+        Ok(_) => facts.execution_succeeded = Some(true),
+        Err(error) => observation::failed(facts, error),
+    }
+    result
+}
+
+fn read_inner(db: &Path, command: ReadCommand, facts: &mut GraphObservation) -> Result<Output> {
+    facts.phase = observation::GraphPhase::Open;
     let store = Store::open_read_only(db)?;
+    facts.phase = observation::GraphPhase::Query;
     let (symbol, options, navigation) = match command {
-        ReadCommand::Stats => return Ok(Output::Stats(store.stats()?)),
+        ReadCommand::Stats => {
+            let stats = store.stats()?;
+            facts.stats(&stats);
+            return Ok(Output::Stats(stats));
+        }
         ReadCommand::Query(a) => {
             nonempty(&a.text, "text")?;
             let graph = options(a.depth, a.limit, a.direction.into(), a.relation)?;
             let extended = a.navigation.enabled();
             let result = store.query_extended(&a.text, &a.navigation.options(graph))?;
+            observation::search(facts, &result);
             return Ok(if extended {
                 Output::Search(result)
             } else {
@@ -74,6 +96,7 @@ pub(crate) fn read(db: &Path, command: ReadCommand) -> Result<Output> {
                 &a.navigation
                     .options(options(a.depth, a.limit, a.direction.into(), a.relation)?),
             )?;
+            observation::path(facts, &path);
             if extended {
                 return Ok(Output::SearchPath(path));
             }
@@ -90,6 +113,7 @@ pub(crate) fn read(db: &Path, command: ReadCommand) -> Result<Output> {
                 .options(options(1, a.limit, Direction::Both, None)?);
             let node = store.resolve_endpoint(&a.symbol, &options)?;
             let result = store.neighbors_extended(&node.id, &options)?;
+            observation::search(facts, &result);
             return Ok(if extended {
                 Output::Search(result)
             } else {
@@ -120,12 +144,14 @@ pub(crate) fn read(db: &Path, command: ReadCommand) -> Result<Output> {
                     relations: a.relation,
                 },
             )?;
+            observation::search(facts, &result);
             return Ok(Output::Search(result));
         }
     };
     nonempty(&symbol, "symbol")?;
     let extended = navigation.enabled();
     let result = store.neighbors_extended(&symbol, &navigation.options(options))?;
+    observation::search(facts, &result);
     Ok(if extended {
         Output::Search(result)
     } else {

@@ -101,9 +101,12 @@ pub fn run(command: &Command, db: Option<&Path>, json_output: bool) -> Result<()
         Command::Push { backend } => push(backend, db)?,
     };
     if json_output {
-        println!("{}", serde_json::to_string(&report)?);
+        crate::output::stdout(format_args!("{}", serde_json::to_string(&report)?))?;
     } else {
-        println!("{}", report["message"].as_str().unwrap_or("Completed"));
+        crate::output::stdout(format_args!(
+            "{}",
+            report["message"].as_str().unwrap_or("Completed")
+        ))?;
     }
     Ok(())
 }

@@ -275,14 +275,22 @@ fn daemon_observation_delivery_rechecks_config_at_each_ownership_boundary() -> R
     let (_, empty_append_loads) =
         ctx_app_config::count_app_config_loads(|| deliver_daemon_events(root.path(), &[]));
     assert_eq!(empty_append_loads, 1);
+    assert!(crate::identity::existing_installation_id(root.path())?.is_none());
     let (_, empty_upload_loads) = ctx_app_config::count_app_config_loads(|| {
-        ctx_daemon_cli::DaemonCliHost::upload_daemon_events(&CtxDaemonCliHost, root.path(), &[]);
+        let host = CtxDaemonCliHost {
+            telemetry: crate::product_runtime::DaemonCollector::new(),
+        };
+        ctx_daemon_cli::DaemonCliHost::upload_daemon_events(&host, root.path(), &[]);
     });
-    assert_eq!(empty_upload_loads, 3);
+    // With no captured collector or existing owner, summary flush and drain
+    // skip policy loading. Only the empty append rechecks consent.
+    assert_eq!(empty_upload_loads, 1);
+    assert!(crate::identity::existing_installation_id(root.path())?.is_none());
     let (_, nonempty_loads) = ctx_app_config::count_app_config_loads(|| {
         deliver_daemon_events(root.path(), std::slice::from_ref(&event));
     });
     assert_eq!(nonempty_loads, 2);
+    assert!(crate::identity::existing_installation_id(root.path())?.is_some());
     Ok(())
 }
 

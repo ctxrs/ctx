@@ -18,6 +18,8 @@ use uuid::Uuid;
 const DEVICE_FILE: &str = "device.json";
 const INSTALLATION_ID_FILE: &str = "install.json";
 const MAX_INSTALLATION_IDENTITY_BYTES: u64 = 1024;
+#[cfg(test)]
+mod optional;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -32,19 +34,32 @@ struct InstallationIdentityRecord {
 /// The identity is product state. Analytics may report it when enabled, but
 /// analytics does not own its creation, lifetime, or format.
 pub(crate) fn installation_id(data_root: &Path) -> Result<String> {
-    access_installation_id(data_root, true)?.context("installation identity was not created")
+    access_installation_id(data_root, true, false)?.context("installation identity was not created")
 }
 
 /// Loads the root identity without creating it or the data root.
 pub(crate) fn existing_installation_id(data_root: &Path) -> Result<Option<String>> {
-    access_installation_id(data_root, false)
+    access_installation_id(data_root, false, false)
+}
+
+/// Optional engine analytics must not wait for a product identity writer.
+pub(crate) fn try_installation_id(data_root: &Path) -> Result<Option<String>> {
+    access_installation_id(data_root, true, true)
+}
+
+pub(crate) fn try_existing_installation_id(data_root: &Path) -> Result<Option<String>> {
+    access_installation_id(data_root, false, true)
 }
 
 pub fn install_path(data_root: &Path) -> PathBuf {
     data_root.join(INSTALLATION_ID_FILE)
 }
 
-fn access_installation_id(data_root: &Path, create: bool) -> Result<Option<String>> {
+fn access_installation_id(
+    data_root: &Path,
+    create: bool,
+    nonblocking: bool,
+) -> Result<Option<String>> {
     validate_identity_root_path(data_root)?;
     if create {
         prepare_identity_root(data_root)?;
@@ -60,8 +75,16 @@ fn access_installation_id(data_root: &Path, create: bool) -> Result<Option<Strin
     let Some(mut file) = open_identity_file(&path, create)? else {
         return Ok(None);
     };
-    file.lock_exclusive()
-        .context("lock installation identity")?;
+    if nonblocking {
+        match file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error).context("lock installation identity"),
+        }
+    } else {
+        file.lock_exclusive()
+            .context("lock installation identity")?;
+    }
     let result = access_locked_identity(&path, data_root, &mut file, create);
     let unlock = fs2::FileExt::unlock(&file).context("unlock installation identity");
     match (result, unlock) {
@@ -122,12 +145,18 @@ fn open_identity_file(path: &Path, create: bool) -> Result<Option<fs::File>> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt as _;
-        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        use windows_sys::Win32::{
+            Foundation::{GENERIC_READ, GENERIC_WRITE},
+            Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC},
+        };
 
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        if create {
+            options.access_mode(GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC);
+        }
     }
     match options.open(path) {
         Ok(file) => Ok(Some(file)),
@@ -142,7 +171,9 @@ fn access_locked_identity(
     file: &mut fs::File,
     create: bool,
 ) -> Result<String> {
-    restrict_private_file(path).context("protect installation identity")?;
+    if create {
+        restrict_private_file(path).context("protect installation identity")?;
+    }
     verify_private_file(path).context("verify installation identity")?;
     verify_open_identity(path, file)?;
     let length = file.metadata()?.len();
@@ -247,6 +278,44 @@ pub fn device_id(data_root: &Path) -> Result<String> {
 }
 
 fn device_id_at_path(path: &Path) -> Result<String> {
+    access_device_id(path, false)?.context("analytics identity is unavailable")
+}
+
+pub(crate) fn try_device_id(data_root: &Path) -> Result<Option<String>> {
+    access_device_id(&device_path(data_root)?, true)
+}
+
+fn access_device_id(path: &Path, nonblocking: bool) -> Result<Option<String>> {
+    fs::create_dir_all(path.parent().context("analytics identity has no parent")?)?;
+    let lock_path = path.with_extension("lock");
+    let file = open_identity_file(&lock_path, true)?.context("open analytics identity lock")?;
+    ctx_history_platform::platform_security::restrict_private_file_handle(&file)?;
+    verify_private_file(&lock_path)?;
+    verify_open_identity(&lock_path, &file)?;
+    if nonblocking {
+        match file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error).context("lock analytics identity"),
+        }
+        if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.len() > 16 * 1024) {
+            anyhow::bail!("optional analytics identity is unavailable");
+        }
+    } else {
+        file.lock_exclusive().context("lock analytics identity")?;
+    }
+    let result = device_id_locked(path).and_then(|id| {
+        // The same owner upgrades legacy profile-file permissions and canonical
+        // UUID spellings for both ordinary and optional analytics callers.
+        restrict_private_file(path)?;
+        verify_private_file(path)?;
+        Ok(Some(id))
+    });
+    let _ = fs2::FileExt::unlock(&file);
+    result
+}
+
+fn device_id_locked(path: &Path) -> Result<String> {
     if path.exists() {
         let mut value: serde_json::Value = serde_json::from_slice(
             &fs::read(path).with_context(|| format!("read {}", path.display()))?,

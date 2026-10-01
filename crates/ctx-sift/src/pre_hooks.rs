@@ -4,26 +4,48 @@
 use crate::hooks::Object;
 use crate::rewrite::{self, Shell};
 use crate::state::Settings;
+use crate::{
+    observation::*,
+    observe::{self, Observed},
+};
 use anyhow::Result;
 use std::io::{Read, Write};
 use std::path::Path;
 
 const MAX_INPUT: usize = 1024 * 1024;
 
+#[allow(dead_code)] // Retained convenience entry point.
 pub fn transform(
     host: &str,
     input: &str,
     executable: &Path,
     exclusions: &[String],
 ) -> Result<Option<String>> {
+    transform_observed(host, input, executable, exclusions, &mut Observed::new())
+}
+
+pub(crate) fn transform_observed(
+    host: &str,
+    input: &str,
+    executable: &Path,
+    exclusions: &[String],
+    observed: &mut Observed,
+) -> Result<Option<String>> {
     // Whole-request policy rules do not necessarily survive command rewriting.
     // Enable only hosts with a qualified original-command policy path. Other
     // CLI names remain accepted as no-ops for existing/manual registrations.
-    if input.len() > MAX_INPUT || !matches!(host, "codex" | "vibe") {
+    if input.len() > MAX_INPUT {
+        observed.skip(SkipReason::EnvelopeLimit);
         return Ok(None);
     }
+    if !matches!(host, "codex" | "vibe") {
+        observed.skip(SkipReason::UnsupportedHost);
+        return Ok(None);
+    }
+    observed.phase = Phase::Protocol;
     let root: Object = serde_json::from_str(input.trim_start_matches('\u{feff}'))?;
     let Some(tool) = root.string("tool_name") else {
+        observed.skip(SkipReason::UnsupportedTool);
         return Ok(None);
     };
     let (event, accepted) = match host {
@@ -31,18 +53,26 @@ pub fn transform(
         "vibe" => ("pre_tool", tool == "bash"),
         _ => return Ok(None),
     };
-    if !accepted || exclusions.iter().any(|e| e == &tool) {
+    if !accepted {
+        observed.skip(SkipReason::UnsupportedTool);
+        return Ok(None);
+    }
+    if exclusions.iter().any(|e| e == &tool) {
+        observed.skip(SkipReason::Excluded);
         return Ok(None);
     }
     if root.get("hook_event_name").is_some()
         && root.string("hook_event_name").as_deref() != Some(event)
     {
+        observed.skip(SkipReason::UnsupportedEvent);
         return Ok(None);
     }
     let Some(mut arguments) = root.object("tool_input") else {
+        observed.skip(SkipReason::MalformedInput);
         return Ok(None);
     };
     let Some(command) = arguments.string("command") else {
+        observed.skip(SkipReason::MalformedInput);
         return Ok(None);
     };
     let shell = match arguments
@@ -52,10 +82,15 @@ pub fn transform(
     {
         Some("powershell" | "pwsh" | "powershell.exe" | "pwsh.exe") => Shell::PowerShell,
         Some("bash" | "sh" | "zsh" | "/bin/bash" | "/bin/sh" | "/bin/zsh") => Shell::Posix,
-        Some(_) => return Ok(None),
+        Some(_) => {
+            observed.skip(SkipReason::UnsupportedShell);
+            return Ok(None);
+        }
         None => Shell::native(),
     };
-    let Some(changed) = rewrite::command(&command, executable, shell, exclusions) else {
+    let Some(changed) =
+        rewrite::command_observed(&command, executable, shell, exclusions, observed)
+    else {
         return Ok(None);
     };
     arguments.set_text("command", &changed)?;
@@ -72,37 +107,70 @@ pub fn transform(
     Ok(Some(response))
 }
 
-pub fn run(host: &str) -> Result<i32> {
+pub fn run_observed(host: &str, observed: &mut Observed) -> Result<i32> {
+    observed.facts.entry = Entry::PreHook;
+    observed.facts.host = Some(observe::host(host));
+    observed.facts.mode = Mode::Rewrite;
     let mut bytes = Vec::new();
-    let output = (|| -> Option<String> {
+    let output = (|| -> Result<Option<String>> {
+        observed.phase = Phase::Input;
         std::io::stdin()
             .lock()
             .take((MAX_INPUT + 1) as u64)
-            .read_to_end(&mut bytes)
-            .ok()?;
+            .read_to_end(&mut bytes)?;
         if bytes.len() > MAX_INPUT {
-            return None;
+            observed.skip(SkipReason::EnvelopeLimit);
+            return Ok(None);
         }
-        let settings = Settings::load().ok().filter(|s| s.enabled)?;
-        transform(
+        observed.phase = Phase::Settings;
+        let settings = Settings::load()?;
+        if !settings.enabled {
+            observed.skip(SkipReason::Disabled);
+            return Ok(None);
+        }
+        observed.phase = Phase::Protocol;
+        let input = match std::str::from_utf8(&bytes) {
+            Ok(input) => input,
+            Err(_) => {
+                observed.skip(SkipReason::MalformedInput);
+                return Ok(None);
+            }
+        };
+        transform_observed(
             host,
-            std::str::from_utf8(&bytes).ok()?,
-            &std::env::current_exe().ok()?,
+            input,
+            &std::env::current_exe()?,
             &settings.exclude_commands,
+            observed,
         )
-        .ok()
-        .flatten()
     })();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            observed.fail(&error);
+            observed.facts.outcome = Outcome::FailOpen;
+            observed.facts.skip = Some(if observed.phase == Phase::Settings {
+                SkipReason::SettingsUnavailable
+            } else {
+                SkipReason::MalformedInput
+            });
+            None
+        }
+    };
+    observed.phase = Phase::Output;
     if let Some(output) = output {
         let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "{output}").and_then(|()| stdout.flush());
+        let written = writeln!(stdout, "{output}").and_then(|()| stdout.flush());
+        observe::envelope_delivery(observed, &written, true);
         Ok(0)
     } else if host == "cursor" {
-        // Cursor can reject invalid permission-hook output. Its documented
-        // non-2 error exit leaves the original action to normal processing.
+        // Preserve Cursor's documented non-2 no-op exit.
+        observed.facts.delivery = Delivery::Unchanged;
         Ok(1)
     } else {
-        let _ = writeln!(std::io::stdout().lock(), "{{}}");
+        let mut stdout = std::io::stdout().lock();
+        let written = writeln!(stdout, "{{}}").and_then(|()| stdout.flush());
+        observe::envelope_delivery(observed, &written, false);
         Ok(0)
     }
 }

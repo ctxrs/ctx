@@ -18,6 +18,7 @@ mod connect;
 mod dispatch;
 mod extraction;
 mod mcp;
+mod observation;
 mod output;
 mod paths;
 mod query_log;
@@ -29,6 +30,8 @@ mod switch_files;
 pub use cli::GraphArgs;
 use cli::*;
 pub use dispatch::run_parsed;
+pub use dispatch::run_parsed_observed;
+pub use observation::{GraphInvocation, GraphObservation, GraphObserver, GraphOperation};
 pub use output::write_search;
 use output::*;
 use paths::database;
@@ -43,6 +46,15 @@ pub fn command() -> clap::Command {
 
 /// Run arguments following `ctx graph`, without terminating the process.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
+    run_observed(args, None)
+}
+
+/// Run with an optional nonblocking, consent-resolved host observer.
+pub fn run_observed(
+    args: impl IntoIterator<Item = OsString>,
+    observer: Option<GraphObserver>,
+) -> i32 {
+    let started = std::time::Instant::now();
     let argv = std::iter::once(OsString::from("ctx graph")).chain(args);
     let parsed = command()
         .try_get_matches_from(argv)
@@ -50,26 +62,58 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
     let cli = match parsed {
         Ok(cli) => cli,
         Err(error) => {
+            let mut facts = GraphObservation::new(GraphOperation::Parse, GraphInvocation::Cli);
+            facts.phase = observation::GraphPhase::Parse;
             if error.use_stderr() {
-                eprintln!("{}", human(error.render().ansi().to_string().trim_end()));
+                let mut stderr = io::stderr().lock();
+                let delivered = writeln!(
+                    stderr,
+                    "{}",
+                    human(error.render().ansi().to_string().trim_end())
+                )
+                .and_then(|()| stderr.flush());
+                facts.output_served = Some(delivered.is_ok());
+                facts.output_boundary = observation::GraphOutputBoundary::CliFlush;
+                facts.output_failure = delivered
+                    .err()
+                    .map(|error| observation::failure_kind(&error.into()));
+                facts.fail(observation::GraphFailureKind::InvalidInput);
+                facts.duration = Some(started.elapsed());
+                observation::emit(&observer, facts);
             } else {
                 let _ = error.print();
             }
             return error.exit_code();
         }
     };
-    run_parsed_exit(cli.graph)
+    run_parsed_exit_observed(cli.graph, observer)
 }
 
 /// Execute parsed graph arguments with the same runtime error output on every entry path.
 pub fn run_parsed_exit(cli: GraphArgs) -> i32 {
+    run_parsed_exit_observed(cli, None)
+}
+
+pub fn run_parsed_exit_observed(cli: GraphArgs, observer: Option<GraphObserver>) -> i32 {
     let json = cli.json;
-    match run_parsed(cli) {
-        Ok(()) => 0,
-        Err(error) => {
-            let _ = output::write_error(&mut io::stderr().lock(), &error, json);
-            1
-        }
+    let started = std::time::Instant::now();
+    let mut facts =
+        GraphObservation::new(observation::operation(&cli.command), GraphInvocation::Cli);
+    let result = run_parsed_observed(cli, &mut facts, observer.clone());
+    let status = observation::finish_cli(
+        &mut facts,
+        &result,
+        json,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+    );
+    facts.duration = Some(started.elapsed());
+    observation::emit(&observer, facts);
+    // Optional host hooks retain their fail-open exit contract on broken pipes.
+    if facts.operation == GraphOperation::HookGuard && result.is_ok() {
+        0
+    } else {
+        status
     }
 }
 
@@ -79,7 +123,38 @@ pub fn search(
     text: &str,
     options: &ctx_graph_core::query::SearchOptions,
 ) -> Result<ctx_graph_core::query::SearchResult> {
-    Store::open_read_only(db)?.query_extended(text, options)
+    search_observed(
+        db,
+        text,
+        options,
+        &mut GraphObservation::new(GraphOperation::Search, GraphInvocation::Library),
+    )
+}
+
+/// Project facts from the same query; no additional source scans or output writes.
+pub fn search_observed(
+    db: &Path,
+    text: &str,
+    options: &ctx_graph_core::query::SearchOptions,
+    facts: &mut GraphObservation,
+) -> Result<ctx_graph_core::query::SearchResult> {
+    let started = std::time::Instant::now();
+    facts.phase = observation::GraphPhase::Open;
+    let result = (|| {
+        let store = Store::open_read_only(db)?;
+        facts.phase = observation::GraphPhase::Query;
+        store.query_extended(text, options)
+    })();
+    facts.query_duration = Some(started.elapsed());
+    facts.duration = Some(started.elapsed());
+    match &result {
+        Ok(result) => {
+            observation::search(facts, result);
+            facts.execution_succeeded = Some(true);
+        }
+        Err(error) => observation::failed(facts, error),
+    }
+    result
 }
 
 fn hook_context(

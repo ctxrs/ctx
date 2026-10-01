@@ -5,12 +5,12 @@ use super::{
     object_schema,
     response::{success_response, tool_error_result, tool_result_with_text},
     response_bound::serialized_json_line_bytes,
-    McpHandled, MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+    McpHandled, McpToolKind, McpUsage, MCP_PRESENTATION_MAX_OUTPUT_BYTES,
 };
 use crate::tool_backend::{
     GraphDirection, GraphOperation, GraphOptions, ToolBackend, ToolBackendError, ToolOutcome,
-    UnifiedErrorCode, UnifiedToolKind, UnifiedToolOperation, MAX_OUTPUT_INPUT_BYTES,
-    OUTPUT_ENCODINGS,
+    ToolUsageFacts, UnifiedErrorCode, UnifiedToolKind, UnifiedToolOperation,
+    MAX_OUTPUT_INPUT_BYTES, OUTPUT_ENCODINGS,
 };
 
 impl UnifiedToolKind {
@@ -219,35 +219,135 @@ pub(super) fn handle<B: ToolBackend>(
     backend: &B,
     render_text: &impl Fn(&Value) -> String,
 ) -> McpHandled<Value> {
+    let started = std::time::Instant::now();
     let result = parse(kind, arguments)
-        .map_err(Into::into)
+        .map_err(|error| crate::tool_backend::ToolExecutionError {
+            error: Box::new(error),
+            usage: Box::new(parse_failure_usage(kind, started.elapsed()).facts),
+        })
         .and_then(|operation| backend.execute_unified(operation));
-    let result = match result {
+    let (value, facts) = match result {
         Ok(ToolOutcome {
             structured,
             compact,
             text,
-            ..
+            usage,
         }) => {
             let text = text.unwrap_or_else(|| render_text(compact.as_ref().unwrap_or(&structured)));
-            tool_result_with_text(structured, text)
+            (tool_result_with_text(structured, text), usage)
         }
-        Err(failure) => tool_error_result(*failure.error),
+        Err(failure) => (tool_error_result(*failure.error), *failure.usage),
     };
-    // These operations have no history usage or analytics authority.
-    McpHandled::plain(result)
+    McpHandled {
+        value,
+        usage: Some(McpUsage {
+            operation: McpToolKind::Unified(kind),
+            facts,
+        }),
+    }
 }
 
-pub(super) fn bound_response(response: Value, id: Value) -> Value {
+pub(super) fn bound_response(response: Value, id: Value, usage: &mut Option<McpUsage>) -> Value {
     if serialized_json_line_bytes(&response)
         .is_ok_and(|size| size <= MCP_PRESENTATION_MAX_OUTPUT_BYTES)
     {
         return response;
     }
+    if let Some(usage) = usage.as_mut() {
+        response_replaced(&mut usage.facts);
+    }
     success_response(id, tool_error_result(ToolBackendError::Unified {
         code: UnifiedErrorCode::OutputLimit,
         detail: "response exceeds the MCP output limit; reduce graph depth/limit or output input size".to_owned(),
     }))
+}
+
+pub(super) fn parse_failure_usage(
+    kind: UnifiedToolKind,
+    duration: std::time::Duration,
+) -> McpUsage {
+    use ctx_client_observability::analytics as a;
+    let mut facts = ToolUsageFacts::default();
+    let operation = match kind {
+        UnifiedToolKind::GraphQuery => Some(a::GraphOperation::Search),
+        UnifiedToolKind::GraphShow => Some(a::GraphOperation::Show),
+        UnifiedToolKind::GraphCallers => Some(a::GraphOperation::Callers),
+        UnifiedToolKind::GraphCallees => Some(a::GraphOperation::Callees),
+        UnifiedToolKind::GraphImpact => Some(a::GraphOperation::Impact),
+        UnifiedToolKind::GraphPath => Some(a::GraphOperation::Path),
+        UnifiedToolKind::GraphStats => Some(a::GraphOperation::Stats),
+        UnifiedToolKind::OutputCompact | UnifiedToolKind::OutputRestore => None,
+    };
+    if let Some(operation) = operation {
+        let mut graph = a::GraphCompletedV1::new(
+            operation,
+            a::GraphSurface::Mcp,
+            a::ProductCompletion::new(
+                duration,
+                Err(a::ProductFailure {
+                    stage: a::ProductFailureStage::Parse,
+                    class: a::ProductFailureClass::InvalidRequest,
+                }),
+                a::DeliveryEvidence::Unknown,
+                a::ProductOutput::Mcp,
+            ),
+        );
+        graph.details.invocation = Some(a::GraphInvocation::UnifiedMcp);
+        graph.details.phase = Some(a::GraphPhase::Parse);
+        graph.details.failure = Some(a::GraphFailureFacts {
+            phase: a::GraphPhase::Parse,
+            kind: a::GraphFailureKind::InvalidInput,
+        });
+        facts.graph = Some(graph);
+    } else {
+        let (operation, mode) = if kind == UnifiedToolKind::OutputCompact {
+            (a::SiftOperation::Compact, a::SiftMode::Lossless)
+        } else {
+            (a::SiftOperation::Restore, a::SiftMode::Restore)
+        };
+        let mut sift = a::SiftSummaryV1::new(operation, mode, std::time::Duration::ZERO);
+        sift.observed = 1;
+        sift.unmeasured = 1;
+        sift.execution_failed = 1;
+        sift.cohort = a::SiftCohort {
+            entry: Some(a::SiftEntry::Mcp),
+            terminal: Some(a::SiftTerminal::Invocation),
+            outcome: Some(a::SiftTerminalOutcome::Failure),
+            delivery: Some(a::SiftDelivery::NotAttempted),
+            failure_phase: Some(a::SiftPhase::Arguments),
+            failure_kind: Some(a::SiftFailureKind::InvalidInput),
+            child: Some(a::SiftChildOutcome::NotApplicable),
+            ..Default::default()
+        };
+        facts.sift = Some(sift);
+    }
+    McpUsage {
+        operation: McpToolKind::Unified(kind),
+        facts,
+    }
+}
+
+/// A replacement envelope is not delivery of the successfully computed result.
+/// Preserve work status and remove candidate savings before the finalizer sees it.
+pub(super) fn response_replaced(facts: &mut ToolUsageFacts) {
+    use ctx_client_observability::analytics as a;
+    if let Some(graph) = facts.graph.as_mut() {
+        graph.completion.delivery = a::DeliveryEvidence::Failed;
+        graph.details.phase = Some(a::GraphPhase::Render);
+    }
+    if let Some(remote) = facts.remote.as_mut() {
+        remote.completion.delivery = a::DeliveryEvidence::Failed;
+        remote.read.response_limited = Some(true);
+    }
+    if let Some(sift) = facts.sift.as_mut() {
+        sift.output_failed = 1;
+        sift.bytes = None;
+        sift.tokens = None;
+        sift.partial += sift.complete;
+        sift.complete = 0;
+        sift.cohort.delivery = Some(a::SiftDelivery::Failed);
+        sift.cohort.missingness = Some(a::SiftMissingness::Incomplete);
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,28 @@
+{
+  "event_id": "4c4bc52a-2571-4d2b-aeef-eef16e6e4f2f",
+  "event_name": "operation_completed",
+  "event_version": 1,
+  "occurred_at": "2026-07-22T12:34:00Z",
+  "surface": "cli",
+  "operation": "remote",
+  "outcome": "success",
+  "duration_bucket": "lt_100ms",
+  "properties": {
+    "native_total_duration_bucket": "1ms-5ms",
+    "execution_result": "success",
+    "output_delivery": "known_complete",
+    "output_kind": "json",
+    "remote_operation": "search",
+    "result_count_bucket": "2-5",
+    "result_empty": false,
+    "remote_page_count_bucket": "1",
+    "remote_limit_count_bucket": "6-20",
+    "remote_coverage_lag_count_bucket": "2-5",
+    "remote_client_limited": true,
+    "remote_complete": false,
+    "remote_exhaustive": false,
+    "remote_has_more": true,
+    "remote_response_limited": false,
+    "remote_query_duration_bucket": "lt_1ms"
+  }
+}

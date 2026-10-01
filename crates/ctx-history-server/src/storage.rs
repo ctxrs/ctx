@@ -54,6 +54,12 @@ impl HistoryServer {
         tx.execute("INSERT INTO uploads(id,collection,principal,digest,bytes,expires) VALUES (?1,?2,?3,?4,?5,?6)",
             params![id,collection,principal,spec.sha256,spec.bytes,expires])?;
         tx.commit()?;
+        drop(connection);
+        self.observe(ServerObservation::Upload {
+            operation: ServerOperation::BeginUpload,
+            bytes: 0,
+            replay: false,
+        });
         Ok(UploadStatus {
             id,
             publisher: principal,
@@ -121,6 +127,12 @@ impl HistoryServer {
             let mut previous = vec![0; bytes.len()];
             file.read_exact(&mut previous)?;
             return if previous == bytes {
+                drop(connection);
+                self.observe(ServerObservation::Upload {
+                    operation: ServerOperation::UploadChunk,
+                    bytes: bytes.len() as u64,
+                    replay: true,
+                });
                 Ok(status)
             } else {
                 Err(Error::Conflict)
@@ -141,6 +153,12 @@ impl HistoryServer {
         )?;
         tx.commit()?;
         status.received_bytes = end;
+        drop(connection);
+        self.observe(ServerObservation::Upload {
+            operation: ServerOperation::UploadChunk,
+            bytes: bytes.len() as u64,
+            replay: false,
+        });
         Ok(status)
     }
 

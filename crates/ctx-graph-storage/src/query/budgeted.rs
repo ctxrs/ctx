@@ -23,12 +23,15 @@ pub(super) fn query_errors<T>(result: Result<T>) -> Result<T> {
 }
 
 pub(super) fn validate(options: &QueryOptions) -> Result<()> {
-    ensure!(options.depth <= 6, "depth must be between 0 and 6");
-    ensure!(
-        (1..=500).contains(&options.limit),
-        "limit must be between 1 and 500"
-    );
-    Ok(())
+    let result = (|| {
+        ensure!(options.depth <= 6, "depth must be between 0 and 6");
+        ensure!(
+            (1..=500).contains(&options.limit),
+            "limit must be between 1 and 500"
+        );
+        Ok(())
+    })();
+    result.map_err(|error| QueryFailure::wrap(QueryFailureKind::InvalidInput, error))
 }
 
 pub(super) fn empty(conn: &Connection) -> Result<GraphResult> {
@@ -95,7 +98,12 @@ pub(super) fn exact(conn: &Connection, text: &str, include_file: bool) -> Result
 
 pub(super) fn unique(conn: &Connection, text: &str) -> Result<Node> {
     let nodes = exact(conn, text, false)?;
-    match nodes.len() {
+    let kind = if nodes.is_empty() {
+        QueryFailureKind::EndpointNotFound
+    } else {
+        QueryFailureKind::EndpointAmbiguous
+    };
+    let result = (|| match nodes.len() {
         0 => bail!("no symbol matches {text:?}"),
         1 => Ok(nodes.into_iter().next().unwrap()),
         _ => {
@@ -110,7 +118,8 @@ pub(super) fn unique(conn: &Connection, text: &str) -> Result<Node> {
                 }
             )
         }
-    }
+    })();
+    result.map_err(|error| QueryFailure::wrap(kind, error))
 }
 
 pub(super) fn query_snapshot(

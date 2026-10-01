@@ -1,14 +1,7 @@
 use super::*;
 
 pub(crate) fn print(value: &impl Serialize, compact: bool) -> Result<()> {
-    let mut out = std::io::stdout().lock();
-    if compact {
-        serde_json::to_writer(&mut out, value)?;
-    } else {
-        serde_json::to_writer_pretty(&mut out, value)?;
-    }
-    writeln!(out)?;
-    Ok(())
+    crate::output::print_value(value, compact)
 }
 
 pub(crate) fn local_database(db: Option<&Path>) -> Result<PathBuf> {
@@ -250,6 +243,6 @@ pub(crate) fn backup_output(parent: &Path, original: &[u8]) -> Result<()> {
         }
         Err(error) => return Err(error.into()),
     }
-    eprintln!("Saved previous output to {}", path.display());
+    crate::output::stderr(format_args!("Saved previous output to {}", path.display()))?;
     Ok(())
 }

@@ -114,5 +114,13 @@ fn entry() {
     // Ignore a closed consumer here: run owns the command's broken-pipe policy.
     let _ = std::io::stdout().write_all(MARKER);
     let _ = std::io::stdout().flush();
-    std::process::exit(crate::run(decode(&args)));
+    let status = if let Ok(case) = std::env::var("CTX_SIFT_OBSERVATION_CASE") {
+        let mut observations = Vec::new();
+        let status = crate::run_observed(decode(&args), |facts| observations.push(facts));
+        crate::observation_tests::check_invocation(&case, status, &observations);
+        status
+    } else {
+        crate::run(decode(&args))
+    };
+    std::process::exit(status);
 }

@@ -1,4 +1,6 @@
+import { isProductPropertyKey, parseProductOperation } from "./product-operation-contract";
 import { isProviderId, normalizeProviderId } from "./provider-contract";
+import { HOSTED_OPERATIONS } from "./product-keys";
 import * as hosted from "./hosted-operation-contract";
 import { ORDINARY_BLAME_PROPERTY_KEYS, parseOrdinaryBlameProperties } from "./ordinary-blame-contract";
 
@@ -16,13 +18,11 @@ export class TelemetryIngestError extends Error {
     this.code = code;
   }
 }
-
 export const MAX_EVENTS = 50;
 export const MAX_EVENT_BYTES = 8 * 1024;
 export const MAX_BATCH_ENVELOPE_BYTES = 8 * 1024;
 export const MAX_BODY_BYTES = MAX_EVENTS * MAX_EVENT_BYTES + MAX_BATCH_ENVELOPE_BYTES;
 export const MAX_DEPTH = 6;
-
 export const V1_BATCH_KEYS = new Set([
   "client_profile_id", "data_root_id", "app_version", "os", "arch", "events",
 ]);
@@ -37,19 +37,17 @@ export const INSTALL_STAGE_V1_KEYS = new Set([
 export const LEGACY_INSTALL_STAGE_KEYS = new Set([
   "install_attempt_id", "stage", "status", "error_kind", "platform", "channel", "version",
 ]);
-
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 export const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 export const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 export const INSTALL_ATTEMPT_ID_PATTERN = /^ia_[A-Za-z0-9_-]{8,128}$/u;
 const UPGRADE_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 export const RELEASE_VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/u;
-
 export const EVENT_NAMES = new Set([
   "analytics_delivery_observation", "operation_completed", "provider_refresh_completed",
   "runtime_observation",
 ]);
-export const SURFACES = new Set(["cli", "mcp", "pro_host", "daemon"]);
+export const SURFACES = new Set(["cli", "mcp", "pro_host", "daemon", "server"]);
 export const OUTCOMES = new Set(["success", "failure"]);
 export const OPERATING_SYSTEMS = new Set(["linux", "macos", "windows", "freebsd"]);
 export const ARCHITECTURES = new Set(["x86_64", "aarch64", "x86", "arm"]);
@@ -76,9 +74,8 @@ const SEARCH_BYTE_BUCKETS = new Set([
   "100gb+",
 ]);
 const TEXT_LENGTH_BUCKETS = new Set(["0", "1-20", "21-100", "101-500", "500+"]);
-
 export const CURRENT_CLI_OPERATIONS = new Set([
-  ...hosted.HOSTED_OPERATIONS,
+  "graph", "remote", ...HOSTED_OPERATIONS,
   "setup", "semantic_enable", "semantic_status", "semantic_disable", "status", "index",
   "sources", "import", "show", "locate", "search", "docs", "integration", "upgrade",
   "doctor", "blame",
@@ -88,7 +85,7 @@ const CLI_OPERATIONS = new Set([
   ...CURRENT_CLI_OPERATIONS,
   ...HISTORICAL_RETIRED_CLI_OPERATIONS,
 ]);
-export const CURRENT_MCP_OPERATIONS = new Set([
+export const CURRENT_MCP_OPERATIONS = new Set(["graph", "remote",
   "status", "sources", "search", "show_session", "show_event", "query_events", "blame", "pro_status",
   "unknown", "missing",
 ]);
@@ -102,18 +99,19 @@ export const MCP_OPERATIONS = new Set([
 const PRO_HOST_OPERATIONS = new Set(["lifecycle", "materialize", "query", "status", "blame"]);
 const DAEMON_OPERATIONS = new Set(["enable", "disable", "status", "run_once"]);
 const SURFACE_OPERATIONS = new Map<string, ReadonlySet<string>>([
+  ["server", new Set(["server_request"])],
   ["cli", CLI_OPERATIONS],
   ["mcp", MCP_OPERATIONS],
   ["pro_host", PRO_HOST_OPERATIONS],
   ["daemon", DAEMON_OPERATIONS],
 ]);
 const RUNTIME_OPERATIONS = new Map<string, ReadonlySet<string>>([
-  ["daemon", new Set(["ready", "stopped", "recovered", "failed", "cycle", "liveness"])],
-  ["mcp", new Set(["initialized", "stopped"])],
+  ["cli", new Set(["sift_summary", "product_runtime"])], ["server", new Set(["product_runtime", "server_summary"])],
+  ["daemon", new Set(["ready", "stopped", "recovered", "failed", "cycle", "liveness", "sharing_summary"])],
+  ["mcp", new Set(["initialized", "stopped", "product_runtime", "sift_summary"])],
 ]);
 const PROVIDER_REFRESH_OPERATIONS = new Set(["refresh"]);
 const PROVIDER_REFRESH_SURFACES = new Set(["cli", "daemon"]);
-
 export const SHARED_PROPERTY_KEYS = new Set([
   "install_manager", "capability_snapshot_schema", "available_parallelism_bucket",
   "host_memory_bucket", "cpu_vector_tier", "acceleration_candidate",
@@ -342,7 +340,6 @@ const DURATION_BUCKET_PROPERTY_KEYS = new Set([
   "refresh_duration_bucket", "query_duration_bucket", "render_duration_bucket",
   "search_output_duration_bucket",
 ]);
-
 export const INSTALL_STAGES = new Set([
   "installer", "artifact_download", "binary_install", "skill_install", "setup", "uninstall",
 ]);
@@ -378,6 +375,7 @@ export function parseOperationProperties(
 ): Record<string, TelemetryScalar> {
   const properties = requireRecord(value, "invalid_properties");
   if (surface !== "cli") throw schemaError("invalid_surface");
+  if (operation === "graph" || operation === "remote") return parseProductOperation(properties, surface, operation, outcome);
   if (hosted.HOSTED_OPERATIONS.has(operation)) return hosted.parseHostedProperties(properties, outcome);
   const operationKeys = OPERATION_PROPERTY_KEYS.get(operation);
   if (!operationKeys) throw schemaError("invalid_operation");
@@ -886,7 +884,7 @@ export function normalizeTelemetryProvider(value: unknown, code: string): string
 }
 
 export function isKnownOperationPropertyKey(key: string): boolean {
-  return KNOWN_OPERATION_PROPERTY_KEYS.has(key) || hosted.HOSTED_PROPERTY_KEYS.has(key);
+  return KNOWN_OPERATION_PROPERTY_KEYS.has(key) || hosted.HOSTED_PROPERTY_KEYS.has(key) || isProductPropertyKey(key);
 }
 
 export function requireBoolean(value: unknown, code: string): boolean {

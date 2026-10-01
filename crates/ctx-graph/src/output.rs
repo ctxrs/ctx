@@ -1,6 +1,32 @@
 use super::*;
 use serde::Serialize;
 
+#[derive(Debug)]
+pub(crate) struct OutputFailure {
+    pub kind: crate::observation::GraphFailureKind,
+    error: anyhow::Error,
+}
+impl std::fmt::Display for OutputFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)
+    }
+}
+impl std::error::Error for OutputFailure {}
+
+pub(crate) fn output_result<T>(result: Result<T>) -> Result<T> {
+    result.map_err(|error| {
+        if error.is::<OutputFailure>() {
+            error
+        } else {
+            OutputFailure {
+                kind: ctx_graph_core::observation::failure_kind(&error),
+                error,
+            }
+            .into()
+        }
+    })
+}
+
 pub(crate) fn human(text: &str) -> impl std::fmt::Display + '_ {
     text.escape_debug()
 }
@@ -102,7 +128,7 @@ pub fn write_search(
     Ok(())
 }
 
-pub(crate) fn print_output(output: Output, json: bool) -> Result<()> {
+fn print_output_inner(output: Output, json: bool) -> Result<()> {
     let mut stdout = io::stdout().lock();
     if json {
         serde_json::to_writer(&mut stdout, &output)?;
@@ -187,10 +213,10 @@ pub(crate) fn print_output(output: Output, json: bool) -> Result<()> {
         Output::Index(r) => {
             diagnostics(&mut io::stderr().lock(), &r.diagnostics)?;
             if !json && let Some(t) = &r.timings {
-                eprintln!(
+                crate::output::stderr(format_args!(
                     "Timing (ms): detect={:.3} extract={:.3} commit={:.3} total={:.3}",
                     t.detect_ms, t.extract_ms, t.commit_ms, t.total_ms
-                );
+                ))?;
             }
         }
         Output::Stats(s) => diagnostics(&mut io::stderr().lock(), &s.diagnostics)?,
@@ -199,7 +225,7 @@ pub(crate) fn print_output(output: Output, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn print_value(value: &impl Serialize, json: bool) -> Result<()> {
+fn print_value_inner(value: &impl Serialize, json: bool) -> Result<()> {
     let mut out = io::stdout().lock();
     if json {
         serde_json::to_writer(&mut out, value)?;
@@ -291,7 +317,7 @@ pub(crate) fn learning_annotations(
     annotation
 }
 
-pub(crate) fn print_show_output(
+fn print_show_output_inner(
     output: Output,
     annotation: serde_json::Value,
     json: bool,
@@ -325,4 +351,28 @@ pub(crate) fn print_show_output(
         writeln!(out, "{}", human(notice))?;
     }
     Ok(())
+}
+
+pub(crate) fn print_output(output: Output, json: bool) -> Result<()> {
+    output_result(print_output_inner(output, json))
+}
+
+pub(crate) fn print_value(value: &impl Serialize, json: bool) -> Result<()> {
+    output_result(print_value_inner(value, json))
+}
+
+pub(crate) fn print_show_output(
+    output: Output,
+    annotation: serde_json::Value,
+    json: bool,
+) -> Result<()> {
+    output_result(print_show_output_inner(output, annotation, json))
+}
+
+/// Tag only actual presentation writes, preserving the underlying I/O error.
+pub(crate) fn stdout(args: std::fmt::Arguments<'_>) -> Result<()> {
+    output_result(writeln!(io::stdout().lock(), "{args}").map_err(Into::into))
+}
+pub(crate) fn stderr(args: std::fmt::Arguments<'_>) -> Result<()> {
+    output_result(writeln!(io::stderr().lock(), "{args}").map_err(Into::into))
 }

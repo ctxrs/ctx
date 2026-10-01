@@ -62,8 +62,15 @@ fn call(backend: &impl ToolBackend, name: &str, arguments: Value) -> Value {
         backend,
         |_| panic!("backend owns the new tools' text projection"),
     );
+    let usage = handled
+        .usage
+        .as_ref()
+        .expect("unified tools retain their carrier");
+    assert!(matches!(usage.operation, McpToolKind::Unified(_)));
     assert!(
-        handled.usage.is_none(),
+        usage.facts.search.is_none()
+            && usage.facts.search_execution.is_none()
+            && usage.facts.blame.is_none(),
         "graph/output has no history usage authority"
     );
     let response = handled.value.unwrap();
@@ -208,7 +215,7 @@ fn response_bound_counts_json_escapes_and_preserves_id_and_errors() {
         ),
     );
     assert!(serialized_json_line_bytes(&oversized).unwrap() > MCP_PRESENTATION_MAX_OUTPUT_BYTES);
-    let bounded = bound_response(oversized, id.clone());
+    let bounded = bound_response(oversized, id.clone(), &mut None);
     assert_eq!(bounded["id"], id);
     assert_eq!(bounded["result"]["isError"], true);
     assert_eq!(
@@ -217,5 +224,105 @@ fn response_bound_counts_json_escapes_and_preserves_id_and_errors() {
     );
     assert!(serialized_json_line_bytes(&bounded).unwrap() < MCP_PRESENTATION_MAX_OUTPUT_BYTES);
     let ordinary = success_response(json!(1), json!({"ok":true}));
-    assert_eq!(bound_response(ordinary.clone(), json!(1)), ordinary);
+    assert_eq!(
+        bound_response(ordinary.clone(), json!(1), &mut None),
+        ordinary
+    );
+}
+
+#[test]
+fn known_unified_parse_failures_keep_closed_facts_without_entering_a_backend() {
+    use ctx_client_observability::analytics as a;
+    for (name, arguments) in [
+        ("graph_path", json!({"source":"synthetic"})),
+        ("graph_stats", json!([])),
+        (
+            "output_restore",
+            json!({"text":"synthetic", "encoding":"unknown"}),
+        ),
+    ] {
+        let request = json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":name,"arguments":arguments}});
+        let handled = handle_protocol_message(
+            request.clone(),
+            RequestDescriptor::from_message(&request),
+            &mut true,
+            McpServerIdentity {
+                name: "ctx",
+                version: "test",
+            },
+            &HistoryOnly,
+            |_| panic!("invalid input has no renderer"),
+        );
+        let facts = handled.usage.unwrap().facts;
+        if name.starts_with("graph") {
+            let graph = facts.graph.unwrap();
+            assert_eq!(
+                graph.completion.execution.unwrap_err().stage,
+                a::ProductFailureStage::Parse
+            );
+            assert_eq!(
+                graph.details.failure.unwrap().kind,
+                a::GraphFailureKind::InvalidInput
+            );
+            assert_eq!(graph.completion.delivery, a::DeliveryEvidence::Unknown);
+        } else {
+            let sift = facts.sift.unwrap();
+            assert_eq!(sift.execution_failed, 1);
+            assert_eq!(sift.tokens, None);
+        }
+    }
+}
+
+#[test]
+fn bounded_response_preserves_successful_graph_work_and_clears_sift_candidates() {
+    use ctx_client_observability::analytics as a;
+    let mut sift = a::SiftSummaryV1::new(
+        a::SiftOperation::Compact,
+        a::SiftMode::Lossless,
+        std::time::Duration::ZERO,
+    );
+    sift.observed = 1;
+    sift.complete = 1;
+    sift.bytes = Some(a::PresentedTotals {
+        samples: 1,
+        input: 10,
+        output: 1,
+    });
+    sift.tokens = sift.bytes;
+    let mut usage = Some(McpUsage {
+        operation: McpToolKind::Unified(UnifiedToolKind::GraphStats),
+        facts: ToolUsageFacts {
+            graph: Some(a::GraphCompletedV1::new(
+                a::GraphOperation::Stats,
+                a::GraphSurface::Mcp,
+                a::ProductCompletion::new(
+                    std::time::Duration::ZERO,
+                    Ok(()),
+                    a::DeliveryEvidence::Unknown,
+                    a::ProductOutput::Mcp,
+                ),
+            )),
+            sift: Some(sift),
+            ..Default::default()
+        },
+    });
+    let oversized = success_response(
+        json!(1),
+        tool_result_with_text(json!({}), "x".repeat(MCP_PRESENTATION_MAX_OUTPUT_BYTES)),
+    );
+    let bounded = bound_response(oversized, json!(1), &mut usage);
+    assert_eq!(bounded["result"]["isError"], true);
+    let facts = usage.unwrap().facts;
+    assert!(facts.graph.unwrap().completion.execution.is_ok());
+    assert_eq!(
+        facts.graph.unwrap().completion.delivery,
+        a::DeliveryEvidence::Failed
+    );
+    let sift = facts.sift.unwrap();
+    assert_eq!(sift.execution_failed, 0);
+    assert_eq!(sift.output_failed, 1);
+    assert_eq!(sift.bytes, None);
+    assert_eq!(sift.tokens, None);
+    assert_eq!(sift.partial, 1);
+    assert!(sift.into_event().is_some());
 }

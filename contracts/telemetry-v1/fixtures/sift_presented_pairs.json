@@ -1,0 +1,142 @@
+[
+  {
+    "name": "weighted_reduction",
+    "unit": "tokens",
+    "samples": 2,
+    "input": 1000,
+    "output": 190,
+    "expected": {
+      "sift_tokens_measured_count_bucket": "2-5",
+      "sift_tokens_input_bucket": "101-1k",
+      "sift_tokens_output_bucket": "101-1k",
+      "sift_tokens_delta_bucket": "101-1k",
+      "sift_tokens_change": "reduced",
+      "sift_tokens_savings_fraction_bucket": "75pct-90pct",
+      "sift_token_basis": "o200k_base_v1"
+    }
+  },
+  {
+    "name": "same_bucket_reduction",
+    "unit": "tokens",
+    "samples": 1,
+    "input": 1000,
+    "output": 999,
+    "expected": {
+      "sift_tokens_measured_count_bucket": "1",
+      "sift_tokens_input_bucket": "101-1k",
+      "sift_tokens_output_bucket": "101-1k",
+      "sift_tokens_delta_bucket": "1",
+      "sift_tokens_change": "reduced",
+      "sift_tokens_savings_fraction_bucket": "lt_10pct",
+      "sift_token_basis": "o200k_base_v1"
+    }
+  },
+  {
+    "name": "token_expansion",
+    "unit": "tokens",
+    "samples": 2,
+    "input": 1000,
+    "output": 1100,
+    "expected": {
+      "sift_tokens_measured_count_bucket": "2-5",
+      "sift_tokens_input_bucket": "101-1k",
+      "sift_tokens_output_bucket": "1k-10k",
+      "sift_tokens_delta_bucket": "21-100",
+      "sift_tokens_change": "increased",
+      "sift_tokens_savings_fraction_bucket": "increased",
+      "sift_token_basis": "o200k_base_v1"
+    }
+  },
+  {
+    "name": "zero_input_expansion",
+    "unit": "tokens",
+    "samples": 1,
+    "input": 0,
+    "output": 7,
+    "expected": {
+      "sift_tokens_measured_count_bucket": "1",
+      "sift_tokens_input_bucket": "0",
+      "sift_tokens_output_bucket": "6-20",
+      "sift_tokens_delta_bucket": "6-20",
+      "sift_tokens_change": "increased",
+      "sift_token_basis": "o200k_base_v1"
+    }
+  },
+  {
+    "name": "measured_zero",
+    "unit": "tokens",
+    "samples": 1,
+    "input": 0,
+    "output": 0,
+    "expected": {
+      "sift_tokens_measured_count_bucket": "1",
+      "sift_tokens_input_bucket": "0",
+      "sift_tokens_output_bucket": "0",
+      "sift_tokens_delta_bucket": "0",
+      "sift_tokens_change": "unchanged",
+      "sift_token_basis": "o200k_base_v1"
+    }
+  },
+  {
+    "name": "unchanged",
+    "unit": "tokens",
+    "samples": 6,
+    "input": 200,
+    "output": 200,
+    "expected": {
+      "sift_tokens_measured_count_bucket": "6-20",
+      "sift_tokens_input_bucket": "101-1k",
+      "sift_tokens_output_bucket": "101-1k",
+      "sift_tokens_delta_bucket": "0",
+      "sift_tokens_change": "unchanged",
+      "sift_tokens_savings_fraction_bucket": "unchanged",
+      "sift_token_basis": "o200k_base_v1"
+    }
+  },
+  {
+    "name": "full_reduction",
+    "unit": "tokens",
+    "samples": 1,
+    "input": 200,
+    "output": 0,
+    "expected": {
+      "sift_tokens_measured_count_bucket": "1",
+      "sift_tokens_input_bucket": "101-1k",
+      "sift_tokens_output_bucket": "0",
+      "sift_tokens_delta_bucket": "101-1k",
+      "sift_tokens_change": "reduced",
+      "sift_tokens_savings_fraction_bucket": "100pct",
+      "sift_token_basis": "o200k_base_v1"
+    }
+  },
+  {
+    "name": "byte_expansion",
+    "unit": "bytes",
+    "samples": 3,
+    "input": 102400,
+    "output": 204800,
+    "expected": {
+      "sift_bytes_measured_count_bucket": "2-5",
+      "sift_bytes_input_bucket": "100kb-1mb",
+      "sift_bytes_output_bucket": "100kb-1mb",
+      "sift_bytes_delta_bucket": "100kb-1mb",
+      "sift_bytes_change": "increased",
+      "sift_bytes_savings_fraction_bucket": "increased"
+    }
+  },
+  {
+    "name": "byte_reduction",
+    "unit": "bytes",
+    "samples": 2,
+    "input": 204800,
+    "output": 102400,
+    "expected": {
+      "sift_bytes_measured_count_bucket": "2-5",
+      "sift_bytes_input_bucket": "100kb-1mb",
+      "sift_bytes_output_bucket": "100kb-1mb",
+      "sift_bytes_delta_bucket": "100kb-1mb",
+      "sift_bytes_change": "reduced",
+      "sift_bytes_savings_fraction_bucket": "50pct-75pct"
+    }
+  }
+]
