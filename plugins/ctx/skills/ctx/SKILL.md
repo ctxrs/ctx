@@ -1,6 +1,6 @@
 ---
 name: ctx
-description: Use ctx as working memory for prior agent work. Search earlier sessions, trace code provenance with blame, and inspect local graph relationships. Use output compaction only when the user requests it or an existing explicit project or user instruction opts in; ordinary command execution alone is not compaction consent.
+description: Use ctx as working memory for prior agent work. Before starting or continuing work in an unfamiliar area, resuming earlier work, or revisiting an investigation, search prior sessions to ground yourself in earlier context. Use ctx blame to trace a line, file, commit, or PR to the agent session that produced it. Use when prior decisions, constraints, attempts, tool calls, transcript evidence, or code provenance may matter. Use ctx graph queries on indexed projects to follow calls and dependencies and understand what a change might affect.
 ---
 
 # ctx

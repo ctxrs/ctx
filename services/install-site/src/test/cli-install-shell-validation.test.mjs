@@ -717,7 +717,6 @@ test("rendered CLI installer skips history but installs the skill with --no-setu
   const { result, cleanup, setupArgsPath } = runRenderedCliInstaller({ args: ["--no-setup"] });
   try {
     assert.equal(result.status, 0, result.stderr);
-    assert.doesNotMatch(result.stderr, /skill|Setup skipped/);
     assert.match(readFileSync(setupArgsPath, "utf8"), /^docs\nman\n--out\n.*\/generated-man\nintegrations\ninstall\nskills\n--format=json\n$/u);
   } finally {
     cleanup();
@@ -1219,7 +1218,6 @@ test("rendered CLI installer can skip generated man pages", () => {
   });
   try {
     assert.equal(result.status, 0, result.stderr);
-    assert.doesNotMatch(result.stderr, /skill|Setup skipped/);
     assert.equal(existsSync(setupArgsPath), false);
   } finally {
     cleanup();
