@@ -652,6 +652,47 @@ fn opencode2_upgrade_reads_session_message_with_session_v2_metadata() {
 }
 
 #[test]
+fn opencode2_upgrade_keeps_the_source_identity_indexed_before_the_upgrade() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "indexed before the upgrade"}),
+    );
+    let (before, _, before_records, _) = scan_current_schema_with_rejections(&database);
+    assert_eq!(
+        before.schema.family,
+        OpenCodeNativeSchemaFamily::MessagePart
+    );
+
+    upgrade_to_opencode2(&connection, temp.path());
+    drop(connection);
+    let (after, _, after_records, _) = scan_current_schema_with_rejections(&database);
+    assert_eq!(
+        after.schema.family,
+        OpenCodeNativeSchemaFamily::SessionMessageSeq
+    );
+    assert!(
+        after.source.exact_descriptor_eq(&before.source),
+        "the upgrade must not move indexed sessions to a second source: {} -> {}",
+        before.source.schema_variant(),
+        after.source.schema_variant()
+    );
+
+    let session_id = |records: &[CoreRecord]| {
+        records
+            .iter()
+            .find(|record| record.provider_session_id.as_deref() == Some("current-session"))
+            .unwrap()
+            .session_id
+            .encode_canonical()
+            .unwrap()
+    };
+    assert_eq!(session_id(&before_records), session_id(&after_records));
+}
+
+#[test]
 fn opencode2_upgrade_with_v1_only_history_fails_closed() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = temp.path().join("opencode.db");

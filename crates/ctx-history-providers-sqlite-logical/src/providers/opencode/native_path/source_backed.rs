@@ -392,7 +392,7 @@ fn observe_logical_source_with_progress_scoped(
     let schema = OpenCodeNativeSchema::probe(connection, dialect)
         .map_err(OpenCodeSourceBackedError::from)
         .map_err(|error| diagnose_provider_query_error(error, SqliteFailurePhase::Schema))?;
-    let source = source_key_scoped(dialect, schema.family, source_scope)?;
+    let source = source_key_scoped(dialect, schema.identity_family, source_scope)?;
     report_progress(opencode_logical_progress(
         SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
         0,

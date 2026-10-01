@@ -22,6 +22,12 @@ const CONVERSATION_TYPES: &str =
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct OpenCodeNativeSchema {
     pub(super) family: OpenCodeNativeSchemaFamily,
+    /// The family that names this database's source identity. It differs from
+    /// `family` only when OpenCode 2's `session_message` supersedes v1
+    /// history: the database keeps the v1 identity it was indexed under before
+    /// the upgrade, so its already indexed sessions are replaced in place
+    /// rather than claimed again by a second source.
+    pub(super) identity_family: OpenCodeNativeSchemaFamily,
     /// The table that owns the selected family's session rows.
     pub(super) session_table: &'static str,
     pub(super) capability_digest: String,
@@ -143,6 +149,15 @@ impl OpenCodeNativeSchema {
             message_part_join,
             session_message_supersedes_v1,
         )?;
+        let identity_family = if session_message_supersedes_v1 {
+            if message_part_join {
+                OpenCodeNativeSchemaFamily::MessagePart
+            } else {
+                OpenCodeNativeSchemaFamily::LegacyMessage
+            }
+        } else {
+            family
+        };
 
         // OpenCode's `session_message` rows belong to `session_v2`. Sessions
         // created after an upgrade to OpenCode 2 exist only there.
@@ -189,6 +204,7 @@ impl OpenCodeNativeSchema {
         let capability_digest = capability_digest(conn, user_version, family)?;
         Ok(Self {
             family,
+            identity_family,
             session_table,
             capability_digest,
             user_version,
