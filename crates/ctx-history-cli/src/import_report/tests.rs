@@ -365,6 +365,10 @@ fn retained_usable_generation_reports_bounded_schema_v2_source_failures() {
     assert_eq!(json["outcome"], "completed_with_source_failures");
     assert_eq!(json["failure_scope"], "source");
     assert_eq!(json["totals"]["failed_sources"], 5);
+    assert_eq!(
+        import_completion_error(&report).unwrap().to_string(),
+        "5 import sources failed; first failure: source changed during refresh"
+    );
     for unsupported in [
         "source_files",
         "source_bytes",
@@ -384,6 +388,52 @@ fn retained_usable_generation_reports_bounded_schema_v2_source_failures() {
     assert!(rendered.contains("/history/2.jsonl"));
     assert!(!rendered.contains("/history/3.jsonl"));
     assert!(rendered.contains("2 source failures were omitted"));
+}
+
+#[test]
+fn source_failure_completion_preserves_partial_reporting_and_requested_diagnostic() {
+    for retained in [0, 7] {
+        for rejected in [0, 2] {
+            let mut report = failed_exact_report();
+            report.totals.failed_sources = 1;
+            report.totals.failed = rejected;
+            report.totals.current_retained_records = Some(retained);
+            report.totals.request_has_usable_records = Some(false);
+
+            assert_eq!(
+                import_completion_error(&report).unwrap().to_string(),
+                "1 import source failed; first failure: /history/codex/sessions.jsonl is not importable: unsupported source schema"
+            );
+            let json = import_report_json(&report);
+            assert_eq!(
+                json["outcome"],
+                match (retained, rejected) {
+                    (0, _) => "failure",
+                    (_, 0) => "completed_with_source_failures",
+                    _ => "completed_with_rejections_and_source_failures",
+                }
+            );
+            assert_eq!(json["totals"]["current_retained_records"], retained);
+            assert_eq!(json["sources"][0]["failure_type"], "unsupported_schema");
+        }
+    }
+}
+
+#[test]
+fn successful_and_valid_empty_imports_have_no_completion_error() {
+    assert!(import_completion_error(&changed_report()).is_none());
+    let empty = report(
+        false,
+        ImportTotals {
+            current_retained_records: Some(0),
+            request_records_attempted: Some(false),
+            request_has_usable_records: Some(false),
+            ..ImportTotals::default()
+        },
+        Vec::new(),
+    );
+    assert!(import_completion_error(&empty).is_none());
+    assert_eq!(import_report_json(&empty)["outcome"], "success");
 }
 
 #[test]

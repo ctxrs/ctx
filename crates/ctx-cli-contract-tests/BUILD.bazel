@@ -52,6 +52,7 @@ filegroup(
     srcs = [
         "tests/contracts/native_providers/additional.rs",
         "tests/contracts/native_providers/factory_retry.rs",
+        "tests/contracts/native_providers/import_failures.rs",
         "tests/contracts/support/native_providers/daemon.rs",
         "tests/contracts/support/native_providers/sqlite_sources.rs",
         "tests/contracts/support/native_providers/workspace_sources.rs",
@@ -159,16 +160,6 @@ ctx_cli_contract_test(
 ctx_cli_contract_test(
     name = "native_provider_real_shapes_tests",
     src = "tests/contracts/native_provider_real_shapes.rs",
-    deps = ["//crates/ctx-history-index:lib"],
-    test_support = [
-        "base",
-        "fixtures",
-    ],
-)
-
-ctx_cli_contract_test(
-    name = "native_provider_rejections_tests",
-    src = "tests/contracts/native_provider_rejections.rs",
     deps = ["//crates/ctx-history-index:lib"],
     test_support = [
         "base",

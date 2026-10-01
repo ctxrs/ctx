@@ -1,5 +1,324 @@
 use super::*;
 
+#[path = "opencode_migration.rs"]
+mod migration;
+
+#[test]
+fn native_v1_to_v2_capture_imports_all_three_messages_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let database = temp.path().join("opencode.db");
+    let native = include_bytes!("../fixtures/opencode-v1-v2/opencode.db");
+    fs::write(&database, native).unwrap();
+    // This checkpointed fixture retains WAL mode. An ordinary native reader
+    // establishes and holds WAL/SHM coordination on the disposable copy; ctx
+    // must not create those provider sidecars itself. No history is rewritten.
+    let reader = Connection::open(&database).unwrap();
+    assert_eq!(
+        reader
+            .query_row("select count(*) from session_message", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    let index_root = temp.path().join("index");
+    let refresh = || {
+        let mut registry = SourceBackedProviderRegistry::new();
+        register_landed_source_backed_route_with_data_root(
+            &mut registry,
+            provider_source_for_path(CaptureProvider::OpenCode, database.clone()),
+            SourceBackedRouteSelection::Automatic,
+            &data_root,
+        )
+        .unwrap();
+        SourceBackedRefreshExecutor::new(registry, WriterOptions::default())
+            .refresh_scope_with_detailed_progress(
+                &index_root,
+                SourceBackedRefreshScope::All,
+                |_| Ok(()),
+            )
+            .unwrap()
+    };
+    let cold = refresh();
+    assert_eq!(cold.successful_route_outcomes.len(), 1);
+    assert_eq!(cold.sources.len(), 1);
+    assert_eq!(cold.sources[0].counts().complete_records, 3);
+    assert_eq!(cold.sources[0].counts().retained_records, 3);
+    assert_eq!(cold.sources[0].counts().rejected_records, 0);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    for (term, expected) in [
+        ("alpha", "migration-orchid-alpha first native message"),
+        ("beta", "migration-orchid-beta second native message"),
+        ("gamma", "migration-orchid-gamma independent session"),
+    ] {
+        let event = only_matching_event(&index, term);
+        let core = index
+            .core_record_by_id(event.event_id.as_uuid())
+            .unwrap()
+            .unwrap();
+        assert_eq!(core.content.meaningful_text(), expected);
+    }
+    assert_eq!(refresh().commit.generation_id, cold.commit.generation_id);
+    assert_eq!(fs::read(&database).unwrap(), native.as_slice());
+    drop(reader);
+}
+
+#[test]
+fn upgraded_opencode_import_replays_appends_and_updates_without_legacy_duplicates() {
+    // Authored native-shape regression. The provider's actual upgrade capture
+    // is separate evidence; this test exercises import and durable refresh.
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let database = temp.path().join("source/opencode.db");
+    let writer = create_opencode_wal_database(&database, "upgradedprefix");
+    let index_root = temp.path().join("index");
+    let refresh = |expected| {
+        let before = ["opencode.db", "opencode.db-wal"]
+            .map(|name| fs::read(database.with_file_name(name)).unwrap());
+        let mut registry = SourceBackedProviderRegistry::new();
+        register_landed_source_backed_route_with_data_root(
+            &mut registry,
+            provider_source_for_path(CaptureProvider::OpenCode, database.clone()),
+            SourceBackedRouteSelection::Automatic,
+            &data_root,
+        )
+        .unwrap();
+        let report = SourceBackedRefreshExecutor::new(registry, WriterOptions::default())
+            .refresh_scope_with_detailed_progress(
+                &index_root,
+                SourceBackedRefreshScope::All,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(report.sources.len(), 1);
+        assert_eq!(report.successful_route_outcomes.len(), 1);
+        assert_eq!(report.sources[0].counts().complete_records, expected);
+        assert_eq!(report.sources[0].counts().retained_records, expected);
+        assert_eq!(report.sources[0].counts().rejected_records, 0);
+        let after = ["opencode.db", "opencode.db-wal"]
+            .map(|name| fs::read(database.with_file_name(name)).unwrap());
+        assert_eq!(before, after, "import must not mutate provider DB/WAL");
+        report
+    };
+    let legacy = refresh(1);
+    assert_eq!(refresh(1).commit.generation_id, legacy.commit.generation_id);
+    let legacy_event = only_matching_event(
+        &VerifiedIndex::open_pinned(&index_root).unwrap(),
+        "upgradedprefix",
+    );
+    writer.execute_batch(
+        "create table session_v2 (
+             id text primary key, parent_id text, directory text, branch text, agent text,
+             time_created integer not null, time_updated integer not null);
+         insert into session_v2 select * from session;
+         create table session_message (
+             id text primary key, session_id text, type text, seq integer,
+             time_created integer, time_updated integer, data text);
+         create unique index session_message_session_seq_idx on session_message(session_id,seq);
+         insert into session_message values
+             ('message-1','session-1','user',1,1,1,'{\"text\":\"upgradedprefix\",\"time\":{\"created\":1}}');",
+    ).unwrap();
+    // A covering row which the real projection would reject must leave the
+    // already imported legacy text and generation intact.
+    writer
+        .execute_batch("update session_message set data=json_set(data,'$.time.created','invalid')")
+        .unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route_with_data_root(
+        &mut registry,
+        provider_source_for_path(CaptureProvider::OpenCode, database.clone()),
+        SourceBackedRouteSelection::Automatic,
+        &data_root,
+    )
+    .unwrap();
+    let refused = SourceBackedRefreshExecutor::new(registry, WriterOptions::default())
+        .refresh_scope_with_detailed_progress(
+            &index_root,
+            SourceBackedRefreshScope::All,
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(refused.successful_route_outcomes.is_empty());
+    assert_eq!(refused.failed_routes.len(), 1);
+    assert!(refused.failed_routes[0].carried_forward);
+    assert_eq!(refused.failed_routes[0].class.as_str(), "unreadable");
+    assert!(refused.source_failures.failures()[0]
+        .detail
+        .contains("ambiguous populated"));
+    assert_eq!(refused.commit.generation_id, legacy.commit.generation_id);
+    assert_eq!(
+        only_matching_event(
+            &VerifiedIndex::open_pinned(&index_root).unwrap(),
+            "upgradedprefix"
+        ),
+        legacy_event
+    );
+    writer
+        .execute_batch("update session_message set data=json_set(data,'$.time.created',1)")
+        .unwrap();
+    let cold = refresh(1);
+    let original = only_matching_event(
+        &VerifiedIndex::open_pinned(&index_root).unwrap(),
+        "upgradedprefix",
+    );
+    let unchanged = refresh(1);
+    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
+    assert!(!unchanged.successful_route_outcomes[0].changed);
+    let LogicalSqliteRoutePlan::OpenCodeFamily { adapter, .. } =
+        logical_sqlite_route_plan_scoped::<ScopedReplayBinding>(
+            provider_source_for_path(CaptureProvider::OpenCode, database.clone()),
+            SourceBackedRouteSelection::Automatic,
+            &data_root,
+            SourceAnchorScope::Unqualified,
+        )
+        .unwrap()
+    else {
+        panic!("expected OpenCode adapter")
+    };
+    let tree = adapter
+        .discover_complete_with_progress(&unchanged.sources, &mut |_| {
+            panic!("unchanged overlap must not copy a snapshot or scan its content")
+        })
+        .unwrap();
+    adapter.revalidate_complete(&tree).unwrap();
+    drop(tree);
+    let prior = &unchanged.sources[0];
+    let old_revision = ctx_history_core::CertifiedSource::certify_with_frontier(
+        prior.observation().clone(),
+        prior.observation().clone(),
+        "opencode-family-source-backed-v13-bounded-oversized-content",
+        *prior.content_digest(),
+        prior.counts(),
+        prior.frontier().cloned(),
+    )
+    .unwrap();
+    let mut recopied = false;
+    let tree = adapter
+        .discover_complete_with_progress(&[old_revision], &mut |_| {
+            recopied = true;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        recopied,
+        "old parser revision must repeat overlap admission"
+    );
+    adapter.revalidate_complete(&tree).unwrap();
+
+    // Old-revision admission owns a stable private copy. Exact no-op replay
+    // instead depends on the live DB/WAL revision remaining unchanged.
+    let replay_tree = adapter
+        .discover_complete_with_progress(&unchanged.sources, &mut |_| {
+            panic!("unchanged overlap must use the exact replay fence")
+        })
+        .unwrap();
+    adapter.revalidate_complete(&replay_tree).unwrap();
+    assert_eq!(
+        writer
+            .execute(
+                "update session_v2 set branch='upgraded-branch' where id='session-1'",
+                [],
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        adapter.revalidate_complete(&tree).unwrap(),
+        tree.tree_fingerprint,
+        "same-object writes do not change the admitted private snapshot"
+    );
+    assert_eq!(
+        adapter.revalidate_complete(&replay_tree).unwrap_err().kind,
+        SourceBackedRouteErrorKind::SourceChanged
+    );
+    drop(replay_tree);
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
+        cold.commit.generation_id
+    );
+    let metadata = refresh(1);
+    assert_ne!(metadata.commit.generation_id, cold.commit.generation_id);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    let event = only_matching_event(&index, "upgradedprefix");
+    assert_eq!(event.event_id, original.event_id);
+    let core = index
+        .core_record_by_id(event.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert!(core
+        .content
+        .activity
+        .as_ref()
+        .unwrap()
+        .facts
+        .iter()
+        .any(|fact| {
+            fact.kind == ctx_history_core::LiteralFactKind::Branch
+                && fact.value == "upgraded-branch"
+        }));
+    drop(index);
+
+    writer.execute_batch(
+        "insert into session_v2 select 'session-2',null,directory,branch,agent,2,2 from session_v2 where id='session-1';
+         insert into session_message values
+             ('message-2','session-1','assistant',2,2,2,'{\"content\":[{\"type\":\"text\",\"text\":\"upgradedsuffix\"}],\"time\":{\"created\":2}}'),
+             ('message-3','session-2','user',1,3,3,'{\"text\":\"currentonlysession\",\"time\":{\"created\":3}}');",
+    ).unwrap();
+    let appended = refresh(3);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(only_matching_event(&index, "upgradedprefix"), original);
+    let suffix = only_matching_event(&index, "upgradedsuffix");
+    assert_eq!(suffix.session_id, original.session_id);
+    assert_ne!(
+        only_matching_event(&index, "currentonlysession").session_id,
+        original.session_id
+    );
+    drop(index);
+    assert_eq!(
+        refresh(3).commit.generation_id,
+        appended.commit.generation_id
+    );
+
+    // A current-only update must invalidate replay without changing identities.
+    writer.execute_batch("update session_message set data=json_set(data,'$.content[0].text','updatedsuffix') where id='message-2'").unwrap();
+    refresh(3);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert!(matching_events(&index, "upgradedsuffix").is_empty());
+    assert_eq!(only_matching_event(&index, "updatedsuffix"), suffix);
+    drop(index);
+
+    // An ordinary dual write updates both representations together.
+    writer.execute_batch(
+        "begin;
+         update part set data=json_set(data,'$.text','updatedprefix') where id='part-1';
+         update session_message set data=json_set(data,'$.text','updatedprefix') where id='message-1';
+         commit;",
+    ).unwrap();
+    let updated = refresh(3);
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert!(matching_events(&index, "upgradedprefix").is_empty());
+    assert_eq!(only_matching_event(&index, "updatedprefix"), original);
+    drop(index);
+    assert_eq!(
+        refresh(3).commit.generation_id,
+        updated.commit.generation_id
+    );
+
+    // Private-copy admission still requires the same named database object.
+    // Even byte-identical replacement must fail its terminal identity fence.
+    drop(writer);
+    adapter.revalidate_complete(&tree).unwrap();
+    let replacement = database.with_extension("replacement");
+    fs::copy(&database, &replacement).unwrap();
+    fs::rename(&replacement, &database).unwrap();
+    assert_eq!(
+        adapter.revalidate_complete(&tree).unwrap_err().kind,
+        SourceBackedRouteErrorKind::SourceChanged
+    );
+}
+
 #[test]
 fn opencode_middle_session_refresh_survives_restart_wal_reset_and_old_changes() {
     let temp = tempfile::tempdir().unwrap();

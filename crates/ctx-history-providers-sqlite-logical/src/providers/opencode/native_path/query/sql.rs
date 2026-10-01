@@ -53,6 +53,7 @@ fn row_event_source_sql(
     table: &str,
     explicit_sequence: bool,
 ) -> String {
+    let session_table = schema.session_table;
     let type_column = type_expression(schema.event_has_type, "x");
     let native_identity = bounded_identity("x.id");
     let session_identity = bounded_identity("x.session_id");
@@ -94,7 +95,7 @@ fn row_event_source_sql(
                 null,
                 case when s.id is null then 1 else 0 end
          from {table} x
-         left join session s on s.id = x.session_id",
+         left join {session_table} s on s.id = x.session_id",
     )
 }
 

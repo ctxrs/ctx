@@ -51,3 +51,71 @@ fn only_payload_content_size_failures_are_record_local() {
         &CoreRecordError::InvalidActivity
     ));
 }
+
+#[test]
+fn schema_transitions_separate_session_ids_without_weakening_provenance() {
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    let legacy_source = source_key_scoped(
+        dialect,
+        OpenCodeNativeSchemaFamily::MessagePart,
+        SourceAnchorScope::Unqualified,
+    )
+    .unwrap();
+    let released = ctx_history_core::derive_native_session_id(
+        &legacy_source,
+        "opencode-family-session",
+        "opencode-family.session-id",
+        TypedKey::utf8("same-session").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        session_id(&legacy_source, "same-session")
+            .unwrap()
+            .encode_canonical()
+            .unwrap(),
+        released.encode_canonical().unwrap()
+    );
+    let mut compact = std::collections::BTreeSet::new();
+    for family in [
+        OpenCodeNativeSchemaFamily::MessagePart,
+        OpenCodeNativeSchemaFamily::SessionMessageSeq,
+        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq,
+        OpenCodeNativeSchemaFamily::SessionEntry,
+        OpenCodeNativeSchemaFamily::LegacyMessage,
+    ] {
+        let source = source_key_scoped(dialect, family, SourceAnchorScope::Unqualified).unwrap();
+        assert_eq!(source.identity(), legacy_source.identity());
+        let session = session_id(&source, "same-session").unwrap();
+        assert!(compact.insert(session.as_uuid()));
+        assert_eq!(
+            session.encode_canonical().unwrap(),
+            session_id(&source, "same-session")
+                .unwrap()
+                .encode_canonical()
+                .unwrap()
+        );
+        let item =
+            NativeItemKey::native_id("message", TypedKey::utf8("message-1").unwrap()).unwrap();
+        derive_event_id(EventIdentityInput {
+            source: &source,
+            session_id: session,
+            logical_item_kind: "message",
+            native_item_key: &item,
+            subrecord_selector: None,
+        })
+        .unwrap();
+        if family != OpenCodeNativeSchemaFamily::MessagePart {
+            assert!(
+                derive_event_id(EventIdentityInput {
+                    source: &source,
+                    session_id: released,
+                    logical_item_kind: "message",
+                    native_item_key: &item,
+                    subrecord_selector: None,
+                })
+                .is_err(),
+                "old provenance must still be rejected by the new descriptor"
+            );
+        }
+    }
+}

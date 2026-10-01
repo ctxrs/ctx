@@ -327,18 +327,6 @@ fn project_sqlite_json(
     (projection, has_explicit_event_time)
 }
 
-pub(super) fn retained_projection(
-    projection: &OpenCodeJsonProjection,
-) -> Option<OpenCodeRetainedJson> {
-    match projection {
-        OpenCodeJsonProjection::Retained(retained) => Some(retained.clone()),
-        OpenCodeJsonProjection::Output(output) => output.diagnostic.clone(),
-        OpenCodeJsonProjection::Rejected(_) | OpenCodeJsonProjection::RejectedWithReason(_, _) => {
-            None
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn core_record(
     source: &SourceKey,

@@ -27,7 +27,9 @@ const ZED_SCHEMA_VARIANT_DIGEST: [u8; 32] = [
     0x3d, 0x6f, 0xe4, 0xba, 0xba, 0xe9, 0xfa, 0x24, 0x5f, 0xc6, 0xb6, 0x3e, 0x04, 0xa5, 0xb5, 0xba,
     0xf4, 0x8a, 0xa8, 0x89, 0xfe, 0xc2, 0x55, 0x1d, 0x98, 0x1a, 0xf6, 0x02, 0x98, 0x58, 0x2f, 0x2d,
 ];
-const CODEX_CORE_ACTIVITY_REVISION: &str = "codex-nativepath-core-activity-v15-revert-lineage";
+const CODEX_CORE_ACTIVITY_REVISION: &str =
+    "codex-nativepath-core-activity-v16-audited-primary-lineage";
+const CODEX_RELEASED_V15_REVISION: &str = "codex-nativepath-core-activity-v15-revert-lineage";
 const CODEX_RELEASED_V14_REVISION: &str =
     "codex-nativepath-core-activity-v14-literal-patch-file-facts";
 const CODEX_RELEASED_V11_REVISION: &str = "codex-nativepath-core-activity-v11-item-call-identity";
@@ -35,7 +37,10 @@ const MUX_CORE_ACTIVITY_REVISION: &str = "mux-source-backed-v16-explicit-root-on
 const OPENCLAW_CORE_ACTIVITY_REVISION: &str =
     "openclaw-source-backed-v20-direct-parent-explicit-root";
 const CRUSH_CORE_ACTIVITY_REVISION: &str = "crush-sqlite-source-backed-v5-record-rejections";
-const OPENCODE_CORE_ACTIVITY_REVISION: &str =
+const OPENCODE_CORE_ACTIVITY_REVISION: &str = "opencode-family-source-backed-v14-proven-v2-overlap";
+const OPENCODE_RELEASED_V13_REVISION: &str =
+    "opencode-family-source-backed-v13-bounded-oversized-content";
+const OPENCODE_RELEASED_V12_REVISION: &str =
     "opencode-family-source-backed-v12-known-file-carriers";
 const ZED_CORE_ACTIVITY_REVISION: &str =
     "zed-nativepath-source-backed-v5-neutral-core-agent-scope-optional-admission";
@@ -52,9 +57,8 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
     if record.event_copy.is_some() {
         return ProducerAuthorityDisposition::IneligibleCopied;
     }
-    if record.agent_scope != Some(AgentScope::Subagent) || record.parent_session_id.is_none() {
-        return ProducerAuthorityDisposition::AbstainUnknown;
-    }
+    let child =
+        record.agent_scope == Some(AgentScope::Subagent) && record.parent_session_id.is_some();
 
     let source = &record.source;
     let exact =
@@ -66,8 +70,22 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
                 && record.parser_revision == parser_revision
         };
 
-    let codex = [
+    let native_identity = record
+        .provider_session_id
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+        && record
+            .native_event_id
+            .as_ref()
+            .is_some_and(|key| *key != crate::protocol::TypedKey::Null);
+    let primary = record.agent_scope == Some(AgentScope::Primary)
+        && record.parent_session_id.is_none()
+        && record
+            .root_session_id
+            .is_none_or(|root| root == record.session_id);
+    let codex_contract = [
         CODEX_CORE_ACTIVITY_REVISION,
+        CODEX_RELEASED_V15_REVISION,
         CODEX_RELEASED_V14_REVISION,
         CODEX_RELEASED_V11_REVISION,
     ]
@@ -79,20 +97,25 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
             "codex-nativepath-jsonl-v0",
             revision,
         )
-    }) && record
-        .provider_session_id
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-        && record.native_event_id.is_some()
-        && matches!(
-            record.session_relationship,
-            Some(
-                ProviderNativeSessionRelationship::Delegated
-                    | ProviderNativeSessionRelationship::Forked
-                    | ProviderNativeSessionRelationship::ResumedFrom
-                    | ProviderNativeSessionRelationship::WorkflowChild
-            )
-        );
+    });
+    // Old Codex parsers discarded unusable parent/root claims on primary
+    // records. Only the audited parser can prove that those claims were absent.
+    // Their already supported child contracts remain usable from retained Core.
+    let codex = native_identity
+        && codex_contract
+        && ((primary
+            && record.parser_revision == CODEX_CORE_ACTIVITY_REVISION
+            && record.session_relationship == Some(ProviderNativeSessionRelationship::Root))
+            || child
+                && matches!(
+                    record.session_relationship,
+                    Some(
+                        ProviderNativeSessionRelationship::Delegated
+                            | ProviderNativeSessionRelationship::Forked
+                            | ProviderNativeSessionRelationship::ResumedFrom
+                            | ProviderNativeSessionRelationship::WorkflowChild
+                    )
+                ));
     let delegated =
         record.session_relationship == Some(ProviderNativeSessionRelationship::Delegated);
     let opencode_schema = matches!(
@@ -108,14 +131,7 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
     // tuples below unchanged: retained Core need not be reimportable.
     // Gemini v2 deliberately has no resolved parent/relationship; neither its
     // header scope nor a directory hint establishes a unique parent recording.
-    let current = record
-        .provider_session_id
-        .as_deref()
-        .is_some_and(|id| !id.is_empty())
-        && record
-            .native_event_id
-            .as_ref()
-            .is_some_and(|key| *key != crate::protocol::TypedKey::Null)
+    let current = native_identity
         && (exact(
             "mux",
             "mux_session_jsonl",
@@ -132,20 +148,34 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
             "crush-project-sqlite-v0",
             CRUSH_CORE_ACTIVITY_REVISION,
         ) || (opencode_schema
-            && exact(
-                "opencode",
-                "opencode_sqlite",
-                source.schema_variant(),
+            && [
                 OPENCODE_CORE_ACTIVITY_REVISION,
-            ))
+                OPENCODE_RELEASED_V13_REVISION,
+                OPENCODE_RELEASED_V12_REVISION,
+            ]
+            .into_iter()
+            .any(|revision| {
+                exact(
+                    "opencode",
+                    "opencode_sqlite",
+                    source.schema_variant(),
+                    revision,
+                )
+            }))
             || exact(
                 "zed",
                 "zed_threads_sqlite",
                 "zed-nativepath-sqlite-v0",
                 ZED_CORE_ACTIVITY_REVISION,
             ));
+    // Exact current contracts distinguish primary native owners from malformed
+    // or unresolved lineage. Codex retains Root explicitly; the other reviewed
+    // emitters retain Primary with no relationship. Neither needs a fake parent.
+    // Released child-only contracts below do not establish that primary shape.
     let eligible = codex
-        || delegated
+        || primary && current && record.session_relationship.is_none()
+        || child
+            && delegated
             && (current
                 || exact(
                     "gemini",
@@ -380,6 +410,7 @@ mod tests {
             "codex-nativepath-core-activity-v11-item-call-identity",
             "codex-nativepath-core-activity-v14-literal-patch-file-facts",
             "codex-nativepath-core-activity-v15-revert-lineage",
+            "codex-nativepath-core-activity-v16-audited-primary-lineage",
         ] {
             let mut codex = record(
                 "codex",
@@ -477,11 +508,100 @@ mod tests {
     }
 
     #[test]
+    fn exact_codex_primary_needs_native_identity_and_consistent_root_claims() {
+        for revision in [
+            "codex-nativepath-core-activity-v11-item-call-identity",
+            "codex-nativepath-core-activity-v14-literal-patch-file-facts",
+            "codex-nativepath-core-activity-v15-revert-lineage",
+            "codex-nativepath-core-activity-v16-audited-primary-lineage",
+        ] {
+            let mut primary = record(
+                "codex",
+                "codex_session_jsonl",
+                "codex-nativepath-jsonl-v0",
+                revision,
+            );
+            let other_session = primary.parent_session_id;
+            primary.parent_session_id = None;
+            primary.agent_scope = Some(AgentScope::Primary);
+            primary.session_relationship = Some(ProviderNativeSessionRelationship::Root);
+            primary.provider_session_id = Some("primary".to_owned());
+            primary.native_event_id = Some(TypedKey::utf8("native-event").unwrap());
+            for root in [None, Some(primary.session_id)] {
+                primary.root_session_id = root;
+                primary.validate_contract().unwrap();
+                assert_eq!(
+                    producer_authority_disposition(&primary),
+                    if revision == CODEX_CORE_ACTIVITY_REVISION {
+                        ProducerAuthorityDisposition::EligibleUnique
+                    } else {
+                        ProducerAuthorityDisposition::AbstainUnknown
+                    }
+                );
+            }
+            for missing in [
+                "scope",
+                "subagent",
+                "parent",
+                "root",
+                "relationship",
+                "delegated",
+                "session",
+                "empty-session",
+                "event",
+                "null-event",
+                "revision",
+            ] {
+                let mut miss = primary.clone();
+                match missing {
+                    "scope" => miss.agent_scope = None,
+                    "subagent" => miss.agent_scope = Some(AgentScope::Subagent),
+                    "parent" => miss.parent_session_id = other_session,
+                    "root" => miss.root_session_id = other_session,
+                    "relationship" => miss.session_relationship = None,
+                    "delegated" => {
+                        miss.session_relationship =
+                            Some(ProviderNativeSessionRelationship::Delegated)
+                    }
+                    "session" => miss.provider_session_id = None,
+                    "empty-session" => miss.provider_session_id = Some(String::new()),
+                    "event" => miss.native_event_id = None,
+                    "null-event" => miss.native_event_id = Some(TypedKey::Null),
+                    "revision" => miss.parser_revision.push_str("-unknown"),
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    producer_authority_disposition(&miss),
+                    ProducerAuthorityDisposition::AbstainUnknown,
+                    "{revision} {missing}"
+                );
+            }
+            primary.event_copy = Some(ProviderNativeEventCopy {
+                ancestor_session_id: other_session.unwrap(),
+                ancestor_event_id: derive_event_id(EventIdentityInput {
+                    source: &primary.source,
+                    session_id: other_session.unwrap(),
+                    logical_item_kind: "message",
+                    native_item_key: &NativeItemKey::native_id("event", TypedKey::U64(3)).unwrap(),
+                    subrecord_selector: None,
+                })
+                .unwrap(),
+                proof: ProviderNativeCopyProof::NativeCallResultIdentity,
+            });
+            assert_eq!(
+                producer_authority_disposition(&primary),
+                ProducerAuthorityDisposition::IneligibleCopied
+            );
+        }
+    }
+
+    #[test]
     fn exact_copied_codex_subagent_is_rejected_before_contract_admission() {
         for admitted_revision in [
             "codex-nativepath-core-activity-v11-item-call-identity",
             "codex-nativepath-core-activity-v14-literal-patch-file-facts",
             "codex-nativepath-core-activity-v15-revert-lineage",
+            "codex-nativepath-core-activity-v16-audited-primary-lineage",
         ] {
             let mut codex = record(
                 "codex",

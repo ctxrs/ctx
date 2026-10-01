@@ -22,7 +22,7 @@ _CONTRACT_SUPPORT_DEPS = [
     "//crates/ctx-history-index:lib",
 ]
 
-def history_ingest_binary_contract(name, src, tags = []):
+def history_ingest_binary_contract(name, src, tags = [], extra_srcs = []):
     ctx_binary_contract_test(
         name = name,
         src = src,
@@ -30,6 +30,7 @@ def history_ingest_binary_contract(name, src, tags = []):
         cargo_manifest_dir = "crates/ctx-history-ingest-application",
         support_deps = _CONTRACT_SUPPORT_DEPS,
         support_srcs = _CONTRACT_SUPPORT_SRCS,
+        extra_srcs = extra_srcs,
         extra_compile_data = [
             "//:ctx_bundled_skills",
             "//:ctx_embedded_docs",

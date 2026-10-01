@@ -36,6 +36,7 @@ path = "tests/fx_publication.rs"
 
 [dev-dependencies]
 base64.workspace = true
+ctx-attribution = { path = "../ctx-attribution" }
 ctx-history-capture-composition = { path = "../ctx-history-capture-composition", features = ["test-support"] }
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-capture-runtime = { path = "../ctx-history-capture-runtime" }
@@ -49,6 +50,7 @@ ctx-history-provider-native-jsonl = { path = "../ctx-history-provider-native-jso
 ctx-history-provider-openclaw-sqlite = { path = "../ctx-history-provider-openclaw-sqlite", features = ["test-support"] }
 ctx-history-provider-runtime = { path = "../ctx-history-provider-runtime", features = ["test-support"] }
 ctx-history-providers-sqlite-selected = { path = "../ctx-history-providers-sqlite-selected", features = ["test-support"] }
+ctx-history-snapshot-reader = { path = "../ctx-history-snapshot-reader" }
 ctx-history-source-discovery = { path = "../ctx-history-source-discovery" }
 ctx-history-source-io = { path = "../ctx-history-source-io", features = ["test-support"] }
 rusqlite.workspace = true

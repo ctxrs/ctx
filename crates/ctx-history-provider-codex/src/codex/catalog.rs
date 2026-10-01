@@ -284,6 +284,7 @@ fn codex_session_meta_identity(value: &Value) -> Option<CodexSessionMetaIdentity
         parent_thread_id,
         forked_from_id,
         history_base_thread_id,
+        provider_root_native_session_id.as_deref(),
     );
     let root_native_session_id = match session_relationship {
         Some(ProviderNativeSessionRelationship::Root) | None => None,
@@ -328,14 +329,40 @@ fn codex_native_session_id_from_meta(value: &Value) -> Option<String> {
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned)
 }
-pub(crate) fn codex_parent_session_id(source: &Value) -> Option<String> {
-    source
-        .pointer("/subagent/thread_spawn/parent_thread_id")
-        .or_else(|| source.pointer("/thread_spawn/parent_thread_id"))
-        .or_else(|| source.get("parent_thread_id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .map(str::to_owned)
+fn codex_parent_session_id(source: &Value) -> std::result::Result<Option<String>, ()> {
+    // A declared spawn with no usable parent is uncertainty, not absence of a
+    // child claim. Inspect every accepted carrier so fallback order cannot hide
+    // malformed or conflicting native metadata.
+    let mut parent = None;
+    for spawn in [
+        source.pointer("/subagent/thread_spawn"),
+        source.get("thread_spawn"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if spawn.get("parent_thread_id").is_none() {
+            return Err(());
+        }
+    }
+    for claim in [
+        source.pointer("/subagent/thread_spawn/parent_thread_id"),
+        source.pointer("/thread_spawn/parent_thread_id"),
+        source.get("parent_thread_id"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let value = claim
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or(())?;
+        if parent.as_deref().is_some_and(|prior| prior != value) {
+            return Err(());
+        }
+        parent = Some(value.to_owned());
+    }
+    Ok(parent)
 }
 
 pub(crate) fn codex_session_relationship(
@@ -344,8 +371,18 @@ pub(crate) fn codex_session_relationship(
     parent_thread_id: Option<&str>,
     forked_from_id: Option<&str>,
     history_base_thread_id: Option<&str>,
+    provider_root_native_session_id: Option<&str>,
 ) -> (Option<String>, Option<ProviderNativeSessionRelationship>) {
-    let source_parent = codex_parent_session_id(source);
+    let Ok(source_parent) = codex_parent_session_id(source) else {
+        return (None, None);
+    };
+    if [parent_thread_id, forked_from_id, history_base_thread_id]
+        .into_iter()
+        .flatten()
+        .any(|id| id.trim().is_empty())
+    {
+        return (None, None);
+    }
     let direct_parent = parent_thread_id
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned);
@@ -365,6 +402,11 @@ pub(crate) fn codex_session_relationship(
         (Some(source_parent), _) => Some(source_parent),
         (None, direct_parent) => direct_parent,
     };
+    if delegated_parent.is_none()
+        && (source.get("subagent").is_some() || source.as_str() == Some("subagent"))
+    {
+        return (None, None);
+    }
     if let Some(parent) = delegated_parent {
         if forked_parent
             .iter()
@@ -389,6 +431,9 @@ pub(crate) fn codex_session_relationship(
             Some(parent),
             Some(ProviderNativeSessionRelationship::ResumedFrom),
         );
+    }
+    if provider_root_native_session_id.is_some_and(|root| root != native_session_id) {
+        return (None, None);
     }
     (None, Some(ProviderNativeSessionRelationship::Root))
 }
@@ -477,6 +522,37 @@ mod tests {
 
     use super::*;
     use crate::common::io::open_provider_source_file;
+
+    #[test]
+    fn declared_unusable_lineage_is_unknown_in_catalog_identity() {
+        for source in [
+            json!({"subagent":{"thread_spawn":{"parent_thread_id":17}}}),
+            json!({"subagent":{"thread_spawn":{"parent_thread_id":null}}}),
+            json!({"subagent":{"thread_spawn":{"parent_thread_id":" "}}}),
+            json!({"subagent":{"thread_spawn":{}}}),
+            json!({"thread_spawn":{}}),
+            json!({"parent_thread_id":false}),
+            json!({"subagent":"review"}),
+            json!("subagent"),
+            json!({"subagent":{"thread_spawn":{"parent_thread_id":"a"}},
+                "thread_spawn":{"parent_thread_id":"b"}}),
+        ] {
+            let value = json!({"type":"session_meta","payload":{
+                "id":"owner", "session_id":"owner", "source":source
+            }});
+            let identity = codex_session_meta_identity(&value).unwrap();
+            assert_eq!(identity.session_relationship, None, "{value}");
+            assert_eq!(identity.parent_native_session_id, None);
+            assert_eq!(identity.root_native_session_id, None);
+        }
+        let value = json!({"type":"session_meta","payload":{
+            "id":"owner", "session_id":"different-owner", "source":"cli"
+        }});
+        let identity = codex_session_meta_identity(&value).unwrap();
+        assert_eq!(identity.session_relationship, None);
+        assert_eq!(identity.parent_native_session_id, None);
+        assert_eq!(identity.root_native_session_id, None);
+    }
 
     fn compressed_session_meta_frame(native_session_id: &str) -> Vec<u8> {
         let mut line = serde_json::to_vec(&json!({

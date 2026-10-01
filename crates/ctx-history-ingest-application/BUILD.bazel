@@ -84,6 +84,7 @@ ctx_rust_test(
 history_ingest_binary_contract(
     name = "custom_root_discovery_tests",
     src = "tests/contracts/custom_root_discovery.rs",
+    extra_srcs = ["tests/contracts/custom_root_discovery/import_failures.rs"],
 )
 
 history_ingest_binary_contract(

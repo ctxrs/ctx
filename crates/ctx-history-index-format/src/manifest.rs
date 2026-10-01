@@ -536,6 +536,22 @@ pub fn prepare_successor_manifest(
     let Some((base_generation_id, base)) = base else {
         return full();
     };
+    // Source equality tracks lineage. Reuse and flat deltas also require the
+    // exact descriptors retained by the base's source routes.
+    if base.sources.len() != manifest.sources.len()
+        || base
+            .sources
+            .iter()
+            .zip(&manifest.sources)
+            .any(|(base, current)| {
+                !base
+                    .observation()
+                    .source()
+                    .exact_descriptor_eq(current.observation().source())
+            })
+    {
+        return full();
+    }
     if manifest.exact_snapshot_eq(base) {
         return Ok(PreparedManifest {
             generation_id: base_generation_id.to_owned(),
@@ -545,7 +561,6 @@ pub fn prepare_successor_manifest(
         });
     }
     if !is_generation_id(base_generation_id)
-        || base.sources.len() != manifest.sources.len()
         || base.core_record_aggregates.len() != manifest.core_record_aggregates.len()
         || base.source_routes().len() != manifest.source_routes().len()
         || base
@@ -577,8 +592,7 @@ pub fn prepare_successor_manifest(
         )
     {
         let source_identity = source.observation().source().identity().digest();
-        if base_source.observation().source().identity().digest() != source_identity
-            || base_aggregate.source_identity_digest() != aggregate.source_identity_digest()
+        if base_aggregate.source_identity_digest() != aggregate.source_identity_digest()
             || aggregate.source_identity_digest() != hex_digest(source_identity)
         {
             return full();

@@ -42,7 +42,7 @@ pub fn provider_record(
             "opencode_sqlite",
             "opencode-family-message_part-v1",
             "opencode-family-source-backed-v9-neutral-core",
-            "opencode-family-source-backed-v12-known-file-carriers",
+            "opencode-family-source-backed-v14-proven-v2-overlap",
         ),
         "zed" => (
             "zed_threads_sqlite",

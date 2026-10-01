@@ -4,8 +4,10 @@ pub(super) fn relevant_schema_evidence(schema: &OpenCodeNativeSchema) -> Vec<u8>
     let mut hasher = Sha256::new();
     hasher.update(b"ctx-opencode-family-relevant-schema-v2\0");
     hash_str(&mut hasher, schema.family.label());
+    hash_str(&mut hasher, schema.session_table);
     hasher.update(schema.user_version.to_le_bytes());
     hasher.update([u8::from(schema.event_has_type)]);
+    hasher.update([u8::from(schema.proven_legacy_overlap)]);
     for column in ["parent_id", "directory", "branch", "agent"] {
         hash_str(&mut hasher, column);
         hasher.update([u8::from(schema.session_columns.contains(column))]);

@@ -1562,6 +1562,7 @@ name = "ctx-history-capture-composition-qualification"
 version = "2.2.4"
 dependencies = [
  "base64 0.22.1",
+ "ctx-attribution",
  "ctx-history-capture-composition",
  "ctx-history-capture-model",
  "ctx-history-capture-runtime",
@@ -1575,6 +1576,7 @@ dependencies = [
  "ctx-history-provider-openclaw-sqlite",
  "ctx-history-provider-runtime",
  "ctx-history-providers-sqlite-selected",
+ "ctx-history-snapshot-reader",
  "ctx-history-source-discovery",
  "ctx-history-source-io",
  "rusqlite",

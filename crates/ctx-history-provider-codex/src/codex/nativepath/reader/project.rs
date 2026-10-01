@@ -171,6 +171,10 @@ impl CodexNativeScanner {
                     physical.raw_ordinal,
                     &built.row,
                 );
+                // Native copy/type bookkeeping uses the original call identity;
+                // only the published activity loses ambiguous join authority.
+                self.terminal_authority
+                    .settle_invocation_linkage(&mut built.row);
                 let row_bytes = built.row.estimated_owned_bytes().unwrap_or(usize::MAX);
                 if row_bytes
                     > MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES
@@ -287,7 +291,7 @@ impl CodexNativeScanner {
         &mut self,
         record: &[u8],
         probe: &CodexRecordProbe<'_>,
-        _result_kind: CodexResultKind,
+        result_kind: CodexResultKind,
         physical: CodexPhysicalRecordContext,
     ) -> Result<CodexRecordProjection> {
         self.counters.native_result_records = self.counters.native_result_records.saturating_add(1);
@@ -297,8 +301,8 @@ impl CodexNativeScanner {
             .saturating_add(physical.end_byte.saturating_sub(physical.start_byte));
 
         let call_id = probe.call_id.as_deref();
-        let source_unique_terminal =
-            call_id.is_some_and(|call_id| self.terminal_authority.is_unique(call_id));
+        let source_unique_terminal = result_kind.is_call_terminal()
+            && call_id.is_some_and(|call_id| self.terminal_authority.is_unique(call_id));
         let linked_invocation_discovery_exclusion = source_unique_terminal
             .then(|| {
                 call_id
@@ -409,7 +413,9 @@ impl CodexNativeScanner {
                         row,
                         estimated_bytes: row_bytes,
                         insert_pending_call: None,
-                        remove_pending_call_id: call_id.map(str::to_owned),
+                        remove_pending_call_id: call_id
+                            .filter(|_| result_kind.is_call_terminal())
+                            .map(str::to_owned),
                     }),
                 });
             }
@@ -573,6 +579,8 @@ fn codex_record_payload_type(class: CodexRecordClass) -> &'static str {
         }
         CodexRecordClass::ExcludedResult(CodexResultKind::ToolSearchOutput) => "tool_search_output",
         CodexRecordClass::ExcludedResult(CodexResultKind::OtherResult) => "tool_result",
+        CodexRecordClass::ExcludedResult(CodexResultKind::PatchApplyEnd) => "patch_apply_end",
+        CodexRecordClass::ExcludedResult(CodexResultKind::McpToolCallEnd) => "mcp_tool_call_end",
         CodexRecordClass::Ignored => "ignored",
     }
 }

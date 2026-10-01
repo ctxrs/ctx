@@ -32,6 +32,16 @@ pub(super) enum CodexResultKind {
     CustomToolCallOutput,
     ToolSearchOutput,
     OtherResult,
+    PatchApplyEnd,
+    McpToolCallEnd,
+}
+
+impl CodexResultKind {
+    pub(super) fn is_call_terminal(self) -> bool {
+        // The patch lifecycle notification complements custom_tool_call_output;
+        // it is retained native content, not another call/result join witness.
+        self != Self::PatchApplyEnd
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -609,10 +619,13 @@ fn classify_event_message(item_type: Option<&str>) -> CodexRecordClass {
     match item_type {
         Some("item_completed") => CodexRecordClass::Retained(CodexRetainedKind::ItemCompleted),
         Some("sub_agent_activity") => CodexRecordClass::DescendantActivity,
-        Some(
-            "patch_apply_end" | "web_search_end" | "exec_command_end" | "command_complete"
-            | "tool_complete" | "mcp_tool_call_end",
-        ) => CodexRecordClass::ExcludedResult(CodexResultKind::OtherResult),
+        Some("patch_apply_end") => CodexRecordClass::ExcludedResult(CodexResultKind::PatchApplyEnd),
+        Some("mcp_tool_call_end") => {
+            CodexRecordClass::ExcludedResult(CodexResultKind::McpToolCallEnd)
+        }
+        Some("web_search_end" | "exec_command_end" | "command_complete" | "tool_complete") => {
+            CodexRecordClass::ExcludedResult(CodexResultKind::OtherResult)
+        }
         Some(
             "task_started" | "task_complete" | "turn_aborted" | "context_compacted" | "token_count",
         ) => CodexRecordClass::Ignored,
@@ -689,6 +702,7 @@ pub(super) fn parse_session_meta(line: &[u8]) -> Option<CodexSessionRow> {
             .history_base
             .as_ref()
             .map(|history_base| history_base.thread_id.as_str()),
+        provider_root_native_session_id.as_deref(),
     );
     if parent_native_session_id
         .as_ref()
@@ -814,6 +828,78 @@ fn parse_after_selector_ambiguity(line: &[u8]) -> Option<CodexDecodedEnvelope> {
 #[cfg(test)]
 mod same_thread_history_tests {
     use super::*;
+    #[test]
+    fn unusable_native_lineage_remains_unknown_without_a_fabricated_parent() {
+        use ctx_history_core::ProviderNativeSessionRelationship::{Delegated, Root};
+        use serde_json::json;
+        for (fields, relationship, parent) in [
+            (json!({"source":"cli"}), Some(Root), None),
+            (
+                json!({"source":"vscode","session_id":"owner"}),
+                Some(Root),
+                None,
+            ),
+            (json!({}), Some(Root), None),
+            (
+                json!({"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}),
+                Some(Delegated),
+                Some("parent"),
+            ),
+            (
+                json!({"source":{"thread_spawn":{"parent_thread_id":"parent"}}}),
+                Some(Delegated),
+                Some("parent"),
+            ),
+            (
+                json!({"source":"subagent", "parent_thread_id":"parent"}),
+                Some(Delegated),
+                Some("parent"),
+            ),
+            (
+                json!({"source":{"subagent":{"thread_spawn":{"parent_thread_id":17}}}}),
+                None,
+                None,
+            ),
+            (
+                json!({"source":{"subagent":{"thread_spawn":{"parent_thread_id":null}}}}),
+                None,
+                None,
+            ),
+            (
+                json!({"source":{"subagent":{"thread_spawn":{"parent_thread_id":""}}}}),
+                None,
+                None,
+            ),
+            (
+                json!({"source":{"subagent":{"thread_spawn":{}}}}),
+                None,
+                None,
+            ),
+            (
+                json!({"source":{"subagent":{"thread_spawn":null}}}),
+                None,
+                None,
+            ),
+            (
+                json!({"source":"cli","session_id":"other-owner"}),
+                None,
+                None,
+            ),
+        ] {
+            let mut value = json!({"type":"session_meta","payload":{
+                "id":"owner", "timestamp":"2026-08-19T12:00:00Z"
+            }});
+            value["payload"]
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let row = parse_session_meta(&serde_json::to_vec(&value).unwrap()).unwrap();
+            assert_eq!(row.session_relationship, relationship, "{value}");
+            assert_eq!(row.parent_native_session_id.as_deref(), parent, "{value}");
+            assert_eq!(row.root_native_session_id, None);
+        }
+    }
+
     #[test]
     fn paginated_revert_keeps_the_thread_owner_without_a_self_parent() {
         let row = parse_session_meta(br#"{"type":"session_meta","payload":{"id":"thread-owner","session_id":"thread-owner","timestamp":"2026-08-19T12:00:00Z","source":"vscode","history_mode":"paginated","history_base":{"thread_id":"thread-owner"}}}"#).unwrap();
