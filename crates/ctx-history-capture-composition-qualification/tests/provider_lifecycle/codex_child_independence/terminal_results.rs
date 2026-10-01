@@ -1,6 +1,208 @@
 use super::*;
 
 #[test]
+fn legacy_mcp_dual_carrier_append_preserves_activity_then_duplicate_withdraws_it() {
+    // Codex e07e58c8429019de78b138d7138deaaf7f3ef22c persists the legacy
+    // McpToolCallEnd and renders the same execution as FunctionCallOutput.
+    for mcp_first in [false, true] {
+        for direct_append in [false, true] {
+            for duplicate_mcp in [false, true] {
+                let temp = tempdir().unwrap();
+                let sessions = temp.path().join("sessions");
+                let index_root = temp.path().join("index");
+                fs::create_dir(&sessions).unwrap();
+                let session = "019fb000-0000-7000-8000-000000000061";
+                let call_id = "legacy-mcp";
+                let arguments = serde_json::json!({"query":"terminal uniqueness"});
+                let invocation = serde_json::json!({"type":"response_item","payload":{
+                    "type":"function_call","name":"mcp__ctx__search","call_id":call_id,
+                    "arguments":arguments.to_string()
+                }});
+                let mcp = exact_mcp_result(call_id, "legacy dual witness");
+                let model_output = serde_json::json!([
+                    {"type":"input_text","text":"Wall time: 0.0000 seconds\nOutput:"},
+                    {"type":"input_text","text":"legacy dual witness"}
+                ]);
+                let model = serde_json::json!({"type":"response_item","payload":{
+                    "type":"function_call_output","call_id":call_id,"output":model_output
+                }});
+                let (first, second) = if mcp_first {
+                    (&mcp, &model)
+                } else {
+                    (&model, &mcp)
+                };
+                write_session(
+                    &sessions,
+                    session,
+                    ProviderNativeSessionRelationship::Root,
+                    None,
+                    [turn_context(), invocation, first.clone()],
+                );
+                let registry = register_tree(&[&sessions]);
+                let prefix =
+                    refresh_source_backed_generation(&index_root, &registry, writer_options())
+                        .unwrap();
+                assert!(prefix.failed_routes.is_empty());
+                let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+                let before = records_for(&index, session);
+                assert_eq!(before.len(), 2);
+                assert!(before.iter().all(|record| record
+                    .content
+                    .activity
+                    .as_ref()
+                    .unwrap()
+                    .provider_call_id
+                    .is_some()));
+                drop(index);
+                let path = session_path(&sessions, session);
+                append_event(&path, second.clone());
+                let (paired, completed) = if direct_append {
+                    let (receipt, completed) = incremental_refresh(&index_root, &registry, &prefix);
+                    (receipt, Some(completed))
+                } else {
+                    (
+                        refresh_source_backed_generation(&index_root, &registry, writer_options())
+                            .unwrap(),
+                        None,
+                    )
+                };
+                assert!(paired.failed_routes.is_empty());
+                let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+                let paired_records = records_for(&index, session);
+                assert_eq!(paired_records.len(), 3);
+                if let Some(completed) = completed {
+                    assert_eq!(completed, 3);
+                }
+                assert_eq!(&paired_records[..2], &before);
+                for record in &paired_records {
+                    record.validate_contract().unwrap();
+                    assert_eq!(
+                        record.content.activity.as_ref().unwrap().provider_call_id,
+                        Some(TypedKey::Utf8(call_id.to_owned()))
+                    );
+                }
+                assert_eq!(
+                    paired_records[0]
+                        .content
+                        .activity
+                        .as_ref()
+                        .unwrap()
+                        .invocation
+                        .as_ref()
+                        .unwrap()
+                        .arguments,
+                    ctx_history_core::ActivityJsonCapture::Present {
+                        value: serde_json::json!(arguments.to_string())
+                    }
+                );
+                let mcp_record = &paired_records[if mcp_first { 1 } else { 2 }];
+                let mcp_activity = mcp_record.content.activity.as_ref().unwrap();
+                let mcp_invocation = mcp_activity.invocation.as_ref().unwrap();
+                assert_eq!(mcp_invocation.protocol.as_deref(), Some("mcp"));
+                assert_eq!(mcp_invocation.server.as_deref(), Some("ctx"));
+                assert_eq!(mcp_invocation.tool, "search");
+                assert_eq!(
+                    mcp_invocation.arguments,
+                    ctx_history_core::ActivityJsonCapture::Present { value: arguments }
+                );
+                assert_eq!(
+                    mcp_activity.result.as_ref().unwrap().structured_content,
+                    ctx_history_core::ActivityJsonCapture::Present {
+                        value: mcp["payload"]["result"].clone()
+                    }
+                );
+                assert_eq!(
+                    mcp_record.content.discovery_exclusion,
+                    Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+                );
+                let model_record = &paired_records[if mcp_first { 2 } else { 1 }];
+                assert_eq!(
+                    model_record
+                        .content
+                        .activity
+                        .as_ref()
+                        .unwrap()
+                        .result
+                        .as_ref()
+                        .unwrap()
+                        .structured_content,
+                    ctx_history_core::ActivityJsonCapture::Present {
+                        value: model_output
+                    }
+                );
+                drop(index);
+                append_event(
+                    &path,
+                    if duplicate_mcp {
+                        mcp.clone()
+                    } else {
+                        model.clone()
+                    },
+                );
+                let (duplicated, completed) = if direct_append {
+                    let (receipt, completed) = incremental_refresh(&index_root, &registry, &paired);
+                    (receipt, Some(completed))
+                } else {
+                    (
+                        refresh_source_backed_generation(&index_root, &registry, writer_options())
+                            .unwrap(),
+                        None,
+                    )
+                };
+                assert!(duplicated.failed_routes.is_empty());
+                let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+                let records = records_for(&index, session);
+                assert_eq!(records.len(), 4);
+                if let Some(completed) = completed {
+                    assert_eq!(completed, 4);
+                }
+                for record in &records {
+                    record.validate_contract().unwrap();
+                    assert!(record
+                        .content
+                        .activity
+                        .as_ref()
+                        .is_none_or(|activity| activity.provider_call_id.is_none()
+                            && activity.invocation.is_none()
+                            && activity.result.is_none()));
+                }
+                for (record, prior) in records.iter().zip(&paired_records) {
+                    assert_eq!(record.event_id, prior.event_id);
+                    assert_eq!(record.native_event_id, prior.native_event_id);
+                    assert_eq!(
+                        record.content.structured_content,
+                        prior.content.structured_content
+                    );
+                    assert_eq!(
+                        record.content.normalized_body,
+                        prior.content.normalized_body
+                    );
+                }
+                assert!(records[1..]
+                    .iter()
+                    .all(|record| record.content.discovery_exclusion.is_none()));
+                drop(index);
+                let reopened = VerifiedIndex::open_pinned(&index_root).unwrap();
+                assert_eq!(records_for(&reopened, session), records);
+                drop(reopened);
+                let cold_root = temp.path().join("cold");
+                let cold =
+                    refresh_source_backed_generation(&cold_root, &registry, writer_options())
+                        .unwrap();
+                assert!(cold.failed_routes.is_empty());
+                let cold_index = VerifiedIndex::open_pinned(&cold_root).unwrap();
+                assert_eq!(records_for(&cold_index, session), records);
+                let (repeated, _) = incremental_refresh(&index_root, &registry, &duplicated);
+                assert_eq!(
+                    repeated.commit.generation_id,
+                    duplicated.commit.generation_id
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn codex_cold_duplicate_direct_and_mcp_terminals_fail_open() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions-cold-duplicate-terminals");
@@ -31,34 +233,27 @@ fn codex_cold_duplicate_direct_and_mcp_terminals_fail_open() {
     let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = records_for(&index, native_session_id);
     assert_eq!(records.len(), 5);
-    let invocation = records
-        .iter()
-        .find(|record| {
-            record.content.activity.as_ref().is_some_and(|activity| {
-                activity.provider_call_id == Some(TypedKey::Utf8(direct_call_id.to_owned()))
-                    && activity.invocation.is_some()
-                    && activity.result.is_none()
-            })
-        })
-        .unwrap();
+    let invocation = &records[0];
+    assert_eq!(invocation.event_type, "tool_call");
+    assert_eq!(
+        invocation
+            .content
+            .activity
+            .as_ref()
+            .unwrap()
+            .provider_call_id,
+        None
+    );
     assert_eq!(
         invocation.content.discovery_exclusion,
         Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
     );
-    let terminals = records
-        .iter()
-        .filter(|record| {
-            record.content.activity.as_ref().is_some_and(|activity| {
-                activity.result.is_some()
-                    && matches!(
-                        activity.provider_call_id.as_ref(),
-                        Some(TypedKey::Utf8(call_id))
-                            if call_id == direct_call_id || call_id == mcp_call_id
-                    )
-            })
-        })
-        .collect::<Vec<_>>();
+    let terminals = &records[1..];
     assert_eq!(terminals.len(), 4);
+    assert!(terminals.iter().all(|record| {
+        let activity = record.content.activity.as_ref().unwrap();
+        activity.provider_call_id.is_none() && activity.invocation.is_none()
+    }));
     assert!(terminals
         .iter()
         .all(|record| record.content.discovery_exclusion.is_none()));
@@ -142,10 +337,25 @@ fn codex_appended_duplicate_direct_and_mcp_terminals_retract_exclusion_with_stab
         direct[0].content.discovery_exclusion,
         Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
     );
-    assert!(direct[1..]
-        .iter()
-        .chain(&mcp)
-        .all(|record| record.content.discovery_exclusion.is_none()));
+    assert_eq!(
+        direct[0]
+            .content
+            .activity
+            .as_ref()
+            .unwrap()
+            .provider_call_id,
+        None
+    );
+    assert_eq!(
+        direct[0].content.structured_content,
+        cold_direct[0].content.structured_content
+    );
+    assert!(direct[1..].iter().chain(&mcp).all(|record| {
+        let activity = record.content.activity.as_ref().unwrap();
+        record.content.discovery_exclusion.is_none()
+            && activity.provider_call_id.is_none()
+            && activity.invocation.is_none()
+    }));
     for marker in ["appenddirectfirst", "appendmcpfirst"] {
         assert!(search_event_candidates(&appended_index, marker, 32)
             .into_iter()
@@ -307,7 +517,7 @@ fn inferred_codex_member_refresh_keeps_released_identity_and_stays_bounded() {
 }
 
 #[test]
-fn codex_incremental_4097th_terminal_saturates_and_replaces_fail_open() {
+fn codex_incremental_4097th_terminal_saturates_only_the_checkpoint() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions-incremental-terminal-saturation");
     let index_root = temp.path().join("index-incremental-terminal-saturation");
@@ -357,16 +567,25 @@ fn codex_incremental_4097th_terminal_saturates_and_replaces_fail_open() {
     assert!(saturated.failed_routes.is_empty());
     let saturated_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let saturated_records = records_for(&saturated_index, native_session_id);
-    assert!(completed_records > 1);
-    assert_eq!(completed_records, saturated_records.len() as u64);
+    assert_eq!(completed_records, 1);
     assert_eq!(
         result_record_for_call(&saturated_records, first_call_id).event_id,
         first_event_id
     );
+    assert_eq!(
+        result_record_for_call(&saturated_records, first_call_id)
+            .content
+            .discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
     assert!(saturated_records.iter().all(|record| {
-        record.content.activity.as_ref().is_none_or(|activity| {
-            activity.result.is_none() || record.content.discovery_exclusion.is_none()
-        })
+        record
+            .content
+            .activity
+            .as_ref()
+            .unwrap()
+            .provider_call_id
+            .is_some()
     }));
     let (_, _, _, saturated_checkpoint) =
         provider_checkpoint_envelope(&saturated_index, native_session_id);

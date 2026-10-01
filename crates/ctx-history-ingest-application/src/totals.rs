@@ -54,6 +54,12 @@ pub enum ImportOutcome {
 }
 
 impl ImportOutcome {
+    /// Whether the requested import completed successfully. Retained or partially
+    /// imported history remains usable even when a requested source failed.
+    pub const fn is_success(self) -> bool {
+        matches!(self, Self::Success | Self::CompletedWithRejections)
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Success => "success",
@@ -337,5 +343,69 @@ mod tests {
             all_ignored.outcome(),
             (ImportOutcome::Failure, ImportFailureScope::None)
         );
+    }
+
+    #[test]
+    fn completion_requires_no_failed_sources_but_allows_useful_record_rejections() {
+        for (outcome, success) in [
+            (ImportOutcome::Success, true),
+            (ImportOutcome::CompletedWithRejections, true),
+            (ImportOutcome::Failure, false),
+            (ImportOutcome::CompletedWithSourceFailures, false),
+            (
+                ImportOutcome::CompletedWithRejectionsAndSourceFailures,
+                false,
+            ),
+        ] {
+            assert_eq!(outcome.is_success(), success, "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn retained_or_new_usable_history_does_not_make_a_source_failure_successful() {
+        for request_has_usable_records in [None, Some(false), Some(true)] {
+            for rejected in [0, 2] {
+                let totals = ImportTotals {
+                    failed_sources: 1,
+                    failed: rejected,
+                    current_retained_records: Some(7),
+                    request_has_usable_records,
+                    ..ImportTotals::default()
+                };
+                let (outcome, scope) = totals.outcome();
+                assert!(!outcome.is_success(), "{totals:?}");
+                assert_eq!(
+                    (outcome, scope),
+                    if rejected == 0 {
+                        (
+                            ImportOutcome::CompletedWithSourceFailures,
+                            ImportFailureScope::Source,
+                        )
+                    } else {
+                        (
+                            ImportOutcome::CompletedWithRejectionsAndSourceFailures,
+                            ImportFailureScope::RecordAndSource,
+                        )
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn valid_empty_requested_source_succeeds_with_or_without_old_history() {
+        for retained in [0, 7] {
+            let totals = ImportTotals {
+                current_retained_records: Some(retained),
+                request_records_attempted: Some(false),
+                request_has_usable_records: Some(false),
+                ..ImportTotals::default()
+            };
+            assert_eq!(
+                totals.outcome(),
+                (ImportOutcome::Success, ImportFailureScope::None)
+            );
+            assert!(totals.outcome().0.is_success());
+        }
     }
 }

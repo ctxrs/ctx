@@ -67,15 +67,25 @@ impl CodexNativeScanner {
         input: &mut JsonlFamilyExecutionIo<impl ProviderRuntimeBinding>,
     ) -> Result<bool> {
         let direct_append = input.is_direct_append_resume();
+        let certified_prefix_end = input.certified_prefix_end();
         while let Some(record) = input.next_record()? {
             if !record.complete() {
                 break;
             }
+            // Ordinary append preflight may reread the certified prefix. Its
+            // terminals are already represented by the restored checkpoint;
+            // only suffix records can add candidates or overlap that prefix.
+            let audit_terminal =
+                certified_prefix_end.is_none_or(|end| record.byte_end_exclusive() > end);
             if record.oversized() {
-                self.terminal_authority.saturate();
+                if audit_terminal {
+                    self.terminal_authority.invalidate_linkage();
+                }
             } else if !record.terminal_nul_padding() {
                 let bytes = input.record_bytes(record)?;
-                self.terminal_authority.observe_record(bytes);
+                if audit_terminal {
+                    self.terminal_authority.observe_record(bytes);
+                }
                 if !self.ownership_quarantined
                     && classify_codex_record(bytes)
                         .ok()
@@ -115,9 +125,12 @@ impl CodexNativeScanner {
         // published counters and will re-observe the same metadata on a normal
         // scan after this seek-free streaming preflight settles.
         self.counters = CodexScanCounters::default();
-        Ok(direct_append
-            && (self.ownership_quarantined
-                || self.terminal_authority.append_requires_replacement()))
+        Ok((direct_append && self.ownership_quarantined)
+            || (certified_prefix_end.is_some()
+                && (self.terminal_authority.append_requires_replacement()
+                    || self
+                        .terminal_authority
+                        .pending_mcp_requires_replacement(&self.pending_calls))))
     }
 
     fn quarantine_ownership(&mut self) {

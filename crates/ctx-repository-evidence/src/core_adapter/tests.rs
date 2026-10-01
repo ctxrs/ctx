@@ -271,6 +271,7 @@ fn exact_codex_exec_command_string_links_the_matching_commit_result() {
         "codex-nativepath-core-activity-v11-item-call-identity",
         "codex-nativepath-core-activity-v14-literal-patch-file-facts",
         "codex-nativepath-core-activity-v15-revert-lineage",
+        "codex-nativepath-core-activity-v16-audited-primary-lineage",
     ] {
         let (_temporary, repository, short) = initialize_repository();
         let workdir = repository.to_string_lossy();
@@ -349,11 +350,111 @@ fn exact_codex_exec_command_string_links_the_matching_commit_result() {
 }
 
 #[test]
+fn settled_codex_terminal_linkage_abstains_in_every_adapter_arrival_order() {
+    let (_temporary, repository, _) = initialize_repository();
+    let native_output = run_git(
+        &repository,
+        &["commit", "--allow-empty", "-m", "settled witness"],
+    );
+    let short = run_git(&repository, &["rev-parse", "--short", "HEAD"]);
+    let workdir = repository.to_string_lossy();
+    let invocation = codex_record(
+        1,
+        "settled-call",
+        Some(codex_exec_invocation(
+            serde_json::json!({"cmd":"git commit --allow-empty -m 'settled witness'", "workdir":workdir}).to_string(),
+        )),
+        None,
+        vec![fact(LiteralFactKind::SessionCwd, &workdir)],
+    );
+    let output = format!("Process exited with code 0\nFinal output:\n{native_output}\n");
+    let result = codex_record(
+        2,
+        "settled-call",
+        None,
+        Some(ActivityResult {
+            status: Some("success".to_owned()),
+            completed_at_unix_ms: Some(1_787_126_404_000),
+            duration_ns: None,
+            text: ActivityTextCapture::Present {
+                value: output.clone(),
+            },
+            structured_content: ActivityJsonCapture::Present {
+                value: Value::String(output.clone()),
+            },
+        }),
+        vec![fact(LiteralFactKind::SessionCwd, &workdir)],
+    );
+    for mode in ["unique", "identical", "conflicting", "failed"] {
+        let mut records = vec![invocation.clone(), result.clone()];
+        if mode != "unique" {
+            let mut terminal = result
+                .content
+                .activity
+                .as_ref()
+                .unwrap()
+                .result
+                .clone()
+                .unwrap();
+            if mode == "conflicting" {
+                let other = run_git(&repository, &["rev-parse", "--short=8", "HEAD^"]);
+                let other_output = output.replace(&short, &other);
+                terminal.text = ActivityTextCapture::Present {
+                    value: other_output.clone(),
+                };
+                terminal.structured_content = ActivityJsonCapture::Present {
+                    value: Value::String(other_output),
+                };
+            } else if mode == "failed" {
+                terminal.status = Some("failed".to_owned());
+            }
+            records.push(codex_record(
+                3,
+                "settled-call",
+                None,
+                Some(terminal),
+                vec![fact(LiteralFactKind::SessionCwd, &workdir)],
+            ));
+            // Authored facts-only Core boundary: native capture owns multiplicity
+            // and qualifies complete payload retention independently.
+            for record in &mut records {
+                let activity = record.content.activity.as_mut().unwrap();
+                activity.provider_call_id = None;
+                activity.invocation = None;
+                activity.result = None;
+            }
+        }
+        for record in &mut records {
+            record.parser_revision =
+                "codex-nativepath-core-activity-v16-audited-primary-lineage".to_owned();
+            record.validate_contract().unwrap();
+        }
+        for order in [[0, 1, 2], [1, 0, 2], [1, 2, 0]] {
+            let mut adapter = CoreRepositoryEvidenceAdapter::default();
+            adapter.begin_source();
+            let mut outcomes = 0;
+            for index in order.into_iter().filter(|index| *index < records.len()) {
+                outcomes += adapter
+                    .evaluate_record(&records[index], &format!("{:064x}", index + 1))
+                    .repository_vcs_observations
+                    .iter()
+                    .filter(|observation| {
+                        matches!(observation.kind, RepositoryVcsObservationKind::Outcome(_))
+                    })
+                    .count();
+            }
+            assert_eq!(outcomes, usize::from(mode == "unique"), "{mode} {order:?}");
+        }
+    }
+}
+
+#[test]
 fn codex_exec_command_near_misses_abstain_without_overriding_literal_facts() {
     for revision in [
         "codex-nativepath-core-activity-v11-item-call-identity",
         "codex-nativepath-core-activity-v14-literal-patch-file-facts",
         "codex-nativepath-core-activity-v15-revert-lineage",
+        "codex-nativepath-core-activity-v16-audited-primary-lineage",
     ] {
         let mut exact = codex_record(
             1,

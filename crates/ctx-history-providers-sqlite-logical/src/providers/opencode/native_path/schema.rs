@@ -24,8 +24,10 @@ pub(super) struct OpenCodeNativeSchema {
     pub(super) capability_digest: String,
     pub(super) user_version: i64,
     pub(super) schema_version: i64,
+    pub(super) session_table: &'static str,
     pub(super) session_columns: BTreeSet<String>,
     pub(super) event_has_type: bool,
+    pub(super) proven_legacy_overlap: bool,
     pub(super) message_part_indexed_streaming: bool,
     pub(super) event_validation_traversals: u64,
 }
@@ -48,17 +50,12 @@ enum CurrentTableRows {
 impl OpenCodeNativeSchema {
     pub(super) fn probe(conn: &Connection, dialect: &OpenCodeSqliteDialect) -> Result<Self> {
         let tables = sqlite_tables(conn)?;
-        if !tables.contains("session") {
+        if !tables.contains("session") && !tables.contains("session_v2") {
             return Err(CaptureError::InvalidPayload(format!(
-                "{} NativePath requires the session table",
+                "{} NativePath requires a session table",
                 dialect.display_name
             )));
         }
-        let session = table_capabilities(conn, "session")?;
-        require_identity_column(&session, "session", "id")?;
-        require_integer_column(&session, "session", "time_created")?;
-        require_integer_column(&session, "session", "time_updated")?;
-
         let session_message = if tables.contains("session_message") {
             let columns = table_capabilities(conn, "session_message")?;
             require_message_columns(&columns, "session_message")?;
@@ -126,6 +123,7 @@ impl OpenCodeNativeSchema {
         };
 
         let (family, event_has_type) = select_schema_family(
+            conn,
             dialect,
             session_message,
             session_entry,
@@ -133,6 +131,18 @@ impl OpenCodeNativeSchema {
             part,
             message_part_join,
         )?;
+
+        let session_table = if tables.contains("session_v2")
+            && matches!(family, OpenCodeNativeSchemaFamily::SessionMessageSeq)
+        {
+            "session_v2"
+        } else {
+            "session"
+        };
+        let session = table_capabilities(conn, session_table)?;
+        require_identity_column(&session, session_table, "id")?;
+        require_integer_column(&session, session_table, "time_created")?;
+        require_integer_column(&session, session_table, "time_updated")?;
 
         let indexed_message_part_candidate = family == OpenCodeNativeSchemaFamily::MessagePart
             && index_has_column_prefix(conn, "message", &["session_id", "time_created", "id"])?
@@ -159,8 +169,12 @@ impl OpenCodeNativeSchema {
             capability_digest,
             user_version,
             schema_version,
+            session_table,
             session_columns: session.keys().cloned().collect(),
             event_has_type,
+            proven_legacy_overlap: family == OpenCodeNativeSchemaFamily::SessionMessageSeq
+                && message.is_some_and(|(_, populated)| populated)
+                && part.is_some(),
             message_part_indexed_streaming,
             event_validation_traversals,
         })
@@ -168,6 +182,7 @@ impl OpenCodeNativeSchema {
 }
 
 fn select_schema_family(
+    conn: &Connection,
     dialect: &OpenCodeSqliteDialect,
     session_message: Option<(OpenCodeNativeSchemaFamily, bool, CurrentTableRows)>,
     session_entry: Option<(OpenCodeNativeSchemaFamily, bool, CurrentTableRows)>,
@@ -182,7 +197,7 @@ fn select_schema_family(
     if let Some((family, has_type, CurrentTableRows::ConversationBearing)) = session_entry {
         populated.push((family, has_type));
     }
-    if message_part_join {
+    if message_part_join || part.is_some_and(|(_, populated)| populated) {
         populated.push((
             OpenCodeNativeSchemaFamily::MessagePart,
             part.is_some_and(|(has_type, _)| has_type),
@@ -195,6 +210,22 @@ fn select_schema_family(
         [selected] => return Ok(*selected),
         [] => {}
         _ => {
+            if let [(OpenCodeNativeSchemaFamily::SessionMessageSeq, true), (legacy, _)] =
+                populated.as_slice()
+            {
+                if message.is_some()
+                    && matches!(
+                        legacy,
+                        OpenCodeNativeSchemaFamily::MessagePart
+                            | OpenCodeNativeSchemaFamily::LegacyMessage
+                    )
+                    && part.is_some()
+                    && overlap_indexes_are_exact(conn)?
+                    && super::overlap::legacy_is_covered(conn, dialect)?
+                {
+                    return Ok((OpenCodeNativeSchemaFamily::SessionMessageSeq, true));
+                }
+            }
             let families = populated
                 .iter()
                 .map(|(family, _)| family.label())
@@ -227,6 +258,31 @@ fn select_schema_family(
             dialect.display_name
         )))
     }
+}
+
+fn overlap_indexes_are_exact(conn: &Connection) -> Result<bool> {
+    // The proof performs identity and per-message part lookups. Require the
+    // producer's exact keys instead of borrowing case-folded identities or
+    // repeatedly scanning/sorting an unindexed part corpus.
+    let session_table = if sqlite_tables(conn)?.contains("session_v2") {
+        "session_v2"
+    } else {
+        "session"
+    };
+    for table in ["message", "part", "session_message", session_table] {
+        if !conn.query_row(
+            "select exists(select 1 from pragma_index_list(?1) i
+             where i.origin='pk' and i.\"unique\"=1 and i.partial=0
+               and (select count(*) from pragma_index_xinfo(i.name) where key=1)=1
+               and exists(select 1 from pragma_index_xinfo(i.name)
+                          where key=1 and name='id' and coll='BINARY'))",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Ok(false);
+        }
+    }
+    index_has_column_prefix(conn, "part", &["message_id", "id"])
 }
 
 fn sqlite_tables(conn: &Connection) -> Result<BTreeSet<String>> {
@@ -383,7 +439,13 @@ fn require_identity_column(
     column: &str,
 ) -> Result<()> {
     let capability = require_text_column_value(columns, table, column)?;
-    if capability.primary_key_ordinal != 1 {
+    if capability.primary_key_ordinal != 1
+        || columns
+            .values()
+            .filter(|column| column.primary_key_ordinal > 0)
+            .count()
+            != 1
+    {
         return Err(CaptureError::InvalidPayload(format!(
             "OpenCode NativePath {table}.{column} must remain the single-column primary identity"
         )));

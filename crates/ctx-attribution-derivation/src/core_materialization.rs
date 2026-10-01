@@ -32,7 +32,7 @@ mod repositories;
 pub use producer_authority::producer_authority_disposition;
 use repositories::{ProjectedRepositories, has_repository_candidate, project_repositories};
 
-pub const CORE_MATERIALIZER_REVISION: &str = "2026.09.24.1+bounded-omissions";
+pub const CORE_MATERIALIZER_REVISION: &str = "2026.10.01.2+audited-primary-producer";
 
 #[allow(dead_code)]
 pub const CORE_PREPARATION_WORKERS_ENV: &str = crate::worker_budget::CORE_PREPARATION_WORKERS_ENV;

@@ -23,7 +23,7 @@ fn explicit_import_reports_warm_carried_route_failure() {
     let first_generation = published_generation(&first);
 
     fs::write(&fixture, b"").unwrap();
-    let carried = json_output(ctx(&temp).args([
+    let carried = failure_json_output(ctx(&temp).args([
         "import",
         "--input-format",
         "ctx-history-jsonl-v2",
@@ -59,6 +59,55 @@ fn explicit_import_reports_warm_carried_route_failure() {
     assert_eq!(published_generation(&carried), first_generation);
     assert!(source["source_identity"].is_string(), "{source:#}");
     assert_eq!(provider_core_counts(&data_root(&temp), "custom"), (1, 1));
+}
+
+#[test]
+fn unrelated_retained_history_does_not_make_a_failed_requested_source_successful() {
+    let temp = tempdir();
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let retained = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &provider_history_fixture("codex-sessions"),
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(retained["outcome"], "success", "{retained:#}");
+    let retained_counts = provider_core_counts(&data_root(&temp), "codex");
+    assert!(retained_counts.1 > 0);
+
+    // An empty byte stream lacks the required manifest; it is a failed source,
+    // unlike a structurally valid source containing no records.
+    let broken = temp.path().join("new-broken-source.jsonl");
+    fs::write(&broken, b"").unwrap();
+    let failed = failure_json_output(ctx(&temp).args([
+        "import",
+        "--input-format",
+        "ctx-history-jsonl-v2",
+        "--path",
+        broken.to_str().unwrap(),
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(
+        failed["outcome"], "completed_with_source_failures",
+        "{failed:#}"
+    );
+    assert_eq!(failed["failure_scope"], "source", "{failed:#}");
+    assert_eq!(failed["totals"]["failed_sources"], 1, "{failed:#}");
+    assert_eq!(failed["sources"][0]["successful_routes"], 0, "{failed:#}");
+    assert_eq!(failed["sources"][0]["carried_forward"], false, "{failed:#}");
+    assert_eq!(
+        provider_core_counts(&data_root(&temp), "codex"),
+        retained_counts
+    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "custom"), (0, 0));
 }
 
 #[test]
@@ -386,8 +435,13 @@ fn import_all_publishes_valid_routes_and_reports_one_invalid_route() {
     fs::create_dir_all(&opencode_dir).unwrap();
     fs::write(opencode_dir.join("opencode.db"), b"not sqlite").unwrap();
 
-    let imported =
-        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
+    let imported = failure_json_output(ctx(&temp).args([
+        "import",
+        "--all",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
     assert_eq!(imported["outcome"], "completed_with_source_failures");
     assert_eq!(imported["failure_scope"], "source");
     assert!(imported["totals"]["current_source_count"]
@@ -467,8 +521,13 @@ fn warm_import_all_advances_with_changed_codex_and_failed_opencode() {
     )
     .unwrap();
 
-    let warm =
-        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
+    let warm = failure_json_output(ctx(&temp).args([
+        "import",
+        "--all",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
     assert_eq!(
         warm["outcome"], "completed_with_source_failures",
         "{warm:#}"

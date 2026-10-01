@@ -310,7 +310,7 @@ pub(super) fn build_source_backed_sparse_output_row(
     let content_exceeds_core = normalized_body.len() > ctx_history_core::MAX_CORE_CONTENT_BYTES;
     let lexical_body =
         source_backed_lexical_body(result_event_type, Some(EventRole::Tool), &normalized_body);
-    let activity = (!content_exceeds_core)
+    let mut activity = (!content_exceeds_core)
         .then(|| {
             codex_result_activity(
                 provider_call_id,
@@ -321,6 +321,14 @@ pub(super) fn build_source_backed_sparse_output_row(
             )
         })
         .flatten();
+    if !source_unique_terminal {
+        // Preflight settled all terminals before any result is published.
+        // Keep output and literal facts, but neither a join nor an embedded
+        // MCP invocation may choose the first of conflicting results.
+        // Core permits typed invocation/results only with a usable call ID.
+        // The complete native payload remains in structured_content/body.
+        activity = activity.and_then(|activity| facts_only_activity(activity.facts));
+    }
     let discovery_exclusion = (!content_exceeds_core)
         .then(|| {
             codex_result_discovery_exclusion(
@@ -352,7 +360,7 @@ pub(super) fn build_source_backed_sparse_output_row(
     }))
 }
 
-fn codex_invocation_activity(
+pub(super) fn codex_invocation_activity(
     payload: &Value,
     audit: &RawJsonAudit,
     occurred_at: DateTime<Utc>,
@@ -362,6 +370,8 @@ fn codex_invocation_activity(
         || audit.selector_ambiguous(SelectorGroup::ItemId)
         || audit.selector_ambiguous(SelectorGroup::ToolName)
         || audit.selector_ambiguous(SelectorGroup::McpTool)
+        || audit.selector_ambiguous(SelectorGroup::Protocol)
+        || audit.selector_ambiguous(SelectorGroup::Server)
     {
         return facts_only_activity(facts);
     }
@@ -389,6 +399,15 @@ fn codex_invocation_activity(
             })
     };
     let (protocol, server, tool) = codex_exact_tool_identity(payload, advertised_tool, audit);
+    // This owner has an exact explicit MCP identity contract, but no mapping
+    // from model namespaces to native servers. Never erase an unsupported
+    // namespace/protocol claim and promote its leaf name to a builtin tool.
+    if payload.get("namespace").is_some()
+        || (protocol.is_none()
+            && (payload.get("protocol").is_some() || payload.get("server").is_some()))
+    {
+        return facts_only_activity(facts);
+    }
     Some(CoreActivity {
         revision: CORE_ACTIVITY_REVISION,
         provider_call_id: Some(provider_call_id),
@@ -482,7 +501,7 @@ fn codex_exact_tool_identity(
     (None, None, native_tool.to_owned())
 }
 
-fn codex_mcp_terminal_invocation(
+pub(super) fn codex_mcp_terminal_invocation(
     payload: &Value,
     audit: &RawJsonAudit,
     occurred_at: DateTime<Utc>,
@@ -517,7 +536,9 @@ fn codex_mcp_terminal_invocation(
     })
 }
 
-fn facts_only_activity(facts: Vec<ctx_history_core::ProviderDeclaredFact>) -> Option<CoreActivity> {
+pub(super) fn facts_only_activity(
+    facts: Vec<ctx_history_core::ProviderDeclaredFact>,
+) -> Option<CoreActivity> {
     (!facts.is_empty()).then_some(CoreActivity {
         revision: CORE_ACTIVITY_REVISION,
         provider_call_id: None,
@@ -914,3 +935,7 @@ fn is_source_only_compacted(payload: &Value) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "rows/terminal_tests.rs"]
+mod terminal_tests;

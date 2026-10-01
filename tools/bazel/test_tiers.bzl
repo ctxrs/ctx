@@ -42,7 +42,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-cli-contract-tests:lib",
     "//crates/ctx-cli-contract-tests:native_blame_tests",
     "//crates/ctx-cli-contract-tests:native_provider_real_shapes_tests",
-    "//crates/ctx-cli-contract-tests:native_provider_rejections_tests",
+    "//crates/ctx-cli-qualification:native_provider_rejections_tests",
     "//crates/ctx-cli-contract-tests:native_providers_tests",
     "//crates/ctx-cli-contract-tests:provider_support_conformance_tests",
     "//crates/ctx-cli-contract-tests:test_targets_capabilities_fixture",

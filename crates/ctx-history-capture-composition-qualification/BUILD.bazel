@@ -90,6 +90,7 @@ ctx_rust_test(
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
     deps = all_crate_deps(normal_dev = True) + [
+        "//crates/ctx-attribution:lib",
         "//crates/ctx-history-capture-composition:test_support_lib",
         "//crates/ctx-history-capture-model:lib",
         "//crates/ctx-history-capture-runtime:lib",
@@ -99,6 +100,7 @@ ctx_rust_test(
         "//crates/ctx-history-provider-gemini:test_support_lib",
         "//crates/ctx-history-provider-runtime:test_support_lib",
         "//crates/ctx-history-providers-sqlite-selected:test_support_lib",
+        "//crates/ctx-history-snapshot-reader:lib",
         "//crates/ctx-history-source-discovery:lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),

@@ -29,7 +29,7 @@ pub fn resume_mode_name(resume: bool) -> &'static str {
 }
 
 pub fn import_completion_error(report: &IngestReport) -> Option<anyhow::Error> {
-    (import_report_outcome(&report.totals).0 == "failure").then(|| {
+    (!report.totals.outcome().0.is_success()).then(|| {
         if report.totals.failed_sources == 0 && !report.totals.has_usable_source_result() {
             return anyhow::anyhow!("No usable history was imported");
         }
@@ -46,7 +46,12 @@ pub fn import_completion_error(report: &IngestReport) -> Option<anyhow::Error> {
             })
             .map(|error| format!("; first failure: {error}"))
             .unwrap_or_default();
-        anyhow::anyhow!("all import sources failed{detail}")
+        let failures = counted_failure(
+            u64::try_from(report.totals.failed_sources).unwrap_or(u64::MAX),
+            "import source failed",
+            "import sources failed",
+        );
+        anyhow::anyhow!("{failures}{detail}")
     })
 }
 

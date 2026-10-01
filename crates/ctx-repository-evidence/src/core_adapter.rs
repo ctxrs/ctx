@@ -23,7 +23,9 @@ const MAX_PENDING_INVOCATIONS: usize = 256;
 const MAX_CODEX_EXEC_COMMAND_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_CODEX_EXEC_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_CODEX_EXEC_COMMAND_WORKDIR_BYTES: usize = 16 * 1024;
-const CODEX_CORE_ACTIVITY_REVISION: &str = "codex-nativepath-core-activity-v15-revert-lineage";
+const CODEX_CORE_ACTIVITY_REVISION: &str =
+    "codex-nativepath-core-activity-v16-audited-primary-lineage";
+const CODEX_RELEASED_V15_REVISION: &str = "codex-nativepath-core-activity-v15-revert-lineage";
 const CODEX_RELEASED_V14_REVISION: &str =
     "codex-nativepath-core-activity-v14-literal-patch-file-facts";
 const CODEX_RELEASED_V11_REVISION: &str = "codex-nativepath-core-activity-v11-item-call-identity";
@@ -283,6 +285,7 @@ fn exact_codex_exec_command(
         && source.schema_variant() == "codex-nativepath-jsonl-v0"
         && source.provider_identity_version() == 1
         && (record.parser_revision == CODEX_CORE_ACTIVITY_REVISION
+            || record.parser_revision == CODEX_RELEASED_V15_REVISION
             || record.parser_revision == CODEX_RELEASED_V14_REVISION
             || record.parser_revision == CODEX_RELEASED_V11_REVISION);
     if !exact_codex_source || invocation.tool != "exec_command" {

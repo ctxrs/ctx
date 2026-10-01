@@ -22,6 +22,10 @@ name = "index"
 path = "tests/index.rs"
 
 [[test]]
+name = "native_provider_rejections"
+path = "tests/native_provider_rejections.rs"
+
+[[test]]
 name = "stats"
 path = "tests/stats.rs"
 
