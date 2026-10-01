@@ -94,7 +94,8 @@ fn row_event_source_sql(
                 null,
                 case when s.id is null then 1 else 0 end
          from {table} x
-         left join session s on s.id = x.session_id",
+         left join {session_table} s on s.id = x.session_id",
+        session_table = schema.session_table,
     )
 }
 
@@ -183,20 +184,28 @@ fn part_event_source_sql_with_payload(
     hydrate_by_rowid: bool,
 ) -> String {
     let type_column = type_expression(schema.event_has_type, "p");
+    let session_join = format!(
+        "left join {} s on s.id = p.session_id",
+        schema.session_table
+    );
     let (source, source_locator, include_payload) =
         if schema.message_part_indexed_streaming && !hydrate_by_rowid {
             (
-                "from message m
+                format!(
+                    "from message m
                  cross join part p on p.message_id = m.id
-                 left join session s on s.id = p.session_id",
+                 {session_join}"
+                ),
                 "p.rowid",
                 true,
             )
         } else if include_payload {
             (
-                "from part p
+                format!(
+                    "from part p
                  left join message m on m.id = p.message_id
-                 left join session s on s.id = p.session_id",
+                 {session_join}"
+                ),
                 "p.rowid",
                 true,
             )
@@ -205,9 +214,11 @@ fn part_event_source_sql_with_payload(
             // indexes are absent. Keep payloads out of that sorter and hydrate
             // the ordered identities through their required primary keys.
             (
-                "from part p
+                format!(
+                    "from part p
                  left join message m on m.id = p.message_id
-                 left join session s on s.id = p.session_id",
+                 {session_join}"
+                ),
                 "0",
                 false,
             )

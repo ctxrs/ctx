@@ -45,7 +45,7 @@ use crate::{
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "opencode-family-source-backed-v13-bounded-oversized-content";
+const PARSER_REVISION: &str = "opencode-family-source-backed-v14-session-v2-current-history";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
@@ -629,26 +629,31 @@ fn scan_session_evidence(
     let mut session_by_id = connection.prepare(&session_by_id_sql)?;
     let mut session_rows_scanned = 0_u64;
     let mut max_session_ancestry_depth = 0_u64;
-    stream_ordered_session_identities(connection, scratch, &mut |identity| {
-        let mut rows = session_by_id.query([identity])?;
-        let Some(row) = rows.next()? else {
-            return Err(OpenCodeSourceBackedError::MissingSession(
-                identity.to_owned(),
-            ));
-        };
-        let (actual_identity, raw) = decode_session_row(row)?;
-        if actual_identity != identity {
-            return Err(OpenCodeSourceBackedError::MissingSession(
-                identity.to_owned(),
-            ));
-        }
-        drop(rows);
-        let (session, ancestry_depth) = source_session(source, actual_identity, raw)?;
-        hash_session(&mut content_hasher, &session);
-        session_rows_scanned = checked_add(session_rows_scanned, 1)?;
-        max_session_ancestry_depth = max_session_ancestry_depth.max(ancestry_depth);
-        Ok(())
-    })?;
+    stream_ordered_session_identities(
+        connection,
+        scratch,
+        schema.session_table,
+        &mut |identity| {
+            let mut rows = session_by_id.query([identity])?;
+            let Some(row) = rows.next()? else {
+                return Err(OpenCodeSourceBackedError::MissingSession(
+                    identity.to_owned(),
+                ));
+            };
+            let (actual_identity, raw) = decode_session_row(row)?;
+            if actual_identity != identity {
+                return Err(OpenCodeSourceBackedError::MissingSession(
+                    identity.to_owned(),
+                ));
+            }
+            drop(rows);
+            let (session, ancestry_depth) = source_session(source, actual_identity, raw)?;
+            hash_session(&mut content_hasher, &session);
+            session_rows_scanned = checked_add(session_rows_scanned, 1)?;
+            max_session_ancestry_depth = max_session_ancestry_depth.max(ancestry_depth);
+            Ok(())
+        },
+    )?;
     Ok(SessionScanState {
         content_hasher,
         session_rows_scanned,
@@ -680,7 +685,8 @@ fn session_source_sql(schema: &OpenCodeNativeSchema) -> String {
                            or typeof(time_updated) <> 'integer'
                            or {parent_invalid}
                      then 1 else 0 end
-         from session"
+         from {session_table}",
+        session_table = schema.session_table,
     )
 }
 
@@ -861,6 +867,7 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
                     &retained.database_leaf,
                     &[
                         "session",
+                        "session_v2",
                         "message",
                         "part",
                         "session_message",

@@ -538,6 +538,146 @@ fn independently_populated_representations_fail_closed() {
     ));
 }
 
+/// Adds what an OpenCode 2 upgrade leaves behind: `session_v2` and
+/// `session_message` carry every session, while the v1 `session`, `message`
+/// and `part` tables stay frozen at the upgrade.
+fn upgrade_to_opencode2(connection: &Connection, directory: &Path) {
+    connection
+        .execute_batch(
+            "create table session_v2 (
+                 id text primary key,
+                 project_id text not null,
+                 parent_id text,
+                 slug text not null,
+                 directory text not null,
+                 title text,
+                 version text not null,
+                 agent text,
+                 time_created integer not null,
+                 time_updated integer not null
+             );",
+        )
+        .unwrap();
+    let directory = directory.to_string_lossy();
+    for (id, parent, created) in [
+        ("current-session", None, 1782259200000_i64),
+        ("v2-parent", None, 1782259300000),
+        ("v2-child", Some("v2-parent"), 1782259400000),
+    ] {
+        connection
+            .execute(
+                "insert into session_v2 values (
+                     ?1, 'project-1', ?2, ?1, ?3, ?1, '2.0.21', 'build', ?4, ?4
+                 )",
+                params![id, parent, directory.as_ref(), created],
+            )
+            .unwrap();
+    }
+    for (index, (session, role, created)) in [
+        ("current-session", "user", 1782259200000_i64),
+        ("current-session", "assistant", 1782259201000),
+        ("v2-parent", "user", 1782259300000),
+        ("v2-child", "user", 1782259400000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        connection
+            .execute(
+                "insert into session_message values (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                params![
+                    format!("v2-message-{index}"),
+                    session,
+                    role,
+                    i64::try_from(index).unwrap(),
+                    created,
+                    json!({
+                        "role": role,
+                        "time": {"created": created},
+                        "text": format!("OpenCode 2 {role} turn in {session}")
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn opencode2_upgrade_reads_session_message_with_session_v2_metadata() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "frozen v1 representation"}),
+    );
+    upgrade_to_opencode2(&connection, temp.path());
+
+    let schema = OpenCodeNativeSchema::probe(
+        &connection,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    )
+    .unwrap();
+    assert_eq!(schema.family, OpenCodeNativeSchemaFamily::SessionMessageSeq);
+    assert_eq!(schema.session_table, "session_v2");
+    drop(connection);
+
+    let (_, _, records, rejections) = scan_current_schema_with_rejections(&database);
+    assert!(
+        rejections.is_empty(),
+        "an upgraded database must not reject sessions created after the upgrade: {rejections:?}"
+    );
+    let sessions = records
+        .iter()
+        .filter_map(|record| record.provider_session_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        sessions,
+        BTreeSet::from(["current-session", "v2-child", "v2-parent"])
+    );
+    let child = records
+        .iter()
+        .find(|record| record.provider_session_id.as_deref() == Some("v2-child"))
+        .unwrap();
+    assert!(
+        child.parent_session_id.is_some(),
+        "session ancestry must come from session_v2"
+    );
+    assert!(records.iter().all(|record| {
+        !serde_json::to_string(&record.content)
+            .unwrap()
+            .contains("frozen v1 representation")
+    }));
+}
+
+#[test]
+fn opencode2_upgrade_with_v1_only_history_fails_closed() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "v1 history"}),
+    );
+    upgrade_to_opencode2(&connection, temp.path());
+    connection
+        .execute(
+            "delete from session_message where session_id = 'current-session'",
+            [],
+        )
+        .unwrap();
+
+    let error = OpenCodeNativeSchema::probe(
+        &connection,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains(
+        "ambiguous populated message schema families: session_message_seq, message_part"
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn current_schema_preserves_literal_workdir_command_and_file_facts() {

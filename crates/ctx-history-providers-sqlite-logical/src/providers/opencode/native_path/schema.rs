@@ -10,6 +10,7 @@ use super::model::OpenCodeNativeSchemaFamily;
 use crate::provider::providers::opencode::OpenCodeSqliteDialect;
 
 const MAX_NATIVE_IDENTITY_BYTES: i64 = 4 * 1024;
+const SESSION_V2_TABLE: &str = "session_v2";
 const JSON_HINT_BYTES: usize = 256;
 const CONVERSATION_ROLES: &str =
     "'user','assistant','system','developer','tool','toolresult','bashexecution'";
@@ -21,6 +22,8 @@ const CONVERSATION_TYPES: &str =
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct OpenCodeNativeSchema {
     pub(super) family: OpenCodeNativeSchemaFamily,
+    /// The table that owns the selected family's session rows.
+    pub(super) session_table: &'static str,
     pub(super) capability_digest: String,
     pub(super) user_version: i64,
     pub(super) schema_version: i64,
@@ -48,16 +51,13 @@ enum CurrentTableRows {
 impl OpenCodeNativeSchema {
     pub(super) fn probe(conn: &Connection, dialect: &OpenCodeSqliteDialect) -> Result<Self> {
         let tables = sqlite_tables(conn)?;
-        if !tables.contains("session") {
+        let has_session_v2 = tables.contains(SESSION_V2_TABLE);
+        if !tables.contains("session") && !has_session_v2 {
             return Err(CaptureError::InvalidPayload(format!(
                 "{} NativePath requires the session table",
                 dialect.display_name
             )));
         }
-        let session = table_capabilities(conn, "session")?;
-        require_identity_column(&session, "session", "id")?;
-        require_integer_column(&session, "session", "time_created")?;
-        require_integer_column(&session, "session", "time_updated")?;
 
         let session_message = if tables.contains("session_message") {
             let columns = table_capabilities(conn, "session_message")?;
@@ -125,6 +125,15 @@ impl OpenCodeNativeSchema {
             false
         };
 
+        let v1_populated = message_part_join || message.is_some_and(|(_, populated)| populated);
+        let session_message_supersedes_v1 = has_session_v2
+            && v1_populated
+            && matches!(
+                session_message,
+                Some((_, _, CurrentTableRows::ConversationBearing))
+            )
+            && v1_sessions_covered_by_session_message(conn, part.is_some())?;
+
         let (family, event_has_type) = select_schema_family(
             dialect,
             session_message,
@@ -132,7 +141,31 @@ impl OpenCodeNativeSchema {
             message,
             part,
             message_part_join,
+            session_message_supersedes_v1,
         )?;
+
+        // OpenCode's `session_message` rows belong to `session_v2`. Sessions
+        // created after an upgrade to OpenCode 2 exist only there.
+        let session_table = if has_session_v2
+            && matches!(
+                family,
+                OpenCodeNativeSchemaFamily::SessionMessageSeq
+                    | OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq
+            ) {
+            SESSION_V2_TABLE
+        } else {
+            "session"
+        };
+        if !tables.contains(session_table) {
+            return Err(CaptureError::InvalidPayload(format!(
+                "{} NativePath requires the {session_table} table",
+                dialect.display_name
+            )));
+        }
+        let session = table_capabilities(conn, session_table)?;
+        require_identity_column(&session, session_table, "id")?;
+        require_integer_column(&session, session_table, "time_created")?;
+        require_integer_column(&session, session_table, "time_updated")?;
 
         let indexed_message_part_candidate = family == OpenCodeNativeSchemaFamily::MessagePart
             && index_has_column_prefix(conn, "message", &["session_id", "time_created", "id"])?
@@ -156,6 +189,7 @@ impl OpenCodeNativeSchema {
         let capability_digest = capability_digest(conn, user_version, family)?;
         Ok(Self {
             family,
+            session_table,
             capability_digest,
             user_version,
             schema_version,
@@ -174,6 +208,7 @@ fn select_schema_family(
     message: Option<(bool, bool)>,
     part: Option<(bool, bool)>,
     message_part_join: bool,
+    session_message_supersedes_v1: bool,
 ) -> Result<(OpenCodeNativeSchemaFamily, bool)> {
     let mut populated = Vec::new();
     if let Some((family, has_type, CurrentTableRows::ConversationBearing)) = session_message {
@@ -194,6 +229,14 @@ fn select_schema_family(
     match populated.as_slice() {
         [selected] => return Ok(*selected),
         [] => {}
+        [current @ (
+            OpenCodeNativeSchemaFamily::SessionMessageSeq
+            | OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq,
+            _,
+        ), (
+            OpenCodeNativeSchemaFamily::MessagePart | OpenCodeNativeSchemaFamily::LegacyMessage,
+            _,
+        )] if session_message_supersedes_v1 => return Ok(*current),
         _ => {
             let families = populated
                 .iter()
@@ -227,6 +270,36 @@ fn select_schema_family(
             dialect.display_name
         )))
     }
+}
+
+/// Late OpenCode 1.x writes v1 `message`/`part` and `session_message` side by
+/// side, and OpenCode 2 keeps the v1 tables but stops writing them. OpenCode's
+/// own 2.0 migration refuses to run unless every v1 session already exists in
+/// `session_message`. When that holds, v1 is a stale subset rather than an
+/// independent representation. Any v1 session that `session_message` lacks
+/// keeps the ambiguity fail-closed.
+fn v1_sessions_covered_by_session_message(conn: &Connection, has_part: bool) -> Result<bool> {
+    let uncovered = |table: &str| {
+        format!(
+            "exists(
+                 select 1 from {table} v1
+                 where not exists(
+                     select 1 from session_message current
+                     where current.session_id = v1.session_id
+                 )
+             )"
+        )
+    };
+    let sql = if has_part {
+        format!(
+            "select not ({} or {})",
+            uncovered("message"),
+            uncovered("part")
+        )
+    } else {
+        format!("select not {}", uncovered("message"))
+    };
+    Ok(conn.query_row(&sql, [], |row| row.get::<_, i64>(0))? != 0)
 }
 
 fn sqlite_tables(conn: &Connection) -> Result<BTreeSet<String>> {

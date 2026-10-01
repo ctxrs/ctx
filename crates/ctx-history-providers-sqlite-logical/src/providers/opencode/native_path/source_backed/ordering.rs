@@ -63,7 +63,6 @@ const OPENCODE_PRIVATE_ORDER_SCHEMA: &str = "create table opencode_session_order
          source_rowid
      );
      begin immediate";
-const OPENCODE_SESSION_KEY_SCAN: &str = "select rowid, id from session";
 const OPENCODE_SESSION_ORDER_SCAN: &str = "select session_identity
        from opencode_session_order indexed by opencode_session_order_idx
       order by session_identity collate binary, source_rowid";
@@ -123,15 +122,17 @@ pub(super) fn initialize_ordering_scratch(scratch: &Connection) -> OpenCodeSourc
 pub(super) fn stream_ordered_session_identities(
     source: &Connection,
     scratch: &Connection,
+    session_table: &str,
     visit: &mut dyn FnMut(&str) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<()> {
-    if query_plan_uses_temp_sort(source, OPENCODE_SESSION_KEY_SCAN)? {
+    let session_key_scan = format!("select rowid, id from {session_table}");
+    if query_plan_uses_temp_sort(source, &session_key_scan)? {
         return Err(CaptureError::SystemInvariant(
             "OpenCode session key discovery would use SQLite temporary storage",
         )
         .into());
     }
-    let mut statement = source.prepare(OPENCODE_SESSION_KEY_SCAN)?;
+    let mut statement = source.prepare(&session_key_scan)?;
     let mut rows = statement.query([])?;
     let mut pending = Vec::<Vec<Value>>::with_capacity(OPENCODE_SORT_KEY_BATCH_ROWS);
     while let Some(row) = rows.next()? {
