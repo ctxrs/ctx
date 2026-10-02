@@ -187,3 +187,124 @@ fn only_current_mux_openclaw_allow_missing_root_and_no_provider_invents_relation
     );
     Ok(())
 }
+
+#[test]
+fn reviewed_provider_primary_shapes_do_not_require_child_lineage() -> TestResult {
+    for provider in PROVIDERS {
+        for released in [false, true] {
+            let mut primary = provider_record(provider, released)?;
+            let other_session =
+                crate::protocol::derive_session_id(crate::protocol::SessionIdentityInput {
+                    source: &primary.source,
+                    logical_session_kind: "session",
+                    native_session_key: &crate::protocol::NativeSessionKey::native_id(
+                        "session",
+                        TypedKey::utf8("ancestor")?,
+                    )?,
+                })?;
+            primary.agent_scope = Some(AgentScope::Primary);
+            primary.parent_session_id = None;
+            primary.root_session_id = None;
+            primary.session_relationship = None;
+            primary.validate_contract()?;
+            // The current reviewed emitters distinguish a native primary from
+            // unknown lineage. Older child-only contracts and Gemini v2 remain
+            // outside this proof; a provider label alone is not admission.
+            let expected = if !released && provider != "gemini" {
+                ProducerAuthorityDisposition::EligibleUnique
+            } else {
+                ProducerAuthorityDisposition::AbstainUnknown
+            };
+            assert_eq!(
+                producer_authority_disposition(&primary),
+                expected,
+                "{provider} released={released}"
+            );
+            for missing in [
+                "scope",
+                "parent",
+                "root",
+                "relationship",
+                "session",
+                "event",
+                "null-event",
+                "revision",
+            ] {
+                let mut miss = primary.clone();
+                match missing {
+                    "scope" => miss.agent_scope = None,
+                    "parent" => miss.parent_session_id = Some(other_session),
+                    "root" => miss.root_session_id = Some(other_session),
+                    "relationship" => {
+                        miss.session_relationship =
+                            Some(ProviderNativeSessionRelationship::Delegated)
+                    }
+                    "session" => miss.provider_session_id = None,
+                    "event" => miss.native_event_id = None,
+                    "null-event" => miss.native_event_id = Some(TypedKey::Null),
+                    "revision" => miss.parser_revision.push_str("-unknown"),
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    producer_authority_disposition(&miss),
+                    ProducerAuthorityDisposition::AbstainUnknown,
+                    "{provider} {missing}"
+                );
+            }
+            primary.event_copy = Some(ProviderNativeEventCopy {
+                ancestor_session_id: other_session,
+                ancestor_event_id: crate::protocol::derive_event_id(
+                    crate::protocol::EventIdentityInput {
+                        source: &primary.source,
+                        session_id: other_session,
+                        logical_item_kind: "event",
+                        native_item_key: &crate::protocol::NativeItemKey::native_id(
+                            "event",
+                            TypedKey::utf8("copied-event")?,
+                        )?,
+                        subrecord_selector: None,
+                    },
+                )?,
+                proof: ProviderNativeCopyProof::NativeCallResultIdentity,
+            });
+            assert_eq!(
+                producer_authority_disposition(&primary),
+                ProducerAuthorityDisposition::IneligibleCopied,
+                "{provider}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn opencode_retained_and_migrated_tuples_preserve_native_primary_and_child_admission() -> TestResult
+{
+    for revision in [
+        "opencode-family-source-backed-v12-known-file-carriers",
+        "opencode-family-source-backed-v13-bounded-oversized-content",
+        "opencode-family-source-backed-v14-proven-v2-overlap",
+    ] {
+        for primary in [false, true] {
+            let mut record = provider_record("opencode", false)?;
+            record.parser_revision = revision.to_owned();
+            if primary {
+                record.agent_scope = Some(AgentScope::Primary);
+                record.parent_session_id = None;
+                record.session_relationship = None;
+            }
+            record.validate_contract()?;
+            assert_eq!(
+                producer_authority_disposition(&record),
+                ProducerAuthorityDisposition::EligibleUnique,
+                "{revision} primary={primary}"
+            );
+            record.parser_revision.push_str("-unknown");
+            assert_eq!(
+                producer_authority_disposition(&record),
+                ProducerAuthorityDisposition::AbstainUnknown
+            );
+        }
+    }
+    Ok(())
+}

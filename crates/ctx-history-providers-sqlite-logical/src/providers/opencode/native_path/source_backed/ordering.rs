@@ -125,14 +125,14 @@ pub(super) fn stream_ordered_session_identities(
     session_table: &str,
     visit: &mut dyn FnMut(&str) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<()> {
-    let session_key_scan = format!("select rowid, id from {session_table}");
-    if query_plan_uses_temp_sort(source, &session_key_scan)? {
+    let key_scan = format!("select rowid, id from {session_table}");
+    if query_plan_uses_temp_sort(source, &key_scan)? {
         return Err(CaptureError::SystemInvariant(
             "OpenCode session key discovery would use SQLite temporary storage",
         )
         .into());
     }
-    let mut statement = source.prepare(&session_key_scan)?;
+    let mut statement = source.prepare(&key_scan)?;
     let mut rows = statement.query([])?;
     let mut pending = Vec::<Vec<Value>>::with_capacity(OPENCODE_SORT_KEY_BATCH_ROWS);
     while let Some(row) = rows.next()? {

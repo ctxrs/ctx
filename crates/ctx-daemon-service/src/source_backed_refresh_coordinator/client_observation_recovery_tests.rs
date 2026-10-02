@@ -1,296 +1,397 @@
 use super::*;
-use std::collections::VecDeque;
+use std::cell::Cell;
 
-fn running_status(request_id: &str) -> Value {
-    compact_json(json!({
-        "ok": true,
-        "schema_version": 1,
-        "owner": "daemon",
-        "request_id": request_id,
-        "request_state": "running",
-    }))
-}
-
-#[test]
-fn transient_status_timeout_recovers_the_same_durable_request() {
-    let request_id = "019fcaaa-0000-7000-8000-000000000301";
-    let expected = running_status(request_id);
-    let mut responses = VecDeque::from([
-        Err(anyhow!("daemon query response read timed out")),
-        Ok(Some(expected.clone())),
-    ]);
-    let mut observed_backoffs = Vec::new();
-    let mut observed_request_ids = Vec::new();
-
-    let recovered = request_bound_status_with_recovery(
-        request_id,
-        |backoff| observed_backoffs.push(backoff),
-        || {
-            observed_request_ids.push(request_id);
-            responses.pop_front().expect("bounded status recovery")
-        },
+fn recovery(allow_daemon_autostart: bool) -> WaitRefreshRecovery {
+    let root = tempfile::tempdir().unwrap();
+    WaitRefreshRecovery::new(
+        root.path(),
+        &RefreshRequest::automatic("original-request".to_owned(), RefreshRequestTrigger::Search),
+        allow_daemon_autostart,
     )
     .unwrap()
-    .unwrap();
+}
 
-    assert_eq!(observed_backoffs, [StdDuration::from_millis(25)]);
-    assert_eq!(observed_request_ids, [request_id, request_id]);
-    assert_eq!(recovered, expected);
+fn running_status() -> Value {
+    json!({"ok":true,"schema_version":1,"owner":"daemon",
+        "request_id":"original-request","request_state":"running"})
+}
+
+fn forgotten_status() -> Value {
+    json!({"ok":false,"schema_version":1,"owner":"daemon",
+        "request_id":"original-request","request_state":"request_unknown",
+        "error_code":"source_refresh_request_unknown",
+        "reason":"request_not_retained_after_restart","retryable":false})
+}
+
+fn lost_response() -> anyhow::Error {
+    std::io::Error::new(std::io::ErrorKind::ConnectionReset, "lost response").into()
 }
 
 #[test]
-fn cancellation_before_status_io_performs_no_roundtrip() {
-    let mut roundtrips = 0;
-    let error = request_bound_status_with_outage_budget_cancellable(
-        "cancel-before-status-io",
-        |_| panic!("pre-I/O cancellation must not sleep"),
-        StdInstant::now,
-        || Err(anyhow!("cancelled before status I/O")),
-        || {
-            roundtrips += 1;
-            Ok(None)
-        },
-    )
-    .unwrap_err();
-
-    assert_eq!(error.to_string(), "cancelled before status I/O");
-    assert_eq!(roundtrips, 0);
+fn live_owner_admission_and_status_outages_survive_retry_and_time_limits() {
+    for admission in [true, false] {
+        let mut recovery = recovery(true);
+        let elapsed = Cell::new(0);
+        let start = StdInstant::now();
+        let mut requests = Vec::new();
+        let mut pauses = Vec::new();
+        let response = recovery
+            .recover_response(
+                admission,
+                |pause| {
+                    pauses.push(pause);
+                    elapsed.set(elapsed.get() + 31);
+                    Ok(())
+                },
+                || start + StdDuration::from_secs(elapsed.get()),
+                || Ok(()),
+                |request| {
+                    requests.push(request.clone());
+                    if requests.len() <= 6 {
+                        Err(lost_response())
+                    } else {
+                        Ok(Some(running_status()))
+                    }
+                },
+                |restore| {
+                    assert!(!restore);
+                    Ok(RefreshOwnerObservation::Live)
+                },
+            )
+            .unwrap();
+        assert_eq!(response, running_status());
+        assert!(elapsed.get() > 30);
+        assert_eq!(requests.len(), 7);
+        assert!(requests.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(
+            pauses,
+            [25, 50, 100, 100, 100, 100].map(StdDuration::from_millis)
+        );
+        assert!(!recovery.owner_restored && !recovery.forgotten_replayed);
+    }
 }
 
 #[test]
-fn cancellation_during_status_retry_backoff_prevents_another_roundtrip() {
-    let mut roundtrips = 0;
-    let error = request_bound_status_with_recovery_cancellable(
-        "cancel-status-backoff",
-        |backoff| {
-            assert_eq!(backoff, StdDuration::from_millis(25));
-            Err(anyhow!("cancelled during status backoff"))
-        },
-        || Ok(()),
-        || {
-            roundtrips += 1;
-            Err(anyhow!("status transport unavailable"))
-        },
-    )
-    .unwrap_err();
-
-    assert_eq!(error.to_string(), "cancelled during status backoff");
-    assert_eq!(roundtrips, 1);
-}
-
-#[test]
-fn cancellation_during_final_status_roundtrip_is_not_reclassified() {
-    let cancelled = std::cell::Cell::new(false);
-    let mut roundtrips = 0;
-    let error = request_bound_status_with_recovery_cancellable(
-        "cancel-final-status-roundtrip",
-        |_| Ok(()),
-        || {
-            if cancelled.get() {
-                Err(anyhow!("cancelled during final status roundtrip"))
-            } else {
+fn uncertain_owner_remains_bounded_without_replay_or_restoration() {
+    let mut recovery = recovery(true);
+    let elapsed = Cell::new(0);
+    let start = StdInstant::now();
+    let mut calls = 0;
+    let error = recovery
+        .recover_response(
+            true,
+            |_| {
+                elapsed.set(elapsed.get() + 15);
                 Ok(())
-            }
-        },
-        || {
-            roundtrips += 1;
-            if roundtrips == REQUEST_BOUND_STATUS_RECOVERY_ATTEMPT_LIMIT + 1 {
-                cancelled.set(true);
-            }
-            Err(anyhow!("status transport unavailable"))
-        },
-    )
-    .unwrap_err();
-
-    assert_eq!(error.to_string(), "cancelled during final status roundtrip");
-    assert_eq!(roundtrips, REQUEST_BOUND_STATUS_RECOVERY_ATTEMPT_LIMIT + 1);
-}
-
-#[test]
-fn cancellation_between_outage_bursts_stops_before_the_next_burst() {
-    let request_id = "cancel-between-outage-bursts";
-    let started = StdInstant::now();
-    let mut times = VecDeque::from([started, started + StdDuration::from_secs(1)]);
-    let mut roundtrips = 0;
-    let mut retry_backoffs = Vec::new();
-    let mut pauses = 0;
-
-    let error = request_bound_status_with_outage_budget_cancellable(
-        request_id,
-        |backoff| {
-            pauses += 1;
-            if pauses == 4 {
-                assert_eq!(backoff, SOURCE_REFRESH_POLL_INTERVAL);
-                return Err(anyhow!("cancelled between outage bursts"));
-            }
-            retry_backoffs.push(backoff);
-            Ok(())
-        },
-        || times.pop_front().expect("bounded outage clock"),
-        || Ok(()),
-        || {
-            roundtrips += 1;
-            Err(anyhow!("status transport unavailable"))
-        },
-    )
-    .unwrap_err();
-
-    assert_eq!(error.to_string(), "cancelled between outage bursts");
-    assert_eq!(roundtrips, 4);
-    assert_eq!(
-        retry_backoffs,
-        [
-            StdDuration::from_millis(25),
-            StdDuration::from_millis(50),
-            StdDuration::from_millis(100),
-        ]
-    );
-    assert!(times.is_empty());
-}
-
-#[test]
-fn one_status_outage_burst_is_typed_and_bounded() {
-    let request_id = "019fcaaa-0000-7000-8000-000000000302";
-    let error = request_bound_status_with_recovery(
-        request_id,
-        |_| {},
-        || Err(anyhow!("daemon query response read timed out")),
-    )
-    .unwrap_err();
-
-    let recovery = error
+            },
+            || start + StdDuration::from_secs(elapsed.get()),
+            || Ok(()),
+            |_| {
+                calls += 1;
+                Err(lost_response())
+            },
+            |restore| {
+                assert!(!restore);
+                Ok(RefreshOwnerObservation::Unknown)
+            },
+        )
+        .unwrap_err();
+    assert_eq!(calls, 3);
+    let typed = error
         .downcast_ref::<SourceRefreshObservationRecoveryFailed>()
-        .expect("typed request-bound observation outcome");
-    assert_eq!(recovery.request_id, request_id);
-    assert_eq!(
-        recovery.recovery_attempts,
-        REQUEST_BOUND_STATUS_RECOVERY_ATTEMPT_LIMIT
-    );
-    assert_eq!(recovery.disconnect_policy, DISCONNECT_POLICY);
-    assert!(error.to_string().contains("durably admitted request"));
-    assert!(error.to_string().contains("outcome is unknown"));
-    assert!(!error.to_string().contains("timed out"));
+        .unwrap();
+    assert_eq!(typed.request_id, "original-request");
+    assert!(!recovery.owner_restored && !recovery.forgotten_replayed);
 }
 
 #[test]
-fn temporary_continuous_outage_reobserves_the_same_request() {
-    let request_id = "019fcaaa-0000-7000-8000-000000000304";
-    let expected = running_status(request_id);
-    let mut responses = VecDeque::from([
-        Err(anyhow!("daemon query response read timed out")),
-        Err(anyhow!("daemon query response read timed out")),
-        Err(anyhow!("daemon query response read timed out")),
-        Err(anyhow!("daemon query response read timed out")),
-        Ok(Some(expected.clone())),
-    ]);
-    let mut observed_backoffs = Vec::new();
-    let mut observed_request_ids = Vec::new();
-    let started = StdInstant::now();
-    let mut times = VecDeque::from([
-        started,
-        started + StdDuration::from_secs(8),
-        started + StdDuration::from_secs(9),
-    ]);
+fn restoration_queries_original_before_replay_and_is_shared_across_ack() {
+    let mut recovery = recovery(true);
+    let mut requests = Vec::new();
+    let mut restorations = 0;
+    recovery
+        .recover_response(
+            true,
+            |_| Ok(()),
+            StdInstant::now,
+            || Ok(()),
+            |request| {
+                requests.push(request.clone());
+                match requests.len() {
+                    1 => Err(lost_response()),
+                    2 => Ok(Some(forgotten_status())),
+                    3 => Ok(Some(running_status())),
+                    _ => panic!("unexpected replay"),
+                }
+            },
+            |restore| {
+                if restore {
+                    restorations += 1;
+                }
+                Ok(RefreshOwnerObservation::Lost)
+            },
+        )
+        .unwrap();
+    assert_eq!(restorations, 1);
+    assert_eq!(requests[0], requests[2]);
+    assert_eq!(requests[1]["op"], SOURCE_REFRESH_STATUS_OP);
+    assert!(requests
+        .iter()
+        .all(|request| request["request_id"] == "original-request"));
+    let error = recovery
+        .recover_response(
+            false,
+            |_| panic!("second owner loss must fail"),
+            StdInstant::now,
+            || Ok(()),
+            |_| Err(lost_response()),
+            |restore| {
+                assert!(!restore);
+                Ok(RefreshOwnerObservation::Lost)
+            },
+        )
+        .unwrap_err();
+    assert!(error.is::<SourceRefreshObservationRecoveryFailed>());
+    assert!(recovery.owner_restored && recovery.forgotten_replayed);
+}
 
-    let recovered = request_bound_status_with_outage_budget(
-        request_id,
-        |backoff| observed_backoffs.push(backoff),
-        || times.pop_front().expect("bounded observation clock"),
-        || {
-            observed_request_ids.push(request_id);
-            responses.pop_front().expect("continued status observation")
-        },
+#[test]
+fn forgotten_replay_allowance_is_shared_between_admission_and_observation() {
+    let mut recovery = recovery(false);
+    let mut calls = 0;
+    recovery
+        .recover_response(
+            true,
+            |_| Ok(()),
+            StdInstant::now,
+            || Ok(()),
+            |_| {
+                calls += 1;
+                Ok(Some(if calls == 1 {
+                    forgotten_status()
+                } else {
+                    running_status()
+                }))
+            },
+            |_| panic!("responsive owner needs no restoration"),
+        )
+        .unwrap();
+    let error = recovery
+        .recover_response(
+            false,
+            |_| Ok(()),
+            StdInstant::now,
+            || Ok(()),
+            |_| Ok(Some(forgotten_status())),
+            |_| panic!("forgotten replay does not restore an owner"),
+        )
+        .unwrap_err();
+    assert!(error.is::<SourceRefreshObservationRecoveryFailed>());
+    assert_eq!(calls, 2);
+}
+
+#[test]
+fn no_start_owner_loss_does_not_restore_or_submit_again() {
+    let mut recovery = recovery(false);
+    let mut calls = 0;
+    let error = recovery
+        .recover_response(
+            true,
+            |_| panic!("confirmed loss must not sleep"),
+            StdInstant::now,
+            || Ok(()),
+            |_| {
+                calls += 1;
+                Err(lost_response())
+            },
+            |restore| {
+                assert!(!restore);
+                Ok(RefreshOwnerObservation::Lost)
+            },
+        )
+        .unwrap_err();
+    assert_eq!(calls, 1);
+    assert!(error.is::<SourceRefreshObservationRecoveryFailed>());
+    assert!(!recovery.owner_restored);
+}
+
+#[test]
+fn no_start_without_an_owner_preserves_definite_unavailability() {
+    let root = tempfile::tempdir().unwrap();
+    let mut recovery = WaitRefreshRecovery::new(
+        root.path(),
+        &RefreshRequest::automatic("never-submitted".to_owned(), RefreshRequestTrigger::Search),
+        false,
     )
-    .unwrap()
     .unwrap();
-
-    assert_eq!(
-        observed_backoffs,
-        [
-            StdDuration::from_millis(25),
-            StdDuration::from_millis(50),
-            StdDuration::from_millis(100),
-            SOURCE_REFRESH_POLL_INTERVAL,
-        ]
-    );
-    assert_eq!(observed_request_ids, [request_id; 5]);
-    assert_eq!(recovered, expected);
-    assert!(times.is_empty());
+    let error = recovery
+        .request(&crate::test_support::AVAILABILITY, root.path(), true)
+        .unwrap_err();
+    assert!(error.is::<SourceBackedRefreshDaemonUnavailable>());
+    assert!(!recovery.owner_restored && !recovery.forgotten_replayed);
 }
 
 #[test]
-fn permanent_continuous_outage_returns_typed_error_at_its_budget() {
-    let request_id = "019fcaaa-0000-7000-8000-000000000305";
-    let mut observed_backoffs = Vec::new();
-    let mut observed_request_ids = Vec::new();
-    let started = StdInstant::now();
-    let mut times = VecDeque::from([
-        started,
-        started + StdDuration::from_secs(8),
-        started + StdDuration::from_secs(9),
-        started + StdDuration::from_secs(17),
-        started + StdDuration::from_secs(18),
-        started + StdDuration::from_secs(26),
-        started + StdDuration::from_secs(27),
-        started + StdDuration::from_secs(35),
-    ]);
-
-    let error = request_bound_status_with_outage_budget(
-        request_id,
-        |backoff| observed_backoffs.push(backoff),
-        || times.pop_front().expect("bounded observation clock"),
-        || {
-            observed_request_ids.push(request_id);
-            Err(anyhow!("daemon query response read timed out"))
-        },
-    )
-    .unwrap_err();
-
-    let retained = error
-        .downcast_ref::<SourceRefreshObservationRecoveryFailed>()
-        .expect("continuous outage remains a typed retained request");
-    assert_eq!(retained.request_id, request_id);
-    assert_eq!(observed_request_ids, [request_id; 16]);
-    assert_eq!(
-        observed_backoffs,
-        [
-            StdDuration::from_millis(25),
-            StdDuration::from_millis(50),
-            StdDuration::from_millis(100),
-            SOURCE_REFRESH_POLL_INTERVAL,
-            StdDuration::from_millis(25),
-            StdDuration::from_millis(50),
-            StdDuration::from_millis(100),
-            SOURCE_REFRESH_POLL_INTERVAL,
-            StdDuration::from_millis(25),
-            StdDuration::from_millis(50),
-            StdDuration::from_millis(100),
-            SOURCE_REFRESH_POLL_INTERVAL,
-            StdDuration::from_millis(25),
-            StdDuration::from_millis(50),
-            StdDuration::from_millis(100),
-        ]
-    );
-    assert!(times.is_empty());
+fn cancellation_before_io_during_backoff_and_before_restoration_is_preserved() {
+    for boundary in ["before-io", "backoff", "after-io"] {
+        let mut recovery = recovery(true);
+        let cancelled = Cell::new(boundary == "before-io");
+        let mut calls = 0;
+        let error = recovery
+            .recover_response(
+                true,
+                |_| Err(anyhow!("cancelled")),
+                StdInstant::now,
+                || {
+                    if cancelled.get() {
+                        Err(anyhow!("cancelled"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| {
+                    calls += 1;
+                    cancelled.set(boundary == "after-io");
+                    Err(lost_response())
+                },
+                |restore| {
+                    assert!(!restore);
+                    Ok(RefreshOwnerObservation::Live)
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "cancelled");
+        assert_eq!(calls, usize::from(boundary != "before-io"));
+        assert!(!recovery.owner_restored);
+    }
 }
 
 #[test]
-fn typed_service_unavailability_still_enters_daemon_recovery_immediately() {
-    let request_id = "019fcaaa-0000-7000-8000-000000000303";
-    let mut roundtrips = 0;
-    let error = request_bound_status_with_outage_budget(
-        request_id,
-        |_| panic!("typed unavailability must not use transport retry backoff"),
-        StdInstant::now,
-        || {
-            roundtrips += 1;
-            Err(DaemonSourceRefreshServiceUnavailable.into())
+fn wrong_id_and_malformed_state_fail_without_retry() {
+    for response in [
+        json!({"ok":true,"schema_version":1,"owner":"daemon","request_id":"wrong","request_state":"running"}),
+        json!({"ok":true,"schema_version":1,"owner":"daemon","request_id":"original-request","request_state":"unknown-state"}),
+        json!({"ok":true,"schema_version":2,"owner":"daemon","request_id":"original-request","request_state":"running"}),
+    ] {
+        let mut recovery = recovery(true);
+        let error = recovery
+            .recover_response(
+                true,
+                |_| panic!("protocol error must not retry"),
+                StdInstant::now,
+                || Ok(()),
+                |_| Ok(Some(response.clone())),
+                |_| panic!("protocol error must not recover"),
+            )
+            .unwrap_err();
+        assert!(!error.is::<SourceRefreshObservationRecoveryFailed>());
+    }
+}
+
+#[test]
+fn decode_utf8_oversize_and_other_errors_are_not_transient() {
+    for error in [
+        anyhow::Error::from(serde_json::from_str::<Value>("{").unwrap_err()),
+        String::from_utf8(vec![0xff]).unwrap_err().into(),
+        ctx_daemon_runtime::DaemonQueryResponseTooLarge::new(1).into(),
+        anyhow!("protocol fingerprint conflict"),
+    ] {
+        assert!(!retryable_refresh_transport_error(&error));
+        let mut recovery = recovery(true);
+        let mut error = Some(error);
+        recovery
+            .recover_response(
+                true,
+                |_| panic!("decode error must not retry"),
+                StdInstant::now,
+                || Ok(()),
+                |_| Err(error.take().unwrap()),
+                |_| panic!("decode error must not recover"),
+            )
+            .unwrap_err();
+    }
+}
+
+#[cfg(unix)]
+fn publish_endpoint(root: &Path) -> Result<()> {
+    crate::query_service::write_daemon_service_endpoint(
+        root,
+        crate::query_service::DaemonIpcService::SourceRefresh,
+        &ctx_daemon_runtime::DaemonQueryEndpoint::Unix {
+            path: root.join("not-listening.sock"),
+            token: "0123456789abcdef0123456789abcdef".to_owned(),
         },
     )
-    .unwrap_err();
+}
 
-    assert_eq!(roundtrips, 1);
-    assert!(error
-        .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-        .is_some());
+#[cfg(unix)]
+#[test]
+fn cleanup_guard_and_alive_retained_pid_do_not_authenticate_owner() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    ctx_history_platform::platform_security::establish_private_data_root(root.path())?;
+    let path = daemon_lock_path(root.path());
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let payload = ctx_daemon_runtime::pid_lock_payload(json!({"owner_id":"retained-owner"}));
+    std::fs::write(&path, serde_json::to_vec(&payload)?)?;
+    publish_endpoint(root.path())?;
+    let _cleanup = ctx_daemon_runtime::DaemonQuiescenceGuard::acquire(root.path())?
+        .context("cleanup guard")?;
+    assert_eq!(observe_pid_advisory_guard(&path), Some(true));
+    assert_eq!(process_state(std::process::id()), ProcessState::Running);
+    let (observation, identity) = observe_refresh_owner(root.path(), None, false)?;
+    assert_eq!(observation, RefreshOwnerObservation::Unknown);
+    assert!(identity.is_some());
+    assert_eq!(read_pid_lock_json(&path), Some(payload));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn observer_detects_release_replacement_and_metadata_gap_without_false_liveness() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let owner = ctx_daemon_runtime::DaemonLock::acquire(root.path())?.context("owner")?;
+    publish_endpoint(root.path())?;
+    let (observation, identity) = observe_refresh_owner(root.path(), None, false)?;
+    assert_eq!(observation, RefreshOwnerObservation::Unknown);
+    let identity = identity.context("captured identity")?;
+    assert_eq!(
+        observe_refresh_owner(root.path(), Some(&identity), true)?.0,
+        RefreshOwnerObservation::Live
+    );
+    assert_eq!(
+        observe_refresh_owner_with_process_state(root.path(), Some(&identity), true, |_| {
+            ProcessState::Unknown
+        })?
+        .0,
+        RefreshOwnerObservation::Live,
+        "exact child proof survives an unknown redundant PID probe"
+    );
+    assert_eq!(
+        observe_refresh_owner_with_process_state(root.path(), Some(&identity), false, |_| {
+            ProcessState::Unknown
+        })?
+        .0,
+        RefreshOwnerObservation::Unknown,
+        "unknown PID plus generic guard is not live proof"
+    );
+    let path = daemon_lock_path(root.path());
+    let original = std::fs::read(&path)?;
+    std::fs::write(&path, b"{")?;
+    assert_eq!(
+        observe_refresh_owner(root.path(), Some(&identity), true)?.0,
+        RefreshOwnerObservation::Unknown
+    );
+    std::fs::write(&path, original)?;
+    drop(owner);
+    assert_eq!(
+        observe_refresh_owner(root.path(), Some(&identity), true)?.0,
+        RefreshOwnerObservation::Lost
+    );
+    let _replacement =
+        ctx_daemon_runtime::DaemonLock::acquire(root.path())?.context("replacement")?;
+    assert_eq!(
+        observe_refresh_owner(root.path(), Some(&identity), true)?.0,
+        RefreshOwnerObservation::Lost
+    );
+    Ok(())
 }

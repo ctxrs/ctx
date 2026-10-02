@@ -143,7 +143,11 @@ fn cancellation_during_final_ambiguous_roundtrip_is_not_reclassified() {
             if roundtrips == AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT {
                 cancelled.set(true);
             }
-            Err(anyhow!("ambiguous admission transport failure"))
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "ambiguous admission transport failure",
+            )
+            .into())
         },
     )
     .unwrap_err();
@@ -292,3 +296,7 @@ fn typed_initial_service_unavailability_preserves_existing_fallback() {
         .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
         .is_some());
 }
+
+#[cfg(unix)]
+#[path = "client_admission_engine_recovery_tests.rs"]
+mod engine_transport_tests;

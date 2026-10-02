@@ -73,7 +73,9 @@ ctx_rust_test(
     srcs = [
         "tests/bazel/capture_facade_replay.rs",
         "tests/bazel/opencode_changes.rs",
+        "tests/bazel/opencode_migration.rs",
     ],
+    compile_data = ["tests/fixtures/opencode-v1-v2/opencode.db"],
     crate_name = "logical_sqlite_capture_facade_replay",
     crate_root = "tests/bazel/capture_facade_replay.rs",
     edition = crate_edition(),

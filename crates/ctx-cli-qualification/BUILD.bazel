@@ -25,6 +25,16 @@ ctx_cli_contract_test(
 )
 
 ctx_cli_contract_test(
+    name = "native_provider_rejections_tests",
+    src = "tests/native_provider_rejections.rs",
+    deps = ["//crates/ctx-history-index:lib"],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
+)
+
+ctx_cli_contract_test(
     name = "stats_tests",
     src = "tests/stats.rs",
     deps = [

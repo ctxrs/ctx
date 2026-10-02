@@ -231,7 +231,7 @@ impl CoreRefreshEngine {
             .unwrap_or_default();
         let attempt = find_attempt(state, request_id).cloned();
         let selected_retry_intent = attempt.as_ref().and_then(|attempt| {
-            matches!(attempt.intent, RefreshIntent::SelectedImport(_))
+            matches!(attempt.intent, RefreshIntent::SelectedImport { .. })
                 .then(|| Arc::new(attempt.intent.clone()))
         });
         let route_results = attempt
@@ -465,7 +465,7 @@ impl CoreRefreshEngine {
             .dirty_routes
             .seed_exact_routes(routes, watermark, now_ms);
         state.dirty_routes.block_exact_routes(blocked_routes.iter());
-        if let Some(intent @ RefreshIntent::SelectedImport(_)) = retry_intent {
+        if let Some(intent @ RefreshIntent::SelectedImport { .. }) = retry_intent {
             let intent = Arc::new(intent.clone());
             for route in retryable_routes {
                 state

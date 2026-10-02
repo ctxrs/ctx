@@ -1,3 +1,4 @@
+#[path = "../../ctx-cli-contract-tests/tests/contracts/support/mod.rs"]
 mod support;
 
 use support::*;
@@ -251,7 +252,7 @@ fn failed_refresh_preserves_last_good_generation() {
         if resume {
             command.arg("--resume");
         }
-        let report = json_output(&mut command);
+        let report = failure_json_output(&mut command);
         assert_eq!(
             report["outcome"], "completed_with_source_failures",
             "{report:#}"

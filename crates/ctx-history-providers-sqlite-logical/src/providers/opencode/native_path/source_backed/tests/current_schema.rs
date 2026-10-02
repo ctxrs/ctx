@@ -539,8 +539,9 @@ fn independently_populated_representations_fail_closed() {
 }
 
 /// Adds what an OpenCode 2 upgrade leaves behind: `session_v2` and
-/// `session_message` carry every session, while the v1 `session`, `message`
-/// and `part` tables stay frozen at the upgrade.
+/// `session_message` preserve the legacy messages, while the v1 `session`,
+/// `message` and `part` tables stay frozen at the upgrade. This is an authored
+/// native-shape fixture; the native producer capture has a separate test.
 fn upgrade_to_opencode2(connection: &Connection, directory: &Path) {
     connection
         .execute_batch(
@@ -573,30 +574,58 @@ fn upgrade_to_opencode2(connection: &Connection, directory: &Path) {
             )
             .unwrap();
     }
-    for (index, (session, role, created)) in [
-        ("current-session", "user", 1782259200000_i64),
-        ("current-session", "assistant", 1782259201000),
-        ("v2-parent", "user", 1782259300000),
-        ("v2-child", "user", 1782259400000),
+    let legacy_text: String = connection
+        .query_row(
+            "select json_extract(data, '$.text') from part where id = 'current-part'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    for (index, (id, session, role, created, data)) in [
+        (
+            "current-user",
+            "current-session",
+            "user",
+            1782259200000_i64,
+            json!({"text": ""}),
+        ),
+        (
+            "current-assistant",
+            "current-session",
+            "assistant",
+            1782259201000,
+            json!({"content": [{"type": "text", "text": legacy_text}]}),
+        ),
+        (
+            "v2-parent-message",
+            "v2-parent",
+            "user",
+            1782259300000,
+            json!({"text": "OpenCode 2 parent turn"}),
+        ),
+        (
+            "v2-child-message",
+            "v2-child",
+            "user",
+            1782259400000,
+            json!({"text": "OpenCode 2 child turn"}),
+        ),
     ]
     .into_iter()
     .enumerate()
     {
+        let mut data = data;
+        data["time"] = json!({"created": created});
         connection
             .execute(
                 "insert into session_message values (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
                 params![
-                    format!("v2-message-{index}"),
+                    id,
                     session,
                     role,
                     i64::try_from(index).unwrap(),
                     created,
-                    json!({
-                        "role": role,
-                        "time": {"created": created},
-                        "text": format!("OpenCode 2 {role} turn in {session}")
-                    })
-                    .to_string()
+                    data.to_string(),
                 ],
             )
             .unwrap();
@@ -644,8 +673,8 @@ fn opencode2_upgrade_reads_session_message_with_session_v2_metadata() {
         child.parent_session_id.is_some(),
         "session ancestry must come from session_v2"
     );
-    assert!(records.iter().all(|record| {
-        !serde_json::to_string(&record.content)
+    assert!(records.iter().any(|record| {
+        serde_json::to_string(&record.content)
             .unwrap()
             .contains("frozen v1 representation")
     }));
@@ -673,12 +702,11 @@ fn opencode2_upgrade_keeps_the_source_identity_indexed_before_the_upgrade() {
         after.schema.family,
         OpenCodeNativeSchemaFamily::SessionMessageSeq
     );
-    assert!(
-        after.source.exact_descriptor_eq(&before.source),
-        "the upgrade must not move indexed sessions to a second source: {} -> {}",
-        before.source.schema_variant(),
-        after.source.schema_variant()
-    );
+    // The database keeps its source identity. The selected representation has
+    // a distinct descriptor and compact session identity, so canonical citations
+    // remain bound to the schema that produced them.
+    assert_eq!(after.source.identity(), before.source.identity());
+    assert!(!after.source.exact_descriptor_eq(&before.source));
 
     let session_id = |records: &[CoreRecord]| {
         records
@@ -689,7 +717,7 @@ fn opencode2_upgrade_keeps_the_source_identity_indexed_before_the_upgrade() {
             .encode_canonical()
             .unwrap()
     };
-    assert_eq!(session_id(&before_records), session_id(&after_records));
+    assert_ne!(session_id(&before_records), session_id(&after_records));
 }
 
 #[test]
@@ -717,6 +745,61 @@ fn opencode2_upgrade_with_v1_only_history_fails_closed() {
     assert!(error.to_string().contains(
         "ambiguous populated message schema families: session_message_seq, message_part"
     ));
+}
+
+#[test]
+fn opencode2_upgrade_with_a_missing_message_in_a_covered_session_fails_closed() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "legacy message"}),
+    );
+    upgrade_to_opencode2(&connection, temp.path());
+    connection
+        .execute(
+            "delete from session_message where id = 'current-assistant'",
+            [],
+        )
+        .unwrap();
+
+    let error = OpenCodeNativeSchema::probe(
+        &connection,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("ambiguous populated message schema families"));
+}
+
+#[test]
+fn opencode2_upgrade_with_different_text_for_the_same_message_fails_closed() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "legacy message"}),
+    );
+    upgrade_to_opencode2(&connection, temp.path());
+    connection
+        .execute(
+            "update session_message set data = json_set(data, '$.content[0].text', 'different text')
+             where id = 'current-assistant'",
+            [],
+        )
+        .unwrap();
+
+    let error = OpenCodeNativeSchema::probe(
+        &connection,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("ambiguous populated message schema families"));
 }
 
 #[cfg(unix)]

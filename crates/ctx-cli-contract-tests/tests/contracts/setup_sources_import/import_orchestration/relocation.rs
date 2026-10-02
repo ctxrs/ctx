@@ -121,7 +121,17 @@ fn failed_explicit_replacement_preserves_retained_relocation_witness() {
 
     write_codex_setup_session(&temp);
     fs::write(&failed_path, b"").unwrap();
-    let failed = import_explicit_custom_source(&temp, &failed_path);
+    let failed = failure_json_output(ctx(&temp).args([
+        "import",
+        "--input-format",
+        "ctx-history-jsonl-v2",
+        "--path",
+        failed_path.to_str().unwrap(),
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
     assert_eq!(
         failed["outcome"], "completed_with_source_failures",
         "{failed:#}"

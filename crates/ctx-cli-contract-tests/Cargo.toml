@@ -37,10 +37,6 @@ name = "native_provider_real_shapes"
 path = "tests/contracts/native_provider_real_shapes.rs"
 
 [[test]]
-name = "native_provider_rejections"
-path = "tests/contracts/native_provider_rejections.rs"
-
-[[test]]
 name = "native_providers"
 path = "tests/contracts/native_providers.rs"
 

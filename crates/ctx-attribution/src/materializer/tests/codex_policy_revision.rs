@@ -3,7 +3,7 @@ use super::*;
 use crate::graph::segment::{EventIndexEntry, SegmentManifest, SegmentStore};
 use crate::graph::segment_state::SegmentCompletedControl;
 use crate::materializer::CoreGenerationStart;
-use crate::protocol::CoreMaterializationReceipt;
+use crate::protocol::{CoreMaterializationReceipt, EventCopyProofKind, ProviderNativeCopyProof};
 use sha2::Digest;
 use std::path::Path;
 
@@ -44,6 +44,24 @@ fn seed_predecessor(
     predecessor_revision: &str,
     prior_origin: IndexedCoreEventOriginKind,
 ) -> TestResult {
+    seed_predecessor_records(
+        root,
+        std::slice::from_ref(record),
+        source,
+        head,
+        predecessor_revision,
+        prior_origin,
+    )
+}
+
+pub(super) fn seed_predecessor_records(
+    root: &Path,
+    records: &[CoreRecord],
+    source: &CoreSourceState,
+    head: &CoreGenerationHead,
+    predecessor_revision: &str,
+    prior_origin: IndexedCoreEventOriginKind,
+) -> TestResult {
     drop(SegmentMaterializer::open(root)?);
     let receipt = CoreMaterializationReceipt {
         core_generation_id: head.core_generation_id.clone(),
@@ -51,11 +69,11 @@ fn seed_predecessor(
         source_snapshot_sha256: head.source_snapshot_sha256.clone(),
         materializer_revision: predecessor_revision.to_owned(),
         source_count: 1,
-        event_count: 1,
+        event_count: records.len() as u64,
     };
     let completed = SegmentCompletedControl::current(
         1,
-        1,
+        records.len() as u64,
         Some(receipt.clone()),
         Some("a".repeat(64)),
         Some(head.clone()),
@@ -83,7 +101,7 @@ fn seed_predecessor(
         0,
         &control,
     )?;
-    let index_source = EventIndexSource::new(record.source.clone())?;
+    let index_source = EventIndexSource::new(source.source.clone())?;
     // Synthetic checked predecessor state: old exact admission was
     // UniqueToSession; a then-unknown newer revision was Unknown. No new capture.
     let index_ref = super::super::publication::write_event_index_segment_for_test(
@@ -91,34 +109,53 @@ fn seed_predecessor(
         1,
         1,
         vec![index_source.clone()],
-        vec![IndexedCoreEventState {
-            source_storage_key: index_source.storage_key,
-            event_id: record.event_id,
-            lineage: IndexedCoreEventLineage {
-                session_id: record.session_id,
-                parent_session_id: record.parent_session_id,
-                root_session_id: record.root_session_id,
-                session_relationship: if record.session_relationship.is_some() {
-                    SessionRelationshipKind::Delegated
-                } else {
-                    SessionRelationshipKind::RelatedUnknown
-                },
-                origin_kind: prior_origin,
-                copied_from: record.event_copy.as_ref().map(|copy| {
-                    crate::graph::segment::IndexedCopiedEventOrigin {
-                        ancestor_session_id: copy.ancestor_session_id,
-                        ancestor_event_id: copy.ancestor_event_id,
-                        proof: crate::protocol::EventCopyProofKind::NativeEventIdentity,
-                    }
-                }),
-            },
-            event_sequence: 1,
-            core_record_sha256: hex::encode(sha2::Sha256::digest(record.encode_stored()?)),
-            core_record_leaf_sha256: "3".repeat(64),
-            flat_record_count: 0,
-            event_output_root: "4".repeat(64),
-            coverage: Default::default(),
-        }],
+        records
+            .iter()
+            .map(|record| {
+                Ok(IndexedCoreEventState {
+                    source_storage_key: index_source.storage_key.clone(),
+                    event_id: record.event_id,
+                    lineage: IndexedCoreEventLineage {
+                        session_id: record.session_id,
+                        parent_session_id: record.parent_session_id,
+                        root_session_id: record.root_session_id,
+                        session_relationship: match record.session_relationship {
+                            Some(ProviderNativeSessionRelationship::Root) => {
+                                SessionRelationshipKind::Root
+                            }
+                            Some(ProviderNativeSessionRelationship::Delegated) => {
+                                SessionRelationshipKind::Delegated
+                            }
+                            _ => SessionRelationshipKind::RelatedUnknown,
+                        },
+                        origin_kind: prior_origin,
+                        copied_from: record.event_copy.as_ref().map(|copy| {
+                            crate::graph::segment::IndexedCopiedEventOrigin {
+                                ancestor_session_id: copy.ancestor_session_id,
+                                ancestor_event_id: copy.ancestor_event_id,
+                                proof: match copy.proof {
+                                    ProviderNativeCopyProof::NativeEventIdentity => {
+                                        EventCopyProofKind::NativeEventIdentity
+                                    }
+                                    ProviderNativeCopyProof::NativeCopiedFromField => {
+                                        EventCopyProofKind::NativeCopiedFromField
+                                    }
+                                    ProviderNativeCopyProof::NativeCallResultIdentity => {
+                                        EventCopyProofKind::NativeCallResultIdentity
+                                    }
+                                },
+                            }
+                        }),
+                    },
+                    event_sequence: record.event_sequence,
+                    core_record_sha256: hex::encode(sha2::Sha256::digest(record.encode_stored()?)),
+                    core_record_leaf_sha256: "3".repeat(64),
+                    flat_record_count: 0,
+                    event_output_root: "4".repeat(64),
+                    coverage: Default::default(),
+                })
+            })
+            .collect::<TestResult<Vec<_>>>()?,
     )?;
     SegmentStore::new(root).install_manifest_for_test(&SegmentManifest {
         schema_version: crate::graph::segment::MANIFEST_SCHEMA_VERSION,

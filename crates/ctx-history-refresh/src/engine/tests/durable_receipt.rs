@@ -2,6 +2,94 @@
 
 use super::*;
 
+#[test]
+fn weaker_durable_demand_is_rejected_before_running_promotion_or_terminal_recovery() {
+    for state in [
+        "admission_pending",
+        "queued",
+        "running",
+        "published",
+        "failed",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+        let first = test_refresh_engine();
+        let request = enqueue_synthetic_manual_all_request(&first, &data_root);
+        if matches!(state, "published" | "failed") {
+            let request_id = request_id(&request);
+            first
+                .complete_pending_admission_for_test(&data_root, &request_id, BTreeMap::new())
+                .unwrap();
+            assert_eq!(
+                first.status(&request_id).unwrap()["request_state"],
+                "queued"
+            );
+        }
+        match state {
+            "published" => {
+                publish_synthetic_terminal(&first, &data_root, "journal-generation");
+            }
+            "failed" => {
+                first
+                    .run_next_with(
+                        |_, _| Err(anyhow!("fixture terminal failure")),
+                        || Ok(None),
+                        |job| {
+                            write_daemon_job_status(
+                                &daemon_source_backed_refresh_job_path(&data_root),
+                                job,
+                            )
+                        },
+                        |_| Ok(()),
+                    )
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let path = daemon_source_backed_refresh_job_path(&data_root);
+        let mut job = read_daemon_job_status(&path).unwrap();
+        job["request_state"] = json!(state);
+        job["reconciliation_demand"] = json!("incremental");
+        write_daemon_job_status(&path, &job).unwrap();
+        drop(first);
+        let restarted = test_refresh_engine();
+        let error = restarted
+            .recover_interrupted_publication(&data_root)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("weaker than its intent"),
+            "{state}: {error:#}"
+        );
+        assert!(!restarted.has_pending_request());
+    }
+}
+
+#[test]
+fn weaker_queued_successor_demand_is_rejected_without_installing_the_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let first = test_refresh_engine();
+    first.enqueue(None);
+    enqueue_synthetic_manual_all_request(&first, &data_root);
+    let path = daemon_source_backed_refresh_job_path(&data_root);
+    let mut job = read_daemon_job_status(&path).unwrap();
+    assert_eq!(job["queued_successors"].as_array().unwrap().len(), 1);
+    job["queued_successors"][0]["reconciliation_demand"] = json!("incremental");
+    write_daemon_job_status(&path, &job).unwrap();
+    drop(first);
+    let restarted = test_refresh_engine();
+    let error = restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("weaker than its intent"),
+        "{error:#}"
+    );
+    assert!(!restarted.has_pending_request());
+}
+
 fn enqueue_synthetic_manual_all_request(
     coordinator: &super::super::CoreRefreshEngine,
     data_root: &Path,

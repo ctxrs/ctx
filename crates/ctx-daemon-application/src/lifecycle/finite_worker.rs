@@ -1,6 +1,6 @@
 use std::{
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Child,
     time::{Duration, Instant},
 };
@@ -88,6 +88,20 @@ impl FiniteWorkerLease {
     /// successor work just because the client finished observing it.
     pub fn reap_if_exited(&mut self) -> io::Result<bool> {
         Ok(self.child.try_wait()?.is_some())
+    }
+
+    /// This exact child capability can establish liveness without trusting a
+    /// reused PID or daemon metadata retained by a different lock holder.
+    pub fn observe_liveness(
+        &mut self,
+        data_root: &Path,
+        owner_id: &str,
+        pid: u32,
+    ) -> io::Result<Option<bool>> {
+        if self.data_root != data_root || self.owner_id != owner_id || self.child.id() != pid {
+            return Ok(None);
+        }
+        Ok(Some(self.child.try_wait()?.is_none()))
     }
 
     /// Gracefully interrupt only the child's private process group, then reap
@@ -342,4 +356,39 @@ pub(super) fn reap_owned_candidate_with_probe_for_test(
     try_wait: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
 ) -> io::Result<()> {
     reap_owned_candidate_with(child, signal, kill, try_wait)
+}
+
+#[cfg(all(test, unix))]
+mod liveness_tests {
+    use super::*;
+
+    #[test]
+    fn exact_child_liveness_requires_matching_root_owner_and_pid() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exec sleep 30"])
+            .spawn()?;
+        let pid = child.id();
+        let mut lease = FiniteWorkerLease {
+            handoff: DaemonHandoff {
+                pid,
+                heartbeat_at_ms: 1,
+            },
+            child,
+            data_root: temp.path().to_path_buf(),
+            owner_id: "exact-owner".to_owned(),
+        };
+        let observations = [
+            lease.observe_liveness(&temp.path().join("other"), "exact-owner", pid)?,
+            lease.observe_liveness(temp.path(), "other-owner", pid)?,
+            lease.observe_liveness(temp.path(), "exact-owner", pid.saturating_add(1))?,
+            lease.observe_liveness(temp.path(), "exact-owner", pid)?,
+        ];
+        lease.child.kill()?;
+        lease.child.wait()?;
+        let exited = lease.observe_liveness(temp.path(), "exact-owner", pid)?;
+        assert_eq!(observations, [None, None, None, Some(true)]);
+        assert_eq!(exited, Some(false));
+        Ok(())
+    }
 }

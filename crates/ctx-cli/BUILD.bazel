@@ -441,7 +441,7 @@ test_suite(
 
 test_suite(
     name = "native_provider_rejections_tests",
-    tests = ["//crates/ctx-cli-contract-tests:native_provider_rejections_tests"],
+    tests = ["//crates/ctx-cli-qualification:native_provider_rejections_tests"],
 )
 
 test_suite(

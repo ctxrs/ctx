@@ -1,6 +1,72 @@
 use super::*;
 
+mod status_parsing;
 mod terminal_outcome;
+
+use status_parsing::{
+    optional_status_string, parse_maintenance_wake, parse_terminal_outcome, required_status_string,
+    TYPED_STATUS_FIELDS,
+};
+
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+
+    #[test]
+    fn selected_import_preserves_legacy_exhaustive_wire_and_incremental_selection() {
+        let selections = [
+            RefreshSelection::All,
+            RefreshSelection::Provider(CaptureProvider::Codex),
+            RefreshSelection::ExactSource(crate::explicit_source_catalog_authority_for_test(1)),
+        ];
+        for selection in selections {
+            let legacy = json!({ "kind": "selected_import", "selection": selection.to_json() });
+            let exhaustive = RefreshIntent::from_json(&legacy).unwrap();
+            assert_eq!(exhaustive.to_json(), legacy);
+            assert_eq!(
+                exhaustive.reconciliation_demand(),
+                SourceBackedReconciliationDemand::Exhaustive
+            );
+            let mut explicit = legacy.clone();
+            explicit["reconciliation_demand"] = json!("exhaustive");
+            assert_eq!(RefreshIntent::from_json(&explicit).unwrap(), exhaustive);
+            explicit["reconciliation_demand"] = json!("incremental");
+            let incremental = RefreshIntent::from_json(&explicit).unwrap();
+            assert_eq!(incremental.to_json(), explicit);
+            assert_eq!(incremental.selection(), Some(&selection));
+            assert_eq!(incremental.operation(), RefreshOperation::Import);
+            assert_eq!(
+                incremental.reconciliation_demand(),
+                SourceBackedReconciliationDemand::Incremental
+            );
+            assert!(incremental.is_selected_import());
+        }
+    }
+
+    #[test]
+    fn selected_import_rejects_invalid_demand_and_unknown_intent_fields() {
+        for demand in [
+            Value::Null,
+            json!(true),
+            json!(0),
+            json!("unknown"),
+            json!({}),
+        ] {
+            assert!(RefreshIntent::from_json(&json!({
+                "kind": "selected_import", "selection": {"kind": "all"},
+                "reconciliation_demand": demand,
+            }))
+            .is_err());
+        }
+        for intent in [
+            json!({"kind": "selected_import", "reconciliation_demand": "incremental"}),
+            json!({"kind": "selected_import", "selection": {"kind": "all"}, "extra": true}),
+            json!({"kind": "automatic_maintenance", "reconciliation_demand": "incremental"}),
+        ] {
+            assert!(RefreshIntent::from_json(&intent).is_err());
+        }
+    }
+}
 
 pub use terminal_outcome::RefreshTerminalOutcome;
 
@@ -476,17 +542,29 @@ impl RefreshSelection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshIntent {
     AutomaticMaintenance,
-    SelectedImport(RefreshSelection),
+    SelectedImport {
+        selection: RefreshSelection,
+        reconciliation_demand: SourceBackedReconciliationDemand,
+    },
 }
 
 impl RefreshIntent {
     pub fn to_json(&self) -> Value {
         match self {
             Self::AutomaticMaintenance => json!({ "kind": "automatic_maintenance" }),
-            Self::SelectedImport(selection) => json!({
-                "kind": "selected_import",
-                "selection": selection.to_json(),
-            }),
+            Self::SelectedImport {
+                selection,
+                reconciliation_demand,
+            } => {
+                let mut intent = json!({
+                    "kind": "selected_import",
+                    "selection": selection.to_json(),
+                });
+                if *reconciliation_demand != SourceBackedReconciliationDemand::Exhaustive {
+                    intent["reconciliation_demand"] = json!(reconciliation_demand.as_str());
+                }
+                intent
+            }
         }
     }
 
@@ -496,11 +574,32 @@ impl RefreshIntent {
             .ok_or_else(|| anyhow!("source refresh intent is not an object"))?;
         match fields.get("kind").and_then(Value::as_str) {
             Some("automatic_maintenance") if fields.len() == 1 => Ok(Self::AutomaticMaintenance),
-            Some("selected_import") if fields.len() == 2 => fields
-                .get("selection")
-                .ok_or_else(|| anyhow!("selected import has no source selection"))
-                .and_then(RefreshSelection::from_json)
-                .map(Self::SelectedImport),
+            Some("selected_import")
+                if fields.keys().all(|field| {
+                    matches!(
+                        field.as_str(),
+                        "kind" | "selection" | "reconciliation_demand"
+                    )
+                }) =>
+            {
+                let selection = RefreshSelection::from_json(
+                    fields
+                        .get("selection")
+                        .ok_or_else(|| anyhow!("selected import has no source selection"))?,
+                )?;
+                let reconciliation_demand = match fields.get("reconciliation_demand") {
+                    None => SourceBackedReconciliationDemand::Exhaustive,
+                    Some(Value::String(value)) => SourceBackedReconciliationDemand::parse(value)
+                        .ok_or_else(|| {
+                            anyhow!("selected import has invalid reconciliation demand")
+                        })?,
+                    Some(_) => bail!("selected import has invalid reconciliation demand"),
+                };
+                Ok(Self::SelectedImport {
+                    selection,
+                    reconciliation_demand,
+                })
+            }
             Some(kind) => bail!("source refresh intent `{kind}` is malformed"),
             None => bail!("source refresh intent kind is missing"),
         }
@@ -509,26 +608,29 @@ impl RefreshIntent {
     pub const fn operation(&self) -> RefreshOperation {
         match self {
             Self::AutomaticMaintenance => RefreshOperation::Refresh,
-            Self::SelectedImport(_) => RefreshOperation::Import,
+            Self::SelectedImport { .. } => RefreshOperation::Import,
         }
     }
 
     pub const fn reconciliation_demand(&self) -> SourceBackedReconciliationDemand {
         match self {
             Self::AutomaticMaintenance => SourceBackedReconciliationDemand::Incremental,
-            Self::SelectedImport(_) => SourceBackedReconciliationDemand::Exhaustive,
+            Self::SelectedImport {
+                reconciliation_demand,
+                ..
+            } => *reconciliation_demand,
         }
     }
 
     pub fn selection(&self) -> Option<&RefreshSelection> {
         match self {
             Self::AutomaticMaintenance => None,
-            Self::SelectedImport(selection) => Some(selection),
+            Self::SelectedImport { selection, .. } => Some(selection),
         }
     }
 
     pub const fn is_selected_import(&self) -> bool {
-        matches!(self, Self::SelectedImport(_))
+        matches!(self, Self::SelectedImport { .. })
     }
 
     pub fn explicit_source_authority(&self) -> Option<&ExplicitSourceCatalogAuthority> {
@@ -561,10 +663,17 @@ impl RefreshRequest {
         Self::new(request_id, RefreshIntent::AutomaticMaintenance, trigger)
     }
 
-    pub fn selected_import(request_id: String, selection: RefreshSelection) -> Self {
+    pub fn selected_import(
+        request_id: String,
+        selection: RefreshSelection,
+        reconciliation_demand: SourceBackedReconciliationDemand,
+    ) -> Self {
         Self::new(
             request_id,
-            RefreshIntent::SelectedImport(selection),
+            RefreshIntent::SelectedImport {
+                selection,
+                reconciliation_demand,
+            },
             RefreshRequestTrigger::Import,
         )
     }
@@ -753,156 +862,6 @@ impl RefreshStatus {
             structured_outcome,
         }))
     }
-}
-
-const TYPED_STATUS_FIELDS: &[&str] = &[
-    "logical_request_id",
-    "physical_attempt_id",
-    "physical_attempt_state",
-    "progress_owner_request_id",
-    "progress_owner_attempt_state",
-    "structured_outcome",
-    "maintenance_wake",
-];
-
-fn parse_maintenance_wake(
-    fields: &Value,
-    request_state: RefreshRequestState,
-) -> Result<RefreshStatusKind> {
-    if fields.get("maintenance_wake").and_then(Value::as_bool) != Some(true)
-        || request_state != RefreshRequestState::Queued
-        || fields.get("logical_phase").and_then(Value::as_str) != Some("waiting")
-        || fields
-            .get("progress")
-            .and_then(|progress| progress.get("phase"))
-            .and_then(Value::as_str)
-            != Some("maintenance_wake")
-        || [
-            "physical_attempt_id",
-            "physical_attempt_state",
-            "progress_owner_request_id",
-            "progress_owner_attempt_state",
-            "structured_outcome",
-        ]
-        .iter()
-        .any(|field| fields.get(*field).is_some())
-    {
-        bail!("source refresh response has invalid background maintenance wake status");
-    }
-    let request_id = required_status_string(fields, "request_id")?.to_owned();
-    if required_status_string(fields, "logical_request_id")? != request_id {
-        bail!("source refresh maintenance wake authority does not match its request ID");
-    }
-    let previous_generation = optional_status_string(fields, "previous_generation")?;
-    let published_generation = optional_status_string(fields, "published_generation")?;
-    if previous_generation != published_generation {
-        bail!("source refresh maintenance wake generation authority is inconsistent");
-    }
-    Ok(RefreshStatusKind::BackgroundMaintenanceWake(
-        RefreshMaintenanceWakeStatus {
-            request_id,
-            previous_generation,
-            published_generation,
-        },
-    ))
-}
-
-fn parse_terminal_outcome(value: &Value) -> Result<RefreshTerminalOutcome> {
-    let fields = value
-        .as_object()
-        .ok_or_else(|| anyhow!("source refresh structured outcome is not an object"))?;
-    let code: RefreshOutcomeCode = required_outcome_string(fields, "code")?.parse()?;
-    let class: RefreshOutcomeClass = required_outcome_string(fields, "class")?.parse()?;
-    let retryable = fields
-        .get("retryable")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| anyhow!("source refresh structured outcome has invalid retryability"))?;
-    let affected_routes = outcome_routes(fields, "affected_routes")?;
-    let retryable_routes = outcome_routes(fields, "retryable_routes")?;
-    let blocked_routes = outcome_routes(fields, "blocked_routes")?;
-    let physical_attempt_id = required_outcome_string(fields, "physical_attempt_id")?.to_owned();
-    let retry_advice = match optional_outcome_string(fields, "retry_advice")? {
-        Some(value) => Some(value.parse()?),
-        None => None,
-    };
-    let outcome = RefreshTerminalOutcome::new(
-        code,
-        retryable,
-        affected_routes,
-        retryable_routes,
-        blocked_routes,
-        physical_attempt_id,
-        optional_outcome_string(fields, "retained_generation")?,
-        optional_outcome_string(fields, "published_generation")?,
-        retry_advice,
-        optional_outcome_string(fields, "detail")?,
-    )?;
-    outcome.validate_declared_class(class)?;
-    Ok(outcome)
-}
-
-fn required_status_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("source refresh response has invalid `{field}`"))
-}
-
-fn optional_status_string(value: &Value, field: &str) -> Result<Option<String>> {
-    match value.get(field) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
-        _ => bail!("source refresh response has invalid `{field}`"),
-    }
-}
-
-fn required_outcome_string<'a>(
-    fields: &'a serde_json::Map<String, Value>,
-    field: &str,
-) -> Result<&'a str> {
-    fields
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("source refresh structured outcome has invalid `{field}`"))
-}
-
-fn optional_outcome_string(
-    fields: &serde_json::Map<String, Value>,
-    field: &str,
-) -> Result<Option<String>> {
-    match fields.get(field) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
-        _ => bail!("source refresh structured outcome has invalid `{field}`"),
-    }
-}
-
-fn outcome_routes(
-    fields: &serde_json::Map<String, Value>,
-    field: &str,
-) -> Result<BTreeSet<SourceRouteIdentity>> {
-    let values = fields
-        .get(field)
-        .and_then(Value::as_array)
-        .filter(|routes| routes.len() <= SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT)
-        .ok_or_else(|| anyhow!("source refresh structured outcome has invalid `{field}`"))?;
-    let routes = values
-        .iter()
-        .map(|route| {
-            route
-                .as_str()
-                .ok_or_else(|| anyhow!("source refresh outcome route is not a string"))
-                .and_then(|route| {
-                    SourceRouteIdentity::from_sha256(route.to_owned()).map_err(Into::into)
-                })
-        })
-        .collect::<Result<BTreeSet<_>>>()?;
-    if routes.len() != values.len() {
-        bail!("source refresh structured outcome has duplicate `{field}` routes");
-    }
-    Ok(routes)
 }
 
 #[cfg(any(test, feature = "test-support"))]

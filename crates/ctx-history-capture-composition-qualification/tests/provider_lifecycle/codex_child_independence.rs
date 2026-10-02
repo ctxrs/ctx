@@ -19,13 +19,17 @@ use ctx_history_index::{
     GenerationStateEnvelope, GenerationWriter, RevalidationTarget, WriterOptions,
 };
 
-const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v15-revert-lineage";
+const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v16-audited-primary-lineage";
 
 #[path = "codex_child_independence/quarantine.rs"]
 mod quarantine;
 
 #[path = "codex_child_independence/patch_files.rs"]
 mod patch_files;
+
+#[cfg(unix)]
+#[path = "codex_child_independence/primary_blame.rs"]
+mod primary_blame;
 
 fn writer_options() -> WriterOptions {
     WriterOptions {
@@ -475,10 +479,20 @@ fn install_single_source_certificate(
     provider_checkpoint: TypedKey,
 ) -> String {
     let current = VerifiedIndex::open_pinned(index_root).unwrap();
-    let routes = current.manifest().source_routes().to_vec();
     let replacement =
         certificate_with_provider_checkpoint(&current, native_session_id, provider_checkpoint);
     let records = records_for(&current, native_session_id);
+    drop(current);
+    install_single_source_records(index_root, replacement, records)
+}
+
+fn install_single_source_records(
+    index_root: &Path,
+    replacement: CertifiedSource,
+    records: Vec<CoreRecord>,
+) -> String {
+    let current = VerifiedIndex::open_pinned(index_root).unwrap();
+    let routes = current.manifest().source_routes().to_vec();
     assert_eq!(
         routes
             .iter()

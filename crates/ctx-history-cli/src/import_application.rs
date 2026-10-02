@@ -49,6 +49,7 @@ pub trait ImportApplicationPort {
         &mut self,
         data_root: &Path,
         selection: RefreshSelection,
+        reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
         no_daemon: bool,
         progress: &mut ProgressReporter<'_>,
     ) -> Result<IngestPublication>;
@@ -90,6 +91,7 @@ fn ingest_request(request: ImportRequest) -> IngestRequest {
         history_source_manifests: request.history_source_manifests,
         all: request.all,
         resume: request.resume,
+        reconciliation_demand: request.reconciliation_demand,
         relocate_from: request.relocate_from,
         reset_cursor: request.reset_cursor,
         no_daemon: request.no_daemon,
@@ -208,13 +210,20 @@ impl<P: ImportApplicationPort> IngestRefreshPort for HistoryImportHost<'_, P> {
         &mut self,
         data_root: &Path,
         selection: RefreshSelection,
+        reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
         no_daemon: bool,
     ) -> Result<IngestPublication> {
         let progress = self
             .progress
             .as_mut()
             .context("ingest refresh requested before progress initialization")?;
-        self.port.refresh(data_root, selection, no_daemon, progress)
+        self.port.refresh(
+            data_root,
+            selection,
+            reconciliation_demand,
+            no_daemon,
+            progress,
+        )
     }
 }
 

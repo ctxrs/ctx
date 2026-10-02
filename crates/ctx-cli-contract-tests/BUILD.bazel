@@ -52,6 +52,7 @@ filegroup(
     srcs = [
         "tests/contracts/native_providers/additional.rs",
         "tests/contracts/native_providers/factory_retry.rs",
+        "tests/contracts/native_providers/import_failures.rs",
         "tests/contracts/support/native_providers/daemon.rs",
         "tests/contracts/support/native_providers/sqlite_sources.rs",
         "tests/contracts/support/native_providers/workspace_sources.rs",
@@ -66,6 +67,7 @@ filegroup(
         "tests/contracts/setup_sources_import/import_orchestration/blame_indexing.rs",
         "tests/contracts/setup_sources_import/import_orchestration/cancellation.rs",
         "tests/contracts/setup_sources_import/import_orchestration/cancellation/semantic.rs",
+        "tests/contracts/setup_sources_import/import_orchestration/incremental.rs",
         "tests/contracts/setup_sources_import/import_orchestration/relocation.rs",
         "tests/contracts/setup_sources_import/import_orchestration/semantic_failure.rs",
         "tests/contracts/setup_sources_import/lifecycle.rs",
@@ -125,6 +127,7 @@ ctx_cli_contract_test(
     binary = "//crates/ctx-cli:ctx_managed_test_binary",
     extra_compile_data = [
         "//crates/ctx-agent-integrations:src/skill/testdata/legacy_skill_v0_17_0.md",
+        "//crates/ctx-agent-integrations:src/skill/testdata/released_skill_v2_2_4.md",
     ],
     tags = ["cli-contract"],
     test_support = [
@@ -159,16 +162,6 @@ ctx_cli_contract_test(
 ctx_cli_contract_test(
     name = "native_provider_real_shapes_tests",
     src = "tests/contracts/native_provider_real_shapes.rs",
-    deps = ["//crates/ctx-history-index:lib"],
-    test_support = [
-        "base",
-        "fixtures",
-    ],
-)
-
-ctx_cli_contract_test(
-    name = "native_provider_rejections_tests",
-    src = "tests/contracts/native_provider_rejections.rs",
     deps = ["//crates/ctx-history-index:lib"],
     test_support = [
         "base",

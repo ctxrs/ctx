@@ -48,3 +48,7 @@ mod codex_policy_revision;
 mod provider_attribution;
 #[path = "tests/provider_policy_revision.rs"]
 mod provider_policy_revision;
+
+#[cfg(unix)]
+#[path = "tests/primary_commit.rs"]
+mod primary_commit;

@@ -168,6 +168,201 @@ fn certified(source: SourceKey) -> CertifiedSource {
     .unwrap()
 }
 
+fn manifest_at_revision(source: SourceKey, revision: u8) -> GenerationManifest {
+    let observation = SourceObservation::new(source, "fixture-revision", vec![revision]).unwrap();
+    GenerationManifest::from_sources(vec![CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "fixture-parser",
+        [revision; 32],
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            indexed_documents: 1,
+            certified_bytes: 16,
+            ..ScannedSourceCounts::default()
+        },
+    )
+    .unwrap()])
+    .unwrap()
+}
+
+fn persist_and_cold_reopen(
+    root: &Path,
+    prepared: PreparedManifest,
+) -> (String, Arc<GenerationManifest>) {
+    let generation_id = prepared.generation_id().to_owned();
+    write_prepared_manifest(root, &prepared).unwrap();
+    drop(prepared);
+    clear_manifest_cache_for_root(root).unwrap();
+    let reopened = load_materialized_manifest(root, &generation_id, 0).unwrap();
+    (generation_id, reopened)
+}
+
+#[test]
+fn descriptor_replacements_reset_flat_delta_base_and_survive_cold_reopen() {
+    for (format, variant, identity_version) in [
+        ("fixture-format-v2", "fixture-v1", 1),
+        ("fixture-format", "fixture-v2", 1),
+        ("fixture-format", "fixture-v1", 2),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let original = fixture_source("descriptor-replacement");
+        let replacement = SourceKey::derive(
+            "fixture",
+            format,
+            variant,
+            identity_version,
+            original.anchor().clone(),
+        )
+        .unwrap();
+        assert_eq!(original.identity(), replacement.identity());
+        assert!(!original.exact_descriptor_eq(&replacement));
+
+        let base = manifest_at_revision(original.clone(), 1);
+        let base_id = base.generation_id().unwrap();
+        write_manifest(temp.path(), &base_id, &base).unwrap();
+        let changed = manifest_at_revision(original, 2);
+        let prepared =
+            prepare_successor_manifest(temp.path(), Arc::new(changed), Some((&base_id, &base)))
+                .unwrap();
+        assert!(prepared.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
+        drop(base);
+        let (delta_id, delta_base) = persist_and_cold_reopen(temp.path(), prepared);
+
+        let migrated = manifest_at_revision(replacement.clone(), 3);
+        let expected_migrated = serde_json::to_vec(&migrated).unwrap();
+        let prepared = prepare_successor_manifest(
+            temp.path(),
+            Arc::new(migrated),
+            Some((&delta_id, &delta_base)),
+        )
+        .unwrap();
+        let is_full = !prepared.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX);
+        drop(delta_base);
+        let (migrated_id, migrated_base) = persist_and_cold_reopen(temp.path(), prepared);
+        assert!(is_full);
+        assert_eq!(
+            serde_json::to_vec(migrated_base.as_ref()).unwrap(),
+            expected_migrated
+        );
+        assert!(migrated_base.sources[0]
+            .observation()
+            .source()
+            .exact_descriptor_eq(&replacement));
+
+        let updated = manifest_at_revision(replacement, 4);
+        let expected_updated = serde_json::to_vec(&updated).unwrap();
+        let prepared = prepare_successor_manifest(
+            temp.path(),
+            Arc::new(updated),
+            Some((&migrated_id, &migrated_base)),
+        )
+        .unwrap();
+        let delta: StoredManifestFlatDeltaV1 = serde_json::from_slice(&prepared.bytes).unwrap();
+        assert_eq!(delta.base_generation_id, migrated_id);
+        drop(migrated_base);
+        let (_, reopened) = persist_and_cold_reopen(temp.path(), prepared);
+        assert_eq!(
+            serde_json::to_vec(reopened.as_ref()).unwrap(),
+            expected_updated
+        );
+    }
+}
+
+#[test]
+fn descriptor_only_replacements_survive_cold_reopen_from_full_and_delta_bases() {
+    for delta_base in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let original = fixture_source("descriptor-only-replacement");
+        let replacement = SourceKey::derive(
+            "fixture",
+            "fixture-format",
+            "fixture-v2",
+            1,
+            original.anchor().clone(),
+        )
+        .unwrap();
+        let base = manifest_at_revision(original.clone(), 1);
+        let prepared = prepare_successor_manifest(temp.path(), Arc::new(base), None).unwrap();
+        let (mut base_id, mut base) = persist_and_cold_reopen(temp.path(), prepared);
+        let revision = if delta_base { 2 } else { 1 };
+        if delta_base {
+            let successor = manifest_at_revision(original, revision);
+            let prepared = prepare_successor_manifest(
+                temp.path(),
+                Arc::new(successor),
+                Some((&base_id, &base)),
+            )
+            .unwrap();
+            assert!(prepared.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
+            drop(base);
+            (base_id, base) = persist_and_cold_reopen(temp.path(), prepared);
+        }
+
+        let successor = manifest_at_revision(replacement.clone(), revision);
+        let expected = serde_json::to_vec(&successor).unwrap();
+        // Lineage-based equality alone cannot detect this descriptor-only change.
+        assert_eq!(base.sources, successor.sources);
+        assert_eq!(
+            base.core_record_aggregates,
+            successor.core_record_aggregates
+        );
+        assert_ne!(serde_json::to_vec(base.as_ref()).unwrap(), expected);
+        let prepared =
+            prepare_successor_manifest(temp.path(), Arc::new(successor), Some((&base_id, &base)))
+                .unwrap();
+        let is_full = !prepared.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX);
+        drop(base);
+        let (successor_id, reopened) = persist_and_cold_reopen(temp.path(), prepared);
+        assert_ne!(successor_id, base_id);
+        assert!(is_full);
+        assert_eq!(serde_json::to_vec(reopened.as_ref()).unwrap(), expected);
+        assert!(reopened.sources[0]
+            .observation()
+            .source()
+            .exact_descriptor_eq(&replacement));
+    }
+}
+
+#[test]
+fn unchanged_descriptors_keep_flat_deltas_across_cold_reopens() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = fixture_source("unchanged-descriptor");
+    let base = manifest_at_revision(source.clone(), 1);
+    let base_id = base.generation_id().unwrap();
+    write_manifest(temp.path(), &base_id, &base).unwrap();
+    let mut previous_id = base_id.clone();
+    let mut previous = Arc::new(base);
+    for revision in [2, 3] {
+        let successor = manifest_at_revision(source.clone(), revision);
+        let expected = serde_json::to_vec(&successor).unwrap();
+        let prepared = prepare_successor_manifest(
+            temp.path(),
+            Arc::new(successor),
+            Some((&previous_id, &previous)),
+        )
+        .unwrap();
+        let delta: StoredManifestFlatDeltaV1 = serde_json::from_slice(&prepared.bytes).unwrap();
+        assert_eq!(delta.base_generation_id, base_id);
+        assert_eq!(delta.changes.len(), 1);
+        drop(previous);
+        (previous_id, previous) = persist_and_cold_reopen(temp.path(), prepared);
+        assert_eq!(serde_json::to_vec(previous.as_ref()).unwrap(), expected);
+    }
+    let replay = prepare_successor_manifest(
+        temp.path(),
+        Arc::clone(&previous),
+        Some((&previous_id, &previous)),
+    )
+    .unwrap();
+    assert_eq!(replay.generation_id(), previous_id);
+    assert_eq!(
+        replay.bytes,
+        load_manifest_bytes(temp.path(), &previous_id).unwrap()
+    );
+}
+
 #[test]
 fn membership_only_successor_uses_a_full_manifest() {
     let temp = tempfile::tempdir().unwrap();

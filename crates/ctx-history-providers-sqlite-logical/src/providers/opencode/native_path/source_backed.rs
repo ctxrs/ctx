@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    json::{OpenCodeJsonProjection, OpenCodeRetainedJson},
+    json::{retained_projection, OpenCodeJsonProjection, OpenCodeRetainedJson},
     model::{OpenCodeNativeEventKind, OpenCodeNativeRejectionKind, OpenCodeNativeSchemaFamily},
     query::{source_backed_decode_order, source_backed_native_record_identity},
     schema::OpenCodeNativeSchema,
@@ -45,7 +45,7 @@ use crate::{
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "opencode-family-source-backed-v14-session-v2-current-history";
+const PARSER_REVISION: &str = "opencode-family-source-backed-v14-proven-v2-overlap";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
@@ -99,6 +99,7 @@ mod adapter;
 mod authority;
 mod diagnostics;
 mod fingerprint;
+mod identity;
 mod ordering;
 mod projection;
 mod value;
@@ -113,11 +114,12 @@ use diagnostics::{
     record_local_core_projection_failure,
 };
 use fingerprint::*;
+use identity::{schema_family_for_source, session_id, source_key_scoped};
 use ordering::{
     initialize_ordering_scratch, stream_fallback_ordered_events, stream_ordered_session_identities,
     OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
 };
-use projection::{core_record, decode_source_event_row, retained_projection};
+use projection::{core_record, decode_source_event_row};
 use value::SqliteSourceValue;
 
 /// Provider-local hook consumed later by the shared registration layer.
@@ -392,7 +394,7 @@ fn observe_logical_source_with_progress_scoped(
     let schema = OpenCodeNativeSchema::probe(connection, dialect)
         .map_err(OpenCodeSourceBackedError::from)
         .map_err(|error| diagnose_provider_query_error(error, SqliteFailurePhase::Schema))?;
-    let source = source_key_scoped(dialect, schema.identity_family, source_scope)?;
+    let source = source_key_scoped(dialect, schema.family, source_scope)?;
     report_progress(opencode_logical_progress(
         SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
         0,
@@ -451,6 +453,10 @@ fn stream_logical_rows(
 ) -> OpenCodeSourceBackedResult<StreamedLogicalRows> {
     let session_by_id_sql = format!("{} where id = ?1", session_source_sql(schema));
     let mut session_by_id = connection.prepare(&session_by_id_sql)?;
+    let mut legacy_parts = schema
+        .proven_legacy_overlap
+        .then(|| super::overlap::legacy_part_rows(connection))
+        .transpose()?;
     let SessionScanState {
         mut content_hasher,
         session_rows_scanned,
@@ -500,7 +506,17 @@ fn stream_logical_rows(
             }
             emit(OpenCodeScanOutput::CompletedBytes(event.content_bytes))?;
             let disposition = projection_disposition(&event.projection);
-            let retained = retained_projection(&event.projection);
+            let mut retained = retained_projection(&event.projection);
+            let (legacy_covered, enriched) = match (&mut legacy_parts, &mut retained) {
+                (Some(parts), Some(retained)) if retained.effective_type == "assistant" => {
+                    super::overlap::restore_assistant_fields(
+                        parts,
+                        &event.message_identity,
+                        &mut retained.body,
+                    )?
+                }
+                _ => (false, false),
+            };
             match disposition {
                 ProjectionDisposition::Retained => {}
                 ProjectionDisposition::Rejected => {
@@ -522,6 +538,15 @@ fn stream_logical_rows(
             let Some(retained) = retained else {
                 return Ok(());
             };
+            if enriched {
+                content_hasher.update(b"restored-assistant-fields\0");
+                let evidence = serde_json::to_vec(&retained.body).map_err(|error| {
+                    CaptureError::InvalidPayload(format!(
+                        "OpenCode enriched evidence serialization failed: {error}"
+                    ))
+                })?;
+                hash_bytes(&mut content_hasher, &evidence);
+            }
             if current_session
                 .as_ref()
                 .map(|session| session.native_identity.as_str())
@@ -557,6 +582,7 @@ fn stream_logical_rows(
                 &mut next_session_sequence,
             ) {
                 Ok(document) => document,
+                Err(error) if legacy_covered => return Err(error),
                 Err(OpenCodeSourceBackedError::CoreRecord(error)) => {
                     if !record_local_core_projection_failure(&error) {
                         return Err(OpenCodeSourceBackedError::CoreRecord(error));
@@ -575,6 +601,13 @@ fn stream_logical_rows(
                 }
                 Err(error) => return Err(error),
             };
+            if legacy_covered && document.content.structured_content.is_none() {
+                return Err(CaptureError::InvalidPayload(
+                    "OpenCode covered legacy assistant exceeds Core structured-content limits"
+                        .into(),
+                )
+                .into());
+            }
             counts.retained_records = checked_add(counts.retained_records, 1)?;
             counts.indexed_documents = checked_add(counts.indexed_documents, 1)?;
             emit(OpenCodeScanOutput::Document(document))
@@ -663,6 +696,7 @@ fn scan_session_evidence(
 }
 
 fn session_source_sql(schema: &OpenCodeNativeSchema) -> String {
+    let table = schema.session_table;
     let parent = optional_session_text(&schema.session_columns, "parent_id");
     let directory = optional_session_text(&schema.session_columns, "directory");
     let branch = optional_session_text(&schema.session_columns, "branch");
@@ -685,8 +719,7 @@ fn session_source_sql(schema: &OpenCodeNativeSchema) -> String {
                            or typeof(time_updated) <> 'integer'
                            or {parent_invalid}
                      then 1 else 0 end
-         from {session_table}",
-        session_table = schema.session_table,
+         from {table}"
     )
 }
 
@@ -753,57 +786,6 @@ fn source_session(
         },
         ancestry_depth,
     ))
-}
-
-fn session_id(
-    source: &SourceKey,
-    native_identity: &str,
-) -> OpenCodeSourceBackedResult<StableEntityId> {
-    let native_session_key =
-        NativeSessionKey::native_id(NATIVE_SESSION_NAMESPACE, TypedKey::utf8(native_identity)?)?;
-    Ok(derive_session_id(SessionIdentityInput {
-        source,
-        logical_session_kind: LOGICAL_SESSION_KIND,
-        native_session_key: &native_session_key,
-    })?)
-}
-
-fn source_key_scoped(
-    dialect: &OpenCodeSqliteDialect,
-    family: OpenCodeNativeSchemaFamily,
-    source_scope: SourceAnchorScope,
-) -> OpenCodeSourceBackedResult<SourceKey> {
-    let anchor = SourceAnchor::provider_native(
-        format!("{}.sqlite-authority", dialect.provider.as_str()),
-        TypedKey::utf8(SOURCE_ANCHOR_KEY)?,
-    )?;
-    Ok(SourceKey::derive_scoped(
-        dialect.provider.as_str(),
-        dialect.source_format,
-        format!("opencode-family-{}-v1", family.label()),
-        SOURCE_IDENTITY_VERSION,
-        anchor,
-        source_scope,
-    )?)
-}
-
-fn schema_family_for_source(
-    dialect: &OpenCodeSqliteDialect,
-    source: &SourceKey,
-    source_scope: SourceAnchorScope,
-) -> Option<OpenCodeNativeSchemaFamily> {
-    [
-        OpenCodeNativeSchemaFamily::SessionMessageSeq,
-        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq,
-        OpenCodeNativeSchemaFamily::SessionEntry,
-        OpenCodeNativeSchemaFamily::LegacyMessage,
-        OpenCodeNativeSchemaFamily::MessagePart,
-    ]
-    .into_iter()
-    .find(|family| {
-        source_key_scoped(dialect, *family, source_scope)
-            .is_ok_and(|candidate| candidate.exact_descriptor_eq(source))
-    })
 }
 
 #[cfg(test)]

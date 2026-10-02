@@ -709,17 +709,19 @@ pub(super) fn new_refresh_attempt(
 
 pub(super) fn recover_reconciliation_demand(
     job: &Value,
-    operation: SourceBackedRefreshOperation,
+    intent: &RefreshIntent,
 ) -> Result<SourceBackedReconciliationDemand> {
-    match job.get("reconciliation_demand") {
+    let requested = intent.reconciliation_demand();
+    let effective = match job.get("reconciliation_demand") {
         Some(Value::String(value)) => SourceBackedReconciliationDemand::parse(value)
-            .ok_or_else(|| anyhow!("durable source refresh has invalid reconciliation demand")),
+            .ok_or_else(|| anyhow!("durable source refresh has invalid reconciliation demand"))?,
         Some(_) => bail!("durable source refresh has invalid reconciliation demand"),
-        None => Ok(match operation {
-            SourceBackedRefreshOperation::Refresh => SourceBackedReconciliationDemand::Incremental,
-            SourceBackedRefreshOperation::Import => SourceBackedReconciliationDemand::Exhaustive,
-        }),
+        None => requested,
+    };
+    if effective < requested {
+        bail!("durable source refresh reconciliation demand is weaker than its intent");
     }
+    Ok(effective)
 }
 
 pub(super) fn recover_refresh_intent(

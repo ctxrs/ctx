@@ -12,6 +12,11 @@ mod output;
 use audit::audit_json;
 use output::*;
 
+pub(super) fn unambiguous_object(raw: &str) -> Option<Value> {
+    let audited = audit_json(raw).ok()?;
+    (audited.value.is_object() && !audited.duplicate_key).then_some(audited.value)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct OpenCodeRetainedJson {
     pub(super) effective_type: String,
@@ -30,6 +35,18 @@ pub(super) enum OpenCodeJsonProjection {
     Output(OpenCodeOutputJson),
     Rejected(OpenCodeNativeRejectionKind),
     RejectedWithReason(OpenCodeNativeRejectionKind, String),
+}
+
+pub(super) fn retained_projection(
+    projection: &OpenCodeJsonProjection,
+) -> Option<OpenCodeRetainedJson> {
+    match projection {
+        OpenCodeJsonProjection::Retained(retained) => Some(retained.clone()),
+        OpenCodeJsonProjection::Output(output) => output.diagnostic.clone(),
+        OpenCodeJsonProjection::Rejected(_) | OpenCodeJsonProjection::RejectedWithReason(_, _) => {
+            None
+        }
+    }
 }
 
 pub(super) fn project_json(

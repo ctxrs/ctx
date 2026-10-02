@@ -309,6 +309,32 @@ cargo_tools.spec(
     repositories = ["ctx_cargo_tools"],
     version = "=1.13.4",
 )
+# Keep cargo-fixit's transitive versions stable when product manifest changes
+# cause this shared extension to resolve tool dependencies again.
+cargo_tools.spec(
+    default_features = False,
+    package = "cargo-util",
+    repositories = ["ctx_cargo_tools"],
+    version = "=0.2.31",
+)
+cargo_tools.spec(
+    default_features = False,
+    package = "cargo-util-schemas",
+    repositories = ["ctx_cargo_tools"],
+    version = "=0.14.2",
+)
+cargo_tools.spec(
+    default_features = False,
+    package = "lazy_static",
+    repositories = ["ctx_cargo_tools"],
+    version = "=1.5.0",
+)
+cargo_tools.spec(
+    default_features = False,
+    package = "rustfix",
+    repositories = ["ctx_cargo_tools"],
+    version = "=0.9.7",
+)
 # ra-ap-rustc_lexer's const check requires both tables to use Unicode 17.
 # unicode-ident 1.0.26 moved to Unicode 18 while unicode-properties is still 17.
 cargo_tools.spec(

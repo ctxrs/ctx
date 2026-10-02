@@ -10,7 +10,6 @@ use super::model::OpenCodeNativeSchemaFamily;
 use crate::provider::providers::opencode::OpenCodeSqliteDialect;
 
 const MAX_NATIVE_IDENTITY_BYTES: i64 = 4 * 1024;
-const SESSION_V2_TABLE: &str = "session_v2";
 const JSON_HINT_BYTES: usize = 256;
 const CONVERSATION_ROLES: &str =
     "'user','assistant','system','developer','tool','toolresult','bashexecution'";
@@ -22,19 +21,13 @@ const CONVERSATION_TYPES: &str =
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct OpenCodeNativeSchema {
     pub(super) family: OpenCodeNativeSchemaFamily,
-    /// The family that names this database's source identity. It differs from
-    /// `family` only when OpenCode 2's `session_message` supersedes v1
-    /// history: the database keeps the v1 identity it was indexed under before
-    /// the upgrade, so its already indexed sessions are replaced in place
-    /// rather than claimed again by a second source.
-    pub(super) identity_family: OpenCodeNativeSchemaFamily,
-    /// The table that owns the selected family's session rows.
-    pub(super) session_table: &'static str,
     pub(super) capability_digest: String,
     pub(super) user_version: i64,
     pub(super) schema_version: i64,
+    pub(super) session_table: &'static str,
     pub(super) session_columns: BTreeSet<String>,
     pub(super) event_has_type: bool,
+    pub(super) proven_legacy_overlap: bool,
     pub(super) message_part_indexed_streaming: bool,
     pub(super) event_validation_traversals: u64,
 }
@@ -57,14 +50,12 @@ enum CurrentTableRows {
 impl OpenCodeNativeSchema {
     pub(super) fn probe(conn: &Connection, dialect: &OpenCodeSqliteDialect) -> Result<Self> {
         let tables = sqlite_tables(conn)?;
-        let has_session_v2 = tables.contains(SESSION_V2_TABLE);
-        if !tables.contains("session") && !has_session_v2 {
+        if !tables.contains("session") && !tables.contains("session_v2") {
             return Err(CaptureError::InvalidPayload(format!(
-                "{} NativePath requires the session table",
+                "{} NativePath requires a session table",
                 dialect.display_name
             )));
         }
-
         let session_message = if tables.contains("session_message") {
             let columns = table_capabilities(conn, "session_message")?;
             require_message_columns(&columns, "session_message")?;
@@ -131,52 +122,23 @@ impl OpenCodeNativeSchema {
             false
         };
 
-        let v1_populated = message_part_join || message.is_some_and(|(_, populated)| populated);
-        let session_message_supersedes_v1 = has_session_v2
-            && v1_populated
-            && matches!(
-                session_message,
-                Some((_, _, CurrentTableRows::ConversationBearing))
-            )
-            && v1_sessions_covered_by_session_message(conn, part.is_some())?;
-
         let (family, event_has_type) = select_schema_family(
+            conn,
             dialect,
             session_message,
             session_entry,
             message,
             part,
             message_part_join,
-            session_message_supersedes_v1,
         )?;
-        let identity_family = if session_message_supersedes_v1 {
-            if message_part_join {
-                OpenCodeNativeSchemaFamily::MessagePart
-            } else {
-                OpenCodeNativeSchemaFamily::LegacyMessage
-            }
-        } else {
-            family
-        };
 
-        // OpenCode's `session_message` rows belong to `session_v2`. Sessions
-        // created after an upgrade to OpenCode 2 exist only there.
-        let session_table = if has_session_v2
-            && matches!(
-                family,
-                OpenCodeNativeSchemaFamily::SessionMessageSeq
-                    | OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq
-            ) {
-            SESSION_V2_TABLE
+        let session_table = if tables.contains("session_v2")
+            && matches!(family, OpenCodeNativeSchemaFamily::SessionMessageSeq)
+        {
+            "session_v2"
         } else {
             "session"
         };
-        if !tables.contains(session_table) {
-            return Err(CaptureError::InvalidPayload(format!(
-                "{} NativePath requires the {session_table} table",
-                dialect.display_name
-            )));
-        }
         let session = table_capabilities(conn, session_table)?;
         require_identity_column(&session, session_table, "id")?;
         require_integer_column(&session, session_table, "time_created")?;
@@ -204,13 +166,15 @@ impl OpenCodeNativeSchema {
         let capability_digest = capability_digest(conn, user_version, family)?;
         Ok(Self {
             family,
-            identity_family,
-            session_table,
             capability_digest,
             user_version,
             schema_version,
+            session_table,
             session_columns: session.keys().cloned().collect(),
             event_has_type,
+            proven_legacy_overlap: family == OpenCodeNativeSchemaFamily::SessionMessageSeq
+                && message.is_some_and(|(_, populated)| populated)
+                && part.is_some(),
             message_part_indexed_streaming,
             event_validation_traversals,
         })
@@ -218,13 +182,13 @@ impl OpenCodeNativeSchema {
 }
 
 fn select_schema_family(
+    conn: &Connection,
     dialect: &OpenCodeSqliteDialect,
     session_message: Option<(OpenCodeNativeSchemaFamily, bool, CurrentTableRows)>,
     session_entry: Option<(OpenCodeNativeSchemaFamily, bool, CurrentTableRows)>,
     message: Option<(bool, bool)>,
     part: Option<(bool, bool)>,
     message_part_join: bool,
-    session_message_supersedes_v1: bool,
 ) -> Result<(OpenCodeNativeSchemaFamily, bool)> {
     let mut populated = Vec::new();
     if let Some((family, has_type, CurrentTableRows::ConversationBearing)) = session_message {
@@ -233,7 +197,7 @@ fn select_schema_family(
     if let Some((family, has_type, CurrentTableRows::ConversationBearing)) = session_entry {
         populated.push((family, has_type));
     }
-    if message_part_join {
+    if message_part_join || part.is_some_and(|(_, populated)| populated) {
         populated.push((
             OpenCodeNativeSchemaFamily::MessagePart,
             part.is_some_and(|(has_type, _)| has_type),
@@ -245,15 +209,23 @@ fn select_schema_family(
     match populated.as_slice() {
         [selected] => return Ok(*selected),
         [] => {}
-        [current @ (
-            OpenCodeNativeSchemaFamily::SessionMessageSeq
-            | OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq,
-            _,
-        ), (
-            OpenCodeNativeSchemaFamily::MessagePart | OpenCodeNativeSchemaFamily::LegacyMessage,
-            _,
-        )] if session_message_supersedes_v1 => return Ok(*current),
         _ => {
+            if let [(OpenCodeNativeSchemaFamily::SessionMessageSeq, true), (legacy, _)] =
+                populated.as_slice()
+            {
+                if message.is_some()
+                    && matches!(
+                        legacy,
+                        OpenCodeNativeSchemaFamily::MessagePart
+                            | OpenCodeNativeSchemaFamily::LegacyMessage
+                    )
+                    && part.is_some()
+                    && overlap_indexes_are_exact(conn)?
+                    && super::overlap::legacy_is_covered(conn, dialect)?
+                {
+                    return Ok((OpenCodeNativeSchemaFamily::SessionMessageSeq, true));
+                }
+            }
             let families = populated
                 .iter()
                 .map(|(family, _)| family.label())
@@ -288,34 +260,29 @@ fn select_schema_family(
     }
 }
 
-/// Late OpenCode 1.x writes v1 `message`/`part` and `session_message` side by
-/// side, and OpenCode 2 keeps the v1 tables but stops writing them. OpenCode's
-/// own 2.0 migration refuses to run unless every v1 session already exists in
-/// `session_message`. When that holds, v1 is a stale subset rather than an
-/// independent representation. Any v1 session that `session_message` lacks
-/// keeps the ambiguity fail-closed.
-fn v1_sessions_covered_by_session_message(conn: &Connection, has_part: bool) -> Result<bool> {
-    let uncovered = |table: &str| {
-        format!(
-            "exists(
-                 select 1 from {table} v1
-                 where not exists(
-                     select 1 from session_message current
-                     where current.session_id = v1.session_id
-                 )
-             )"
-        )
-    };
-    let sql = if has_part {
-        format!(
-            "select not ({} or {})",
-            uncovered("message"),
-            uncovered("part")
-        )
+fn overlap_indexes_are_exact(conn: &Connection) -> Result<bool> {
+    // The proof performs identity and per-message part lookups. Require the
+    // producer's exact keys instead of borrowing case-folded identities or
+    // repeatedly scanning/sorting an unindexed part corpus.
+    let session_table = if sqlite_tables(conn)?.contains("session_v2") {
+        "session_v2"
     } else {
-        format!("select not {}", uncovered("message"))
+        "session"
     };
-    Ok(conn.query_row(&sql, [], |row| row.get::<_, i64>(0))? != 0)
+    for table in ["message", "part", "session_message", session_table] {
+        if !conn.query_row(
+            "select exists(select 1 from pragma_index_list(?1) i
+             where i.origin='pk' and i.\"unique\"=1 and i.partial=0
+               and (select count(*) from pragma_index_xinfo(i.name) where key=1)=1
+               and exists(select 1 from pragma_index_xinfo(i.name)
+                          where key=1 and name='id' and coll='BINARY'))",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Ok(false);
+        }
+    }
+    index_has_column_prefix(conn, "part", &["message_id", "id"])
 }
 
 fn sqlite_tables(conn: &Connection) -> Result<BTreeSet<String>> {
@@ -472,7 +439,13 @@ fn require_identity_column(
     column: &str,
 ) -> Result<()> {
     let capability = require_text_column_value(columns, table, column)?;
-    if capability.primary_key_ordinal != 1 {
+    if capability.primary_key_ordinal != 1
+        || columns
+            .values()
+            .filter(|column| column.primary_key_ordinal > 0)
+            .count()
+            != 1
+    {
         return Err(CaptureError::InvalidPayload(format!(
             "OpenCode NativePath {table}.{column} must remain the single-column primary identity"
         )));

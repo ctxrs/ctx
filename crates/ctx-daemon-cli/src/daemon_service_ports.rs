@@ -203,6 +203,15 @@ impl DaemonAvailabilityPort for CliDaemonAvailabilityPort {
     fn interrupted(&self, error: &anyhow::Error) -> bool {
         super::finite_worker_owner::finite_worker_interrupted(error)
     }
+
+    fn source_refresh_owner_is_live(
+        &self,
+        data_root: &Path,
+        owner_id: &str,
+        pid: u32,
+    ) -> Result<Option<bool>> {
+        super::finite_worker_owner::source_refresh_owner_is_live(data_root, owner_id, pid)
+    }
 }
 
 pub(super) struct CliDaemonInstallationPort;

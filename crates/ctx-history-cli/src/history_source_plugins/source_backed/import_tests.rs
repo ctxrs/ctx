@@ -63,6 +63,7 @@ impl ImportApplicationPort for ImportHost {
         &mut self,
         _: &Path,
         _: RefreshSelection,
+        _: ctx_history_refresh::SourceBackedReconciliationDemand,
         _: bool,
         _: &mut ProgressReporter<'_>,
     ) -> Result<IngestPublication> {
@@ -110,6 +111,7 @@ fn plugin_header_rejection_precedes_source_admission_and_refresh() {
         input_format: None,
         all: false,
         resume: false,
+        reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand::Exhaustive,
         no_daemon: true,
         format: OutputFormat::Json,
         progress: ProgressMode::None,

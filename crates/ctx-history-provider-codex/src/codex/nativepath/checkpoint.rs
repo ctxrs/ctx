@@ -11,6 +11,7 @@ const CODEX_SEMANTIC_CHECKPOINT_VERSION: u8 = 8;
 const CODEX_SEMANTIC_CHECKPOINT_PREFIX: &str = "codex.projector-checkpoint.v8:";
 pub(super) const MAX_CODEX_PENDING_CALLS: usize = 24;
 pub(super) const MAX_CODEX_CALL_ID_BYTES: usize = 1024;
+// Serialization/resume capacity only; cold scans count every distinct terminal.
 pub(super) const MAX_CODEX_TERMINAL_AUTHORITIES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -57,6 +57,7 @@ pub trait IngestRefreshPort {
         &mut self,
         data_root: &Path,
         selection: RefreshSelection,
+        reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
         no_daemon: bool,
     ) -> Result<IngestPublication>;
 }
@@ -97,6 +98,7 @@ pub struct IngestRequest {
     pub history_source_manifests: Vec<PathBuf>,
     pub all: bool,
     pub resume: bool,
+    pub reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
     pub relocate_from: Option<PathBuf>,
     pub reset_cursor: bool,
     pub no_daemon: bool,
