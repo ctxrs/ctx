@@ -337,6 +337,9 @@ describe("released v0.25 cli_invocation compatibility", () => {
       delete batch.events[0].properties.integration_name;
       batch.events[0].properties.integration_target = "mcp";
     })],
+    ["current-v1 output-hook target", mutate("integrations-skills-status.valid.json", (batch) => {
+      batch.events[0].properties.integration_target = "output_hook";
+    })],
     ["current-v1 auto-upgrade channel", mutate("setup-completed.valid.json", (batch) => {
       delete batch.events[0].properties.upgrade_channel;
       batch.events[0].properties.auto_upgrade_channel = "stable";

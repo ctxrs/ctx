@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, test } from "vitest";
 
 import { createTelemetryWorker } from "../src/worker";
@@ -15,24 +17,24 @@ const ROUTES = ["/functions/v1/analytics", "/functions/v1/telemetry"];
 // Released producer values, independent of the receiver's allowlists.
 const ACTIONS = ["install", "remove", "status"];
 const TARGETS = ["mcp", "skills", "slash_commands", "plugin"];
+// The event envelope is also checked against the Rust serializer.
+const OPERATION_EVENT = JSON.parse(readFileSync(new URL(
+  "../../../contracts/telemetry-v1/fixtures/operation_completed.valid.json", import.meta.url,
+), "utf8"));
 
-function batch(properties, outcome = "success") {
+function batch(properties, outcome = "success", appVersion = "1.4.2") {
   return {
     client_profile_id: "11111111-1111-4111-8111-111111111111",
     data_root_id: "22222222-2222-4222-8222-222222222222",
-    app_version: "1.4.2",
+    app_version: appVersion,
     os: "macos",
     arch: "aarch64",
     events: [{
-      event_id: "33333333-3333-4333-8333-333333333333",
-      event_name: "operation_completed",
-      event_version: 1,
+      ...OPERATION_EVENT,
       occurred_at: NOW.toISOString(),
-      surface: "cli",
       operation: "integration",
       outcome,
-      duration_bucket: "lt_1s",
-      properties: { output: "json", ...properties },
+      properties: { output: OPERATION_EVENT.properties.output, ...properties },
     }],
   };
 }
@@ -89,16 +91,52 @@ describe.each(ROUTES)("released integration telemetry on %s", (route) => {
     });
   });
 
+  test.each(ACTIONS.flatMap((action) => ["global", "project"].flatMap((scope) =>
+    ["success", "failure"].map((outcome) => ({ action, scope, outcome })),
+  )))("queues Sift output-hook $action/$scope/$outcome", async ({ action, scope, outcome }) => {
+    const h = harness();
+    // The output-hook path emits these fields without integration_result or force.
+    const properties = {
+      integration_action: action,
+      integration_target: "output_hook",
+      integration_scope: scope,
+      target_agent_group: "explicit",
+      target_agents_count_bucket: "1",
+    };
+    const payload = batch(properties, outcome, "2.2.6");
+    const response = await h.worker.fetch(request(route, payload), ENV);
+
+    expect(response.status, await response.text()).toBe(204);
+    expect(h.rejections).toHaveLength(0);
+    expect(h.telemetryWrites).toHaveLength(1);
+    expect(h.telemetryWrites[0]).toHaveLength(1);
+    const row = h.telemetryWrites[0][0];
+    expect(row).toMatchObject({
+      app_version: "2.2.6",
+      event_name: "operation_completed",
+      status: outcome,
+      activity_class: action === "status" ? "status" : "setup",
+      client_profile_id_hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      data_root_id_hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
+    expect(row.properties).toEqual({ ...payload.events[0].properties, operation: "integration", outcome });
+    expect(row).not.toHaveProperty("client_profile_id");
+    expect(row).not.toHaveProperty("data_root_id");
+  });
+
   test.each([
     ["integration_action", "delete", "invalid_integration_action"],
     ["integration_action", true, "invalid_integration_action"],
     ["integration_action", " remove ", "invalid_integration_action"],
     ["integration_target", "arbitrary_plugin_name", "invalid_integration_target"],
+    ["integration_target", "output-hook", "invalid_integration_target"],
+    ["integration_target", "sift", "invalid_integration_target"],
+    ["integration_target", " output_hook ", "invalid_integration_target"],
     ["integration_target", null, "invalid_integration_target"],
     ["integration_path", "/private/example", "unknown_operation_property"],
   ])("rejects invalid %s=%j before Queue admission", async (key, value, code) => {
     const h = harness();
-    const payload = batch({ integration_action: "install", integration_target: "mcp", [key]: value });
+    const payload = batch({ integration_action: "install", integration_target: "output_hook", [key]: value });
     const response = await h.worker.fetch(request(route, payload), ENV);
 
     expect(response.status).toBe(422);
