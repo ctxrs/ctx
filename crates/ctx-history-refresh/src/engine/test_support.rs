@@ -231,7 +231,11 @@ pub(super) fn test_refresh_engine_with_journal_executor_and_admitted_routes(
 }
 
 pub(super) fn test_refresh_submission(request_id: &str) -> RefreshRequest {
-    RefreshRequest::selected_import(request_id.to_owned(), RefreshSelection::All)
+    RefreshRequest::selected_import(
+        request_id.to_owned(),
+        RefreshSelection::All,
+        SourceBackedReconciliationDemand::Exhaustive,
+    )
 }
 
 pub(super) fn status_value(engine: &CoreRefreshEngine, request_id: &str) -> Value {

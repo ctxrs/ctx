@@ -7,6 +7,7 @@
 use std::{
     cell::RefCell,
     fmt,
+    path::Path,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
@@ -268,6 +269,26 @@ pub(super) fn retain(lease: FiniteCoreWorkerLease) -> Result<()> {
         Ok(()) => Err(error),
         Err(cleanup) => Err(error.context(format!("reap unscoped finite worker: {cleanup}"))),
     }
+}
+
+pub(super) fn source_refresh_owner_is_live(
+    data_root: &Path,
+    owner_id: &str,
+    pid: u32,
+) -> Result<Option<bool>> {
+    checkpoint()?;
+    ACTIVE_OPERATION.with(|operation| {
+        let mut operation = operation.borrow_mut();
+        let Some(operation) = operation.as_mut() else {
+            return Ok(None);
+        };
+        for lease in &mut operation.leases {
+            if let Some(live) = lease.observe_liveness(data_root, owner_id, pid)? {
+                return Ok(Some(live));
+            }
+        }
+        Ok(None)
+    })
 }
 
 #[cfg(test)]

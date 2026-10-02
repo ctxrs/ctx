@@ -539,6 +539,7 @@ but does not participate in setup, `--all`, daemon refresh, or search refresh.
 ```bash
 ctx import
 ctx import --all
+ctx import --all --incremental
 ctx import --provider codex
 ctx import --provider pi
 ctx import --provider antigravity
@@ -606,6 +607,20 @@ has a complete compatible semantic generation: a full daemon owns that write,
 while manual and source-refresh-only operation reconcile it in the foreground.
 An already-ready empty generation succeeds without constructing an executor.
 It does not write `config.toml` for implicit defaults.
+
+Use `ctx import --incremental` for one catch-up using the existing index and
+provider checkpoints. It keeps the same source selectors and completion rules;
+add `--no-blame` to skip this command's Blame wait. In manual indexing mode,
+the finite worker completes admitted requests and exits, without starting
+watchers or changing the configured mode. In automatic mode, the existing
+background worker may remain running. Files appended after a capture's frozen
+boundary can wait for the next invocation.
+
+Ordinary imports, including `--resume`, remain exhaustive unless
+`--incremental` is supplied. Incremental capture still discovers source files
+and verifies publication; some providers or recovery cases require more work.
+It does not recheck every old byte of an eligible append-only history file.
+Use the default exhaustive import for a complete reconciliation or repair.
 
 History-source plugin import is explicit and single-source in 1.0. A selected
 manifest declares a durable provider-owned `ctx-history-jsonl-v2` path; the

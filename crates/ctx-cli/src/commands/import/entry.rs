@@ -179,6 +179,11 @@ fn import_request(args: &ImportArgs) -> ctx_history_cli::ImportRequest {
             .map(|_| ctx_history_cli::ImportFormat::CtxHistoryJsonlV2),
         all: args.all,
         resume: args.resume,
+        reconciliation_demand: if args.incremental {
+            ctx_history_refresh::SourceBackedReconciliationDemand::Incremental
+        } else {
+            ctx_history_refresh::SourceBackedReconciliationDemand::Exhaustive
+        },
         no_daemon: args.no_daemon,
         format: if args.format.is_json() {
             ctx_history_cli::OutputFormat::Json
@@ -242,6 +247,90 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn import_parser_maps_only_explicit_incremental_flag_to_incremental_demand() {
+        use crate::cli::{Cli, CommandRoot};
+        use clap::Parser;
+        use ctx_history_refresh::SourceBackedReconciliationDemand;
+
+        let selectors = [
+            vec![],
+            vec!["--all"],
+            vec!["--provider", "codex"],
+            vec!["--provider", "codex", "--path", "source.jsonl"],
+            vec![
+                "--input-format",
+                "ctx-history-jsonl-v2",
+                "--path",
+                "source.jsonl",
+            ],
+            vec!["--history-source", "example/default"],
+            vec!["--history-source-manifest", "plugin.json"],
+            vec![
+                "--provider",
+                "codex",
+                "--path",
+                "new.jsonl",
+                "--relocate-from",
+                "old.jsonl",
+            ],
+        ];
+        for selector in selectors {
+            for resume in [false, true] {
+                let mut argv = vec!["ctx", "import", "--no-daemon"];
+                argv.extend(selector.iter().copied());
+                if resume {
+                    argv.push("--resume");
+                }
+                let Cli {
+                    command: CommandRoot::Import(args),
+                    ..
+                } = Cli::try_parse_from(argv.iter().copied()).unwrap()
+                else {
+                    panic!("import args")
+                };
+                let exhaustive = import_request(&args);
+                assert_eq!(
+                    exhaustive.reconciliation_demand,
+                    SourceBackedReconciliationDemand::Exhaustive
+                );
+                argv.push("--incremental");
+                let Cli {
+                    command: CommandRoot::Import(args),
+                    ..
+                } = Cli::try_parse_from(argv.iter().copied()).unwrap()
+                else {
+                    panic!("import args")
+                };
+                let mut incremental = import_request(&args);
+                assert_eq!(
+                    incremental.reconciliation_demand,
+                    SourceBackedReconciliationDemand::Incremental
+                );
+                incremental.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
+                assert_eq!(incremental, exhaustive);
+            }
+        }
+        assert!(Cli::try_parse_from([
+            "ctx",
+            "import",
+            "--incremental",
+            "--all",
+            "--provider",
+            "codex"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "ctx",
+            "import",
+            "--incremental",
+            "--reset-cursor",
+            "--history-source",
+            "example/default"
+        ])
+        .is_ok());
+    }
 
     fn terminal_error(code: RefreshOutcomeCode, retryable: bool) -> anyhow::Error {
         crate::semantic::SourceBackedRefreshTerminalError::from(

@@ -169,7 +169,10 @@ impl CoreRefreshEngine {
                 trigger: "import",
                 trigger_provenance: "explicit_source_catalog",
             },
-            RefreshIntent::SelectedImport(RefreshSelection::ExactSource(requested_catalog)),
+            RefreshIntent::SelectedImport {
+                selection: RefreshSelection::ExactSource(requested_catalog),
+                reconciliation_demand: SourceBackedReconciliationDemand::Exhaustive,
+            },
             SourceBackedRefreshScope::All,
             Some(request_id),
             None,
@@ -205,7 +208,10 @@ impl CoreRefreshEngine {
                 trigger: "import",
                 trigger_provenance: "import_command",
             },
-            RefreshIntent::SelectedImport(RefreshSelection::All),
+            RefreshIntent::SelectedImport {
+                selection: RefreshSelection::All,
+                reconciliation_demand: SourceBackedReconciliationDemand::Exhaustive,
+            },
             SourceBackedRefreshScope::All,
             Some(request_id),
             None,

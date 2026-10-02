@@ -141,6 +141,8 @@ fn pre_submission_connection_refusal_remains_typed_unavailable() -> Result<()> {
 #[test]
 fn same_id_reenqueue_replays_the_exact_payload_after_a_lost_ack() -> Result<()> {
     let data_root = short_data_root()?;
+    let _owner =
+        ctx_daemon_runtime::DaemonLock::acquire(data_root.path())?.context("test owner")?;
     let socket_path = data_root.path().join("lost-ack.sock");
     let listener = UnixListener::bind(&socket_path)?;
     write_daemon_service_endpoint(
@@ -175,7 +177,7 @@ fn same_id_reenqueue_replays_the_exact_payload_after_a_lost_ack() -> Result<()> 
         &crate::test_support::AVAILABILITY,
         data_root.path(),
         request_id,
-        RefreshIntent::SelectedImport(RefreshSelection::Provider(CaptureProvider::Codex)),
+        exhaustive_import_intent(RefreshSelection::Provider(CaptureProvider::Codex)),
         RefreshRequestTrigger::Import,
     )?;
     let requests = server.join().expect("lost-ack test server panicked")?;
@@ -204,6 +206,7 @@ fn provider_import_recovery_payload_keeps_selector_and_import_identity() -> Resu
     let canonical = RefreshRequest::selected_import(
         "019fcaaa-0000-7000-8000-000000000414".to_owned(),
         RefreshSelection::Provider(CaptureProvider::Codex),
+        ctx_history_refresh::SourceBackedReconciliationDemand::Exhaustive,
     );
     let request = wait_authority_request_json(SourceBackedRefreshMode::Wait, &canonical)?;
 
@@ -227,10 +230,12 @@ fn canonical_requests_emit_only_the_canonical_intent() -> Result<()> {
     let all = RefreshRequest::selected_import(
         "019fcaaa-0000-7000-8000-000000000415".to_owned(),
         RefreshSelection::All,
+        ctx_history_refresh::SourceBackedReconciliationDemand::Exhaustive,
     );
     let exact = RefreshRequest::selected_import(
         "019fcaaa-0000-7000-8000-000000000416".to_owned(),
         RefreshSelection::ExactSource(authority.clone()),
+        ctx_history_refresh::SourceBackedReconciliationDemand::Exhaustive,
     );
 
     let all = wait_authority_request_json(SourceBackedRefreshMode::Wait, &all)?;
@@ -271,20 +276,25 @@ fn canonical_requests_emit_only_the_canonical_intent() -> Result<()> {
 fn automatic_provider_import_policy_keeps_selector_and_import_identity() {
     let policy = SourceBackedRefreshRequestPolicy::import(
         RefreshSelection::Provider(CaptureProvider::Codex),
+        ctx_history_refresh::SourceBackedReconciliationDemand::Exhaustive,
         true,
     );
 
     assert_eq!(policy.trigger, RefreshRequestTrigger::Import);
     assert_eq!(
         policy.intent,
-        RefreshIntent::SelectedImport(RefreshSelection::Provider(CaptureProvider::Codex))
+        exhaustive_import_intent(RefreshSelection::Provider(CaptureProvider::Codex))
     );
     assert!(policy.intent.is_selected_import());
 }
 
 #[test]
 fn all_automatic_import_policy_preserves_legacy_refresh_operation() {
-    let policy = SourceBackedRefreshRequestPolicy::import(RefreshSelection::All, true);
+    let policy = SourceBackedRefreshRequestPolicy::import(
+        RefreshSelection::All,
+        ctx_history_refresh::SourceBackedReconciliationDemand::Exhaustive,
+        true,
+    );
 
     assert_eq!(
         policy.intent.operation(),
@@ -293,7 +303,7 @@ fn all_automatic_import_policy_preserves_legacy_refresh_operation() {
     assert_eq!(policy.trigger, RefreshRequestTrigger::Import);
     assert_eq!(
         policy.intent,
-        RefreshIntent::SelectedImport(RefreshSelection::All)
+        exhaustive_import_intent(RefreshSelection::All)
     );
 }
 
@@ -360,7 +370,7 @@ fn background_lost_ack_terminal_replay_is_not_reported_as_pending() -> Result<()
 }
 
 #[test]
-fn exhausted_post_submission_disconnects_return_typed_ambiguous_admission() -> Result<()> {
+fn background_post_submission_disconnects_remain_bounded() -> Result<()> {
     let data_root = short_data_root()?;
     let socket_path = data_root.path().join("lost-all-acks.sock");
     let listener = UnixListener::bind(&socket_path)?;
@@ -382,12 +392,19 @@ fn exhausted_post_submission_disconnects_return_typed_ambiguous_admission() -> R
         Ok(requests)
     });
 
-    let error = enqueue_equivalent_wait_refresh_request(
-        &crate::test_support::AVAILABILITY,
-        data_root.path(),
+    let canonical = RefreshRequest::automatic(request_id.to_owned(), RefreshRequestTrigger::Search);
+    let request = wait_authority_request_json(SourceBackedRefreshMode::Background, &canonical)?;
+    let error = request_admission_with_recovery(
         request_id,
-        RefreshIntent::AutomaticMaintenance,
-        RefreshRequestTrigger::Search,
+        |_| {},
+        || {
+            daemon_source_refresh_request(
+                data_root.path(),
+                request.clone(),
+                SOURCE_REFRESH_IPC_TIMEOUT,
+                SOURCE_REFRESH_RESPONSE_MAX_BYTES,
+            )
+        },
     )
     .unwrap_err();
     let requests = server.join().expect("lost-ack test server panicked")?;
@@ -411,12 +428,13 @@ fn exhausted_post_submission_disconnects_return_typed_ambiguous_admission() -> R
 
 // Real client transport with a controlled daemon-side state transition. The
 // listener records the independently constructed request and actual wire response.
-fn foreground_transport_fixture<T>(
+pub(super) fn foreground_transport_fixture<T>(
     data_root: &Path,
     mut respond: impl FnMut(&Value) -> Result<Value> + Send + 'static,
     client: impl FnOnce() -> T,
 ) -> Result<(T, Vec<(Value, Value)>)> {
     use std::sync::atomic::{AtomicBool, Ordering};
+    let _owner = ctx_daemon_runtime::DaemonLock::acquire(data_root)?.context("test owner")?;
     let socket_path = data_root.join("identity.sock");
     let listener = UnixListener::bind(&socket_path)?;
     listener.set_nonblocking(true)?;
@@ -486,11 +504,17 @@ fn foreground_client_ids_survive_admission_and_status_beside_periodic_work() -> 
         || {
             (0..2)
                 .map(|_| {
+                    let mut reported_admission = false;
                     coordinate_source_backed_refresh_with_progress(
                         &RecordingAvailability::default(),
                         data_root.path(),
                         SourceBackedRefreshMode::Wait,
-                        &mut |_| bail!("stop after observing admitted status"),
+                        &mut |_| {
+                            if std::mem::replace(&mut reported_admission, true) {
+                                bail!("stop after observing admitted status");
+                            }
+                            Ok(())
+                        },
                     )
                     .err()
                     .expect("reporter ends the wait after real admission and status")
@@ -501,184 +525,144 @@ fn foreground_client_ids_survive_admission_and_status_beside_periodic_work() -> 
     for error in errors {
         assert!(format!("{error:#}").contains("stop after observing admitted status"));
     }
-    assert_eq!(exchanges.len(), 4);
+    assert!(exchanges.len() >= 4);
     let mut ids = BTreeSet::new();
-    for pair in exchanges.chunks_exact(2) {
-        let (admission, accepted) = &pair[0];
-        let (status_request, status) = &pair[1];
-        assert_eq!(admission["op"], SOURCE_REFRESH_REQUEST_OP);
+    for (admission, accepted) in exchanges
+        .iter()
+        .filter(|(request, _)| request["op"] == SOURCE_REFRESH_REQUEST_OP)
+    {
         assert_eq!(admission["mode"], "wait");
         assert_eq!(admission["trigger"], "search");
         assert_eq!(admission["refresh_intent"]["kind"], "automatic_maintenance");
         let id = admission["request_id"].as_str().context("client UUID")?;
         Uuid::parse_str(id)?;
-        assert!(ids.insert(id.to_owned()));
+        assert!(
+            ids.insert(id.to_owned()),
+            "each invocation admits exactly once"
+        );
         assert_ne!(admission["request_id"], periodic["request_id"]);
         assert_eq!(accepted["request_id"], admission["request_id"]);
-        assert_eq!(status_request["op"], SOURCE_REFRESH_STATUS_OP);
-        assert_eq!(status_request["request_id"], admission["request_id"]);
-        assert_eq!(status["request_id"], admission["request_id"]);
+        let statuses = exchanges
+            .iter()
+            .filter(|(request, _)| {
+                request["op"] == SOURCE_REFRESH_STATUS_OP && request["request_id"] == id
+            })
+            .collect::<Vec<_>>();
+        assert!(!statuses.is_empty());
+        assert!(statuses
+            .iter()
+            .all(|(request, response)| request["request_id"] == response["request_id"]));
         assert!(engine.status(id).is_some());
     }
+    assert_eq!(ids.len(), 2);
     Ok(())
 }
 
 #[test]
 fn foreground_forgotten_request_replays_exact_authority_and_pins_terminal_generation() -> Result<()>
 {
-    let data_root = short_data_root()?;
-    ctx_history_platform::platform_security::establish_private_data_root(data_root.path())?;
-    let source = tempfile::tempdir()?;
-    let source_path = source.path().join("source.jsonl");
-    std::fs::write(
-        &source_path,
-        "{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}\n",
-    )?;
-    let source =
-        ctx_history_refresh::explicit_source_for_path(data_root.path(), &source_path, None, true)?;
-    let authority =
-        ctx_history_refresh::upsert_explicit_source(data_root.path(), &source)?.authority;
-    let server_root = data_root.path().to_owned();
-    let mut engine = CoreRefreshEngine::new();
-    let mut step = 0;
-    let availability = RecordingAvailability::default();
-    let (observation, exchanges) = foreground_transport_fixture(
-        data_root.path(),
-        move |request| {
-            step += 1;
-            if step == 2 {
-                // Inject the supported forgotten-state boundary. Ordinary
-                // restart normally restores the journal; this deliberately
-                // tests the response when this ID is no longer retained.
-                engine = CoreRefreshEngine::new();
-            }
-            if step == 4 {
-                assert!(engine.prepare_next_pending_admission(&server_root)?);
-                let run = engine
-                    .run_next(&server_root)
-                    .context("readmitted refresh run")?;
-                assert!(!run.failed, "{:#}", run.job);
-            }
-            engine
-                .handle_ipc_request(&server_root, request)?
-                .context("wire response")
-        },
-        || {
-            coordinate_source_backed_refresh_with_policy(
-                &availability,
-                data_root.path(),
-                SourceBackedRefreshMode::Wait,
-                SourceBackedRefreshRequestPolicy::import(
-                    RefreshSelection::ExactSource(authority.clone()),
-                    false,
-                ),
-                false,
-                None,
-            )
-        },
-    )?;
-    let observation = observation?;
-    assert_eq!(exchanges.len(), 4);
-    assert_eq!(exchanges[0].0, exchanges[2].0);
-    assert_eq!(exchanges[1].0, exchanges[3].0);
-    assert_eq!(
-        exchanges[1].1["error_code"],
-        SOURCE_REFRESH_UNKNOWN_REQUEST_ERROR_CODE
-    );
-    assert_eq!(exchanges[3].1["request_state"], "published");
-    assert_eq!(
-        observation.request_id.as_deref(),
-        exchanges[0].0["request_id"].as_str()
-    );
-    assert_eq!(
-        observation.pin.generation_id(),
-        exchanges[3].1["published_generation"].as_str().unwrap()
-    );
-    let receipt = observation.receipt.context("terminal receipt")?;
-    assert_eq!(
-        receipt.published_generation,
-        observation.pin.generation_id()
-    );
-    assert_eq!(receipt.published_explicit_source_catalog, Some(authority));
-    assert!(
-        availability.0.lock().unwrap().is_empty(),
-        "healthy no-start recovery must not start a worker"
-    );
-    Ok(())
-}
-
-#[test]
-fn foreground_unknown_recovery_is_bounded_and_rejects_mismatched_identity() -> Result<()> {
-    for mutation in [
-        None,
-        Some(("request_id", json!("different-request"))),
-        Some(("owner", json!("different-owner"))),
-        Some(("schema_version", json!(2))),
-        Some(("ok", json!(true))),
-        Some(("request_state", json!("failed"))),
-        Some(("reason", json!("unrecognized-reason"))),
-        Some(("retryable", json!(true))),
-        Some(("retryable", Value::Null)),
-        Some(("error_code", Value::Null)),
-        Some((
-            "admission_durability",
-            json!("replacement_visible_or_indeterminate"),
-        )),
-        Some((
-            "admission_acknowledgement",
-            json!("retained_after_durability_error"),
-        )),
-        Some(("receipt", json!({}))),
-        Some(("receipt", Value::Null)),
-        Some(("published_generation", json!("generation"))),
-        Some(("previous_generation", json!("previous"))),
-        Some(("generation_changed", json!(false))),
-        Some(("outcome", json!("published"))),
-        Some(("structured_outcome", json!({}))),
-        Some(("finished_at_ms", json!(123))),
+    for demand in [
+        ctx_history_refresh::SourceBackedReconciliationDemand::Exhaustive,
+        ctx_history_refresh::SourceBackedReconciliationDemand::Incremental,
     ] {
-        let malformed = mutation.is_some();
         let data_root = short_data_root()?;
-        let (error, exchanges) = foreground_transport_fixture(
+        ctx_history_platform::platform_security::establish_private_data_root(data_root.path())?;
+        let source_root = tempfile::tempdir()?;
+        let source_path = source_root.path().join("source.jsonl");
+        std::fs::write(
+            &source_path,
+            "{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}\n",
+        )?;
+        let source = ctx_history_refresh::explicit_source_for_path(
+            data_root.path(),
+            &source_path,
+            None,
+            true,
+        )?;
+        let authority =
+            ctx_history_refresh::upsert_explicit_source(data_root.path(), &source)?.authority;
+        let server_root = data_root.path().to_owned();
+        let mut engine = CoreRefreshEngine::new();
+        let mut step = 0;
+        let availability = RecordingAvailability::default();
+        let (observation, exchanges) = foreground_transport_fixture(
             data_root.path(),
             move |request| {
-                let id = request["request_id"].as_str().context("client ID")?;
-                Ok(if request["op"] == SOURCE_REFRESH_REQUEST_OP {
-                    json!({"ok":true,"owner":"daemon","request_id":id,"request_state":"admission_pending","schema_version":1})
-                } else {
-                    let mut response = json!({"ok":false,"owner":"daemon","request_id":id,
-                        "request_state":"request_unknown","error_code":"source_refresh_request_unknown",
-                        "reason":"request_not_retained_after_restart","retryable":false,"schema_version":1,
-                        "error":"arbitrary human text cannot authorize recovery",
-                        "diagnostic_extension":"informational"});
-                    if let Some((field, value)) = &mutation {
-                        response[*field] = value.clone();
-                    }
-                    response
-                })
+                step += 1;
+                if step == 2 {
+                    // Inject the supported forgotten-state boundary. Ordinary
+                    // restart normally restores the journal; this deliberately
+                    // tests the response when this ID is no longer retained.
+                    engine = CoreRefreshEngine::new();
+                }
+                if step == 4 {
+                    assert!(engine.prepare_next_pending_admission(&server_root)?);
+                    let run = engine
+                        .run_next(&server_root)
+                        .context("readmitted refresh run")?;
+                    assert!(!run.failed, "{:#}", run.job);
+                }
+                engine
+                    .handle_ipc_request(&server_root, request)?
+                    .context("wire response")
             },
             || {
-                coordinate_source_backed_refresh(
-                    &RecordingAvailability::default(),
+                coordinate_source_backed_refresh_with_policy(
+                    &availability,
                     data_root.path(),
                     SourceBackedRefreshMode::Wait,
+                    SourceBackedRefreshRequestPolicy::import(
+                        RefreshSelection::ExactSource(authority.clone()),
+                        demand,
+                        false,
+                    ),
+                    false,
+                    None,
                 )
-                .err()
-                .expect("unobservable or mismatched request must fail")
             },
         )?;
-        assert_eq!(exchanges.len(), if malformed { 2 } else { 4 });
-        if !malformed {
-            assert_eq!(exchanges[0].0, exchanges[2].0);
-            let typed = error
-                .downcast_ref::<SourceRefreshObservationRecoveryFailed>()
-                .expect("bounded unknown recovery");
-            assert_eq!(
-                typed.request_id,
-                exchanges[0].0["request_id"].as_str().unwrap()
-            );
-            assert_eq!(typed.recovery_attempts, 1);
+        let observation = observation?;
+        assert_eq!(exchanges.len(), 4);
+        assert_eq!(exchanges[0].0, exchanges[2].0);
+        assert_eq!(exchanges[0].0["trigger"], "import");
+        let mut expected_intent = json!({
+            "kind": "selected_import",
+            "selection": {"kind": "exact_source", "authority": authority.to_json()},
+        });
+        if demand == ctx_history_refresh::SourceBackedReconciliationDemand::Incremental {
+            expected_intent["reconciliation_demand"] = json!("incremental");
         }
+        assert_eq!(exchanges[0].0["refresh_intent"], expected_intent);
+        assert!(exchanges[0].1["request_fingerprint"].as_str().is_some());
+        assert_eq!(
+            exchanges[0].1["request_fingerprint"],
+            exchanges[2].1["request_fingerprint"]
+        );
+        assert_eq!(exchanges[2].1["reconciliation_demand"], demand.as_str());
+        assert_eq!(exchanges[1].0, exchanges[3].0);
+        assert_eq!(
+            exchanges[1].1["error_code"],
+            SOURCE_REFRESH_UNKNOWN_REQUEST_ERROR_CODE
+        );
+        assert_eq!(exchanges[3].1["request_state"], "published");
+        assert_eq!(
+            observation.request_id.as_deref(),
+            exchanges[0].0["request_id"].as_str()
+        );
+        assert_eq!(
+            observation.pin.generation_id(),
+            exchanges[3].1["published_generation"].as_str().unwrap()
+        );
+        let receipt = observation.receipt.context("terminal receipt")?;
+        assert_eq!(
+            receipt.published_generation,
+            observation.pin.generation_id()
+        );
+        assert_eq!(receipt.published_explicit_source_catalog, Some(authority));
+        assert!(
+            availability.0.lock().unwrap().is_empty(),
+            "healthy no-start recovery must not start a worker"
+        );
     }
     Ok(())
 }
@@ -829,7 +813,7 @@ fn optional_background_does_not_hide_cold_or_wait_import_overload() -> Result<()
         (
             true,
             SourceBackedRefreshMode::Wait,
-            RefreshIntent::SelectedImport(RefreshSelection::All),
+            exhaustive_import_intent(RefreshSelection::All),
             RefreshRequestTrigger::Import,
         ),
     ] {
@@ -941,7 +925,7 @@ fn optional_background_rejects_malformed_or_indeterminate_admission_denials() ->
     assert!(background_admission_rejected_fallback(
         data_root.path(),
         SourceBackedRefreshMode::Background,
-        &RefreshIntent::SelectedImport(RefreshSelection::All),
+        &exhaustive_import_intent(RefreshSelection::All),
         false,
         &queue_full_response_for_test(),
     )?

@@ -1,6 +1,8 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
 
+mod incremental_tests;
+
 fn private_data_root() -> (tempfile::TempDir, PathBuf) {
     // Provider admission rejects symlinked roots; canonicalize macOS temporary paths.
     let base = std::env::temp_dir()
@@ -226,7 +228,11 @@ fn release_pending_admission(
 }
 
 fn provider_submission(request_id: &str, provider: CaptureProvider) -> RefreshRequest {
-    RefreshRequest::selected_import(request_id.to_owned(), RefreshSelection::Provider(provider))
+    RefreshRequest::selected_import(
+        request_id.to_owned(),
+        RefreshSelection::Provider(provider),
+        SourceBackedReconciliationDemand::Exhaustive,
+    )
 }
 
 fn assert_unreadable_admission_failure(retain_generation: bool, request_id: &str) {
@@ -573,6 +579,7 @@ fn explicit_catalog_admission_uses_only_its_exact_path_authority() {
             RefreshRequest::selected_import(
                 request_id.to_owned(),
                 RefreshSelection::ExactSource(authority),
+                SourceBackedReconciliationDemand::Exhaustive,
             ),
         )
         .unwrap();
@@ -609,6 +616,7 @@ fn explicit_catalog_path_disappearance_has_a_typed_terminal_outcome() {
             RefreshRequest::selected_import(
                 request_id.to_owned(),
                 RefreshSelection::ExactSource(authority),
+                SourceBackedReconciliationDemand::Exhaustive,
             ),
         )
         .unwrap();
@@ -664,6 +672,7 @@ fn explicit_catalog_admission_does_not_inherit_running_all_route_work() {
             RefreshRequest::selected_import(
                 request_id.to_owned(),
                 RefreshSelection::ExactSource(authority),
+                SourceBackedReconciliationDemand::Exhaustive,
             ),
         )
         .unwrap();
@@ -1095,13 +1104,18 @@ fn stable_request_id_distinguishes_exact_source_from_selected_all() {
         RefreshRequest::selected_import(
             request_id.to_owned(),
             RefreshSelection::ExactSource(authority.clone()),
+            SourceBackedReconciliationDemand::Exhaustive,
         )
     };
 
     let legacy = coordinator
         .submit(
             &data_root,
-            RefreshRequest::selected_import(request_id.to_owned(), RefreshSelection::All),
+            RefreshRequest::selected_import(
+                request_id.to_owned(),
+                RefreshSelection::All,
+                SourceBackedReconciliationDemand::Exhaustive,
+            ),
         )
         .unwrap();
     release_pending_admission(&coordinator, legacy);
@@ -1117,7 +1131,11 @@ fn stable_request_id_replays_the_same_provider_and_conflicts_on_provider_change(
     let coordinator = test_refresh_engine();
     let request_id = "019fcaaa-0000-7000-8000-000000000414";
     let submission = |provider| {
-        RefreshRequest::selected_import(request_id.to_owned(), RefreshSelection::Provider(provider))
+        RefreshRequest::selected_import(
+            request_id.to_owned(),
+            RefreshSelection::Provider(provider),
+            SourceBackedReconciliationDemand::Exhaustive,
+        )
     };
 
     let first = coordinator
@@ -1154,6 +1172,7 @@ fn provider_selection_does_not_coalesce_with_all_automatic() {
             RefreshRequest::selected_import(
                 provider_request_id.to_owned(),
                 RefreshSelection::Provider(CaptureProvider::Codex),
+                SourceBackedReconciliationDemand::Exhaustive,
             ),
         )
         .unwrap();
@@ -1183,7 +1202,10 @@ fn durable_recovery_preserves_intent_separately_from_physical_scope() {
     let attempt = new_refresh_attempt(
         None,
         SourceRefreshRuntimeMetadata::default(),
-        RefreshIntent::SelectedImport(RefreshSelection::Provider(CaptureProvider::Codex)),
+        RefreshIntent::SelectedImport {
+            selection: RefreshSelection::Provider(CaptureProvider::Codex),
+            reconciliation_demand: SourceBackedReconciliationDemand::Exhaustive,
+        },
         scope.clone(),
     );
     let job = attempt.job_json();
@@ -1386,7 +1408,10 @@ fn crash_restart_preserves_a_logical_successors_non_null_generation_baseline() {
     let mut successor = new_refresh_attempt(
         Some(generation_zero.clone()),
         SourceRefreshRuntimeMetadata::default(),
-        RefreshIntent::SelectedImport(RefreshSelection::All),
+        RefreshIntent::SelectedImport {
+            selection: RefreshSelection::All,
+            reconciliation_demand: SourceBackedReconciliationDemand::Exhaustive,
+        },
         SourceBackedRefreshScope::All,
     );
     successor.request_id = "019fcaaa-0000-7000-8000-0000000002a1".to_owned();

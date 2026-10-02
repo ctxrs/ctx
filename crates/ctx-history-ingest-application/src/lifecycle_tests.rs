@@ -46,6 +46,7 @@ struct FakeHost {
     source_identity_calls: Cell<usize>,
     relocate_from: RefCell<Option<PathBuf>>,
     refresh_selections: RefCell<Vec<RefreshSelection>>,
+    refresh_demands: RefCell<Vec<ctx_history_refresh::SourceBackedReconciliationDemand>>,
 }
 
 impl FakeHost {
@@ -69,6 +70,7 @@ impl FakeHost {
             source_identity_calls: Cell::new(0),
             relocate_from: RefCell::new(None),
             refresh_selections: RefCell::new(Vec::new()),
+            refresh_demands: RefCell::new(Vec::new()),
         }
     }
 
@@ -197,6 +199,7 @@ impl IngestRefreshPort for FakeHost {
         &mut self,
         _: &Path,
         selection: RefreshSelection,
+        reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
         _: bool,
     ) -> Result<IngestPublication> {
         let event = match &selection {
@@ -206,6 +209,9 @@ impl IngestRefreshPort for FakeHost {
         };
         self.push(event);
         self.refresh_selections.borrow_mut().push(selection);
+        self.refresh_demands
+            .borrow_mut()
+            .push(reconciliation_demand);
         self.refresh_calls.set(self.refresh_calls.get() + 1);
         if self.refresh_path_missing {
             return Err(anyhow!("daemon terminal detail").context(ImportPathMissingDuringRefresh));
@@ -297,6 +303,59 @@ fn write_source(temp: &tempfile::TempDir) -> PathBuf {
     let path = temp.path().join("history.jsonl");
     fs::write(&path, b"history\n").unwrap();
     path
+}
+
+#[test]
+fn import_demand_is_forwarded_without_changing_all_provider_or_exact_scope() {
+    use ctx_history_refresh::SourceBackedReconciliationDemand;
+    let temp = tempfile::tempdir().unwrap();
+    let path = write_source(&temp);
+    for demand in [
+        SourceBackedReconciliationDemand::Exhaustive,
+        SourceBackedReconciliationDemand::Incremental,
+    ] {
+        for selection in [
+            RefreshSelection::All,
+            RefreshSelection::Provider(CaptureProvider::Codex),
+            RefreshSelection::ExactSource(explicit_source_catalog_authority_for_test(1)),
+        ] {
+            let mut host = FakeHost::new(
+                path.clone(),
+                publication(receipt(
+                    None,
+                    SourceBackedRefreshRouteResult::succeeded(ROUTE.into(), true),
+                )),
+            );
+            host.all_discovery.sources = vec![host.exact_source.clone()];
+            host.provider_discovery.sources = vec![host.exact_source.clone()];
+            let mut request = IngestRequest {
+                reconciliation_demand: demand,
+                resume: true,
+                no_daemon: true,
+                ..IngestRequest::default()
+            };
+            match &selection {
+                RefreshSelection::All => request.all = true,
+                RefreshSelection::Provider(provider) => request.provider = Some(*provider),
+                RefreshSelection::ExactSource(_) => {
+                    request.path = Some(path.clone());
+                    request.provider = Some(CaptureProvider::Codex);
+                    host.publication = Some(publication(receipt(
+                        Some(host.lineage_hex()),
+                        SourceBackedRefreshRouteResult::succeeded(ROUTE.into(), true),
+                    )));
+                }
+            }
+            run_ingest(&request, &temp.path().join("ctx"), &mut host).unwrap();
+            assert_eq!(host.refresh_demands.borrow().as_slice(), [demand]);
+            assert_eq!(host.refresh_selections.borrow().as_slice(), [selection]);
+            assert_eq!(host.refresh_calls.get(), 1);
+        }
+    }
+    assert_eq!(
+        IngestRequest::default().reconciliation_demand,
+        SourceBackedReconciliationDemand::Exhaustive
+    );
 }
 
 #[test]
@@ -860,53 +919,60 @@ fn selected_automatic_provider_uses_only_its_provider_snapshot_and_forwards_sele
 
 #[test]
 fn plugin_route_prepares_inventory_once_and_requires_selected_lineage() {
-    let temp = tempfile::tempdir().unwrap();
-    let source_path = write_source(&temp);
-    let manifest = temp.path().join("ctx-history-plugin.json");
-    fs::write(
-        &manifest,
-        serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1,
-            "name": "example",
-            "history_sources": [{
-                "id": "default",
-                "source_format": "example-v1",
-                "path": source_path,
-                "enabled": true
-            }]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let mut host = FakeHost::new(
-        source_path.clone(),
-        publication(receipt(
-            None,
+    for demand in [
+        ctx_history_refresh::SourceBackedReconciliationDemand::Exhaustive,
+        ctx_history_refresh::SourceBackedReconciliationDemand::Incremental,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = write_source(&temp);
+        let manifest = temp.path().join("ctx-history-plugin.json");
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "name": "example",
+                "history_sources": [{
+                    "id": "default",
+                    "source_format": "example-v1",
+                    "path": source_path,
+                    "enabled": true
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut host = FakeHost::new(
+            source_path.clone(),
+            publication(receipt(
+                None,
+                SourceBackedRefreshRouteResult::succeeded(ROUTE.into(), true),
+            )),
+        );
+        let lineage = host.lineage_hex();
+        host.publication = Some(publication(receipt(
+            Some(lineage),
             SourceBackedRefreshRouteResult::succeeded(ROUTE.into(), true),
-        )),
-    );
-    let lineage = host.lineage_hex();
-    host.publication = Some(publication(receipt(
-        Some(lineage),
-        SourceBackedRefreshRouteResult::succeeded(ROUTE.into(), true),
-    )));
-    let request = IngestRequest {
-        history_source: Some("example/default".to_owned()),
-        history_source_manifests: vec![manifest],
-        ..IngestRequest::default()
-    };
+        )));
+        let request = IngestRequest {
+            reconciliation_demand: demand,
+            history_source: Some("example/default".to_owned()),
+            history_source_manifests: vec![manifest],
+            ..IngestRequest::default()
+        };
 
-    let report = run_ingest(&request, temp.path(), &mut host).unwrap();
+        let report = run_ingest(&request, temp.path(), &mut host).unwrap();
 
-    assert!(matches!(report.sources[0], IngestSourceOutcome::Plugin(_)));
-    assert_eq!(host.admission_calls.get(), 1);
-    assert_eq!(host.refresh_calls.get(), 1);
-    assert_eq!(
-        host.events
-            .borrow()
-            .iter()
-            .filter(|event| event.as_str() == "prepare_plugin")
-            .count(),
-        1
-    );
+        assert!(matches!(report.sources[0], IngestSourceOutcome::Plugin(_)));
+        assert_eq!(host.admission_calls.get(), 1);
+        assert_eq!(host.refresh_calls.get(), 1);
+        assert_eq!(host.refresh_demands.borrow().as_slice(), [demand]);
+        assert_eq!(
+            host.events
+                .borrow()
+                .iter()
+                .filter(|event| event.as_str() == "prepare_plugin")
+                .count(),
+            1
+        );
+    }
 }

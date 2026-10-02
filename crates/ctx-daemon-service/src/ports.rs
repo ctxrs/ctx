@@ -188,6 +188,17 @@ pub trait DaemonAvailabilityPort: Sync {
         false
     }
 
+    /// Observe an exact retained finite-worker child. `None` means this caller
+    /// has no authoritative child observation for the supplied identity.
+    fn source_refresh_owner_is_live(
+        &self,
+        _data_root: &Path,
+        _owner_id: &str,
+        _pid: u32,
+    ) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
     /// Injectable wait seam used by retry and observation loops. Tests can
     /// advance a fake clock or trip a deterministic barrier without sleeping.
     fn pause(&self, duration: std::time::Duration) -> Result<()> {

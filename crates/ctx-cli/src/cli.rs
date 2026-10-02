@@ -224,6 +224,11 @@ pub(crate) struct ImportArgs {
     pub(crate) resume: bool,
     #[arg(
         long,
+        help = "Reuse unchanged history and reconcile supported appends; indexing mode is unchanged"
+    )]
+    pub(crate) incremental: bool,
+    #[arg(
+        long,
         help = "Do not start or restart the daemon; require an already-running daemon"
     )]
     pub(crate) no_daemon: bool,

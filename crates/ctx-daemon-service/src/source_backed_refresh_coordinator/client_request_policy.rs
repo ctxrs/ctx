@@ -15,9 +15,16 @@ impl SourceBackedRefreshRequestPolicy {
         }
     }
 
-    pub(super) fn import(selection: RefreshSelection, allow_daemon_autostart: bool) -> Self {
+    pub(super) fn import(
+        selection: RefreshSelection,
+        reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
+        allow_daemon_autostart: bool,
+    ) -> Self {
         Self {
-            intent: RefreshIntent::SelectedImport(selection),
+            intent: RefreshIntent::SelectedImport {
+                selection,
+                reconciliation_demand,
+            },
             trigger: RefreshRequestTrigger::Import,
             allow_daemon_autostart,
         }

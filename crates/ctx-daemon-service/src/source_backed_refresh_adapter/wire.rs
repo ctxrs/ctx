@@ -146,7 +146,7 @@ fn refresh_request(request: &Value) -> Result<RefreshRequest> {
         .transpose()?
         .unwrap_or(match &intent {
             RefreshIntent::AutomaticMaintenance => RefreshRequestTrigger::Search,
-            RefreshIntent::SelectedImport(_) => RefreshRequestTrigger::Import,
+            RefreshIntent::SelectedImport { .. } => RefreshRequestTrigger::Import,
         });
     if !matches!(
         (&intent, trigger),
@@ -156,7 +156,7 @@ fn refresh_request(request: &Value) -> Result<RefreshRequest> {
                 | RefreshRequestTrigger::Search
                 | RefreshRequestTrigger::Import
         ) | (
-            RefreshIntent::SelectedImport(_),
+            RefreshIntent::SelectedImport { .. },
             RefreshRequestTrigger::Import
         )
     ) {
@@ -202,7 +202,38 @@ fn unknown_refresh_request_response(request_id: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ctx_history_refresh::RefreshJournal;
+    use ctx_history_core::CaptureProvider;
+    use ctx_history_refresh::{RefreshJournal, RefreshSelection};
+
+    #[test]
+    fn selected_import_wire_preserves_demand_and_requires_wait() {
+        for demand in [None, Some("exhaustive"), Some("incremental")] {
+            let mut payload = json!({
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "request_id": "019fcaaa-0000-7000-8000-000000000517",
+                "mode": "wait",
+                "refresh_intent": {"kind": "selected_import", "selection": {"kind": "provider", "provider": "codex"}},
+            });
+            if let Some(demand) = demand {
+                payload["refresh_intent"]["reconciliation_demand"] = json!(demand);
+            }
+            let request = refresh_request(&payload).unwrap();
+            assert_eq!(request.trigger(), RefreshRequestTrigger::Import);
+            assert_eq!(
+                request.intent().selection(),
+                Some(&RefreshSelection::Provider(CaptureProvider::Codex))
+            );
+            assert_eq!(
+                request.intent().reconciliation_demand().as_str(),
+                demand.unwrap_or("exhaustive")
+            );
+            payload["mode"] = json!("background");
+            assert!(refresh_request(&payload).is_err());
+            payload["mode"] = json!("wait");
+            payload["trigger"] = json!("search");
+            assert!(refresh_request(&payload).is_err());
+        }
+    }
 
     #[test]
     fn refresh_request_requires_a_canonical_intent() {
