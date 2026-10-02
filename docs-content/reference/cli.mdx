@@ -114,6 +114,7 @@ ctx sources --json
 ```bash
 ctx import
 ctx import --all
+ctx import --all --incremental
 ctx import --provider codex
 ctx import --provider pi
 ctx import --provider claude
@@ -138,6 +139,8 @@ ctx import --progress json --json
 ```
 
 `import` explicitly indexes provider history into the local Tantivy Core. The normal first-run path is `ctx setup`, which already imports discovered sources. Use `import` to repair, re-run, resume, or target a specific provider or path. Current `--resume` output marks an idempotent rescan; provider-native cursor resume is not yet a universal contract.
+
+`--incremental` requests one catch-up using retained records and provider checkpoints. In manual indexing mode, the worker completes admitted work and exits; the command does not change indexing mode. In automatic mode, the existing worker may remain running. Normal imports remain exhaustive unless the flag is supplied. Incremental capture still discovers sources and verifies publication, and later appends can wait for the next invocation. Use ordinary import for exhaustive reconciliation or repair; add `--no-blame` to skip this command's Blame wait.
 
 Custom history plugins use a local manifest to identify a durable provider-owned
 `ctx-history-jsonl-v2` file. Explicit import registers that file with normal Core

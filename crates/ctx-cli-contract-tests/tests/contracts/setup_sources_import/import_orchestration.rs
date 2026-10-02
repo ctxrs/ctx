@@ -3,7 +3,7 @@ use super::{
     write_active_daemon_upgrade_handoff, write_codex_setup_session,
 };
 use std::{
-    io::Read,
+    io::{Read, Write},
     process::{Child, Command as StdCommand, Stdio},
 };
 
@@ -11,6 +11,8 @@ use std::{
 mod blame_indexing;
 #[path = "import_orchestration/cancellation.rs"]
 mod cancellation;
+#[path = "import_orchestration/incremental.rs"]
+mod incremental;
 #[path = "import_orchestration/relocation.rs"]
 mod relocation;
 #[path = "import_orchestration/semantic_failure.rs"]

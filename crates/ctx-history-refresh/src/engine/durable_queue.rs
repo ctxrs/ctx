@@ -505,7 +505,7 @@ fn recover_pending_attempt(
     let mut attempt = new_refresh_attempt(previous_generation, metadata, intent, refresh_scope);
     attempt.request_id = request_id.to_owned();
     attempt.last_failure = RefreshFailureSummary::from_job(job);
-    attempt.reconciliation_demand = recover_reconciliation_demand(job, operation)?;
+    attempt.reconciliation_demand = recover_reconciliation_demand(job, &attempt.intent)?;
     let _legacy_physical_attempt_id = optional_pending_string(job, "physical_attempt_id")?;
     attempt.state = if request_state == Some(SourceBackedRefreshState::AdmissionPending) {
         SourceBackedRefreshState::AdmissionPending

@@ -108,17 +108,19 @@ ctx status
 ctx index mode
 ```
 
-Request an authoritative refresh explicitly:
+Request a finite incremental catch-up explicitly:
 
 ```bash
-ctx import --all
+ctx import --all --incremental
 ctx search "the missing phrase"
 # Or refresh before this search:
 ctx search "the missing phrase" --refresh wait
 ```
 
-Use `ctx import --resume --format json` when you want output to mark the run as an
-idempotent rescan. In manual mode, explicit import and `--refresh wait` may
+Use `ctx import --all` for an exhaustive reconciliation or repair. Add
+`--no-blame` to skip command-owned Blame completion. `--incremental` leaves
+indexing mode unchanged. Use `ctx import --resume --format json` when you want
+output to mark the run as an idempotent rescan. In manual mode, explicit import and `--refresh wait` may
 start a finite Core worker and wait for it to publish. `--refresh off` never
 starts or wakes one. Run `ctx index mode auto` to return to automatic indexing;
 when no process-level override disables it, that command installs or repairs

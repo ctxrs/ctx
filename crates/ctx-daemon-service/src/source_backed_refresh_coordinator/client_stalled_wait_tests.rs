@@ -33,7 +33,7 @@ fn responsive_stalled_wait_is_cancellable_without_discarding_the_durable_request
     let request_id = Uuid::new_v4().to_string();
     let availability = AdvancingAvailability::default();
     let start = StdInstant::now();
-    let intent = RefreshIntent::SelectedImport(RefreshSelection::All);
+    let intent = exhaustive_import_intent(RefreshSelection::All);
     let (result, exchanges) = foreground_transport_fixture(
         data_root.path(),
         move |request| {
@@ -49,6 +49,15 @@ fn responsive_stalled_wait_is_cancellable_without_discarding_the_durable_request
                 intent.clone(),
                 RefreshRequestTrigger::Import,
             )?;
+            let recovery = WaitRefreshRecovery::new(
+                data_root.path(),
+                &RefreshRequest::new(
+                    request_id.clone(),
+                    intent.clone(),
+                    RefreshRequestTrigger::Import,
+                ),
+                true,
+            )?;
             wait_for_published_generation_inner(
                 &availability,
                 data_root.path(),
@@ -56,11 +65,11 @@ fn responsive_stalled_wait_is_cancellable_without_discarding_the_durable_request
                 PublishedGenerationWait {
                     mode: SourceBackedRefreshMode::Wait,
                     intent,
-                    trigger: RefreshRequestTrigger::Import,
-                    allow_daemon_autostart: true,
                     retain_peer: false,
                     report_progress: None,
                 },
+                recovery,
+                None,
                 || start + StdDuration::from_secs(availability.0.load(Ordering::SeqCst)),
             )
         },
@@ -110,7 +119,7 @@ fn quiet_long_phases_wait_for_the_authoritative_terminal_result() -> Result<()> 
             ctx_history_refresh::explicit_source_for_path(data_root.path(), &path, None, true)?;
         let authority =
             ctx_history_refresh::upsert_explicit_source(data_root.path(), &source)?.authority;
-        let intent = RefreshIntent::SelectedImport(RefreshSelection::ExactSource(authority));
+        let intent = exhaustive_import_intent(RefreshSelection::ExactSource(authority));
         let request_id = Uuid::new_v4().to_string();
         let server_root = data_root.path().to_owned();
         let engine = CoreRefreshEngine::new();
@@ -159,6 +168,15 @@ fn quiet_long_phases_wait_for_the_authoritative_terminal_result() -> Result<()> 
                     intent.clone(),
                     RefreshRequestTrigger::Import,
                 )?;
+                let recovery = WaitRefreshRecovery::new(
+                    data_root.path(),
+                    &RefreshRequest::new(
+                        request_id.clone(),
+                        intent.clone(),
+                        RefreshRequestTrigger::Import,
+                    ),
+                    true,
+                )?;
                 wait_for_published_generation_inner(
                     &availability,
                     data_root.path(),
@@ -166,11 +184,11 @@ fn quiet_long_phases_wait_for_the_authoritative_terminal_result() -> Result<()> 
                     PublishedGenerationWait {
                         mode: SourceBackedRefreshMode::Wait,
                         intent,
-                        trigger: RefreshRequestTrigger::Import,
-                        allow_daemon_autostart: true,
                         retain_peer: false,
                         report_progress: None,
                     },
+                    recovery,
+                    None,
                     || start + StdDuration::from_secs(availability.0.load(Ordering::SeqCst)),
                 )
             },
@@ -195,6 +213,83 @@ fn quiet_long_phases_wait_for_the_authoritative_terminal_result() -> Result<()> 
                 error.to_string().contains("synthetic worker failure"),
                 "{error:#}"
             );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn foreground_unknown_recovery_is_bounded_and_rejects_mismatched_identity() -> Result<()> {
+    for mutation in [
+        None,
+        Some(("request_id", json!("different-request"))),
+        Some(("owner", json!("different-owner"))),
+        Some(("schema_version", json!(2))),
+        Some(("ok", json!(true))),
+        Some(("request_state", json!("failed"))),
+        Some(("reason", json!("unrecognized-reason"))),
+        Some(("retryable", json!(true))),
+        Some(("retryable", Value::Null)),
+        Some(("error_code", Value::Null)),
+        Some((
+            "admission_durability",
+            json!("replacement_visible_or_indeterminate"),
+        )),
+        Some((
+            "admission_acknowledgement",
+            json!("retained_after_durability_error"),
+        )),
+        Some(("receipt", json!({}))),
+        Some(("receipt", Value::Null)),
+        Some(("published_generation", json!("generation"))),
+        Some(("previous_generation", json!("previous"))),
+        Some(("generation_changed", json!(false))),
+        Some(("outcome", json!("published"))),
+        Some(("structured_outcome", json!({}))),
+        Some(("finished_at_ms", json!(123))),
+    ] {
+        let malformed = mutation.is_some();
+        let data_root = short_data_root()?;
+        let (error, exchanges) = foreground_transport_fixture(
+            data_root.path(),
+            move |request| {
+                let id = request["request_id"].as_str().context("client ID")?;
+                Ok(if request["op"] == SOURCE_REFRESH_REQUEST_OP {
+                    json!({"ok":true,"owner":"daemon","request_id":id,"request_state":"admission_pending","schema_version":1,
+                        "progress":{"phase":"admission_pending","completed_sources":0,"total_sources":0}})
+                } else {
+                    let mut response = json!({"ok":false,"owner":"daemon","request_id":id,
+                        "request_state":"request_unknown","error_code":"source_refresh_request_unknown",
+                        "reason":"request_not_retained_after_restart","retryable":false,"schema_version":1,
+                        "error":"arbitrary human text cannot authorize recovery",
+                        "diagnostic_extension":"informational"});
+                    if let Some((field, value)) = &mutation {
+                        response[*field] = value.clone();
+                    }
+                    response
+                })
+            },
+            || {
+                coordinate_source_backed_refresh(
+                    &RecordingAvailability::default(),
+                    data_root.path(),
+                    SourceBackedRefreshMode::Wait,
+                )
+                .err()
+                .expect("unobservable or mismatched request must fail")
+            },
+        )?;
+        assert_eq!(exchanges.len(), if malformed { 2 } else { 4 });
+        if !malformed {
+            assert_eq!(exchanges[0].0, exchanges[2].0);
+            let typed = error
+                .downcast_ref::<SourceRefreshObservationRecoveryFailed>()
+                .expect("bounded unknown recovery");
+            assert_eq!(
+                typed.request_id,
+                exchanges[0].0["request_id"].as_str().unwrap()
+            );
+            assert_eq!(typed.recovery_attempts, 1);
         }
     }
     Ok(())

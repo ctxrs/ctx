@@ -143,7 +143,7 @@ fn test_refresh_submission_from_json(request: &Value) -> Result<RefreshRequest> 
         .transpose()?
         .unwrap_or(match &intent {
             RefreshIntent::AutomaticMaintenance => RefreshRequestTrigger::Search,
-            RefreshIntent::SelectedImport(_) => RefreshRequestTrigger::Import,
+            RefreshIntent::SelectedImport { .. } => RefreshRequestTrigger::Import,
         });
     Ok(RefreshRequest::new(request_id, intent, trigger))
 }

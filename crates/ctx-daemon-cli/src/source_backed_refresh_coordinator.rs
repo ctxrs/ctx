@@ -61,6 +61,7 @@ pub fn coordinate_import_source_backed_refresh_with_progress(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     selection: RefreshSelection,
+    reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
     allow_daemon_autostart: bool,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
@@ -69,6 +70,7 @@ pub fn coordinate_import_source_backed_refresh_with_progress(
         data_root,
         mode,
         selection,
+        reconciliation_demand,
         allow_daemon_autostart,
         report_progress,
     )

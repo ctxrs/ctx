@@ -85,9 +85,9 @@ impl CoreRefreshEngine {
                 "daemon exact source refresh exceeds {SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT} routes"
             );
         }
-        let should_seed = matches!(intent, RefreshIntent::SelectedImport(_))
+        let should_seed = matches!(intent, RefreshIntent::SelectedImport { .. })
             || matches!(scope, SourceBackedRefreshScope::All);
-        if matches!(intent, RefreshIntent::SelectedImport(_)) {
+        if matches!(intent, RefreshIntent::SelectedImport { .. }) {
             state
                 .automatic_retry_checkpoints
                 .retain(|route, _| !exact_routes.contains(route));
@@ -172,8 +172,11 @@ impl CoreRefreshEngine {
         state
             .route_admission_watermarks
             .insert(request_id.to_owned(), admitted_watermarks);
+        // Selected imports inventory every member of their admitted routes.
+        // Watcher member hints belong only to automatic maintenance.
         let incremental_exact = find_attempt(&state, request_id).is_some_and(|attempt| {
-            attempt.reconciliation_demand == SourceBackedReconciliationDemand::Incremental
+            intent == RefreshIntent::AutomaticMaintenance
+                && attempt.reconciliation_demand == SourceBackedReconciliationDemand::Incremental
                 && matches!(scope, SourceBackedRefreshScope::Exact(_))
         });
         let admitted_routes = state

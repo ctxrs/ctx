@@ -219,9 +219,10 @@ fn open_generation_for_request_recovery(data_root: &Path) -> Result<Option<Arc<V
 fn require_scoped_rehydration(attempt: &mut SourceBackedRefreshAttempt) -> Result<()> {
     if matches!(
         attempt.intent,
-        RefreshIntent::SelectedImport(
-            RefreshSelection::Provider(_) | RefreshSelection::ExactSource(_)
-        )
+        RefreshIntent::SelectedImport {
+            selection: RefreshSelection::Provider(_) | RefreshSelection::ExactSource(_),
+            ..
+        }
     ) && attempt.state == SourceBackedRefreshState::Queued
         && !matches!(attempt.refresh_scope, SourceBackedRefreshScope::Exact(_))
     {
@@ -328,7 +329,7 @@ fn recover_terminal_attempt(
     attempt.request_id =
         required_nonempty_string(job, "request_id", "terminal source refresh")?.to_owned();
     let _legacy_physical_attempt_id = optional_string(job, "physical_attempt_id")?;
-    attempt.reconciliation_demand = recover_reconciliation_demand(job, operation)?;
+    attempt.reconciliation_demand = recover_reconciliation_demand(job, &attempt.intent)?;
     attempt.state = state;
     attempt.requested_at_ms = optional_i64(job, "requested_at_ms")?
         .or(optional_i64(job, "last_run_at_ms")?)

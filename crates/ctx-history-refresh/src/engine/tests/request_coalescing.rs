@@ -2,6 +2,32 @@
 
 use super::*;
 
+#[test]
+fn incremental_selected_import_remains_distinct_from_automatic_maintenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let coordinator = CoreRefreshEngine::new();
+    let automatic = coordinator.enqueue_periodic(&data_root).unwrap();
+    let mut ids = BTreeSet::from([request_id(&automatic)]);
+    for _ in 0..2 {
+        let request = RefreshRequest::selected_import(
+            Uuid::now_v7().to_string(),
+            RefreshSelection::All,
+            SourceBackedReconciliationDemand::Incremental,
+        );
+        let selected = coordinator.submit(&data_root, request).unwrap();
+        assert!(ids.insert(selected.status().request_id().unwrap().to_owned()));
+        assert_eq!(selected.status()["coalesced_requests"], 0);
+        assert_eq!(
+            selected.status()["refresh_intent"]["kind"],
+            "selected_import"
+        );
+        assert_eq!(selected.status()["reconciliation_demand"], "incremental");
+    }
+    assert_eq!(ids.len(), 3);
+}
+
 fn command_refresh_submission(
     trigger: RefreshRequestTrigger,
     fresh_after_admitted_snapshot: bool,
@@ -10,7 +36,10 @@ fn command_refresh_submission(
     if fresh_after_admitted_snapshot {
         RefreshRequest::new(
             request_id,
-            RefreshIntent::SelectedImport(RefreshSelection::All),
+            RefreshIntent::SelectedImport {
+                selection: RefreshSelection::All,
+                reconciliation_demand: SourceBackedReconciliationDemand::Exhaustive,
+            },
             trigger,
         )
     } else {

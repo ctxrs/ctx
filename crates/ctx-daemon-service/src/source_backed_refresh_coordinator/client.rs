@@ -9,7 +9,7 @@ mod types;
 #[cfg(feature = "test-support")]
 pub use observation_recovery::SourceRefreshObservationRecoveryFailed;
 use observation_recovery::{
-    request_bound_status_with_outage_budget_cancellable, retained_request_unobservable,
+    retained_request_unobservable, retryable_refresh_transport_error, WaitRefreshRecovery,
 };
 use request_policy::SourceBackedRefreshRequestPolicy;
 use response::*;
@@ -23,6 +23,14 @@ type SourceBackedRefreshProgressReporter<'a> = &'a mut dyn FnMut(&RefreshStatus)
 // Polls observe in-memory progress at 20 Hz; report at most 10 Hz so the
 // terminal feels live without making rendering itself the hot loop.
 const SOURCE_REFRESH_PROGRESS_HEARTBEAT: StdDuration = StdDuration::from_millis(100);
+
+#[cfg(test)]
+fn exhaustive_import_intent(selection: RefreshSelection) -> RefreshIntent {
+    RefreshIntent::SelectedImport {
+        selection,
+        reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand::Exhaustive,
+    }
+}
 
 fn daemon_trigger(trigger: RefreshRequestTrigger) -> crate::DaemonTrigger {
     match trigger {
@@ -151,7 +159,8 @@ where
         // idempotent request. It must recover before the generic unavailable
         // classification, which is only safe before submission.
         Err(error)
-            if DaemonSourceRefreshServiceUnavailable::request_may_have_been_submitted(&error) => {}
+            if DaemonSourceRefreshServiceUnavailable::request_may_have_been_submitted(&error)
+                && retryable_refresh_transport_error(&error) => {}
         Err(error)
             if error
                 .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
@@ -187,6 +196,10 @@ where
         checkpoint()?;
         match roundtrip() {
             Ok(Some(response)) => return Ok(Some(response)),
+            Err(error) if !retryable_refresh_transport_error(&error) => {
+                checkpoint()?;
+                return Err(error);
+            }
             Ok(None) | Err(_) => checkpoint()?,
         }
     }
@@ -289,6 +302,7 @@ pub fn coordinate_import_source_backed_refresh_with_progress(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     selection: RefreshSelection,
+    reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
     allow_daemon_autostart: bool,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
@@ -297,6 +311,7 @@ pub fn coordinate_import_source_backed_refresh_with_progress(
         data_root,
         mode,
         selection,
+        reconciliation_demand,
         allow_daemon_autostart,
         Some(report_progress),
     )
@@ -307,6 +322,7 @@ fn coordinate_import_source_backed_refresh_inner(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     selection: RefreshSelection,
+    reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
     allow_daemon_autostart: bool,
     report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
@@ -314,7 +330,11 @@ fn coordinate_import_source_backed_refresh_inner(
         availability,
         data_root,
         mode,
-        SourceBackedRefreshRequestPolicy::import(selection, allow_daemon_autostart),
+        SourceBackedRefreshRequestPolicy::import(
+            selection,
+            reconciliation_demand,
+            allow_daemon_autostart,
+        ),
         false,
         report_progress,
     )
@@ -388,9 +408,22 @@ fn coordinate_source_backed_refresh_with_policy(
     let canonical_request =
         RefreshRequest::new(logical_request_id.clone(), intent.clone(), trigger);
     let admission_request = wait_authority_request_json(mode, &canonical_request)?;
-    let mut retirement_recovery_attempted = false;
-    let response = loop {
-        let retirement_error = match request_admission_with_recovery_cancellable(
+    let mut recovery = if mode == SourceBackedRefreshMode::Wait {
+        Some(WaitRefreshRecovery::new(
+            data_root,
+            &canonical_request,
+            allow_daemon_autostart,
+        )?)
+    } else {
+        None
+    };
+    let response = if mode == SourceBackedRefreshMode::Wait {
+        recovery
+            .as_mut()
+            .expect("wait recovery")
+            .request(availability, data_root, true)?
+    } else {
+        match request_admission_with_recovery_cancellable(
             &logical_request_id,
             |duration| availability.pause(duration),
             || availability.checkpoint(),
@@ -404,25 +437,8 @@ fn coordinate_source_backed_refresh_with_policy(
                 )
             },
         ) {
-            Ok(Some(response)) => break response,
-            Ok(None)
-                if mode == SourceBackedRefreshMode::Wait
-                    && allow_daemon_autostart
-                    && !retirement_recovery_attempted =>
-            {
-                None
-            }
+            Ok(Some(response)) => response,
             Ok(None) => return daemon_unavailable_fallback(data_root, mode, retain_peer, None),
-            Err(error)
-                if error
-                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                    .is_some()
-                    && mode == SourceBackedRefreshMode::Wait
-                    && allow_daemon_autostart
-                    && !retirement_recovery_attempted =>
-            {
-                Some(error)
-            }
             Err(error)
                 if error
                     .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
@@ -431,21 +447,7 @@ fn coordinate_source_backed_refresh_with_policy(
                 return daemon_unavailable_fallback(data_root, mode, retain_peer, Some(error));
             }
             Err(error) => return Err(error),
-        };
-        retirement_recovery_attempted = true;
-        availability.checkpoint()?;
-        if availability
-            .ensure_available(
-                data_root,
-                daemon_trigger(trigger),
-                crate::DaemonAvailabilityDemand::ExplicitWait,
-            )
-            .context("recover daemon after source refresh endpoint retirement")?
-            == crate::DaemonAvailability::Disabled
-        {
-            return daemon_unavailable_fallback(data_root, mode, retain_peer, retirement_error);
         }
-        availability.checkpoint()?;
     };
     if let Some(observation) =
         background_admission_rejected_fallback(data_root, mode, &intent, retain_peer, &response)?
@@ -516,11 +518,11 @@ fn coordinate_source_backed_refresh_with_policy(
         PublishedGenerationWait {
             mode,
             intent,
-            trigger,
-            allow_daemon_autostart,
             retain_peer,
             report_progress,
         },
+        recovery.expect("wait recovery"),
+        Some(response),
         StdInstant::now,
     )
 }
@@ -534,31 +536,38 @@ pub(super) fn wait_for_published_generation(
     expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
 ) -> Result<SourceBackedRefreshObservation> {
+    let trigger = match operation {
+        ctx_history_refresh::RefreshOperation::Refresh => RefreshRequestTrigger::Search,
+        ctx_history_refresh::RefreshOperation::Import => RefreshRequestTrigger::Import,
+    };
+    let wait = PublishedGenerationWait {
+        mode,
+        intent: match (operation, expected_catalog) {
+            (_, Some(authority)) => {
+                exhaustive_import_intent(RefreshSelection::ExactSource(authority.clone()))
+            }
+            (ctx_history_refresh::RefreshOperation::Import, None) => {
+                exhaustive_import_intent(RefreshSelection::All)
+            }
+            (ctx_history_refresh::RefreshOperation::Refresh, None) => {
+                RefreshIntent::AutomaticMaintenance
+            }
+        },
+        retain_peer: false,
+        report_progress: None,
+    };
+    let recovery = WaitRefreshRecovery::new(
+        data_root,
+        &RefreshRequest::new(request_id.clone(), wait.intent.clone(), trigger),
+        allow_daemon_autostart,
+    )?;
     wait_for_published_generation_inner(
         &crate::test_support::AVAILABILITY,
         data_root,
         request_id,
-        PublishedGenerationWait {
-            mode,
-            intent: match (operation, expected_catalog) {
-                (_, Some(authority)) => {
-                    RefreshIntent::SelectedImport(RefreshSelection::ExactSource(authority.clone()))
-                }
-                (ctx_history_refresh::RefreshOperation::Import, None) => {
-                    RefreshIntent::SelectedImport(RefreshSelection::All)
-                }
-                (ctx_history_refresh::RefreshOperation::Refresh, None) => {
-                    RefreshIntent::AutomaticMaintenance
-                }
-            },
-            trigger: match operation {
-                ctx_history_refresh::RefreshOperation::Refresh => RefreshRequestTrigger::Search,
-                ctx_history_refresh::RefreshOperation::Import => RefreshRequestTrigger::Import,
-            },
-            allow_daemon_autostart,
-            retain_peer: false,
-            report_progress: None,
-        },
+        wait,
+        recovery,
+        None,
         StdInstant::now,
     )
 }
@@ -566,8 +575,6 @@ pub(super) fn wait_for_published_generation(
 struct PublishedGenerationWait<'progress> {
     mode: SourceBackedRefreshMode,
     intent: RefreshIntent,
-    trigger: RefreshRequestTrigger,
-    allow_daemon_autostart: bool,
     retain_peer: bool,
     report_progress: Option<SourceBackedRefreshProgressReporter<'progress>>,
 }
@@ -577,112 +584,27 @@ fn wait_for_published_generation_inner(
     data_root: &Path,
     request_id: String,
     wait: PublishedGenerationWait<'_>,
+    mut recovery: WaitRefreshRecovery,
+    mut initial_response: Option<Value>,
     mut now: impl FnMut() -> StdInstant,
 ) -> Result<SourceBackedRefreshObservation> {
     let PublishedGenerationWait {
         mode,
         intent,
-        trigger,
-        allow_daemon_autostart,
         retain_peer,
         mut report_progress,
     } = wait;
-    let mut owner_recovery_attempted = false;
-    let mut forgotten_request_replayed = false;
     let mut last_reported_status = None;
     let mut last_reported_at = None;
     loop {
         availability.checkpoint()?;
-        let status_request = compact_json(json!({
-            "schema_version": 1,
-            "op": SOURCE_REFRESH_STATUS_OP,
-            "request_id": request_id,
-        }));
-        let response = match request_bound_status_with_outage_budget_cancellable(
-            &request_id,
-            |duration| availability.pause(duration),
-            StdInstant::now,
-            || availability.checkpoint(),
-            || {
-                daemon_source_refresh_request_with_cancellation(
-                    availability,
-                    data_root,
-                    status_request.clone(),
-                    SOURCE_REFRESH_IPC_TIMEOUT,
-                    SOURCE_REFRESH_RESPONSE_MAX_BYTES,
-                )
-            },
-        ) {
-            Ok(Some(response)) => response,
-            Ok(None) => {
-                if !allow_daemon_autostart || owner_recovery_attempted {
-                    return Err(retained_request_unobservable(
-                        &request_id,
-                        usize::from(owner_recovery_attempted),
-                    ));
-                }
-                owner_recovery_attempted = true;
-                availability.checkpoint()?;
-                recover_wait_refresh_request(
-                    availability,
-                    data_root,
-                    &request_id,
-                    trigger,
-                    allow_daemon_autostart,
-                )
-                .with_context(|| {
-                    format!("recover daemon while waiting for source refresh request {request_id}")
-                })?;
-                continue;
-            }
-            Err(error)
-                if error
-                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                    .is_some() =>
-            {
-                if !allow_daemon_autostart || owner_recovery_attempted {
-                    return Err(retained_request_unobservable(
-                        &request_id,
-                        usize::from(owner_recovery_attempted),
-                    ));
-                }
-                owner_recovery_attempted = true;
-                availability.checkpoint()?;
-                recover_wait_refresh_request(
-                    availability,
-                    data_root,
-                    &request_id,
-                    trigger,
-                    allow_daemon_autostart,
-                )
-                .with_context(|| {
-                    format!(
-                        "recover unavailable daemon while waiting for source refresh request {request_id}: {error:#}"
-                    )
-                })?;
-                continue;
-            }
-            Err(error) => {
-                return Err(
-                    error.context("wait for daemon-owned source-backed refresh publication")
-                );
-            }
+        let response = match initial_response.take() {
+            Some(response) => response,
+            None => recovery
+                .request(availability, data_root, false)
+                .context("wait for daemon-owned source-backed refresh publication")?,
         };
         availability.checkpoint()?;
-        if source_refresh_request_is_unknown(&response, &request_id)? {
-            if forgotten_request_replayed {
-                return Err(retained_request_unobservable(&request_id, 1));
-            }
-            forgotten_request_replayed = true;
-            enqueue_equivalent_wait_refresh_request(
-                availability,
-                data_root,
-                &request_id,
-                intent.clone(),
-                trigger,
-            )?;
-            continue;
-        }
         validate_source_refresh_status_response_authority(&response, &request_id)?;
         validate_daemon_refresh_response(&response)?;
         let status = source_refresh_progress_status(response.clone())?;
@@ -723,8 +645,8 @@ fn wait_for_published_generation_inner(
             | RefreshRequestState::Running => {
                 // A responsive owner can be parsing, merging, or syncing with
                 // unchanged counters for any duration. Only its terminal
-                // receipt decides the result; transport outages remain bounded
-                // above, and every poll/pause remains cancellable.
+                // receipt decides the result; owner-aware transport recovery
+                // and every poll/pause remain cancellable.
                 availability.pause(SOURCE_REFRESH_POLL_INTERVAL)?;
             }
         }
@@ -847,6 +769,7 @@ pub(super) fn recover_wait_refresh_request(
     })
 }
 
+#[cfg(test)]
 fn enqueue_equivalent_wait_refresh_request(
     availability: &dyn crate::DaemonAvailabilityPort,
     data_root: &Path,
@@ -855,25 +778,8 @@ fn enqueue_equivalent_wait_refresh_request(
     trigger: RefreshRequestTrigger,
 ) -> Result<String> {
     let canonical_request = RefreshRequest::new(request_id.to_owned(), intent, trigger);
-    let request = wait_authority_request_json(SourceBackedRefreshMode::Wait, &canonical_request)?;
-    let response = request_admission_with_recovery_cancellable(
-        request_id,
-        |duration| availability.pause(duration),
-        || availability.checkpoint(),
-        || {
-            daemon_source_refresh_request_with_cancellation(
-                availability,
-                data_root,
-                request.clone(),
-                SOURCE_REFRESH_IPC_TIMEOUT,
-                SOURCE_REFRESH_RESPONSE_MAX_BYTES,
-            )
-        },
-    )?
-    .ok_or_else(|| retained_request_unobservable(request_id, 1))?;
-    validate_daemon_refresh_response(&response)?;
-    validate_source_refresh_status_response_authority(&response, request_id)?;
-    source_refresh_protocol_state(&response)?;
+    let mut recovery = WaitRefreshRecovery::new(data_root, &canonical_request, false)?;
+    recovery.request(availability, data_root, true)?;
     Ok(request_id.to_owned())
 }
 
@@ -884,6 +790,7 @@ fn wait_authority_request_json(
     SourceBackedRefreshRequest::new(mode, request).to_json()
 }
 
+#[cfg(test)]
 fn source_refresh_protocol_state(response: &Value) -> Result<RefreshRequestState> {
     Ok(source_refresh_protocol_status(response)?.request_state())
 }

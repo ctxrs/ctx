@@ -65,7 +65,12 @@ where
 
     host.protect_data_root(data_root)
         .context("protect ctx data root before provider refresh")?;
-    let publication = host.refresh(data_root, selection, request.no_daemon)?;
+    let publication = host.refresh(
+        data_root,
+        selection,
+        request.reconciliation_demand,
+        request.no_daemon,
+    )?;
     let (publication, receipt) = verified_publication(
         publication,
         "daemon source refresh published without an authoritative terminal receipt",
@@ -198,6 +203,7 @@ where
         .refresh(
             data_root,
             RefreshSelection::ExactSource(upsert.authority.clone()),
+            request.reconciliation_demand,
             request.no_daemon,
         )
         .map_err(|source| classify_import_path_refresh_error(path, source))?;
@@ -381,6 +387,7 @@ where
         .refresh(
             data_root,
             RefreshSelection::ExactSource(upsert.authority.clone()),
+            request.reconciliation_demand,
             request.no_daemon,
         )
         .map_err(|source| classify_import_path_refresh_error(&route_source.path, source))?;

@@ -90,6 +90,7 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
         &mut self,
         data_root: &Path,
         selection: RefreshSelection,
+        reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
         no_daemon: bool,
         progress: &mut ProgressReporter<'_>,
     ) -> Result<IngestPublication> {
@@ -110,6 +111,7 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
             data_root,
             no_daemon,
             selection,
+            reconciliation_demand,
             &self.semantic_completion,
             self.complete_blame,
             progress,

@@ -219,6 +219,7 @@ pub struct ImportRequest {
     pub input_format: Option<ImportFormat>,
     pub all: bool,
     pub resume: bool,
+    pub reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
     pub no_daemon: bool,
     pub format: OutputFormat,
     pub progress: ProgressMode,

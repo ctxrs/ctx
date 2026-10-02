@@ -19,6 +19,7 @@ pub(super) fn wait_for_import_core_refresh(
     data_root: &Path,
     no_daemon: bool,
     selection: RefreshSelection,
+    reconciliation_demand: ctx_history_refresh::SourceBackedReconciliationDemand,
     semantic_completion: &ImportSemanticCompletion,
     complete_blame: bool,
     progress: &mut ProgressReporter<'_>,
@@ -40,6 +41,7 @@ pub(super) fn wait_for_import_core_refresh(
         data_root,
         SourceBackedRefreshMode::Wait,
         selection,
+        reconciliation_demand,
         !no_daemon,
         &mut report_progress,
     )
