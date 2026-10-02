@@ -21,6 +21,9 @@ use ctx_history_index::{
 
 const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v16-audited-primary-lineage";
 
+#[path = "codex_child_independence/incremental_admission.rs"]
+mod incremental_admission;
+
 #[path = "codex_child_independence/quarantine.rs"]
 mod quarantine;
 

@@ -62,8 +62,9 @@ fn generation_source_owner_is_admissible_v0(
     // ignored-file behavior for partial writes while quarantining any
     // nonempty source whose bounded ownership prefix is absent or conflicting.
     //
-    // This validation must precede streaming: NativePath may otherwise stage
-    // pages before a later session_meta proves ownership ambiguous.
+    // Run this only when the shared family cannot reuse committed admission.
+    // It must precede append selection: direct append scans only the suffix,
+    // while a growing rewrite can also change ownership in the old prefix.
     if source.catalog_observation.len == 0 {
         return Ok(true);
     }
@@ -405,7 +406,7 @@ impl<B: ProviderRuntimeBinding> CodexSessionJsonlFamilyAdapterV0<B> {
             ));
         }
         let plans = prepared.sources;
-        let mut rejected_leaves = prepared
+        let rejected_leaves = prepared
             .rejected_leaves
             .iter()
             .map(|leaf| {
@@ -450,29 +451,18 @@ impl<B: ProviderRuntimeBinding> CodexSessionJsonlFamilyAdapterV0<B> {
                         "Codex catalog source has no authority path",
                     ))?;
             let observation = carried_or_observe_generation_source_capability_v0(source)?;
-            let owner_is_admissible =
-                crate::provider::codex::catalog::is_codex_compressed_session_rollout_path(
-                    &source.source_path,
-                ) || generation_source_owner_is_admissible_v0(source, native_session_id)?;
-            if owner_is_admissible {
-                leaves.push(JsonlFamilyLeaf::bind_frozen_observed(
-                    source_key.clone(),
-                    source.source_path.clone(),
-                    Arc::clone(&authority),
-                    authority_path,
-                    TypedKey::utf8(native_session_id)
-                        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
-                    observation,
-                ));
-            } else {
-                rejected_leaves.push(rejected_owner_leaf_v0(
-                    source,
-                    source_key,
-                    authority_path,
-                    observation,
-                    native_session_id,
-                )?);
-            }
+            // The filename supplies a candidate identity, not ownership authority.
+            // Shared JSONL reuses a compatible certified checkpoint for unchanged
+            // bytes and calls validate_changed_leaf before scanning other leaves.
+            leaves.push(JsonlFamilyLeaf::bind_frozen_observed(
+                source_key.clone(),
+                source.source_path.clone(),
+                Arc::clone(&authority),
+                authority_path,
+                TypedKey::utf8(native_session_id)
+                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
+                observation,
+            ));
             authorities
                 .entry(authority.named_path().to_path_buf())
                 .or_insert(authority);
@@ -619,6 +609,45 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexSessionJsonlFamilyAd
                 "Codex generation route has no discovery authority",
             ))
         }
+    }
+
+    fn validate_changed_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+    ) -> Result<Option<JsonlFamilyRejectedLeaf>> {
+        if !self.generation.is_session_tree()
+            || self.physical_encoding(leaf) != JsonlPhysicalEncoding::RawJsonl
+        {
+            return Ok(None);
+        }
+        let plan = self
+            .state
+            .lock()
+            .map_err(|_| codex_family_state_error())?
+            .plans
+            .get(leaf.source())
+            .cloned()
+            .ok_or(CaptureError::SystemInvariant(
+                "Codex JSONL leaf has no source plan",
+            ))?;
+        if generation_source_owner_is_admissible_v0(&plan.0, &plan.2)? {
+            return Ok(None);
+        }
+        let authority_path =
+            plan.0
+                .authority_relative_path
+                .clone()
+                .ok_or(CaptureError::SystemInvariant(
+                    "Codex catalog source has no authority path",
+                ))?;
+        rejected_owner_leaf_v0(
+            &plan.0,
+            &plan.1,
+            authority_path,
+            leaf.observation().clone(),
+            &plan.2,
+        )
+        .map(Some)
     }
 
     fn partial_member_roots(&self, _root: &Path) -> Option<Vec<PathBuf>> {

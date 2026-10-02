@@ -189,18 +189,20 @@ pub(super) fn bind_codex_partial_member_v0(
         .map_err(CaptureError::from)?;
     let observation = opened_codex_file_observation(member.source_path(), member.opened().file())?;
     let native_session_id =
-        crate::provider::codex::catalog::codex_canonical_session_id_from_path(member.source_path())
-            .or(
-                crate::provider::codex::catalog::probe_codex_native_session_id(
-                    member.source_path(),
-                    member.opened(),
-                    observation.len,
-                )?,
-            )
-            .or_else(|| codex_uncompressed_native_session_id_path_hint(member.source_path()))
-            .ok_or_else(|| CodexSourceBackedErrorV0::MissingNativeSessionId {
-                path: member.source_path().to_path_buf(),
-            })?;
+        match crate::provider::codex::catalog::codex_canonical_session_id_from_path(
+            member.source_path(),
+        ) {
+            Some(native_session_id) => Some(native_session_id),
+            None => crate::provider::codex::catalog::probe_codex_native_session_id(
+                member.source_path(),
+                member.opened(),
+                observation.len,
+            )?,
+        }
+        .or_else(|| codex_uncompressed_native_session_id_path_hint(member.source_path()))
+        .ok_or_else(|| CodexSourceBackedErrorV0::MissingNativeSessionId {
+            path: member.source_path().to_path_buf(),
+        })?;
     let after = opened_codex_file_observation(member.source_path(), member.opened().file())?;
     if !observation.admits_append_only_growth(&after) {
         return Err(CodexSourceBackedErrorV0::Capture(
