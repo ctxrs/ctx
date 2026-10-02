@@ -1,5 +1,6 @@
 use super::*;
 
+mod admission;
 mod first_record;
 mod paths;
 pub(super) use first_record::classify_incomplete_first_records;
@@ -233,6 +234,10 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     let mut opening = adapter
         .discover(root)
         .map_err(|error| route_discovery(adapter, error))?;
+    let bases = base_sources_for_route(adapter, sink)?;
+    let bases_by_descriptor = paths::bases_by_descriptor(&bases)?;
+    admission::validate_changed_leaves(adapter, &mut opening, &bases_by_descriptor)
+        .map_err(|error| route_discovery(adapter, error))?;
     classify_incomplete_first_records(adapter, &mut opening)
         .map_err(|error| route_discovery(adapter, error))?;
     if opening.root_missing()
@@ -243,9 +248,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             "provider JSONL root is unavailable",
         ));
     }
-    let bases = base_sources_for_route(adapter, sink)?;
     bind_prior_disposition_sources(adapter, &mut opening, &bases)?;
-    let bases_by_descriptor = paths::bases_by_descriptor(&bases)?;
     let authenticated_change_time_hints = normalize_authenticated_change_time_hints(
         adapter,
         &mut opening,
@@ -750,6 +753,14 @@ fn capture_partial_members<R: JsonlFamilyRuntime>(
         let retained = checkpoint.physical.source_observation();
         let current = leaf.observation();
         let unchanged = retained == current;
+        if !admission::can_reuse_admission(adapter, leaf, &base)
+            && adapter
+                .validate_changed_leaf(leaf)
+                .map_err(|error| route_discovery(adapter, error))?
+                .is_some()
+        {
+            return Ok(false);
+        }
         let append_candidate =
             current.length() > retained.length() && retained.same_stable_file(current);
         if !unchanged && !append_candidate {

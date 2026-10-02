@@ -272,6 +272,16 @@ pub trait JsonlFamilyAdapter: Send + Sync {
         JsonlRuntimeError<Self::Runtime>,
     >;
 
+    /// Validates provider admission before append selection, unless a compatible
+    /// committed checkpoint already certifies the exact strong file observation.
+    /// Returning a rejected leaf keeps the ordinary inventory quarantine path.
+    fn validate_changed_leaf(
+        &self,
+        _leaf: &JsonlFamilyLeaf<JsonlRuntimeError<Self::Runtime>>,
+    ) -> JsonlResult<Option<JsonlFamilyRejectedLeaf>, JsonlRuntimeError<Self::Runtime>> {
+        Ok(None)
+    }
+
     /// Retained roots under which a bounded member workset may be opened.
     /// Returning `None` selects the existing exhaustive path.
     fn partial_member_roots(&self, _root: &Path) -> Option<Vec<PathBuf>> {
