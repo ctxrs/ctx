@@ -300,7 +300,7 @@ const PROPERTY_ENUMS = new Map<string, ReadonlySet<string>>([
   ["docs_operation", new Set(["list", "search", "show", "man_print", "man_generate"])],
   ["topic", docTopics()],
   ["integration_action", new Set(["install", "remove", "status"])],
-  ["integration_target", new Set(["mcp", "skills", "slash_commands", "plugin"])],
+  ["integration_target", new Set(["mcp", "skills", "slash_commands", "plugin", "output_hook"])],
   ["integration_scope", new Set(["global", "project"])],
   ["target_agent_group", new Set(["all", "detected", "explicit", "picker", "fallback"])],
   ["integration_result", new Set(["ok", "partial_error", "all_current", "none_current", "partially_current"])],
