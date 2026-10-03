@@ -7,6 +7,7 @@ use notify::{
 };
 use std::{
     collections::BTreeMap,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -22,6 +23,29 @@ struct Stamp {
     modified: Option<SystemTime>,
     len: u64,
     kind: u8,
+    identity: (u64, u64),
+    created: Option<SystemTime>,
+}
+impl Stamp {
+    fn change_from(&self, prior: Option<&Self>) -> Option<EventKind> {
+        let Some(prior) = prior else {
+            return Some(EventKind::Create(CreateKind::Any));
+        };
+        if self.kind != prior.kind
+            || self.identity != prior.identity
+            || self.created != prior.created
+        {
+            return Some(EventKind::Modify(ModifyKind::Any));
+        }
+        // Entries within each subscription are compared separately. A directory's
+        // own mtime must not invalidate every source and config below it.
+        if self.kind == 1 || self == prior {
+            return None;
+        }
+        Some(EventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::WriteTime,
+        )))
+    }
 }
 struct Root {
     recursive: bool,
@@ -69,13 +93,7 @@ impl MetadataWatcher {
                             if canceled.load(Ordering::Acquire) {
                                 return;
                             }
-                            let kind = match root.entries.get(path) {
-                                None => Some(EventKind::Create(CreateKind::Any)),
-                                Some(old) if old != stamp => Some(EventKind::Modify(
-                                    ModifyKind::Metadata(MetadataKind::WriteTime),
-                                )),
-                                _ => None,
-                            };
+                            let kind = stamp.change_from(root.entries.get(path));
                             if let Some(kind) = kind {
                                 handler(Ok(Event::new(kind).add_path(path.clone())));
                             }
@@ -160,6 +178,8 @@ fn scan(
             Stamp {
                 modified: metadata.modified().ok(),
                 len: metadata.len(),
+                identity: (metadata.dev(), metadata.ino()),
+                created: metadata.created().ok(),
                 kind: if directory {
                     1
                 } else if metadata.file_type().is_symlink() {
@@ -194,6 +214,110 @@ fn scan(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn directory_mtime_change_does_not_invalidate_descendants() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("config.toml"), b"unchanged").unwrap();
+        let before = scan(root, false, || false).unwrap();
+        let modified = before[root].modified.unwrap() + Duration::from_secs(10);
+        std::fs::File::open(root)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let after = scan(root, false, || false).unwrap();
+        assert_ne!(before[root].modified, after[root].modified);
+        assert!(after
+            .iter()
+            .all(|(path, stamp)| stamp.change_from(before.get(path)).is_none()));
+    }
+
+    #[test]
+    fn directory_metadata_filter_preserves_child_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let active = root.join("active.jsonl");
+        std::fs::write(&active, b"first\n").unwrap();
+        let before = scan(root, false, || false).unwrap();
+        std::fs::write(&active, b"first\nsecond\n").unwrap();
+        let new_directory = root.join("new-provider");
+        std::fs::create_dir(&new_directory).unwrap();
+        let after = scan(root, false, || false).unwrap();
+        assert!(after[root].change_from(before.get(root)).is_none());
+        assert_eq!(
+            after[&active].change_from(before.get(&active)),
+            Some(EventKind::Modify(ModifyKind::Metadata(
+                MetadataKind::WriteTime
+            )))
+        );
+        assert_eq!(
+            after[&new_directory].change_from(before.get(&new_directory)),
+            Some(EventKind::Create(CreateKind::Any))
+        );
+    }
+
+    #[test]
+    fn same_timestamp_directory_replacement_requires_rearm() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("provider");
+        std::fs::create_dir(&root).unwrap();
+        let before = scan(&root, false, || false).unwrap();
+        std::fs::rename(&root, temp.path().join("previous-provider")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::File::open(&root)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(before[&root].modified.unwrap()))
+            .unwrap();
+        let after = scan(&root, false, || false).unwrap();
+        assert_eq!(before[&root].modified, after[&root].modified);
+        assert_ne!(before[&root].identity, after[&root].identity);
+        let kind = after[&root].change_from(before.get(&root)).unwrap();
+        let event = super::super::normalize_native_watch_event(Ok(Event::new(kind).add_path(root)))
+            .unwrap();
+        assert!(event.requires_rearm());
+    }
+
+    #[test]
+    fn reused_directory_inode_with_new_birth_time_is_structural() {
+        let prior = Stamp {
+            modified: Some(SystemTime::UNIX_EPOCH),
+            len: 64,
+            kind: 1,
+            identity: (1, 2),
+            created: Some(SystemTime::UNIX_EPOCH),
+        };
+        let replacement = Stamp {
+            created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+            ..prior.clone()
+        };
+        assert_eq!(
+            replacement.change_from(Some(&prior)),
+            Some(EventKind::Modify(ModifyKind::Any))
+        );
+    }
+
+    #[test]
+    fn same_size_and_timestamp_file_replacement_is_structural() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let path = root.join("config.toml");
+        std::fs::write(&path, b"before").unwrap();
+        let before = scan(root, false, || false).unwrap();
+        std::fs::rename(&path, root.join("previous-config")).unwrap();
+        std::fs::write(&path, b"after!").unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(before[&path].modified.unwrap()))
+            .unwrap();
+        let after = scan(root, false, || false).unwrap();
+        assert_eq!(before[&path].modified, after[&path].modified);
+        assert_eq!(before[&path].len, after[&path].len);
+        assert_eq!(
+            after[&path].change_from(before.get(&path)),
+            Some(EventKind::Modify(ModifyKind::Any))
+        );
+    }
 
     #[test]
     fn same_timestamp_append_is_reported() {
