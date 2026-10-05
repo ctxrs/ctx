@@ -9,6 +9,7 @@ use ctx_attribution_model::{
 };
 use ctx_history_snapshot_reader::{CoreSnapshot, SnapshotContract, load_active_generation_id};
 
+use crate::catch_up::sync_generation_pinned_core;
 use crate::diagnostic::{from_adapter_error, from_snapshot_error};
 use crate::errors::AdapterError;
 use crate::graph::segment_graph::{SegmentGraph, SegmentGraphError};
@@ -153,7 +154,7 @@ pub fn status(
 }
 
 /// Completes attribution from the exact snapshot retained by the caller.
-/// Used identically by daemon startup/publication and explicit manual completion.
+/// Explicit completion keeps its pin even while waiting for another writer.
 pub fn catch_up(
     data_root: &Path,
     snapshot: &CoreSnapshot,
@@ -167,12 +168,31 @@ pub fn catch_up(
         crate::core_materialization::CORE_MATERIALIZER_REVISION,
         cancelled,
     )?;
-    crate::catch_up::sync_generation_pinned_core(
-        data_root,
-        snapshot,
-        &mut materializer,
-        Some(cancelled),
-    )
+    sync_generation_pinned_core(data_root, snapshot, &mut materializer, Some(cancelled))
+}
+
+/// Background maintenance selects current Core after acquiring the writer lease.
+/// A queued worker must not republish the snapshot that was current before its wait.
+pub fn catch_up_current(
+    data_root: &Path,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> anyhow::Result<Option<CoreMaterializationSyncOutcome>> {
+    if cancelled() {
+        return Err(crate::materializer::SegmentMaterializerError::Cancelled.into());
+    }
+    if load_active_generation_id(data_root)?.is_none() {
+        return Ok(None);
+    }
+    let mut materializer = SegmentMaterializer::open_cancellable(
+        index_root(data_root),
+        crate::core_materialization::CORE_MATERIALIZER_REVISION,
+        cancelled,
+    )?;
+    let Some(generation) = load_active_generation_id(data_root)? else {
+        return Ok(None);
+    };
+    let snapshot = CoreSnapshot::open(data_root, &generation, &SnapshotContract::current()?)?;
+    sync_generation_pinned_core(data_root, &snapshot, &mut materializer, Some(cancelled)).map(Some)
 }
 
 /// Reads active materializer progress without waiting, creating files, or inspecting index bodies.
@@ -247,12 +267,8 @@ pub fn catch_up_with_progress(
             &checkpoint,
         )?;
         report(&materializer.progress())?;
-        let outcome = crate::catch_up::sync_generation_pinned_core(
-            data_root,
-            snapshot,
-            &mut materializer,
-            Some(&checkpoint),
-        )?;
+        let outcome =
+            sync_generation_pinned_core(data_root, snapshot, &mut materializer, Some(&checkpoint))?;
         let mut progress = materializer.progress();
         progress.phase = MaterializationPhase::Complete;
         progress.core_generation_id = Some(snapshot.generation_id().to_owned());
