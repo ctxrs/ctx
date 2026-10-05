@@ -1,5 +1,16 @@
 use super::*;
 
+pub(super) fn acquire_daemon_lock(
+    data_root: &Path,
+    finite_worker: bool,
+) -> Result<Option<DaemonLock>> {
+    if finite_worker {
+        DaemonLock::acquire_for_finite_worker(data_root)
+    } else {
+        DaemonLock::acquire(data_root)
+    }
+}
+
 pub(super) fn recover_source_refresh_coordinator_before_ipc(
     runtime: &mut DaemonRuntime,
     data_root: &Path,
@@ -183,6 +194,27 @@ pub(super) fn ensure_daemon_ipc_services_healthy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finite_lock_omits_sha_and_preserves_singleton_ownership() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let lock = acquire_daemon_lock(temp.path(), true)?.expect("finite worker lock");
+        let path = ctx_daemon_runtime::daemon_lock_path(temp.path());
+        let identity = ctx_daemon_runtime::read_pid_lock_json(&path).expect("finite identity");
+        assert!(identity.get("binary_sha256").is_none());
+        assert!(ctx_daemon_runtime::daemon_lock_executable_metadata(&identity).is_some());
+        assert!(acquire_daemon_lock(temp.path(), false)?.is_none());
+        drop(lock);
+
+        let _lock = acquire_daemon_lock(temp.path(), false)?.expect("persistent daemon lock");
+        let identity = ctx_daemon_runtime::read_pid_lock_json(&path).expect("persistent identity");
+        assert!(identity["binary_sha256"]
+            .as_str()
+            .is_some_and(|sha| sha.len() == 64));
+        assert!(ctx_daemon_runtime::daemon_lock_executable_metadata(&identity).is_some());
+        assert!(acquire_daemon_lock(temp.path(), true)?.is_none());
+        Ok(())
+    }
 
     fn tracker(started_at: Instant) -> FiniteCoreWorkerExit {
         FiniteCoreWorkerExit {

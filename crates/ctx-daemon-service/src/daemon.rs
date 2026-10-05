@@ -313,7 +313,7 @@ where
     {
         return Ok(());
     }
-    let Some(lock) = DaemonLock::acquire(data_root)? else {
+    let Some(lock) = acquire_daemon_lock(data_root, finite_worker)? else {
         return Ok(());
     };
     // Close the check/acquire race with an installation lifecycle owner that

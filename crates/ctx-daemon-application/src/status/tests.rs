@@ -70,6 +70,78 @@ fn report(
 }
 
 #[test]
+fn hashless_worker_status_is_live_until_its_lock_is_released() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let lock = DaemonLock::acquire_for_finite_worker(temp.path())?.expect("finite worker lock");
+    write_private_json_file(
+        &daemon_status_path(temp.path()),
+        &json!({"status": "running", "pid": process::id()}),
+    )?;
+    let running = report(temp.path(), false, None);
+    assert_eq!(running["status"], "running");
+    assert_eq!(running["running"], true);
+    assert_eq!(running["live_pid"], process::id());
+    assert_eq!(running["recoverable"], false);
+    assert_eq!(running["lock_identity"]["owner_image_matches"], true);
+    assert!(running["lock_identity"].get("binary_sha256").is_none());
+    assert!(running["lock_identity"].get("binary_metadata").is_some());
+    drop(lock);
+    let released = report(temp.path(), false, None);
+    assert_eq!(released["running"], false);
+    assert_eq!(released["status"], "stale_lock");
+    assert!(released.get("live_pid").is_none());
+    Ok(())
+}
+
+#[test]
+fn hashless_worker_status_rejects_stale_or_malformed_metadata() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let _lock = DaemonLock::acquire_for_finite_worker(temp.path())?.expect("finite worker lock");
+    let path = daemon_lock_path(temp.path());
+    let original = read_pid_lock_json(&path).expect("finite metadata");
+    write_private_json_file(
+        &daemon_status_path(temp.path()),
+        &json!({"status": "running", "pid": process::id()}),
+    )?;
+    let mut changed_stamp = original["binary_metadata"].clone();
+    changed_stamp["len"] = json!(changed_stamp["len"].as_u64().unwrap() + 1);
+    for stamp in [changed_stamp, Value::Null, json!({})] {
+        let mut changed = original.clone();
+        changed["binary_metadata"] = stamp;
+        write_private_json_file(&path, &changed)?;
+        let stale = report(temp.path(), false, None);
+        assert_eq!(stale["status"], "stale_lock", "{stale}");
+        assert_eq!(stale["running"], false);
+        assert_eq!(stale["reason"], "daemon_owner_identity_mismatch");
+        assert!(stale.get("live_pid").is_none());
+    }
+    write_private_json_file(&path, &original)?;
+    assert_eq!(report(temp.path(), false, None)["running"], true);
+    Ok(())
+}
+
+#[test]
+fn legacy_sha_only_owner_status_still_verifies_the_live_image() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let _lock = DaemonLock::acquire(temp.path())?.expect("legacy fixture owner");
+    let path = daemon_lock_path(temp.path());
+    let mut legacy = read_pid_lock_json(&path).expect("fixture identity");
+    legacy.as_object_mut().unwrap().remove("binary_metadata");
+    write_private_json_file(&path, &legacy)?;
+    write_private_json_file(
+        &daemon_status_path(temp.path()),
+        &json!({"status": "running", "pid": process::id()}),
+    )?;
+    assert_eq!(report(temp.path(), false, None)["running"], true);
+    legacy["binary_sha256"] = json!("0".repeat(64));
+    write_private_json_file(&path, &legacy)?;
+    let stale = report(temp.path(), false, None);
+    assert_eq!(stale["running"], false);
+    assert_eq!(stale["reason"], "daemon_owner_identity_mismatch");
+    Ok(())
+}
+
+#[test]
 fn orphaned_running_status_is_recoverable_without_claiming_a_live_pid() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     write_lifecycle_status(temp.path(), "running", None)?;

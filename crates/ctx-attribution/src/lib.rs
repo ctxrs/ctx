@@ -36,7 +36,8 @@ pub mod presentation;
 mod runtime;
 pub use ctx_attribution_derivation::worker_budget;
 pub use runtime::{
-    blame, catch_up, catch_up_with_progress, materialization_progress, query, readiness, status,
+    blame, catch_up, catch_up_current, catch_up_with_progress, materialization_progress, query,
+    readiness, status,
 };
 mod diagnostic;
 pub use catch_up::CoreMaterializationSyncOutcome;

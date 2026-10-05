@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use ctx_daemon_runtime::{
-    daemon_lock_path, daemon_owner_binary_identity_matches, daemon_root_path, daemon_status_path,
+    daemon_lock_path, daemon_owner_metadata_identity_matches, daemon_root_path, daemon_status_path,
     pid_lock_file_is_orphaned, pid_lock_file_reports_running, process_state, read_daemon_status,
     read_pid_lock_file, read_pid_lock_json,
 };
@@ -106,7 +106,7 @@ pub(super) fn prepare_daemon_status<'a>(
                 .get("binary")
                 .and_then(Value::as_str)
                 .map(Path::new)
-                .map(|executable| daemon_owner_binary_identity_matches(identity, executable))
+                .map(|executable| daemon_owner_metadata_identity_matches(identity, executable))
                 .unwrap_or(Ok(false))
         });
     let owner_identity_matches = match &owner_identity {
@@ -297,6 +297,7 @@ impl DaemonStatusPreparation<'_> {
                 .lock_value
                 .as_ref()
                 .and_then(|value| json_string(value, "binary_sha256")),
+            "binary_metadata": self.lock_value.as_ref().and_then(|value| value.get("binary_metadata")),
             "owner_image_matches": self.owner_identity_matches,
             "owner_image_status": if self.owner_inspection_denied {
                 Some("permission_denied")

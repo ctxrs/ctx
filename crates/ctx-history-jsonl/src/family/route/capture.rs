@@ -236,8 +236,15 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         .map_err(|error| route_discovery(adapter, error))?;
     let bases = base_sources_for_route(adapter, sink)?;
     let bases_by_descriptor = paths::bases_by_descriptor(&bases)?;
-    admission::validate_changed_leaves(adapter, &mut opening, &bases_by_descriptor)
-        .map_err(|error| route_discovery(adapter, error))?;
+    let append_only_trust_allowed = sink.reconciliation_demand()
+        == ctx_history_capture_runtime::SourceBackedReconciliationDemand::Incremental;
+    admission::validate_changed_leaves(
+        adapter,
+        &mut opening,
+        &bases_by_descriptor,
+        append_only_trust_allowed,
+    )
+    .map_err(|error| route_discovery(adapter, error))?;
     classify_incomplete_first_records(adapter, &mut opening)
         .map_err(|error| route_discovery(adapter, error))?;
     if opening.root_missing()
@@ -349,8 +356,6 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     let mut retained_terminal_sources = HashMap::new();
     #[cfg(test)]
     tests::begin_admission(selected_leaves.len(), bases.len());
-    let append_only_trust_allowed = sink.reconciliation_demand()
-        == ctx_history_capture_runtime::SourceBackedReconciliationDemand::Incremental;
     for leaf in &selected_leaves {
         let Some(base) = base_for_leaf(&bases_by_descriptor, leaf) else {
             scan_selected_leaves.push(leaf.clone());
@@ -753,7 +758,7 @@ fn capture_partial_members<R: JsonlFamilyRuntime>(
         let retained = checkpoint.physical.source_observation();
         let current = leaf.observation();
         let unchanged = retained == current;
-        if !admission::can_reuse_admission(adapter, leaf, &base)
+        if !admission::can_reuse_admission(adapter, leaf, &base, true)
             && adapter
                 .validate_changed_leaf(leaf)
                 .map_err(|error| route_discovery(adapter, error))?

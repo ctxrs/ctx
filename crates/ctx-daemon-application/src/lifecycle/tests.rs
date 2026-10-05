@@ -2,6 +2,7 @@ use super::*;
 use crate::{SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, SEMANTIC_EMBEDDING_TOKEN_ENV};
 use std::cell::RefCell;
 
+mod executable_metadata_tests;
 mod managed_root;
 mod owner_wait_tests;
 
@@ -605,7 +606,8 @@ fn test_daemon_owner(owner_id: &str, pid: u32) -> DaemonOwnerIdentity {
         owner_id: owner_id.to_owned(),
         pid,
         started_at_ms: 1_000,
-        binary_sha256: "0123456789abcdef".to_owned(),
+        binary_sha256: Some("0123456789abcdef".to_owned()),
+        binary_metadata: None,
     }
 }
 
@@ -1051,7 +1053,7 @@ fn owner_replacement_during_probe_rejects_readiness() {
     changed_start.started_at_ms += 1;
     replacements.push(changed_start);
     let mut changed_digest = owner.clone();
-    changed_digest.binary_sha256 = "fedcba9876543210".to_owned();
+    changed_digest.binary_sha256 = Some("fedcba9876543210".to_owned());
     replacements.push(changed_digest);
 
     for replacement in replacements {
@@ -1373,7 +1375,7 @@ fn recovery_probes_first_then_revalidates_the_full_owner_before_termination() ->
 fn recovery_never_terminates_an_owner_replaced_during_the_probe() -> Result<()> {
     let owner = test_daemon_owner("unusable-owner", 48);
     let mut replacement = owner.clone();
-    replacement.binary_sha256 = "replacement-binary-digest".to_owned();
+    replacement.binary_sha256 = Some("replacement-binary-digest".to_owned());
     let events = RefCell::new(Vec::new());
 
     let terminated = recover_unusable_daemon_owner_with(

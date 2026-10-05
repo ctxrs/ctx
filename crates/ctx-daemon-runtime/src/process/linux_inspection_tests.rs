@@ -145,9 +145,22 @@ fn live_owner_inspection_denial_preserves_pid_and_io_error() -> Result<()> {
                 .context("executable-inspection denial lost its I/O cause")?;
             assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
             assert_eq!(source.raw_os_error(), denied_io.raw_os_error());
+            let before = EXECUTABLE_HASH_READS.with(std::cell::Cell::get);
+            let error = daemon_owner_metadata_identity_matches(&owner, &executable)
+                .expect_err("metadata inspection denial must remain typed");
+            assert_eq!(
+                error
+                    .downcast_ref::<ProcessExecutableInspectionDenied>()
+                    .map(|denied| denied.pid),
+                Some(pid),
+            );
+            assert_eq!(EXECUTABLE_HASH_READS.with(std::cell::Cell::get), before);
             // Termination callers still receive no usable image evidence.
             assert_eq!(process_executable_sha256(pid), None);
         } else {
+            let before = EXECUTABLE_HASH_READS.with(std::cell::Cell::get);
+            assert!(daemon_owner_metadata_identity_matches(&owner, &executable)?);
+            assert_eq!(EXECUTABLE_HASH_READS.with(std::cell::Cell::get), before);
             assert!(daemon_owner_binary_identity_matches(&owner, &executable)?);
             assert_eq!(
                 process_executable_sha256(pid).as_deref(),

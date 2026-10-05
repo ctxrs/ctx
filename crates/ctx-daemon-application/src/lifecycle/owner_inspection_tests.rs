@@ -12,6 +12,7 @@ use std::{
 fn denied_image_observation_requires_live_stable_owner_and_authenticated_response() -> Result<()> {
     for case in [
         "ready",
+        "hashless_ready",
         "wrong_response_pid",
         "malformed",
         "changed_owner",
@@ -21,7 +22,12 @@ fn denied_image_observation_requires_live_stable_owner_and_authenticated_respons
     ] {
         let temp = tempfile::tempdir_in("/tmp")?;
         let data_root = temp.path();
-        let lock = DaemonLock::acquire(data_root)?.expect("new owner");
+        let lock = if case == "hashless_ready" {
+            DaemonLock::acquire_for_finite_worker(data_root)?
+        } else {
+            DaemonLock::acquire(data_root)?
+        }
+        .expect("new owner");
         let lock_path = daemon_lock_path(data_root);
         let original = fs::read(&lock_path)?;
         let endpoint_path = data_root.join("daemon/source-refresh-endpoint.json");
@@ -84,7 +90,11 @@ fn denied_image_observation_requires_live_stable_owner_and_authenticated_respons
                 pid: std::process::id(),
             },
         );
-        assert_eq!(result.is_ok(), case == "ready", "{case}: {result:?}");
+        assert_eq!(
+            result.is_ok(),
+            matches!(case, "ready" | "hashless_ready"),
+            "{case}: {result:?}"
+        );
         if let Some(server) = server {
             server.join().expect("probe server")?;
         }

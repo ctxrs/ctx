@@ -227,16 +227,7 @@ fn reconcile_current_attribution(
     if !ctx_app_config::AppConfig::load(data_root)?.blame.enabled {
         return Ok(());
     }
-    let Some(generation) = ctx_history_snapshot_reader::load_active_generation_id(data_root)?
-    else {
-        return Ok(());
-    };
-    let snapshot = ctx_history_snapshot_reader::CoreSnapshot::open(
-        data_root,
-        &generation,
-        &ctx_history_snapshot_reader::SnapshotContract::current()?,
-    )?;
-    ctx_attribution::catch_up(data_root, &snapshot, cancelled)?;
+    ctx_attribution::catch_up_current(data_root, cancelled)?;
     Ok(())
 }
 
