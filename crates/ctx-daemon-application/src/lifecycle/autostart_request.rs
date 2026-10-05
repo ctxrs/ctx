@@ -36,7 +36,7 @@ pub(super) fn request_daemon_autostart_with(
         && daemon_lock_is_active(data_root)
     {
         let executable = daemon_autostart_exe()?;
-        if daemon_lock_matches_executable(data_root, &executable)? {
+        if daemon_lock_matches_executable_metadata(data_root, &executable)? {
             if let Some(existing) = existing_daemon_request(data_root, checkpoint)? {
                 return Ok(existing);
             }

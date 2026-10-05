@@ -137,7 +137,10 @@ fn codex_prefix_ownership_quarantine_retains_prior_source_and_repairs() {
         ]),
     )
     .unwrap();
-    let (quarantined, _) = incremental_refresh(&index_root, &registry, &initial);
+    // Historical rewriting plus growth of the same object violates the live
+    // append contract. Exhaustive reconciliation is the detection boundary.
+    let quarantined =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(quarantined.failed_routes.is_empty());
     assert_eq!(quarantined.logical_source_failures.total(), 1);
     let index = VerifiedIndex::open_pinned(&index_root).unwrap();
@@ -325,7 +328,11 @@ fn committed_codex_good_bad_good_retains_prior_source_while_neighbor_advances() 
     .unwrap();
     append_event(&neighbor_path, message("goodbadgood-neighbor-advanced"));
 
-    let (middle, _) = incremental_refresh(&index_root, &registry, &cold);
+    // This rewrites already admitted bytes while growing the same object.
+    // Exhaustive reconciliation checks historical ownership; incremental
+    // append trusts those rows and validates newly appended records.
+    let middle =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(middle.failed_routes.is_empty());
     let middle_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(records_for(&middle_index, repairable_id).len(), 1);
