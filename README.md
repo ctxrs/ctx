@@ -242,7 +242,7 @@ output and makes generic compaction reversible. It also has automatic agent
 setup, local savings reports, optional original-output recovery, and a
 one-command migration for recognized RTK integrations.
 
-In the [v0.4.0 release benchmark](benchmarks/results/2026-09-21-release-v0.4.0/README.md),
+In the [v0.4.0 release benchmark](https://github.com/ctxrs/sift/blob/c22fb1b3747352dba8f8323c057d60e7afd92bf5/benchmarks/results/2026-09-21-release-v0.4.0/README.md),
 ctx was faster than RTK 0.49 on all ten of our sample workloads and stayed within
 1.35 ms of running the command directly. Across workloads collected from our own real usage,
 ctx reduced tool call output by 43%.
