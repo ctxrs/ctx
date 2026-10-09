@@ -45,6 +45,7 @@ use std::{path::Path, sync::Arc};
 
 mod complexity_contract;
 mod merge_policy;
+mod rollback_merge_lifetime;
 mod routes;
 mod verification;
 

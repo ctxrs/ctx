@@ -191,7 +191,6 @@ use ctx_history_index_format::{
     IndexDocument, OpenedPinnedPublication, PinnedPublication,
 };
 use ctx_history_index_generation::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
-use merge_policy::LexicalMergePolicy;
 use preparation::PreparedSessionIdentityFacts;
 use staging::{finish_identical_staging, PendingSource as StagedPendingSource, PendingSourceMode};
 use writer_options::CHANGED_SESSION_REGISTRY_ENTRY_CHARGE_BYTES;
@@ -399,6 +398,7 @@ pub struct GenerationWriter {
     retained_generation_directories: ctx_history_index_generation::RetainedGenerationDirectories,
     preflight_lock: Option<DirectoryLock>,
     writer: Option<IndexWriter<IndexDocument>>,
+    merge_activation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     writer_options: WriterOptions,
     replacement_memory_bytes: usize,
     replacement_memory_used: usize,

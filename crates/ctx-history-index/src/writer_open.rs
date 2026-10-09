@@ -297,6 +297,7 @@ impl GenerationWriter {
                 retained_generation_directories,
                 preflight_lock: Some(preflight_lock),
                 writer: None,
+                merge_activation: None,
                 writer_options: options,
                 replacement_memory_bytes,
                 replacement_memory_used: 0,
