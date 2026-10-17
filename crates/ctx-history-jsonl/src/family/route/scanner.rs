@@ -67,9 +67,21 @@ pub(super) fn physical_identity<R: JsonlFamilyRuntime>(
     leaf: &JsonlFamilyLeaf<JsonlRuntimeError<R>>,
 ) -> JsonlSourceIdentity {
     let encoding = adapter.physical_encoding(leaf);
-    let policy_revision = match encoding {
-        super::super::JsonlPhysicalEncoding::RawJsonl => FAMILY_POLICY_REVISION.to_owned(),
-        _ => format!("{FAMILY_POLICY_REVISION}:{}", encoding.checkpoint_tag()),
+    let mutable_first_record = leaf
+        .identity_probe
+        .as_ref()
+        .and_then(|probe| probe.mutable_first_record);
+    let policy_revision = match (encoding, mutable_first_record) {
+        (super::super::JsonlPhysicalEncoding::RawJsonl, None) => FAMILY_POLICY_REVISION.to_owned(),
+        (super::super::JsonlPhysicalEncoding::RawJsonl, Some(policy)) => {
+            format!("{FAMILY_POLICY_REVISION}:{}", policy.checkpoint_tag())
+        }
+        (_, None) => format!("{FAMILY_POLICY_REVISION}:{}", encoding.checkpoint_tag()),
+        (_, Some(policy)) => format!(
+            "{FAMILY_POLICY_REVISION}:{}:{}",
+            policy.checkpoint_tag(),
+            encoding.checkpoint_tag()
+        ),
     };
     JsonlSourceIdentity::new(
         adapter.provider().as_str(),

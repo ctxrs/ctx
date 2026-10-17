@@ -26,6 +26,11 @@ pub(in crate::family::route) fn classify_incomplete_first_records<R: JsonlFamily
                         framing: adapter.record_framing(),
                         freeze_observation_at_scan: leaf.frozen_scan_observation().is_some(),
                         admitted_length: leaf.admitted_length(),
+                        mutable_first_record: leaf
+                            .identity_probe
+                            .as_ref()
+                            .and_then(|probe| probe.mutable_first_record)
+                            .is_some(),
                     },
                 )?;
                 if incomplete {
@@ -67,6 +72,7 @@ pub(in crate::family::route) fn classify_incomplete_first_records<R: JsonlFamily
                             framing: adapter.record_framing(),
                             freeze_observation_at_scan: false,
                             admitted_length: observation.length(),
+                            mutable_first_record: false,
                         },
                     )?
                     .0
@@ -105,6 +111,7 @@ struct FirstRecordProbe {
     framing: JsonlRecordFraming,
     freeze_observation_at_scan: bool,
     admitted_length: u64,
+    mutable_first_record: bool,
 }
 
 fn first_record_is_incomplete<E: JsonlFamilyError>(
@@ -119,9 +126,10 @@ fn first_record_is_incomplete<E: JsonlFamilyError>(
         framing,
         freeze_observation_at_scan,
         admitted_length,
+        mutable_first_record,
     } = probe;
     let opened = authority.open_file(authority_path)?;
-    let current = if freeze_observation_at_scan {
+    let current = if freeze_observation_at_scan || mutable_first_record {
         observe_opened_file_allow_append(source_path, &opened)?
     } else {
         observe_opened_file(source_path, &opened)?
@@ -130,8 +138,9 @@ fn first_record_is_incomplete<E: JsonlFamilyError>(
     // observation. Classify their first record inside that bound while later
     // scan and terminal proofs authenticate the prefix; newly appended bytes
     // belong to the next refresh. Exact leaves retain exact preflight behavior.
-    if (freeze_observation_at_scan && !expected.admits_frozen_prefix_in(&current))
-        || (!freeze_observation_at_scan && expected != &current)
+    if ((freeze_observation_at_scan || mutable_first_record)
+        && !expected.admits_frozen_prefix_in(&current))
+        || (!freeze_observation_at_scan && !mutable_first_record && expected != &current)
     {
         return Err(E::source_changed());
     }

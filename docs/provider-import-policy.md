@@ -249,6 +249,15 @@ contract for that source family:
   next refresh imports that suffix exactly once, while truncation, path
   replacement, and mutation inside the authenticated prefix continue to fail
   closed.
+  Pi's OMP title slot is a narrow exception: valid v1 metadata may change
+  within the first 256 bytes, including LF. The identity probe validates the
+  slot before opting in. Prefix and admitted-EOF authentication revalidate its
+  schema and substitute 256 zero bytes when hashing. Session headers and all
+  following bytes remain exact. Different slot widths, CRLF, relocated
+  newlines, malformed metadata, truncation, and file replacement still fail
+  closed. The checkpoint identity names this mode, so raw-prefix checkpoints
+  cannot resume masked-prefix scans. Other Pi title records remain
+  parse-compatible without this exception.
 - Standard-Zstandard Codex rollouts snapshot exactly the frozen compressed
   prefix from the retained source handle, then decode and hash that same private
   snapshot. The compressed snapshot plus decoded spool is bounded to 256 MiB

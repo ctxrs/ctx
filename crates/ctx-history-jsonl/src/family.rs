@@ -20,6 +20,8 @@ use ctx_history_source_io::{
 mod checkpoint;
 mod framing;
 mod identity;
+mod mutable_first_record;
+pub use mutable_first_record::JsonlMutableFirstRecord;
 mod physical;
 mod rejections;
 mod revalidation;
@@ -215,6 +217,7 @@ pub struct JsonlProbe {
     prefix_hasher: JsonlResumableSha256,
     complete_prefix_end: u64,
     next_physical_ordinal: u64,
+    mutable_first_record: Option<JsonlMutableFirstRecord>,
 }
 
 impl JsonlProbe {
@@ -245,6 +248,7 @@ pub struct JsonlReader<E: JsonlFamilyError> {
     whole_record: bool,
     append_log: bool,
     bind_admitted_eof: bool,
+    mutable_first_record: Option<JsonlMutableFirstRecord>,
     logical_eof: Option<u64>,
     complete_prefix_ends_with_terminal_nul_padding: bool,
     semantic_append_resume: Option<JsonlSemanticAppendResume>,
@@ -317,6 +321,28 @@ pub fn probe_records_until<T, E, V>(
     source_path: &Path,
     source_file: &Arc<OpenedProviderSourceFile<E>>,
     max_records: usize,
+    visit: impl FnMut(JsonlRecordRef<'_>) -> JsonlResult<Option<T>, V>,
+) -> JsonlResult<Option<(T, JsonlProbe)>, V>
+where
+    E: JsonlFamilyError,
+    V: From<E>,
+{
+    probe_records_until_with_mutable_first_record(
+        source_path,
+        source_file,
+        max_records,
+        None,
+        visit,
+    )
+}
+
+/// Like `probe_records_until`, with a provider-approved fixed-width first
+/// metadata record. Only a complete matching first record activates the policy.
+pub fn probe_records_until_with_mutable_first_record<T, E, V>(
+    source_path: &Path,
+    source_file: &Arc<OpenedProviderSourceFile<E>>,
+    max_records: usize,
+    first_record_policy: Option<JsonlMutableFirstRecord>,
     mut visit: impl FnMut(JsonlRecordRef<'_>) -> JsonlResult<Option<T>, V>,
 ) -> JsonlResult<Option<(T, JsonlProbe)>, V>
 where
@@ -343,7 +369,10 @@ where
     let mut hasher = new_prefix_hasher();
     let mut buffer = Vec::new();
     let mut start = 0_u64;
+    let mut mutable_first_record = None;
     for ordinal in 0..max_records {
+        let before_first_record =
+            (ordinal == 0 && first_record_policy.is_some()).then(|| hasher.clone());
         let (end, record_digest, _wire_bytes) = match read_bounded_line::<E>(
             &mut reader,
             &mut buffer,
@@ -371,6 +400,15 @@ where
                 "provider identity probe ordinal exceeds u64",
             ))
         })?;
+        if ordinal == 0 {
+            if let Some(policy) =
+                first_record_policy.filter(|policy| policy.validates_framing(&buffer, end))
+            {
+                hasher = before_first_record.expect("first-record policy retained its hash state");
+                hasher.update(&JsonlMutableFirstRecord::MASK);
+                mutable_first_record = Some(policy);
+            }
+        }
         if let Some(value) = visit(JsonlRecordRef::new(
             &buffer,
             JsonlRecordEvidence::new(physical_ordinal, start, end, record_digest),
@@ -382,6 +420,7 @@ where
                 &observation,
                 end,
                 prefix_digest(&hasher),
+                mutable_first_record,
             )
             .map_err(V::from)?;
             return Ok(Some((
@@ -391,6 +430,7 @@ where
                     prefix_hasher: hasher,
                     complete_prefix_end: end,
                     next_physical_ordinal: physical_ordinal.saturating_add(1),
+                    mutable_first_record,
                 },
             )));
         }
@@ -402,6 +442,7 @@ where
         &observation,
         start,
         prefix_digest(&hasher),
+        mutable_first_record,
     )
     .map_err(V::from)?;
     Ok(None)

@@ -11,7 +11,9 @@ use std::{fs::File, io::Read, path::Path};
 
 use sha2::{Digest, Sha256};
 
-use super::{identity::observe_metadata, new_prefix_hasher, JsonlFileObservation};
+use super::{
+    identity::observe_metadata, new_prefix_hasher, JsonlFileObservation, JsonlMutableFirstRecord,
+};
 use super::{JsonlFamilyError, JsonlResult, JsonlResumableSha256, OpenedProviderSourceFile};
 
 #[cfg(any(test, feature = "test-support"))]
@@ -293,6 +295,7 @@ pub fn revalidate_frozen_prefix<E: JsonlFamilyError>(
     frozen: &JsonlFileObservation,
     prefix_length: u64,
     expected_prefix_digest: [u8; 32],
+    mutable_first_record: Option<JsonlMutableFirstRecord>,
 ) -> JsonlResult<JsonlFileObservation, E> {
     revalidate_frozen_prefix_with_hasher(
         source_path,
@@ -302,6 +305,7 @@ pub fn revalidate_frozen_prefix<E: JsonlFamilyError>(
         expected_prefix_digest,
         new_prefix_hasher(),
         false,
+        mutable_first_record,
     )
 }
 
@@ -311,6 +315,7 @@ pub(crate) fn authenticate_frozen_prefix<E: JsonlFamilyError>(
     frozen: &JsonlFileObservation,
     prefix_length: u64,
     expected_prefix_digest: [u8; 32],
+    mutable_first_record: Option<JsonlMutableFirstRecord>,
 ) -> JsonlResult<JsonlFileObservation, E> {
     revalidate_frozen_prefix_with_hasher(
         source_path,
@@ -320,6 +325,7 @@ pub(crate) fn authenticate_frozen_prefix<E: JsonlFamilyError>(
         expected_prefix_digest,
         new_prefix_hasher(),
         true,
+        mutable_first_record,
     )
 }
 
@@ -329,6 +335,7 @@ pub(crate) fn revalidate_frozen_prefix_sha256<E: JsonlFamilyError>(
     frozen: &JsonlFileObservation,
     prefix_length: u64,
     expected_prefix_digest: [u8; 32],
+    mutable_first_record: Option<JsonlMutableFirstRecord>,
 ) -> JsonlResult<JsonlFileObservation, E> {
     revalidate_frozen_prefix_with_hasher(
         source_path,
@@ -338,6 +345,7 @@ pub(crate) fn revalidate_frozen_prefix_sha256<E: JsonlFamilyError>(
         expected_prefix_digest,
         Sha256::default(),
         false,
+        mutable_first_record,
     )
 }
 
@@ -347,6 +355,7 @@ pub(crate) fn authenticate_frozen_prefix_sha256<E: JsonlFamilyError>(
     frozen: &JsonlFileObservation,
     prefix_length: u64,
     expected_prefix_digest: [u8; 32],
+    mutable_first_record: Option<JsonlMutableFirstRecord>,
 ) -> JsonlResult<JsonlFileObservation, E> {
     revalidate_frozen_prefix_with_hasher(
         source_path,
@@ -356,6 +365,7 @@ pub(crate) fn authenticate_frozen_prefix_sha256<E: JsonlFamilyError>(
         expected_prefix_digest,
         Sha256::default(),
         true,
+        mutable_first_record,
     )
 }
 
@@ -367,6 +377,7 @@ fn revalidate_frozen_prefix_with_hasher<E: JsonlFamilyError>(
     expected_prefix_digest: [u8; 32],
     prefix_hasher: impl JsonlPrefixHasher,
     force_authentication: bool,
+    mutable_first_record: Option<JsonlMutableFirstRecord>,
 ) -> JsonlResult<JsonlFileObservation, E> {
     if prefix_length > frozen.length() {
         return Err(E::source_changed());
@@ -393,6 +404,7 @@ fn revalidate_frozen_prefix_with_hasher<E: JsonlFamilyError>(
         prefix_length,
         expected_prefix_digest,
         prefix_hasher.clone(),
+        mutable_first_record,
     )?;
     #[cfg(any(test, feature = "test-support"))]
     run_after_jsonl_prefix_hash_hook();
@@ -415,6 +427,7 @@ fn revalidate_frozen_prefix_with_hasher<E: JsonlFamilyError>(
         prefix_length,
         expected_prefix_digest,
         prefix_hasher.clone(),
+        mutable_first_record,
     )?;
     #[cfg(any(test, feature = "test-support"))]
     run_after_second_jsonl_prefix_hash_hook();
@@ -436,6 +449,7 @@ fn revalidate_frozen_prefix_with_hasher<E: JsonlFamilyError>(
         prefix_length,
         expected_prefix_digest,
         prefix_hasher,
+        mutable_first_record,
     )?;
     #[cfg(any(test, feature = "test-support"))]
     run_after_final_jsonl_prefix_hash_hook();
@@ -478,12 +492,14 @@ fn verify_prefix_digest<E: JsonlFamilyError, H: JsonlPrefixHasher>(
     prefix_length: u64,
     expected_prefix_digest: [u8; 32],
     prefix_hasher: H,
+    mutable_first_record: Option<JsonlMutableFirstRecord>,
 ) -> JsonlResult<(), E> {
     let observed = hash_prefix::<E, _>(
         source_path,
         &mut source_file.reopen_same_object()?,
         prefix_length,
         prefix_hasher,
+        mutable_first_record,
     )?;
     if observed.finish_digest() != expected_prefix_digest {
         return Err(E::source_changed());
@@ -496,6 +512,7 @@ pub(super) fn hash_prefix<E: JsonlFamilyError, H: JsonlPrefixHasher>(
     file: &mut File,
     length: u64,
     mut hasher: H,
+    mutable_first_record: Option<JsonlMutableFirstRecord>,
 ) -> JsonlResult<H, E> {
     use std::io::{Seek, SeekFrom};
 
@@ -504,6 +521,29 @@ pub(super) fn hash_prefix<E: JsonlFamilyError, H: JsonlPrefixHasher>(
 
     file.seek(SeekFrom::Start(0))?;
     let mut remaining = length;
+    if let Some(policy) = mutable_first_record {
+        let width = JsonlMutableFirstRecord::WIRE_BYTES as u64;
+        if length < width {
+            return Err(E::system_invariant(
+                "mutable JSONL metadata exceeds its authenticated prefix",
+            ));
+        }
+        let mut prefix = [0_u8; JsonlMutableFirstRecord::WIRE_BYTES];
+        file.read_exact(&mut prefix).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                E::source_changed()
+            } else {
+                E::from(error)
+            }
+        })?;
+        if !policy.validates_wire(&prefix) {
+            return Err(E::source_changed());
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        record_jsonl_prefix_hash_bytes(source_path, width);
+        hasher.update_bytes(&JsonlMutableFirstRecord::MASK);
+        remaining -= width;
+    }
     let mut buffer = [0_u8; 64 * 1024];
     while remaining > 0 {
         let requested = usize::try_from(remaining.min(buffer.len() as u64))

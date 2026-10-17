@@ -21,6 +21,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             direct_append,
             route_resources,
         } = options;
+        let mutable_first_record = probe.as_ref().and_then(|probe| probe.mutable_first_record);
         source_file.revalidate_same_object()?;
         let current_metadata = source_file.file().metadata()?;
         let current_observation = observe_metadata::<E>(
@@ -31,8 +32,10 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
         let mut file = source_file.reopen_same_object()?;
         let reopened = observe_metadata::<E>(identity.source_path(), &file, &file.metadata()?)?;
         if reopened != current_observation
-            && !(frozen_observation.is_some()
-                && reopened.length() > current_observation.length()
+            && !(((frozen_observation.is_some()
+                && reopened.length() > current_observation.length())
+                || (mutable_first_record.is_some()
+                    && reopened.length() >= current_observation.length()))
                 && current_observation.admits_frozen_prefix_in(&reopened))
         {
             return Err(E::source_changed());
@@ -94,6 +97,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                         &observation,
                         admitted_length,
                         admitted_eof_sha256,
+                        mutable_first_record,
                     )?;
                 } else if previous.complete_prefix_end() == previous.admitted_length() {
                     super::authenticate_frozen_prefix(
@@ -102,6 +106,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                         &observation,
                         admitted_length,
                         *previous.complete_prefix_sha256(),
+                        mutable_first_record,
                     )?;
                 } else {
                     return Err(E::source_changed());
@@ -125,6 +130,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                         &observation,
                         admitted_length,
                         admitted_eof_sha256,
+                        mutable_first_record,
                     )?;
                 } else if previous.complete_prefix_end() == admitted_length {
                     super::authenticate_frozen_prefix(
@@ -133,6 +139,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                         &observation,
                         admitted_length,
                         *previous.complete_prefix_sha256(),
+                        mutable_first_record,
                     )?;
                 } else {
                     return Err(E::source_changed());
@@ -200,6 +207,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                         &mut file,
                         previous.complete_prefix_end(),
                         new_prefix_hasher(),
+                        mutable_first_record,
                     )?;
                     if prefix_digest(&observed_prefix) == *previous.complete_prefix_sha256() {
                         prefix_hasher = observed_prefix;
@@ -233,12 +241,25 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                         &probe.observation,
                         probe.complete_prefix_end,
                         prefix_digest(&probe.prefix_hasher),
+                        mutable_first_record,
                     )?;
                 }
                 prefix_hasher = probe.prefix_hasher;
                 complete_prefix_end = probe.complete_prefix_end;
                 next_physical_ordinal = probe.next_physical_ordinal;
             }
+        }
+        if mutable_first_record.is_some()
+            && (whole_record
+                || bind_admitted_eof
+                || direct_append
+                || physical_encoding != JsonlPhysicalEncoding::RawJsonl
+                || complete_prefix_end < JsonlMutableFirstRecord::WIRE_BYTES as u64
+                || next_physical_ordinal < 2)
+        {
+            return Err(E::system_invariant(
+                "mutable first-record authentication requires a covering raw JSONL identity probe",
+            ));
         }
         let full_hasher = if whole_record || skip_scan {
             None
@@ -272,6 +293,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                     &mut file,
                     complete_prefix_end,
                     JsonlResumableSha256::new(),
+                    mutable_first_record,
                 )?,
             })
         };
@@ -341,6 +363,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             whole_record,
             append_log: !whole_record,
             bind_admitted_eof,
+            mutable_first_record,
             logical_eof,
             complete_prefix_ends_with_terminal_nul_padding: false,
             semantic_append_resume,
@@ -791,6 +814,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                         &current,
                         checkpoint.admitted_length(),
                         admitted_eof_sha256,
+                        self.mutable_first_record,
                     )?;
                 } else if checkpoint.complete_prefix_end() == checkpoint.admitted_length() {
                     super::authenticate_frozen_prefix(
@@ -799,6 +823,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                         &current,
                         checkpoint.admitted_length(),
                         *checkpoint.complete_prefix_sha256(),
+                        self.mutable_first_record,
                     )?;
                 } else {
                     return Err(E::source_changed());
@@ -818,6 +843,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                     &self.observation,
                     checkpoint.complete_prefix_end(),
                     *checkpoint.complete_prefix_sha256(),
+                    self.mutable_first_record,
                 )?;
             }
         }
