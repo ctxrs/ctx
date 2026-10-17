@@ -35,6 +35,7 @@ pub(super) struct CursorTranscriptSelection {
     pub(super) selected_observation: JsonlFileObservation,
     pub(super) selected_physical_sha256: [u8; 32],
     pub(super) route_observations: Vec<JsonlFileObservation>,
+    pub(super) route_physical_sha256: Vec<[u8; 32]>,
     pub(super) selected_signature: [u8; 32],
     pub(super) divergent_indices: BTreeSet<usize>,
 }
@@ -99,6 +100,7 @@ pub(super) fn select_cursor_transcript(
             .iter()
             .map(|summary| summary.observation.clone())
             .collect(),
+        route_physical_sha256: summaries.iter().map(|summary| summary.physical_sha256).collect(),
         selected_signature: selected.signature,
         divergent_indices,
     })

@@ -165,7 +165,7 @@ fn copilot_cli_import_still_rejects_symlinked_transcript() {
 }
 
 #[test]
-fn cursor_divergent_transcript_copies_retain_history_and_repair_to_strict_extension() {
+fn cursor_divergent_transcript_copies_publish_independently_after_convergence() {
     let temp = tempdir();
     let query = "cursor-conflicting-copies-oracle";
     let path = write_native_cursor_fixture(&temp, query);
@@ -200,7 +200,7 @@ fn cursor_divergent_transcript_copies_retain_history_and_repair_to_strict_extens
     }
     let _daemon = start_isolated_provider_daemon(&temp);
 
-    let receipt = failure_json_output(ctx(&temp).args([
+    let receipt = json_output(ctx(&temp).args([
         "import",
         "--provider",
         "cursor",
@@ -212,18 +212,15 @@ fn cursor_divergent_transcript_copies_retain_history_and_repair_to_strict_extens
     wait_for_imported_core(&temp, &receipt);
 
     assert_eq!(
-        receipt["sources"][0]["source_failure_total"], 1,
-        "only the genuinely divergent copy must remain visible as a source diagnostic: {receipt:#}"
-    );
-    assert_eq!(
-        receipt["sources"][0]["carried_forward"], false,
-        "the diagnostic belongs to the discarded physical copy, not the imported winner: {receipt:#}"
+        receipt["sources"][0]["source_failure_total"], 0,
+        "every physical view in a fork must publish independently: {receipt:#}"
     );
 
-    // The selected conflicted session and its healthy sibling both publish.
+    // All three physical views and the healthy sibling publish. Identical
+    // views in a fork cohort remain separate rather than inventing chronology.
     let (sessions, events) = provider_core_counts(&data_root(&temp), "cursor");
-    assert!(sessions >= 2, "{receipt:#}");
-    assert!(events >= 2, "{receipt:#}");
+    assert!(sessions >= 4, "{receipt:#}");
+    assert!(events >= 4, "{receipt:#}");
     let selected = json_output(ctx(&temp).args([
         "search",
         "first copy",
@@ -249,10 +246,8 @@ fn cursor_divergent_transcript_copies_retain_history_and_repair_to_strict_extens
     ]));
     assert_search_provider_oracle(&search, "cursor", query, 1, "message");
 
-    // An unchanged warm refresh remains a no-op while preserving the physical
-    // copy diagnostic. It must never claim that the accepted winner failed or
-    // was carried forward.
-    let replay = failure_json_output(ctx(&temp).args([
+    // An unchanged warm refresh preserves all views without a source failure.
+    let replay = json_output(ctx(&temp).args([
         "import",
         "--provider",
         "cursor",
@@ -263,7 +258,7 @@ fn cursor_divergent_transcript_copies_retain_history_and_repair_to_strict_extens
     ]));
     wait_for_imported_core(&temp, &replay);
     assert_eq!(
-        replay["sources"][0]["source_failure_total"], 1,
+        replay["sources"][0]["source_failure_total"], 0,
         "{replay:#}"
     );
     assert_eq!(replay["sources"][0]["carried_forward"], false, "{replay:#}");
@@ -272,8 +267,7 @@ fn cursor_divergent_transcript_copies_retain_history_and_repair_to_strict_extens
         "{replay:#}"
     );
 
-    // The second copy converges into a strict extension. The longer history
-    // wins, the divergence diagnostic clears, and the added event is visible.
+    // Convergence does not collapse previously addressable physical views.
     fs::write(
         &conflicted_paths[1],
         concat!(
@@ -296,7 +290,7 @@ fn cursor_divergent_transcript_copies_retain_history_and_repair_to_strict_extens
     wait_for_imported_core(&temp, &repaired);
     assert_eq!(
         repaired["sources"][0]["source_failure_total"], 0,
-        "a unique strict extension must repair the divergence: {repaired:#}"
+        "converged views must remain readable without a source failure: {repaired:#}"
     );
     let extension = json_output(ctx(&temp).args([
         "search",

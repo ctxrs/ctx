@@ -272,6 +272,20 @@ pub trait JsonlFamilyAdapter: Send + Sync {
         JsonlRuntimeError<Self::Runtime>,
     >;
 
+    /// Supplies committed identities to providers whose physical alternatives
+    /// must retain their identity across ranking changes. Bases are hints only:
+    /// every discovered leaf still authenticates its current bytes normally.
+    fn discover_with_base(
+        &self,
+        root: &Path,
+        _bases: &[CertifiedSource],
+    ) -> JsonlResult<
+        JsonlFamilyInventory<JsonlRuntimeError<Self::Runtime>>,
+        JsonlRuntimeError<Self::Runtime>,
+    > {
+        self.discover(root)
+    }
+
     /// Validates provider admission before append selection, unless a compatible
     /// committed checkpoint certifies the exact strong file observation or the
     /// adapter explicitly accepts its same-object append trust contract.

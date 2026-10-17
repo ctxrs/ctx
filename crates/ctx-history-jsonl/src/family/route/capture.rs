@@ -231,10 +231,10 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             .map_err(|error| route_discovery(adapter, error))?;
     }
     reset_terminal(resident)?;
-    let mut opening = adapter
-        .discover(root)
-        .map_err(|error| route_discovery(adapter, error))?;
     let bases = base_sources_for_route(adapter, sink)?;
+    let mut opening = adapter
+        .discover_with_base(root, &bases)
+        .map_err(|error| route_discovery(adapter, error))?;
     let bases_by_descriptor = paths::bases_by_descriptor(&bases)?;
     let append_only_trust_allowed = sink.reconciliation_demand()
         == ctx_history_capture_runtime::SourceBackedReconciliationDemand::Incremental;
