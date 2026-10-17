@@ -242,11 +242,30 @@ fn cursor_alternative_identity_binds_native_session_relative_route_and_root_scop
     let scope = SourceAnchorScope::Lineage([7; 32]);
     let first = alternative_source_key("session", relative, scope).unwrap();
     assert_eq!(alternative_native_session(&first), Some("session"));
-    assert_eq!(alternative_source_key("session", relative, scope).unwrap(), first);
-    assert_ne!(alternative_source_key("other", relative, scope).unwrap(), first);
-    assert_ne!(alternative_source_key("session", relative, SourceAnchorScope::Unqualified).unwrap(), first);
-    assert_ne!(alternative_source_key("session", Path::new("b/agent-transcripts/session/session.jsonl"), scope).unwrap(), first);
-    assert!(alternative_source_key("session", Path::new("/absolute/session.jsonl"), scope).is_err());
+    assert_eq!(
+        alternative_source_key("session", relative, scope).unwrap(),
+        first
+    );
+    assert_ne!(
+        alternative_source_key("other", relative, scope).unwrap(),
+        first
+    );
+    assert_ne!(
+        alternative_source_key("session", relative, SourceAnchorScope::Unqualified).unwrap(),
+        first
+    );
+    assert_ne!(
+        alternative_source_key(
+            "session",
+            Path::new("b/agent-transcripts/session/session.jsonl"),
+            scope
+        )
+        .unwrap(),
+        first
+    );
+    assert!(
+        alternative_source_key("session", Path::new("/absolute/session.jsonl"), scope).is_err()
+    );
     assert!(alternative_source_key("session", Path::new("../session.jsonl"), scope).is_err());
 }
 
@@ -258,7 +277,12 @@ fn cursor_alternative_binding_rejects_source_descriptor_and_physical_route_subst
     ]);
     let route = &routes[0];
     let relative = route.authority_relative_path();
-    let source = alternative_source_key(route.native_session_id(), relative, SourceAnchorScope::Unqualified).unwrap();
+    let source = alternative_source_key(
+        route.native_session_id(),
+        relative,
+        SourceAnchorScope::Unqualified,
+    )
+    .unwrap();
     let binding = CursorBinding {
         native_session_id: route.native_session_id().to_owned(),
         logical_transcript_sha256: None,
@@ -272,7 +296,8 @@ fn cursor_alternative_binding_rejects_source_descriptor_and_physical_route_subst
         Arc::new(route.authority().clone()),
         relative.to_path_buf(),
         TypedKey::bytes(serde_json::to_vec(&binding).unwrap()).unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     let opened = route.authority().open_file(relative).unwrap();
     validate_binding(&leaf, &binding, &opened, SourceAnchorScope::Unqualified).unwrap();
     let mut forged = binding.clone();
@@ -287,7 +312,13 @@ fn cursor_alternative_binding_rejects_source_descriptor_and_physical_route_subst
     let mut forged = binding.clone();
     forged.selected_route_sha256 = cursor_route_sha256(routes[1].path());
     assert!(validate_binding(&leaf, &forged, &opened, SourceAnchorScope::Unqualified).is_err());
-    assert!(validate_binding(&leaf, &binding, &opened, SourceAnchorScope::Lineage([7; 32])).is_err());
+    assert!(validate_binding(
+        &leaf,
+        &binding,
+        &opened,
+        SourceAnchorScope::Lineage([7; 32])
+    )
+    .is_err());
 }
 
 #[test]
@@ -305,11 +336,17 @@ fn cursor_fork_admission_keeps_each_raw_body_and_path_proof_exact() {
         route.authority_relative_path().to_path_buf(),
         selection.route_observations[1].clone(),
         selection.route_physical_sha256[1],
-    ).unwrap();
-    fs::write(route.path(), [
-        cursor_record("2026-06-24T12:00:00Z", "edited"),
-        cursor_record("2026-06-24T12:00:01Z", "append"),
-    ].concat()).unwrap();
+    )
+    .unwrap();
+    fs::write(
+        route.path(),
+        [
+            cursor_record("2026-06-24T12:00:00Z", "edited"),
+            cursor_record("2026-06-24T12:00:01Z", "append"),
+        ]
+        .concat(),
+    )
+    .unwrap();
     assert!(proof.revalidate_dependency().is_err());
     fs::remove_file(route.path()).unwrap();
     assert!(proof.revalidate_dependency().is_err());

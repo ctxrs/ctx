@@ -100,7 +100,10 @@ pub(super) fn select_cursor_transcript(
             .iter()
             .map(|summary| summary.observation.clone())
             .collect(),
-        route_physical_sha256: summaries.iter().map(|summary| summary.physical_sha256).collect(),
+        route_physical_sha256: summaries
+            .iter()
+            .map(|summary| summary.physical_sha256)
+            .collect(),
         selected_signature: selected.signature,
         divergent_indices,
     })

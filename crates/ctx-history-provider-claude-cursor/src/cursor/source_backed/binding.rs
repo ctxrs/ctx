@@ -11,7 +11,6 @@ pub(super) struct CursorBinding {
     pub(super) alternative_relative_path: Option<PathBuf>,
 }
 
-
 pub(super) fn validate_binding(
     leaf: &JsonlFamilyLeaf,
     binding: &CursorBinding,
