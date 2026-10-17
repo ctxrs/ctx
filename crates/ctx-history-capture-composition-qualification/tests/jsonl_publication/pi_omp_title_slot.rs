@@ -129,6 +129,50 @@ fn pi_omp_append_with_a_title_update_preserves_prior_events() {
 }
 
 #[test]
+fn pi_omp_incomplete_message_completion_with_title_update_preserves_prior_events() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_temp = crate::test_support_paths::tempdir().unwrap();
+    let transcript = temp.path().join("session.jsonl");
+    write_omp_pi_session(&transcript, "initial title", "original body");
+    overwrite_title(&transcript, &title_slot("initial title"));
+    let pending = serde_json::to_vec(&json!({
+        "type": "message",
+        "id": "completed-message",
+        "timestamp": "2026-08-20T15:12:22.000Z",
+        "message": {"role": "assistant", "content": "completed answer"},
+    }))
+    .unwrap();
+    let split = pending.len() / 2;
+    OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap()
+        .write_all(&pending[..split])
+        .unwrap();
+    let index = index_temp.path().join("index");
+    refresh_source_backed_generation(&index, &pi_registry(temp.path()), writer_options()).unwrap();
+    let before = all_indexed_records(&index);
+    assert_eq!(before.len(), 1);
+    let mut file = OpenOptions::new().append(true).open(&transcript).unwrap();
+    file.write_all(&pending[split..]).unwrap();
+    file.write_all(b"\n").unwrap();
+    overwrite_title(&transcript, &title_slot("completed title"));
+    let fired = title_update_at_publication(temp.path(), &transcript);
+    let publication =
+        refresh_source_backed_generation(&index, &pi_registry(temp.path()), writer_options())
+            .unwrap();
+    assert!(fired.load(Ordering::SeqCst));
+    assert!(publication.failed_routes.is_empty());
+    let records = all_indexed_records(&index);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0], before[0]);
+    assert_eq!(
+        records[1].content.normalized_body.as_deref(),
+        Some("completed answer")
+    );
+}
+
+#[test]
 fn pi_omp_mutations_outside_a_valid_title_slot_cannot_publish() {
     for mutation in ["body", "session", "invalid-title", "slot-length"] {
         let temp = crate::test_support_paths::tempdir().unwrap();

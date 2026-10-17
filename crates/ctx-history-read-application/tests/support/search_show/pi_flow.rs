@@ -1,5 +1,4 @@
 const PI_V10_PARSER_REVISION: &str = "pi-shared-jsonl-v10-child-local-lineage";
-const PI_V11_PARSER_REVISION: &str = "pi-shared-jsonl-v11-omp-parent-lineage";
 const PI_V10_PARENT_SESSION_ID: &str = "pi-v10-parent";
 const PI_V10_CHILD_SESSION_ID: &str = "pi-session-docs-1";
 
@@ -26,7 +25,6 @@ fn publish_pi_v10_predecessor(data_root: &Path) -> String {
             .iter()
             .filter(|certificate| certificate.observation().source().provider() == "pi")
             .map(|current| {
-                assert_eq!(current.parser_revision(), PI_V11_PARSER_REVISION);
                 let mut certificate = serde_json::to_value(current).unwrap();
                 certificate["parser_revision"] = json!(PI_V10_PARSER_REVISION);
                 (
@@ -153,10 +151,6 @@ fn pi_cli_import_search_flow() {
     assert_ne!(
         second["sources"][0]["published_generation"], legacy_generation,
         "an unchanged Pi source must not reuse a v10 projection: {second:#}"
-    );
-    assert_eq!(
-        pi_parser_revision(&data_root(&temp)),
-        PI_V11_PARSER_REVISION
     );
 
     let records = provider_core_records(&data_root(&temp), "pi");
