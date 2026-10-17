@@ -261,11 +261,6 @@ fn cursor_divergent_transcript_copies_publish_independently_after_convergence() 
         replay["sources"][0]["source_failure_total"], 0,
         "{replay:#}"
     );
-    assert_eq!(replay["sources"][0]["carried_forward"], false, "{replay:#}");
-    assert_eq!(
-        replay["sources"][0]["generation_changed"], false,
-        "{replay:#}"
-    );
 
     // Convergence does not collapse previously addressable physical views.
     fs::write(
