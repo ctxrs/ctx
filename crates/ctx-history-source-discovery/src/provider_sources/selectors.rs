@@ -236,7 +236,7 @@ impl SelectorReader {
                 toml_edit::de::from_str(&text).map_err(|_| SelectorReadError::Parse)?,
             ),
             SelectorFormat::Yaml => SelectorDocument::Structured(
-                serde_yaml::from_str(&text).map_err(|_| SelectorReadError::Parse)?,
+                yaml_serde::from_str(&text).map_err(|_| SelectorReadError::Parse)?,
             ),
             SelectorFormat::Xml => SelectorDocument::Xml(parse_xml(&text)?),
         };

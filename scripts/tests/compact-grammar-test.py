@@ -439,7 +439,7 @@ print(json.dumps({"argv":sys.argv[1:], "env":{k:os.environ.get(k) for k in ("CAR
             for name, version, relative, source in (
                 ("ctx", "1.0.0", "crates/ctx-cli", None),
                 ("ctx-sift-codec", "1.0.0", "crates/ctx-sift-codec", None),
-                ("tantivy", "0.26.1", "registry/tantivy", staging.REGISTRY),
+                ("tantivy", "0.27.0", "registry/tantivy", staging.REGISTRY),
             ):
                 manifest = root / relative / "Cargo.toml"
                 manifest.parent.mkdir(parents=True)

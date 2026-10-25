@@ -20,6 +20,9 @@ const MAX_RECORDS: usize = 4096;
 const MAX_NODES: usize = 100;
 const DAY: u64 = 86400;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -211,7 +214,7 @@ pub fn save_result_at(
         .to_string_lossy()
         .trim_start_matches('.')
         .to_owned();
-    let text = format!("---\n{}---\n", serde_yaml_ng::to_string(&record)?);
+    let text = format!("---\n{}---\n", yaml_serde::to_string(&record)?);
     ensure!(
         text.len() <= MAX_RECORD_BYTES,
         "memory record exceeds size limit"
@@ -501,13 +504,13 @@ fn parse_record(text: &str) -> Result<Option<MemoryRecord>> {
     let Some((header, body)) = rest.split_once("\n---\n") else {
         bail!("unterminated memory frontmatter")
     };
-    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(header)?;
+    let value: yaml_serde::Value = yaml_serde::from_str(header)?;
     let contributor = value
         .get("contributor")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if contributor == "graf" {
-        let record: MemoryRecord = serde_yaml_ng::from_value(value)?;
+        let record: MemoryRecord = yaml_serde::from_value(value)?;
         ensure!(
             !record.event_id.is_empty() && record.event_id.len() <= 256,
             "invalid event ID"
@@ -528,7 +531,7 @@ fn parse_record(text: &str) -> Result<Option<MemoryRecord>> {
         #[serde(default)]
         source_nodes: Vec<String>,
     }
-    let legacy: Legacy = serde_yaml_ng::from_value(value)?;
+    let legacy: Legacy = yaml_serde::from_value(value)?;
     let answer = body
         .split_once("\n## Answer\n")
         .context("Graphify memory has no Answer section")?
