@@ -375,7 +375,17 @@ fn read_bounded_record_with_digest<E: JsonlFamilyError, D: JsonlRecordDigest>(
 
     loop {
         let (consumed, complete) = {
-            let available = reader.fill_buf()?;
+            #[cfg(all(unix, any(test, feature = "test-support")))]
+            let refill = reader.buffer().is_empty();
+            reader.fill_buf()?;
+            #[cfg(all(unix, any(test, feature = "test-support")))]
+            if refill {
+                ctx_history_source_io::read_metrics::record_source_read(
+                    reader.get_ref(),
+                    reader.buffer().len(),
+                );
+            }
+            let available = reader.buffer();
             if available.is_empty() {
                 if byte_len == 0 {
                     return Err(source_changed());
