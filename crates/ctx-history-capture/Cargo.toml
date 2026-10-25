@@ -9,6 +9,9 @@ homepage.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+test-support = ["ctx-history-capture-composition/test-support", "ctx-history-provider-claude-cursor/test-support", "ctx-history-provider-runtime/test-support", "ctx-history-source-io/test-support"]
+
 [dependencies]
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-capture-composition = { path = "../ctx-history-capture-composition" }
