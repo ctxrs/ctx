@@ -136,20 +136,20 @@ impl CoreRefreshEngine {
         Ok(job)
     }
 
-    /// Completes the scheduler handoff for a durably terminal admission-fence
-    /// failure. This releases queue capacity without resubmitting capture work
+    /// Completes the scheduler handoff for a durably terminal failed request.
+    /// This releases queue capacity without resubmitting capture work
     /// or changing the failed logical request's terminal image.
-    pub fn complete_retry_admission_handoff(&self, request_id: &str) -> Result<()> {
+    pub fn complete_failed_request_handoff(&self, request_id: &str) -> Result<()> {
         let mut state = self.lock_state();
         let attempt = find_attempt(&state, request_id)
             .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
-        let retry_admission = attempt.state == SourceBackedRefreshState::Failed
-            && attempt.terminal_outcome.as_ref().is_some_and(|outcome| {
-                outcome.code() == RefreshOutcomeCode::SourceRefreshAdmissionFailed
-                    && outcome.retry_advice() == Some(RefreshRetryAdvice::RetryAdmission)
-            });
-        if !retry_admission {
-            bail!("source refresh request `{request_id}` has no terminal retry-admission handoff");
+        if attempt.state != SourceBackedRefreshState::Failed
+            || state
+                .pending_terminal_persistence
+                .as_ref()
+                .is_some_and(|pending| pending.request_id == request_id)
+        {
+            bail!("source refresh request `{request_id}` has no durable failed-request handoff");
         }
         match state.pending_scheduler_retry_root_id.as_deref() {
             None => Ok(()),
@@ -158,7 +158,7 @@ impl CoreRefreshEngine {
                 Ok(())
             }
             Some(pending) => bail!(
-                "source refresh retry-admission handoff belongs to `{pending}`, not `{request_id}`"
+                "source refresh failed-request handoff belongs to `{pending}`, not `{request_id}`"
             ),
         }
     }
