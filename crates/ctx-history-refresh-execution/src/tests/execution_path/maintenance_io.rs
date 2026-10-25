@@ -6,6 +6,88 @@ const OWNER: &str = "019fb000-0000-7000-8000-000000000091";
 const PEER: &str = "019fb000-0000-7000-8000-000000000092";
 const RESTART_ROOT: &str = "CTX_TEST_MAINTENANCE_IO_ROOT";
 
+#[test]
+fn exact_member_leaf_failure_reconciles_and_publishes_healthy_progress() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let sessions = root.join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    for (id, marker) in [(OWNER, "retainedmarker"), (PEER, "peermarker")] {
+        fs::write(
+            session_path(&sessions, id),
+            jsonl([session_meta(id), message(marker)]),
+        )
+        .unwrap();
+    }
+    let (_, _, discovery) = discovery_fixture(root);
+    ctx_history_platform::platform_security::establish_private_data_root(&root.join("data"))
+        .unwrap();
+    refresh(root, &discovery, admission(root, &discovery));
+    let owner = session_path(&sessions, OWNER);
+    let refused = owner.with_extension("jsonl.zst");
+    fs::remove_file(&owner).unwrap();
+    fs::write(&refused, b"invalid compressed stream").unwrap();
+    let peer = session_path(&sessions, PEER);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&peer)
+        .unwrap()
+        .write_all(&jsonl([message("peeradvancemarker")]))
+        .unwrap();
+    let catalog = admission(root, &discovery)
+        .discovery()
+        .watch_catalog()
+        .clone();
+    let routes = catalog.route_ids().cloned().collect::<BTreeSet<_>>();
+    let route = routes.first().unwrap().clone();
+    // Regular files enter exact-member admission; the decoder failure occurs
+    // during capture and requires the exhaustive family reconciliation retry.
+    assert!(catalog
+        .exact_member_discovery_report(
+            &routes,
+            &BTreeMap::from([(
+                route.clone(),
+                BTreeSet::from([refused.clone(), peer.clone()])
+            )]),
+        )
+        .is_some());
+    let admitted =
+        AdmittedRefresh::from_exact_catalog_authority(routes, StdDuration::ZERO, catalog)
+            .unwrap()
+            .with_execution_facts(BTreeMap::from([(
+                route,
+                SourceBackedRefreshWorkset::members([refused.clone(), peer]),
+            )]))
+            .unwrap();
+    let (publication, _, _) = refresh(root, &discovery, admitted);
+    assert_eq!(publication.route_results.len(), 1);
+    let result = &publication.route_results[0];
+    assert!(result.outcome.is_success());
+    assert_eq!(result.source_failure_total, 1);
+    assert_eq!(
+        result.source_failures[0].source_selector,
+        refused.to_str().unwrap()
+    );
+    // The rollout's filename identifies the prior logical source even though
+    // its replacement compressed representation cannot be decoded.
+    assert!(result.source_failures[0].carried_forward);
+    let index = VerifiedIndex::open_pinned(source_backed_index_root(&root.join("data"))).unwrap();
+    assert_eq!(
+        index
+            .complete_lexical_search("retainedmarker", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        index
+            .complete_lexical_search("peeradvancemarker", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 // Authored I/O fixtures; native provider-shape coverage lives with the adapters.
 #[test]
 fn ordinary_maintenance_reads_changed_data_including_after_restart() {

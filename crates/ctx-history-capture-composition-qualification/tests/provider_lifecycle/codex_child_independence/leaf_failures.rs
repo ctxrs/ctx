@@ -1,5 +1,46 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn cold_symlinked_directory_fails_route_and_repairs() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let directory = sessions.join("2026/10/24");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&directory).unwrap();
+    let id = "019fb000-0000-7000-8000-000000000083";
+    write_session(
+        &directory,
+        id,
+        ProviderNativeSessionRelationship::Root,
+        None,
+        [message("directorysessionmarker")],
+    );
+    let target = temp.path().join("moved-directory");
+    fs::rename(&directory, &target).unwrap();
+    std::os::unix::fs::symlink(&target, &directory).unwrap();
+    let registry = register_tree(&[&sessions]);
+    let error = refresh_source_backed_generation(&index_root, &registry, writer_options())
+        .expect_err("an inaccessible subtree must not certify an empty route");
+    assert!(
+        error.to_string().contains("symlinked provider source"),
+        "{error}"
+    );
+    assert!(VerifiedIndex::open_pinned(&index_root).is_err());
+
+    fs::remove_file(&directory).unwrap();
+    fs::rename(&target, &directory).unwrap();
+    let repaired =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert!(repaired.failed_routes.is_empty());
+    assert!(repaired.logical_source_failures.is_empty());
+    assert!(source_records_contain(
+        &VerifiedIndex::open_pinned(&index_root).unwrap(),
+        id,
+        "directorysessionmarker"
+    ));
+}
+
 // Authored filesystem and malformed-stream cases, not native producer captures.
 enum Refusal {
     CorruptCompressed,

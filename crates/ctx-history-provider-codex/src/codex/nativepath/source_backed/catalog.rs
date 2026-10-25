@@ -371,35 +371,34 @@ fn discover_codex_metadata_inventory_root_v0(
             let opened = match directory.open_child(&name) {
                 Ok(opened) => opened,
                 Err(error)
-                    if error.is_ignorable_membership_entry() || codex_leaf_unavailable(&error) =>
+                    if selected
+                        && (error.is_ignorable_membership_entry()
+                            || codex_leaf_unavailable(&error)) =>
                 {
-                    if selected {
-                        let kind = if codex_leaf_unavailable(&error) {
-                            ctx_history_capture_runtime::SourceBackedRouteErrorKind::Unavailable
-                        } else {
-                            ctx_history_capture_runtime::SourceBackedRouteErrorKind::InvalidSource
-                        };
-                        let failure =
-                            ctx_history_capture_runtime::SourceBackedRouteError::from_error(
-                                kind, &error,
-                            );
-                        rejected.push(CodexRejectedCatalogLeafV0 {
-                            source_path,
-                            source_root_lineage: Some(codex_session_tree_source_root_lineage(
-                                session_root,
-                            )?),
-                            authority_path: relative_path,
-                            observation: None,
-                            failure,
-                        });
-                        crate::provider::codex::catalog::ensure_catalog_source_bound(
-                            leaves.len().saturating_add(rejected.len()),
-                        )?;
-                    } else if !error.is_ignorable_membership_entry() {
-                        return Err(error.into());
-                    }
+                    let kind = if codex_leaf_unavailable(&error) {
+                        ctx_history_capture_runtime::SourceBackedRouteErrorKind::Unavailable
+                    } else {
+                        ctx_history_capture_runtime::SourceBackedRouteErrorKind::InvalidSource
+                    };
+                    let failure = ctx_history_capture_runtime::SourceBackedRouteError::from_error(
+                        kind, &error,
+                    );
+                    rejected.push(CodexRejectedCatalogLeafV0 {
+                        source_path,
+                        source_root_lineage: Some(codex_session_tree_source_root_lineage(
+                            session_root,
+                        )?),
+                        authority_path: relative_path,
+                        observation: None,
+                        failure,
+                    });
+                    crate::provider::codex::catalog::ensure_catalog_source_bound(
+                        leaves.len().saturating_add(rejected.len()),
+                    )?;
                     continue;
                 }
+                // An unselected entry may be a directory containing rollouts.
+                // Refusal cannot certify that subtree as empty.
                 Err(error) => return Err(error.into()),
             };
             match opened {
