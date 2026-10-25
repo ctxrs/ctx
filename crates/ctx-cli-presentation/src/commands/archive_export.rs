@@ -156,7 +156,10 @@ fn preview_text(preview: &ExportPreview, context: &RenderContext) -> String {
         "Creator-supplied; not verified machine identities.",
     );
     if let Some(workspace) = &preview.workspace {
-        field("Workspace", workspace);
+        field(
+            "Workspace",
+            &sanitize_untrusted_history_body_for_terminal(workspace),
+        );
     }
     if let (Some(since), Some(until)) = (preview.since_unix_ms, preview.until_unix_ms) {
         field("Since (inclusive)", &timestamp(Some(since), context));
@@ -196,10 +199,12 @@ fn preview_text(preview: &ExportPreview, context: &RenderContext) -> String {
                 Field::new("Provider", &conversation.provider),
                 Field::new(
                     "Provider session",
-                    conversation
-                        .provider_session_id
-                        .as_deref()
-                        .unwrap_or("unknown"),
+                    &sanitize_untrusted_history_body_for_terminal(
+                        conversation
+                            .provider_session_id
+                            .as_deref()
+                            .unwrap_or("unknown"),
+                    ),
                 ),
                 Field::new(
                     "First timestamp",
@@ -221,7 +226,7 @@ fn preview_text(preview: &ExportPreview, context: &RenderContext) -> String {
                     } else {
                         "Other workspace"
                     },
-                    &evidence.value,
+                    &sanitize_untrusted_history_body_for_terminal(&evidence.value),
                 )],
             ));
         }
@@ -313,7 +318,7 @@ mod tests {
                 origin: "other \u{202e}desktop\u{202c}".into(),
                 view: "notes\u{2028}\u{2029}".into(),
             }],
-            workspace: Some("shop".into()),
+            workspace: Some("shop\u{202e}filter\u{202c}".into()),
             since_unix_ms: Some(100),
             until_unix_ms: Some(200),
             selection_complete: true,
@@ -328,14 +333,20 @@ mod tests {
             conversations: vec![ConversationPreview {
                 ctx_session_id: "synthetic-session".into(),
                 provider: "synthetic".into(),
-                provider_session_id: Some("provider\u{001b}[31m\nvalue".into()),
+                provider_session_id: Some("provider\u{001b}[31m\n\u{202e}café\u{202c}".into()),
                 first_occurred_at_unix_ms: Some(99),
                 last_occurred_at_unix_ms: Some(100),
                 scope: ScopeCounts::default(),
-                workspace_values: vec![WorkspaceValue {
-                    value: "/work/café\tshop".into(),
-                    matches_workspace: true,
-                }],
+                workspace_values: vec![
+                    WorkspaceValue {
+                        value: "/work/café\t\u{2066}shop\u{2069}".into(),
+                        matches_workspace: true,
+                    },
+                    WorkspaceValue {
+                        value: "/other\u{2028}work\u{2029}".into(),
+                        matches_workspace: false,
+                    },
+                ],
                 workspace_values_truncated: true,
                 show_session_command: "ctx show session synthetic-session --mode log".into(),
             }],
@@ -367,6 +378,21 @@ mod tests {
         let structured = selection_value(&preview).unwrap();
         assert_eq!(structured["identity"]["origin"], preview.identity.origin);
         assert_eq!(structured["identity"]["view"], preview.identity.view);
+        assert_eq!(
+            structured["workspace"],
+            preview.workspace.as_deref().unwrap()
+        );
+        let conversation = &preview.conversations[0];
+        assert_eq!(
+            structured["conversations"][0]["provider_session_id"],
+            conversation.provider_session_id.as_deref().unwrap()
+        );
+        for (index, evidence) in conversation.workspace_values.iter().enumerate() {
+            assert_eq!(
+                structured["conversations"][0]["workspace_values"][index]["value"],
+                evidence.value
+            );
+        }
         let context = RenderContext::for_test(
             TestContext::pipe(StreamKind::Stdout).time_zone("America/New_York"),
         );

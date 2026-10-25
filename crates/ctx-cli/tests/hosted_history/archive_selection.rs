@@ -284,6 +284,83 @@ fn unicode_workspaces_stay_distinct_through_search_preview_export_and_restore() 
 }
 
 #[test]
+fn imported_preview_and_export_escape_workspace_and_provider_session_metadata() {
+    let source = Sandbox::new();
+    let provider_session = "provider\u{202e}café\u{202c}";
+    let workspaces = ["alpha\u{2066}shop\u{2069}", "other\u{2028}work\u{2029}"];
+    seed_selection_records(
+        &source,
+        workspaces.map(|workspace| (provider_session.into(), Some(100), workspace.into())),
+    );
+    let archive = source.path("snapshot");
+    success(
+        source
+            .command()
+            .args([
+                "archive",
+                "export",
+                "--origin",
+                "synthetic-laptop",
+                "--format=json",
+                "--output",
+            ])
+            .arg(&archive),
+    );
+    let destination = Sandbox::new();
+    success(
+        destination
+            .command()
+            .args(["archive", "restore", "--format=json"])
+            .arg(archive),
+    );
+    for preview in [true, false] {
+        for machine in [false, true] {
+            let output_path = destination.path(&format!("export-{preview}-{machine}"));
+            let mut command = destination.command();
+            command
+                .args([
+                    "archive",
+                    "export",
+                    "--origin",
+                    "synthetic-laptop",
+                    "--workspace",
+                    "alpha",
+                    "--output",
+                ])
+                .arg(&output_path);
+            if preview {
+                command.arg("--preview");
+            }
+            if machine {
+                let result = success(command.arg("--format=json"));
+                let conversation = &result["selection"]["conversations"][0];
+                assert_eq!(conversation["provider_session_id"], provider_session);
+                assert_eq!(conversation["scope"]["retained_records"], 2);
+                for (index, workspace) in workspaces.iter().enumerate() {
+                    let evidence = &conversation["workspace_values"][index];
+                    assert_eq!(evidence["value"], format!("/work/{workspace}"));
+                    assert_eq!(evidence["matches_workspace"], index == 0);
+                }
+            } else {
+                let output = command.assert().success().get_output().clone();
+                let text = String::from_utf8(output.stdout).unwrap();
+                for control in ('\u{2028}'..='\u{202e}').chain('\u{2066}'..='\u{2069}') {
+                    assert!(!text.contains(control), "{text:?}");
+                }
+                for expected in [
+                    "provider\\u{202e}café\\u{202c}",
+                    "/work/alpha\\u{2066}shop\\u{2069}",
+                    "/work/other\\u{2028}work\\u{2029}",
+                ] {
+                    assert!(text.contains(expected), "missing {expected}: {text}");
+                }
+            }
+            assert_eq!(output_path.exists(), !preview);
+        }
+    }
+}
+
+#[test]
 fn invalid_or_incomplete_filters_fail_without_publishing() {
     let sandbox = Sandbox::new();
     seed_selection(&sandbox);
