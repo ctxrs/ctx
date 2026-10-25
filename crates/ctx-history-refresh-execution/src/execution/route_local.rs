@@ -227,7 +227,6 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                 if exact_catalog_members
                     && exact_member_family_fallback_required(
                         &route_worksets,
-                        &complete_inventory_route_ids,
                         successful_route_outcomes,
                         &failed_routes,
                     )

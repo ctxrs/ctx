@@ -282,6 +282,8 @@ pub fn validate_candidate_managed_files(
         .take(MAX_MANAGED_METADATA_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| IndexError::ChecksumMismatch)?;
+    #[cfg(any(test, feature = "test-support"))]
+    crate::read_metrics::record(|reads| &mut reads.tantivy_control, bytes.len());
     if bytes.len() != capacity {
         return Err(IndexError::ChecksumMismatch);
     }
