@@ -891,6 +891,7 @@ fn show_schema_v1_reads_complete_normalized_core_content() {
         events.iter().map(render_event_value).collect(),
         false,
         None,
+        &Default::default(),
     );
     assert_eq!(
         sorted_json_keys(&session_value),

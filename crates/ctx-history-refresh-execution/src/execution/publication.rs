@@ -402,7 +402,10 @@ pub(super) fn provider_route_results<S: ImmutableCaptureSnapshot + ?Sized>(
                 provider: failure.source.provider().to_owned(),
                 class: failure.class.as_str().to_owned(),
                 carried_forward: failure.carried_forward,
-                source_selector: format!("logical-source:{source_identity}"),
+                source_selector: failure
+                    .source_selector
+                    .clone()
+                    .unwrap_or_else(|| format!("logical-source:{source_identity}")),
                 detail: failure.detail.clone(),
             });
     }

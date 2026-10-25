@@ -424,6 +424,7 @@ const fn direction_name(direction: CoreEventRangeDirection) -> &'static str {
 pub fn render_event_read_model(
     event: &CoreEventRecord,
     projection: EventContentProjection,
+    provenance: &crate::ArchiveProvenanceMap,
 ) -> serde_json::Result<Value> {
     let record = &event.core_record;
     let content = &record.content;
@@ -477,5 +478,6 @@ pub fn render_event_read_model(
     if let Some(activity) = activity {
         rendered["activity"] = serde_json::to_value(activity)?;
     }
+    provenance.decorate(&mut rendered, event.session_id);
     Ok(rendered)
 }

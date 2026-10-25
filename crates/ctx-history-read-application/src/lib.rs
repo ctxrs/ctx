@@ -6,6 +6,8 @@
 //! services, writers, and terminal rendering remain in the outer composition
 //! layer.
 
+mod archive_provenance;
+pub use archive_provenance::{ArchiveLabelAuthority, ArchiveProvenance, ArchiveProvenanceMap};
 mod application;
 mod compact_presentation;
 mod event_read_model;

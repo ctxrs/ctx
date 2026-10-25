@@ -10,6 +10,8 @@ shipped.
   Zstandard `.jsonl.zst` rollout sources. Compressed rollout admission retains
   at most 256 MiB of combined compressed snapshot plus decoded spool per leaf,
   and all parallel leaves share the 1 GiB route scratch ceiling.
+  An oversized, unreadable, or symlinked rollout is reported individually;
+  other rollouts continue refreshing. Symlink targets are not followed.
 - Pi local import is supported when matching local session JSONL files exist
   under `~/.pi/agent/sessions`, or when an explicit Pi session JSONL file is
   passed with `--path`.

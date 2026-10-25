@@ -425,3 +425,6 @@ impl Drop for WorkerCleanup<'_> {
         }
     }
 }
+
+#[path = "hosted_history/archive_provenance.rs"]
+mod archive_provenance;
