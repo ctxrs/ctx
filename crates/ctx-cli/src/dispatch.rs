@@ -279,7 +279,11 @@ pub(crate) fn run_cli() -> Result<()> {
     {
         if args.all {
             let mut ui = Ui::stdio(cli.color.into());
-            ctx_daemon_cli::run_registered_daemon_status(args.format.into(), &mut ui)?;
+            ctx_cli_presentation::commands::daemon::run_registered_status(
+                &ctx_daemon_cli::registered_daemon_status()?,
+                args.format.into(),
+                &mut ui,
+            )?;
             return ui.flush().context("flush daemon inventory");
         }
     }

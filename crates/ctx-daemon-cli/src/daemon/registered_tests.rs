@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 use std::{collections::BTreeMap, fs, path::Path};
 
 fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -106,35 +107,4 @@ fn registered_roots_use_existing_liveness_without_mutation() -> Result<()> {
         "failed inventory pruned records"
     );
     Ok(())
-}
-
-#[test]
-fn registered_root_rendering_preserves_paths_and_unverified_state() {
-    use ctx_terminal::{ColorMode, StreamKind, TestContext};
-    for width in [32, 48, 80, 120] {
-        let context = RenderContext::for_test(
-            TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never),
-        );
-        let rendered = render(
-            &context,
-            &[
-                (
-                    PathBuf::from("/scratch/two  spaces\u{1b}"),
-                    json!({"running": false, "status": "unverified"}),
-                ),
-                (
-                    PathBuf::from("/scratch/active"),
-                    json!({"running": true, "status": "running"}),
-                ),
-            ],
-        )
-        .render_plain();
-        assert!(rendered.contains("/scratch/two  spaces\\x1b"), "{rendered}");
-        assert!(rendered.contains("Unverified"), "{rendered}");
-        assert!(rendered.contains("Running"), "{rendered}");
-        assert!(!rendered.contains('\u{1b}'));
-        assert!(render(&context, &[])
-            .render_plain()
-            .contains("No registered daemons"));
-    }
 }

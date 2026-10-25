@@ -554,12 +554,9 @@ pub(crate) fn run_daemon_command(
             trigger_command: args.trigger_command.map(daemon_trigger),
             format: output_format(args.format),
         }),
-        C::Status(args) => {
-            ctx_daemon_cli::DaemonCommand::Status(ctx_daemon_cli::DaemonStatusArgs {
-                all: args.all,
-                format: output_format(args.format),
-            })
-        }
+        C::Status(args) => ctx_daemon_cli::DaemonCommand::Status(ctx_daemon_cli::FormatArgs {
+            format: output_format(args.format),
+        }),
         C::Enable(args) => ctx_daemon_cli::DaemonCommand::Enable(ctx_daemon_cli::FormatArgs {
             format: output_format(args.format),
         }),
