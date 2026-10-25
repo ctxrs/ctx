@@ -9,7 +9,7 @@
   },
   "macos_sdk": {
     "authority": "ctx-release-macos-sdk-v1",
-    "archive_size_bytes": 100814923,
-    "archive_sha256": "e9e77854ad84b73cdeb366da1e7facc697886acbd6922763e7815594ce315e6c"
+    "archive_size_bytes": 101960030,
+    "archive_sha256": "633818058e889a08e0be4ca985741e8678578af8da9ce1f8a85a6218b452c0fb"
   }
 }
