@@ -147,6 +147,8 @@ fn first_record_is_incomplete<E: JsonlFamilyError>(
     if encoding == JsonlPhysicalEncoding::RawJsonl && admitted_length >= 4 {
         let mut magic = [0_u8; 4];
         file.read_exact(&mut magic)?;
+        #[cfg(all(unix, any(test, feature = "test-support")))]
+        ctx_history_source_io::read_metrics::record_source_read(&file, magic.len());
         file.seek(SeekFrom::Start(0))?;
         if magic == [0x28, 0xb5, 0x2f, 0xfd] {
             // A quarantined member does not necessarily have a provider leaf
