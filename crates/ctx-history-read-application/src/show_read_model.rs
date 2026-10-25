@@ -74,6 +74,7 @@ pub fn session_transcript_read_model(
     rendered: Vec<Value>,
     truncated: bool,
     max_events: Option<usize>,
+    provenance: &crate::ArchiveProvenanceMap,
 ) -> Value {
     let mut value = compact_json(json!({
         "schema_version": 1,
@@ -84,6 +85,7 @@ pub fn session_transcript_read_model(
         "provider_key": session.provider_key,
         "source_id": session.source_id,
         "provider_session_id": session.provider_session_id,
+        "archive_provenance": provenance.for_session(session.session_id),
         "mode": mode.as_str(),
         "format": format.as_str(),
         "session": {
@@ -96,6 +98,7 @@ pub fn session_transcript_read_model(
             "source_id": session.source_id,
             "provider_session_id": session.provider_session_id,
             "source_format": session.source_format,
+            "archive_provenance": provenance.for_session(session.session_id),
             "parent_ctx_session_id": session.parent_session_id.map(|id| id.as_uuid()),
             "root_ctx_session_id": session.root_session_id.map(|id| id.as_uuid()),
             "session_relationship": session.session_relationship,
@@ -115,9 +118,10 @@ pub fn event_window_read_model(
     events: &[CoreEventRecord],
     format: StructuredOutputFormat,
     output_limit_bytes: usize,
+    provenance: &crate::ArchiveProvenanceMap,
 ) -> Result<Value> {
     let references = events.iter().collect::<Vec<_>>();
-    let rendered = render_event_read_model_values(&references, output_limit_bytes)?;
+    let rendered = render_event_read_model_values(&references, output_limit_bytes, provenance)?;
     event_window_value(selected, format, rendered)
 }
 
@@ -127,8 +131,10 @@ pub fn event_window_with_lineage_read_model(
     copied_lineage: &CopiedEventLineage,
     format: StructuredOutputFormat,
     output_limit_bytes: usize,
+    provenance: &crate::ArchiveProvenanceMap,
 ) -> Result<Value> {
-    let mut value = event_window_read_model(selected, events, format, output_limit_bytes)?;
+    let mut value =
+        event_window_read_model(selected, events, format, output_limit_bytes, provenance)?;
     value["copied_lineage"] = copied_lineage_read_model(copied_lineage)?;
     Ok(value)
 }
@@ -161,6 +167,7 @@ pub fn event_window_value(
 pub fn render_event_read_model_values(
     events: &[&CoreEventRecord],
     output_limit_bytes: usize,
+    provenance: &crate::ArchiveProvenanceMap,
 ) -> Result<Vec<Value>> {
     let mut rendered = Vec::with_capacity(events.len());
     let mut serialized_event_bytes = 2_usize;
@@ -174,7 +181,7 @@ pub fn render_event_read_model_values(
             output_limit_bytes,
             event.event_id.as_uuid(),
         )?;
-        let value = render_show_event_read_model(event);
+        let value = render_show_event_read_model(event, provenance);
         serialized_event_bytes = serialized_event_bytes
             .saturating_add(usize::from(!rendered.is_empty()))
             .saturating_add(serialized_json_bytes(&value)?);
@@ -188,7 +195,10 @@ pub fn render_event_read_model_values(
     Ok(rendered)
 }
 
-pub fn render_show_event_read_model(event: &CoreEventRecord) -> Value {
+pub fn render_show_event_read_model(
+    event: &CoreEventRecord,
+    provenance: &crate::ArchiveProvenanceMap,
+) -> Value {
     let content = &event.core_record.content;
     let view = EventReadView::new(event);
     let policy = EventContentPolicyView::new(content);
@@ -202,6 +212,7 @@ pub fn render_show_event_read_model(event: &CoreEventRecord) -> Value {
         "source_id": view.source_id,
         "provider_session_id": event.provider_session_id,
         "source_format": event.source_format,
+        "archive_provenance": provenance.for_session(event.session_id),
         "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
         "root_ctx_session_id": event.root_session_id.map(|id| id.as_uuid()),
         "session_relationship": event.session_relationship,
@@ -237,6 +248,7 @@ pub fn retain_structured_session_page(
     events: Vec<ShowSessionEvent>,
     query_has_more: bool,
     output_limit_bytes: usize,
+    provenance: &crate::ArchiveProvenanceMap,
 ) -> Result<SessionPageReadModel> {
     let mut selected = Vec::with_capacity(events.len());
     let mut serialized_event_bytes = 2_usize;
@@ -244,7 +256,7 @@ pub fn retain_structured_session_page(
     let mut output_truncated = false;
     for selected_event in events {
         let event_id = selected_event.event.event_id.as_uuid();
-        let value = render_show_event_read_model(&selected_event.event);
+        let value = render_show_event_read_model(&selected_event.event, provenance);
         let candidate_bytes = serialized_event_bytes
             .saturating_add(usize::from(!selected.is_empty()))
             .saturating_add(serialized_json_bytes(&value)?);
@@ -279,9 +291,11 @@ pub fn paginated_session_transcript_read_model(
     limit: usize,
     has_more: bool,
     next_cursor: Option<&SessionEventCursor>,
+    provenance: &crate::ArchiveProvenanceMap,
 ) -> Result<Value> {
     let returned = events.len();
-    let mut value = session_transcript_read_model(session, mode, format, events, false, None);
+    let mut value =
+        session_transcript_read_model(session, mode, format, events, false, None, provenance);
     value["pagination"] = compact_json(json!({
         "limit": limit,
         "returned": returned,

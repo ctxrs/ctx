@@ -329,6 +329,7 @@ fn committed_pointers_require_bounded_owned_paths_and_original_revision_proof() 
 
     let pointer = |snapshot: &str, path: &str| {
         serde_json::to_vec(&crate::retained::OwnedMember {
+            identity: None,
             snapshot: snapshot.to_owned(),
             member: path.to_owned(),
         })
@@ -386,7 +387,7 @@ fn committed_pointers_require_bounded_owned_paths_and_original_revision_proof() 
         assert!(!output.exists());
     }
     commit(
-        owned_kind,
+        certificate.observation().revision_kind(),
         certificate.observation().revision().to_vec(),
         digest,
     );

@@ -92,6 +92,10 @@ impl ListEventsApplicationResult {
         self.generation.receipt()
     }
 
+    pub fn archive_provenance(&self) -> &crate::ArchiveProvenanceMap {
+        self.generation.archive_provenance()
+    }
+
     pub const fn index(&self) -> &VerifiedIndex {
         self.generation.index()
     }
@@ -137,6 +141,7 @@ pub fn execute_list_events_page<Generation: GenerationReadPort>(
 }
 
 pub struct ListEventsStreamPage<'read> {
+    pub archive_provenance: &'read crate::ArchiveProvenanceMap,
     pub index: &'read VerifiedIndex,
     pub ordinal: usize,
     pub page: &'read CoreEventRangePage,
@@ -234,6 +239,7 @@ where
         let page_items = page.items.len();
         let control = stream
             .page(ListEventsStreamPage {
+                archive_provenance: generation.archive_provenance(),
                 index: generation.index(),
                 ordinal: items,
                 page: &page,

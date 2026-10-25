@@ -10,6 +10,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ctx-history-archive = { path = "../ctx-history-archive" }
 anyhow.workspace = true
 chrono.workspace = true
 serde_json.workspace = true

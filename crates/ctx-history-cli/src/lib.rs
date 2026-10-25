@@ -6,6 +6,7 @@
 //! and observations.
 
 mod analytics;
+mod archive_provenance;
 mod cli;
 mod config;
 mod dispatch;

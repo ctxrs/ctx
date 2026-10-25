@@ -15,7 +15,8 @@ pub(super) fn generation_read(
         RetainedPeerRead::IfAvailable => open_retained_peer(&mut index)?,
         RetainedPeerRead::Deferred => None,
     };
-    Ok(GenerationRead::new(index, retained_peer))
+    let provenance = crate::archive_provenance::load(&index)?;
+    Ok(GenerationRead::new(index, retained_peer).with_archive_provenance(provenance))
 }
 
 pub(crate) fn open_generation_read(

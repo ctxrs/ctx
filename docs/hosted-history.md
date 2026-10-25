@@ -59,6 +59,20 @@ is a no-op. A corrected session requires `--expected-predecessors FILE`, a JSON
 object mapping that member's inventory path to its currently imported SHA-256.
 Missing sessions in a later archive do not delete earlier imports.
 
+Local search, conversation details, event enumeration, and locate output expose
+`archive_provenance` with `origin`, `view`, and `label_authority: "archive_creator"`.
+CLI text and MCP text identify these as creator-supplied labels, not verified
+machine identities. JSON, JSONL, and MCP structured results retain the exact
+labels. Different origins remain separate even when conversation content is
+identical. Querying uses metadata in the pinned history generation and does not
+open archive files or contact the original machine.
+
+For history restored by an older ctx version, repeat `archive restore` with the
+same archive once to retain the labels in the query generation. This preserves
+conversation IDs and records; subsequent unchanged restores remain no-ops.
+Until then, the optional provenance field is absent, not evidence of local origin.
+
+
 When exporting a restored root, reuse the original `--origin` and `--view`. ctx
 exports the retained original records, preserving their identities and provenance.
 If the root contains several original identities, export each separately; output

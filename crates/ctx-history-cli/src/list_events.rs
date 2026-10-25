@@ -32,6 +32,8 @@ pub use request::{
 #[derive(Debug, thiserror::Error)]
 pub enum EventQueryError {
     #[error(transparent)]
+    Archive(#[from] ctx_history_archive::ArchiveError),
+    #[error(transparent)]
     GenerationReadAuthority(#[from] ctx_history_read_application::GenerationReadAuthorityError),
     #[error(transparent)]
     Range(#[from] CoreEventRangeError),
@@ -113,8 +115,12 @@ fn execute(
                 &mut generation,
             )
             .map_err(list_page_application_error)?;
-            let page =
-                encode_bounded_page(application.index(), &application.result().page, &request)?;
+            let page = encode_bounded_page(
+                application.index(),
+                &application.result().page,
+                &request,
+                application.archive_provenance(),
+            )?;
             writer.write_all(&page.encoded)?;
             writer.flush()?;
             Ok(page.items)
@@ -225,9 +231,11 @@ fn open_event_range_generation(
     }
     .map_err(CoreEventRangeError::from)
     .map_err(EventQueryError::from)?;
-    Ok(ctx_history_read_application::GenerationRead::new(
-        index, None,
-    ))
+    let provenance = crate::archive_provenance::load(&index)?;
+    Ok(
+        ctx_history_read_application::GenerationRead::new(index, None)
+            .with_archive_provenance(provenance),
+    )
 }
 
 fn list_page_request(
@@ -284,7 +292,12 @@ pub fn event_range_page_value(
         &mut generation,
     )
     .map_err(list_page_application_error)?;
-    let page = encode_bounded_page(application.index(), &application.result().page, request)?;
+    let page = encode_bounded_page(
+        application.index(),
+        &application.result().page,
+        request,
+        application.archive_provenance(),
+    )?;
     Ok(serde_json::from_slice(&page.encoded)?)
 }
 
@@ -292,11 +305,19 @@ fn encode_bounded_page(
     index: &VerifiedIndex,
     page: &CoreEventRangePage,
     request: &EventQueryWireRequest,
+    provenance: &ctx_history_read_application::ArchiveProvenanceMap,
 ) -> std::result::Result<EncodedPage, EventQueryError> {
     let rendered = page
         .items
         .iter()
-        .map(|event| render_event(event, request.content))
+        .map(|event| {
+            ctx_history_read_application::render_event_read_model(
+                event,
+                request.content,
+                provenance,
+            )
+            .map_err(EventQueryError::from)
+        })
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let next_cursor = page.next_cursor.as_ref().map(encode_cursor);
     let full = encode_page(
@@ -500,7 +521,11 @@ where
     ) -> std::result::Result<ctx_history_read_application::ListEventsStreamControl, Self::Error>
     {
         for (offset, event) in page.page.items.iter().enumerate() {
-            let rendered = render_event(event, self.request.content)?;
+            let rendered = ctx_history_read_application::render_event_read_model(
+                event,
+                self.request.content,
+                page.archive_provenance,
+            )?;
             let record = ctx_history_read_application::event_query_event_read_model(
                 &page.page.generation_id,
                 page.ordinal.saturating_add(offset),

@@ -483,6 +483,7 @@ fn structured_read_models_are_composed_from_pinned_query_results() {
         })
         .collect::<Vec<_>>();
     let search_value = render_search_json(SearchJsonInput {
+        provenance: &Default::default(),
         request: &search.request,
         index: &index,
         collection: &search.collection,
@@ -534,6 +535,7 @@ fn structured_read_models_are_composed_from_pinned_query_results() {
         &shown.copied_lineage,
         StructuredOutputFormat::Json,
         ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES,
+        &Default::default(),
     )
     .unwrap();
     assert_eq!(event_window["target"], "event");
@@ -584,16 +586,24 @@ fn structured_read_models_are_composed_from_pinned_query_results() {
             strict_budget: None,
         })
         .unwrap();
-    let listed_value =
-        render_event_read_model(&listed.page.items[0], EventContentProjection::Text).unwrap();
+    let listed_value = render_event_read_model(
+        &listed.page.items[0],
+        EventContentProjection::Text,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(listed_value["content_projection"], "text");
     assert_eq!(listed_value["text"], "needle first");
     assert!(listed_value
         .get("structured_content")
         .is_some_and(|value| value.is_null()));
     assert!(listed_value.get("activity").is_none());
-    let full_value =
-        render_event_read_model(&listed.page.items[0], EventContentProjection::Full).unwrap();
+    let full_value = render_event_read_model(
+        &listed.page.items[0],
+        EventContentProjection::Full,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(
         full_value["activity"],
         serde_json::to_value(records[0].content.activity.as_ref().unwrap()).unwrap()
@@ -673,11 +683,13 @@ fn event_projections_share_published_custom_metadata_and_absent_semantics() {
         &SearchResultCommands {
             suggested_next_commands: vec!["adapter fixture command".to_owned()],
         },
+        &Default::default(),
     )
     .unwrap();
 
-    let shown = render_show_event_read_model(&event);
-    let listed = render_event_read_model(&event, EventContentProjection::Text).unwrap();
+    let shown = render_show_event_read_model(&event, &Default::default());
+    let listed =
+        render_event_read_model(&event, EventContentProjection::Text, &Default::default()).unwrap();
     let located = locate_read_model(&LocateResult::Event(Box::new(event.clone())));
 
     for (field, expected) in [
@@ -737,6 +749,7 @@ fn structured_cursor_and_compact_reference_compatibility_are_neutral() {
         page.events,
         page.has_more,
         ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES,
+        &Default::default(),
     )
     .unwrap();
     let transcript = paginated_session_transcript_read_model(
@@ -747,6 +760,7 @@ fn structured_cursor_and_compact_reference_compatibility_are_neutral() {
         1,
         rendered.has_more,
         rendered.next_cursor.as_ref(),
+        &Default::default(),
     )
     .unwrap();
     assert_eq!(transcript["pagination"]["limit"], 1);

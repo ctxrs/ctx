@@ -28,6 +28,8 @@ use super::search::{
 use crate::RefreshMode as RefreshArg;
 
 mod activity;
+mod archive;
+pub(in crate::source_index) use archive::append as append_archive_provenance;
 mod human;
 mod locate;
 mod search;
@@ -103,8 +105,10 @@ pub(super) fn search_json_document(
         .as_ref()
         .map(|fallback| semantic_fallback_detail(fallback.reason, &fallback.detail));
     let generated_at = utc_now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let provenance = crate::archive_provenance::load(index)?;
     ctx_history_read_application::render_search_json(
         ctx_history_read_application::SearchJsonInput {
+            provenance: &provenance,
             request,
             index,
             collection,
@@ -293,6 +297,7 @@ fn render_show_text(value: &Value) -> String {
             ));
         }
     }
+    append_archive_provenance(&mut output, value, false);
     append_copied_lineage_text(&mut output, value);
     for event in value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
         let role = event["role"]
@@ -305,6 +310,7 @@ fn render_show_text(value: &Value) -> String {
             event["event_type"].as_str().unwrap_or("event"),
             event["ctx_event_id"].as_str().unwrap_or("unknown"),
         ));
+        append_archive_provenance(&mut output, event, false);
         append_activity_text(&mut output, event);
         output.push_str(event["text"].as_str().unwrap_or_default());
         output.push_str("\n\n");
@@ -329,6 +335,7 @@ fn render_show_markdown(value: &Value) -> String {
             value["ctx_session_id"].as_str().unwrap_or("unknown")
         ),
     };
+    append_archive_provenance(&mut output, value, true);
     append_copied_lineage_markdown(&mut output, value);
     for event in value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
         let role = event["role"]
@@ -341,6 +348,7 @@ fn render_show_markdown(value: &Value) -> String {
             event["occurred_at"].as_str().unwrap_or("-"),
             event["ctx_event_id"].as_str().unwrap_or("unknown"),
         ));
+        append_archive_provenance(&mut output, event, true);
         append_activity_markdown(&mut output, event);
         output.push_str(event["text"].as_str().unwrap_or_default());
         output.push('\n');
