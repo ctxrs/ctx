@@ -442,9 +442,9 @@ impl CoreRefreshEngine {
             let published_generation = find_attempt(&state, &request_id)
                 .and_then(|attempt| attempt.published_generation.clone());
             if failed_run && scheduler_retry {
-                // The daemon still has to add its durable retry deadline to
-                // this terminal root. Reserve the root's queue slot until
-                // that lock-serialized write completes.
+                // The daemon still has to consume this failed terminal result.
+                // Reserve the root's queue slot until its scheduler handoff
+                // completes, just as after the initial successful write.
                 state.pending_scheduler_retry_root_id = Some(request_id.clone());
             }
             advance_after_terminal_attempt(&mut state, &request_id, published_generation);
