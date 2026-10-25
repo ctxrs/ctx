@@ -6,6 +6,8 @@ use ctx_history_capture::{
 };
 use ctx_history_capture_model::ProviderSourceStatus;
 
+mod partial_retry;
+
 fn retryable_internal_outcome(
     retryable_routes: BTreeSet<SourceRouteIdentity>,
     blocked_routes: BTreeSet<SourceRouteIdentity>,

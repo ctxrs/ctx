@@ -199,9 +199,10 @@ fn read_codex_session_meta(
     if compressed_length == 0
         || compressed_length > ctx_history_jsonl::MAX_STANDARD_ZSTD_COMPRESSED_BYTES
     {
-        return Err(CaptureError::InvalidPayload(
-            "Codex compressed catalog source exceeds the bounded physical limit".to_owned(),
-        ));
+        return Err(CaptureError::InvalidPayload(format!(
+            "Codex compressed catalog source is empty or exceeds the bounded physical limit (compressed_bytes={compressed_length}, limit_bytes={})",
+            ctx_history_jsonl::MAX_STANDARD_ZSTD_COMPRESSED_BYTES,
+        )));
     }
     let mut decoder =
         zstd::stream::read::Decoder::new(file.take(compressed_length)).map_err(|error| {
@@ -213,11 +214,31 @@ fn read_codex_session_meta(
     let mut reader = BufReader::new(
         decoder.take(CODEX_COMPRESSED_CATALOG_MAX_DECODED_PREFIX_BYTES.saturating_add(1)),
     );
-    let session_meta = read_codex_session_meta_from_reader(&mut reader, expected_owner.as_deref())?;
+    let session_meta = read_codex_session_meta_from_reader(&mut reader, expected_owner.as_deref())
+        .map_err(|error| match error {
+            // Zstandard reports malformed/truncated frames through io::Error.
+            // Preserve real filesystem errors instead of quarantining a
+            // resource failure as corrupt input.
+            CaptureError::Io(error)
+                if error.raw_os_error().is_none()
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Other
+                            | std::io::ErrorKind::InvalidData
+                            | std::io::ErrorKind::UnexpectedEof
+                    ) =>
+            {
+                CaptureError::InvalidPayload(format!(
+                    "corrupt or truncated Codex compressed catalog source: {error}"
+                ))
+            }
+            error => error,
+        })?;
     if session_meta.is_none() && reader.get_ref().limit() == 0 {
-        return Err(CaptureError::InvalidPayload(
-            "Codex compressed catalog prefix exceeds the bounded decompression limit".to_owned(),
-        ));
+        return Err(CaptureError::InvalidPayload(format!(
+            "Codex compressed catalog prefix exceeds the bounded decompression limit (compressed_bytes={compressed_length}, decoded_bytes_at_least={}, limit_bytes={CODEX_COMPRESSED_CATALOG_MAX_DECODED_PREFIX_BYTES})",
+            CODEX_COMPRESSED_CATALOG_MAX_DECODED_PREFIX_BYTES.saturating_add(1),
+        )));
     }
     Ok(session_meta)
 }

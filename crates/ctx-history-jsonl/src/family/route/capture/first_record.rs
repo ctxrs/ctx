@@ -3,7 +3,8 @@ use super::*;
 /// Applies the shared physical JSONL contract before any provider semantic
 /// classification. A nonempty first record without its framing terminator is
 /// pending/incomplete; zero-byte files and complete malformed records retain
-/// their existing provider semantics.
+/// their existing provider semantics. Refused or unreadable physical streams
+/// become source failures while systemic errors still abort capture.
 pub(in crate::family::route) fn classify_incomplete_first_records<R: JsonlFamilyRuntime>(
     adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
     opening: &mut JsonlFamilyInventory<JsonlRuntimeError<R>>,
@@ -16,7 +17,7 @@ pub(in crate::family::route) fn classify_incomplete_first_records<R: JsonlFamily
     for member in std::mem::take(&mut opening.members) {
         match member {
             JsonlFamilyInventoryMember::Accepted { identity, leaf } if !leaf.whole_record => {
-                let (incomplete, frozen_prefix_sha256) = first_record_is_incomplete(
+                let probe = first_record_is_incomplete(
                     &leaf.source_path,
                     &leaf.authority,
                     &leaf.authority_path,
@@ -27,7 +28,44 @@ pub(in crate::family::route) fn classify_incomplete_first_records<R: JsonlFamily
                         freeze_observation_at_scan: leaf.frozen_scan_observation().is_some(),
                         admitted_length: leaf.admitted_length(),
                     },
-                )?;
+                );
+                let (incomplete, frozen_prefix_sha256) = match probe {
+                    Ok(probe) => probe,
+                    Err(error) => {
+                        let unobserved = error.is_source_unavailable();
+                        let kind = normalized_jsonl_error_kind(&error)
+                            .unwrap_or_else(|| adapter.scan_error_kind(&error));
+                        if !kind.is_logical_source_failure() || error.is_not_found() {
+                            return Err(error);
+                        }
+                        let failure = route_scan(adapter, error);
+                        let source = leaf.source.clone();
+                        let rejected = if unobserved {
+                            JsonlFamilyRejectedLeaf::bind_unobserved(
+                                leaf.source_path,
+                                leaf.authority_path,
+                                leaf.binding,
+                                0,
+                            )
+                        } else {
+                            JsonlFamilyRejectedLeaf::bind_observed(
+                                leaf.source_path,
+                                leaf.authority_path,
+                                leaf.observation,
+                                leaf.binding,
+                                0,
+                            )
+                        }
+                        .with_logical_source_error(source.clone(), failure)
+                        .with_quarantined_source(source);
+                        classified.push(JsonlFamilyInventoryMember::Quarantined {
+                            identity,
+                            leaf: rejected,
+                        });
+                        changed = true;
+                        continue;
+                    }
+                };
                 if incomplete {
                     changed = true;
                     let mut pending = JsonlFamilyPendingLeaf::bind_observed(

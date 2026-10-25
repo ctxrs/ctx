@@ -7,7 +7,7 @@ pub struct JsonlFamilyRejectedLeaf {
     pub(super) observation: Option<JsonlFileObservation>,
     pub(super) proof: TypedKey,
     pub(super) rejected_records: u64,
-    pub(super) logical_source_failure: Option<(SourceKey, String)>,
+    pub(super) logical_source_failure: Option<(SourceKey, SourceBackedRouteError)>,
     pub(super) quarantined_source: Option<SourceKey>,
     pub(super) physical_encoding: JsonlPhysicalEncoding,
 }
@@ -63,7 +63,17 @@ impl JsonlFamilyRejectedLeaf {
         source: SourceKey,
         detail: impl Into<String>,
     ) -> Self {
-        self.logical_source_failure = Some((source, detail.into()));
+        self.logical_source_failure = Some((source, route_invalid(detail.into())));
+        self
+    }
+
+    /// Preserves the typed boundary of an unreadable or refused physical member.
+    pub fn with_logical_source_error(
+        mut self,
+        source: SourceKey,
+        failure: SourceBackedRouteError,
+    ) -> Self {
+        self.logical_source_failure = Some((source, failure));
         self
     }
 

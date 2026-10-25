@@ -425,6 +425,7 @@ where
             source.clone(),
             failure.failure.clone(),
             failure.retained.is_some(),
+            None,
         )
         .map_err(|error| {
             sink_error(

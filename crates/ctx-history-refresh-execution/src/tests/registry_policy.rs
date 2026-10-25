@@ -881,3 +881,49 @@ fn write_registry_policy_codex_rollout(root: &Path) {
     )
     .unwrap();
 }
+
+#[test]
+fn oversized_codex_leaf_reports_its_selector_and_size_while_peer_publishes() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let (_, _, discovery) = discovery_fixture(temp.path());
+    let codex_root = temp.path().join("codex-sessions");
+    write_registry_policy_codex_rollout(&codex_root);
+    let oversized = codex_root.join("rollout-019fb000-0000-7000-8000-000000000091.jsonl.zst");
+    // Authored sparse boundary input; refusal precedes decompression.
+    std::fs::File::create(&oversized)
+        .unwrap()
+        .set_len(256 * 1024 * 1024 + 1)
+        .unwrap();
+    let publication = run_report(
+        &discovery,
+        DiscoveryReport {
+            sources: vec![provider_source_for_path(CaptureProvider::Codex, codex_root)],
+            issues: Vec::new(),
+        },
+        &data_root,
+        &index_root,
+    )
+    .unwrap();
+    assert_eq!(publication.route_results.len(), 1);
+    let route = &publication.route_results[0];
+    assert!(route.outcome.is_success());
+    assert_eq!(route.source_failure_total, 1);
+    assert_eq!(route.source_failures.len(), 1);
+    let failure = &route.source_failures[0];
+    assert_eq!(failure.source_selector, oversized.display().to_string());
+    assert_eq!(failure.class, "unreadable");
+    assert!(!failure.carried_forward);
+    assert!(failure.detail.contains("compressed_bytes=268435457"));
+    assert!(failure.detail.contains("limit_bytes=268435456"));
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .complete_lexical_search("registrypolicyvalidmarker", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}

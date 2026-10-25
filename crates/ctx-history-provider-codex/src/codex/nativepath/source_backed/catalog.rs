@@ -2,6 +2,7 @@ use super::*;
 use crate::provider::source_backed::family::jsonl::{
     observe_opened_file, JsonlFamilyOpenedMember, JsonlFileObservation,
 };
+use ctx_history_jsonl::JsonlFamilyError;
 
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
@@ -242,9 +243,8 @@ pub(super) struct CodexRejectedCatalogLeafV0 {
     pub(super) source_path: PathBuf,
     pub(super) source_root_lineage: Option<[u8; 32]>,
     pub(super) authority_path: PathBuf,
-    pub(super) observation: CodexFileObservation,
-    pub(super) jsonl_observation: JsonlFileObservation,
-    pub(super) reason: &'static str,
+    pub(super) observation: Option<(CodexFileObservation, JsonlFileObservation)>,
+    pub(super) failure: ctx_history_capture_runtime::SourceBackedRouteError,
 }
 
 pub(crate) struct CodexDeferredSessionTreeInventoryV0 {
@@ -258,10 +258,15 @@ fn discover_codex_session_tree_metadata_inventory_v0(
     let normalized_roots = normalized_session_roots(session_roots)?;
     let mut leaves = Vec::new();
     let mut authorities = Vec::with_capacity(normalized_roots.len());
+    let mut rejected_leaves = Vec::new();
     for session_root in &normalized_roots {
-        let (root, mut root_leaves) = discover_codex_metadata_inventory_root_v0(session_root)?;
+        let (root, mut root_leaves) =
+            discover_codex_metadata_inventory_root_v0(session_root, &mut rejected_leaves)?;
         crate::provider::codex::catalog::ensure_catalog_source_bound(
-            leaves.len().saturating_add(root_leaves.len()),
+            leaves
+                .len()
+                .saturating_add(root_leaves.len())
+                .saturating_add(rejected_leaves.len()),
         )?;
         leaves.append(&mut root_leaves);
         authorities.push(root);
@@ -271,21 +276,24 @@ fn discover_codex_session_tree_metadata_inventory_v0(
     run_after_codex_metadata_inventory_hook();
 
     let mut catalog_sources = Vec::with_capacity(leaves.len());
-    let mut rejected_leaves = Vec::new();
     for leaf in leaves {
         match catalog_source_from_path_hint(&leaf) {
             Ok(source) => catalog_sources.push(source),
-            Err(CodexSourceBackedErrorV0::Capture(CaptureError::InvalidPayload(_)))
-            | Err(CodexSourceBackedErrorV0::MissingNativeSessionId { .. }) => {
+            Err(
+                error @ (CodexSourceBackedErrorV0::Capture(CaptureError::InvalidPayload(_))
+                | CodexSourceBackedErrorV0::MissingNativeSessionId { .. }),
+            ) => {
                 rejected_leaves.push(CodexRejectedCatalogLeafV0 {
+                    failure: ctx_history_capture_runtime::SourceBackedRouteError::new(
+                        ctx_history_capture_runtime::SourceBackedRouteErrorKind::InvalidSource,
+                        error.to_string(),
+                    ),
                     source_path: leaf.source_path,
                     source_root_lineage: Some(codex_session_tree_source_root_lineage(
                         leaf.authority.named_path(),
                     )?),
                     authority_path: leaf.relative_path,
-                    observation: leaf.observation,
-                    jsonl_observation: leaf.jsonl_observation,
-                    reason: "missing or conflicting Codex session owner",
+                    observation: Some((leaf.observation, leaf.jsonl_observation)),
                 });
             }
             Err(error) => return Err(error),
@@ -307,6 +315,7 @@ fn discover_codex_session_tree_metadata_inventory_v0(
 
 fn discover_codex_metadata_inventory_root_v0(
     session_root: &Path,
+    rejected: &mut Vec<CodexRejectedCatalogLeafV0>,
 ) -> CodexSourceBackedResultV0<(ProviderSourceRoot, Vec<CodexMetadataInventoryLeafV0>)> {
     let authority = ProviderSourceRoot::open(session_root)?;
     let mut leaves = Vec::new();
@@ -357,15 +366,47 @@ fn discover_codex_metadata_inventory_root_v0(
                     ),
                 ));
             }
-            match directory.open_child(&name)? {
+            let selected =
+                crate::provider::codex::catalog::is_codex_session_rollout_path(&source_path);
+            let opened = match directory.open_child(&name) {
+                Ok(opened) => opened,
+                Err(error)
+                    if error.is_ignorable_membership_entry() || codex_leaf_unavailable(&error) =>
+                {
+                    if selected {
+                        let kind = if codex_leaf_unavailable(&error) {
+                            ctx_history_capture_runtime::SourceBackedRouteErrorKind::Unavailable
+                        } else {
+                            ctx_history_capture_runtime::SourceBackedRouteErrorKind::InvalidSource
+                        };
+                        let failure =
+                            ctx_history_capture_runtime::SourceBackedRouteError::from_error(
+                                kind, &error,
+                            );
+                        rejected.push(CodexRejectedCatalogLeafV0 {
+                            source_path,
+                            source_root_lineage: Some(codex_session_tree_source_root_lineage(
+                                session_root,
+                            )?),
+                            authority_path: relative_path,
+                            observation: None,
+                            failure,
+                        });
+                        crate::provider::codex::catalog::ensure_catalog_source_bound(
+                            leaves.len().saturating_add(rejected.len()),
+                        )?;
+                    } else if !error.is_ignorable_membership_entry() {
+                        return Err(error.into());
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            match opened {
                 OpenedProviderSourcePath::Directory(_) => {
                     child_directories.push((relative_path, depth.saturating_add(1)));
                 }
-                OpenedProviderSourcePath::File(opened)
-                    if crate::provider::codex::catalog::is_codex_session_rollout_path(
-                        &source_path,
-                    ) =>
-                {
+                OpenedProviderSourcePath::File(opened) if selected => {
                     ctx_history_source_io::provider_path_identity(&source_path)
                         .map_err(CaptureError::from)?;
                     let observation = opened_codex_file_observation(&source_path, opened.file())?;
@@ -384,7 +425,9 @@ fn discover_codex_metadata_inventory_root_v0(
                         jsonl_observation,
                         authority: authority.clone(),
                     });
-                    crate::provider::codex::catalog::ensure_catalog_source_bound(leaves.len())?;
+                    crate::provider::codex::catalog::ensure_catalog_source_bound(
+                        leaves.len().saturating_add(rejected.len()),
+                    )?;
                 }
                 OpenedProviderSourcePath::File(_) => {}
             }
@@ -553,4 +596,9 @@ pub fn codex_session_root_rank(root: &Path) -> u8 {
         Some("archived_sessions") => 1,
         _ => 2,
     }
+}
+
+fn codex_leaf_unavailable(error: &CaptureError) -> bool {
+    error.is_source_unavailable()
+        || matches!(error, CaptureError::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
 }
