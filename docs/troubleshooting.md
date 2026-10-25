@@ -52,6 +52,65 @@ For an unmanaged executable or mismatched marker, follow the
 [upgrade recovery instructions](upgrade.md#fix-upgrade-diagnostics) before
 moving any files.
 
+## History Generation Lease Errors
+
+A generation read lock protects history while a query is using it. Its
+coordinator files are separate from `generation-retention-lease.json`, which
+holds one generation for a deferred consumer. ctx 2.2.7 and 2.2.8 used the same
+formats, but reported failures in either mechanism as a malformed durable
+lease. On macOS, `0600` alone does not rule out an extended ACL or a filesystem
+identity error.
+
+Current ctx repairs owner-controlled coordinator metadata in place, preserving
+live OS locks. Current-version holds accept JSON whitespace and member reordering.
+An invalid durable hold does not prevent searching the verified
+active or previous generation. If refresh reports an invalid hold, run:
+
+```bash
+ctx doctor --repair
+ctx search "your query" --refresh off
+```
+
+For a custom root, pass the same `--data-root PATH` to each command. Repair
+verifies the active generation under the publication lock, restores private
+control permissions, and moves an invalid durable hold to the reported
+`.generation-retention-lease.invalid-*` file. It keeps the active pointer,
+generation files, valid holds, and live readers. It does not import sources,
+reclaim history, enable automatic indexing, or start a daemon. Unsupported
+future lease versions and unsafe paths remain errors; a failed history
+verification leaves the hold in place. Ordinary `ctx doctor` remains an
+observation.
+
+After repair, `ctx import --all` explicitly refreshes history. In manual mode,
+that command may start a finite worker; it does not enable persistent indexing.
+
+### If You Are Still Running 2.2.8
+
+`doctor --repair` is not available in 2.2.8. Preserve the existing data root and
+upgrade to a release containing this fix before using it. Do not delete lock
+files, the retention record, or `search/lexical` to force recovery. Replacing a
+lock file can separate live readers from the locks that protect their history.
+
+For diagnosis on macOS, inspect the exact affected root (these examples use
+the default):
+
+```bash
+ctx doctor --format json
+ls -ldeO@ "$HOME/.ctx" "$HOME/.ctx/search" "$HOME/.ctx/search/lexical"
+ls -leO@ "$HOME/.ctx/search/lexical/.ctx-generation-read-leases-v2.lock" \
+  "$HOME/.ctx/search/lexical/.ctx-generation-lease-coordinator-init-v2.lock"
+```
+
+If the only problem is an extended ACL or permission drift on one of those
+existing, current-user-owned, single-link regular files, `chmod -N PATH`
+(macOS) and `chmod 600 PATH` repair that file's permissions in place. Substitute
+only the verified affected file; do not use recursive permission changes.
+Retry `ctx search "your query" --refresh off`. For a malformed durable hold or
+filesystem identity/synchronization failure, preserve the data and use a release
+containing the recovery command and detailed diagnostics. Synchronization
+failures may still require filesystem-specific diagnosis. The old generic
+error alone cannot distinguish these cases; an index reset is not a repair.
+
 ## Uninstall The Managed CLI
 
 Use the hosted uninstaller for an installer-managed ctx binary. On macOS or Linux:

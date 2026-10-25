@@ -813,3 +813,49 @@ fn clean_multisource_setup_imports_hermes_and_preserves_source_bytes() {
     assert!(!data_root(&temp).join("relational.sqlite").exists());
     assert_eq!(fs::read(&hermes_db).unwrap(), hermes_before);
 }
+
+#[test]
+fn doctor_repairs_invalid_lease_without_refresh_or_daemon_start() {
+    let temp = tempdir();
+    let root = data_root(&temp);
+    let generation = initialize_generation_only_core(&root);
+    let config = b"[indexing]\nmode = \"manual\"\n";
+    fs::write(root.join("config.toml"), config).unwrap();
+    let index = root.join("search/lexical");
+    let pointer = fs::read(index.join("active-generation.json")).unwrap();
+    fs::write(
+        index.join("generation-retention-lease.json"),
+        b"{interrupted",
+    )
+    .unwrap();
+
+    // Ordinary reads use the verified active generation even before repair.
+    ctx(&temp)
+        .args(["search", "absent", "--refresh", "off"])
+        .assert()
+        .success();
+    let repaired = json_output(ctx(&temp).args(["doctor", "--repair", "--format=json"]));
+    assert_eq!(repaired["ok"], true, "{repaired:#}");
+    assert_eq!(repaired["read_only"], false);
+    assert_eq!(repaired["repair"]["generation_id"], generation);
+    let saved = repaired["repair"]["quarantined_lease"].as_str().unwrap();
+    assert_eq!(fs::read(saved).unwrap(), b"{interrupted");
+    assert_eq!(
+        fs::read(index.join("active-generation.json")).unwrap(),
+        pointer
+    );
+    assert_eq!(fs::read(root.join("config.toml")).unwrap(), config);
+    assert!(!index.join("generation-retention-lease.json").exists());
+    assert_no_daemon_autostart_mutation(&temp);
+    assert!(!root.join("daemon/source-refresh.json").exists());
+    ctx(&temp)
+        .args(["doctor", "--repair"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("History lease repair complete"));
+    ctx(&temp)
+        .args(["search", "absent", "--refresh", "off"])
+        .assert()
+        .success();
+    assert_no_daemon_autostart_mutation(&temp);
+}

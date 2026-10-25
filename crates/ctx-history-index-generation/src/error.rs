@@ -45,11 +45,15 @@ pub enum GenerationError {
     UnsupportedActiveGenerationPointer(u32),
     #[error("the active generation pointer is malformed or non-canonical")]
     InvalidActiveGenerationPointer,
-    #[error("the durable generation-retention lease is malformed, non-canonical, or not owner-private; resolve the unfinished lease owner before publishing Core")]
+    #[error("the durable generation-retention lease is invalid; run `ctx doctor --repair` to verify retained history and quarantine the invalid hold before retrying `ctx import --all`")]
     InvalidGenerationRetentionLease,
-    #[error("unsupported durable generation-retention lease version {0}")]
+    #[error("generation read-lock coordinator is unavailable: {0}; run `ctx doctor --repair`; do not delete lock files")]
+    GenerationReadLeaseCoordinator(#[source] std::io::Error),
+    #[error("unsupported durable generation-retention lease version {0}; run `ctx upgrade` to use a compatible reader; the hold has been preserved")]
     UnsupportedGenerationRetentionLease(u32),
-    #[error("generation-retention lease owner kind or identity is invalid")]
+    #[error(
+        "generation-retention lease owner kind or identity is invalid; run `ctx doctor --repair`"
+    )]
     InvalidGenerationRetentionLeaseOwner,
     #[error("generation {requested_generation_id} cannot be leased because it is not the active or previous retained generation")]
     GenerationRetentionLeaseTargetNotRetained { requested_generation_id: String },

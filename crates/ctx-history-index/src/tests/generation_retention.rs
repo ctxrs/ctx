@@ -456,7 +456,7 @@ fn ordinary_reader_does_not_retain_the_previous_generation() {
 }
 
 #[test]
-fn generation_retention_lease_is_single_owner_private_and_fail_closed() {
+fn invalid_durable_hold_blocks_publication_but_not_verified_history() {
     let temp = tempdir().unwrap();
     let first = publish(
         temp.path(),
@@ -508,10 +508,39 @@ fn generation_retention_lease_is_single_owner_private_and_fail_closed() {
         GenerationWriter::open(temp.path(), WriterOptions::default()),
         Err(IndexError::InvalidGenerationRetentionLease)
     ));
-    assert!(matches!(
-        VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id),
-        Err(IndexError::InvalidGenerationRetentionLease)
-    ));
+    let reader = VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id).unwrap();
+    assert_eq!(reader.generation_id(), first.generation_id);
+    assert_eq!(
+        VerifiedIndex::open_pinned(temp.path())
+            .unwrap()
+            .generation_id(),
+        first.generation_id
+    );
+    let pointer = fs::read(temp.path().join("active-generation.json")).unwrap();
+    let repair = repair_generation_leases(temp.path()).unwrap();
+    assert_eq!(repair.generation_id, first.generation_id);
+    assert_eq!(
+        fs::read(repair.quarantined_lease.unwrap()).unwrap(),
+        b"{not-canonical"
+    );
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer
+    );
+    assert!(repair_generation_leases(temp.path())
+        .unwrap()
+        .quarantined_lease
+        .is_none());
+    assert!(load_generation_retention_lease(temp.path())
+        .unwrap()
+        .is_none());
+    assert_eq!(reader.generation_id(), first.generation_id);
+    publish(
+        temp.path(),
+        &source("generation-retention-lease-bound.jsonl"),
+        2,
+        "recovered",
+    );
 }
 
 #[test]
@@ -611,4 +640,154 @@ fn allocated_bytes(root: &Path) -> u64 {
 #[cfg(not(unix))]
 fn allocated_bytes(_root: &Path) -> u64 {
     0
+}
+
+#[test]
+fn lease_repair_preserves_valid_holds_and_refuses_unverified_history() {
+    let temp = tempdir().unwrap();
+    let first = publish(
+        temp.path(),
+        &source("lease-repair.jsonl"),
+        1,
+        "retained history",
+    );
+    let lease = acquire_generation_retention_lease(
+        temp.path(),
+        &first.generation_id,
+        "foreign_consumer",
+        &"a".repeat(64),
+    )
+    .unwrap();
+    assert!(repair_generation_leases(temp.path())
+        .unwrap()
+        .quarantined_lease
+        .is_none());
+    assert_eq!(
+        load_generation_retention_lease(temp.path()).unwrap(),
+        Some(lease)
+    );
+    let lease_path = temp.path().join("generation-retention-lease.json");
+    fs::write(&lease_path, b"{interrupted").unwrap();
+    let pointer = temp.path().join("active-generation.json");
+    fs::write(&pointer, b"corrupt pointer").unwrap();
+    assert!(repair_generation_leases(temp.path()).is_err());
+    assert_eq!(fs::read(&lease_path).unwrap(), b"{interrupted");
+    assert_eq!(fs::read(&pointer).unwrap(), b"corrupt pointer");
+}
+
+#[test]
+fn damaged_released_coordinator_does_not_require_reimport_after_upgrade() {
+    let temp = tempdir().unwrap();
+    let first = publish(
+        temp.path(),
+        &source("released-lease.jsonl"),
+        1,
+        "upgrade needle",
+    );
+    // These are the v2 coordinator filenames used by both 2.2.7 and 2.2.8.
+    // Neither release has a different durable-retention record format.
+    let marker = temp.path().join(".ctx-generation-read-leases-v2.lock");
+    fs::write(&marker, b"damaged marker").unwrap();
+    let pointer = fs::read(temp.path().join("active-generation.json")).unwrap();
+    let reader = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    assert_eq!(reader.generation_id(), first.generation_id);
+    assert_eq!(reader.document_count(), 1);
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer
+    );
+    assert_eq!(
+        fs::read(marker).unwrap(),
+        b"ctx-generation-read-leases-v2\n"
+    );
+}
+
+#[test]
+fn malformed_hold_cannot_authorize_a_generation_outside_the_pointer_pair() {
+    let temp = tempdir().unwrap();
+    let source = source("invalid-old-hold.jsonl");
+    let first = publish(temp.path(), &source, 1, "first");
+    let lease = acquire_generation_retention_lease(
+        temp.path(),
+        &first.generation_id,
+        "consumer",
+        &"a".repeat(64),
+    )
+    .unwrap();
+    let second = publish(temp.path(), &source, 2, "second");
+    let third = publish(temp.path(), &source, 3, "third");
+    let path = temp.path().join("generation-retention-lease.json");
+    let mut future = serde_json::to_value(&lease).unwrap();
+    future["version"] = serde_json::json!(999);
+    for extended in [false, true] {
+        if extended {
+            future["future_field"] = serde_json::json!("preserve me");
+        }
+        let bytes = serde_json::to_vec_pretty(&future).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            repair_generation_leases(temp.path()),
+            Err(IndexError::UnsupportedGenerationRetentionLease(999))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+    fs::write(&path, b"{invalid").unwrap();
+    assert!(VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id).is_err());
+    for id in [&second.generation_id, &third.generation_id] {
+        assert_eq!(
+            VerifiedIndex::open_pinned_generation(temp.path(), id)
+                .unwrap()
+                .generation_id(),
+            id
+        );
+    }
+    let pointer = fs::read(temp.path().join("active-generation.json")).unwrap();
+    repair_generation_leases(temp.path()).unwrap();
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer
+    );
+    assert!(crate::publication::manifest_path(temp.path(), &first.generation_id).exists());
+}
+
+#[test]
+fn current_hold_json_formatting_is_compatible_and_damaged_targets_are_repairable() {
+    let temp = tempdir().unwrap();
+    let first = publish(temp.path(), &source("lease-shape.jsonl"), 1, "preserved");
+    let lease = acquire_generation_retention_lease(
+        temp.path(),
+        &first.generation_id,
+        "consumer",
+        &"a".repeat(64),
+    )
+    .unwrap();
+    let path = temp.path().join("generation-retention-lease.json");
+    let value = serde_json::to_value(&lease).unwrap();
+    let formatted = serde_json::to_vec_pretty(&value).unwrap();
+    fs::write(&path, &formatted).unwrap();
+    assert!(repair_generation_leases(temp.path())
+        .unwrap()
+        .quarantined_lease
+        .is_none());
+    assert_eq!(
+        load_generation_retention_lease(temp.path()).unwrap(),
+        Some(lease)
+    );
+    assert_eq!(fs::read(&path).unwrap(), formatted);
+    for field in ["generation_id", "directory", "physical_integrity_digest"] {
+        let mut damaged = value.clone();
+        damaged["target"][field] = serde_json::json!("bad");
+        let bytes = serde_json::to_vec(&damaged).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            load_generation_retention_lease(temp.path()),
+            Err(IndexError::InvalidGenerationRetentionLease)
+        ));
+        let repaired = repair_generation_leases(temp.path()).unwrap();
+        assert_eq!(repaired.generation_id, first.generation_id);
+        assert_eq!(
+            fs::read(repaired.quarantined_lease.unwrap()).unwrap(),
+            bytes
+        );
+    }
 }

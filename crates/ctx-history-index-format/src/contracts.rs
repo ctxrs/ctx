@@ -79,11 +79,15 @@ pub enum IndexError {
     UnsupportedActiveGenerationPointer(u32),
     #[error("the active generation pointer is malformed or non-canonical")]
     InvalidActiveGenerationPointer,
-    #[error("the durable generation-retention lease is malformed, non-canonical, or not owner-private; resolve the unfinished lease owner before publishing Core")]
+    #[error("the durable generation-retention lease is invalid; run `ctx doctor --repair` to verify retained history and quarantine the invalid hold before retrying `ctx import --all`")]
     InvalidGenerationRetentionLease,
-    #[error("unsupported durable generation-retention lease version {0}")]
+    #[error("generation read-lock coordinator is unavailable: {0}; run `ctx doctor --repair`; do not delete lock files")]
+    GenerationReadLeaseCoordinator(#[source] std::io::Error),
+    #[error("unsupported durable generation-retention lease version {0}; run `ctx upgrade` to use a compatible reader; the hold has been preserved")]
     UnsupportedGenerationRetentionLease(u32),
-    #[error("generation-retention lease owner kind or identity is invalid")]
+    #[error(
+        "generation-retention lease owner kind or identity is invalid; run `ctx doctor --repair`"
+    )]
     InvalidGenerationRetentionLeaseOwner,
     #[error(
         "generation {requested_generation_id} cannot be leased because it is not the active or previous retained generation"
@@ -523,7 +527,7 @@ impl IndexError {
     /// Preserve typed I/O evidence even when Tantivy omits its source chain.
     pub fn io_error(&self) -> Option<&std::io::Error> {
         match self {
-            Self::Io(error) => Some(error),
+            Self::Io(error) | Self::GenerationReadLeaseCoordinator(error) => Some(error),
             Self::Tantivy(error) => ctx_history_index_generation::tantivy_io_error(error),
             Self::CandidateFailureWithLowSpace { cause, .. } => cause.io_error(),
             _ => None,
@@ -544,6 +548,9 @@ impl From<ctx_history_index_generation::GenerationError> for IndexError {
                 Self::UnsupportedActiveGenerationPointer(version)
             }
             GenerationError::InvalidActiveGenerationPointer => Self::InvalidActiveGenerationPointer,
+            GenerationError::GenerationReadLeaseCoordinator(error) => {
+                Self::GenerationReadLeaseCoordinator(error)
+            }
             GenerationError::InvalidGenerationRetentionLease => {
                 Self::InvalidGenerationRetentionLease
             }

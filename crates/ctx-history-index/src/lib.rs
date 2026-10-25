@@ -7,6 +7,8 @@ mod commit_contract;
 mod identity;
 mod merge_policy;
 mod preparation;
+mod repair;
+pub use repair::{repair_generation_leases, GenerationLeaseRepair};
 mod publication;
 mod staging;
 mod writer_deletion;

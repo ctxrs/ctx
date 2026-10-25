@@ -144,6 +144,11 @@ ctx daemon run
   Partial refresh findings include bounded provider error details, including
   resource shortages. Status and doctor warn when a live daemon's heartbeat
   is stale without treating its process as dead.
+- `doctor --repair` repairs history lease metadata after verifying the active
+  generation under the publication lock. Invalid durable holds are quarantined;
+  valid holds and retained history remain. It does not import, reclaim history,
+  start a daemon, or change indexing mode. See
+  [generation lease recovery](troubleshooting.md#history-generation-lease-errors).
 - `index` prints a one-shot indexing status view. It is the focused view of the
   current indexing mode, lexical publication, refresh progress, semantic
   coverage, and background process state. Use `--format json` for the
