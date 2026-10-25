@@ -10,16 +10,6 @@
       "rationale": "Reviewed 2026-10-25 UTC against fresh OSV data and the checksum-verified locked sources. tokenizers 0.22.2 is the sole direct caller: ctx-semantic-model reaches it through fastembed 5.17.2 and directly on macOS. Its two paste invocations generate serde helper identifiers from source-defined struct names at compile time; runtime history and model inputs are not macro inputs. This is an unmaintained-crate advisory with no patched version, not a reported exploitable defect. Current stable tokenizers 0.23.2 still requires paste, including through fastembed 7.5.0. tokenizers 1.0.0-rc.3 removes the direct edge but replaces the tokenizer API and is outside both the locked FastEmbed 5.17.2 and current FastEmbed 7.5.0 requirements; adopting it requires coordinated embedding and Core ML changes. A pastey substitution likewise requires a maintained parent patch and validation. Accept the exact locked build-time maintenance risk only through 2026-10-31. Re-evaluate before expiry or when a compatible upstream removes the dependency; remove this exception after validating that migration.",
       "owner": "ctx-release-security",
       "expires": "2026-10-31"
-    },
-    {
-      "advisory_id": "RUSTSEC-2024-0449",
-      "ecosystem": "crates.io",
-      "package": "unsafe-libyaml",
-      "version": "0.2.11",
-      "lockfile": "Cargo.lock",
-      "rationale": "Reviewed 2026-10-25 UTC against fresh OSV data and the locked caller graph. serde_yaml 0.9.34+deprecated and serde_yaml_ng 0.10.0 both call this archived parser. Runtime callers are ctx-agent-integrations YAML MCP configuration, ctx-history-source-discovery YAML selectors, and ctx-graph-configs/core/ingest configuration, memory frontmatter and document ingestion; ctx-agent-application and CLI contract tests also depend on serde_yaml. Unlike paste, this unsafe parser processes user-supplied YAML at runtime, including ingested documents, so its maintenance risk applies and is explicitly accepted, not dismissed as unreachable. The advisory reports abandonment rather than a specific vulnerability and offers no patched version. Both latest versions of the existing parent crates retain this dependency. Replacing these APIs with safe-Rust serde-saphyr requires a separate migration validating Value/Mapping, streaming-document, tag, merge-key and serialization compatibility across these callers; renaming to another libyaml fork would not establish memory safety. Accept only this exact locked informational finding through 2026-10-31 while that migration is evaluated. Re-review before expiry, on any caller expansion or on a new defect advisory; replace the parser and remove this entry after validating existing configuration and document behavior.",
-      "owner": "ctx-release-security",
-      "expires": "2026-10-31"
     }
   ]
 }

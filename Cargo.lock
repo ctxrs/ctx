@@ -954,11 +954,11 @@ dependencies = [
  "predicates",
  "rusqlite",
  "serde_json",
- "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
  "toml_edit 0.22.27",
  "uuid",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -975,12 +975,12 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
  "toml_edit 0.22.27",
  "uuid",
  "windows-sys 0.61.2",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -1102,12 +1102,12 @@ dependencies = [
  "ring",
  "rusqlite",
  "serde_json",
- "serde_yaml",
  "sha2 0.10.9",
  "tar",
  "tempfile",
  "uuid",
  "windows-sys 0.61.2",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -1327,11 +1327,11 @@ dependencies = [
  "globset",
  "quick-xml",
  "serde_json",
- "serde_yaml_ng",
  "toml_edit 0.23.7",
  "tree-sitter",
  "tree-sitter-hcl",
  "tree-sitter-sequel",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -1357,7 +1357,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "serde_yaml_ng",
  "tempfile",
  "toml_edit 0.23.7",
  "tree-sitter",
@@ -1365,6 +1364,7 @@ dependencies = [
  "tree-sitter-go",
  "tree-sitter-rust",
  "tree-sitter-swift",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -1385,9 +1385,9 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
- "serde_yaml_ng",
  "tempfile",
  "tokio",
+ "yaml_serde",
  "zip",
 ]
 
@@ -2215,11 +2215,11 @@ dependencies = [
  "same-file",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
  "toml_edit 0.22.27",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -3926,6 +3926,12 @@ dependencies = [
  "pkg-config",
  "vcpkg",
 ]
+
+[[package]]
+name = "libyaml-rs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
 
 [[package]]
 name = "linux-raw-sys"
@@ -6035,32 +6041,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
-name = "serde_yaml_ng"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "servo_arc"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7431,12 +7411,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
 
 [[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
-
-[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8114,6 +8088,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "388c44dc09d76f1536602ead6d325eb532f5c122f17782bd57fb47baeeb767e2"
 dependencies = [
  "lzma-sys",
+]
+
+[[package]]
+name = "yaml_serde"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33b729a08a9a6be689bbad3e2bf8015926db54b6622cc89c3a5f7dc174b9e918"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "libyaml-rs",
+ "ryu",
+ "serde",
 ]
 
 [[package]]
