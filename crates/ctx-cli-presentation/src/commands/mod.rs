@@ -1,6 +1,7 @@
 pub mod archive_export;
 mod attribution;
 pub use attribution::append_attribution;
+pub mod daemon;
 pub mod doctor;
 mod doctor_presentation;
 mod history_health;
