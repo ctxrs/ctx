@@ -25,7 +25,6 @@ pub struct ExportPlan {
     explicit: Selection,
     filtered: bool,
     db: Connection,
-    _scratch: tempfile::NamedTempFile,
     preview: ExportPreview,
 }
 
@@ -89,8 +88,9 @@ pub fn plan_export_with_control(
         .filter(|(origin, view)| origin != &identity.origin || view != &identity.view)
         .map(|(origin, view)| ArchiveIdentity { origin, view })
         .collect();
-    let scratch = tempfile::NamedTempFile::new()?;
-    let db = Connection::open(scratch.path())?;
+    // SQLite's temporary database uses OS delete-on-close semantics, including
+    // abrupt process termination. Its bounded cache can still spill to disk.
+    let db = Connection::open("")?;
     db.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-2048;
         CREATE TABLE selected_sessions(id TEXT PRIMARY KEY, source TEXT NOT NULL, stable TEXT NOT NULL, matches INTEGER NOT NULL);
         CREATE INDEX selected_sources ON selected_sessions(source); BEGIN;")?;
@@ -191,7 +191,6 @@ pub fn plan_export_with_control(
         filtered: query.domain() != CoreEventRangeDomain::All
             || query.filters() != &CoreEventRangeFilters::default(),
         db,
-        _scratch: scratch,
         preview,
     })
 }

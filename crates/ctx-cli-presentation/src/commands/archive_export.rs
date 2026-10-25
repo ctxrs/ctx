@@ -63,8 +63,7 @@ pub fn run(
                 workspace: args.workspace.clone(),
                 ..CoreEventRangeFilters::default()
             },
-        )
-        .map_err(|error| ctx_history_archive::ArchiveError::Invalid(error.to_string()))?;
+        )?;
         Some(ctx_history_archive::plan_export(
             root,
             identity.clone(),
@@ -160,8 +159,8 @@ fn preview_text(preview: &ExportPreview, context: &RenderContext) -> String {
         field("Workspace", workspace);
     }
     if let (Some(since), Some(until)) = (preview.since_unix_ms, preview.until_unix_ms) {
-        field("Since (inclusive)", &timestamp(Some(since)));
-        field("Until (exclusive)", &timestamp(Some(until)));
+        field("Since (inclusive)", &timestamp(Some(since), context));
+        field("Until (exclusive)", &timestamp(Some(until), context));
     }
     field("Conversations", &preview.selected_conversations.to_string());
     field(
@@ -204,11 +203,11 @@ fn preview_text(preview: &ExportPreview, context: &RenderContext) -> String {
                 ),
                 Field::new(
                     "First timestamp",
-                    &timestamp(conversation.first_occurred_at_unix_ms),
+                    &timestamp(conversation.first_occurred_at_unix_ms, context),
                 ),
                 Field::new(
                     "Last timestamp",
-                    &timestamp(conversation.last_occurred_at_unix_ms),
+                    &timestamp(conversation.last_occurred_at_unix_ms, context),
                 ),
             ],
         ));
@@ -278,8 +277,10 @@ fn append_counts(document: &mut Document, context: &RenderContext, scope: &Scope
     ));
 }
 
-fn timestamp(value: Option<i64>) -> String {
-    ctx_history_read_application::timestamp_json(value).unwrap_or_else(|| "unknown".into())
+fn timestamp(value: Option<i64>, context: &RenderContext) -> String {
+    ctx_history_read_application::timestamp_json(value)
+        .map(|value| context.human_timestamp(&value).into_owned())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 pub fn digest(value: &str) -> std::result::Result<String, String> {
@@ -366,5 +367,18 @@ mod tests {
         let structured = selection_value(&preview).unwrap();
         assert_eq!(structured["identity"]["origin"], preview.identity.origin);
         assert_eq!(structured["identity"]["view"], preview.identity.view);
+        let context = RenderContext::for_test(
+            TestContext::pipe(StreamKind::Stdout).time_zone("America/New_York"),
+        );
+        let text = preview_text(&preview, &context);
+        // Both bounds and both conversation timestamps use the terminal zone.
+        assert_eq!(text.matches("1969-12-31 19:00:00 EST").count(), 4);
+        assert_eq!(timestamp(None, &context), "unknown");
+        assert_eq!(structured["since_unix_ms"], 100);
+        assert_eq!(structured["until_unix_ms"], 200);
+        assert_eq!(
+            structured["conversations"][0]["first_occurred_at_unix_ms"],
+            99
+        );
     }
 }

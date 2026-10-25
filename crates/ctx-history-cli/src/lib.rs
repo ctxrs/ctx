@@ -48,7 +48,7 @@ pub use import_report::{
     ImportFailureScope, ImportFailureType,
 };
 pub use list_events::{
-    decode_cursor, event_query_error_value, event_range_page_value,
+    decode_cursor, event_query_error_value, event_range_page_value, list_events_error_code,
     mcp_event_query_core_record_bytes, render_event, run as run_list_events,
     selection as list_events_selection,
     selection_from_request as list_events_selection_from_request,

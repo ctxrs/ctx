@@ -88,7 +88,8 @@ ctx archive export --origin laptop --view work --workspace /work/shop \
 
 Selection uses the same [event-query meanings](event-queries.md): `--workspace`
 matches a substring of stored workspace, session CWD, tool working directory,
-or project metadata. It does not inspect the filesystem or detect semantic topics.
+or project metadata with ASCII-only case folding; non-ASCII characters remain
+exact. It does not inspect the filesystem or detect semantic topics.
 Supply both time bounds or neither. Bounds are absolute RFC3339 timestamps that
 resolve exactly to milliseconds; the interval includes `--since` and excludes
 `--until`. Events without timestamps cannot match a time range. When combined,

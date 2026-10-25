@@ -19,7 +19,8 @@ const FILTERS: &[&str] = &[
 ];
 
 fn seed_selection(sandbox: &Sandbox) {
-    seed_history_with(sandbox, |template| {
+    seed_selection_records(
+        sandbox,
         [
             ("selected", Some(99), "other"),
             ("selected", Some(100), "alpha"),
@@ -28,45 +29,58 @@ fn seed_selection(sandbox: &Sandbox) {
             ("crossed", Some(150), "other"),
             ("sibling", Some(150), "other"),
         ]
-        .into_iter()
-        .enumerate()
-        .map(|(sequence, (session, time, workspace))| {
-            let mut record = template.clone();
-            let session_key =
-                NativeSessionKey::native_id("session", TypedKey::utf8(session).unwrap()).unwrap();
-            record.session_id = derive_session_id(SessionIdentityInput {
-                source: &record.source,
-                logical_session_kind: "thread",
-                native_session_key: &session_key,
+        .map(|(session, time, workspace)| (session.into(), time, workspace.into())),
+    );
+}
+
+pub(super) fn seed_selection_records(
+    sandbox: &Sandbox,
+    records: impl IntoIterator<Item = (String, Option<i64>, String)>,
+) {
+    seed_history_with(sandbox, |template| {
+        records
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, (session, time, workspace))| {
+                let mut record = template.clone();
+                let session_key =
+                    NativeSessionKey::native_id("session", TypedKey::utf8(&session).unwrap())
+                        .unwrap();
+                record.session_id = derive_session_id(SessionIdentityInput {
+                    source: &record.source,
+                    logical_session_kind: "thread",
+                    native_session_key: &session_key,
+                })
+                .unwrap();
+                let event_key = NativeItemKey::native_id(
+                    "message",
+                    TypedKey::utf8(sequence.to_string()).unwrap(),
+                )
+                .unwrap();
+                record.event_id = derive_event_id(EventIdentityInput {
+                    source: &record.source,
+                    session_id: record.session_id,
+                    logical_item_kind: "message",
+                    native_item_key: &event_key,
+                    subrecord_selector: None,
+                })
+                .unwrap();
+                record.event_sequence = sequence as u64;
+                record.provider_session_id = Some(session);
+                record.occurred_at_unix_ms = time;
+                record.content.activity = Some(CoreActivity {
+                    revision: CORE_ACTIVITY_REVISION,
+                    provider_call_id: None,
+                    invocation: None,
+                    result: None,
+                    facts: vec![ProviderDeclaredFact {
+                        kind: LiteralFactKind::SessionCwd,
+                        value: format!("/work/{workspace}"),
+                    }],
+                });
+                record
             })
-            .unwrap();
-            let event_key =
-                NativeItemKey::native_id("message", TypedKey::utf8(sequence.to_string()).unwrap())
-                    .unwrap();
-            record.event_id = derive_event_id(EventIdentityInput {
-                source: &record.source,
-                session_id: record.session_id,
-                logical_item_kind: "message",
-                native_item_key: &event_key,
-                subrecord_selector: None,
-            })
-            .unwrap();
-            record.event_sequence = sequence as u64;
-            record.provider_session_id = Some(session.into());
-            record.occurred_at_unix_ms = time;
-            record.content.activity = Some(CoreActivity {
-                revision: CORE_ACTIVITY_REVISION,
-                provider_call_id: None,
-                invocation: None,
-                result: None,
-                facts: vec![ProviderDeclaredFact {
-                    kind: LiteralFactKind::SessionCwd,
-                    value: format!("/work/{workspace}"),
-                }],
-            });
-            record
-        })
-        .collect()
+            .collect()
     });
 }
 
@@ -189,6 +203,87 @@ fn empty_selection_is_complete_and_creates_no_archive() {
 }
 
 #[test]
+fn unicode_workspaces_stay_distinct_through_search_preview_export_and_restore() {
+    let source = Sandbox::new();
+    seed_selection_records(
+        &source,
+        [
+            ("uppercase".into(), Some(100), "ÉCOLE".into()),
+            ("lowercase".into(), Some(100), "école".into()),
+        ],
+    );
+    for (workspace, other, session) in [
+        ("/work/ÉCOLE", "/work/école", "uppercase"),
+        ("/work/école", "/work/ÉCOLE", "lowercase"),
+    ] {
+        let search_args = [
+            "search",
+            "observatory",
+            "--workspace",
+            workspace,
+            "--backend=lexical",
+            "--refresh=off",
+            "--format=json",
+        ];
+        let search = success(source.command().args(search_args));
+        assert_eq!(search["results"].as_array().unwrap().len(), 1);
+        let export_args = [
+            "archive",
+            "export",
+            "--origin",
+            "synthetic-laptop",
+            "--workspace",
+            workspace,
+            "--format=json",
+        ];
+        let preview = success(source.command().args(export_args).arg("--preview"));
+        let selection = &preview["selection"];
+        assert_eq!(selection["selected_conversations"], 1);
+        let conversation = &selection["conversations"][0];
+        assert_eq!(
+            conversation["ctx_session_id"],
+            search["results"][0]["ctx_session_id"]
+        );
+        assert_eq!(conversation["provider_session_id"], session);
+        assert_eq!(conversation["workspace_values"][0]["value"], workspace);
+        assert_eq!(
+            conversation["workspace_values"][0]["matches_workspace"],
+            true
+        );
+        let snapshot = source.path(session);
+        let exported = success(
+            source
+                .command()
+                .args(export_args)
+                .arg("--output")
+                .arg(&snapshot),
+        );
+        assert_eq!(exported["selection"], *selection);
+        assert_eq!(exported["manifest"]["records"], 1);
+        let destination = Sandbox::new();
+        success(
+            destination
+                .command()
+                .args(["archive", "restore"])
+                .arg(snapshot)
+                .arg("--format=json"),
+        );
+        let restored = success(destination.command().args(search_args));
+        assert_eq!(restored["results"].as_array().unwrap().len(), 1);
+        let missing = success(destination.command().args([
+            "search",
+            "observatory",
+            "--workspace",
+            other,
+            "--backend=lexical",
+            "--refresh=off",
+            "--format=json",
+        ]));
+        assert!(missing["results"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn invalid_or_incomplete_filters_fail_without_publishing() {
     let sandbox = Sandbox::new();
     seed_selection(&sandbox);
@@ -224,7 +319,7 @@ fn invalid_or_incomplete_filters_fail_without_publishing() {
                 .arg(sandbox.path("invalid"))
                 .args(filters),
         );
-        assert_eq!(result["error"]["code"], "invalid_archive");
+        assert_eq!(result["error"]["code"], "invalid_range");
         assert!(!sandbox.path("invalid").exists());
     }
 }
