@@ -816,10 +816,9 @@ fn update_automatic_retry_after_publication(state: &mut CoreRefreshEngineState, 
             receipt
                 .route_results
                 .iter()
-                .filter(|result| {
-                    result.outcome.is_success()
-                        && source_backed_route_retry_disposition(result).is_none()
-                })
+                // Source-local failures have their own retry policy. A route
+                // that can publish again has recovered from its internal failure.
+                .filter(|result| result.outcome.is_success())
                 .filter_map(|result| {
                     SourceRouteIdentity::from_sha256(result.route_identity.clone()).ok()
                 })

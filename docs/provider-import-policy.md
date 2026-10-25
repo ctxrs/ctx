@@ -255,7 +255,13 @@ contract for that source family:
   per leaf; a 256x plus 16 MiB expansion bound and 128 MiB decoder-window bound
   apply inside that ceiling. At most four maximum-size compressed leaves run in
   parallel against the shared 1 GiB route scratch budget. Corrupt, truncated,
-  over-bound, or budget-unavailable streams fail closed.
+  over-bound, or budget-unavailable streams fail closed. A corrupt or
+  over-bound leaf produces a source failure with its selector; size-limit
+  diagnostics include compressed bytes, the applicable bound, and decoded
+  bytes observed so far when decoding began. Healthy leaves still publish,
+  and an exact prior source remains indexed when the partial-inventory
+  retention rules apply.
+  Directory enumeration and root-authority failures still fail the route.
 - SQLite is observed as one short read-only logical snapshot. WAL size,
   checkpointing, and physical database-file size are not ingestion states.
   Concurrent committed rows belong to a subsequent certified snapshot unless

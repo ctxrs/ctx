@@ -67,12 +67,12 @@ pub(super) fn decode_standard_zstd_jsonl<E: JsonlFamilyError>(
     }
     if compressed_length > limits.compressed_bytes {
         return Err(invalid_standard_zstd::<E>(
-            "compressed stream exceeds the bounded physical limit",
+            &format!("compressed stream exceeds the bounded physical limit (compressed_bytes={compressed_length}, limit_bytes={})", limits.compressed_bytes),
         ));
     }
     if compressed_length > MAX_STANDARD_ZSTD_TEMP_BYTES_PER_LEAF {
         return Err(invalid_standard_zstd::<E>(
-            "compressed snapshot exceeds the per-leaf temporary-volume limit",
+            &format!("compressed snapshot exceeds the per-leaf temporary-volume limit (compressed_bytes={compressed_length}, limit_bytes={MAX_STANDARD_ZSTD_TEMP_BYTES_PER_LEAF})"),
         ));
     }
     let ratio_bound = compressed_length
@@ -117,13 +117,13 @@ pub(super) fn decode_standard_zstd_jsonl<E: JsonlFamilyError>(
         })?;
         if logical_length > decoded_bound {
             return Err(invalid_standard_zstd::<E>(
-                "decoded stream exceeds the bounded decompression limit",
+                &format!("decoded stream exceeds the bounded decompression limit (compressed_bytes={compressed_length}, decoded_bytes_at_least={logical_length}, limit_bytes={decoded_bound})"),
             ));
         }
         if compressed_length.saturating_add(logical_length) > MAX_STANDARD_ZSTD_TEMP_BYTES_PER_LEAF
         {
             return Err(invalid_standard_zstd::<E>(
-                "compressed snapshot and decoded stream exceed the per-leaf temporary-volume limit",
+                &format!("compressed snapshot and decoded stream exceed the per-leaf temporary-volume limit (compressed_bytes={compressed_length}, decoded_bytes_at_least={logical_length}, limit_bytes={MAX_STANDARD_ZSTD_TEMP_BYTES_PER_LEAF})"),
             ));
         }
         if let Some(reservation) = reserve_standard_zstd_scratch::<E>(route_resources, read_u64)? {

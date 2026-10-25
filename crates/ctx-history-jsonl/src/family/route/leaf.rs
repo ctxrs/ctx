@@ -183,6 +183,7 @@ fn scan_leaf_serial<R: JsonlFamilyRuntime>(
             leaf.source().clone(),
             route_invalid("JSONL source is unreadable"),
             retained.is_some(),
+            Some(&leaf.source_path().display().to_string()),
         )
         .map_err(route_internal)?;
         sink.record_failed_attempt_rejections(record_rejections);
