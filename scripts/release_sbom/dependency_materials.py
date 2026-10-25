@@ -21,7 +21,7 @@ HEX_40 = re.compile(r"[0-9a-f]{40}")
 HEX_64 = re.compile(r"[0-9a-f]{64}")
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 BUILD_INFO_CLASSIFICATION = "sanitized-release-evidence-not-slsa-provenance"
-TANTIVY_VERSION = "0.26.1"
+TANTIVY_VERSION = "0.27.0"
 TANTIVY_FEATURES = [
     "columnar-zstd-compression",
     "lz4-compression",
@@ -637,7 +637,7 @@ def assert_tantivy_contract(
         or len(declaration.get("features", [])) != len(TANTIVY_FEATURES)
     ):
         raise ValueError(
-            "workspace Tantivy must be exactly 0.26.1 with defaults off and "
+            "workspace Tantivy must be exactly 0.27.0 with defaults off and "
             "mmap/lz4/columnar-zstd features"
         )
     for name, manifest in index_manifests.items():
@@ -652,13 +652,13 @@ def assert_tantivy_contract(
         if identity[0] == "tantivy" and identity[1] == TANTIVY_VERSION
     ]
     if len(candidates) != 1:
-        raise ValueError("target closure must select exactly Tantivy 0.26.1")
+        raise ValueError("target closure must select exactly Tantivy 0.27.0")
     if any(identity[0] == "rust-stemmers" for identity in selected):
         raise ValueError("target closure enables Tantivy's forbidden default stemmer")
     feature_sets = [
         features
         for label, features in configured_features.items()
-        if re.search(r"crates__tantivy-0\.26\.1//:tantivy$", label)
+        if re.search(r"crates__tantivy-0\.27\.0//:tantivy$", label)
     ]
     if len(feature_sets) != 1 or sorted(feature_sets[0]) != TANTIVY_RESOLVED_FEATURES:
         raise ValueError(
@@ -671,7 +671,7 @@ def assert_tantivy_contract(
         if package.get("name") == "tantivy"
     ]
     if lock_candidates != [candidates[0]]:
-        raise ValueError("Cargo.lock Tantivy identity is not exactly 0.26.1")
+        raise ValueError("Cargo.lock Tantivy identity is not exactly 0.27.0")
     return candidates[0]
 
 

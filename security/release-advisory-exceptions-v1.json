@@ -7,19 +7,9 @@
       "package": "paste",
       "version": "1.0.15",
       "lockfile": "Cargo.lock",
-      "rationale": "Re-evaluated 2026-09-28 for the 2.1.0 release against unchanged checksum-verified paste 1.0.15, tokenizers 0.22.2 and fastembed 5.17.2. paste is an unmaintained build-time procedural macro; tokenizers uses it to construct fixed serde helper identifiers. Runtime history and model inputs are not passed to the macro. Build-time execution and maintenance risk remain. Published tokenizers 0.23.2 still requires paste, and compatible fastembed 5.17.4 retains tokenizers 0.22.2; neither removes the finding. Adopting pastey requires a separately validated parent dependency change. Accept only this exact locked finding through 2026-10-05, with re-evaluation before expiry and removal when the dependency is actually removed or replaced. No advisory gate or dependency identity is broadened.",
+      "rationale": "Reviewed 2026-10-25 UTC against fresh OSV data and the checksum-verified locked sources. tokenizers 0.22.2 is the sole direct caller: ctx-semantic-model reaches it through fastembed 5.17.2 and directly on macOS. Its two paste invocations generate serde helper identifiers from source-defined struct names at compile time; runtime history and model inputs are not macro inputs. This is an unmaintained-crate advisory with no patched version, not a reported exploitable defect. Current stable tokenizers 0.23.2 still requires paste, including through fastembed 7.5.0. tokenizers 1.0.0-rc.3 removes the direct edge but replaces the tokenizer API and is outside both the locked FastEmbed 5.17.2 and current FastEmbed 7.5.0 requirements; adopting it requires coordinated embedding and Core ML changes. A pastey substitution likewise requires a maintained parent patch and validation. Accept the exact locked build-time maintenance risk only through 2026-10-31. Re-evaluate before expiry or when a compatible upstream removes the dependency; remove this exception after validating that migration.",
       "owner": "ctx-release-security",
-      "expires": "2026-10-05"
-    },
-    {
-      "advisory_id": "RUSTSEC-2026-0253",
-      "ecosystem": "crates.io",
-      "package": "lru",
-      "version": "0.16.4",
-      "lockfile": "Cargo.lock",
-      "rationale": "Re-evaluated 2026-09-28 for the 2.1.0 release against unchanged checksum-verified lru 0.16.4 and Tantivy 0.26.1. The reported LruCache::pop defect requires a panicking key destructor and reuse after unwinding. Tantivy uses a private LruCache<usize, OwnedBytes> for stored documents, with new/get/put/len and destruction; inspected operations do not call pop and usize has no panicking destructor. Larger histories increase cache activity without introducing those missing preconditions. This is specific to the reported defect, not a memory-safety certification of the dependency. Published compatible Tantivy 0.26.2 still requires lru ^0.16.3, excluding fixed versions >=0.18.2; upstream 0.27 is an unpublished broader migration. Accept only this exact locked finding through 2026-10-05. Re-evaluate before expiry or if the cache caller/key type changes; remove the exception after validated dependency remediation. Unsafe dependency code and residual uncertainty remain.",
-      "owner": "ctx-release-security",
-      "expires": "2026-10-05"
+      "expires": "2026-10-31"
     }
   ]
 }

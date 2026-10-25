@@ -298,8 +298,8 @@ fn markdown(path: &str, text: &str, hash: &str) -> Result<FileFacts> {
         for line in text[first..].split_inclusive('\n').take(200) {
             if matches!(line.trim(), "---" | "...") {
                 let frontmatter = &text[first..offset];
-                let value: serde_yaml_ng::Value =
-                    serde_yaml_ng::from_str(frontmatter).map_err(|error| {
+                let value: yaml_serde::Value =
+                    yaml_serde::from_str(frontmatter).map_err(|error| {
                         super::rejection::yaml_error(path, frontmatter, None, 1, error)
                     })?;
                 facts.nodes[0].metadata["frontmatter"] = serde_json::to_value(value)?;
@@ -512,12 +512,12 @@ fn html(path: &str, text: &str, hash: &str) -> Result<FileFacts> {
 fn yaml(path: &str, text: &str, hash: &str) -> Result<FileFacts> {
     use serde::Deserialize;
     let mut facts = base(path, hash, "document");
-    let mut documents = serde_yaml_ng::Deserializer::from_str(text).peekable();
+    let mut documents = yaml_serde::Deserializer::from_str(text).peekable();
     let mut visited = 0;
     let mut document = 0;
     while let Some(deserializer) = documents.next() {
         document += 1;
-        let value = serde_yaml_ng::Value::deserialize(deserializer)
+        let value = yaml_serde::Value::deserialize(deserializer)
             .map_err(|error| super::rejection::yaml_error(path, text, Some(document), 0, error))?;
         let multiple = document > 1 || documents.peek().is_some();
         let node_start = facts.nodes.len();
@@ -530,7 +530,7 @@ fn yaml(path: &str, text: &str, hash: &str) -> Result<FileFacts> {
                 "YAML nesting/fact limit exceeded"
             );
             match value {
-                serde_yaml_ng::Value::Mapping(map) => {
+                yaml_serde::Value::Mapping(map) => {
                     for (key, value) in map {
                         if let Some(key) = key.as_str() {
                             pending.push((
@@ -545,12 +545,12 @@ fn yaml(path: &str, text: &str, hash: &str) -> Result<FileFacts> {
                         }
                     }
                 }
-                serde_yaml_ng::Value::Sequence(values) => {
+                yaml_serde::Value::Sequence(values) => {
                     for (i, value) in values.iter().enumerate() {
                         pending.push((format!("{name}[{i}]"), value, depth + 1));
                     }
                 }
-                serde_yaml_ng::Value::String(value) => {
+                yaml_serde::Value::String(value) => {
                     let field = section(
                         &mut facts,
                         &name,
