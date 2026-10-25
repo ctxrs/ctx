@@ -70,6 +70,8 @@ ctx semantic enable --wait
 ctx semantic status
 ctx semantic disable
 ctx daemon run
+ctx daemon status --all
+ctx daemon status --all --format json
 ```
 
 - `setup` creates the data root, discovers known provider history locations,
@@ -193,6 +195,21 @@ ctx daemon run
   `semantic status` reports configured and effective throttling. See
   [Semantic Embedding Executors](semantic-executors.md) for the V2 protocol and
   retained fixed-E5 V1 compatibility.
+- `daemon status --all` lists registered data roots for the current installation
+  and reports whether each daemon is running, stopped, or unverified. It uses
+  the same observation as single-root `daemon status`, without starting,
+  stopping, repairing, or removing anything. The registry is scoped to the
+  current executable and managed root (`CTX_DATA_ROOT`, or `~/.ctx`); it is not
+  a history of every root ever used. Gracefully stopped daemons normally remove
+  their registrations; retained crash or handoff registrations remain visible.
+  JSON returns `schema_version: 1` and a `daemons` array containing each
+  `data_root` and its ordinary `daemon` status object. An invalid or unreadable
+  registration is reported separately with `error`, `registration_path`, and a
+  null `daemon`; `data_root` is null when it cannot be read. Other roots remain
+  visible. Legacy relative registrations are unverified because their original
+  working directory is unknown; they are not resolved against the observer's
+  directory. New registrations store absolute roots. To stop one root, run
+  `ctx --data-root=PATH index mode manual`.
 - `daemon run` is an advanced command that runs persistent local maintenance in
   the foreground and blocks until stopped. It does not change the configured
   indexing mode. In manual mode, pass `--force` to run it explicitly. Each pass
@@ -828,6 +845,10 @@ ctx search "incident follow-up" --source-group work
 `search` defaults to `--refresh background`, which serves the published
 Tantivy generation. In automatic indexing mode it may start or wake the
 persistent daemon for lexical publication and optional semantic catch-up.
+Human search output reports a newly launched persistent indexer on stderr when
+the selected root differs from the managed root, including when search fails.
+The notice names the root and the command to stop it. Searches that reuse a
+daemon and machine-readable searches do not print this notice.
 Each accepted refresh keeps its own durable request ID. If the automatic
 refresh queue is full, background search can still read an existing generation;
 JSON freshness reports `admission_rejected` with no accepted request ID or

@@ -364,7 +364,12 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "hosted_history_archive_tests",
     src = "tests/hosted_history_archive.rs",
-    extra_srcs = ["tests/hosted_history/support.rs", "tests/hosted_history/archive_provenance.rs"],
+    extra_srcs = [
+        "tests/hosted_history/support.rs",
+        "tests/hosted_history/archive_provenance.rs",
+        "tests/hosted_history/archive_selection.rs",
+        "tests/hosted_history/archive_selection_signal.rs",
+    ],
     extra_crates = ["libc"],
     extra_deps = [
         "//crates/ctx-history-archive:lib",

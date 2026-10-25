@@ -148,6 +148,9 @@ fn error_code(error: &anyhow::Error) -> &'static str {
     use ctx_history_server::Error as Server;
     use ctx_history_sharing::Error as Sharing;
 
+    if let Some(error) = error.downcast_ref::<ctx_history_read_application::ListEventsError>() {
+        return ctx_history_cli::list_events_error_code(error);
+    }
     if let Some(error) = error.downcast_ref::<ArchiveError>() {
         return match error {
             ArchiveError::Conflict { .. } => "conflict",

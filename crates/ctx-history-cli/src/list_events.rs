@@ -743,7 +743,9 @@ fn event_range_error_code(error: &CoreEventRangeError) -> &'static str {
     }
 }
 
-fn list_events_error_code(error: &ctx_history_read_application::ListEventsError) -> &'static str {
+pub fn list_events_error_code(
+    error: &ctx_history_read_application::ListEventsError,
+) -> &'static str {
     use ctx_history_read_application::ListEventsError;
     match error {
         ListEventsError::Range(error) => event_range_error_code(error),

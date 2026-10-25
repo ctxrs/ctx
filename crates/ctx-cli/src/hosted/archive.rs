@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
 
+pub(super) use ctx_cli_presentation::commands::archive_export::digest;
+use ctx_cli_presentation::commands::archive_export::{self, ExportArgs};
+
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use ctx_history_archive::{ArchiveIdentity, ImportBinding, RestoreOptions, Selection};
+use ctx_history_archive::{ImportBinding, RestoreOptions};
 use serde_json::json;
 
 use crate::{output::JsonOutputFormat, ui::Ui};
@@ -21,7 +24,7 @@ impl ArchiveArgs {
     ) -> Option<ctx_client_observability::analytics::HostedOperationV1> {
         use ctx_client_observability::analytics::HostedOperationV1 as Operation;
         Some(match self.command {
-            ArchiveCommand::Export { .. } => Operation::ArchiveExport,
+            ArchiveCommand::Export(_) => Operation::ArchiveExport,
             ArchiveCommand::Restore { .. } => Operation::ArchiveRestore,
             _ => return None,
         })
@@ -31,23 +34,7 @@ impl ArchiveArgs {
 #[derive(Debug, Subcommand)]
 enum ArchiveCommand {
     /// Save a coherent snapshot of retained normalized history; no provider files or credentials.
-    Export {
-        /// New output directory for the completed archive.
-        #[arg(long)]
-        output: PathBuf,
-        /// Stable origin for native history; selects the original origin in a restored root.
-        #[arg(long)]
-        origin: String,
-        /// Stable view for native history; selects the original view in a restored root.
-        #[arg(long, default_value = "personal")]
-        view: String,
-        /// Include this full Core source digest (repeat to select more).
-        #[arg(long, value_parser = digest)]
-        source: Vec<String>,
-        /// Include this full Core session digest (repeat to select more).
-        #[arg(long, value_parser = digest)]
-        session: Vec<String>,
-    },
+    Export(ExportArgs),
     /// Check the complete inventory, normalized records, and content digests.
     Verify { archive: PathBuf },
     /// Restore retained history into a new or archive-owned local data root.
@@ -61,46 +48,10 @@ enum ArchiveCommand {
 
 pub(super) fn run(args: &ArchiveArgs, root: Option<&Path>, ui: &mut Ui) -> Result<()> {
     match &args.command {
-        ArchiveCommand::Export {
-            output,
-            origin,
-            view,
-            source,
-            session,
-        } => {
+        ArchiveCommand::Export(options) => {
             let root = super::data_root(root)?;
-            let exported = ctx_history_archive::export_data_root(
-                &root,
-                output,
-                ArchiveIdentity {
-                    origin: origin.clone(),
-                    view: view.clone(),
-                },
-                &Selection {
-                    sources: source.iter().cloned().collect(),
-                    sessions: session.iter().cloned().collect(),
-                },
-            )?;
-            let mut text = format!(
-                "Exported {} sessions and {} records to {}\nOrigin: {}. View: {}. This archive contains one identity.\nRetained normalized history only; native agent resumption is not included.",
-                exported.manifest.members,
-                exported.manifest.records,
-                output.display(),
-                exported.manifest.identity.origin,
-                exported.manifest.identity.view
-            );
-            for identity in &exported.excluded_identities {
-                text.push_str(&format!("\nNot included: origin {}, view {}. Export it separately with --origin and --view.", identity.origin, identity.view));
-            }
-            super::print_result(
-                args.format,
-                json!({
-                    "schema_version": 1, "operation": "archive_export", "archive": output,
-                    "manifest": exported.manifest, "excluded_identities": exported.excluded_identities
-                }),
-                text,
-                ui,
-            )
+            let (value, text) = archive_export::run(options, &root, ui.stdout_context())?;
+            super::print_result(args.format, value, text, ui)
         }
         ArchiveCommand::Verify { archive } => {
             let manifest = ctx_history_archive::verify(archive)?;
@@ -155,17 +106,5 @@ pub(super) fn run(args: &ArchiveArgs, root: Option<&Path>, ui: &mut Ui) -> Resul
                 ui,
             )
         }
-    }
-}
-
-pub(super) fn digest(value: &str) -> std::result::Result<String, String> {
-    if value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        Ok(value.to_owned())
-    } else {
-        Err("expected a full 64-character lowercase Core identity digest".to_owned())
     }
 }

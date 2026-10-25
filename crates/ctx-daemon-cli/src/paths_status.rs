@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::{
     compact_json,
-    composition::{load_runtime_config, DaemonRuntimeConfig},
+    composition::{load_runtime_config, observe_runtime_config, DaemonRuntimeConfig},
 };
 
 use super::health_search::{json_i64, json_string};
@@ -81,6 +81,13 @@ pub(crate) fn daemon_report_with_application(
         disabled_overrides_lifecycle,
         current_config.as_ref(),
     )
+}
+
+pub(crate) fn daemon_report_read_only(data_root: &Path) -> Value {
+    let config = observe_runtime_config(data_root).ok();
+    super::daemon_supervisor::with_daemon_application(|application| {
+        daemon_report_with_config_and_application(application, data_root, true, config.as_ref())
+    })
 }
 
 fn daemon_report_with_config_and_application(
