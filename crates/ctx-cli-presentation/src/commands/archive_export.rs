@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use ctx_history_archive::{
     ArchiveIdentity, CoreEventRangeFilters, ExportPreview, ScopeCounts, Selection,
 };
+use ctx_terminal::sanitize_untrusted_history_body_for_terminal;
 use serde_json::json;
 
 use crate::ui::{fields, Document, Field, RenderContext, Token};
@@ -101,12 +102,14 @@ pub fn run(
     let mut text = format!(
         "Exported {} sessions and {} records to {}\nOrigin: {}. View: {}. This archive contains one identity.\nRetained normalized history only; native agent resumption is not included.",
         exported.manifest.members, exported.manifest.records, output.display(),
-        exported.manifest.identity.origin, exported.manifest.identity.view,
+        sanitize_untrusted_history_body_for_terminal(&exported.manifest.identity.origin),
+        sanitize_untrusted_history_body_for_terminal(&exported.manifest.identity.view),
     );
     for identity in &exported.excluded_identities {
         text.push_str(&format!(
             "\nNot included: origin {}, view {}. Export it separately with --origin and --view.",
-            identity.origin, identity.view
+            sanitize_untrusted_history_body_for_terminal(&identity.origin),
+            sanitize_untrusted_history_body_for_terminal(&identity.view)
         ));
     }
     let mut value = json!({
@@ -141,8 +144,14 @@ fn preview_text(preview: &ExportPreview, context: &RenderContext) -> String {
             "Complete: whole conversations are selected."
         },
     );
-    field("Archive origin", &preview.identity.origin);
-    field("Archive view", &preview.identity.view);
+    field(
+        "Archive origin",
+        &sanitize_untrusted_history_body_for_terminal(&preview.identity.origin),
+    );
+    field(
+        "Archive view",
+        &sanitize_untrusted_history_body_for_terminal(&preview.identity.view),
+    );
     field(
         "Labels",
         "Creator-supplied; not verified machine identities.",
@@ -170,7 +179,10 @@ fn preview_text(preview: &ExportPreview, context: &RenderContext) -> String {
     for excluded in &preview.excluded_identities {
         field(
             "Excluded origin/view",
-            &format!("{} / {}", excluded.origin, excluded.view),
+            &sanitize_untrusted_history_body_for_terminal(&format!(
+                "{} / {}",
+                excluded.origin, excluded.view
+            )),
         );
     }
     document.push_blank();
@@ -293,10 +305,13 @@ mod tests {
         let preview = ExportPreview {
             generation_id: "synthetic-generation".into(),
             identity: ArchiveIdentity {
-                origin: "café laptop".into(),
-                view: "work".into(),
+                origin: "café laptop \u{202a} \u{202b} \u{202c} \u{202d} \u{202e}".into(),
+                view: "work \u{2028} \u{2029} \u{2066} \u{2067} \u{2068} \u{2069}".into(),
             },
-            excluded_identities: Vec::new(),
+            excluded_identities: vec![ArchiveIdentity {
+                origin: "other \u{202e}desktop\u{202c}".into(),
+                view: "notes\u{2028}\u{2029}".into(),
+            }],
             workspace: Some("shop".into()),
             since_unix_ms: Some(100),
             until_unix_ms: Some(200),
@@ -332,6 +347,10 @@ mod tests {
             let text = preview_text(&preview, &context);
             assert!(text.contains("café laptop"));
             assert!(!text.contains('\u{001b}') && !text.contains('\t'));
+            for control in ('\u{2028}'..='\u{202e}').chain('\u{2066}'..='\u{2069}') {
+                assert!(!text.contains(control), "{text:?}");
+                assert!(text.contains(&format!("\\u{{{:04x}}}", u32::from(control))));
+            }
             let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(words.contains("1 before; 0 at/after end; 1 untimed"));
             assert!(words
@@ -344,5 +363,8 @@ mod tests {
                 );
             }
         }
+        let structured = selection_value(&preview).unwrap();
+        assert_eq!(structured["identity"]["origin"], preview.identity.origin);
+        assert_eq!(structured["identity"]["view"], preview.identity.view);
     }
 }
