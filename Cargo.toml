@@ -150,7 +150,7 @@ semver = "1.0"
 sha2 = "0.10"
 sift = { package = "ctx-sift-codec", path = "crates/ctx-sift-codec" }
 supports-unicode = "3.0"
-tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "columnar-zstd-compression"] }
+tantivy = { version = "0.27.0", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "columnar-zstd-compression"] }
 tempfile = "3.10"
 terminal_size = "0.4"
 thiserror = "1.0"

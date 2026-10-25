@@ -1,6 +1,39 @@
 use super::*;
 use std::{cell::RefCell, process::Child};
 
+#[test]
+fn office_zip_reads_documents_and_rejects_traversal() {
+    use std::io::Write;
+    use zip::{ZipWriter, write::SimpleFileOptions};
+
+    for extra_name in ["notes.txt", "../outside.txt"] {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("word/document.xml", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(b"<document><body><p><r><t>Office text</t></r></p></body></document>")
+            .unwrap();
+        writer
+            .start_file(extra_name, SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"extra member").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let result = office(&bytes, "docx", 4096);
+        if extra_name == "notes.txt" {
+            assert_eq!(result.unwrap().text.trim(), "Office text");
+        } else {
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("unsafe Office archive member path")
+            );
+        }
+    }
+}
+
 type SampleHook = Box<dyn FnOnce(&mut Child)>;
 thread_local! {
     static AFTER_SAMPLE: RefCell<Option<SampleHook>> = const { RefCell::new(None) };
