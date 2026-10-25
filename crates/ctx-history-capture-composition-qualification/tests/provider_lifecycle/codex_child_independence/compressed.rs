@@ -532,19 +532,13 @@ fn compressed_same_inode_overwrite_after_snapshot_fails_terminal_fence() {
 }
 
 fn assert_compressed_registry_rejected(registry: &SourceBackedProviderRegistry, index_root: &Path) {
-    match refresh_source_backed_generation(index_root, registry, writer_options()) {
-        Ok(receipt) => {
-            assert_eq!(receipt.failed_routes.len(), 1);
-            assert!(receipt.sources.is_empty());
-        }
-        Err(SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes }) => {
-            assert_eq!(failed_routes.len(), 1);
-        }
-        Err(SourceBackedCoordinatorError::RouteScan { source, .. }) => {
-            assert_eq!(source.kind, SourceBackedRouteErrorKind::InvalidSource);
-        }
-        Err(error) => panic!("unexpected compressed-source failure: {error:?}"),
-    }
+    let error = refresh_source_backed_generation(index_root, registry, writer_options())
+        .expect_err("a cold route with only unreadable leaves must fail");
+    let SourceBackedCoordinatorError::NoUsableLogicalSources { failed_sources } = error else {
+        panic!("unexpected compressed-source failure: {error:?}");
+    };
+    assert_eq!(failed_sources.total(), 1);
+    assert!(!failed_sources.failures()[0].carried_forward);
 }
 
 fn assert_compressed_source_rejected(sessions: &Path, index_root: &Path) {

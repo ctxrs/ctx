@@ -293,17 +293,30 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         ));
     }
     for rejected in opening.quarantined_leaves() {
-        if let Some((source, detail)) = &rejected.logical_source_failure {
+        if let Some((source, failure)) = &rejected.logical_source_failure {
             if !quarantined_member_is_route_local::<R>(rejected, sink) {
                 continue;
             }
-            let failure =
-                SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, detail);
+            // A refused member may have only a physical diagnostic identity.
+            // Report the exact retained source when prior path binding found it.
+            let source = rejected
+                .source()
+                .filter(|source| {
+                    bases
+                        .iter()
+                        .any(|base| base.observation().source().exact_descriptor_eq(source))
+                })
+                .unwrap_or(source);
             let carried_forward = bases
                 .iter()
                 .any(|base| base.observation().source().exact_descriptor_eq(source));
-            sink.record_logical_source_failure(source.clone(), failure, carried_forward)
-                .map_err(route_internal)?;
+            sink.record_logical_source_failure(
+                source.clone(),
+                failure.clone(),
+                carried_forward,
+                Some(&rejected.source_path.display().to_string()),
+            )
+            .map_err(route_internal)?;
         }
     }
     let mut rejected_quarantine_sources = HashMap::new();
@@ -507,6 +520,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             quarantined.failure_source.clone(),
             failure,
             carried_forward,
+            Some(&quarantined.source_path.display().to_string()),
         )
         .map_err(route_internal)?;
     }

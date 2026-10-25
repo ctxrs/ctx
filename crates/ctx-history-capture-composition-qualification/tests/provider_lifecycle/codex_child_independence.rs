@@ -27,6 +27,9 @@ mod incremental_admission;
 #[path = "codex_child_independence/quarantine.rs"]
 mod quarantine;
 
+#[path = "codex_child_independence/leaf_failures.rs"]
+mod leaf_failures;
+
 #[path = "codex_child_independence/patch_files.rs"]
 mod patch_files;
 
