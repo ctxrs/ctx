@@ -21,6 +21,16 @@ pub(crate) fn run_doctor_with_components(
     components: Option<&UnifiedHealth>,
     ui: &mut Ui,
 ) -> Result<()> {
+    if args.repair {
+        let report =
+            ctx_history_index::repair_generation_leases(&data_root.join("search/lexical"))?;
+        return ctx_cli_presentation::commands::write_doctor_repair(
+            &report.generation_id,
+            report.quarantined_lease.as_deref(),
+            args.format,
+            ui,
+        );
+    }
     let json_output = args.format.is_json();
     let mut model = match doctor_read_model(&data_root) {
         Ok(model) => model,
@@ -242,7 +252,10 @@ mod tests {
                     )
                 } else {
                     run_doctor_with_components(
-                        DoctorArgs { format },
+                        DoctorArgs {
+                            format,
+                            repair: false,
+                        },
                         root.path().to_path_buf(),
                         &mut telemetry,
                         Some(&health),
