@@ -237,10 +237,7 @@ impl VerifiedIndex {
     ) -> Result<Self>
     where
         F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
-        S: FnMut(
-            &ActiveGenerationPointer,
-            Option<&GenerationRetentionLease>,
-        ) -> Result<ReaderGenerationSelection>,
+        S: FnMut(&ActiveGenerationPointer, &Path) -> Result<ReaderGenerationSelection>,
     {
         if !root.is_dir() {
             return Err(IndexError::MissingActiveGenerationPointer);
@@ -252,8 +249,7 @@ impl VerifiedIndex {
         let first_pointer =
             load_pointer(&root)?.ok_or(IndexError::MissingActiveGenerationPointer)?;
         let first_result = {
-            let durable_authority = load_generation_retention_lease(&root)?;
-            select(&first_pointer, durable_authority.as_ref()).and_then(|selection| {
+            select(&first_pointer, &root).and_then(|selection| {
                 Self::open_query_reader_attempt(
                     &root,
                     &first_pointer,
@@ -270,8 +266,7 @@ impl VerifiedIndex {
 
         let retry_pointer = observed_pointer.ok_or(IndexError::MissingActiveGenerationPointer)?;
         let retry_result = {
-            let durable_authority = load_generation_retention_lease(&root)?;
-            select(&retry_pointer, durable_authority.as_ref()).and_then(|selection| {
+            select(&retry_pointer, &root).and_then(|selection| {
                 Self::open_query_reader_attempt(
                     &root,
                     &retry_pointer,
@@ -605,7 +600,7 @@ impl VerifiedIndex {
         Self::open_query_reader_with_loader(
             root,
             &mut load_pointer,
-            |pointer, durable_authority| {
+            |pointer, root| {
                 let (target, durable_authority) =
                     if pointer.active().generation_id() == expected_generation_id {
                         (pointer.active().clone(), None)
@@ -614,10 +609,12 @@ impl VerifiedIndex {
                         .filter(|slot| slot.generation_id() == expected_generation_id)
                     {
                         (previous.clone(), None)
-                    } else if let Some(authority) = durable_authority.filter(|authority| {
-                        authority.target().generation_id() == expected_generation_id
-                    }) {
-                        (authority.target().clone(), Some(authority.clone()))
+                    } else if let Some(authority) =
+                        load_generation_retention_lease(root)?.filter(|authority| {
+                            authority.target().generation_id() == expected_generation_id
+                        })
+                    {
+                        (authority.target().clone(), Some(authority))
                     } else {
                         return Err(IndexError::PinnedGenerationNotRetained {
                             expected_generation_id: expected_generation_id.to_owned(),
