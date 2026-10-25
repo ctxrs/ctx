@@ -24,8 +24,9 @@ ctx archive verify ./history-snapshot
 ```
 
 Reuse the same origin name for later snapshots from this history. Each export
-needs a new output directory. `--source` and `--session` select full Core identity
-digests; without them, export includes all indexed sources and sessions.
+needs a new output directory. Without selection flags, export includes all indexed
+sources and sessions. `--source` and `--session` remain available for full Core
+identity digests; they intersect with workspace and time selection.
 
 The archive contains retained normalized records, including structured content
 and explicit omission states. It contains no provider credentials or executable
@@ -72,6 +73,46 @@ same archive once to retain the labels in the query generation. This preserves
 conversation IDs and records; subsequent unchanged restores remain no-ops.
 Until then, the optional provenance field is absent, not evidence of local origin.
 
+
+### Export a project's recent conversations
+
+Preview a selection, then export it to a new directory:
+
+```sh
+ctx archive export --origin laptop --view work --workspace /work/shop \
+  --since 2026-10-01T00:00:00Z --until 2026-11-01T00:00:00Z --preview
+ctx archive export --origin laptop --view work --workspace /work/shop \
+  --since 2026-10-01T00:00:00Z --until 2026-11-01T00:00:00Z \
+  --output ./shop-october
+```
+
+Selection uses the same [event-query meanings](event-queries.md): `--workspace`
+matches a substring of stored workspace, session CWD, tool working directory,
+or project metadata. It does not inspect the filesystem or detect semantic topics.
+Supply both time bounds or neither. Bounds are absolute RFC3339 timestamps that
+resolve exactly to milliseconds; the interval includes `--since` and excludes
+`--until`. Events without timestamps cannot match a time range. When combined,
+workspace and time must match the same event.
+
+One matching event selects its whole conversation, including retained activity
+outside the window and events without timestamps or workspace metadata. Related
+parent, child, and sibling conversations are not automatically added. Preview
+shows conversation IDs, inspection commands, full observed timestamp spans,
+workspace evidence, and counts of matching, retained, outside-window, untimed,
+and unknown or mixed-workspace records. These counts describe local conversations
+before identical retained original members from multiple namespaces coalesce
+on export.
+
+`--preview` creates no archive and needs no `--output`. Add `--format=json` for
+structured scope information. An empty selection explicitly reports no matching
+conversations and creates no archive. An interrupted or incomplete traversal
+fails without publishing an archive. At most 100 conversations and eight distinct
+workspace values per displayed conversation are shown; display truncation does
+not truncate selection or counts.
+
+Each invocation pins one generation through selection and export. Separate
+preview and export invocations recompute from their own reported generations, so
+new imports between them can change the result.
 
 When exporting a restored root, reuse the original `--origin` and `--view`. ctx
 exports the retained original records, preserving their identities and provenance.

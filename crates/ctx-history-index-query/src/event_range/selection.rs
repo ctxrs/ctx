@@ -99,6 +99,37 @@ impl CoreEventRangeSelection {
         &self.filters
     }
 
+    /// Stored workspace evidence and whether each value matches this selection's
+    /// indexed workspace predicate. With no workspace filter, every value matches.
+    pub fn workspace_metadata<'a>(
+        &'a self,
+        record: &'a CoreRecord,
+    ) -> impl Iterator<Item = (&'a str, bool)> + 'a {
+        record
+            .content
+            .activity
+            .iter()
+            .flat_map(|activity| &activity.facts)
+            .filter(|fact| {
+                matches!(
+                    fact.kind,
+                    LiteralFactKind::Workspace
+                        | LiteralFactKind::SessionCwd
+                        | LiteralFactKind::ToolWorkdir
+                        | LiteralFactKind::Project
+                )
+            })
+            .map(|fact| {
+                (
+                    fact.value.as_str(),
+                    self.filters
+                        .workspace
+                        .as_deref()
+                        .is_none_or(|expected| fact.value.to_ascii_lowercase().contains(expected)),
+                )
+            })
+    }
+
     pub fn cursor_for(
         &self,
         generation_id: &str,
@@ -191,17 +222,9 @@ impl CoreEventRangeSelection {
         {
             return false;
         }
-        if filters.workspace.as_deref().is_some_and(|expected| {
-            !has_literal_fact(record, LiteralFactKind::Workspace, |value| {
-                value.to_lowercase().contains(expected)
-            }) && !has_literal_fact(record, LiteralFactKind::SessionCwd, |value| {
-                value.to_lowercase().contains(expected)
-            }) && !has_literal_fact(record, LiteralFactKind::ToolWorkdir, |value| {
-                value.to_lowercase().contains(expected)
-            }) && !has_literal_fact(record, LiteralFactKind::Project, |value| {
-                value.to_lowercase().contains(expected)
-            })
-        }) {
+        if filters.workspace.is_some()
+            && !self.workspace_metadata(record).any(|(_, matches)| matches)
+        {
             return false;
         }
         if filters.file.as_deref().is_some_and(|expected| {

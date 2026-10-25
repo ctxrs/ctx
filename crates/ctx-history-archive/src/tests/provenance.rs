@@ -75,6 +75,13 @@ fn legacy_restore_enriches_labels_once_without_changing_records_or_ids() {
     let index = VerifiedIndex::open_pinned(root.join("search/lexical")).unwrap();
     assert!(source_identities(&index).unwrap().is_empty());
     drop(index);
+    let all = ctx_history_index::CoreEventRangeSelection::all(Default::default()).unwrap();
+    let plan = plan_export(&root, identity(), &Selection::default(), &all).unwrap();
+    assert_eq!(plan.preview().selected_conversations, 1);
+    assert_eq!(plan.preview().scope.untimed_records, 1);
+    let output = temp.path().join("legacy-export");
+    assert_eq!(plan.export(&output).unwrap().manifest.identity, identity());
+    assert_eq!(archive_records(&output), archive_records(&archive));
     let updated = restore(&archive, &root, &options()).unwrap();
     assert_eq!(updated.imported_members, 1);
     let index = VerifiedIndex::open_pinned(root.join("search/lexical")).unwrap();

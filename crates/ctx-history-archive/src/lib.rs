@@ -12,16 +12,20 @@
 
 mod export;
 mod io;
+mod plan;
 mod provenance;
 mod restore;
 mod retained;
+mod selection;
 
 use std::{collections::BTreeSet, path::Path};
 
 pub use ctx_history_core::{CoreRecord, SourceKey, StableEntityId};
-pub use ctx_history_index::VerifiedIndex;
+pub use ctx_history_index::{CoreEventRangeFilters, CoreEventRangeSelection, VerifiedIndex};
 pub use export::{export, export_session, export_with_control};
 pub use io::{verify, verify_member, visit_member_records, visit_members, visit_records};
+pub use plan::summary::{ConversationPreview, ExportPreview, ScopeCounts, WorkspaceValue};
+pub use plan::{plan_export, plan_export_with_control, ExportPlan};
 pub use provenance::source_identities;
 pub use restore::{
     is_archive_root, map_record, mapped_event, mapped_session, mapped_source, prepare_restore_root,
@@ -47,6 +51,8 @@ pub enum ArchiveError {
     Identity(#[from] ctx_history_core::ProjectionContractError),
     #[error(transparent)]
     Index(#[from] ctx_history_index::IndexError),
+    #[error(transparent)]
+    EventRange(#[from] ctx_history_index::CoreEventRangeError),
     #[error("Core index requires committed migration recovery: {0:?}")]
     MigrationRecovery(ctx_history_index::CommittedPredecessorMigrationRecovery),
     #[error(transparent)]
@@ -92,6 +98,19 @@ pub struct Selection {
 }
 
 impl Selection {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self
+            .sources
+            .iter()
+            .chain(&self.sessions)
+            .any(|id| !is_digest(id))
+        {
+            return Err(invalid(
+                "selection requires full lowercase identity digests",
+            ));
+        }
+        Ok(())
+    }
     pub fn includes_source(&self, source: &SourceKey) -> bool {
         self.sources.is_empty() || self.sources.contains(&hex(&source.identity().digest()))
     }

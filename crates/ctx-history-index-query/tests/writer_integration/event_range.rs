@@ -1233,3 +1233,39 @@ fn indexed_selective_continuation_never_walks_chronology_or_materializes_decoys(
         selected_ids.len()
     );
 }
+
+#[test]
+fn workspace_scope_evidence_agrees_with_indexed_matching_and_cursor_validation() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "workspace-evidence");
+    let mut events = Vec::new();
+    for (i, value) in ["/WORK/éCOLE", "/work/ÉCOLE", "/other/project"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut event = record(&source, i as u64, i as u64, Some(150), "workspace evidence");
+        add_literal_fact(&mut event, LiteralFactKind::SessionCwd, value);
+        events.push(event);
+    }
+    publish(temp.path(), 1, &[(source, events.clone())]);
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::all(CoreEventRangeFilters {
+        workspace: Some("école".into()),
+        ..CoreEventRangeFilters::default()
+    })
+    .unwrap();
+    let page = index.core_event_range_page(&selection, None, 10).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].core_record.event_id, events[0].event_id);
+    assert!(selection
+        .cursor_for(index.generation_id(), &page.items[0])
+        .is_ok());
+    for (i, event) in events.iter().enumerate() {
+        assert_eq!(
+            selection
+                .workspace_metadata(event)
+                .any(|(_, matches)| matches),
+            i == 0
+        );
+    }
+}
