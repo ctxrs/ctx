@@ -89,6 +89,9 @@ mod native {
                     }
                 }
             }
+            if self.data_root != data_root(&self.temp) {
+                command.arg("--data-root").arg(&self.data_root);
+            }
             for (name, suffix) in [
                 ("XDG_CONFIG_HOME", ".config"),
                 ("XDG_DATA_HOME", ".local/share"),

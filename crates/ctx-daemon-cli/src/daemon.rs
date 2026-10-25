@@ -22,6 +22,7 @@ use super::{
 };
 
 pub(crate) mod control;
+mod registered;
 #[cfg(test)]
 mod seam_tests;
 pub use control::{run_daemon_command, update_indexing_mode};

@@ -191,6 +191,7 @@ impl Default for DaemonRuntimeConfig {
 }
 
 pub trait DaemonCliHost: Send + Sync {
+    fn persistent_daemon_spawned(&self, _data_root: &Path) {}
     fn load_config(&self, data_root: &Path) -> Result<DaemonRuntimeConfig>;
     fn home_dir(&self) -> Option<PathBuf>;
     fn run_daemon_service(

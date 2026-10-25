@@ -227,7 +227,7 @@ pub(super) fn remove_installation_daemon_coordination() -> Result<()> {
     Ok(())
 }
 
-pub(super) fn registered_installation_daemon_roots() -> Result<Vec<PathBuf>> {
+pub(crate) fn registered_installation_daemon_roots() -> Result<Vec<PathBuf>> {
     let (_, root) = ctx_upgrade_engine::installation_daemon_coordination_paths()?;
     registered_installation_daemon_roots_from(&root)
 }

@@ -8,6 +8,26 @@ use serde_json::json;
 use support::*;
 
 #[test]
+fn all_daemon_status_is_read_only_for_an_uninitialized_installation() {
+    let temp = tempdir();
+    let root = data_root(&temp);
+    let listed = json_output(&mut ctx(&temp).args(["daemon", "status", "--all", "--format=json"]));
+    assert_eq!(listed["schema_version"], 1);
+    assert_eq!(listed["daemons"], json!([]));
+    assert!(!root.exists(), "status created an uninitialized data root");
+    ctx(&temp)
+        .args(["daemon", "status", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No registered daemons"));
+    assert!(!root.exists());
+    ctx(&temp)
+        .args(["daemon", "run", "--all"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn human_daemon_failure_is_rendered_once_by_final_dispatch() {
     let temp = tempdir();
     let root = data_root(&temp);

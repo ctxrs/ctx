@@ -1,6 +1,119 @@
 use super::*;
 
 #[test]
+fn scratch_search_reports_persistent_start_and_lists_registered_roots() {
+    let _serial = TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut harness = Harness::new();
+    harness.json(&["index", "mode", "manual", "--format=json"]);
+    harness.data_root = harness.home().join("scratch root");
+    let notice = "Launched a persistent background indexer";
+
+    let first = harness.output(&["search", "empty scratch oracle", "--limit", "1"]);
+    assert!(
+        !first.status.success(),
+        "empty search unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert_eq!(stderr.matches(notice).count(), 1, "{first:?}");
+    assert!(
+        stderr.contains(&harness.root().display().to_string()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("index mode manual"), "{stderr}");
+    assert!(!String::from_utf8_lossy(&first.stdout).contains(notice));
+    let pid = live_pid(&wait_for_daemon(&harness, None));
+    assert!(process_is_running(pid), "search left no persistent daemon");
+
+    let second = harness.output(&["search", "empty scratch oracle", "--limit", "1"]);
+    assert!(
+        !String::from_utf8_lossy(&second.stderr).contains(notice),
+        "{second:?}"
+    );
+    let listed = harness.json(&["daemon", "status", "--all", "--format=json"]);
+    assert_eq!(listed["schema_version"], 1);
+    let rows = listed["daemons"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{listed:#}");
+    assert_eq!(rows[0]["data_root"], json!(harness.root()));
+    assert_eq!(rows[0]["daemon"]["running"], true, "{listed:#}");
+    assert_eq!(rows[0]["daemon"]["live_pid"], pid, "{listed:#}");
+    let human = harness.output(&["daemon", "status", "--all"]);
+    assert!(human.status.success(), "{human:?}");
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Running"));
+    assert!(process_is_running(pid), "status stopped the daemon");
+
+    harness.json(&["index", "mode", "manual", "--format=json"]);
+    wait_for_process_state(pid, false, OBSERVATION_TIMEOUT).unwrap();
+    let manual = harness.output(&["search", "empty scratch oracle"]);
+    assert!(
+        !String::from_utf8_lossy(&manual.stderr).contains(notice),
+        "{manual:?}"
+    );
+    assert_eq!(harness.daemon_status()["running"], false);
+}
+
+#[test]
+fn scratch_notice_is_silent_for_managed_and_machine_searches() {
+    let _serial = TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut harness = Harness::new();
+    let notice = "Launched a persistent background indexer";
+    let managed = harness.output(&["search", "empty managed oracle"]);
+    assert!(
+        !String::from_utf8_lossy(&managed.stderr).contains(notice),
+        "{managed:?}"
+    );
+    let managed_pid = live_pid(&wait_for_daemon(&harness, None));
+    harness.json(&["index", "mode", "manual", "--format=json"]);
+    wait_for_process_state(managed_pid, false, OBSERVATION_TIMEOUT).unwrap();
+
+    harness.data_root = harness.home().join("scratch");
+    let off = harness.output(&["search", "empty scratch oracle", "--refresh", "off"]);
+    assert!(
+        !String::from_utf8_lossy(&off.stderr).contains(notice),
+        "{off:?}"
+    );
+    assert_eq!(harness.daemon_status()["running"], false);
+    write_codex_session(harness.home(), "scratch machine output oracle");
+    let machine = harness.output(&[
+        "search",
+        "scratch machine output oracle",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]);
+    assert!(
+        !String::from_utf8_lossy(&machine.stderr).contains(notice),
+        "{machine:?}"
+    );
+    assert!(machine.status.success(), "{machine:?}");
+    let _: Value = serde_json::from_slice(&machine.stdout).expect("search JSON stays parseable");
+    let pid = live_pid(&wait_for_daemon(&harness, None));
+    harness.json(&["index", "mode", "manual", "--format=json"]);
+    wait_for_process_state(pid, false, OBSERVATION_TIMEOUT).unwrap();
+    let finite = harness.output(&[
+        "search",
+        "scratch machine output oracle",
+        "--refresh",
+        "wait",
+    ]);
+    assert!(finite.status.success(), "{finite:?}");
+    assert!(
+        !String::from_utf8_lossy(&finite.stderr).contains(notice),
+        "{finite:?}"
+    );
+    if let Some(pid) = read_lock(harness.root())
+        .as_ref()
+        .and_then(|lock| json_u32(lock, "pid"))
+    {
+        wait_for_process_state(pid, false, OBSERVATION_TIMEOUT).unwrap();
+    }
+    assert_eq!(harness.daemon_status()["running"], false);
+}
+
+#[test]
 fn abandoned_daemon_lock_and_status_recover_after_binary_relocation() {
     let _serial = TEST_SERIAL
         .lock()

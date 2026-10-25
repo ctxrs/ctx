@@ -47,6 +47,8 @@ pub use supervisor::{
 /// Narrow boundary for product-specific operations around neutral lifecycle
 /// policy. Implementations belong to the CLI composition layer.
 pub trait DaemonApplicationHost: Send + Sync {
+    /// Reports process creation even if the subsequent readiness wait fails.
+    fn persistent_daemon_spawned(&self, _data_root: &Path) {}
     fn hosted_uninstall_active(&self) -> Result<bool>;
     fn hosted_uninstall_active_for_executable(&self, executable: &Path) -> Result<bool>;
     fn managed_install_executable(&self) -> Result<Option<PathBuf>>;

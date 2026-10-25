@@ -53,10 +53,13 @@ fn daemon_operation_for_command(
 
 pub(super) fn run_daemon_status(
     application: &ctx_daemon_application::DaemonApplication<'_>,
-    args: FormatArgs,
+    args: crate::DaemonStatusArgs,
     data_root: PathBuf,
     ui: &mut Ui,
 ) -> Result<()> {
+    if args.all {
+        return super::registered::run(application, args.format, ui);
+    }
     let daemon =
         super::super::paths_status::daemon_report_with_application(application, &data_root, true);
     if args.format.is_json() {

@@ -39,6 +39,10 @@ impl CliDaemonApplicationHost<'_> {
 }
 
 impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<'_> {
+    fn persistent_daemon_spawned(&self, data_root: &Path) {
+        crate::composition::host().persistent_daemon_spawned(data_root);
+    }
+
     fn hosted_uninstall_active(&self) -> Result<bool> {
         ctx_upgrade_engine::installation_hosted_uninstall_is_active()
     }

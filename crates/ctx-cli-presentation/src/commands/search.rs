@@ -12,6 +12,41 @@ use crate::ui::Ui;
 
 pub const MAX_SEARCH_LIMIT: usize = 200;
 
+pub fn render_persistent_daemon_notice(
+    context: &ctx_terminal::RenderContext,
+    data_root: &std::path::Path,
+) -> ctx_terminal::Document {
+    use ctx_terminal::{fields, hint, outcome, Action, Field, Hint, Outcome, OutcomeState, Token};
+
+    let root = data_root.display().to_string();
+    let command = format!(
+        "ctx --data-root {} index mode manual",
+        crate::transcript::shell_quote_arg(&root),
+    );
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: OutcomeState::Warning,
+            title: "Launched a persistent background indexer",
+            detail: Some("It can keep indexing history from your home after this search exits."),
+        },
+    );
+    document.push_blank();
+    document.append(fields(
+        context,
+        &[Field::new("Data root", &root).with_value_token(Token::Reference)],
+    ));
+    document.push_blank();
+    document.append(hint(
+        context,
+        Hint {
+            text: "Stop background indexing for this root:",
+        },
+        Some(Action { command: &command }),
+    ));
+    document
+}
+
 #[derive(Debug, Args)]
 pub struct SearchArgs {
     #[arg(help = "Natural-language query to search local agent history")]
@@ -357,6 +392,32 @@ const fn observed_failure_phase(value: ctx_history_cli::SearchFailurePhase) -> S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn persistent_daemon_notice_preserves_root_and_stop_command() {
+        use ctx_terminal::{ColorMode, RenderContext, StreamKind, TestContext};
+        let root = std::path::Path::new("/scratch/two  spaces\u{1b}");
+        for width in [32, 48, 80, 120] {
+            let context = RenderContext::for_test(
+                TestContext::tty(StreamKind::Stderr, width).color(ColorMode::Never),
+            );
+            let rendered = super::render_persistent_daemon_notice(&context, root).render_plain();
+            assert!(
+                rendered
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains("persistent background"),
+                "{rendered}"
+            );
+            assert!(rendered.contains("/scratch/two  spaces\\x1b"), "{rendered}");
+            assert!(
+                rendered.contains("ctx --data-root '/scratch/two  spaces\\x1b' index mode manual"),
+                "{rendered}"
+            );
+            assert!(!rendered.contains('\u{1b}'));
+        }
+    }
+
     use std::time::Duration;
 
     use clap::Parser;

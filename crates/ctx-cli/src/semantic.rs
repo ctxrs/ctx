@@ -139,11 +139,20 @@ fn wait_for_import_daemon_semantic_completion(
 
 struct CtxDaemonCliHost {
     telemetry: crate::product_runtime::DaemonCollector,
+    spawned_daemon: Mutex<Option<std::path::PathBuf>>,
 }
 
 static HOST: CtxDaemonCliHost = CtxDaemonCliHost {
     telemetry: crate::product_runtime::DaemonCollector::new(),
+    spawned_daemon: Mutex::new(None),
 };
+
+pub(crate) fn take_spawned_daemon() -> Option<std::path::PathBuf> {
+    HOST.spawned_daemon
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
 const ATTRIBUTION_MAINTENANCE_WAKE_RUNNING: u8 = 1;
 const ATTRIBUTION_MAINTENANCE_WAKE_PENDING: u8 = 2;
 static ATTRIBUTION_MAINTENANCE_WAKE_STATE: AtomicU8 = AtomicU8::new(0);
@@ -611,9 +620,12 @@ pub(crate) fn run_daemon_command(
             trigger_command: args.trigger_command.map(daemon_trigger),
             format: output_format(args.format),
         }),
-        C::Status(args) => ctx_daemon_cli::DaemonCommand::Status(ctx_daemon_cli::FormatArgs {
-            format: output_format(args.format),
-        }),
+        C::Status(args) => {
+            ctx_daemon_cli::DaemonCommand::Status(ctx_daemon_cli::DaemonStatusArgs {
+                all: args.all,
+                format: output_format(args.format),
+            })
+        }
         C::Enable(args) => ctx_daemon_cli::DaemonCommand::Enable(ctx_daemon_cli::FormatArgs {
             format: output_format(args.format),
         }),
@@ -640,6 +652,13 @@ pub(crate) fn run_daemon_command(
 }
 
 impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
+    fn persistent_daemon_spawned(&self, data_root: &Path) {
+        *self
+            .spawned_daemon
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(data_root.to_path_buf());
+    }
+
     fn load_config(&self, data_root: &Path) -> Result<DaemonRuntimeConfig> {
         let config = ctx_app_config::AppConfig::load(data_root)?;
         if !config.analytics.enabled {

@@ -235,9 +235,15 @@ pub struct DaemonArgs {
 #[derive(Debug, Clone)]
 pub enum DaemonCommand {
     Run(DaemonRunArgs),
-    Status(FormatArgs),
+    Status(DaemonStatusArgs),
     Enable(FormatArgs),
     Disable(DaemonDisableArgs),
+}
+
+#[derive(Debug, Clone)]
+pub struct DaemonStatusArgs {
+    pub all: bool,
+    pub format: ctx_terminal::JsonOutputFormat,
 }
 
 #[derive(Debug, Clone)]
