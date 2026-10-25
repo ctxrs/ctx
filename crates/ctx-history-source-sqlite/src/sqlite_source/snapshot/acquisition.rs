@@ -143,6 +143,18 @@ pub(super) fn acquire_sqlite_connection_with_progress<E>(
             evidence,
             options.limits,
             tables,
+            &[],
+            report_progress,
+        );
+    }
+    if let SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(tables, columns) = options.policy {
+        return super::selective::acquire(
+            snapshot_context,
+            family,
+            evidence,
+            options.limits,
+            tables,
+            columns,
             report_progress,
         );
     }

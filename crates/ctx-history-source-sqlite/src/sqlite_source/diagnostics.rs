@@ -591,7 +591,8 @@ impl SqliteSourceReadSnapshot {
                 error.with_exact_provider_content_provenance()
             }
             SqliteSourceSnapshotPolicy::StablePrivateCopy
-            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => error,
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_)
+            | SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(_, _) => error,
         }
     }
 }

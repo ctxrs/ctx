@@ -135,9 +135,10 @@ pub(crate) mod provider_sources {
         open_root_handle_sqlite_source_snapshot, resource_exhaustion_io_error,
         retain_sqlite_source_directory_authority, rusqlite_resource_failure, sqlite_retry_decision,
         SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase, SqliteLogicalSnapshot,
-        SqliteRetryDecision, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
-        SqliteSourceErrorComposition, SqliteSourceEvidence, SqliteSourceProgressError,
-        SqliteSourceReadSnapshot, SqliteSourceReplayFence, SqliteSourceTerminalFence,
+        SqliteRetryDecision, SqliteSelectedColumnProjection, SqliteSourceAccessError,
+        SqliteSourceDirectoryAuthority, SqliteSourceErrorComposition, SqliteSourceEvidence,
+        SqliteSourceProgressError, SqliteSourceReadSnapshot, SqliteSourceReplayFence,
+        SqliteSourceTerminalFence,
     };
 }
 

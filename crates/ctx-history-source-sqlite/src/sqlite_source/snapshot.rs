@@ -35,6 +35,15 @@ fn take_private_directory_cleanup_failure_for_test() -> bool {
     FAIL_NEXT_PRIVATE_DIRECTORY_CLEANUP.with(|fail| fail.replace(false))
 }
 
+/// An opt-in bound applied before a selected native cell is materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqliteSelectedColumnProjection {
+    pub table: &'static str,
+    pub column: &'static str,
+    pub maximum_bytes: usize,
+    pub original_bytes_column: &'static str,
+}
+
 /// How one authorized provider SQLite leaf is stabilized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SqliteSourceSnapshotPolicy {
@@ -42,6 +51,10 @@ pub(super) enum SqliteSourceSnapshotPolicy {
     PinnedReadOnlyWal,
     StablePrivateCopy,
     SelectivePrivateCopy(&'static [&'static str]),
+    ProjectedPrivateCopy(
+        &'static [&'static str],
+        &'static [SqliteSelectedColumnProjection],
+    ),
 }
 
 /// Snapshot-wide scratch policy. The aggregate includes every retained DB/WAL
@@ -217,7 +230,8 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         })?;
     let native_evidence = match options.policy {
         SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
-        | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+        | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_)
+        | SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(_, _) => {
             family.capture_revision_evidence()?
         }
         SqliteSourceSnapshotPolicy::ExactRevision
@@ -242,7 +256,8 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         // evidence read so a concurrent write cannot escape acquisition.
         match options.policy {
             SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
-            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_)
+            | SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(_, _) => {
                 family.revalidate_database_identity(&native_evidence)?
             }
             SqliteSourceSnapshotPolicy::ExactRevision
@@ -253,7 +268,8 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         let sqlite_evidence = capture_sqlite_evidence(&acquired.connection)?;
         match options.policy {
             SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
-            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_)
+            | SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(_, _) => {
                 family.revalidate_database_identity(&native_evidence)?
             }
             SqliteSourceSnapshotPolicy::ExactRevision
@@ -286,7 +302,8 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
     // additionally recover exactly that commit, not later unpublished frames.
     let replay_safe = match options.policy {
         SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
-        | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+        | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_)
+        | SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(_, _) => {
             family.revalidate_revision(&native_evidence).is_ok()
         }
         _ => {
@@ -295,7 +312,8 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         }
     };
     let policy = match options.policy {
-        SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+        SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_)
+        | SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(_, _) => {
             SqliteSourceSnapshotPolicy::StablePrivateCopy
         }
         policy => policy,
@@ -318,6 +336,10 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         sqlite_evidence,
         evidence,
         policy,
+        projected_columns: match options.policy {
+            SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(_, columns) => columns,
+            _ => &[],
+        },
         admitted_revision_is_replay_safe: replay_safe,
         strategy,
         copied_bytes,

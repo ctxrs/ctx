@@ -16,8 +16,7 @@ fn opencode_scan_measurement() {
     let start = std::time::Instant::now();
     let authorized = open_root_authorized_snapshot_retained(temp.path(), &database).unwrap();
     let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
-    let observation =
-        observe_logical_source(authorized.sqlite_snapshot.connection().unwrap(), dialect).unwrap();
+    let observation = observe_snapshot(&authorized.sqlite_snapshot, dialect).unwrap();
     let admission = start.elapsed();
     let mut documents = 0_u64;
     let scan = scan_pinned_source(

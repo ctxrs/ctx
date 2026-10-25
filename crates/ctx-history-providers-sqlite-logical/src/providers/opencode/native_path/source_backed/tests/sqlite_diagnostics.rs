@@ -154,8 +154,8 @@ fn production_schema_and_projection_errors_explicitly_report_cleanup_failure_wit
     drop(writer);
     fail_next_opened_snapshot_cleanup_for_test();
     let authorized = open_root_authorized_snapshot_retained(&data_root, &database).unwrap();
-    let observation = observe_logical_source(
-        authorized.sqlite_snapshot.connection().unwrap(),
+    let observation = observe_snapshot(
+        &authorized.sqlite_snapshot,
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
     )
     .unwrap();

@@ -26,6 +26,29 @@ impl SqliteSourceDirectoryAuthority {
             &mut report_progress,
         )
     }
+
+    /// Copies selected tables with explicit cell bounds and original byte lengths.
+    /// Unsupported no-write readers retain the ordinary full-family capture.
+    pub fn open_projected_tables_snapshot_with_progress<E>(
+        &self,
+        database_name: &OsStr,
+        tables: &'static [&'static str],
+        columns: &'static [SqliteSelectedColumnProjection],
+        mut report_progress: impl FnMut(SqliteSourceProgress) -> Result<(), E>,
+    ) -> Result<SqliteSourceReadSnapshot, SqliteSourceProgressError<E>> {
+        let policy = if selective_reader_available() {
+            SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(tables, columns)
+        } else {
+            SqliteSourceSnapshotPolicy::StablePrivateCopy
+        };
+        open_root_handle_sqlite_source_snapshot_with_progress(
+            self,
+            database_name,
+            policy,
+            SqliteSourceSnapshotLimits::default(),
+            &mut report_progress,
+        )
+    }
 }
 
 fn selective_reader_available() -> bool {
@@ -45,11 +68,20 @@ pub(super) fn acquire<E>(
     evidence: &SqliteFamilyEvidence,
     limits: SqliteSourceSnapshotLimits,
     tables: &[&str],
+    projections: &[SqliteSelectedColumnProjection],
     report: &mut impl FnMut(SqliteSourceProgress) -> Result<(), E>,
 ) -> Result<AcquiredSqliteConnection, SqliteSourceProgressError<E>> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (context, family, evidence, limits, tables, report);
+        let _ = (
+            context,
+            family,
+            evidence,
+            limits,
+            tables,
+            projections,
+            report,
+        );
         Err(SqliteSourceAccessError::SnapshotUnavailable {
             reason: "selective snapshots require the Linux no-write SQLite reader".into(),
         }
@@ -62,7 +94,7 @@ pub(super) fn acquire<E>(
             verify_connection_read_only(&source)?;
             configure_and_pin_snapshot(&source)?;
             family.revalidate_database_identity(evidence)?;
-            copy_tables(context, &source, limits, tables, report)
+            copy_tables(context, &source, limits, tables, projections, report)
         })();
         // Close the live transaction before any adapter query. A failed close
         // also discards the private candidate; no second allocation is opened.
@@ -89,6 +121,7 @@ fn copy_tables<E>(
     source: &Connection,
     limits: SqliteSourceSnapshotLimits,
     tables: &[&str],
+    projections: &[SqliteSelectedColumnProjection],
     report: &mut impl FnMut(SqliteSourceProgress) -> Result<(), E>,
 ) -> Result<AcquiredSqliteConnection, SqliteSourceProgressError<E>> {
     let scratch = SqliteRouteScratch::new(context, limits.maximum_scratch_limit());
@@ -126,7 +159,7 @@ fn copy_tables<E>(
             let mut bytes = 0_u64;
             report_progress(report, bytes)?;
             for table in tables {
-                copy_table(source, &target, table, &mut bytes, report)?;
+                copy_table(source, &target, table, projections, &mut bytes, report)?;
             }
             target.execute_batch("COMMIT").map_err(private_error)?;
             report_progress(report, bytes)?;
@@ -176,6 +209,7 @@ fn copy_table<E>(
     source: &Connection,
     target: &Connection,
     table: &str,
+    projections: &[SqliteSelectedColumnProjection],
     bytes: &mut u64,
     report: &mut impl FnMut(SqliteSourceProgress) -> Result<(), E>,
 ) -> Result<(), SqliteSourceProgressError<E>> {
@@ -229,6 +263,49 @@ fn copy_table<E>(
         .into());
     }
     execute_schema(target, table, &schema)?;
+    let projections: Vec<_> = projections
+        .iter()
+        .filter(|value| value.table == table)
+        .collect();
+    for (index, projection) in projections.iter().enumerate() {
+        let collision: bool = source
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo(?1) WHERE name=?2 COLLATE NOCASE)",
+                rusqlite::params![table, projection.original_bytes_column],
+                |row| row.get(0),
+            )
+            .map_err(source_error)?;
+        let present: bool = source
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2 COLLATE NOCASE)",
+                rusqlite::params![table, projection.column],
+                |row| row.get(0),
+            )
+            .map_err(source_error)?;
+        if collision
+            || !present
+            || projections[..index].iter().any(|previous| {
+                previous.column.eq_ignore_ascii_case(projection.column)
+                    || previous
+                        .original_bytes_column
+                        .eq_ignore_ascii_case(projection.original_bytes_column)
+            })
+        {
+            return Err(SqliteSourceAccessError::SnapshotUnavailable {
+                reason: "selected SQLite projection collides with or lacks a native column".into(),
+            }
+            .into());
+        }
+        target
+            .execute(
+                &format!(
+                    "ALTER TABLE {quoted} ADD COLUMN {} INTEGER",
+                    quote_identifier(projection.original_bytes_column)
+                ),
+                [],
+            )
+            .map_err(private_error)?;
+    }
     let mut indexes = source
         .prepare(
             "SELECT sql FROM sqlite_schema WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL",
@@ -239,8 +316,40 @@ fn copy_table<E>(
         let sql: String = row.get(0).map_err(source_error)?;
         execute_schema(target, table, &sql)?;
     }
+    let selection = if projections.is_empty() {
+        "rowid, *".to_owned()
+    } else {
+        let names = source
+            .prepare(&format!("SELECT * FROM {quoted} LIMIT 0"))
+            .map_err(source_error)?;
+        let mut expressions = vec!["rowid".to_owned()];
+        for name in names.column_names() {
+            let column = quote_identifier(name);
+            if let Some(projection) = projections
+                .iter()
+                .find(|value| value.column.eq_ignore_ascii_case(name))
+            {
+                expressions.push(format!(
+                    "CASE WHEN typeof({column})='text' AND octet_length({column})>{limit} THEN '' \
+                     WHEN typeof({column})='blob' AND octet_length({column})>{limit} THEN x'' \
+                     ELSE {column} END AS {column}",
+                    limit = projection.maximum_bytes,
+                ));
+            } else {
+                expressions.push(column);
+            }
+        }
+        for projection in &projections {
+            let column = quote_identifier(projection.column);
+            expressions.push(format!(
+                "CASE WHEN typeof({column}) IN ('text','blob') THEN octet_length({column}) END AS {}",
+                quote_identifier(projection.original_bytes_column),
+            ));
+        }
+        expressions.join(",")
+    };
     let mut select = source
-        .prepare(&format!("SELECT rowid, * FROM {quoted} NOT INDEXED"))
+        .prepare(&format!("SELECT {selection} FROM {quoted} NOT INDEXED"))
         .map_err(source_error)?;
     let columns = select.column_count();
     let parameters = vec!["?"; columns].join(",");
@@ -283,6 +392,11 @@ fn copy_table<E>(
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 #[cfg(target_os = "linux")]

@@ -140,6 +140,16 @@ provider. Unknown required events and future versions fail the source.
 Delegated sessions remain independent imports; the immediate parent header
 does not prove the transitive root identity required for typed lineage edges.
 
+On Linux with the certified no-write SQLite reader, OpenCode's private selected
+snapshot applies its 16 MiB payload-cell limit before copying `data` values.
+Above-bound TEXT/BLOB values are represented only by their native storage class
+and original byte length in ctx-owned projection metadata. The adapter retains
+valid sibling history and reports the same per-record oversized-content or
+unsupported-storage rejection; it never truncates oversized content into a
+searchable record. Provider databases remain untouched. Generic selected SQLite
+snapshots keep their separate byte-preserving contract, and platforms without
+the no-write selected reader retain the existing full-family snapshot path.
+
 fx supports fx v0.0.10 schema-v4 session manifests with schema-v1/v2
 conversation events, legacy marker-less schema-v1/v2 snapshots, and schema-v3
 transactional event logs. The default root is `~/.fx/sessions`; named and exact

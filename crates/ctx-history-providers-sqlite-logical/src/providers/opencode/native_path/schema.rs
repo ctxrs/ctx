@@ -8,6 +8,7 @@ use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
 use super::model::OpenCodeNativeSchemaFamily;
 use crate::provider::providers::opencode::OpenCodeSqliteDialect;
+use crate::provider_sources::SqliteSelectedColumnProjection;
 
 const MAX_NATIVE_IDENTITY_BYTES: i64 = 4 * 1024;
 const JSON_HINT_BYTES: usize = 256;
@@ -30,6 +31,7 @@ pub(super) struct OpenCodeNativeSchema {
     pub(super) proven_legacy_overlap: bool,
     pub(super) message_part_indexed_streaming: bool,
     pub(super) event_validation_traversals: u64,
+    pub(super) projected_data_tables: BTreeSet<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,8 +50,18 @@ enum CurrentTableRows {
 }
 
 impl OpenCodeNativeSchema {
+    #[cfg(test)]
     pub(super) fn probe(conn: &Connection, dialect: &OpenCodeSqliteDialect) -> Result<Self> {
+        Self::probe_with_projections(conn, dialect, &[])
+    }
+
+    pub(super) fn probe_with_projections(
+        conn: &Connection,
+        dialect: &OpenCodeSqliteDialect,
+        projections: &[SqliteSelectedColumnProjection],
+    ) -> Result<Self> {
         let tables = sqlite_tables(conn)?;
+        let projected_data_tables = projected_data_tables(conn, projections)?;
         if !tables.contains("session") && !tables.contains("session_v2") {
             return Err(CaptureError::InvalidPayload(format!(
                 "{} NativePath requires a session table",
@@ -69,7 +81,12 @@ impl OpenCodeNativeSchema {
             Some((
                 family,
                 has_type,
-                current_table_rows(conn, "session_message", has_type)?,
+                current_table_rows(
+                    conn,
+                    "session_message",
+                    has_type,
+                    projected_data_tables.contains("session_message"),
+                )?,
             ))
         } else {
             None
@@ -81,7 +98,12 @@ impl OpenCodeNativeSchema {
             Some((
                 OpenCodeNativeSchemaFamily::SessionEntry,
                 has_type,
-                current_table_rows(conn, "session_entry", has_type)?,
+                current_table_rows(
+                    conn,
+                    "session_entry",
+                    has_type,
+                    projected_data_tables.contains("session_entry"),
+                )?,
             ))
         } else {
             None
@@ -130,6 +152,7 @@ impl OpenCodeNativeSchema {
             message,
             part,
             message_part_join,
+            &projected_data_tables,
         )?;
 
         let session_table = if tables.contains("session_v2")
@@ -163,7 +186,8 @@ impl OpenCodeNativeSchema {
         };
         let user_version = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let schema_version = conn.pragma_query_value(None, "schema_version", |row| row.get(0))?;
-        let capability_digest = capability_digest(conn, user_version, family)?;
+        let capability_digest =
+            capability_digest(conn, user_version, family, &projected_data_tables)?;
         Ok(Self {
             family,
             capability_digest,
@@ -177,7 +201,12 @@ impl OpenCodeNativeSchema {
                 && part.is_some(),
             message_part_indexed_streaming,
             event_validation_traversals,
+            projected_data_tables,
         })
+    }
+
+    pub(super) fn data_bytes_sql(&self, table: &str, column: &str) -> String {
+        data_bytes_sql(column, self.projected_data_tables.contains(table))
     }
 }
 
@@ -189,6 +218,7 @@ fn select_schema_family(
     message: Option<(bool, bool)>,
     part: Option<(bool, bool)>,
     message_part_join: bool,
+    projected_data_tables: &BTreeSet<&'static str>,
 ) -> Result<(OpenCodeNativeSchemaFamily, bool)> {
     let mut populated = Vec::new();
     if let Some((family, has_type, CurrentTableRows::ConversationBearing)) = session_message {
@@ -221,7 +251,7 @@ fn select_schema_family(
                     )
                     && part.is_some()
                     && overlap_indexes_are_exact(conn)?
-                    && super::overlap::legacy_is_covered(conn, dialect)?
+                    && super::overlap::legacy_is_covered(conn, dialect, projected_data_tables)?
                 {
                     return Ok((OpenCodeNativeSchemaFamily::SessionMessageSeq, true));
                 }
@@ -296,6 +326,38 @@ fn sqlite_tables(conn: &Connection) -> Result<BTreeSet<String>> {
         .map_err(CaptureError::from)
 }
 
+fn projected_data_tables(
+    conn: &Connection,
+    projections: &[SqliteSelectedColumnProjection],
+) -> Result<BTreeSet<&'static str>> {
+    let mut projected = BTreeSet::new();
+    for projection in projections {
+        if !matches!(
+            projection.table,
+            "message" | "part" | "session_message" | "session_entry"
+        ) || projection.column != "data"
+            || projection.original_bytes_column != "_ctx_data_original_bytes"
+            || projection.maximum_bytes != MAX_PROVIDER_SQLITE_VALUE_BYTES
+        {
+            continue;
+        }
+        let columns = table_capabilities(conn, projection.table)?;
+        if columns.contains_key("data") {
+            require_integer_column(&columns, projection.table, projection.original_bytes_column)?;
+            projected.insert(projection.table);
+        }
+    }
+    Ok(projected)
+}
+
+pub(super) fn data_bytes_sql(column: &str, projected: bool) -> String {
+    if projected {
+        let prefix = column.strip_suffix("data").expect("data column");
+        format!("coalesce({prefix}_ctx_data_original_bytes, octet_length({column}))")
+    } else {
+        format!("octet_length({column})")
+    }
+}
 fn table_has_rows(conn: &Connection, table: &str) -> Result<bool> {
     let sql = format!("select exists(select 1 from {table} limit 1)");
     Ok(conn.query_row(&sql, [], |row| row.get::<_, i64>(0))? != 0)
@@ -305,7 +367,9 @@ fn current_table_rows(
     conn: &Connection,
     table: &str,
     has_type_column: bool,
+    projected: bool,
 ) -> Result<CurrentTableRows> {
+    let data_bytes = data_bytes_sql("data", projected);
     let column_type_marker = if has_type_column {
         format!(
             "case when typeof(type) = 'text'
@@ -327,7 +391,7 @@ fn current_table_rows(
                  where ({column_type_marker})
                     or case
                            when typeof(data) = 'text'
-                                and octet_length(data) <= {MAX_PROVIDER_SQLITE_VALUE_BYTES}
+                                and {data_bytes} <= {MAX_PROVIDER_SQLITE_VALUE_BYTES}
                            then case
                                     when json_valid(data) then
                                         ({role} in ({CONVERSATION_ROLES})
@@ -616,6 +680,7 @@ fn capability_digest(
     conn: &Connection,
     user_version: i64,
     selected_family: OpenCodeNativeSchemaFamily,
+    projected_data_tables: &BTreeSet<&'static str>,
 ) -> Result<String> {
     let table_names = sqlite_tables(conn)?;
     let mut tables = BTreeMap::new();
@@ -624,6 +689,10 @@ fn capability_digest(
         let mut statement = conn.prepare(&sql)?;
         let columns = statement
             .query_map([], |row| row.get::<_, String>(1))?
+            .filter(|column| {
+                !projected_data_tables.contains(table.as_str())
+                    || !matches!(column, Ok(name) if name == "_ctx_data_original_bytes")
+            })
             .collect::<std::result::Result<Vec<_>, _>>()?;
         tables.insert(table.clone(), columns);
     }
