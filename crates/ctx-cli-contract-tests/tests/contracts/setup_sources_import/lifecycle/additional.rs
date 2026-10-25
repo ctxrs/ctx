@@ -825,7 +825,7 @@ fn doctor_repairs_invalid_lease_without_refresh_or_daemon_start() {
     let pointer = fs::read(index.join("active-generation.json")).unwrap();
     fs::write(
         index.join("generation-retention-lease.json"),
-        b"{interrupted",
+        br#"{"version":1}"#,
     )
     .unwrap();
 
@@ -839,7 +839,7 @@ fn doctor_repairs_invalid_lease_without_refresh_or_daemon_start() {
     assert_eq!(repaired["read_only"], false);
     assert_eq!(repaired["repair"]["generation_id"], generation);
     let saved = repaired["repair"]["quarantined_lease"].as_str().unwrap();
-    assert_eq!(fs::read(saved).unwrap(), b"{interrupted");
+    assert_eq!(fs::read(saved).unwrap(), br#"{"version":1}"#);
     assert_eq!(
         fs::read(index.join("active-generation.json")).unwrap(),
         pointer

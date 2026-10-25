@@ -501,7 +501,7 @@ fn invalid_durable_hold_blocks_publication_but_not_verified_history() {
 
     fs::write(
         temp.path().join("generation-retention-lease.json"),
-        b"{not-canonical",
+        br#"{"version":1}"#,
     )
     .unwrap();
     assert!(matches!(
@@ -521,7 +521,7 @@ fn invalid_durable_hold_blocks_publication_but_not_verified_history() {
     assert_eq!(repair.generation_id, first.generation_id);
     assert_eq!(
         fs::read(repair.quarantined_lease.unwrap()).unwrap(),
-        b"{not-canonical"
+        br#"{"version":1}"#
     );
     assert_eq!(
         fs::read(temp.path().join("active-generation.json")).unwrap(),
@@ -731,7 +731,7 @@ fn malformed_hold_cannot_authorize_a_generation_outside_the_pointer_pair() {
         ));
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
-    fs::write(&path, b"{invalid").unwrap();
+    fs::write(&path, br#"{"version":1}"#).unwrap();
     assert!(VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id).is_err());
     for id in [&second.generation_id, &third.generation_id] {
         assert_eq!(
@@ -789,5 +789,88 @@ fn current_hold_json_formatting_is_compatible_and_damaged_targets_are_repairable
             fs::read(repaired.quarantined_lease.unwrap()).unwrap(),
             bytes
         );
+    }
+}
+
+#[test]
+fn repair_preserves_oversized_future_and_unclassifiable_holds_before_import() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let source = source("future-hold.jsonl");
+    publish_manifest_base(root, &source);
+    let first = publish(root, &source, 1, "retained by hold only");
+    let lease =
+        acquire_generation_retention_lease(root, &first.generation_id, "consumer", &"a".repeat(64))
+            .unwrap();
+    let held_directory = root
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(lease.target().directory());
+    publish(root, &source, 2, "previous");
+    let active = publish(root, &source, 3, "active");
+    let pointer = fs::read(root.join("active-generation.json")).unwrap();
+    let directories = generation_directories(root);
+    let path = root.join("generation-retention-lease.json");
+    let mut future = serde_json::to_value(&lease).unwrap();
+    future["version"] = serde_json::json!(2);
+    let mut records = Vec::new();
+    // Reproduce both the accepted-size and oversized future records: the
+    // latter used to be quarantined, allowing the next import to delete A.
+    for size in [480, 4580] {
+        let mut bytes = serde_json::to_vec(&future).unwrap();
+        assert!(bytes.len() <= size);
+        bytes.resize(size, b' ');
+        assert_eq!(bytes.len(), size);
+        assert!(serde_json::from_slice::<serde_json::Value>(&bytes).is_ok());
+        records.push(bytes);
+    }
+    records.extend([
+        br#"{"target":{}}"#.to_vec(),
+        br#"{"version":1,"version":2}"#.to_vec(),
+        br#"{"version":2,"target":"#.to_vec(),
+        br#"{"version":"future"}"#.to_vec(),
+    ]);
+    for bytes in records {
+        fs::write(&path, &bytes).unwrap();
+        let is_small_future = bytes.len() == 480;
+        let repair = repair_generation_leases(root);
+        if is_small_future {
+            assert!(matches!(
+                repair,
+                Err(IndexError::UnsupportedGenerationRetentionLease(2))
+            ));
+        } else {
+            assert!(matches!(
+                repair,
+                Err(IndexError::UnclassifiedGenerationRetentionLease)
+            ));
+        }
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        let writer = GenerationWriter::open(root, WriterOptions::default());
+        if is_small_future {
+            assert!(matches!(
+                writer,
+                Err(IndexError::UnsupportedGenerationRetentionLease(2))
+            ));
+        } else {
+            assert!(matches!(
+                writer,
+                Err(IndexError::UnclassifiedGenerationRetentionLease)
+            ));
+        }
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            fs::read(root.join("active-generation.json")).unwrap(),
+            pointer
+        );
+        assert!(held_directory.is_dir());
+        assert_eq!(generation_directories(root), directories);
+        assert!(!fs::read_dir(root).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".generation-retention-lease.invalid-")));
+        let reader = VerifiedIndex::open_pinned(root).unwrap();
+        assert_eq!(reader.generation_id(), active.generation_id);
+        assert_eq!(reader.count_term("active").unwrap(), 1);
     }
 }

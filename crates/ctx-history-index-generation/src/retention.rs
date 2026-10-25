@@ -166,9 +166,11 @@ pub fn load_generation_retention_lease(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
+    if metadata.len() > MAX_GENERATION_RETENTION_LEASE_BYTES {
+        return Err(IndexError::UnclassifiedGenerationRetentionLease);
+    }
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
-        || metadata.len() > MAX_GENERATION_RETENTION_LEASE_BYTES
         || verify_private_file(&path).is_err()
     {
         return Err(IndexError::InvalidGenerationRetentionLease);
@@ -177,9 +179,6 @@ pub fn load_generation_retention_lease(
     File::open(&path)?
         .take(MAX_GENERATION_RETENTION_LEASE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_GENERATION_RETENTION_LEASE_BYTES {
-        return Err(IndexError::InvalidGenerationRetentionLease);
-    }
     let lease = decode_retention_lease(&bytes)?;
     let target = slot_path(root, lease.target());
     let target_metadata =
@@ -205,18 +204,15 @@ fn load_generation_retention_lease_from_opened_root(
         Err(error) => return Err(error.into()),
     };
     let metadata = file.metadata()?;
-    if !metadata.is_file()
-        || metadata.len() > MAX_GENERATION_RETENTION_LEASE_BYTES
-        || verify_private_file_handle(&file).is_err()
-    {
+    if metadata.len() > MAX_GENERATION_RETENTION_LEASE_BYTES {
+        return Err(IndexError::UnclassifiedGenerationRetentionLease);
+    }
+    if !metadata.is_file() || verify_private_file_handle(&file).is_err() {
         return Err(IndexError::InvalidGenerationRetentionLease);
     }
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
     file.take(MAX_GENERATION_RETENTION_LEASE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_GENERATION_RETENTION_LEASE_BYTES {
-        return Err(IndexError::InvalidGenerationRetentionLease);
-    }
     let lease = decode_retention_lease(&bytes)?;
     root.open_directory(&Path::new(INDEX_GENERATIONS_DIRECTORY).join(lease.target().directory()))
         .map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
@@ -224,14 +220,19 @@ fn load_generation_retention_lease_from_opened_root(
 }
 
 fn decode_retention_lease(bytes: &[u8]) -> Result<GenerationRetentionLease> {
+    // A size limit is not evidence of a damaged current-version hold. Keep
+    // oversized and unclassifiable records intact, including future schemas.
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_GENERATION_RETENTION_LEASE_BYTES {
+        return Err(IndexError::UnclassifiedGenerationRetentionLease);
+    }
     // Check the version before applying the current schema. A future writer's
     // added fields or JSON member order must not make its hold repairable.
     #[derive(Deserialize)]
     struct Version {
         version: u32,
     }
-    let version: Version =
-        serde_json::from_slice(bytes).map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
+    let version: Version = serde_json::from_slice(bytes)
+        .map_err(|_| IndexError::UnclassifiedGenerationRetentionLease)?;
     if version.version != u32::from(GENERATION_RETENTION_LEASE_VERSION) {
         return Err(IndexError::UnsupportedGenerationRetentionLease(
             version.version,

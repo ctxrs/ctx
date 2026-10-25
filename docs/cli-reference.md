@@ -145,8 +145,9 @@ ctx daemon run
   resource shortages. Status and doctor warn when a live daemon's heartbeat
   is stale without treating its process as dead.
 - `doctor --repair` repairs history lease metadata after verifying the active
-  generation under the publication lock. Invalid durable holds are quarantined;
-  valid holds and retained history remain. It does not import, reclaim history,
+  generation under the publication lock. Proven-invalid current-version holds
+  are quarantined; valid, unsupported-version, oversized, and unclassifiable
+  holds remain, along with retained history. It does not import, reclaim history,
   start a daemon, or change indexing mode. See
   [generation lease recovery](troubleshooting.md#history-generation-lease-errors).
 - `index` prints a one-shot indexing status view. It is the focused view of the

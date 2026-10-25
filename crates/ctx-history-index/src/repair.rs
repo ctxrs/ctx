@@ -18,9 +18,9 @@ pub struct GenerationLeaseRepair {
 }
 
 /// Repairs coordination state without importing, publishing, or reclaiming
-/// history. An invalid durable hold is quarantined only after the active Core
-/// generation verifies under the writer lock. Live OS reader locks and valid
-/// durable holds are never removed.
+/// history. A proven-invalid current-version hold is quarantined only after
+/// the active Core generation verifies under the writer lock. Live OS reader
+/// locks and valid, unsupported, oversized, or unclassifiable holds remain.
 pub fn repair_generation_leases(root: &Path) -> Result<GenerationLeaseRepair> {
     // Do not turn a missing index into an initialized empty one.
     std::fs::symlink_metadata(root)?;

@@ -61,8 +61,12 @@ formats, but reported failures in either mechanism as a malformed durable
 lease. On macOS, `0600` alone does not rule out an extended ACL or a filesystem
 identity error.
 
-Current ctx repairs owner-controlled coordinator metadata in place, preserving
-live OS locks. Current-version holds accept JSON whitespace and member reordering.
+Current ctx fixes a macOS device-identity comparison that could reject a valid
+coordinator on filesystems with signed device IDs. If this caused the error,
+ordinary reads recover automatically after upgrading; `doctor --repair` is not
+needed. ctx also repairs owner-controlled coordinator metadata in place,
+preserving live OS locks. Current-version holds accept JSON whitespace and
+member reordering.
 An invalid durable hold does not prevent searching the verified
 active or previous generation. If refresh reports an invalid hold, run:
 
@@ -73,13 +77,15 @@ ctx search "your query" --refresh off
 
 For a custom root, pass the same `--data-root PATH` to each command. Repair
 verifies the active generation under the publication lock, restores private
-control permissions, and moves an invalid durable hold to the reported
-`.generation-retention-lease.invalid-*` file. It keeps the active pointer,
+control permissions, and moves a proven-invalid current-version hold to the
+reported `.generation-retention-lease.invalid-*` file. It keeps the active pointer,
 generation files, valid holds, and live readers. It does not import sources,
 reclaim history, enable automatic indexing, or start a daemon. Unsupported
-future lease versions and unsafe paths remain errors; a failed history
-verification leaves the hold in place. Ordinary `ctx doctor` remains an
-observation.
+versions, records exceeding the 4 KiB limit, and records whose version cannot
+be determined are preserved and continue to block publication. Verified active
+and previous history remains searchable with `--refresh off`. Unsafe paths
+remain errors; a failed history verification leaves the hold in place. Ordinary
+`ctx doctor` remains an observation.
 
 After repair, `ctx import --all` explicitly refreshes history. In manual mode,
 that command may start a finite worker; it does not enable persistent indexing.

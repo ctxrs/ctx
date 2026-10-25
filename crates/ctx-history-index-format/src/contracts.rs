@@ -81,6 +81,8 @@ pub enum IndexError {
     InvalidActiveGenerationPointer,
     #[error("the durable generation-retention lease is invalid; run `ctx doctor --repair` to verify retained history and quarantine the invalid hold before retrying `ctx import --all`")]
     InvalidGenerationRetentionLease,
+    #[error("the durable generation-retention lease exceeds the 4096-byte limit or its version cannot be determined; the hold has been preserved; run `ctx upgrade` before retrying repair, or `ctx search --refresh off` to search verified history")]
+    UnclassifiedGenerationRetentionLease,
     #[error("generation read-lock coordinator is unavailable: {0}; run `ctx doctor --repair`; do not delete lock files")]
     GenerationReadLeaseCoordinator(#[source] std::io::Error),
     #[error("unsupported durable generation-retention lease version {0}; run `ctx upgrade` to use a compatible reader; the hold has been preserved")]
@@ -553,6 +555,9 @@ impl From<ctx_history_index_generation::GenerationError> for IndexError {
             }
             GenerationError::InvalidGenerationRetentionLease => {
                 Self::InvalidGenerationRetentionLease
+            }
+            GenerationError::UnclassifiedGenerationRetentionLease => {
+                Self::UnclassifiedGenerationRetentionLease
             }
             GenerationError::UnsupportedGenerationRetentionLease(version) => {
                 Self::UnsupportedGenerationRetentionLease(version)

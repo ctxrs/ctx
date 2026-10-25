@@ -1,8 +1,9 @@
 use super::*;
 
-/// Quarantines an invalid durable hold after the caller verifies the active
+/// Quarantines a proven-invalid current-version hold after the caller verifies the active
 /// generation while holding the publication writer lock. Valid holds, including
-/// unrelated consumers, remain intact. No generation data is reclaimed.
+/// unrelated consumers, remain intact, as do oversized or unclassifiable holds.
+/// No generation data is reclaimed.
 #[doc(hidden)]
 pub fn quarantine_invalid_retention_lease_with_writer_lock_held(
     root: &Path,
@@ -20,8 +21,7 @@ pub fn quarantine_invalid_retention_lease_with_writer_lock_held(
         Ok(_) => Ok(None),
         Err(
             IndexError::InvalidGenerationRetentionLease
-            | IndexError::InvalidGenerationRetentionLeaseOwner
-            | IndexError::InvalidGenerationId,
+            | IndexError::InvalidGenerationRetentionLeaseOwner,
         ) => {
             let quarantine = root.join(format!(
                 ".generation-retention-lease.invalid-{}",

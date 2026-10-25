@@ -24,26 +24,12 @@ pub(crate) fn run_doctor_with_components(
     if args.repair {
         let report =
             ctx_history_index::repair_generation_leases(&data_root.join("search/lexical"))?;
-        if args.format.is_json() {
-            print_json(
-                json!({"schema_version": 1, "ok": true, "read_only": false, "repair": report}),
-            )?;
-        } else {
-            let mut document = crate::ui::Document::new();
-            document.push_line(crate::ui::Line::text(format!(
-                "History lease repair complete; preserved generation {}.",
-                report.generation_id
-            )));
-            if let Some(path) = report.quarantined_lease {
-                document.push_line(crate::ui::Line::text(format!(
-                    "Invalid hold saved at {}",
-                    path.display()
-                )));
-            }
-            document.push_line(crate::ui::Line::text("Run `ctx search --refresh off` to search retained history; run `ctx import --all` to refresh."));
-            ui.write_stdout(&document)?;
-        }
-        return Ok(());
+        return ctx_cli_presentation::commands::write_doctor_repair(
+            &report.generation_id,
+            report.quarantined_lease.as_deref(),
+            args.format,
+            ui,
+        );
     }
     let json_output = args.format.is_json();
     let mut model = match doctor_read_model(&data_root) {
