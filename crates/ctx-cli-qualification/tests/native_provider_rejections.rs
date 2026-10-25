@@ -445,6 +445,8 @@ fn unsafe_default_source_is_rejected_before_inventory() {
 #[test]
 fn doctor_reports_a_rejected_root_before_an_import_is_attempted() {
     let temp = daemon_test_root();
+    // Establish the healthy baseline without racing periodic refresh admission.
+    json_output(ctx(&temp).args(["daemon", "disable", "--format=json"]));
     let path = write_codex_message_fixture(
         &temp.path().join("explicit-history"),
         "root-health",
@@ -460,7 +462,6 @@ fn doctor_reports_a_rejected_root_before_an_import_is_attempted() {
         "--progress",
         "none",
     ]));
-    json_output(ctx(&temp).args(["daemon", "disable", "--format=json"]));
     let before = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(before["ok"], true, "{before:#}");
 

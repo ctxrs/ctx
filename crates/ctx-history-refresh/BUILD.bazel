@@ -1,5 +1,7 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars")
 load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 
@@ -13,6 +15,14 @@ filegroup(
 COMMON_RUSTC_ENV = {
     "CARGO_MANIFEST_DIR": "crates/ctx-history-refresh",
 }
+
+# Retry checkpoints use the application version owned by Cargo.toml, just as
+# the CLI does. rules_rust's default package version is otherwise 0.0.0.
+cargo_toml_env_vars(
+    name = "cargo_toml_env_vars",
+    src = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
 
 RUST_SRCS = glob(["src/**/*.rs"])
 
@@ -47,6 +57,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + CTX_HISTORY_REFRESH_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
+    rustc_env_files = [":cargo_toml_env_vars"],
 )
 
 # CLI unit tests still exercise the extracted state machine through their old
@@ -63,12 +74,14 @@ rust_library(
     deps = all_crate_deps(normal = True) + CTX_HISTORY_REFRESH_TEST_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
+    rustc_env_files = [":cargo_toml_env_vars"],
     rustc_flags = ['--cfg=feature="test-support"'],
 )
 
 ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
+    compile_data = ["//:Cargo.toml"],
     crate_name = "ctx_history_refresh",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
@@ -78,4 +91,39 @@ ctx_rust_test(
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,
+    rustc_env_files = [":cargo_toml_env_vars"],
+)
+
+# Compile the same retry implementation at two application versions.
+# The test passes the durable journal between processes without rewriting it.
+[
+    ctx_rust_test(
+        name = "retry_build_" + version.replace(".", "_"),
+        srcs = RUST_SRCS,
+        compile_data = ["//:Cargo.toml"],
+        crate_name = "ctx_history_refresh",
+        crate_root = "src/lib.rs",
+        edition = crate_edition(),
+        aliases = aliases(normal_dev = True, proc_macro_dev = True),
+        deps = all_crate_deps(normal = True, normal_dev = True) + CTX_HISTORY_REFRESH_TEST_DEPS + [
+            "//crates/ctx-history-platform:lib",
+        ],
+        proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+        rustc_env = dict(COMMON_RUSTC_ENV, CARGO_PKG_VERSION = version),
+        tags = ["manual"],
+    )
+    for version in ["2.2.8", "2.3.0"]
+]
+
+sh_test(
+    name = "automatic_retry_upgrade_test",
+    srcs = ["tests/automatic_retry_upgrade.sh"],
+    args = [
+        "$(rootpath :retry_build_2_2_8)",
+        "$(rootpath :retry_build_2_3_0)",
+    ],
+    data = [
+        ":retry_build_2_2_8",
+        ":retry_build_2_3_0",
+    ],
 )

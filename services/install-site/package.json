@@ -11,8 +11,8 @@
     "test": "node src/run-node-test-suite.mjs src/*.test.mjs src/test/*.test.mjs"
   },
   "overrides": {
-    "sharp": "0.35.4",
-    "undici": "7.29.1"
+    "sharp": "0.35.5",
+    "undici": "7.30.1"
   },
   "devDependencies": {
     "wrangler": "^4.114.0"
