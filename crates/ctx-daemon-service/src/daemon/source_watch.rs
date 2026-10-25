@@ -60,6 +60,25 @@ pub(crate) fn daemon_wait_duration(
     source_refresh: Option<&CoreRefreshEngine>,
     next_safety_reconcile: Instant,
     now: Instant,
+    did_work: bool,
+) -> StdDuration {
+    let wait = daemon_next_work_wait_duration(runtime, source_refresh, next_safety_reconcile, now);
+    if !did_work && wait.is_zero() {
+        // An overdue deadline is not proof that work can be admitted. After a
+        // no-progress cycle, bound timeout retries while still letting real
+        // filesystem/IPC signals wake the daemon immediately. A due safety
+        // reconciliation retains its own deadline and advances it on wake.
+        return super::super::daemon_retry::DaemonRetryBackoff::BASE_DELAY
+            .min(next_safety_reconcile.saturating_duration_since(now));
+    }
+    wait
+}
+
+fn daemon_next_work_wait_duration(
+    runtime: &DaemonRuntime,
+    source_refresh: Option<&CoreRefreshEngine>,
+    next_safety_reconcile: Instant,
+    now: Instant,
 ) -> StdDuration {
     let pending_source_refresh = source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
     let mut wait_for = next_safety_reconcile.saturating_duration_since(now);
