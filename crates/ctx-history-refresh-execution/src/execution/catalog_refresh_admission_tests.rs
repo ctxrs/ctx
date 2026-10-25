@@ -176,21 +176,33 @@ fn catalog_selector_distinguishes_exact_members_from_global_fallbacks() {
 }
 
 #[test]
-fn complete_inventory_member_fallback_runs_only_once() {
+fn member_fallback_requires_failure_and_runs_only_once() {
     let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
-    let complete = BTreeSet::from([route.clone()]);
-    let members = BTreeMap::from([(route, BTreeSet::from([PathBuf::from("changed.json")]))]);
+    let members = BTreeMap::from([(
+        route.clone(),
+        BTreeSet::from([PathBuf::from("changed.json")]),
+    )]);
+    let mut outcome = SourceBackedSuccessfulRouteOutcome {
+        route_identity: route,
+        changed: true,
+        logical_source_failure_total: 0,
+        logical_source_retryable_failure_total: 0,
+    };
 
+    assert!(!exact_member_family_fallback_required(
+        &members,
+        std::slice::from_ref(&outcome),
+        &[],
+    ));
+    outcome.logical_source_failure_total = 1;
     assert!(exact_member_family_fallback_required(
         &members,
-        &complete,
-        &[],
-        &[],
+        std::slice::from_ref(&outcome),
+        &[]
     ));
     assert!(!exact_member_family_fallback_required(
         &BTreeMap::new(),
-        &complete,
-        &[],
+        &[outcome],
         &[],
     ));
 }
