@@ -306,29 +306,44 @@ fn strict_legacy_owner_rejects_incremental_once_and_accepts_ordinary_exhaustive(
         let server_engine = engine.clone();
         let server_root = root.path().to_owned();
         let availability = RecordingAvailability::default();
-        let (result, exchanges) = foreground_transport_fixture(
-            root.path(),
-            move |request| {
-                assert_eq!(request["op"], SOURCE_REFRESH_REQUEST_OP);
-                if let Err(error) = legacy_import_selection(&request["refresh_intent"]) {
-                    return Ok(json!({
-                        "ok": false, "schema_version": 1, "owner": "daemon",
-                        "request_id": request["request_id"], "error": error.to_string(),
-                    }));
-                }
-                server_engine
-                    .handle_ipc_request(&server_root, request)?
-                    .context("legacy admission")?;
-                assert!(server_engine.prepare_next_pending_admission(&server_root)?);
+        let worker_engine = engine.clone();
+        let worker_root = root.path().to_owned();
+        let (start_worker, worker_ready) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || -> Result<()> {
+            if worker_ready.recv().is_ok() {
+                assert!(worker_engine.prepare_next_pending_admission(&worker_root)?);
                 assert!(
-                    !server_engine
-                        .run_next(&server_root)
+                    !worker_engine
+                        .run_next(&worker_root)
                         .context("legacy terminal")?
                         .failed
                 );
+            }
+            Ok(())
+        });
+        let mut start_worker = Some(start_worker);
+        let transport = foreground_transport_fixture(
+            root.path(),
+            move |request| {
+                if request["op"] == SOURCE_REFRESH_REQUEST_OP {
+                    if let Err(error) = legacy_import_selection(&request["refresh_intent"]) {
+                        return Ok(json!({
+                            "ok": false, "schema_version": 1, "owner": "daemon",
+                            "request_id": request["request_id"], "error": error.to_string(),
+                        }));
+                    }
+                } else {
+                    assert_eq!(request["op"], SOURCE_REFRESH_STATUS_OP);
+                    // The real owner acknowledges admission before doing refresh work.
+                    // Start only after the first status poll proves that ACK arrived;
+                    // filesystem work must not consume the client's IPC deadline.
+                    if let Some(start_worker) = start_worker.take() {
+                        start_worker.send(())?;
+                    }
+                }
                 server_engine
                     .handle_ipc_request(&server_root, request)?
-                    .context("legacy terminal response")
+                    .context("legacy response")
             },
             || {
                 coordinate_source_backed_refresh_with_policy(
@@ -340,11 +355,16 @@ fn strict_legacy_owner_rejects_incremental_once_and_accepts_ordinary_exhaustive(
                     None,
                 )
             },
-        )?;
+        );
+        worker.join().expect("legacy refresh worker")?;
+        let (result, exchanges) = transport?;
         assert_eq!(
-            exchanges.len(),
+            exchanges
+                .iter()
+                .filter(|(request, _)| request["op"] == SOURCE_REFRESH_REQUEST_OP)
+                .count(),
             1,
-            "no retry, status query or exhaustive fallback"
+            "no repeated admission or exhaustive fallback"
         );
         assert_import_request(&exchanges[0].0, &authority, demand);
         assert!(
@@ -353,6 +373,11 @@ fn strict_legacy_owner_rejects_incremental_once_and_accepts_ordinary_exhaustive(
         );
         assert!(!engine.has_pending_request());
         if demand == Demand::Incremental {
+            assert_eq!(
+                exchanges.len(),
+                1,
+                "no retry or status query after rejection"
+            );
             let error = result.err().context("legacy incremental rejection")?;
             assert!(format!("{error:#}").contains("legacy selected import intent is malformed"));
             assert!(!error.is::<SourceRefreshObservationRecoveryFailed>());
@@ -361,6 +386,12 @@ fn strict_legacy_owner_rejects_incremental_once_and_accepts_ordinary_exhaustive(
                 .status(exchanges[0].0["request_id"].as_str().unwrap())
                 .is_none());
         } else {
+            assert!(exchanges.len() > 1, "observe the accepted legacy refresh");
+            assert_eq!(exchanges[0].1["request_state"], "admission_pending");
+            assert!(exchanges[1..].iter().all(|(request, _)| {
+                request["op"] == SOURCE_REFRESH_STATUS_OP
+                    && request["request_id"] == exchanges[0].0["request_id"]
+            }));
             let observation = result?;
             assert_eq!(
                 observation.request_id.as_deref(),
