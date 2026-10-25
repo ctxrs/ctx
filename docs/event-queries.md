@@ -33,8 +33,10 @@ The typed filters cover:
 - indexed touched-file metadata.
 
 Filters are applied before page and byte limits. Exact fields and chronology
-ranges use the existing Tantivy index. Workspace and file filters use their
-existing indexed lowercase projections. An exact public source ID is resolved
+ranges use the existing Tantivy index. Workspace and file filters match indexed
+metadata substrings with ASCII-only case folding, as in search. Non-ASCII
+characters remain exact: `/work/ÉCOLE` and `/work/école` are distinct.
+An exact public source ID is resolved
 against the pinned generation manifest to its full source identity before the
 query runs.
 

@@ -1,3 +1,4 @@
+pub mod archive_export;
 mod attribution;
 pub use attribution::append_attribution;
 pub mod daemon;

@@ -10,11 +10,15 @@ const VIEW: &str = "work `notes` \u{202a}\u{202b}\u{202d}\u{2066}\u{2067}\u{2068
 const SAFE_VIEW: &str =
     "work `notes` \\u{202a}\\u{202b}\\u{202d}\\u{2066}\\u{2067}\\u{2068}\\u{2069}\\u{2029}";
 
-fn assert_safe_labels(text: &str) {
+fn assert_safe_label_values(text: &str) {
     for control in ('\u{2028}'..='\u{202e}').chain('\u{2066}'..='\u{2069}') {
         assert!(!text.contains(control), "{text:?}");
     }
     assert!(text.contains(SAFE_VIEW), "{text}");
+}
+
+fn assert_safe_labels(text: &str) {
+    assert_safe_label_values(text);
     assert!(text.to_lowercase().contains("creator-supplied"), "{text}");
     assert!(text.to_lowercase().contains("not verified"), "{text}");
 }
@@ -25,15 +29,49 @@ fn archive_labels_are_creator_supplied_and_survive_without_archive_files() {
     seed_history(&source);
     let destination = Sandbox::new();
     for (origin, archive) in [("synthetic-laptop", "laptop"), (ORIGIN, "desktop")] {
-        success(
-            source
-                .command()
-                .args([
-                    "archive", "export", "--origin", origin, "--view", VIEW, "--output",
-                ])
-                .arg(source.path(archive))
-                .arg("--format=json"),
-        );
+        let exported = source
+            .command()
+            .args([
+                "archive", "export", "--origin", origin, "--view", VIEW, "--output",
+            ])
+            .arg(source.path(archive))
+            .output()
+            .unwrap();
+        assert!(exported.status.success());
+        let text = String::from_utf8(exported.stdout).unwrap();
+        assert_safe_label_values(&text);
+        assert!(text.contains(if origin == ORIGIN {
+            SAFE_ORIGIN
+        } else {
+            origin
+        }));
+        let preview = source
+            .command()
+            .args([
+                "archive",
+                "export",
+                "--origin",
+                origin,
+                "--view",
+                VIEW,
+                "--preview",
+            ])
+            .output()
+            .unwrap();
+        assert!(preview.status.success());
+        assert_safe_labels(&String::from_utf8(preview.stdout).unwrap());
+        let preview = success(source.command().args([
+            "archive",
+            "export",
+            "--origin",
+            origin,
+            "--view",
+            VIEW,
+            "--preview",
+            "--format=json",
+        ]));
+        assert_eq!(preview["selection"]["identity"]["origin"], origin);
+        assert_eq!(preview["selection"]["identity"]["view"], VIEW);
         success(
             destination
                 .command()

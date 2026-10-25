@@ -1520,3 +1520,38 @@ These are exact creator-supplied labels, not verified machine or user identities
 The same object appears in MCP structured history results, independently of
 event content projection. Absence does not prove local origin: archives restored
 with older versions may need to be restored again to retain their labels.
+
+## Archive export selection
+
+`archive export --preview --format=json` reports `schema_version: 1`,
+`operation: "archive_export_preview"`, `status: "preview"` or `"empty"`,
+`archive: null`, and `selection`. Filtered export reports `operation:
+"archive_export"` with the same selection shape and either `status: "exported"`
+plus the archive path and manifest, or `status: "empty"` and `archive: null`.
+Empty selection creates no archive. Invalid or incomplete selection fails; it
+does not return a successful partial plan or become an unrestricted export.
+
+`selection` contains the pinned `generation_id`, creator-supplied `identity` and
+`excluded_identities`, `label_authority: "archive_creator"`, normalized `workspace`,
+`since_unix_ms`, `until_unix_ms`,
+`selection_complete`, `selected_conversations`, aggregate `scope`, bounded
+`conversations`, and `conversations_truncated`. Time bounds are inclusive/exclusive.
+Each invocation selects against its own generation; a previous preview does not
+lock a later export.
+
+Each conversation includes `ctx_session_id`, provider identity, an inspection
+command, its full observed timestamp span, scope counts, and workspace evidence.
+Scope counts cover matched and retained records, records before/at-or-after the
+time bounds, untimed records, records without workspace metadata, records without
+a matching workspace value, and records containing other workspace values. An
+event with both matching and other workspace values contributes to the latter
+count. Missing time or workspace metadata remains unknown. With no workspace
+filter, all observed workspace values match.
+
+Counts describe selected local conversations before identical original members
+from multiple import namespaces coalesce on export. Manifest counts describe the
+written archive. `conversations_truncated` and each conversation's
+`workspace_values_truncated` describe presentation only: at most 100 conversations
+and eight distinct workspace values per displayed conversation. A successful
+plan always has `selection_complete: true`; all selected conversations are exported
+regardless of presentation limits.

@@ -220,6 +220,17 @@ fn namespaces_coalesce_identical_members_but_conflicts_require_local_core_select
     // metadata bound: the committed pointer does not duplicate the binding.
     second.binding.namespace = "n".repeat(4096);
     restore(&archive, &root, &second).unwrap();
+    let all = ctx_history_index::CoreEventRangeSelection::all(Default::default()).unwrap();
+    let plan = plan_export(&root, identity(), &Selection::default(), &all).unwrap();
+    assert_eq!(plan.preview().selected_conversations, 2);
+    assert_eq!(plan.preview().scope.retained_records, 2);
+    assert_eq!(
+        plan.export(&temp.path().join("planned-coalesced"))
+            .unwrap()
+            .manifest
+            .members,
+        1
+    );
     assert_eq!(
         backup(&root, &temp.path().join("coalesced"))
             .manifest
@@ -249,6 +260,13 @@ fn namespaces_coalesce_identical_members_but_conflicts_require_local_core_select
     let error = export_data_root(&root, &ambiguous, identity(), &Selection::default()).unwrap_err();
     assert!(error.to_string().contains("--source"));
     assert!(!ambiguous.exists());
+    let plan = plan_export(&root, identity(), &Selection::default(), &all).unwrap();
+    assert!(plan
+        .export(&ambiguous)
+        .unwrap_err()
+        .to_string()
+        .contains("--source"));
+    assert!(!ambiguous.exists());
     for (name, binding, expected) in [
         ("first", options().binding, original),
         ("second", second.binding.clone(), corrected.clone()),
@@ -259,7 +277,10 @@ fn namespaces_coalesce_identical_members_but_conflicts_require_local_core_select
             sessions: BTreeSet::new(),
         };
         let selected = temp.path().join(name);
-        export_data_root(&root, &selected, identity(), &selection).unwrap();
+        plan_export(&root, identity(), &selection, &all)
+            .unwrap()
+            .export(&selected)
+            .unwrap();
         assert_eq!(archive_records(&selected), vec![expected]);
     }
     let selected = temp.path().join("by-local-session");

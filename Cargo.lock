@@ -1121,6 +1121,7 @@ dependencies = [
  "ctx-agent-application",
  "ctx-agent-integrations",
  "ctx-client-observability",
+ "ctx-history-archive",
  "ctx-history-cli",
  "ctx-history-core",
  "ctx-history-read-application",
