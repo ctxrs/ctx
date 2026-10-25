@@ -197,8 +197,13 @@ ctx daemon status --all --format json
   a history of every root ever used. Gracefully stopped daemons normally remove
   their registrations; retained crash or handoff registrations remain visible.
   JSON returns `schema_version: 1` and a `daemons` array containing each
-  `data_root` and its ordinary `daemon` status object. To stop one root, run
-  `ctx --data-root PATH index mode manual`.
+  `data_root` and its ordinary `daemon` status object. An invalid or unreadable
+  registration is reported separately with `error`, `registration_path`, and a
+  null `daemon`; `data_root` is null when it cannot be read. Other roots remain
+  visible. Legacy relative registrations are unverified because their original
+  working directory is unknown; they are not resolved against the observer's
+  directory. New registrations store absolute roots. To stop one root, run
+  `ctx --data-root=PATH index mode manual`.
 - `daemon run` is an advanced command that runs persistent local maintenance in
   the foreground and blocks until stopped. It does not change the configured
   indexing mode. In manual mode, pass `--force` to run it explicitly. Each pass

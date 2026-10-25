@@ -29,6 +29,8 @@ impl InstallationDaemonLease {
         allow_active_upgrade: bool,
         persistent: bool,
     ) -> Result<Option<Self>> {
+        let data_root = std::path::absolute(data_root)
+            .context("resolve absolute ctx daemon registration root")?;
         let lock = open_installation_daemon_quiescence_lock()?;
         match fs2::FileExt::try_lock_shared(&lock) {
             Ok(()) => {}
@@ -55,7 +57,7 @@ impl InstallationDaemonLease {
             lock,
             registration_path,
             registration_id,
-            data_root: data_root.to_path_buf(),
+            data_root,
             trigger,
             loop_interval_seconds,
             persistent,

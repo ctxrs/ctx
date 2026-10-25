@@ -175,6 +175,50 @@ pub fn read_installation_restart_records(
 }
 
 pub fn read_installation_registrations(root: &Path) -> Result<Vec<(PathBuf, Value)>> {
+    installation_registration_paths(root)?
+        .into_iter()
+        .map(|path| {
+            let value = read_installation_registration(&path)?;
+            validate_installation_registration(&value, &path)?;
+            Ok((path, value))
+        })
+        .collect()
+}
+
+/// An invalid record retains its claimed root for display, never for observation
+/// or restart authority. In particular, an observer cannot resolve legacy relative roots.
+#[derive(Debug)]
+pub struct InstallationRegistrationObservation {
+    pub registration_path: PathBuf,
+    pub data_root: Option<PathBuf>,
+    pub error: Option<anyhow::Error>,
+}
+
+pub fn observe_installation_registrations(
+    root: &Path,
+) -> Result<Vec<InstallationRegistrationObservation>> {
+    Ok(installation_registration_paths(root)?
+        .into_iter()
+        .map(|path| {
+            let value = read_installation_registration(&path);
+            let data_root = value
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("data_root").and_then(Value::as_str))
+                .map(PathBuf::from);
+            let error = value
+                .and_then(|value| validate_installation_registration(&value, &path))
+                .err();
+            InstallationRegistrationObservation {
+                registration_path: path,
+                data_root,
+                error,
+            }
+        })
+        .collect())
+}
+
+fn installation_registration_paths(root: &Path) -> Result<Vec<PathBuf>> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -183,31 +227,30 @@ pub fn read_installation_registrations(root: &Path) -> Result<Vec<(PathBuf, Valu
                 .with_context(|| format!("read ctx daemon acknowledgements {}", root.display()));
         }
     };
-    let mut registrations = Vec::new();
+    let mut paths = Vec::new();
     for entry in entries {
         let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
+        if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+            paths.push(path);
         }
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("inspect ctx daemon acknowledgement {}", path.display()))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(anyhow!(
-                "ctx daemon acknowledgement is not a regular file: {}",
-                path.display()
-            ));
-        }
-        let value = fs::read(&path)
-            .with_context(|| format!("read ctx daemon acknowledgement {}", path.display()))
-            .and_then(|bytes| {
-                serde_json::from_slice::<Value>(&bytes)
-                    .with_context(|| format!("parse ctx daemon acknowledgement {}", path.display()))
-            })?;
-        validate_installation_registration(&value, &path)?;
-        registrations.push((path, value));
     }
-    registrations.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(registrations)
+    paths.sort();
+    Ok(paths)
+}
+
+fn read_installation_registration(path: &Path) -> Result<Value> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect ctx daemon acknowledgement {}", path.display()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "ctx daemon acknowledgement is not a regular file: {}",
+            path.display()
+        ));
+    }
+    let bytes = fs::read(path)
+        .with_context(|| format!("read ctx daemon acknowledgement {}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse ctx daemon acknowledgement {}", path.display()))
 }
 
 fn validate_installation_registration(value: &Value, path: &Path) -> Result<()> {
@@ -274,6 +317,45 @@ mod tests {
             value["persistent"] = Value::Bool(persistent);
         }
         value
+    }
+
+    #[test]
+    fn observation_keeps_valid_records_and_reports_each_invalid_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("registrations");
+        assert!(observe_installation_registrations(&root)
+            .unwrap()
+            .is_empty());
+        assert!(!root.exists());
+        let data = temp.path().join("data");
+        write_registration(&root, "a-valid.json", registration(&data, None));
+        write_registration(
+            &root,
+            "b-relative.json",
+            registration(Path::new("legacy-relative"), None),
+        );
+        fs::write(root.join("c-malformed.json"), b"not json").unwrap();
+        fs::create_dir(root.join("d-directory.json")).unwrap();
+        let rows = observe_installation_registrations(&root).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].data_root.as_deref(), Some(data.as_path()));
+        assert!(rows[0].error.is_none());
+        assert_eq!(
+            rows[1].data_root.as_deref(),
+            Some(Path::new("legacy-relative"))
+        );
+        for row in &rows[1..] {
+            assert!(row.error.is_some());
+        }
+        assert!(rows[2].data_root.is_none());
+        assert!(rows[3].data_root.is_none());
+        // Mutation/restart consumers retain their strict validation contract.
+        assert!(read_installation_registrations(&root).is_err());
+        assert!(read_installation_restart_records(&root, "attempt", false, 3_600).is_err());
+        assert_eq!(
+            fs::read(root.join("c-malformed.json")).unwrap(),
+            b"not json"
+        );
     }
 
     #[test]

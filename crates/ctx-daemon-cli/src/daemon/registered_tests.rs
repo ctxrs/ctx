@@ -1,6 +1,9 @@
 use super::*;
-use serde_json::json;
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut result = BTreeMap::new();
@@ -75,19 +78,19 @@ fn registered_roots_use_existing_liveness_without_mutation() -> Result<()> {
     let rows = collect()?;
 
     assert_eq!(
-        rows.iter().map(|(root, _)| root).collect::<Vec<_>>(),
-        [&active, &stopped, &missing]
+        rows.iter().map(|row| &row["data_root"]).collect::<Vec<_>>(),
+        [&json!(active), &json!(stopped), &json!(missing)]
     );
-    assert_eq!(rows[0].1["running"], true);
+    assert_eq!(rows[0]["daemon"]["running"], true);
     assert_eq!(
-        rows[1].1["running"], false,
+        rows[1]["daemon"]["running"], false,
         "a retained PID is not a live owner"
     );
     assert_eq!(
-        rows[1].1["enabled"], false,
+        rows[1]["daemon"]["enabled"], false,
         "read-only config was not parsed"
     );
-    assert_eq!(rows[2].1["running"], false);
+    assert_eq!(rows[2]["daemon"]["running"], false);
     assert!(!missing.exists());
     assert_eq!(
         files(temp.path()),
@@ -96,15 +99,47 @@ fn registered_roots_use_existing_liveness_without_mutation() -> Result<()> {
     );
 
     fs::write(registrations.join("malformed.json"), b"not JSON")?;
+    fs::write(
+        registrations.join("relative.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1, "registration_id": "relative", "status": "live",
+            "data_root": "old-relative", "pid": std::process::id(),
+        }))?,
+    )?;
     let before = files(temp.path());
-    assert!(
-        collect().is_err(),
-        "invalid registry must not look complete"
+    let observed = collect()?;
+    assert_eq!(observed.len(), 5);
+    assert_eq!(
+        observed[..3]
+            .iter()
+            .map(|row| &row["data_root"])
+            .collect::<Vec<_>>(),
+        [&json!(active), &json!(stopped), &json!(missing)]
     );
+    assert_eq!(observed[0]["daemon"]["running"], true);
+    assert_eq!(observed[1]["daemon"]["running"], false);
+    assert_eq!(observed[2]["daemon"]["running"], false);
+    assert!(observed[3]["data_root"].is_null());
+    assert!(observed[3]["daemon"].is_null());
+    assert!(observed[3]["error"]
+        .as_str()
+        .unwrap()
+        .contains("parse ctx daemon acknowledgement"));
+    assert_eq!(
+        observed[3]["registration_path"],
+        json!(registrations.join("malformed.json"))
+    );
+    assert_eq!(observed[4]["data_root"], "old-relative");
+    assert!(observed[4]["daemon"].is_null());
+    assert!(observed[4]["error"]
+        .as_str()
+        .unwrap()
+        .contains("invalid ctx daemon acknowledgement"));
+    assert!(ctx_daemon_runtime::registered_installation_roots(&registrations).is_err());
     assert_eq!(
         files(temp.path()),
         before,
-        "failed inventory pruned records"
+        "partial inventory mutated records"
     );
     Ok(())
 }

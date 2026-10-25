@@ -68,7 +68,7 @@ pub fn render_persistent_daemon_notice(
 
     let root = data_root.display().to_string();
     let command = format!(
-        "ctx --data-root {} index mode manual",
+        "ctx --data-root={} index mode manual",
         root_shell_argument(data_root),
     );
     let mut document = outcome(
@@ -473,10 +473,13 @@ mod tests {
                 let command = rendered
                     .lines()
                     .map(str::trim)
-                    .find(|line| line.starts_with("ctx --data-root "))
+                    .find(|line| line.starts_with("ctx --data-root="))
                     .expect("stop command");
                 let output = std::process::Command::new("sh")
-                    .args(["-c", &format!("ctx() {{ printf '%s' \"$2\"; }}; {command}")])
+                    .args([
+                        "-c",
+                        &format!("ctx() {{ printf '%s' \"${{1#--data-root=}}\"; }}; {command}"),
+                    ])
                     .output()
                     .unwrap();
                 assert!(output.status.success(), "{output:?}");
