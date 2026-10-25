@@ -19,7 +19,7 @@ fs2 = "0.4.3"
 jsonc-parser = { version = "0.33", features = ["serde", "serde_json"] }
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9"
+yaml_serde.workspace = true
 sha2.workspace = true
 toml_edit = "0.22"
 uuid.workspace = true

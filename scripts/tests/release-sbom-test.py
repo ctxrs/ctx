@@ -79,7 +79,7 @@ EXTERNAL_PACKAGES = (
     ("serde", "1.0.0"),
     ("serde_json", "1.0.0"),
     ("sha2", "0.10.9"),
-    ("tantivy", "0.26.1"),
+    ("tantivy", "0.27.0"),
     ("tempfile", "3.0.0"),
     ("thiserror", "1.0.0"),
     ("uuid", "1.0.0"),
@@ -210,7 +210,7 @@ serde = { version = "1.0.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0.0", features = ["raw_value"] }
 sha2 = "0.10.9"
 tempfile = "3.0.0"
-tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "columnar-zstd-compression"] }
+tantivy = { version = "0.27.0", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "columnar-zstd-compression"] }
 thiserror = "1.0.0"
 uuid = "1.0.0"
 zstd = "0.13"
@@ -312,7 +312,7 @@ repository = "https://example.invalid/{name}"
                 )
             )
         tantivy_label = (
-            f"@@{CRATE_REPOSITORY_PREFIX}crates__tantivy-0.26.1//:tantivy"
+            f"@@{CRATE_REPOSITORY_PREFIX}crates__tantivy-0.27.0//:tantivy"
         )
         material_lines.extend(
             f"feature\t{tantivy_label}\t{feature}"
@@ -825,7 +825,7 @@ repository = "https://example.invalid/{name}"
             {"tantivy", "fs4", "lz4_flex", "memmap2", "tempfile", "zstd"}
             <= closure_names
         )
-        self.assertIn("tantivy 0.26.1", self.notices.read_text(encoding="utf-8"))
+        self.assertIn("tantivy 0.27.0", self.notices.read_text(encoding="utf-8"))
         self.assertIn("thiserror 1.0.0", self.notices.read_text(encoding="utf-8"))
         self.assertIn(
             "Synthetic license text for tantivy.",
@@ -878,7 +878,7 @@ repository = "https://example.invalid/{name}"
         for logical in notices:
             self.assertIn(logical, rendered)
         self.assertIn(
-            f"{CRATE_REPOSITORY_PREFIX}crates__tantivy-0.26.1/LICENSE", rendered
+            f"{CRATE_REPOSITORY_PREFIX}crates__tantivy-0.27.0/LICENSE", rendered
         )
         for text in (attribution, ordinary_license):
             self.assertEqual(rendered.count(text), 1)
@@ -930,7 +930,7 @@ repository = "https://example.invalid/{name}"
     def test_missing_license_expression_is_rejected(self) -> None:
         manifest = (
             self.runfiles
-            / f"{CRATE_REPOSITORY_PREFIX}crates__tantivy-0.26.1/Cargo.toml"
+            / f"{CRATE_REPOSITORY_PREFIX}crates__tantivy-0.27.0/Cargo.toml"
         )
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(

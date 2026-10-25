@@ -143,9 +143,9 @@ if grep_files 'work-[r]ecord-(publish|report|vcs)[[:space:]]*=' \
 fi
 
 if ! grep -Fxq \
-  'tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "columnar-zstd-compression"] }' \
+  'tantivy = { version = "0.27.0", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "columnar-zstd-compression"] }' \
   Cargo.toml; then
-  fail 'workspace Tantivy dependency must keep the exact 0.26.1 release feature contract'
+  fail 'workspace Tantivy dependency must keep the exact 0.27.0 release feature contract'
 fi
 
 if ! grep -Fxq 'tantivy.workspace = true' crates/ctx-history-index/Cargo.toml \
@@ -156,8 +156,8 @@ if ! grep -Fxq 'tantivy.workspace = true' crates/ctx-history-index/Cargo.toml \
 fi
 
 if ! grep -A2 -Fx 'name = "tantivy"' Cargo.lock \
-  | grep -Fxq 'version = "0.26.1"'; then
-  fail 'Cargo.lock must select Tantivy 0.26.1'
+  | grep -Fxq 'version = "0.27.0"'; then
+  fail 'Cargo.lock must select Tantivy 0.27.0'
 fi
 
 if grep -Fxq 'name = "rust-stemmers"' Cargo.lock; then
