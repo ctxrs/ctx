@@ -205,6 +205,8 @@ pub fn load_active_generation_id_from_read_root(
 }
 
 fn parse_active_generation_pointer(bytes: Vec<u8>) -> Result<ActiveGenerationPointer> {
+    #[cfg(any(test, feature = "test-support"))]
+    crate::read_metrics::record(|reads| &mut reads.pointer, bytes.len());
     #[derive(Deserialize)]
     struct PointerVersion {
         version: u32,

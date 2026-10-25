@@ -101,6 +101,8 @@ pub fn load_manifest_bytes(root: &Path, generation_id: &str) -> Result<Vec<u8>> 
         }
         Err(error) => return Err(GenerationError::Io(error)),
     };
+    #[cfg(any(test, feature = "test-support"))]
+    crate::read_metrics::record(|reads| &mut reads.manifest, bytes.len());
     let actual = sha256_hex(&bytes);
     if actual != generation_id {
         return Err(GenerationError::ManifestDigestMismatch {
