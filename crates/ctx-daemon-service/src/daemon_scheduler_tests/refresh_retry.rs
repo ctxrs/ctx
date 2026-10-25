@@ -7,6 +7,9 @@ mod durable_retry;
 #[path = "refresh_retry/terminal_status.rs"]
 mod terminal_status;
 
+#[path = "refresh_retry/idle_admission.rs"]
+mod idle_admission;
+
 fn enqueue_synthetic_refresh_successor(
     coordinator: &CoreRefreshEngine,
     data_root: &Path,
