@@ -303,14 +303,13 @@ fn infer_format(
         let zip =
             zip::ZipArchive::new(std::io::Cursor::new(data)).context("invalid downloaded ZIP")?;
         ensure!(zip.len() <= 4096, "downloaded archive entry limit exceeded");
-        let names = zip.file_names().collect::<zip::result::ZipResult<Vec<_>>>()?;
+        let names = zip
+            .file_names()
+            .collect::<zip::result::ZipResult<Vec<_>>>()?;
         if names.iter().any(|name| name == "word/document.xml") {
             return Ok("docx".into());
         }
-        if names
-            .iter()
-            .any(|name| name.starts_with("xl/worksheets/"))
-        {
+        if names.iter().any(|name| name.starts_with("xl/worksheets/")) {
             return Ok("xlsx".into());
         }
     }
