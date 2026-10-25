@@ -433,6 +433,12 @@ Source-level failures remain terminal and are reported separately.
 `ctx daemon run --format json` returns the daemon object directly. The legacy hidden
 `__ctx-daemon` entry point follows the same run output for compatibility.
 
+`ctx doctor --repair --format json` returns `schema_version: 1`, `ok: true`,
+`read_only: false`, and `repair` containing the preserved `generation_id` and
+nullable `quarantined_lease` path. It reports the explicit lease repair, not a
+full health assessment; failures return a nonzero exit status. It neither
+refreshes history nor starts a daemon.
+
 `ctx doctor --format json` returns `schema_version`, `ok`, `findings`, and the
 same top-level `daemon` object used by status so callers can inspect daemon
 lifecycle and job state without parsing human findings.

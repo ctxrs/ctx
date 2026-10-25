@@ -464,7 +464,7 @@ impl LeaseCoordinator {
         }
         self.opened
             .verify_binding(COORDINATOR_FILE, COORDINATOR_MAGIC)
-            .map_err(|_| IndexError::InvalidGenerationRetentionLease)
+            .map_err(IndexError::GenerationReadLeaseCoordinator)
     }
 }
 
@@ -578,7 +578,7 @@ fn coordinator_for_opened(
         {
             IndexError::Io(error)
         } else {
-            IndexError::InvalidGenerationRetentionLease
+            IndexError::GenerationReadLeaseCoordinator(error)
         }
     })?;
     let coordinator = Arc::new(LeaseCoordinator {
