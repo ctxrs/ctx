@@ -31,7 +31,13 @@ CTX_HISTORY_REFRESH_EXECUTION_DEPS = [
     "//crates/ctx-history-source-io:lib",
 ]
 
-CTX_HISTORY_REFRESH_EXECUTION_TEST_DEPS = CTX_HISTORY_REFRESH_EXECUTION_DEPS + [
+CTX_HISTORY_REFRESH_EXECUTION_TEST_DEPS = [
+    dep.replace(":lib", ":test_support_lib") if dep in [
+        "//crates/ctx-history-capture:lib",
+        "//crates/ctx-history-source-io:lib",
+    ] else dep
+    for dep in CTX_HISTORY_REFRESH_EXECUTION_DEPS
+] + [
     "//crates/ctx-history-index-format:test_support_lib",
 ]
 

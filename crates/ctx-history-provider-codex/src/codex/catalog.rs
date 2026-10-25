@@ -189,6 +189,8 @@ fn read_codex_session_meta(
 ) -> Result<Option<Value>> {
     let mut file = opened.file().try_clone()?;
     file.seek(SeekFrom::Start(0))?;
+    #[cfg(all(unix, any(test, feature = "test-support")))]
+    let file = ctx_history_source_io::read_metrics::CountedFile::new(file);
     let expected_owner = codex_canonical_session_id_from_path(path);
     if !is_codex_compressed_session_rollout_path(path) {
         return read_codex_session_meta_from_reader(

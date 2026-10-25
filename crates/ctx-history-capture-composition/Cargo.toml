@@ -11,7 +11,7 @@ publish = false
 
 [features]
 default = []
-test-support = ["ctx-history-provider-gemini/test-support"]
+test-support = ["ctx-history-jsonl/test-support", "ctx-history-provider-codex/test-support", "ctx-history-provider-gemini/test-support", "ctx-history-source-io/test-support"]
 
 [dependencies]
 chrono.workspace = true
