@@ -49,6 +49,8 @@ pub fn lexical_index_settings() -> IndexSettings {
         docstore_compression: Compressor::Lz4,
         docstore_compress_dedicated_thread: true,
         docstore_blocksize: 32 * 1024,
+        sort_by_field: None,
+        manual_doc_id_mapping: false,
     }
 }
 
@@ -656,6 +658,20 @@ fn is_generation_directory_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_unsorted_index_settings_remain_compatible() {
+        // Tantivy 0.26 wrote these settings before sort_by_field was added.
+        let settings: IndexSettings = serde_json::from_str(
+            r#"{
+                "docstore_compression": "lz4",
+                "docstore_compress_dedicated_thread": true,
+                "docstore_blocksize": 32768
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(settings, lexical_index_settings());
+    }
 
     fn create_mismatched_slot(root: &Path) -> GenerationSlot {
         let directory_name = "generation-00000000000000000000000000000001";

@@ -26,9 +26,9 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = ["
 tempfile = "3"
 pulldown-cmark = "0.13"
 scraper = "0.27"
-serde_yaml_ng = "0.10"
+yaml_serde = "0.10.7"
 lopdf = { version = "0.45", default-features = false }
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "9.1", default-features = false, features = ["deflate"] }
 quick-xml = "0.41"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 ctx_graph_types = { package = "ctx-graph-types", path = "../ctx-graph-types" }

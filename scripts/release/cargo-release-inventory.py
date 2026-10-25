@@ -189,7 +189,7 @@ def configured_features(
     tantivy = {
         record["feature"]
         for record in records
-        if "crates__tantivy-0.26.1//:tantivy" in record["label"]
+        if "crates__tantivy-0.27.0//:tantivy" in record["label"]
     }
     if tantivy != REQUIRED_TANTIVY_FEATURES:
         raise ValueError(

@@ -139,7 +139,7 @@ ctx_cli_contract_test(
 ctx_cli_contract_test(
     name = "test_targets_minimal_fixture",
     src = "tests/build_support/minimal.rs",
-    extra_crates = ["serde_yaml"],
+    extra_crates = ["yaml_serde"],
     tags = ["manual"],
     test_support = [],
 )
