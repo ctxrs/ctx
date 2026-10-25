@@ -634,6 +634,8 @@ fn zstd_settings_generation_is_rebuilt_without_clone_or_pointer_churn() {
                 ),
                 docstore_compress_dedicated_thread: true,
                 docstore_blocksize: 64 * 1024,
+                sort_by_field: None,
+                manual_doc_id_mapping: false,
             })
             .unwrap();
         },
