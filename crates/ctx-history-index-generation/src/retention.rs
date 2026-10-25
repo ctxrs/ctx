@@ -28,6 +28,8 @@ use crate::{
 };
 
 mod read_lease;
+mod repair;
+pub use repair::quarantine_invalid_retention_lease_with_writer_lock_held;
 
 pub(crate) use read_lease::{
     acquire_candidate_generation_directory_read_authority,
@@ -91,7 +93,9 @@ impl GenerationRetentionLease {
         {
             return Err(IndexError::InvalidGenerationRetentionLeaseOwner);
         }
-        self.target.validate()
+        self.target
+            .validate()
+            .map_err(|_| IndexError::InvalidGenerationRetentionLease)
     }
 }
 
@@ -147,7 +151,7 @@ pub fn acquire_generation_retention_lease(
     Ok(lease)
 }
 
-/// Loads and strictly validates the sole lease. Corrupt, oversized, or
+/// Loads and validates the sole lease. Corrupt, oversized, or
 /// non-private state is actionable and never broadens retention.
 pub fn load_generation_retention_lease(
     root: impl AsRef<Path>,
@@ -162,9 +166,11 @@ pub fn load_generation_retention_lease(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
+    if metadata.len() > MAX_GENERATION_RETENTION_LEASE_BYTES {
+        return Err(IndexError::UnclassifiedGenerationRetentionLease);
+    }
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
-        || metadata.len() > MAX_GENERATION_RETENTION_LEASE_BYTES
         || verify_private_file(&path).is_err()
     {
         return Err(IndexError::InvalidGenerationRetentionLease);
@@ -173,15 +179,7 @@ pub fn load_generation_retention_lease(
     File::open(&path)?
         .take(MAX_GENERATION_RETENTION_LEASE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_GENERATION_RETENTION_LEASE_BYTES {
-        return Err(IndexError::InvalidGenerationRetentionLease);
-    }
-    let lease: GenerationRetentionLease =
-        serde_json::from_slice(&bytes).map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
-    if serde_json::to_vec(&lease)? != bytes {
-        return Err(IndexError::InvalidGenerationRetentionLease);
-    }
-    lease.validate()?;
+    let lease = decode_retention_lease(&bytes)?;
     let target = slot_path(root, lease.target());
     let target_metadata =
         fs::symlink_metadata(target).map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
@@ -206,27 +204,46 @@ fn load_generation_retention_lease_from_opened_root(
         Err(error) => return Err(error.into()),
     };
     let metadata = file.metadata()?;
-    if !metadata.is_file()
-        || metadata.len() > MAX_GENERATION_RETENTION_LEASE_BYTES
-        || verify_private_file_handle(&file).is_err()
-    {
+    if metadata.len() > MAX_GENERATION_RETENTION_LEASE_BYTES {
+        return Err(IndexError::UnclassifiedGenerationRetentionLease);
+    }
+    if !metadata.is_file() || verify_private_file_handle(&file).is_err() {
         return Err(IndexError::InvalidGenerationRetentionLease);
     }
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
     file.take(MAX_GENERATION_RETENTION_LEASE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_GENERATION_RETENTION_LEASE_BYTES {
-        return Err(IndexError::InvalidGenerationRetentionLease);
-    }
-    let lease: GenerationRetentionLease =
-        serde_json::from_slice(&bytes).map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
-    if serde_json::to_vec(&lease)? != bytes {
-        return Err(IndexError::InvalidGenerationRetentionLease);
-    }
-    lease.validate()?;
+    let lease = decode_retention_lease(&bytes)?;
     root.open_directory(&Path::new(INDEX_GENERATIONS_DIRECTORY).join(lease.target().directory()))
         .map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
     Ok(Some(lease))
+}
+
+fn decode_retention_lease(bytes: &[u8]) -> Result<GenerationRetentionLease> {
+    // A size limit is not evidence of a damaged current-version hold. Keep
+    // oversized and unclassifiable records intact, including future schemas.
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_GENERATION_RETENTION_LEASE_BYTES {
+        return Err(IndexError::UnclassifiedGenerationRetentionLease);
+    }
+    // Check the version before applying the current schema. A future writer's
+    // added fields or JSON member order must not make its hold repairable.
+    #[derive(Deserialize)]
+    struct Version {
+        version: u32,
+    }
+    let version: Version = serde_json::from_slice(bytes)
+        .map_err(|_| IndexError::UnclassifiedGenerationRetentionLease)?;
+    if version.version != u32::from(GENERATION_RETENTION_LEASE_VERSION) {
+        return Err(IndexError::UnsupportedGenerationRetentionLease(
+            version.version,
+        ));
+    }
+    let lease: GenerationRetentionLease =
+        serde_json::from_slice(bytes).map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
+    // Whitespace and member ordering carry no authority. Typed deserialization
+    // still rejects duplicate fields and unknown current-version fields.
+    lease.validate()?;
+    Ok(lease)
 }
 
 /// Releases exactly the observed owner under the publication lock, then makes
@@ -675,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_coordinator_fails_closed() {
+    fn malformed_coordinator_recovers_in_place() {
         let root = tempdir().unwrap();
         let coordinator = root.path().join(read_lease::COORDINATOR_FILE);
         fs::write(&coordinator, b"malformed").unwrap();
@@ -685,11 +702,11 @@ mod tests {
             .open(&coordinator)
             .unwrap();
         restrict_private_file_handle(&file).unwrap();
-        assert!(matches!(
-            ensure_generation_read_lease_coordinator(root.path()),
-            Err(IndexError::InvalidGenerationRetentionLease)
-        ));
-        assert_eq!(fs::read(coordinator).unwrap(), b"malformed");
+        ensure_generation_read_lease_coordinator(root.path()).unwrap();
+        assert_eq!(
+            fs::read(coordinator).unwrap(),
+            read_lease::COORDINATOR_MAGIC
+        );
     }
 
     #[cfg(unix)]
@@ -766,7 +783,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             ensure_generation_read_lease_coordinator(symlink_root.path()),
-            Err(IndexError::InvalidGenerationRetentionLease)
+            Err(IndexError::GenerationReadLeaseCoordinator(_))
         ));
 
         let root = tempdir().unwrap();
@@ -788,7 +805,7 @@ mod tests {
         restrict_private_file_handle(&replacement).unwrap();
         assert!(matches!(
             try_generation_id_reclaim_authority(root.path(), slot.generation_id()),
-            Err(IndexError::InvalidGenerationRetentionLease)
+            Err(IndexError::GenerationReadLeaseCoordinator(_))
         ));
         drop(lease);
     }
@@ -835,6 +852,17 @@ mod tests {
             markers.iter().all(|marker| marker.is_file()),
             "lease children did not acquire both shared locks"
         );
+
+        // A damaged initialization marker must not strand an existing index.
+        // Recovery keeps the same file, so both live children's OS locks still
+        // prevent GC below, including when the replacement marker is shorter.
+        let coordinator_path = root.path().join(read_lease::COORDINATOR_FILE);
+        fs::write(
+            &coordinator_path,
+            b"interrupted or damaged marker longer than the magic",
+        )
+        .unwrap();
+        ensure_generation_read_lease_coordinator(root.path()).unwrap();
 
         let previous = create_slot(root.path(), 'b');
         let active = create_slot(root.path(), 'c');
