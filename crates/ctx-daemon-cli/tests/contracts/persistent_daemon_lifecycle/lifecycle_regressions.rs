@@ -113,6 +113,76 @@ fn scratch_notice_is_silent_for_managed_and_machine_searches() {
     assert_eq!(harness.daemon_status()["running"], false);
 }
 
+#[cfg(unix)]
+#[test]
+fn scratch_rendered_stop_command_stops_the_control_character_root() {
+    let _serial = TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut harness = Harness::new();
+    harness.data_root = harness.home().join("scratch\nwith-escape-\u{1b}\n");
+    let first = harness.output(&["search", "empty scratch oracle"]);
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    let stop = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("ctx --data-root "))
+        .expect("stop command");
+    let pid = live_pid(&wait_for_daemon(&harness, None));
+    let prepared = harness.std_command();
+    let mut shell = StdCommand::new("/bin/sh");
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                shell.env(name, value);
+            }
+            None => {
+                shell.env_remove(name);
+            }
+        }
+    }
+    // Use the exact rendered command with the fixture executable on PATH.
+    let bin = harness.home().join("shell-bin");
+    fs::create_dir(&bin).unwrap();
+    std::os::unix::fs::symlink(&harness.binary, bin.join("ctx")).unwrap();
+    shell.env("PATH", &bin).args(["-c", stop]);
+    let output = shell.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    wait_for_process_state(pid, false, OBSERVATION_TIMEOUT).unwrap();
+    assert_eq!(harness.daemon_status()["running"], false);
+    assert!(fs::read_to_string(harness.root().join("config.toml"))
+        .unwrap()
+        .contains("manual"));
+}
+
+#[test]
+fn scratch_notice_is_silent_for_a_relative_managed_root() {
+    let _serial = TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let harness = Harness::new();
+    let mut command = harness.std_command();
+    command
+        .current_dir(harness.home())
+        .arg("--data-root")
+        .arg(harness.root().file_name().unwrap())
+        .args(["search", "relative managed oracle"]);
+    let child = CapturedChild::spawn(&mut command, harness.home()).unwrap();
+    let output = wait_for_output(
+        child,
+        COMMAND_TIMEOUT,
+        &["search", "relative managed oracle"],
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("Launched a persistent background indexer"),
+        "{output:?}"
+    );
+    let pid = live_pid(&wait_for_daemon(&harness, None));
+    harness.json(&["index", "mode", "manual", "--format=json"]);
+    wait_for_process_state(pid, false, OBSERVATION_TIMEOUT).unwrap();
+}
+
 #[test]
 fn abandoned_daemon_lock_and_status_recover_after_binary_relocation() {
     let _serial = TEST_SERIAL
@@ -348,7 +418,9 @@ fn active_daemon_work_exits_within_the_process_signal_deadline() {
             None,
         );
         let marker_result = wait_for_marker(&blocked, "daemon active refresh cycle");
-        refresh_wait.terminate().expect("cancel and reap refresh wait");
+        refresh_wait
+            .terminate()
+            .expect("cancel and reap refresh wait");
         marker_result.unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(snapshot_file(&pointer_path), retained_pointer);
 

@@ -272,6 +272,18 @@ pub(crate) fn run_cli() -> Result<()> {
         }
     }
     semantic::initialize()?;
+    // Installation inventory must bypass config migration and startup reconciliation.
+    if let CommandRoot::Daemon(crate::DaemonArgs {
+        command: DaemonCommand::Status(args),
+    }) = &cli.command
+    {
+        if args.all {
+            let mut ui = Ui::stdio(cli.color.into());
+            ctx_daemon_cli::run_registered_daemon_status(args.format.into(), &mut ui)?;
+            return ui.flush().context("flush daemon inventory");
+        }
+    }
+
     cli.command = match cli.command {
         CommandRoot::Mcp(args) => {
             let data_root = resolve_history_data_root(cli.data_root)?;

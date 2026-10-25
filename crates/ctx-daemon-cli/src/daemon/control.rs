@@ -58,7 +58,7 @@ pub(super) fn run_daemon_status(
     ui: &mut Ui,
 ) -> Result<()> {
     if args.all {
-        return super::registered::run(application, args.format, ui);
+        return super::registered::run(args.format, ui);
     }
     let daemon =
         super::super::paths_status::daemon_report_with_application(application, &data_root, true);

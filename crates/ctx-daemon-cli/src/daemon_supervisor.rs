@@ -82,6 +82,19 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
         Ok(daemon_config_snapshot(&config))
     }
 
+    fn observe_daemon_config(
+        &self,
+        data_root: &Path,
+    ) -> Result<ctx_daemon_application::DaemonConfigSnapshot> {
+        if !self.reload_persisted_config {
+            if let Some(config) = self.run_config {
+                return Ok(daemon_config_snapshot(config));
+            }
+        }
+        let config = crate::composition::observe_runtime_config(data_root)?;
+        Ok(daemon_config_snapshot(&config))
+    }
+
     fn persisted_daemon_enabled(&self, data_root: &Path) -> Result<bool> {
         ctx_app_config::persisted_daemon_enabled(data_root)
     }

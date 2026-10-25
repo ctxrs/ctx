@@ -315,6 +315,7 @@ mod query_service;
 pub use query_service::{wait_for_daemon_query_service, wait_for_daemon_query_service_cancellable};
 mod daemon;
 mod paths_status;
+pub use daemon::run_registered_daemon_status;
 pub use daemon::{run_daemon_command, update_indexing_mode};
 pub mod daemon_service_ports;
 mod daemon_status;

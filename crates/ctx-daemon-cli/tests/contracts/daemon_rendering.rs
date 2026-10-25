@@ -11,7 +11,7 @@ use support::*;
 fn all_daemon_status_is_read_only_for_an_uninitialized_installation() {
     let temp = tempdir();
     let root = data_root(&temp);
-    let listed = json_output(&mut ctx(&temp).args(["daemon", "status", "--all", "--format=json"]));
+    let listed = json_output(ctx(&temp).args(["daemon", "status", "--all", "--format=json"]));
     assert_eq!(listed["schema_version"], 1);
     assert_eq!(listed["daemons"], json!([]));
     assert!(!root.exists(), "status created an uninitialized data root");
@@ -25,6 +25,23 @@ fn all_daemon_status_is_read_only_for_an_uninitialized_installation() {
         .args(["daemon", "run", "--all"])
         .assert()
         .failure();
+}
+
+#[test]
+fn all_daemon_status_does_not_migrate_selected_root_config() {
+    let temp = tempdir();
+    let root = data_root(&temp);
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("config.toml");
+    let config = b"[upgrade]\nallow_rfc2544_fake_ip = true\n";
+    fs::write(&path, config).unwrap();
+    ctx(&temp)
+        .args(["daemon", "status", "--all", "--format=json"])
+        .assert()
+        .success();
+    assert_eq!(fs::read(&path).unwrap(), config);
+    assert!(!root.join("config.lock").exists());
+    assert!(!root.join("daemon/supervisor-installation.lock").exists());
 }
 
 #[test]

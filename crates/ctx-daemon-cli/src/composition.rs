@@ -60,6 +60,34 @@ pub struct DaemonRuntimeConfig {
 }
 
 impl DaemonRuntimeConfig {
+    pub fn from_app_config(
+        config: &ctx_app_config::AppConfig,
+        automatic_upgrade_eligible: bool,
+    ) -> Self {
+        Self::new(
+            config.analytics.enabled,
+            automatic_upgrade_eligible,
+            config.upgrade.channel.clone(),
+            config.upgrade.interval,
+            DaemonConfig {
+                enabled: config.automatic_indexing_enabled(),
+                mode: match config.daemon.mode {
+                    ctx_app_config::DaemonMode::Full => DaemonMode::Full,
+                    ctx_app_config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
+                },
+            },
+            config.semantic_search_enabled(),
+            config.semantic_search_source(),
+        )
+        .with_semantic_embedding_executor(config.semantic_embedding_executor().clone())
+        .with_semantic_builtin_throttling(
+            config.semantic_builtin_throttling_configured(),
+            config.semantic_builtin_throttling_source(),
+        )
+        .with_automatic_provider_discovery(config.automatic_source_discovery_enabled())
+        .with_provider_roots(config.provider_root_definitions())
+    }
+
     pub fn new(
         analytics_enabled: bool,
         automatic_upgrade_enabled: bool,
@@ -227,6 +255,14 @@ pub(crate) fn load_runtime_config(data_root: &Path) -> Result<DaemonRuntimeConfi
     host().load_config(data_root)
 }
 
+pub(crate) fn observe_runtime_config(data_root: &Path) -> Result<DaemonRuntimeConfig> {
+    let config = ctx_app_config::AppConfig::load_read_only(data_root)?;
+    Ok(DaemonRuntimeConfig::from_app_config(
+        &config,
+        config.auto_upgrade_enabled(),
+    ))
+}
+
 static HOST: OnceLock<&'static dyn DaemonCliHost> = OnceLock::new();
 
 pub fn install_host(host: &'static dyn DaemonCliHost) -> Result<()> {
@@ -262,38 +298,10 @@ static TEST_HOST: TestHost = TestHost;
 impl DaemonCliHost for TestHost {
     fn load_config(&self, data_root: &Path) -> Result<DaemonRuntimeConfig> {
         let config = ctx_app_config::AppConfig::load(data_root)?;
-        let daemon_enabled = config.automatic_indexing_enabled();
-        let daemon_mode = match config.daemon.mode {
-            ctx_app_config::DaemonMode::Full => DaemonMode::Full,
-            ctx_app_config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
-        };
-        let semantic_enabled = config.semantic_search_enabled();
-        let semantic_source = config.semantic_search_source();
-        let semantic_builtin_throttling_configured =
-            config.semantic_builtin_throttling_configured();
-        let semantic_builtin_throttling_source = config.semantic_builtin_throttling_source();
-        let semantic_executor = config.semantic_embedding_executor().clone();
-        let automatic_provider_discovery = config.automatic_source_discovery_enabled();
-        let provider_roots = config.provider_root_definitions();
-        Ok(DaemonRuntimeConfig::new(
-            config.analytics.enabled,
+        Ok(DaemonRuntimeConfig::from_app_config(
+            &config,
             config.auto_upgrade_enabled(),
-            config.upgrade.channel,
-            config.upgrade.interval,
-            DaemonConfig {
-                enabled: daemon_enabled,
-                mode: daemon_mode,
-            },
-            semantic_enabled,
-            semantic_source,
-        )
-        .with_semantic_embedding_executor(semantic_executor)
-        .with_semantic_builtin_throttling(
-            semantic_builtin_throttling_configured,
-            semantic_builtin_throttling_source,
-        )
-        .with_automatic_provider_discovery(automatic_provider_discovery)
-        .with_provider_roots(provider_roots))
+        ))
     }
 
     fn home_dir(&self) -> Option<PathBuf> {

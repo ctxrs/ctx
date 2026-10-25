@@ -12,6 +12,54 @@ use crate::ui::Ui;
 
 pub const MAX_SEARCH_LIMIT: usize = 200;
 
+// One pending diagnostic for this CLI invocation; daemon lifecycle owns the
+// spawn fact, while presentation owns when and how it is shown.
+static SPAWNED_DAEMON: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+pub fn persistent_daemon_spawned(data_root: &std::path::Path, managed: Option<&std::path::Path>) {
+    if managed.is_some_and(|managed| same_root(data_root, managed)) {
+        return;
+    }
+    *SPAWNED_DAEMON
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(data_root.to_path_buf());
+}
+
+fn same_root(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right
+        || std::fs::canonicalize(left)
+            .ok()
+            .zip(std::fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn take_spawned_daemon() -> Option<PathBuf> {
+    SPAWNED_DAEMON
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
+fn root_shell_argument(root: &std::path::Path) -> String {
+    #[cfg(unix)]
+    if root
+        .to_str()
+        .is_none_or(|root| root.chars().any(char::is_control))
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let encoded: String = root
+            .as_os_str()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("\\0{byte:03o}"))
+            .collect();
+        // A final slash preserves trailing newlines through command substitution
+        // and names the same directory. The command contains no terminal controls.
+        return format!("\"$(printf '%b' '{encoded}/')\"");
+    }
+    crate::transcript::shell_quote_arg(&root.display().to_string())
+}
+
 pub fn render_persistent_daemon_notice(
     context: &ctx_terminal::RenderContext,
     data_root: &std::path::Path,
@@ -21,7 +69,7 @@ pub fn render_persistent_daemon_notice(
     let root = data_root.display().to_string();
     let command = format!(
         "ctx --data-root {} index mode manual",
-        crate::transcript::shell_quote_arg(&root),
+        root_shell_argument(data_root),
     );
     let mut document = outcome(
         context,
@@ -201,6 +249,8 @@ pub fn run_search(
     local_usage: &mut CliUsage,
     ui: &mut Ui,
 ) -> Result<()> {
+    let human_output = !args.format.is_json();
+    take_spawned_daemon();
     telemetry.refresh_mode = Some(match args.refresh {
         CliRefreshArg::Background => RefreshMode::Background,
         CliRefreshArg::Off => RefreshMode::Off,
@@ -211,14 +261,21 @@ pub fn run_search(
     telemetry.query_term_count = Some(count_bucket(
         u64::try_from(query_term_count).unwrap_or(u64::MAX),
     ));
-    ctx_history_cli::run_search(
+    let result = ctx_history_cli::run_search(
         adapt(args),
         data_root,
         config,
         local_usage,
         ui,
         |observation| apply_search_observation(telemetry, observation),
-    )
+    );
+    // Consume on errors too: a persistent child can survive failed search/readiness.
+    if let Some(root) = take_spawned_daemon() {
+        if human_output {
+            ui.write_stderr(&render_persistent_daemon_notice(ui.stderr_context(), &root))?;
+        }
+    }
+    result
 }
 
 fn positional_query_shape(query: Option<&str>) -> (usize, usize) {
@@ -392,29 +449,43 @@ const fn observed_failure_phase(value: ctx_history_cli::SearchFailurePhase) -> S
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
     #[test]
-    fn persistent_daemon_notice_preserves_root_and_stop_command() {
+    fn rendered_stop_command_preserves_directory_bytes_in_a_shell() {
         use ctx_terminal::{ColorMode, RenderContext, StreamKind, TestContext};
-        let root = std::path::Path::new("/scratch/two  spaces\u{1b}");
-        for width in [32, 48, 80, 120] {
-            let context = RenderContext::for_test(
-                TestContext::tty(StreamKind::Stderr, width).color(ColorMode::Never),
-            );
-            let rendered = super::render_persistent_daemon_notice(&context, root).render_plain();
-            assert!(
-                rendered
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .contains("persistent background"),
-                "{rendered}"
-            );
-            assert!(rendered.contains("/scratch/two  spaces\\x1b"), "{rendered}");
-            assert!(
-                rendered.contains("ctx --data-root '/scratch/two  spaces\\x1b' index mode manual"),
-                "{rendered}"
-            );
-            assert!(!rendered.contains('\u{1b}'));
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let temp = tempfile::tempdir().unwrap();
+        for name in [
+            b"two  spaces'$(false)\\".as_slice(),
+            b"line\nbreak\x1b\n",
+            b"non-utf8-\xff\n",
+        ] {
+            let root = temp.path().join(std::ffi::OsStr::from_bytes(name));
+            std::fs::create_dir(&root).unwrap();
+            for width in [32, 48, 80, 120] {
+                let context = RenderContext::for_test(
+                    TestContext::tty(StreamKind::Stderr, width).color(ColorMode::Never),
+                );
+                let rendered =
+                    super::render_persistent_daemon_notice(&context, &root).render_plain();
+                assert!(!rendered.contains('\u{1b}'), "{rendered}");
+                let command = rendered
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| line.starts_with("ctx --data-root "))
+                    .expect("stop command");
+                let output = std::process::Command::new("sh")
+                    .args(["-c", &format!("ctx() {{ printf '%s' \"$2\"; }}; {command}")])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+                let actual = std::path::PathBuf::from(std::ffi::OsString::from_vec(output.stdout));
+                assert_eq!(
+                    std::fs::canonicalize(actual).unwrap(),
+                    std::fs::canonicalize(&root).unwrap()
+                );
+            }
         }
     }
 

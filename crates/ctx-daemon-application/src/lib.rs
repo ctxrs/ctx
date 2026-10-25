@@ -55,6 +55,8 @@ pub trait DaemonApplicationHost: Send + Sync {
     fn installation_upgrade_active(&self) -> Result<bool>;
     fn automatic_upgrade_recovery_allowed(&self, data_root: &Path) -> Result<bool>;
     fn daemon_config(&self, data_root: &Path) -> Result<DaemonConfigSnapshot>;
+    /// Snapshot settings without migrating, repairing, or locking saved configuration.
+    fn observe_daemon_config(&self, data_root: &Path) -> Result<DaemonConfigSnapshot>;
     fn persisted_daemon_enabled(&self, data_root: &Path) -> Result<bool>;
     fn defer_restart_for_upgrade_handoff(
         &self,
@@ -442,6 +444,10 @@ impl DaemonApplicationHost for TestHost {
             semantic_builtin_throttling_configured: true,
             semantic_builtin_throttling_effective: Some(true),
         })
+    }
+
+    fn observe_daemon_config(&self, data_root: &Path) -> Result<DaemonConfigSnapshot> {
+        self.daemon_config(data_root)
     }
 
     fn persisted_daemon_enabled(&self, _data_root: &Path) -> Result<bool> {

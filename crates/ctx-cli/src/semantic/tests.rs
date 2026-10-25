@@ -279,7 +279,6 @@ fn daemon_observation_delivery_rechecks_config_at_each_ownership_boundary() -> R
     let (_, empty_upload_loads) = ctx_app_config::count_app_config_loads(|| {
         let host = CtxDaemonCliHost {
             telemetry: crate::product_runtime::DaemonCollector::new(),
-            spawned_daemon: Mutex::new(None),
         };
         ctx_daemon_cli::DaemonCliHost::upload_daemon_events(&host, root.path(), &[]);
     });

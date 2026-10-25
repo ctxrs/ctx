@@ -6,12 +6,8 @@ use ctx_terminal::{
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-pub(super) fn run(
-    application: &ctx_daemon_application::DaemonApplication<'_>,
-    format: JsonOutputFormat,
-    ui: &mut Ui,
-) -> Result<()> {
-    let daemons = collect(application)?;
+pub fn run(format: JsonOutputFormat, ui: &mut Ui) -> Result<()> {
+    let daemons = collect()?;
     if format.is_json() {
         print_json(json!({
             "schema_version": 1,
@@ -26,15 +22,12 @@ pub(super) fn run(
     Ok(())
 }
 
-fn collect(
-    application: &ctx_daemon_application::DaemonApplication<'_>,
-) -> Result<Vec<(PathBuf, Value)>> {
+fn collect() -> Result<Vec<(PathBuf, Value)>> {
     Ok(
         crate::daemon_autostart::registered_installation_daemon_roots()?
             .into_iter()
             .map(|root| {
-                let report =
-                    crate::paths_status::daemon_report_with_application(application, &root, true);
+                let report = crate::paths_status::daemon_report_read_only(&root);
                 (root, report)
             })
             .collect(),
