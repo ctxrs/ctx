@@ -14,7 +14,8 @@ pub(super) fn fields(
     }
     for (label, key) in [("Archive origin", "origin"), ("Archive view", "view")] {
         if let Some(value) = provenance[key].as_str() {
-            super::human::push_field(document, context, indent, label, 14, value, Token::Text);
+            let safe = ctx_terminal::sanitize_untrusted_history_body_for_terminal(value);
+            super::human::push_field(document, context, indent, label, 14, &safe, Token::Text);
         }
     }
     super::human::push_wrapped(

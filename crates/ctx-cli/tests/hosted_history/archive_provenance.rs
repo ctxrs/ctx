@@ -4,32 +4,41 @@ use serde_json::{json, Value};
 
 use super::support::{seed_history, success, Sandbox};
 
+const ORIGIN: &str = "synthetic-\u{202e}desktop\u{202c}\u{2028}forged-field";
+const SAFE_ORIGIN: &str = "synthetic-\\u{202e}desktop\\u{202c}\\u{2028}forged-field";
+const VIEW: &str = "work `notes` \u{202a}\u{202b}\u{202d}\u{2066}\u{2067}\u{2068}\u{2069}\u{2029}";
+const SAFE_VIEW: &str =
+    "work `notes` \\u{202a}\\u{202b}\\u{202d}\\u{2066}\\u{2067}\\u{2068}\\u{2069}\\u{2029}";
+
+fn assert_safe_labels(text: &str) {
+    for control in ('\u{2028}'..='\u{202e}').chain('\u{2066}'..='\u{2069}') {
+        assert!(!text.contains(control), "{text:?}");
+    }
+    assert!(text.contains(SAFE_VIEW), "{text}");
+    assert!(text.to_lowercase().contains("creator-supplied"), "{text}");
+    assert!(text.to_lowercase().contains("not verified"), "{text}");
+}
+
 #[test]
 fn archive_labels_are_creator_supplied_and_survive_without_archive_files() {
     let source = Sandbox::new();
     seed_history(&source);
     let destination = Sandbox::new();
-    for origin in ["synthetic-laptop", "synthetic-desktop"] {
+    for (origin, archive) in [("synthetic-laptop", "laptop"), (ORIGIN, "desktop")] {
         success(
             source
                 .command()
                 .args([
-                    "archive",
-                    "export",
-                    "--origin",
-                    origin,
-                    "--view",
-                    "work `notes`",
-                    "--output",
+                    "archive", "export", "--origin", origin, "--view", VIEW, "--output",
                 ])
-                .arg(source.path(origin))
+                .arg(source.path(archive))
                 .arg("--format=json"),
         );
         success(
             destination
                 .command()
                 .args(["archive", "restore"])
-                .arg(source.path(origin))
+                .arg(source.path(archive))
                 .arg("--format=json"),
         );
     }
@@ -54,10 +63,7 @@ fn archive_labels_are_creator_supplied_and_survive_without_archive_files() {
         .iter()
         .map(|hit| hit["archive_provenance"]["origin"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        origins,
-        BTreeSet::from(["synthetic-laptop", "synthetic-desktop"])
-    );
+    assert_eq!(origins, BTreeSet::from(["synthetic-laptop", ORIGIN]));
     assert_ne!(hits[0]["ctx_session_id"], hits[1]["ctx_session_id"]);
     let listing = success(destination.command().args([
         "list",
@@ -69,7 +75,7 @@ fn archive_labels_are_creator_supplied_and_survive_without_archive_files() {
     for hit in hits {
         let expected = &hit["archive_provenance"];
         assert_eq!(expected["label_authority"], "archive_creator");
-        assert_eq!(expected["view"], "work `notes`");
+        assert_eq!(expected["view"], VIEW);
         let session = hit["ctx_session_id"].as_str().unwrap();
         let event = hit["ctx_event_id"].as_str().unwrap();
         let shown = success(destination.command().args([
@@ -102,7 +108,11 @@ fn archive_labels_are_creator_supplied_and_survive_without_archive_files() {
             vec!["show", "session", session, "--mode", "log"],
             vec!["show", "event", event],
             vec!["locate", "event", event],
+            vec!["locate", "session", session],
+            vec!["show", "session", session, "--format=text"],
             vec!["show", "session", session, "--format=markdown"],
+            vec!["show", "event", event, "--format=text"],
+            vec!["show", "event", event, "--format=markdown"],
         ] {
             let output = destination.command().args(args).output().unwrap();
             assert!(
@@ -111,12 +121,13 @@ fn archive_labels_are_creator_supplied_and_survive_without_archive_files() {
                 String::from_utf8_lossy(&output.stderr)
             );
             let text = String::from_utf8(output.stdout).unwrap();
-            assert!(
-                text.contains(expected["origin"].as_str().unwrap()),
-                "{text}"
-            );
-            assert!(text.to_lowercase().contains("creator-supplied"), "{text}");
-            assert!(text.to_lowercase().contains("not verified"), "{text}");
+            let safe_origin = if expected["origin"] == ORIGIN {
+                SAFE_ORIGIN
+            } else {
+                "synthetic-laptop"
+            };
+            assert!(text.contains(safe_origin), "{text}");
+            assert_safe_labels(&text);
         }
     }
     let output = destination
@@ -133,10 +144,10 @@ fn archive_labels_are_creator_supplied_and_survive_without_archive_files() {
         .unwrap();
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(
-        text.contains("synthetic-laptop") && text.contains("synthetic-desktop"),
+        text.contains("synthetic-laptop") && text.contains(SAFE_ORIGIN),
         "{text}"
     );
-    assert!(text.contains("Creator-supplied"));
+    assert_safe_labels(&text);
 
     let session = hits[0]["ctx_session_id"].as_str().unwrap();
     let event = hits[0]["ctx_event_id"].as_str().unwrap();
@@ -190,10 +201,13 @@ fn archive_labels_are_creator_supplied_and_survive_without_archive_files() {
             "{result}"
         );
         if id != 5 {
-            assert!(
-                result["content"].to_string().contains("creator-supplied"),
-                "{result}"
-            );
+            let text = result["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|content| content["text"].as_str())
+                .collect::<String>();
+            assert_safe_labels(&text);
         }
     }
 }
