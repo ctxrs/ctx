@@ -10,6 +10,33 @@ use super::history_health::history_partial_cause;
 
 const MAX_REFRESH_ERROR_BYTES: usize = 512;
 
+pub fn write_doctor_repair(
+    generation_id: &str,
+    quarantined_lease: Option<&std::path::Path>,
+    format: crate::output::JsonOutputFormat,
+    ui: &mut crate::ui::Ui,
+) -> anyhow::Result<()> {
+    if format.is_json() {
+        return crate::output::print_json(serde_json::json!({
+            "schema_version": 1, "ok": true, "read_only": false,
+            "repair": {"generation_id": generation_id, "quarantined_lease": quarantined_lease},
+        }));
+    }
+    let mut document = Document::new();
+    document.push_line(crate::ui::Line::text(format!(
+        "History lease repair complete; preserved generation {generation_id}."
+    )));
+    if let Some(path) = quarantined_lease {
+        document.push_line(crate::ui::Line::text(format!(
+            "Invalid hold saved at {}",
+            path.display()
+        )));
+    }
+    document.push_line(crate::ui::Line::text("Run `ctx search --refresh off` to search retained history; run `ctx import --all` to refresh."));
+    ui.write_stdout(&document)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoctorSearchAvailability {
     Available,
