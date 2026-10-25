@@ -1010,3 +1010,46 @@ fn explicit_root_is_noncanonical_when_managed_home_is_unavailable() {
     )
     .unwrap());
 }
+
+#[test]
+fn supervisor_status_neither_creates_nor_waits_for_installation_lock() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let backend = Arc::new(FakeSupervisorBackend::with_registration(Some(4_242)));
+    write_supervisor_receipt(
+        temp.path(),
+        &SupervisorReceipt {
+            kind: native_supervisor_kind().to_owned(),
+            status: "installed",
+            autostart_supported: true,
+            restart_supported: true,
+            registration_verified: true,
+            live_owner_verified: true,
+            owner_pid: Some(4_242),
+            artifact_path: None,
+            executable_path: Some(temp.path().join("ctx")),
+            limitation: None,
+            last_error: None,
+        },
+    )?;
+    let lock_path =
+        ctx_daemon_runtime::daemon_root_path(temp.path()).join("supervisor-installation.lock");
+    let report = revalidated_supervisor_report_with(&TestHost, temp.path(), backend.as_ref());
+    assert_eq!(report["registration_verified"], true, "{report:#}");
+    assert_eq!(report["owner_pid"], 4_242);
+    assert!(!lock_path.exists(), "status created an installation lock");
+
+    let lock = SupervisorInstallationLock::acquire(temp.path())?;
+    let root = temp.path().to_owned();
+    let (send, receive) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        let report = revalidated_supervisor_report_with(&TestHost, &root, backend.as_ref());
+        let _ = send.send(report);
+    });
+    let report = receive.recv_timeout(Duration::from_secs(2));
+    drop(lock);
+    observer.join().unwrap();
+    let report = report.expect("status waited for an exclusive lifecycle lock");
+    assert_eq!(report["registration_verified"], true, "{report:#}");
+    assert_eq!(report["owner_pid"], 4_242);
+    Ok(())
+}
