@@ -12,6 +12,7 @@
 
 mod export;
 mod io;
+mod provenance;
 mod restore;
 mod retained;
 
@@ -21,6 +22,7 @@ pub use ctx_history_core::{CoreRecord, SourceKey, StableEntityId};
 pub use ctx_history_index::VerifiedIndex;
 pub use export::{export, export_session, export_with_control};
 pub use io::{verify, verify_member, visit_member_records, visit_members, visit_records};
+pub use provenance::source_identities;
 pub use restore::{
     is_archive_root, map_record, mapped_event, mapped_session, mapped_source, prepare_restore_root,
     restore, ImportBinding, RestoreOptions, RestoreReceipt,

@@ -891,6 +891,7 @@ fn rendered_semantic_result_preserves_exact_ids() {
     assert_eq!(search.collection.diversification.changed_final_top_n, None);
 
     let value = render_search_json(SearchJsonInput {
+        provenance: &Default::default(),
         request: &search.request,
         index: &index,
         collection: &search.collection,

@@ -1501,3 +1501,16 @@ Compatibility `item_id`, `id`, `session_id`, and `event_id` fields can remain
 in some outputs. New integrations should prefer ctx-owned `ctx_session_id` and
 `ctx_event_id` where present, and should treat provider-owned IDs as metadata
 unless an explicit provider lookup flag is present.
+
+## Imported archive labels
+
+Local history search, show, list events, and locate results may include:
+
+```json
+{"archive_provenance":{"origin":"laptop","view":"personal","label_authority":"archive_creator"}}
+```
+
+These are exact creator-supplied labels, not verified machine or user identities.
+The same object appears in MCP structured history results, independently of
+event content projection. Absence does not prove local origin: archives restored
+with older versions may need to be restored again to retain their labels.

@@ -18,6 +18,7 @@ HISTORY_PACKAGE = "ctx-history-cli"
 FINAL_PACKAGE = "ctx"
 FORBIDDEN_HISTORY_CARGO = {"clap", "ctx-cli"}
 HISTORY_DEPS = (
+    "//crates/ctx-history-archive:lib",
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-platform:lib",
@@ -30,6 +31,7 @@ HISTORY_DEPS = (
     "//crates/ctx-terminal:lib",
 )
 HISTORY_TEST_SUPPORT_DEPS = (
+    "//crates/ctx-history-archive:lib",
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-platform:lib",

@@ -19,6 +19,7 @@ fn machine_show_contract_keeps_lineage_in_existing_nested_fields() {
         vec![render_event_value(&event)],
         false,
         None,
+        &Default::default(),
     );
     assert_eq!(
         sorted_json_keys(&session_value),
