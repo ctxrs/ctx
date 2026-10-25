@@ -672,6 +672,7 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
         source: SourceKey,
         failure: SourceBackedRouteError,
         carried_forward: bool,
+        source_selector: Option<&str>,
     ) -> SourceBackedCoordinatorResult<(), L::Error> {
         if !failure.kind.is_logical_source_failure() {
             return Err(SourceBackedCoordinatorError::InvalidLogicalSourceFailure {
@@ -690,6 +691,9 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
                 source,
                 class,
                 carried_forward,
+                source_selector: source_selector.map(|selector| {
+                    diagnostics::bounded_text(selector, MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES)
+                }),
                 detail: diagnostics::bounded_text(
                     &failure.detail,
                     MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES,

@@ -362,7 +362,8 @@ impl SourceBackedFailedRoute {
 
 /// One independently owned logical source that could not be replaced during
 /// an otherwise safe provider route. The source descriptor is retained so the
-/// outcome is typed and deterministic without exposing a provider path.
+/// outcome is typed and deterministic. The optional selector is a bounded
+/// local diagnostic, separate from the source identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceBackedLogicalSourceFailure {
     pub route_index: usize,
@@ -371,6 +372,7 @@ pub struct SourceBackedLogicalSourceFailure {
     pub source: SourceKey,
     pub class: SourceBackedSourceFailureClass,
     pub carried_forward: bool,
+    pub source_selector: Option<String>,
     pub detail: String,
 }
 
