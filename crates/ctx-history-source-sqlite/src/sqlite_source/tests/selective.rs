@@ -1,5 +1,6 @@
 use super::super::resources::override_next_scratch_available_space_for_test;
 use super::*;
+use crate::SqliteSelectedColumnProjection;
 
 fn selected(authority: &SqliteSourceDirectoryAuthority) -> SqliteSourceReadSnapshot {
     authority
