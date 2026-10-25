@@ -318,7 +318,7 @@ impl Directory for DurableMmapDirectory {
         self.write_failure
             .check()
             .map_err(|error| OpenReadError::wrap_io_error(error, path.to_path_buf()))?;
-        match &self.inner {
+        let bytes = match &self.inner {
             DurableDirectoryBackend::Mmap(inner) => inner.atomic_read(path),
             DurableDirectoryBackend::Anchored(inner) => {
                 let mut file = inner.open_file(path).map_err(|error| {
@@ -333,7 +333,10 @@ impl Directory for DurableMmapDirectory {
                     .map_err(|error| OpenReadError::wrap_io_error(error, path.to_path_buf()))?;
                 Ok(bytes)
             }
-        }
+        }?;
+        #[cfg(any(test, feature = "test-support"))]
+        crate::read_metrics::record(|reads| &mut reads.tantivy_control, bytes.len());
+        Ok(bytes)
     }
 
     fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
