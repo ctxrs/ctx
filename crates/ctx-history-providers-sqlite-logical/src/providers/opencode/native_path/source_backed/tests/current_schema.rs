@@ -4,6 +4,469 @@ use super::*;
 mod scan_measurement;
 use ctx_history_capture_runtime::SourceBackedRecordRejectionClass;
 
+// Compare the opt-in private projection with the unchanged fidelity snapshot,
+// using the same native path so all logical identities remain comparable.
+fn assert_projected_scan_matches_native(database: &Path) {
+    let data = crate::test_support_paths::tempdir().unwrap();
+    let retained = retain_root_authorized_source(data.path(), database).unwrap();
+    let ordinary = retained
+        .sqlite_authority
+        .open_selected_tables_snapshot_with_progress(
+            &retained.database_leaf,
+            &[
+                "session",
+                "session_v2",
+                "message",
+                "part",
+                "session_message",
+                "session_entry",
+            ],
+            |_| Ok::<(), ()>(()),
+        )
+        .unwrap();
+    let projected = open_root_authorized_snapshot_retained(data.path(), database)
+        .unwrap()
+        .sqlite_snapshot;
+    let scan = |snapshot: SqliteSourceReadSnapshot| {
+        let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+        let observation = observe_snapshot(&snapshot, dialect).unwrap();
+        let family = observation.schema.family;
+        let indexed = observation.schema.message_part_indexed_streaming;
+        let mut records = Vec::new();
+        let mut rejections = Vec::new();
+        let scan = scan_pinned_source(database, dialect, &observation, snapshot, &mut |output| {
+            match output {
+                OpenCodeScanOutput::Document(record) => records.push(record),
+                OpenCodeScanOutput::Rejection(rejection) => {
+                    rejections.push((rejection.line_number, rejection.class, rejection.detail))
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(scan.bounds.max_buffered_payload_bytes <= OPENCODE_HYDRATION_SINGLETON_MAX_BYTES);
+        (
+            family,
+            indexed,
+            scan.certificate.counts(),
+            *scan.certificate.content_digest(),
+            records,
+            rejections,
+        )
+    };
+    assert_eq!(scan(ordinary), scan(projected));
+}
+
+#[test]
+fn masked_data_preserves_native_records_rejections_and_bytes_in_every_family() {
+    for (table, indexed) in [
+        ("message", true),
+        ("part", true),
+        ("part", false),
+        ("session_message", true),
+        ("session_message", false),
+        ("session_entry", true),
+    ] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = temp.path().join("masked.db");
+        let connection = write_current_schema(
+            &database,
+            temp.path(),
+            &json!({"type":"text","text":"retained sibling"}),
+        );
+        match table {
+            "message" => {
+                connection.execute_batch("drop table part;").unwrap();
+            }
+            "session_message" | "session_entry" => {
+                connection
+                    .execute_batch("delete from part; delete from message;")
+                    .unwrap();
+                connection
+                    .execute_batch(
+                        "insert into session_message values (
+                        'retained', 'current-session', 'user', 0,
+                        1782259200000, 1782259200000, '{\"text\":\"retained sibling\"}'
+                    );",
+                    )
+                    .unwrap();
+                if table == "session_entry" {
+                    connection.execute_batch(
+                        "create table session_entry (
+                            id text primary key, session_id text not null, type text not null,
+                            time_created integer not null, time_updated integer not null,
+                            data text not null
+                        );
+                        insert into session_entry select id,session_id,type,time_created,time_updated,data
+                            from session_message;
+                        drop table session_message;",
+                    ).unwrap();
+                }
+            }
+            _ => {}
+        }
+        if table == "session_message" && !indexed {
+            connection
+                .execute_batch("alter table session_message drop column seq;")
+                .unwrap();
+        }
+        if table == "part" && !indexed {
+            connection
+                .execute_batch("drop index part_message_id_id_idx;")
+                .unwrap();
+        }
+        let extra = if table == "part" { "message_id," } else { "" };
+        let has_sequence = table == "session_message" && indexed;
+        let sequence = if has_sequence { "seq," } else { "" };
+        let sequence_value = if has_sequence { "seq+?3," } else { "" };
+        let kind = if matches!(table, "session_message" | "session_entry") {
+            "type,"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "insert into {table}(rowid,id,session_id,{extra}{sequence}{kind}time_created,time_updated,data)
+             select ?3,?1,session_id,{extra}{sequence_value}{kind}time_created,time_updated,?2
+             from {table} order by rowid limit 1"
+        );
+        let oversized = padded_json_value(
+            json!({"type":"text","role":"user","text":"","padding":""}),
+            MAX_PROVIDER_SQLITE_VALUE_BYTES + 1,
+        );
+        connection
+            .execute(&sql, params!["oversized-text", oversized, 401_i64])
+            .unwrap();
+        connection
+            .execute(
+                &sql,
+                params![
+                    "oversized-blob",
+                    vec![b'x'; MAX_PROVIDER_SQLITE_VALUE_BYTES + 1],
+                    909_i64,
+                ],
+            )
+            .unwrap();
+        let capture = |masked: bool| {
+            let retained = retain_root_authorized_source(temp.path(), &database).unwrap();
+            let snapshot = retained
+                .sqlite_authority
+                .open_selected_tables_snapshot_with_progress(
+                    &retained.database_leaf,
+                    &[
+                        "session",
+                        "session_v2",
+                        "message",
+                        "part",
+                        "session_message",
+                        "session_entry",
+                    ],
+                    |_| Ok::<(), ()>(()),
+                )
+                .unwrap();
+            let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+            let projections = [SqliteSelectedColumnProjection {
+                table,
+                column: "data",
+                maximum_bytes: MAX_PROVIDER_SQLITE_VALUE_BYTES,
+                original_bytes_column: "_ctx_data_original_bytes",
+            }];
+            let observation = observe_logical_source_with_projections(
+                snapshot.connection().unwrap(),
+                dialect,
+                if masked { &projections } else { &[] },
+            )
+            .unwrap();
+            if table == "part" {
+                assert_eq!(observation.schema.message_part_indexed_streaming, indexed);
+            }
+            let mut records = Vec::new();
+            let mut rejections = Vec::new();
+            let scan =
+                scan_pinned_source(&database, dialect, &observation, snapshot, &mut |output| {
+                    match output {
+                        OpenCodeScanOutput::Document(record) => records.push(record),
+                        OpenCodeScanOutput::Rejection(rejection) => rejections.push((
+                            rejection.line_number,
+                            rejection.class,
+                            rejection.detail,
+                        )),
+                        _ => {}
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                scan.bounds.max_buffered_payload_bytes <= OPENCODE_HYDRATION_SINGLETON_MAX_BYTES
+            );
+            (
+                observation.schema.family,
+                scan.certificate.counts(),
+                *scan.certificate.content_digest(),
+                records,
+                rejections,
+            )
+        };
+        let ordinary = capture(false);
+        assert!(!ordinary.3.is_empty());
+        assert_eq!(ordinary.4.len(), 2);
+        assert!(ordinary
+            .4
+            .iter()
+            .any(|(row, _, detail)| *row == 401 && detail.contains("retained-content size limit")));
+        assert!(ordinary
+            .4
+            .iter()
+            .any(|(row, _, detail)| *row == 909
+                && detail.contains("unsupported SQLite storage class")));
+        connection
+            .execute_batch(&format!(
+                "alter table {table} add column _ctx_data_original_bytes integer;
+             update {table} set _ctx_data_original_bytes =
+                 case when typeof(data) in ('text','blob') then octet_length(data) end;
+             update {table} set data =
+                 case typeof(data) when 'text' then '' when 'blob' then x'' else data end
+                 where _ctx_data_original_bytes > {};",
+                MAX_PROVIDER_SQLITE_VALUE_BYTES,
+            ))
+            .unwrap();
+        let physical: (String, i64, i64) = connection.query_row(
+            &format!("select typeof(data), octet_length(data), _ctx_data_original_bytes from {table} where rowid=909"),
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(
+            physical,
+            (
+                "blob".to_owned(),
+                0,
+                (MAX_PROVIDER_SQLITE_VALUE_BYTES + 1) as i64
+            )
+        );
+        assert_eq!(ordinary, capture(true), "{table}, indexed={indexed}");
+    }
+}
+
+#[test]
+fn masked_current_role_probes_and_legacy_overlap_keep_the_same_admission() {
+    for table in ["session_message", "session_entry"] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = temp.path().join("coexist.db");
+        let connection = write_current_schema(
+            &database,
+            temp.path(),
+            &json!({"type":"text","text":"legacy conversation"}),
+        );
+        if table == "session_entry" {
+            connection
+                .execute_batch(
+                    "drop table session_message;
+                 create table session_entry (
+                    id text primary key, session_id text not null, type text not null,
+                    time_created integer not null, time_updated integer not null, data text not null
+                 );",
+                )
+                .unwrap();
+        }
+        let seq_column = if table == "session_message" {
+            "seq,"
+        } else {
+            ""
+        };
+        let seq_value = if table == "session_message" { "1," } else { "" };
+        let payload = padded_json_value(
+            json!({"role":"user","text":"too large","padding":""}),
+            MAX_PROVIDER_SQLITE_VALUE_BYTES + 1,
+        );
+        connection.execute(
+            &format!("insert into {table}(id,session_id,type,{seq_column}time_created,time_updated,data)
+                values ('metadata','current-session','provider.metadata',{seq_value}1782259200000,1782259200000,?1)"),
+            [payload],
+        ).unwrap();
+        let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+        assert_eq!(
+            OpenCodeNativeSchema::probe(&connection, dialect)
+                .unwrap()
+                .family,
+            OpenCodeNativeSchemaFamily::MessagePart
+        );
+        connection
+            .execute_batch(&format!(
+                "alter table {table} add column _ctx_data_original_bytes integer;
+             update {table} set _ctx_data_original_bytes=octet_length(data), data='';",
+            ))
+            .unwrap();
+        let projections = [SqliteSelectedColumnProjection {
+            table,
+            column: "data",
+            maximum_bytes: MAX_PROVIDER_SQLITE_VALUE_BYTES,
+            original_bytes_column: "_ctx_data_original_bytes",
+        }];
+        assert_eq!(
+            OpenCodeNativeSchema::probe_with_projections(&connection, dialect, &projections)
+                .unwrap()
+                .family,
+            OpenCodeNativeSchemaFamily::MessagePart
+        );
+        // NULL metadata is the native-value fallback, not an instruction to skip
+        // a bounded JSON role that makes the current family conversation-bearing.
+        connection
+            .execute_batch(&format!(
+                "update {table} set data='{{\"role\":\"user\",\"text\":\"current conversation\"}}',
+                _ctx_data_original_bytes=null;",
+            ))
+            .unwrap();
+        assert!(
+            OpenCodeNativeSchema::probe_with_projections(&connection, dialect, &projections)
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous populated message schema families")
+        );
+    }
+
+    for table in ["message", "part", "session_message"] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = temp.path().join("overlap.db");
+        let connection = write_current_schema(
+            &database,
+            temp.path(),
+            &json!({"type":"text","text":"frozen conversation"}),
+        );
+        upgrade_to_opencode2(&connection, temp.path());
+        let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+        assert!(
+            OpenCodeNativeSchema::probe(&connection, dialect)
+                .unwrap()
+                .proven_legacy_overlap
+        );
+        let payload = padded_json_value(
+            json!({"role":"assistant","summary":true,"parentID":"not-a-cover","padding":""}),
+            MAX_PROVIDER_SQLITE_VALUE_BYTES + 1,
+        );
+        connection.execute(
+            &format!("update {table} set data=?1 where id=(select id from {table} order by id limit 1)"),
+            [payload],
+        ).unwrap();
+        let ordinary = OpenCodeNativeSchema::probe(&connection, dialect)
+            .unwrap_err()
+            .to_string();
+        connection
+            .execute_batch(&format!(
+                "alter table {table} add column _ctx_data_original_bytes integer;
+             update {table} set _ctx_data_original_bytes=octet_length(data);
+             update {table} set data='' where _ctx_data_original_bytes>{};",
+                MAX_PROVIDER_SQLITE_VALUE_BYTES,
+            ))
+            .unwrap();
+        let projections = [SqliteSelectedColumnProjection {
+            table,
+            column: "data",
+            maximum_bytes: MAX_PROVIDER_SQLITE_VALUE_BYTES,
+            original_bytes_column: "_ctx_data_original_bytes",
+        }];
+        assert_eq!(
+            ordinary,
+            OpenCodeNativeSchema::probe_with_projections(&connection, dialect, &projections)
+                .unwrap_err()
+                .to_string()
+        );
+        assert!(ordinary.contains("ambiguous populated message schema families"));
+    }
+}
+
+#[test]
+fn native_lookalike_metadata_never_authorizes_projected_bounds() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("native-lookalike.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type":"text","text":"native bounded sibling"}),
+    );
+    let payload = padded_json_value(
+        json!({"type":"text","text":"","padding":""}),
+        MAX_PROVIDER_SQLITE_VALUE_BYTES + 1,
+    );
+    connection.execute(
+        "insert into part(rowid,id,message_id,session_id,time_created,time_updated,data)
+         select 401,'oversized',message_id,session_id,time_created,time_updated,?1 from part limit 1",
+        [payload],
+    ).unwrap();
+    connection
+        .execute_batch(&format!(
+            "alter table part add column _ctx_data_original_bytes integer;
+         update part set _ctx_data_original_bytes={};
+         update part set _ctx_data_original_bytes=0 where rowid=401;",
+            MAX_PROVIDER_SQLITE_VALUE_BYTES + 1,
+        ))
+        .unwrap();
+    let retained = retain_root_authorized_source(temp.path(), &database).unwrap();
+    // This is also the trust state of a non-Linux StablePrivateCopy fallback.
+    let snapshot = retained
+        .sqlite_authority
+        .open_selected_tables_snapshot_with_progress(
+            &retained.database_leaf,
+            &["session", "message", "part", "session_message"],
+            |_| Ok::<(), ()>(()),
+        )
+        .unwrap();
+    assert!(snapshot.projected_columns().is_empty());
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    let observation = observe_snapshot(&snapshot, dialect).unwrap();
+    assert!(observation.schema.projected_data_tables.is_empty());
+    let mut records = Vec::new();
+    let mut rejections = Vec::new();
+    scan_pinned_source(&database, dialect, &observation, snapshot, &mut |output| {
+        match output {
+            OpenCodeScanOutput::Document(record) => records.push(record),
+            OpenCodeScanOutput::Rejection(rejection) => rejections.push(rejection),
+            _ => {}
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].content.meaningful_text(),
+        "native bounded sibling"
+    );
+    assert_eq!(rejections.len(), 1);
+    assert_eq!(rejections[0].line_number, 401);
+    assert!(rejections[0].detail.contains("retained-content size limit"));
+    connection.execute_batch(&format!(
+        "alter table session_message add column _ctx_data_original_bytes integer;
+         insert into session_message(id,session_id,type,seq,time_created,time_updated,data,_ctx_data_original_bytes)
+         values ('native-current','current-session','provider.metadata',0,1782259200000,1782259200000,
+             '{{\"role\":\"user\",\"text\":\"native role\"}}',{});",
+        MAX_PROVIDER_SQLITE_VALUE_BYTES + 1,
+    )).unwrap();
+    assert!(OpenCodeNativeSchema::probe(&connection, dialect)
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous populated message schema families"));
+
+    let overlap_database = temp.path().join("native-overlap.db");
+    let overlap = write_current_schema(
+        &overlap_database,
+        temp.path(),
+        &json!({"type":"text","text":"native overlap"}),
+    );
+    upgrade_to_opencode2(&overlap, temp.path());
+    for table in ["message", "part", "session_message"] {
+        overlap
+            .execute_batch(&format!(
+                "alter table {table} add column _ctx_data_original_bytes integer;
+             update {table} set _ctx_data_original_bytes={};",
+                MAX_PROVIDER_SQLITE_VALUE_BYTES + 1,
+            ))
+            .unwrap();
+    }
+    assert!(
+        OpenCodeNativeSchema::probe(&overlap, dialect)
+            .unwrap()
+            .proven_legacy_overlap
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn unavailable_wal_commit_header_is_a_replay_miss_and_capture_can_retry() {
@@ -315,12 +778,14 @@ fn oversized_message_and_part_values_are_record_local_across_ordering_paths() {
         .unwrap();
     drop(connection);
 
+    assert_projected_scan_matches_native(&database);
     let indexed = scan_current_schema_with_rejections(&database);
     assert!(indexed.0.schema.message_part_indexed_streaming);
     Connection::open(&database)
         .unwrap()
         .execute("drop index part_message_id_id_idx", [])
         .unwrap();
+    assert_projected_scan_matches_native(&database);
     let fallback = scan_current_schema_with_rejections(&database);
     assert!(!fallback.0.schema.message_part_indexed_streaming);
 
@@ -651,6 +1116,7 @@ fn opencode2_upgrade_reads_session_message_with_session_v2_metadata() {
     assert_eq!(schema.family, OpenCodeNativeSchemaFamily::SessionMessageSeq);
     assert_eq!(schema.session_table, "session_v2");
     drop(connection);
+    assert_projected_scan_matches_native(&database);
 
     let (_, _, records, rejections) = scan_current_schema_with_rejections(&database);
     assert!(
@@ -1006,9 +1472,22 @@ fn native_selected_snapshot_matches_full_family_capture() {
         .sqlite_authority
         .open_stable_snapshot(&retained.database_leaf)
         .unwrap();
-    let selected = open_root_authorized_snapshot_retained(temp.path(), &database)
-        .unwrap()
-        .sqlite_snapshot;
+    let selected = retained
+        .sqlite_authority
+        .open_selected_tables_snapshot_with_progress(
+            &retained.database_leaf,
+            &[
+                "session",
+                "session_v2",
+                "message",
+                "part",
+                "session_message",
+                "session_entry",
+            ],
+            |_| Ok::<(), ()>(()),
+        )
+        .unwrap();
+    assert_projected_scan_matches_native(&database);
     let tables = [
         "session",
         "message",
@@ -1060,7 +1539,7 @@ fn native_selected_snapshot_matches_full_family_capture() {
     }
     let scan = |snapshot: SqliteSourceReadSnapshot| {
         let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
-        let observation = observe_logical_source(snapshot.connection().unwrap(), dialect).unwrap();
+        let observation = observe_snapshot(&snapshot, dialect).unwrap();
         let mut records = Vec::new();
         let scan = scan_pinned_source(&database, dialect, &observation, snapshot, &mut |output| {
             if let OpenCodeScanOutput::Document(record) = output {

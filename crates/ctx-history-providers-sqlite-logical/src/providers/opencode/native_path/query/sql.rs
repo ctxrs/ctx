@@ -57,8 +57,9 @@ fn row_event_source_sql(
     let type_column = type_expression(schema.event_has_type, "x");
     let native_identity = bounded_identity("x.id");
     let session_identity = bounded_identity("x.session_id");
-    let source_data = bounded_payload("x.data");
-    let oversized_text = oversized_text_disposition("x.data", SOURCE_OVERSIZED_TEXT);
+    let data_bytes = schema.data_bytes_sql(table, "x.data");
+    let source_data = bounded_payload("x.data", &data_bytes);
+    let oversized_text = oversized_text_disposition("x.data", &data_bytes, SOURCE_OVERSIZED_TEXT);
     let order_a = if explicit_sequence {
         "cast(x.seq as integer)"
     } else {
@@ -79,7 +80,7 @@ fn row_event_source_sql(
                 cast(x.time_created as integer),
                 cast(x.time_updated as integer),
                 case when typeof(x.data) in ('text', 'blob')
-                     then octet_length(x.data) else 0 end,
+                     then {data_bytes} else 0 end,
                 {type_column},
                 {oversized_text},
                 x.rowid, {source_data},
@@ -106,15 +107,17 @@ fn part_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
 pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema) -> String {
     match schema.family {
         OpenCodeNativeSchemaFamily::SessionMessageSeq => {
-            row_sort_key_sql("session_message", "x.seq")
+            row_sort_key_sql(schema, "session_message", "x.seq")
         }
         OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq => {
-            row_sort_key_sql("session_message", "x.time_created")
+            row_sort_key_sql(schema, "session_message", "x.time_created")
         }
         OpenCodeNativeSchemaFamily::SessionEntry => {
-            row_sort_key_sql("session_entry", "x.time_created")
+            row_sort_key_sql(schema, "session_entry", "x.time_created")
         }
-        OpenCodeNativeSchemaFamily::LegacyMessage => row_sort_key_sql("message", "x.time_created"),
+        OpenCodeNativeSchemaFamily::LegacyMessage => {
+            row_sort_key_sql(schema, "message", "x.time_created")
+        }
         OpenCodeNativeSchemaFamily::MessagePart if schema.message_part_indexed_streaming => {
             format!(
                 "select p.rowid, {}, m.time_created,
@@ -125,8 +128,8 @@ pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema)
                 bounded_identity("m.session_id"),
                 bounded_identity("m.id"),
                 bounded_identity("p.id"),
-                hydrated_payload_bytes("p.data"),
-                hydrated_payload_bytes("m.data"),
+                hydrated_payload_bytes("p.data", &schema.data_bytes_sql("part", "p.data")),
+                hydrated_payload_bytes("m.data", &schema.data_bytes_sql("message", "m.data")),
             )
         }
         OpenCodeNativeSchemaFamily::MessagePart => format!(
@@ -139,19 +142,19 @@ pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema)
             bounded_identity("p.session_id"),
             bounded_identity("p.message_id"),
             bounded_identity("p.id"),
-            hydrated_payload_bytes("p.data"),
-            hydrated_payload_bytes("m.data"),
+            hydrated_payload_bytes("p.data", &schema.data_bytes_sql("part", "p.data")),
+            hydrated_payload_bytes("m.data", &schema.data_bytes_sql("message", "m.data")),
         ),
     }
 }
 
-fn row_sort_key_sql(table: &str, order: &str) -> String {
+fn row_sort_key_sql(schema: &OpenCodeNativeSchema, table: &str, order: &str) -> String {
     format!(
         "select x.rowid, {}, {order}, {}, 0, '', {}
            from {table} x",
         bounded_identity("x.session_id"),
         bounded_identity("x.id"),
-        hydrated_payload_bytes("x.data"),
+        hydrated_payload_bytes("x.data", &schema.data_bytes_sql(table, "x.data")),
     )
 }
 
@@ -216,15 +219,17 @@ fn part_event_source_sql_with_payload(
     let native_identity = bounded_identity("p.id");
     let message_identity = bounded_identity("p.message_id");
     let session_identity = bounded_identity("p.session_id");
-    let source_data = include_payload.then(|| bounded_payload("p.data"));
-    let parent_source_data = include_payload.then(|| bounded_payload("m.data"));
+    let data_bytes = schema.data_bytes_sql("part", "p.data");
+    let parent_data_bytes = schema.data_bytes_sql("message", "m.data");
+    let source_data = include_payload.then(|| bounded_payload("p.data", &data_bytes));
+    let parent_source_data = include_payload.then(|| bounded_payload("m.data", &parent_data_bytes));
     let source_data = source_data.as_deref().unwrap_or("null");
     let parent_source_data = parent_source_data.as_deref().unwrap_or("null");
     let oversized_text = if include_payload {
         format!(
             "{} + {}",
-            oversized_text_disposition("p.data", SOURCE_OVERSIZED_TEXT),
-            oversized_text_disposition("m.data", PARENT_OVERSIZED_TEXT),
+            oversized_text_disposition("p.data", &data_bytes, SOURCE_OVERSIZED_TEXT),
+            oversized_text_disposition("m.data", &parent_data_bytes, PARENT_OVERSIZED_TEXT),
         )
     } else {
         "0".to_owned()
@@ -237,7 +242,7 @@ fn part_event_source_sql_with_payload(
                 cast(p.time_created as integer),
                 cast(p.time_updated as integer),
                 case when typeof(p.data) in ('text', 'blob')
-                     then octet_length(p.data) else 0 end,
+                     then {data_bytes} else 0 end,
                 {type_column},
                 {oversized_text},
                 {source_locator}, {source_data},
@@ -282,26 +287,26 @@ fn bounded_identity(column: &str) -> String {
     )
 }
 
-fn bounded_payload(column: &str) -> String {
+fn bounded_payload(column: &str, data_bytes: &str) -> String {
     format!(
         "case when typeof({column}) in ('text', 'blob')
-                    and octet_length({column}) > {MAX_PROVIDER_SQLITE_VALUE_BYTES}
+                    and {data_bytes} > {MAX_PROVIDER_SQLITE_VALUE_BYTES}
               then null else {column} end"
     )
 }
 
-fn hydrated_payload_bytes(column: &str) -> String {
+fn hydrated_payload_bytes(column: &str, data_bytes: &str) -> String {
     format!(
         "case when typeof({column}) in ('text', 'blob')
-                    and octet_length({column}) <= {MAX_PROVIDER_SQLITE_VALUE_BYTES}
-              then octet_length({column}) else 0 end"
+                    and {data_bytes} <= {MAX_PROVIDER_SQLITE_VALUE_BYTES}
+              then {data_bytes} else 0 end"
     )
 }
 
-fn oversized_text_disposition(column: &str, disposition: i64) -> String {
+fn oversized_text_disposition(column: &str, data_bytes: &str, disposition: i64) -> String {
     format!(
         "case when typeof({column}) = 'text'
-                    and octet_length({column}) > {MAX_PROVIDER_SQLITE_VALUE_BYTES}
+                    and {data_bytes} > {MAX_PROVIDER_SQLITE_VALUE_BYTES}
               then {disposition} else 0 end"
     )
 }

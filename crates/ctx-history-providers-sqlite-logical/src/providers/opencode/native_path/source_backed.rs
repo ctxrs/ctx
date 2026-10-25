@@ -36,16 +36,16 @@ use crate::{
     },
     provider_sources::{
         sqlite_retry_decision, SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase,
-        SqliteLogicalSnapshot, SqliteRetryDecision, SqliteSourceAccessError,
-        SqliteSourceDirectoryAuthority, SqliteSourceErrorComposition, SqliteSourceProgressError,
-        SqliteSourceReadSnapshot, SqliteSourceTerminalFence,
+        SqliteLogicalSnapshot, SqliteRetryDecision, SqliteSelectedColumnProjection,
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceErrorComposition,
+        SqliteSourceProgressError, SqliteSourceReadSnapshot, SqliteSourceTerminalFence,
     },
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "opencode-family-source-backed-v14-proven-v2-overlap";
+const PARSER_REVISION: &str = "opencode-family-source-backed-v15-bounded-data-snapshot";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
@@ -355,25 +355,45 @@ fn scan_pinned_source_with_scratch_limit(
 }
 
 #[cfg(test)]
-fn observe_logical_source(
-    connection: &Connection,
+fn observe_snapshot(
+    snapshot: &SqliteSourceReadSnapshot,
     dialect: &'static OpenCodeSqliteDialect,
 ) -> OpenCodeSourceBackedResult<OpenCodeLogicalObservation> {
-    observe_logical_source_with_progress(connection, dialect, &mut |_| Ok(()))
+    observe_logical_source_with_projections(
+        snapshot.connection()?,
+        dialect,
+        snapshot.projected_columns(),
+    )
 }
 
 #[cfg(test)]
-fn observe_logical_source_with_progress(
+fn observe_logical_source_with_projections(
     connection: &Connection,
+    dialect: &'static OpenCodeSqliteDialect,
+    projections: &[SqliteSelectedColumnProjection],
+) -> OpenCodeSourceBackedResult<OpenCodeLogicalObservation> {
+    observe_logical_source_with_progress_scoped(
+        connection,
+        dialect,
+        SourceAnchorScope::Unqualified,
+        projections,
+        &mut |_| Ok(()),
+    )
+}
+
+#[cfg(test)]
+fn observe_snapshot_with_progress(
+    snapshot: &SqliteSourceReadSnapshot,
     dialect: &'static OpenCodeSqliteDialect,
     report_progress: &mut dyn FnMut(
         SourceBackedCurrentSourceProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeLogicalObservation> {
     observe_logical_source_with_progress_scoped(
-        connection,
+        snapshot.connection()?,
         dialect,
         SourceAnchorScope::Unqualified,
+        snapshot.projected_columns(),
         report_progress,
     )
 }
@@ -382,6 +402,7 @@ fn observe_logical_source_with_progress_scoped(
     connection: &Connection,
     dialect: &'static OpenCodeSqliteDialect,
     source_scope: SourceAnchorScope,
+    projections: &[SqliteSelectedColumnProjection],
     report_progress: &mut dyn FnMut(
         SourceBackedCurrentSourceProgress,
     ) -> SourceBackedRouteResult<()>,
@@ -391,7 +412,7 @@ fn observe_logical_source_with_progress_scoped(
         0,
         0,
     ))?;
-    let schema = OpenCodeNativeSchema::probe(connection, dialect)
+    let schema = OpenCodeNativeSchema::probe_with_projections(connection, dialect, projections)
         .map_err(OpenCodeSourceBackedError::from)
         .map_err(|error| diagnose_provider_query_error(error, SqliteFailurePhase::Schema))?;
     let source = source_key_scoped(dialect, schema.family, source_scope)?;
@@ -455,7 +476,12 @@ fn stream_logical_rows(
     let mut session_by_id = connection.prepare(&session_by_id_sql)?;
     let mut legacy_parts = schema
         .proven_legacy_overlap
-        .then(|| super::overlap::legacy_part_rows(connection))
+        .then(|| {
+            super::overlap::legacy_part_rows(
+                connection,
+                schema.projected_data_tables.contains("part"),
+            )
+        })
         .transpose()?;
     let SessionScanState {
         mut content_hasher,
@@ -845,7 +871,7 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
         loop {
             match retained
                 .sqlite_authority
-                .open_selected_tables_snapshot_with_progress(
+                .open_projected_tables_snapshot_with_progress(
                     &retained.database_leaf,
                     &[
                         "session",
@@ -854,6 +880,32 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
                         "part",
                         "session_message",
                         "session_entry",
+                    ],
+                    &[
+                        SqliteSelectedColumnProjection {
+                            table: "message",
+                            column: "data",
+                            maximum_bytes: MAX_PROVIDER_SQLITE_VALUE_BYTES,
+                            original_bytes_column: "_ctx_data_original_bytes",
+                        },
+                        SqliteSelectedColumnProjection {
+                            table: "part",
+                            column: "data",
+                            maximum_bytes: MAX_PROVIDER_SQLITE_VALUE_BYTES,
+                            original_bytes_column: "_ctx_data_original_bytes",
+                        },
+                        SqliteSelectedColumnProjection {
+                            table: "session_message",
+                            column: "data",
+                            maximum_bytes: MAX_PROVIDER_SQLITE_VALUE_BYTES,
+                            original_bytes_column: "_ctx_data_original_bytes",
+                        },
+                        SqliteSelectedColumnProjection {
+                            table: "session_entry",
+                            column: "data",
+                            maximum_bytes: MAX_PROVIDER_SQLITE_VALUE_BYTES,
+                            original_bytes_column: "_ctx_data_original_bytes",
+                        },
                     ],
                     |progress| report_progress(sqlite_source_progress(progress)),
                 ) {

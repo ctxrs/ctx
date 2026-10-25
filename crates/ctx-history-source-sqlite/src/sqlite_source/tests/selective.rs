@@ -38,6 +38,7 @@ fn selective_copy_admits_conversation_when_unrelated_table_exceeds_free_space() 
         .is_snapshot_capacity_failure());
     override_next_scratch_available_space_for_test(32 * 1024 * 1024);
     let snapshot = selected(&authority);
+    assert_eq!(snapshot.projected_columns(), &[]);
     assert_eq!(
         snapshot.strategy(),
         SqliteSourceSnapshotStrategy::SelectiveTables
@@ -315,4 +316,195 @@ fn selected_schema_execution_cannot_attach_or_change_unrelated_objects() {
         "CREATE INDEX foreign_table ON messages((SELECT value FROM other))"
     )
     .is_err());
+}
+
+const BODY_PROJECTION: &[SqliteSelectedColumnProjection] = &[SqliteSelectedColumnProjection {
+    table: "messages",
+    column: "body",
+    maximum_bytes: 4,
+    original_bytes_column: "_ctx_data_original_bytes",
+}];
+
+#[test]
+fn projected_copy_bounds_native_cells_and_preserves_rowids_and_indexes() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let source = Connection::open(temp.path().join("provider.sqlite")).unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE messages(body, sibling TEXT);
+         CREATE INDEX by_sibling ON messages(sibling);
+         INSERT INTO messages(rowid,body,sibling) VALUES
+           (-7,CAST(zeroblob(1024*1024) AS TEXT),'large text'),
+           (99,zeroblob(1024*1024),'large blob'),
+           (101,CAST(x'ff800061' AS TEXT),'bounded text'),
+           (103,x'00ff80','bounded blob'),
+           (105,NULL,'null'), (107,42,'integer'), (109,1.25,'real');",
+        )
+        .unwrap();
+    let before = directory_file_state(temp.path());
+    let authority = retain_parent_in_data_root(data.path(), temp.path());
+    let snapshot = authority
+        .open_projected_tables_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            &["messages"],
+            BODY_PROJECTION,
+            |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
+    let copied = snapshot.connection().unwrap();
+    assert_eq!(snapshot.projected_columns(), BODY_PROJECTION);
+    let mut statement = copied
+        .prepare(
+            "SELECT rowid,typeof(body),hex(body),_ctx_data_original_bytes,sibling
+         FROM messages ORDER BY rowid",
+        )
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                -7,
+                "text".into(),
+                "".into(),
+                Some(1024 * 1024),
+                "large text".into()
+            ),
+            (
+                99,
+                "blob".into(),
+                "".into(),
+                Some(1024 * 1024),
+                "large blob".into()
+            ),
+            (
+                101,
+                "text".into(),
+                "FF800061".into(),
+                Some(4),
+                "bounded text".into()
+            ),
+            (
+                103,
+                "blob".into(),
+                "00FF80".into(),
+                Some(3),
+                "bounded blob".into()
+            ),
+            (105, "null".into(), "".into(), None, "null".into()),
+            (107, "integer".into(), "3432".into(), None, "integer".into()),
+            (109, "real".into(), "312E3235".into(), None, "real".into()),
+        ]
+    );
+    assert_eq!(
+        copied
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='by_sibling'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        source
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('messages')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
+    );
+    assert!(
+        fs::metadata(snapshot.snapshot_directory().unwrap().join("source.sqlite"))
+            .unwrap()
+            .len()
+            < 64 * 1024
+    );
+    drop(statement);
+    snapshot.finish().unwrap();
+    assert_eq!(directory_file_state(temp.path()), before);
+    assert_eq!(staging_entries(data.path()), 0);
+    let generic = selected(&authority);
+    assert_eq!(
+        generic
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT octet_length(body) FROM messages WHERE rowid=-7",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1024 * 1024
+    );
+    assert_eq!(
+        generic
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('messages')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
+    );
+    generic.finish().unwrap();
+    assert_eq!(staging_entries(data.path()), 0);
+}
+
+#[test]
+fn projected_collision_and_cancellation_leave_source_unchanged_and_clean_up() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let source = Connection::open(temp.path().join("provider.sqlite")).unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE messages(body, _CTX_DATA_ORIGINAL_BYTES INTEGER);
+         INSERT INTO messages VALUES('native', 123);",
+        )
+        .unwrap();
+    let before = directory_file_state(temp.path());
+    let authority = retain_parent_in_data_root(data.path(), temp.path());
+    assert!(authority
+        .open_projected_tables_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            &["messages"],
+            BODY_PROJECTION,
+            |_| Ok::<_, ()>(()),
+        )
+        .is_err());
+    assert_eq!(staging_entries(data.path()), 0);
+    assert!(matches!(
+        authority.open_projected_tables_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            &["messages"],
+            BODY_PROJECTION,
+            |_| Err("cancelled"),
+        ),
+        Err(SqliteSourceProgressError::Progress("cancelled"))
+    ));
+    assert_eq!(directory_file_state(temp.path()), before);
+    assert_eq!(staging_entries(data.path()), 0);
 }

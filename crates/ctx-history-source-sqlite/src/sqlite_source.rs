@@ -597,7 +597,8 @@ impl SqliteSourceTerminalFence {
                 family.revalidate(&self.inner.native_evidence)?;
             }
             SqliteSourceSnapshotPolicy::StablePrivateCopy
-            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_)
+            | SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(_, _) => {
                 let family = SqliteSourceFamily::open(&authority, &self.inner.database_name, || {})
                     .map_err(map_revalidation_error)?;
                 family.revalidate_database_identity(&self.inner.native_evidence)?;
@@ -662,6 +663,7 @@ pub struct SqliteSourceReadSnapshot {
     sqlite_evidence: SqliteSnapshotEvidence,
     evidence: SqliteSourceEvidence,
     policy: SqliteSourceSnapshotPolicy,
+    projected_columns: &'static [SqliteSelectedColumnProjection],
     admitted_revision_is_replay_safe: bool,
     strategy: SqliteSourceSnapshotStrategy,
     copied_bytes: u64,
@@ -709,6 +711,12 @@ impl SqliteSourceReadSnapshot {
         self.strategy
     }
 
+    /// Returns trusted projections applied while capturing this private snapshot.
+    /// Native column names alone never establish projection metadata authority.
+    pub fn projected_columns(&self) -> &'static [SqliteSelectedColumnProjection] {
+        self.projected_columns
+    }
+
     pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
     }
@@ -746,7 +754,8 @@ impl SqliteSourceReadSnapshot {
                 family.revalidate_database_identity(&self.native_evidence)
             }
             SqliteSourceSnapshotPolicy::StablePrivateCopy
-            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_)
+            | SqliteSourceSnapshotPolicy::ProjectedPrivateCopy(_, _) => {
                 family.revalidate_database_identity(&self.native_evidence)
             }
         }
@@ -985,7 +994,8 @@ pub use snapshot::{
 };
 pub use snapshot::{
     open_root_handle_sqlite_source_snapshot, open_root_handle_sqlite_source_snapshot_with_limits,
-    retain_sqlite_source_directory_authority, SqliteSourceSnapshotLimits,
+    retain_sqlite_source_directory_authority, SqliteSelectedColumnProjection,
+    SqliteSourceSnapshotLimits,
 };
 
 #[cfg(any(test, feature = "test-support"))]

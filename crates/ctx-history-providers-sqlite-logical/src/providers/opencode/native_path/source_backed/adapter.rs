@@ -410,6 +410,7 @@ fn observe_present_document_tree_with_progress(
             authorized.sqlite_snapshot.connection()?,
             dialect,
             source_scope,
+            authorized.sqlite_snapshot.projected_columns(),
             report_progress,
         )
     })();

@@ -11,11 +11,13 @@ use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 use super::super::{normalization::opencode_event_time, OpenCodeSqliteDialect};
 use super::json::{project_json, retained_projection, unambiguous_object};
 use super::model::OpenCodeNativeSchemaFamily;
+use super::schema::data_bytes_sql;
 use crate::provider::normalization::provider_required_timestamp_millis;
 
 pub(super) fn legacy_is_covered(
     conn: &Connection,
     dialect: &OpenCodeSqliteDialect,
+    projected: &BTreeSet<&'static str>,
 ) -> Result<bool> {
     // Check every legacy relationship, including parts outside any joined message.
     if conn.query_row(
@@ -37,6 +39,7 @@ pub(super) fn legacy_is_covered(
     } else {
         "session"
     };
+    let legacy_data = bounded_json("m.data", projected.contains("message"));
     let sql = format!(
         "select m.id, {}, n.type, {},
                 n.id is not null and n.session_id is m.session_id collate binary and s.id is not null
@@ -50,20 +53,20 @@ pub(super) fn legacy_is_covered(
                 n.time_created, m.session_id, n.id
          from message m left join session_message n on n.id=coalesce(
              (select id from session_message where id=m.id collate binary),
-             case when json_valid(m.data) then
-                 case when json_extract(m.data,'$.role')='assistant'
-                           and json_extract(m.data,'$.summary')=1
-                      then json_extract(m.data,'$.parentID') end end) collate binary
+             case when json_valid({legacy_data}) then
+                 case when json_extract({legacy_data},'$.role')='assistant'
+                           and json_extract({legacy_data},'$.summary')=1
+                      then json_extract({legacy_data},'$.parentID') end end) collate binary
          left join {session_table} s on s.id=m.session_id collate binary",
-        bounded_json("m.data"),
-        bounded_json("n.data"),
+        legacy_data,
+        bounded_json("n.data", projected.contains("session_message")),
     );
     let mut statement = conn.prepare(&sql)?;
     let mut rows = statement.query([])?;
     let mut paired_summaries = BTreeSet::new();
     let mut parts = conn.prepare(&format!(
         "select {} from part where message_id=?1 collate binary order by id collate binary",
-        bounded_json("data"),
+        bounded_json("data", projected.contains("part")),
     ))?;
     while let Some(row) = rows.next()? {
         if !row.get::<_, bool>(4)? {
@@ -174,8 +177,9 @@ pub(super) fn legacy_is_covered(
     Ok(true)
 }
 
-fn bounded_json(column: &str) -> String {
-    format!("case when typeof({column})='text' and octet_length({column})<={MAX_PROVIDER_SQLITE_VALUE_BYTES} then {column} end")
+fn bounded_json(column: &str, projected: bool) -> String {
+    let data_bytes = data_bytes_sql(column, projected);
+    format!("case when typeof({column})='text' and {data_bytes}<={MAX_PROVIDER_SQLITE_VALUE_BYTES} then {column} end")
 }
 
 fn object(row: &Row<'_>, column: usize) -> Result<Option<Value>> {
@@ -522,10 +526,10 @@ fn tool_covered(part: &Value, block: &Value) -> bool {
     }
 }
 
-pub(super) fn legacy_part_rows(conn: &Connection) -> Result<Statement<'_>> {
+pub(super) fn legacy_part_rows(conn: &Connection, projected: bool) -> Result<Statement<'_>> {
     Ok(conn.prepare(&format!(
         "select {} from part where message_id=?1 collate binary order by id collate binary",
-        bounded_json("data"),
+        bounded_json("data", projected),
     ))?)
 }
 
