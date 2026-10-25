@@ -45,9 +45,9 @@ use super::{
 #[cfg(test)]
 pub(crate) use mcp::{mcp_show_event, mcp_show_session};
 pub use mcp::{mcp_show_event_application, mcp_show_session_application};
+pub(super) use render::session_transcript_value;
 #[cfg(test)]
-pub(super) use render::{event_window_value, render_event_values};
-pub(super) use render::{render_event_value, session_transcript_value};
+pub(super) use render::{event_window_value, render_event_value, render_event_values};
 
 const CLI_SESSION_EVENT_PAGE_ITEMS: usize = ctx_history_read_application::SHOW_SESSION_PAGE_ITEMS;
 const PRESENTATION_MAX_EVENT_WINDOW_EVENTS: usize = MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS;
@@ -486,8 +486,15 @@ impl<'a> SessionStreamRenderer<'a> {
         writes_stdout: bool,
         projection: ShowReadModelProjection<'_>,
     ) -> Result<Self> {
-        let metadata =
-            session_transcript_value(session, mode, format, Vec::new(), false, max_events);
+        let metadata = session_transcript_value(
+            session,
+            mode,
+            format,
+            Vec::new(),
+            false,
+            max_events,
+            projection.archive_provenance(),
+        );
         let mut renderer = Self {
             output,
             metadata,
@@ -513,7 +520,10 @@ impl<'a> SessionStreamRenderer<'a> {
         projection: ShowReadModelProjection<'_>,
     ) -> Result<()> {
         let event_id = event.event_id.as_uuid();
-        let value = render_event_value(&event);
+        let value = ctx_history_read_application::render_show_event_read_model(
+            &event,
+            projection.archive_provenance(),
+        );
         let event_json = serde_json::to_vec(&value)?;
         self.content_bytes = self
             .content_bytes
@@ -760,6 +770,7 @@ fn render_stream_text_header(value: &Value) -> String {
         "mode: {}\nformat: text\n\n",
         value["mode"].as_str().unwrap_or("lite")
     ));
+    super::render::append_archive_provenance(&mut output, value, false);
     output
 }
 
@@ -774,6 +785,7 @@ fn render_stream_text_event(event: &Value) -> String {
         event["event_type"].as_str().unwrap_or("event"),
         event["ctx_event_id"].as_str().unwrap_or("unknown"),
     );
+    super::render::append_archive_provenance(&mut output, event, false);
     append_stream_event_copy(&mut output, event, "");
     append_stream_activity_text(&mut output, event, "");
     output.push_str(event["text"].as_str().unwrap_or_default());
@@ -800,6 +812,7 @@ fn render_stream_markdown_header(value: &Value) -> String {
     if let Some(relationship) = value["session"]["session_relationship"].as_str() {
         output.push_str(&format!("- session_relationship: `{relationship}`\n"));
     }
+    super::render::append_archive_provenance(&mut output, value, true);
     output
 }
 
@@ -814,6 +827,7 @@ fn render_stream_markdown_event(event: &Value) -> String {
         event["occurred_at"].as_str().unwrap_or("-"),
         event["ctx_event_id"].as_str().unwrap_or("unknown"),
     );
+    super::render::append_archive_provenance(&mut output, event, true);
     append_stream_event_copy(&mut output, event, "- ");
     append_stream_activity_markdown(&mut output, event, "- ");
     output.push_str(event["text"].as_str().unwrap_or_default());

@@ -12,6 +12,7 @@ use crate::{
 };
 
 pub struct SearchJsonInput<'input> {
+    pub provenance: &'input crate::ArchiveProvenanceMap,
     pub request: &'input SearchRequest,
     pub index: &'input VerifiedIndex,
     pub collection: &'input SearchCollection,
@@ -43,6 +44,7 @@ pub fn search_json(input: SearchJsonInput<'_>) -> Result<Value> {
 pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
     let SearchJsonInput {
         request,
+        provenance,
         index,
         collection,
         filters,
@@ -95,6 +97,7 @@ pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
                 result_scope,
                 offset.saturating_add(1),
                 commands,
+                provenance,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -208,6 +211,7 @@ pub fn search_result_json(
     result_scope: &str,
     rank: usize,
     commands: &SearchResultCommands,
+    provenance: &crate::ArchiveProvenanceMap,
 ) -> Result<Value> {
     let (snippet, snippet_truncated) = search_snippet(presentation);
     let view = EventReadView::new(&hit.event);
@@ -258,6 +262,7 @@ pub fn search_result_json(
         "source_id": view.source_id,
         "provider_session_id": event.provider_session_id,
         "source_format": event.source_format,
+        "archive_provenance": provenance.for_session(event.session_id),
         "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
         "root_ctx_session_id": event.root_session_id.map(|id| id.as_uuid()),
         "session_relationship": event.session_relationship,

@@ -27,6 +27,8 @@ pub(crate) const OBSERVATION_KIND: &str = "archive-owned-member-v1";
 pub(crate) struct OwnedMember {
     pub snapshot: String,
     pub member: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ArchiveIdentity>,
 }
 
 /// A single-origin export, including identities intentionally not exported.
@@ -99,13 +101,16 @@ pub fn export_data_root(
     for certificate in &index.manifest().sources {
         let observation = certificate.observation();
         if observation.source().source_format() != "ctx_archive_v1"
-            || observation.revision_kind() != OBSERVATION_KIND
+            || !matches!(
+                observation.revision_kind(),
+                OBSERVATION_KIND | crate::provenance::OBSERVATION_KIND
+            )
         {
             return Err(invalid(
                 "archive-owned export requires committed original-member references",
             ));
         }
-        let owned: OwnedMember = serde_json::from_slice(observation.revision())?;
+        let owned: OwnedMember = OwnedMember::decode(observation)?;
         if !crate::is_digest(&owned.snapshot)
             || !owned
                 .member

@@ -1609,6 +1609,7 @@ dependencies = [
  "chrono",
  "ctx-client-observability",
  "ctx-daemon-cli",
+ "ctx-history-archive",
  "ctx-history-capture",
  "ctx-history-core",
  "ctx-history-index",

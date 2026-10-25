@@ -9,6 +9,7 @@ use tempfile::tempdir;
 
 use super::*;
 
+mod provenance;
 mod reexport;
 mod restore_regressions;
 

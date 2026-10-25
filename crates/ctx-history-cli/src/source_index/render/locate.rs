@@ -14,6 +14,7 @@ pub(in crate::source_index) fn render_locate_document(
     let target = value["target"].as_str().unwrap_or("item");
     push_heading(&mut document, &capitalize(target), Token::Heading);
 
+    super::archive::fields(&mut document, context, value, 2);
     let id_field = if target == "session" {
         "ctx_session_id"
     } else {
