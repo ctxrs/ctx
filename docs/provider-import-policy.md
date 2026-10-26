@@ -224,6 +224,23 @@ edits, deletions, and deferred increments reconcile in roughly 60–80 minutes
 with a healthy daemon, or on `ctx import --provider hermes` or
 `ctx import --all`.
 
+## Cursor Transcript Alternatives
+
+Equivalent Cursor copies and ordered strict prefixes share one canonical source.
+A content or order conflict instead preserves every physical view as an independent ordered history.
+ctx retains redundant common events rather than inventing a merged chronology or dropping unique tool events.
+Previously published alternatives remain separate after their contents converge.
+
+Committed sources guide identity assignment only. The previous canonical path keeps its native source key when present.
+An unambiguous root-relative suffix can locate that path after a named-root relocation.
+Alternative source keys bind the native session ID, authority-relative path, and source-anchor scope.
+Current bytes still pass the ordinary raw prefix, path, object, and terminal proof checks.
+Provider code reads prior paths through `base_source_path`, not serialized checkpoint internals.
+
+Removing a canonical view retires its identity; ctx does not repurpose an existing alternative's identity.
+This policy does not promise citation transfer to an equivalent sibling after canonical deletion.
+Native UUID lookups can be ambiguous across alternatives; use ctx session and event IDs to select a view.
+
 ## Active-Writer Lifecycle Contract
 
 Provider discovery and ingestion must remain read-only and must not lock,
@@ -249,6 +266,15 @@ contract for that source family:
   next refresh imports that suffix exactly once, while truncation, path
   replacement, and mutation inside the authenticated prefix continue to fail
   closed.
+  Pi's OMP title slot is a narrow exception: valid v1 metadata may change
+  within the first 256 bytes, including LF. The identity probe validates the
+  slot before opting in. Prefix and admitted-EOF authentication revalidate its
+  schema and substitute 256 zero bytes when hashing. Session headers and all
+  following bytes remain exact. Different slot widths, CRLF, relocated
+  newlines, malformed metadata, truncation, and file replacement still fail
+  closed. The checkpoint identity names this mode, so raw-prefix checkpoints
+  cannot resume masked-prefix scans. Other Pi title records remain
+  parse-compatible without this exception.
 - Standard-Zstandard Codex rollouts snapshot exactly the frozen compressed
   prefix from the retained source handle, then decode and hash that same private
   snapshot. The compressed snapshot plus decoded spool is bounded to 256 MiB

@@ -128,6 +128,8 @@ use shared_runtime::*;
 #[path = "tests/source_adapters.rs"]
 mod source_adapters;
 use source_adapters::*;
+#[path = "tests/mutable_discovery.rs"]
+mod mutable_discovery;
 #[path = "tests/scheduler_support.rs"]
 mod scheduler_support;
 use scheduler_support::*;

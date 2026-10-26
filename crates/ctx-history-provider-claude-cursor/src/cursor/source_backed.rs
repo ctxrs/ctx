@@ -1,14 +1,19 @@
 //! Thin Cursor adapter for the shared certified-append JSONL family.
 
-use std::{collections::BTreeMap, fs, io, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
 use ctx_history_capture_runtime::BaseEventLookup;
 use ctx_history_core::{
     derive_event_id, derive_native_session_id, ActivityInvocation, ActivityJsonCapture,
-    ActivityResult, ActivityTextCapture, AgentScope, CaptureProvider, CoreActivity, CoreRecord,
-    CoreRecordAnnotation, EventIdentityInput, EventType, NativeItemKey, SourceAnchorScope,
-    SourceKey, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
+    ActivityResult, ActivityTextCapture, AgentScope, CaptureProvider, CertifiedSource,
+    CoreActivity, CoreRecord, CoreRecordAnnotation, EventIdentityInput, EventType, NativeItemKey,
+    SourceAnchor, SourceAnchorScope, SourceKey, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(any(test, feature = "test-support"))]
@@ -30,8 +35,8 @@ use super::{
 use crate::CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT;
 use ctx_history_jsonl::{
     fit_jsonl_activity, selected_content_fits, JsonlActivityObservedBytes, JsonlFamilyAdapter,
-    JsonlFamilyRejectedLeaf, JsonlOversizedRecordPolicy, JsonlRecordRejections,
-    SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDrafts,
+    JsonlOversizedRecordPolicy, JsonlRecordRejections, SourceBackedRecordRejectionClass,
+    SourceBackedRecordRejectionDrafts,
 };
 use ctx_history_provider_runtime::{
     source_io::OpenedProviderSourceFile, CaptureError, JsonlFamilyAppendMode,
@@ -47,7 +52,7 @@ type JsonlReader = ProviderJsonlReader;
 type JsonlFamilyWorkerContext<B> = ProviderJsonlWorkerContext<B>;
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "cursor.session";
-const DIVERGENT_COPY_ANCHOR_NAMESPACE: &str = "cursor.divergent-transcript-copy.v1";
+const ALTERNATIVE_ANCHOR_NAMESPACE: &str = "cursor.transcript-alternative.v1";
 const NATIVE_SESSION_NAMESPACE: &str = "cursor.session";
 const NATIVE_EVENT_LOGICAL_KIND: &str = "cursor.logical-event-v3";
 const LOGICAL_SESSION_KIND: &str = "cursor-session";
@@ -192,6 +197,14 @@ where
     }
 
     fn discover(&self, root: &Path) -> Result<ProviderJsonlInventory> {
+        self.discover_with_base(root, &[])
+    }
+
+    fn discover_with_base(
+        &self,
+        root: &Path,
+        bases: &[CertifiedSource],
+    ) -> Result<ProviderJsonlInventory> {
         match fs::symlink_metadata(root) {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -228,14 +241,94 @@ where
                 .or_default()
                 .push(transcript);
         }
+        let bases_by_descriptor = std::cell::OnceCell::new();
+        let prior_alternative_sessions = bases
+            .iter()
+            .filter_map(|base| alternative_native_session(base.observation().source()))
+            .collect::<BTreeSet<_>>();
         let mut leaves = Vec::with_capacity(native_sessions.len());
-        let mut rejected_leaves = Vec::new();
         let mut exact_dependencies = Vec::new();
         for (native_session_id, mut routes) in native_sessions {
             routes.sort_by(|left, right| left.path().cmp(right.path()));
             let duplicate_selection = (routes.len() > 1)
                 .then(|| select_cursor_transcript(&routes))
                 .transpose()?;
+            let source = source_key_scoped(&native_session_id, self.source_anchor_scope)?;
+            let preserve = duplicate_selection
+                .as_ref()
+                .is_some_and(|selection| !selection.divergent_indices.is_empty())
+                || prior_alternative_sessions.contains(native_session_id.as_str());
+            if preserve {
+                // A base chooses only which physical view keeps an existing
+                // canonical identity. Current bytes/proofs admit every view.
+                let canonical_path = bases_by_descriptor
+                    .get_or_init(|| {
+                        bases
+                            .iter()
+                            .map(|base| {
+                                (base.observation().source().exact_descriptor_digest(), base)
+                            })
+                            .collect::<BTreeMap<_, _>>()
+                    })
+                    .get(&source.exact_descriptor_digest())
+                    .filter(|base| base.observation().source().exact_descriptor_eq(&source))
+                    .map(|base| self.base_source_path(base))
+                    .transpose()?;
+                let canonical_index = canonical_path
+                    .as_deref()
+                    .and_then(|path| prior_cursor_route_index(path, &routes));
+                for (index, route) in routes.iter().enumerate() {
+                    let relative = route.authority_relative_path();
+                    let alternative_relative_path =
+                        (Some(index) != canonical_index).then(|| relative.to_path_buf());
+                    let route_source = if alternative_relative_path.is_some() {
+                        alternative_source_key(
+                            &native_session_id,
+                            relative,
+                            self.source_anchor_scope,
+                        )?
+                    } else {
+                        source.clone()
+                    };
+                    let binding = CursorBinding {
+                        native_session_id: native_session_id.clone(),
+                        logical_transcript_sha256: None,
+                        selected_route_sha256: cursor_route_sha256(route.path()),
+                        alias_route_sha256: Vec::new(),
+                        alternative_relative_path,
+                    };
+                    let opened = authority.open_file(relative)?;
+                    let current = ctx_history_provider_runtime::observe_opened_file_allow_append(
+                        route.path(),
+                        &opened,
+                    )?;
+                    let observation = duplicate_selection.as_ref().map_or_else(
+                        || current.clone(),
+                        |selection| selection.route_observations[index].clone(),
+                    );
+                    if !observation.admits_frozen_prefix_in(&current) {
+                        return Err(CaptureError::SourceChangedDuringCapture);
+                    }
+                    if let Some(selection) = &duplicate_selection {
+                        exact_dependencies.push(JsonlFamilyTerminalProof::frozen_prefix_path(
+                            route.path().to_path_buf(),
+                            Arc::clone(&authority),
+                            relative.to_path_buf(),
+                            observation.clone(),
+                            selection.route_physical_sha256[index],
+                        )?);
+                    }
+                    leaves.push(ProviderJsonlLeaf::bind_frozen_observed(
+                        route_source,
+                        route.path().to_path_buf(),
+                        Arc::clone(&authority),
+                        relative.to_path_buf(),
+                        TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?,
+                        observation,
+                    ));
+                }
+                continue;
+            }
             let mut route_proofs = Vec::new();
             if let Some(selection) = &duplicate_selection {
                 for (index, route) in routes.iter().enumerate() {
@@ -258,7 +351,6 @@ where
                     route_proofs.push(proof);
                 }
             }
-            let source = source_key_scoped(&native_session_id, self.source_anchor_scope)?;
             let selected_index = duplicate_selection
                 .as_ref()
                 .map_or(0, |selection| selection.selected_index);
@@ -271,45 +363,14 @@ where
                 .filter(|(index, _)| *index != selected_index)
                 .map(|(_, route)| cursor_route_sha256(route.path()))
                 .collect::<Vec<_>>();
-            if let Some(selection) = duplicate_selection.as_ref() {
-                for index in selection.divergent_indices.iter().copied() {
-                    let route = &routes[index];
-                    let route_sha256 = cursor_route_sha256(route.path());
-                    let proof = CursorDivergentAliasProof {
-                        schema_version: 1,
-                        native_session_id: native_session_id.clone(),
-                        selected_signature: selection.selected_signature,
-                        rejected_route_sha256: route_sha256,
-                    };
-                    rejected_leaves.push(
-                        JsonlFamilyRejectedLeaf::bind_observed(
-                            route.path().to_path_buf(),
-                            route.authority_relative_path().to_path_buf(),
-                            selection.route_observations[index].clone(),
-                            TypedKey::bytes(serde_json::to_vec(&proof)?).map_err(contract)?,
-                            0,
-                        )
-                        .with_logical_source_failure(
-                            divergent_copy_source_key(route_sha256, self.source_anchor_scope)?,
-                            "Cursor transcript copy diverges from another copy of the same session; ctx retained the deterministic copy with the most valid history and did not merge this alternative",
-                        ),
-                    );
-                }
-            }
             let selected = routes.remove(selected_index);
-            exact_dependencies.extend(route_proofs.into_iter().enumerate().filter_map(
-                |(index, proof)| {
-                    (duplicate_selection
-                        .as_ref()
-                        .is_none_or(|selection| !selection.divergent_indices.contains(&index)))
-                    .then_some(proof)
-                },
-            ));
+            exact_dependencies.extend(route_proofs);
             let binding = CursorBinding {
                 native_session_id,
                 logical_transcript_sha256,
                 selected_route_sha256: cursor_route_sha256(selected.path()),
                 alias_route_sha256,
+                alternative_relative_path: None,
             };
             let opened = authority.open_file(selected.authority_relative_path())?;
             let current = ctx_history_provider_runtime::observe_opened_file_allow_append(
@@ -339,14 +400,10 @@ where
                     .map(|selection| &selection.selected_observation),
             )?);
         }
-        Ok(ProviderJsonlInventory::present_with_rejected(
-            self.provider(),
-            root,
-            authority,
-            leaves,
-            rejected_leaves,
-        )?
-        .with_exact_dependencies(exact_dependencies))
+        Ok(
+            ProviderJsonlInventory::present(self.provider(), root, authority, leaves)?
+                .with_exact_dependencies(exact_dependencies),
+        )
     }
 
     fn projector_with_provider_checkpoint(
@@ -396,20 +453,73 @@ fn authenticate_selected_cursor_leaf(
     Ok(leaf)
 }
 
-fn divergent_copy_source_key(
-    route_sha256: [u8; 32],
+fn alternative_source_key(
+    native_session_id: &str,
+    relative_path: &Path,
     scope: SourceAnchorScope,
 ) -> Result<SourceKey> {
+    if relative_path.as_os_str().is_empty()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(contract(
+            "Cursor alternative provenance must be root-relative",
+        ));
+    }
     SourceKey::derive_provider_native_scoped(
         CaptureProvider::Cursor.as_str(),
         CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
         SOURCE_SCHEMA_VARIANT,
         1,
-        DIVERGENT_COPY_ANCHOR_NAMESPACE,
-        TypedKey::bytes(route_sha256.to_vec()).map_err(contract)?,
+        ALTERNATIVE_ANCHOR_NAMESPACE,
+        TypedKey::composite(vec![
+            TypedKey::utf8(native_session_id).map_err(contract)?,
+            TypedKey::bytes(relative_path.as_os_str().as_encoded_bytes().to_vec())
+                .map_err(contract)?,
+        ])
+        .map_err(contract)?,
         scope,
     )
     .map_err(contract)
+}
+
+fn alternative_native_session(source: &SourceKey) -> Option<&str> {
+    let SourceAnchor::ProviderNative { namespace, key } = source.anchor() else {
+        return None;
+    };
+    if namespace != ALTERNATIVE_ANCHOR_NAMESPACE {
+        return None;
+    }
+    let TypedKey::Composite(parts) = key else {
+        return None;
+    };
+    let parts = match parts.as_slice() {
+        [TypedKey::Bytes(_), TypedKey::Composite(scoped)] => scoped.as_slice(),
+        parts => parts,
+    };
+    match parts {
+        [TypedKey::Utf8(native), TypedKey::Bytes(_)] => Some(native),
+        _ => None,
+    }
+}
+
+fn prior_cursor_route_index(
+    base_path: &Path,
+    routes: &[super::layout::CursorTranscriptPath],
+) -> Option<usize> {
+    if let Some(index) = routes.iter().position(|route| route.path() == base_path) {
+        return Some(index);
+    }
+    // Named-root relocation keeps relative provenance. Never resolve an
+    // ambiguous suffix, and never transfer a deleted canonical to a sibling.
+    let mut matches = routes
+        .iter()
+        .enumerate()
+        .filter(|(_, route)| base_path.ends_with(route.authority_relative_path()))
+        .map(|(index, _)| index);
+    let index = matches.next()?;
+    matches.next().is_none().then_some(index)
 }
 
 struct CursorProjector<B: ProviderRuntimeBinding> {

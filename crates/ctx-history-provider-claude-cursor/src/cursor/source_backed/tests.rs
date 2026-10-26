@@ -129,6 +129,7 @@ fn cursor_duplicate_selection_authenticates_the_selected_file_observation() {
             .filter(|(index, _)| *index != selection.selected_index)
             .map(|(_, route)| cursor_route_sha256(route.path()))
             .collect(),
+        alternative_relative_path: None,
     };
 
     fs::write(
@@ -233,6 +234,122 @@ fn source_and_session_identities_are_root_scoped() {
         session_id(&first, "same-session").unwrap(),
         session_id(&second, "same-session").unwrap()
     );
+}
+
+#[test]
+fn cursor_alternative_identity_binds_native_session_relative_route_and_root_scope() {
+    let relative = Path::new("a/agent-transcripts/session/session.jsonl");
+    let scope = SourceAnchorScope::Lineage([7; 32]);
+    let first = alternative_source_key("session", relative, scope).unwrap();
+    assert_eq!(alternative_native_session(&first), Some("session"));
+    assert_eq!(
+        alternative_source_key("session", relative, scope).unwrap(),
+        first
+    );
+    assert_ne!(
+        alternative_source_key("other", relative, scope).unwrap(),
+        first
+    );
+    assert_ne!(
+        alternative_source_key("session", relative, SourceAnchorScope::Unqualified).unwrap(),
+        first
+    );
+    assert_ne!(
+        alternative_source_key(
+            "session",
+            Path::new("b/agent-transcripts/session/session.jsonl"),
+            scope
+        )
+        .unwrap(),
+        first
+    );
+    assert!(
+        alternative_source_key("session", Path::new("/absolute/session.jsonl"), scope).is_err()
+    );
+    assert!(alternative_source_key("session", Path::new("../session.jsonl"), scope).is_err());
+}
+
+#[test]
+fn cursor_alternative_binding_rejects_source_descriptor_and_physical_route_substitution() {
+    let (_temp, routes) = duplicate_cursor_routes(&[
+        ("a", vec![cursor_record("2026-06-24T12:00:00Z", "first")]),
+        ("b", vec![cursor_record("2026-06-24T12:00:00Z", "other")]),
+    ]);
+    let route = &routes[0];
+    let relative = route.authority_relative_path();
+    let source = alternative_source_key(
+        route.native_session_id(),
+        relative,
+        SourceAnchorScope::Unqualified,
+    )
+    .unwrap();
+    let binding = CursorBinding {
+        native_session_id: route.native_session_id().to_owned(),
+        logical_transcript_sha256: None,
+        selected_route_sha256: cursor_route_sha256(route.path()),
+        alias_route_sha256: Vec::new(),
+        alternative_relative_path: Some(relative.to_path_buf()),
+    };
+    let leaf = ProviderJsonlLeaf::observe(
+        source,
+        route.path().to_path_buf(),
+        Arc::new(route.authority().clone()),
+        relative.to_path_buf(),
+        TypedKey::bytes(serde_json::to_vec(&binding).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let opened = route.authority().open_file(relative).unwrap();
+    validate_binding(&leaf, &binding, &opened, SourceAnchorScope::Unqualified).unwrap();
+    let mut forged = binding.clone();
+    forged.alternative_relative_path = Some(routes[1].authority_relative_path().to_path_buf());
+    assert!(validate_binding(&leaf, &forged, &opened, SourceAnchorScope::Unqualified).is_err());
+    let mut forged = binding.clone();
+    forged.alternative_relative_path = None;
+    assert!(validate_binding(&leaf, &forged, &opened, SourceAnchorScope::Unqualified).is_err());
+    let mut forged = binding.clone();
+    forged.native_session_id = "other-session".to_owned();
+    assert!(validate_binding(&leaf, &forged, &opened, SourceAnchorScope::Unqualified).is_err());
+    let mut forged = binding.clone();
+    forged.selected_route_sha256 = cursor_route_sha256(routes[1].path());
+    assert!(validate_binding(&leaf, &forged, &opened, SourceAnchorScope::Unqualified).is_err());
+    assert!(validate_binding(
+        &leaf,
+        &binding,
+        &opened,
+        SourceAnchorScope::Lineage([7; 32])
+    )
+    .is_err());
+}
+
+#[test]
+fn cursor_fork_admission_keeps_each_raw_body_and_path_proof_exact() {
+    let (_temp, routes) = duplicate_cursor_routes(&[
+        ("a", vec![cursor_record("2026-06-24T12:00:00Z", "first")]),
+        ("b", vec![cursor_record("2026-06-24T12:00:00Z", "other")]),
+    ]);
+    let selection = select_cursor_transcript(&routes).unwrap();
+    assert!(!selection.divergent_indices.is_empty());
+    let route = &routes[1];
+    let proof = JsonlFamilyTerminalProof::frozen_prefix_path(
+        route.path().to_path_buf(),
+        Arc::new(route.authority().clone()),
+        route.authority_relative_path().to_path_buf(),
+        selection.route_observations[1].clone(),
+        selection.route_physical_sha256[1],
+    )
+    .unwrap();
+    fs::write(
+        route.path(),
+        [
+            cursor_record("2026-06-24T12:00:00Z", "edited"),
+            cursor_record("2026-06-24T12:00:01Z", "append"),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    assert!(proof.revalidate_dependency().is_err());
+    fs::remove_file(route.path()).unwrap();
+    assert!(proof.revalidate_dependency().is_err());
 }
 
 fn event(event_type: EventType, body: CursorEventBody) -> CursorNativeEvent {

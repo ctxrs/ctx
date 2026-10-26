@@ -949,3 +949,5 @@ fn direct_append_completed_tail_retains_terminal_nul_framing() {
     );
     assert_eq!(prefix_reads.bytes(), 0);
 }
+#[path = "tests/mutable_first_record.rs"]
+mod mutable_first_record;

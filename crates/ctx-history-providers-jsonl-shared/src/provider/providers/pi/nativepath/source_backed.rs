@@ -35,10 +35,10 @@ use crate::{
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::{
             family::jsonl::{
-                observe_opened_file, probe_records_until, JsonlFamilyAdapter,
-                JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+                observe_opened_file_allow_append, probe_records_until_with_mutable_first_record,
+                JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
                 JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
-                JsonlFileObservation, JsonlRecordRef,
+                JsonlFileObservation, JsonlMutableFirstRecord, JsonlRecordRef,
             },
             FallbackEventIdentityState,
         },
@@ -58,7 +58,7 @@ const NATIVE_EVENT_NAMESPACE: &str = "pi.entry";
 const LOGICAL_SESSION_KIND: &str = "pi-session";
 const LOGICAL_EVENT_KIND: &str = "pi-event";
 const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
-const PARSER_REVISION: &str = "pi-shared-jsonl-v11-omp-parent-lineage";
+const PARSER_REVISION: &str = "pi-shared-jsonl-v12-omp-mutable-title-slot";
 const EVENT_IDENTITY_REVISION: &str = "pi-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.pi.fallback-event-fingerprint.v1\0";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
@@ -220,7 +220,9 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
         for path in paths {
             let relative_path = relative_to_authority(&authority, &path)?;
             let opened = Arc::new(authority.open_file(&relative_path)?);
-            let observation = observe_opened_file(&path, opened.as_ref())?;
+            // Full metadata is the binding-cache key. Only object identity is
+            // fenced here; the probe and terminal proof authenticate bytes.
+            let observation = observe_opened_file_allow_append(&path, opened.as_ref())?;
             let (binding, identity_probe, leading_rejections) = match previous.get(&path) {
                 Some(cached) if cached.observation == observation => (
                     cached.binding.clone(),
@@ -229,10 +231,11 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
                 ),
                 _ => {
                     let mut leading_rejection_details = Vec::new();
-                    let (binding, probe) = probe_records_until(
+                    let (binding, probe) = probe_records_until_with_mutable_first_record(
                         &path,
                         &opened,
                         MAX_HEADER_PROBE_RECORDS,
+                        Some(JsonlMutableFirstRecord::OmpTitleSlotV1),
                         |record| -> Result<Option<Binding>> {
                             let Some(mut binding) =
                                 parse_header_binding(record, self.source_anchor_scope)?
@@ -693,21 +696,8 @@ fn is_omp_filename_timestamp(timestamp: &str) -> bool {
 }
 
 fn is_omp_title_slot(record: JsonlRecordRef<'_>) -> bool {
-    if record.evidence().physical_ordinal() != 0 {
-        return false;
-    }
-    let Ok(value) = serde_json::from_slice::<Value>(record.bytes()) else {
-        return false;
-    };
-    value.get("type").and_then(Value::as_str) == Some("title")
-        && value.get("v").and_then(Value::as_f64) == Some(1.0)
-        && value.get("title").is_some_and(Value::is_string)
-        && value.get("updatedAt").is_some_and(Value::is_string)
-        && value.get("pad").is_some_and(Value::is_string)
-        && match value.get("source") {
-            None => true,
-            Some(source) => matches!(source.as_str(), Some("auto" | "user")),
-        }
+    record.evidence().physical_ordinal() == 0
+        && JsonlMutableFirstRecord::OmpTitleSlotV1.validates_record(record.bytes())
 }
 
 fn projected_body(value: &Value, event_type: EventType) -> String {

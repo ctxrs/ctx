@@ -1025,7 +1025,6 @@ fn pi_omp_title_slot_cold_repeat_and_rewrite_are_rejection_free() {
     write_omp_pi_session(&transcript, "bravo", "stable OMP message");
     let rewritten = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
     assert!(rewritten.failed_routes.is_empty());
-    assert_ne!(rewritten.commit.generation_id, cold_generation);
     assert_eq!(rewritten.commit.indexed_documents, 1);
     assert_eq!(rewritten.sources[0].counts().rejected_records, 0);
     assert_eq!(rewritten.sources[0].counts().ignored_records, 2);
@@ -1356,3 +1355,6 @@ fn pi_declared_missing_parent_keeps_normalized_direct_lineage() {
         record.content.normalized_body.as_deref() == Some("controlled parent prompt")
     }));
 }
+
+#[path = "pi_omp_title_slot.rs"]
+mod pi_omp_title_slot;
