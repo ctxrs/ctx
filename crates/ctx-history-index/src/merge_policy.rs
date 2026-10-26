@@ -1,4 +1,10 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use tantivy::{
     index::SegmentMeta,
@@ -46,6 +52,31 @@ impl MergePolicy for LexicalMergePolicy {
     }
 }
 
+#[derive(Debug)]
+struct DeferredLexicalMergePolicy {
+    enabled: Arc<AtomicBool>,
+    terminal_policy: LexicalMergePolicy,
+}
+
+impl MergePolicy for DeferredLexicalMergePolicy {
+    fn compute_merge_candidates(&self, segments: &[SegmentMeta]) -> Vec<MergeCandidate> {
+        if self.enabled.load(Ordering::Acquire) {
+            self.terminal_policy.compute_merge_candidates(segments)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+pub(super) fn staging_merge_policy() -> (Box<dyn MergePolicy>, Arc<AtomicBool>) {
+    let enabled = Arc::new(AtomicBool::new(false));
+    let policy = DeferredLexicalMergePolicy {
+        enabled: Arc::clone(&enabled),
+        terminal_policy: LexicalMergePolicy::default(),
+    };
+    (Box::new(policy), enabled)
+}
+
 pub(crate) fn deletion_density_exceeds_limit(segment: &SegmentMeta) -> bool {
     u64::from(segment.num_deleted_docs()) * LEXICAL_DELETED_DOCUMENT_RECLAIM_DENOMINATOR
         > u64::from(segment.max_doc()) * LEXICAL_DELETED_DOCUMENT_RECLAIM_NUMERATOR
@@ -66,6 +97,30 @@ mod tests {
         index
             .new_segment_meta(SegmentId::generate_random(), max_doc)
             .with_delete_meta(deleted, 1)
+    }
+
+    #[test]
+    fn terminal_activation_cannot_enable_an_abandoned_updater_epoch() {
+        let index = Index::create_in_ram(Schema::builder().build());
+        let segments = (0..LEXICAL_SEGMENT_MERGE_FAN_IN)
+            .map(|_| segment(&index, 1, 0))
+            .collect::<Vec<_>>();
+        let (abandoned_policy, _abandoned_activation) = staging_merge_policy();
+        let (terminal_policy, terminal_activation) = staging_merge_policy();
+        assert!(abandoned_policy
+            .compute_merge_candidates(&segments)
+            .is_empty());
+        assert!(terminal_policy
+            .compute_merge_candidates(&segments)
+            .is_empty());
+        terminal_activation.store(true, Ordering::Release);
+        assert!(!terminal_policy
+            .compute_merge_candidates(&segments)
+            .is_empty());
+        // A queued task on the killed updater must remain unable to start a merge.
+        assert!(abandoned_policy
+            .compute_merge_candidates(&segments)
+            .is_empty());
     }
 
     #[test]

@@ -420,6 +420,12 @@ refresh waits for any triggered merge before publication completes. Thus every
 published active segment has at most 25% deletions, while exact no-op refreshes
 perform no writer or merge work.
 
+ctx suppresses merges while route or cohort staging can still roll back.
+Each replacement writer gets a fresh disabled merge control; abandoned updaters
+cannot reactivate it. After all abortable checks, ctx enables only the terminal
+writer immediately before commit. Publication waits for that writer's merges
+to finish.
+
 Generation candidates hard-link unchanged base segments when the filesystem
 supports it. For threshold planning, let `F` be the physical footprint of the
 same live documents in a deletion-free generation. Assume stored bytes scale

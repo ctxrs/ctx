@@ -519,7 +519,9 @@ impl GenerationWriter {
             })?;
         if let Some(writer) = self.writer.as_mut() {
             writer.rollback()?;
-            writer.set_merge_policy(Box::new(LexicalMergePolicy::default()));
+            let (policy, activation) = merge_policy::staging_merge_policy();
+            writer.set_merge_policy(policy);
+            self.merge_activation = Some(activation);
         }
         self.complete_inventories = checkpoint.complete_inventories;
         self.source_route_plan = Some(checkpoint.source_route_plan);
@@ -558,7 +560,9 @@ impl GenerationWriter {
         })?;
         if let Some(writer) = self.writer.as_mut() {
             writer.rollback()?;
-            writer.set_merge_policy(Box::new(LexicalMergePolicy::default()));
+            let (policy, activation) = merge_policy::staging_merge_policy();
+            writer.set_merge_policy(policy);
+            self.merge_activation = Some(activation);
         }
         self.complete_inventories = checkpoint.complete_inventories;
         self.source_route_plan = Some(checkpoint.source_route_plan);

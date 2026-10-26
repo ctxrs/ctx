@@ -136,7 +136,11 @@ impl GenerationWriter {
                 return Err(IndexError::ConcurrentGenerationChange);
             }
 
-            writer.set_merge_policy(Box::new(LexicalMergePolicy::default()));
+            // Rollback replaces Tantivy's updater without joining its merges.
+            // Only the terminal writer may start merge work.
+            let (policy, activation) = merge_policy::staging_merge_policy();
+            writer.set_merge_policy(policy);
+            self.merge_activation = Some(activation);
             let _ = writer.garbage_collect_files().wait()?;
             self.writer = Some(writer);
         }
@@ -344,6 +348,13 @@ impl GenerationWriter {
         let generation_id = prepared_manifest.generation_id().to_owned();
 
         self.apply_route_deletions()?;
+        let merge_activation = self
+            .merge_activation
+            .as_ref()
+            .ok_or(IndexError::WriterInvariant(
+                "terminal merge activation is missing its lazy writer",
+            ))?
+            .clone();
         let candidate_path = self.candidate_path()?;
         let previous_generation_id = self
             .base_publication
@@ -414,6 +425,9 @@ impl GenerationWriter {
             hook(&candidate_path);
         }
         report_progress(PublicationStage::Merging)?;
+        // Enable only the terminal epoch. Killed staging epochs retain their
+        // own disabled controls.
+        merge_activation.store(true, std::sync::atomic::Ordering::Release);
         let commit_result = prepared.commit();
         #[cfg(test)]
         let commit_result = if self.return_commit_error_after_visibility {
