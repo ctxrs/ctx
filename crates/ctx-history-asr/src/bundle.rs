@@ -405,7 +405,8 @@ pub fn export(options: &Options) -> Result<Summary> {
             let subagent = source_header["agentId"].as_str() == Some(session.as_str());
             if provider == Provider::Codex {
                 spool.db.execute_batch(
-                    "CREATE TABLE codex_active(pos INTEGER PRIMARY KEY,record TEXT);",
+                    "CREATE TABLE codex_active(pos INTEGER PRIMARY KEY,record TEXT);
+                     CREATE INDEX codex_active_records ON codex_active(record);",
                 )?;
             }
             let mut pos = 0;
