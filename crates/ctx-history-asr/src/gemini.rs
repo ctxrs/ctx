@@ -4,7 +4,7 @@ use crate::{
     spool::Spool,
     Provider, Result,
 };
-use ruopencode_source::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 pub(crate) fn segment(spool: &Spool) -> Result<()> {

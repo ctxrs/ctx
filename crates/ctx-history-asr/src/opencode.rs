@@ -7,7 +7,7 @@ use crate::{
     opencode_source::millis,
     Result,
 };
-use ruopencode_source::OptionalExtension;
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 pub(crate) fn convert(s: &mut Spool, w: &mut Writer, n: &Value, cwd: Option<&str>) -> Result<()> {

@@ -1,6 +1,7 @@
 //! Native history to Agent Session Record 0.1. No Core store or network access.
 mod antigravity;
 mod batch8;
+mod batch10;
 mod bundle;
 mod claude;
 mod codex;
@@ -45,7 +46,7 @@ pub enum Error {
     #[error("ASR I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("ASR index: {0}")]
-    Sql(#[from] ruopencode_source::Error),
+    Sql(#[from] rusqlite::Error),
     #[error("ASR JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("{0}")]
@@ -99,6 +100,18 @@ impl Provider {
 impl Provider {
     pub(crate) fn sqlite(self) -> bool {
         matches!(self, Self::Crush | Self::Goose | Self::Lingma | Self::Warp)
+    CodeBuddy,
+    Continue,
+    OpenHands,
+    Auggie,
+    RovoDev,
+}
+impl Provider {
+    pub(crate) fn batch10(self) -> bool {
+        matches!(
+            self,
+            Self::CodeBuddy | Self::Continue | Self::OpenHands | Self::Auggie | Self::RovoDev
+        )
     }
     pub(crate) fn from_agent(agent: &str) -> Option<Self> {
         [
@@ -122,6 +135,14 @@ impl Provider {
             self,
             Self::Firebender | Self::ForgeCode | Self::DeepAgents | Self::Devin
         )
+            Self::CodeBuddy,
+            Self::Continue,
+            Self::OpenHands,
+            Self::Auggie,
+            Self::RovoDev,
+        ]
+        .into_iter()
+        .find(|p| p.agent() == agent)
     }
     pub fn agent(self) -> &'static str {
         match self {
@@ -160,6 +181,11 @@ impl Provider {
             Self::Devin => "ai.cognition.devin",
             Self::OpenClaw => "openclaw",
             Self::NanoClaw => "dev.nanoclaw",
+            Self::CodeBuddy => "com.tencent.codebuddy",
+            Self::Continue => "dev.continue",
+            Self::OpenHands => "openhands",
+            Self::Auggie => "auggie",
+            Self::RovoDev => "com.atlassian.rovodev",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
@@ -197,6 +223,11 @@ impl Provider {
             Self::Devin => "ai.cognition.devin",
             Self::OpenClaw => "ai.openclaw",
             Self::NanoClaw => "dev.nanoclaw",
+            Self::CodeBuddy => "com.tencent.codebuddy",
+            Self::Continue => "dev.continue",
+            Self::OpenHands => "dev.all-hands.openhands",
+            Self::Auggie => "com.augmentcode.auggie",
+            Self::RovoDev => "com.atlassian.rovodev",
         }
     }
     pub(crate) fn format(self) -> &'static str {
@@ -228,6 +259,11 @@ impl Provider {
             Self::ForgeCode => "forgecode-sqlite",
             Self::DeepAgents => "deepagents-langgraph-sqlite",
             Self::Devin => "devin-cli-sessions-sqlite",
+            Self::CodeBuddy => "codebuddy-history",
+            Self::Continue => "continue-session-json",
+            Self::OpenHands => "openhands-events",
+            Self::Auggie => "auggie-session-json",
+            Self::RovoDev => "rovodev-session-context",
         }
     }
     pub fn is_sqlite(self) -> bool {

@@ -1,5 +1,5 @@
 use crate::{source, spool::Spool, Provider, Result};
-use ruopencode_source::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::{
     io::{Seek, Write},

@@ -1,6 +1,6 @@
 //! Authored native-schema cases, not harness captures.
 use super::*;
-use ruopencode_source::{params, Connection};
+use rusqlite::{params, Connection};
 fn database(provider: Provider) -> (tempfile::TempDir, Options, Connection) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("native.db");

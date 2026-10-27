@@ -4,7 +4,7 @@ use crate::{
     spool::Spool,
     tree, Provider, Result,
 };
-use ruopencode_source::OptionalExtension;
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 pub(crate) fn header(spool: &mut Spool, h: &mut Value) -> Result<()> {

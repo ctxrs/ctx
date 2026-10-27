@@ -1,5 +1,5 @@
 use crate::{records::Writer, spool::Spool, Result};
-use ruopencode_source::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 pub(crate) fn native_parent(spool: &Spool, source: &Value, field: &str) -> Result<Option<String>> {

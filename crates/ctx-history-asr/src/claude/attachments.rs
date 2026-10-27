@@ -26,7 +26,7 @@ pub(super) fn summary(spool: &Spool, writer: &mut Writer, v: &Value) -> Result<(
                 found = true;
                 break;
             }
-            use ruopencode_source::OptionalExtension;
+            use rusqlite::OptionalExtension;
             tip = spool
                 .db
                 .query_row("SELECT parent FROM structure WHERE id=?1", [node], |r| {

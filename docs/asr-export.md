@@ -207,6 +207,34 @@ Firebender's fixture is schema-derived, Deep Agents' fixture was written by
 AsyncSqliteSaver, and Devin's durable background heads have only authored
 coverage. These are conversion capabilities, not current-harness certification.
 
+## Document and event-store converters
+
+Select these converters with `--provider codebuddy`, `continue`, `openhands`,
+`auggie` or `rovodev`. CodeBuddy accepts CLI JSONL and IDE session catalogs with
+message files; Continue accepts session history JSON; Auggie accepts exchange
+snapshots; Rovo Dev accepts `session_context.json` with optional `metadata.json`;
+OpenHands accepts SDK conversation directories or individual event paths.
+Legacy `v1_conversations` trees are acquired, but unrecognized event variants
+remain vendor records. Native format coverage is limited to the shapes exercised
+by the converter tests and available fixtures; it is not a claim of complete
+coverage of every producer release.
+
+Changed documents and event-store captures produce a new immutable stream with
+`observedAt`. Native message/event IDs keep record identities across captures;
+source positions without stable IDs carry `idScope: "capture"`. Mutable session
+metadata and state snapshots follow the recorded history. Independent sources
+with a colliding session ID require separate bundles. Unknown tool rendering,
+model labels and lineage are retained as native metadata without inferred links.
+OpenHands condensation replaces individual forgotten entries; it never assumes
+that the forgotten set is a prefix.
+
+Document arrays are read one item at a time. The size limit applies to each
+item and retained document metadata; an oversized document value stops that
+capture without publishing a partial session. Large image/audio content moves
+to binary blobs, and unsafe JSON numbers remain exact JSON text. Whole native
+items accompany projections under provider metadata keys; unknown variants are
+retained with declared semantic loss.
+
 ## Adding a converter
 
 `crates/ctx-history-asr` owns ASR semantics, output identity and bundle publication.
@@ -248,7 +276,7 @@ reconstruct native facts from rendered Core text.
 
 ```sh
 scripts/bazelw test //crates/ctx-history-asr:unit_tests --config=dev-linux
-node /path/to/agent-session-record/tools/validator/bin/asr-validate.js ./asr --format json
+node /path/to/agent-session-record/tools/validator/bin/asr-validate.js ./asr --streaming --format json
 ```
 
 The ASR checkout is an optional external conformance oracle, not a dependency of

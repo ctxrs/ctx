@@ -7,7 +7,7 @@ use crate::{
     Error, Options, Provider, Result, Summary,
 };
 use fs2::FileExt;
-use ruopencode_source::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -65,9 +65,17 @@ pub fn export(options: &Options) -> Result<Summary> {
     crate::sqlite::namespace(&db, options.namespace.as_deref())?;
     let mut summary = Summary::default();
     let staging = tempfile::tempdir_in(&options.out)?;
+    let mut seen_inputs = std::collections::BTreeSet::new();
     for input in &options.inputs {
+        let normalized = crate::Input {
+            provider: input.provider,
+            path: crate::batch10::source::root(input.provider, &input.path),
+        };
+        if !seen_inputs.insert((normalized.provider.agent(), normalized.path.clone())) {
+            continue;
+        }
         source::visit(
-            input,
+            &normalized,
             options.max_record_bytes,
             staging.path(),
             options.namespace.as_deref(),
@@ -140,6 +148,16 @@ pub fn export(options: &Options) -> Result<Summary> {
             .into_iter()
             .find(|p| p.agent() == agent)
             .ok_or_else(|| Error::Invalid("unknown ASR provider".into()))?;
+        if provider.batch10() {
+            let count: u64 = db.query_row(
+                "SELECT count(*) FROM sources WHERE agent=?1 AND session=?2",
+                params![agent, session],
+                |r| r.get(0),
+            )?;
+            if count > 1 {
+                return Err(Error::Invalid("multiple native sources share a session ID; export each source to a separate bundle".into()));
+            }
+        }
         let mut hash = Sha256::new();
         hash.update(REVISION);
         if provider.sqlite() {
@@ -294,6 +312,7 @@ pub fn export(options: &Options) -> Result<Summary> {
                 writer.bundle = Some(options.out.clone());
             }
             let mut stream_header = header::make(provider, &session, &source_header);
+            if provider.batch10() { crate::batch10::prepare(&mut spool)?; }
             if provider.sqlite() {
                 crate::sqlite::capture_header(
                     &mut stream_header,
@@ -380,6 +399,7 @@ pub fn export(options: &Options) -> Result<Summary> {
                     Provider::OpenClaw | Provider::NanoClaw => {
                         crate::native::convert(&mut spool, &mut writer, &mut stream_header, &value)?
                     }
+                    Provider::CodeBuddy | Provider::Continue | Provider::OpenHands | Provider::Auggie | Provider::RovoDev => crate::batch10::convert(&mut spool, &mut writer, &value)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();

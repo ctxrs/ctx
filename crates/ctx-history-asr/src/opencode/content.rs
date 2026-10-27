@@ -47,7 +47,7 @@ pub(super) fn fold(s: &mut Spool, w: &Writer, r: &mut Value, id: &str, d: &Value
     let mut pos = 0;
     let mut small = Vec::new();
     loop {
-        let next:Option<u64>=s.db.query_row("SELECT pos FROM rows WHERE response=?1 AND kind='part' AND pos>?2 ORDER BY pos LIMIT 1",ruopencode_source::params![id,pos],|r|r.get(0)).optional()?;
+        let next:Option<u64>=s.db.query_row("SELECT pos FROM rows WHERE response=?1 AND kind='part' AND pos>?2 ORDER BY pos LIMIT 1",rusqlite::params![id,pos],|r|r.get(0)).optional()?;
         let Some(next) = next else {
             break;
         };

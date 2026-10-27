@@ -13,7 +13,7 @@ use crate::{
     spool::Spool,
     Provider, Result,
 };
-use ruopencode_source::params;
+use rusqlite::params;
 use serde_json::{json, Value};
 
 pub(crate) fn convert(

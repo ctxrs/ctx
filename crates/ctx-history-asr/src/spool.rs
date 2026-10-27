@@ -1,5 +1,6 @@
+mod batch10;
 use crate::{source, Provider, Result};
-use ruopencode_source::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{
     fs::File,
@@ -86,6 +87,9 @@ impl Spool {
     }
         if provider.journal() {
             return crate::journals::ingest::ingest(self, path, provider, segment);
+    }
+        if provider.batch10() {
+            return crate::batch10::source::ingest(self, path, provider);
         }
         let mut reader = source::reader(path)?;
         let mut bytes = Vec::new();

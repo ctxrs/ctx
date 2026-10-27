@@ -6,7 +6,7 @@ use crate::{
     spool::Spool,
     Input, Provider, Result,
 };
-use ruopencode_source::params;
+use rusqlite::params;
 use serde_json::{json, Value};
 use std::{
     fs,

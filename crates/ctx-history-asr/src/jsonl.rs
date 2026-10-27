@@ -4,7 +4,7 @@ use crate::{
     spool::Spool,
     Provider, Result,
 };
-use ruopencode_source::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 pub(crate) fn session_id(provider: Provider, v: &Value) -> Option<String> {
@@ -116,7 +116,7 @@ pub(crate) fn index(spool: &Spool, provider: Provider, v: &Value, pos: u64) -> R
     Ok(())
 }
 pub(crate) fn resolve(
-    db: &ruopencode_source::Connection,
+    db: &rusqlite::Connection,
     provider: Provider,
     header: &mut Value,
 ) -> Result<()> {

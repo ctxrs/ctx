@@ -77,7 +77,7 @@ pub(crate) fn inspect(
     if input.provider == Provider::Copilot {
         // Embedded child event streams share the journal, not the conversation.
         let temp = tempfile::tempdir()?;
-        let ids = ruopencode_source::Connection::open(temp.path().join("agents.sqlite"))?;
+        let ids = rusqlite::Connection::open(temp.path().join("agents.sqlite"))?;
         ids.execute_batch(
             "PRAGMA cache_size=-1024; CREATE TABLE agents(id TEXT PRIMARY KEY); BEGIN;",
         )?;

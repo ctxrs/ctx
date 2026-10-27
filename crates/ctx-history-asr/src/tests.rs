@@ -100,3 +100,4 @@ mod opencode_source;
 mod sqlite;
 mod warp;
 mod mixed;
+mod batch10;
