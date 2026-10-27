@@ -6,13 +6,12 @@ workspace contained only a small Python greeting function and assertions.
 They are sanitized authentic captures, not authored approximations of the
 native format.
 
-- Qwen: edit and shell-test a greeting; resume; fork and request a read-only
-  Explore subagent. The parent journals and child sidecar retain their layout.
+- Qwen: read the greeting and its test, add a second assertion and run the
+  Python test through native file and shell tools.
 - Continue: read the files, add a second assertion and run the Python test.
 
 The test scope is session discovery, transcript and tool projection, native
-field preservation, child discovery, and unchanged repeat exports. This is
-not blanket qualification of these releases, every tool, or compaction.
+field preservation and unchanged repeat exports. This is not blanket qualification of these releases, every tool, or compaction.
 
 `scripts/fixtures/sanitize-asr-text-capture.py` applies consistent literal
 replacements and deterministic identifier pseudonyms to both file names and

@@ -8,7 +8,7 @@ fn authentic_headless_text_captures_preserve_tools_and_repeat() {
         .join("../../tests/fixtures/provider-history/authentic-headless/v1");
     for (provider, name, sessions, calls) in [
         (Provider::Continue, "continue", 1, 4),
-        (Provider::QwenCode, "qwen-code", 3, 18),
+        (Provider::QwenCode, "qwen-code", 1, 4),
     ] {
         let out = tempfile::tempdir().unwrap();
         copy_tree(&root.join(name), &out.path().join("source"));

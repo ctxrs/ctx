@@ -346,9 +346,8 @@ trigger. Unknown enum values remain native metadata.
 ## Authentic capture coverage
 
 Sanitized Qwen Code 0.26.1 and Continue CLI 1.5.47 transcripts under
-`tests/fixtures/provider-history/authentic-headless/v1` cover real file edits,
-shell tools, resume/fork and a Qwen child conversation. Their fixture README
-states the narrower claim for each producer. A successful schema validation
+`tests/fixtures/provider-history/authentic-headless/v1` cover real file edits and
+shell tools. Their fixture README states the narrower claim for each producer. A successful schema validation
 alone does not establish semantic completeness or support for every release.
 
 OpenClaw agent database schema 25 is accepted alongside the existing pinned
