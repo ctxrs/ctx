@@ -1,3 +1,4 @@
+mod batch10;
 use crate::{source, Provider, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -55,6 +56,9 @@ impl Spool {
         segment: &str,
         allocate: &mut dyn FnMut(&str) -> Result<u64>,
     ) -> Result<()> {
+        if provider.batch10() {
+            return crate::batch10::source::ingest(self, path, provider);
+        }
         let mut reader = source::reader(path)?;
         let mut bytes = Vec::new();
         let mut physical = 0;

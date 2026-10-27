@@ -14,6 +14,14 @@ enum AsrProvider {
     #[value(alias = "claude-code")]
     Claude,
     Codex,
+    #[value(name = "codebuddy", alias = "code-buddy")]
+    CodeBuddy,
+    Continue,
+    #[value(name = "openhands", alias = "open-hands")]
+    OpenHands,
+    Auggie,
+    #[value(name = "rovodev")]
+    RovoDev,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -50,7 +58,20 @@ impl ExportArgs {
         let providers = match args.provider {
             Some(AsrProvider::Claude) => vec![Provider::Claude],
             Some(AsrProvider::Codex) => vec![Provider::Codex],
-            None => vec![Provider::Claude, Provider::Codex],
+            Some(AsrProvider::CodeBuddy) => vec![Provider::CodeBuddy],
+            Some(AsrProvider::Continue) => vec![Provider::Continue],
+            Some(AsrProvider::OpenHands) => vec![Provider::OpenHands],
+            Some(AsrProvider::Auggie) => vec![Provider::Auggie],
+            Some(AsrProvider::RovoDev) => vec![Provider::RovoDev],
+            None => vec![
+                Provider::Claude,
+                Provider::Codex,
+                Provider::CodeBuddy,
+                Provider::Continue,
+                Provider::OpenHands,
+                Provider::Auggie,
+                Provider::RovoDev,
+            ],
         };
         let mut inputs = Vec::new();
         for provider in providers {
@@ -64,13 +85,19 @@ impl ExportArgs {
             let capture = match provider {
                 Provider::Claude => ctx_history_core::CaptureProvider::Claude,
                 Provider::Codex => ctx_history_core::CaptureProvider::Codex,
+                Provider::CodeBuddy => ctx_history_core::CaptureProvider::CodeBuddy,
+                Provider::Continue => ctx_history_core::CaptureProvider::Continue,
+                Provider::OpenHands => ctx_history_core::CaptureProvider::OpenHands,
+                Provider::Auggie => ctx_history_core::CaptureProvider::Auggie,
+                Provider::RovoDev => ctx_history_core::CaptureProvider::RovoDev,
             };
             let home = crate::identity::home_dir();
             let report =
                 ctx_history_cli::discovered_sources_for_provider_report(home.as_deref(), capture);
             for source in report.sources {
-                if source.source_format.contains("jsonl")
-                    && !source.source_format.contains("history_jsonl")
+                if !matches!(provider, Provider::Claude | Provider::Codex)
+                    || source.source_format.contains("jsonl")
+                        && !source.source_format.contains("history_jsonl")
                 {
                     inputs.push(Input {
                         provider,

@@ -10,6 +10,7 @@ pub(crate) struct Writer {
     pub out: BufWriter<File>,
     pub provider: Provider,
     pub pos: u64,
+    pub record_base: Option<String>,
     slot: u64,
     pub count: u64,
     pub last: Option<String>,
@@ -25,6 +26,7 @@ impl Writer {
             out: BufWriter::new(file),
             provider,
             pos: 0,
+            record_base: None,
             slot: 0,
             count: 0,
             last: None,
@@ -43,7 +45,10 @@ impl Writer {
         self.slot = slot;
     }
     pub fn id(&self) -> String {
-        format!("r{}", self.pos * STRIDE + self.slot)
+        self.record_base
+            .as_ref()
+            .map(|base| format!("{base}-{}", self.slot))
+            .unwrap_or_else(|| format!("r{}", self.pos * STRIDE + self.slot))
     }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
         let seq = self
@@ -57,7 +62,7 @@ impl Writer {
                 "too many records for one native item".into(),
             ));
         }
-        let id = format!("r{seq}");
+        let id = self.id();
         value["seq"] = json!(seq);
         value["id"] = json!(id);
         if let Some(ts) = source

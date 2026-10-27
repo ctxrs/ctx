@@ -15,7 +15,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-const REVISION: &str = "ctx-asr-6";
+const REVISION: &str = "ctx-asr-batch10-1";
 
 pub fn export(options: &Options) -> Result<Summary> {
     if options.max_record_bytes < 1024 {
@@ -48,9 +48,17 @@ pub fn export(options: &Options) -> Result<Summary> {
         CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,path));
         CREATE INDEX source_sessions ON sources(agent,session,path);")?;
     let mut summary = Summary::default();
+    let mut seen_inputs = std::collections::BTreeSet::new();
     for input in &options.inputs {
+        let normalized = crate::Input {
+            provider: input.provider,
+            path: crate::batch10::source::root(input.provider, &input.path),
+        };
+        if !seen_inputs.insert((normalized.provider.agent(), normalized.path.clone())) {
+            continue;
+        }
         source::visit(
-            input,
+            &normalized,
             options.max_record_bytes,
             &mut |s| {
                 if options.session.as_deref().is_none_or(|id| id == s.session) {
@@ -82,11 +90,18 @@ pub fn export(options: &Options) -> Result<Summary> {
             break;
         };
         previous = (agent.clone(), session.clone());
-        let provider = if agent == "codex" {
-            Provider::Codex
-        } else {
-            Provider::Claude
-        };
+        let provider = Provider::from_agent(&agent)
+            .ok_or_else(|| Error::Invalid("unknown ASR agent".into()))?;
+        if provider.batch10() {
+            let count: u64 = db.query_row(
+                "SELECT count(*) FROM sources WHERE agent=?1 AND session=?2",
+                params![agent, session],
+                |r| r.get(0),
+            )?;
+            if count > 1 {
+                return Err(Error::Invalid("multiple native sources share a session ID; export each source to a separate bundle".into()));
+            }
+        }
         let mut hash = Sha256::new();
         hash.update(REVISION);
         hash.update(env!("CARGO_PKG_VERSION"));
@@ -187,6 +202,11 @@ pub fn export(options: &Options) -> Result<Summary> {
             let mut writer =
                 Writer::new(temporary.reopen()?, provider, session_ref(provider, root));
             let mut stream_header = header::make(provider, &session, &source_header);
+            if provider.batch10() {
+                stream_header["observedAt"] =
+                    json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
+                crate::batch10::prepare(&mut spool)?;
+            }
             let copied_boundary =
                 header::copied_boundary(&spool, provider, &session, &source_header)?;
             let mut copied_last = None;
@@ -214,6 +234,7 @@ pub fn export(options: &Options) -> Result<Summary> {
                         claude::convert(&mut spool, &mut writer, pos, &value, cwd, subagent)?
                     }
                     Provider::Codex => codex::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    _ => crate::batch10::convert(&mut spool, &mut writer, &value)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -263,7 +284,7 @@ pub fn export(options: &Options) -> Result<Summary> {
             let path = if !target.exists() {
                 temporary.persist(&target).map_err(|e| e.error)?;
                 prior.to_string()
-            } else if append_prefix(&target, temporary.as_file_mut())? {
+            } else if !provider.batch10() && append_prefix(&target, temporary.as_file_mut())? {
                 prior.to_string()
             } else {
                 summary.snapshots += 1;
