@@ -18,7 +18,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-pub(crate) const REVISION: &str = "ctx-asr-round4-1";
+pub(crate) const REVISION: &str = "ctx-asr-round4-2";
 
 pub fn export(options: &Options) -> Result<Summary> {
     if options.namespace.as_deref().is_some_and(str::is_empty) {

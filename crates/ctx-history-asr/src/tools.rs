@@ -88,7 +88,7 @@ pub(crate) fn call_audit(
 ) -> Result<()> {
     let name = name.strip_prefix("functions.").unwrap_or(name);
     if matches!(name, "AskUserQuestion" | "request_user_input") {
-        question(writer, spool, source, id, input, None)?;
+        question(writer, spool, source, id, Some(id), input, None)?;
     }
     if matches!(name, "TodoWrite" | "update_plan") {
         let items = input
@@ -128,6 +128,7 @@ pub(crate) fn question(
     spool: &Spool,
     source: &Value,
     id: &str,
+    call_id: Option<&str>,
     input: &Value,
     output: Option<&Value>,
 ) -> Result<()> {
@@ -213,7 +214,10 @@ pub(crate) fn question(
         }
         normalized.push(v);
     }
-    let mut v = json!({"type":"input_request","requestId":id,"idSource":"derived","callId":id,"mode":"questions","questions":normalized});
+    let mut v = json!({"type":"input_request","requestId":id,"idSource":"derived","mode":"questions","questions":normalized});
+    if let Some(call_id) = call_id {
+        v["callId"] = json!(call_id);
+    }
     copy(&mut v, "blocking", input, "blocking");
     copy(&mut v, "blocking", input, "isBlocking");
     if let Some(output) = output {
@@ -260,7 +264,7 @@ pub(crate) fn result_audit(
     let input = &call["input"];
     let name = name.strip_prefix("functions.").unwrap_or(name);
     if matches!(name, "AskUserQuestion" | "request_user_input") {
-        question(writer, spool, source, id, input, Some(output))?;
+        question(writer, spool, source, id, Some(id), input, Some(output))?;
     }
     if matches!(name, "Edit" | "Write" | "NotebookEdit") {
         if let Some(file) = output

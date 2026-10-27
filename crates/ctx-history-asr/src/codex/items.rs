@@ -28,7 +28,8 @@ pub(super) fn convert(
         "AgentMessage" if p["delivery"] == "async" && p["questions"].is_array() => {
             let mut input = p.clone();
             input["blocking"] = json!(false);
-            tools::question(writer, spool, v, &id, &input, None)
+            // This is a message-based question, not a recorded tool invocation.
+            tools::question(writer, spool, v, &id, None, &input, None)
         }
         "AgentMessage" | "Reasoning" if spool.output(&id)?.is_some() => {
             // These are UI snapshots of the native model item, not another model message.
