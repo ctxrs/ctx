@@ -60,6 +60,9 @@ impl Writer {
         let id = format!("r{seq}");
         value["seq"] = json!(seq);
         value["id"] = json!(id);
+        if matches!(self.provider, Provider::Droid | Provider::Kimi) {
+            value["idScope"] = json!("capture");
+        }
         if let Some(ts) = source
             .get("timestamp")
             .and_then(Value::as_str)
@@ -178,6 +181,19 @@ pub(crate) fn extras(target: &mut Value, provider: Provider, source: &Value, cov
     }
 }
 pub(crate) fn session_ref(provider: Provider, id: &str) -> String {
+    if matches!(provider, Provider::Kimi | Provider::Copilot) {
+        if let Ok((namespace, agent)) = serde_json::from_str::<(String, String)>(id) {
+            return format!(
+                "{}:{}:{}",
+                provider.agent(),
+                component(&namespace),
+                component(&agent)
+            );
+        }
+    }
+    format!("{}:{}", provider.agent(), component(id))
+}
+fn component(id: &str) -> String {
     let mut encoded = String::new();
     for c in id.chars() {
         if c.is_control() || matches!(c, '%' | ':' | '#' | ' ') {
@@ -188,7 +204,7 @@ pub(crate) fn session_ref(provider: Provider, id: &str) -> String {
             encoded.push(c);
         }
     }
-    format!("{}:{encoded}", provider.agent())
+    encoded
 }
 pub(crate) fn path(value: &str, cwd: Option<&str>) -> Value {
     let spelling = value.replace('\\', "/");

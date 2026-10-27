@@ -1,6 +1,6 @@
 # ASR export
 
-`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Claude Code and Codex are the first supported converters.
+`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Converters are available for Claude Code, Codex, GitHub Copilot CLI, Factory AI Droid, Kimi Code, and Qoder.
 
 ```sh
 ctx export asr --all --out ./asr
@@ -13,6 +13,35 @@ Automatic input selection uses ctx's existing provider-root discovery. `--path`
 selects a native transcript or directory and requires `--provider`. Session IDs
 are native IDs, not ctx citation IDs; Claude subagents use their `agentId`.
 Export reads provider files without importing them into the search store.
+
+The CLI journal converters use `--provider copilot`, `droid`, `kimi`, or `qoder`.
+Copilot reads `events.jsonl`; Droid and Qoder read their session JSONL journals.
+Kimi reads `sessions/<workdir>/<session>/agents/<agent>/wire.jsonl` plus the
+session's bounded `state.json` metadata. Its ASR namespace is the native session
+ID and its session ID is the native agent ID, so agents named `main` in separate
+sessions cannot collide. `--session` accepts the containing native session ID
+or agent ID for Kimi. Copilot's embedded subagent events are separate streams,
+namespaced by their containing native session ID.
+
+Copilot schedules become turn `trigger` objects only when the native message
+identifies a scheduled firing that begins that turn. Creating a schedule is
+retained as a vendor event. Tool names and IDs remain verbatim; repeated IDs
+produce ambiguous result linkage with the native ID in metadata and no paired
+`callId`. Display output and raw sidecars remain
+separate from model-facing content. Kimi request records identify inference
+attempts; step completion revises the final request of the same native turn/step.
+Droid and Qoder message IDs are not treated as inference IDs.
+
+These are lossy converters. Unknown events remain vendor records; additional
+native fields remain in provider-qualified metadata. Kimi tool output is kept
+as raw/display data because its request projector can rewrite it, with
+`capture.content: absent` and a declared loss. Blobref media remains a native
+resource reference. Context undo, detailed request projection, and unattributed
+usage observations remain vendor data. Compactions with no identified replaced
+range explicitly use `replaces.state: unknown`. The native Copilot 1.0.104
+scheduler fixture qualifies that narrow mapping; authored semantic cases do
+not establish general conformance for a provider release.
+
 The JSON result reports sessions, unchanged sessions, records, bytes, gaps,
 new snapshots and sources without a usable session identity.
 

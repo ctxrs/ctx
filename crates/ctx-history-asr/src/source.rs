@@ -138,6 +138,9 @@ fn inspect(
     visitor: &mut dyn FnMut(Source) -> Result<()>,
     unidentified: &mut u64,
 ) -> Result<()> {
+    if input.provider.journal() {
+        return crate::journals::source::inspect(input, limit, visitor, unidentified);
+    }
     let mut input_reader = reader(&input.path)?;
     let mut buffer = Vec::new();
     let mut metas = Vec::new();
@@ -201,6 +204,7 @@ fn inspect(
             };
             (id.to_owned(), v.clone())
         }
+        _ => return Err(Error::Invalid("unexpected journal provider".into())),
     };
     if input.provider == Provider::Claude {
         let sidecar = input.path.with_extension("meta.json");

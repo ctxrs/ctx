@@ -14,6 +14,13 @@ enum AsrProvider {
     #[value(alias = "claude-code")]
     Claude,
     Codex,
+    #[value(name = "copilot", alias = "copilot-cli")]
+    Copilot,
+    #[value(alias = "factory-droid")]
+    Droid,
+    #[value(alias = "kimi-code")]
+    Kimi,
+    Qoder,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -50,7 +57,18 @@ impl ExportArgs {
         let providers = match args.provider {
             Some(AsrProvider::Claude) => vec![Provider::Claude],
             Some(AsrProvider::Codex) => vec![Provider::Codex],
-            None => vec![Provider::Claude, Provider::Codex],
+            Some(AsrProvider::Copilot) => vec![Provider::Copilot],
+            Some(AsrProvider::Droid) => vec![Provider::Droid],
+            Some(AsrProvider::Kimi) => vec![Provider::Kimi],
+            Some(AsrProvider::Qoder) => vec![Provider::Qoder],
+            None => vec![
+                Provider::Claude,
+                Provider::Codex,
+                Provider::Copilot,
+                Provider::Droid,
+                Provider::Kimi,
+                Provider::Qoder,
+            ],
         };
         let mut inputs = Vec::new();
         for provider in providers {
@@ -64,6 +82,10 @@ impl ExportArgs {
             let capture = match provider {
                 Provider::Claude => ctx_history_core::CaptureProvider::Claude,
                 Provider::Codex => ctx_history_core::CaptureProvider::Codex,
+                Provider::Copilot => ctx_history_core::CaptureProvider::CopilotCli,
+                Provider::Droid => ctx_history_core::CaptureProvider::FactoryAiDroid,
+                Provider::Kimi => ctx_history_core::CaptureProvider::KimiCodeCli,
+                Provider::Qoder => ctx_history_core::CaptureProvider::Qoder,
             };
             let home = crate::identity::home_dir();
             let report =

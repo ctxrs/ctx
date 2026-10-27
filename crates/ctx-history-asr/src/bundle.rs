@@ -15,7 +15,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-const REVISION: &str = "ctx-asr-6";
+pub(crate) const REVISION: &str = "ctx-asr-batch3-6";
 
 pub fn export(options: &Options) -> Result<Summary> {
     if options.max_record_bytes < 1024 {
@@ -45,7 +45,7 @@ pub fn export(options: &Options) -> Result<Summary> {
         CREATE TABLE IF NOT EXISTS exports(agent TEXT, session TEXT, stamp TEXT, entry TEXT, PRIMARY KEY(agent,session));
         CREATE TABLE IF NOT EXISTS positions(agent TEXT,session TEXT,segment TEXT,local TEXT,pos INTEGER,PRIMARY KEY(agent,session,segment,local));
         CREATE INDEX IF NOT EXISTS observation_order ON positions(agent,session,pos);
-        CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,path));
+        CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,session,path));
         CREATE INDEX source_sessions ON sources(agent,session,path);")?;
     let mut summary = Summary::default();
     for input in &options.inputs {
@@ -53,7 +53,11 @@ pub fn export(options: &Options) -> Result<Summary> {
             input,
             options.max_record_bytes,
             &mut |s| {
-                if options.session.as_deref().is_none_or(|id| id == s.session) {
+                if options.session.as_deref().is_none_or(|id| {
+                    id == s.session
+                        || (matches!(s.provider, Provider::Kimi | Provider::Copilot)
+                            && (s.header["_nativeSession"] == id || s.header["_agent"] == id))
+                }) {
                     db.execute(
                         "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
                         params![
@@ -82,11 +86,10 @@ pub fn export(options: &Options) -> Result<Summary> {
             break;
         };
         previous = (agent.clone(), session.clone());
-        let provider = if agent == "codex" {
-            Provider::Codex
-        } else {
-            Provider::Claude
-        };
+        let provider = Provider::ALL
+            .into_iter()
+            .find(|p| p.agent() == agent)
+            .ok_or_else(|| Error::Invalid("unknown ASR provider".into()))?;
         let mut hash = Sha256::new();
         hash.update(REVISION);
         hash.update(env!("CARGO_PKG_VERSION"));
@@ -161,6 +164,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                     Ok(last_pos)
                 })?;
             }
+            if provider == Provider::Copilot {
+                spool.db.execute_batch("INSERT INTO native_calls SELECT call_id,position FROM journal_calls a WHERE kind=CASE WHEN (SELECT count(*) FROM journal_calls WHERE call_id=a.call_id AND kind='start') >= (SELECT count(*) FROM journal_calls WHERE call_id=a.call_id AND kind='request') THEN 'start' ELSE 'request' END;")?;
+            }
             crate::privacy::prepare(&mut spool)?;
             db.execute_batch("COMMIT")?;
             let mut source_header = source_header.unwrap_or(json!({}));
@@ -187,8 +193,17 @@ pub fn export(options: &Options) -> Result<Summary> {
             let mut writer =
                 Writer::new(temporary.reopen()?, provider, session_ref(provider, root));
             let mut stream_header = header::make(provider, &session, &source_header);
-            let copied_boundary =
-                header::copied_boundary(&spool, provider, &session, &source_header)?;
+            let copied_boundary = if provider == Provider::Kimi
+                && stream_header["lineage"]["forkedFrom"]["session"].is_string()
+            {
+                let boundary:Option<u64>=spool.db.query_row("SELECT max(pos) FROM rows WHERE pos<(SELECT max(pos) FROM rows WHERE kind='forked')",[],|r|r.get(0))?;
+                if boundary.is_some() {
+                    stream_header["lineage"]["inherits"] = json!({"mode":"copied","from":stream_header["lineage"]["forkedFrom"]["session"],"evidence":"native_structure"});
+                }
+                boundary
+            } else {
+                header::copied_boundary(&spool, provider, &session, &source_header)?
+            };
             let mut copied_last = None;
             let cwd = source_header["cwd"].as_str();
             let subagent = source_header["agentId"].as_str() == Some(session.as_str());
@@ -214,6 +229,7 @@ pub fn export(options: &Options) -> Result<Summary> {
                         claude::convert(&mut spool, &mut writer, pos, &value, cwd, subagent)?
                     }
                     Provider::Codex => codex::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    _ => crate::journals::convert(&mut spool, &mut writer, pos, &value, cwd)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -275,7 +291,10 @@ pub fn export(options: &Options) -> Result<Summary> {
                 path
             };
             summary.source_bytes += spool.source_bytes;
-            let entry = json!({"agent":agent,"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            let mut entry = json!({"agent":agent,"sessionId":stream_header["sessionId"],"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            if let Some(namespace) = stream_header.get("namespace") {
+                entry["namespace"] = namespace.clone();
+            }
             db.execute(
                 "INSERT OR REPLACE INTO exports VALUES(?1,?2,?3,?4)",
                 params![agent, session, stamp, serde_json::to_string(&entry)?],

@@ -3,6 +3,7 @@ mod bundle;
 mod claude;
 mod codex;
 mod content;
+mod journals;
 mod privacy;
 mod records;
 mod source;
@@ -32,24 +33,51 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Provider {
     Claude,
     Codex,
+    Copilot,
+    Droid,
+    Kimi,
+    Qoder,
 }
 impl Provider {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Copilot,
+        Self::Droid,
+        Self::Kimi,
+        Self::Qoder,
+    ];
+    pub(crate) fn journal(self) -> bool {
+        !matches!(self, Self::Claude | Self::Codex)
+    }
     pub fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude-code",
             Self::Codex => "codex",
+            Self::Copilot => "copilot-cli",
+            Self::Droid => "droid",
+            Self::Kimi => "com.moonshot.kimi-code",
+            Self::Qoder => "com.qoder.cli",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
         match self {
             Self::Claude => "com.anthropic.claude-code",
             Self::Codex => "com.openai.codex",
+            Self::Copilot => "com.github.copilot-cli",
+            Self::Droid => "ai.factory.droid",
+            Self::Kimi => "com.moonshot.kimi-code",
+            Self::Qoder => "com.qoder.cli",
         }
     }
     pub(crate) fn format(self) -> &'static str {
         match self {
             Self::Claude => "claude-code-jsonl",
             Self::Codex => "codex-rollout",
+            Self::Copilot => "copilot-cli-events",
+            Self::Droid => "factory-droid-jsonl",
+            Self::Kimi => "kimi-code-wire-jsonl",
+            Self::Qoder => "qoder-transcript-jsonl",
         }
     }
 }
