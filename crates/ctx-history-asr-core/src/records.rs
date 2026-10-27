@@ -247,6 +247,11 @@ impl Writer {
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(timestamp)
+            .or_else(|| {
+                (self.provider == Provider::Pi)
+                    .then(|| millis(&source["timestamp"]))
+                    .flatten()
+            })
         {
             value["ts"] = json!(ts);
         }
@@ -477,6 +482,7 @@ pub fn clock(provider: Provider, v: &Value) -> Value {
     let mut source = json!({});
     let ts = match provider {
         Provider::DeepSeekHarness => millis(&v["time"]),
+        Provider::Pi if v["timestamp"].is_number() => millis(&v["timestamp"]),
         Provider::GrokBuild => v
             .pointer("/params/_meta/agentTimestampMs")
             .or_else(|| v.pointer("/_meta/agentTimestampMs"))

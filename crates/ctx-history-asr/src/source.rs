@@ -177,6 +177,11 @@ fn inspect(
     if input.provider.cli_journal() {
         return crate::cli_journals::source::inspect(input, limit, visitor, unidentified);
     }
+    if input.provider == Provider::DeepSeekHarness
+        && !crate::deepseek::source::selected(&input.path)?
+    {
+        return Ok(());
+    }
     let mut input_reader = reader(&input.path)?;
     let mut buffer = Vec::new();
     let mut metas = Vec::new();

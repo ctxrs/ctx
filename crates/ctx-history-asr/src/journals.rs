@@ -8,15 +8,24 @@ mod mux;
 pub(crate) mod source;
 mod tabnine;
 mod tail;
+mod unified;
 mod vibe;
 use crate::{records::Writer, spool::Spool, Provider, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 pub(crate) use tail::tail;
+pub(crate) use unified::ingest as ingest_unified;
 
 pub(crate) fn header(provider: Provider, id: &str, n: &Value) -> Value {
     let mut h = json!({"type":"session","formatVersion":"0.1","agent":{"name":provider.agent()},"sessionId":id,"producer":{"name":"ctx","version":env!("CARGO_PKG_VERSION"),"method":"converter","instance":"ctx-asr-batch4-1","source":{"format":provider.format()},"lossy":["order","revision_history","message.author","tool_result.content","inference","cost","provider.identity","lineage","copies","_rs.ctx/native_line_limit","_rs.ctx/vendor_only"]},"profiles":["core","coding","usage","lineage"],"contentLevel":"full","workspace":{"roots":[{"id":"unknown","path":null}]}});
     let m = &n["metadata"];
+    if n["_unified"] == true {
+        h["producer"]["source"]["format"] = json!("mistral.vibe.unified-session-store/v1");
+        h["producer"]["lossy"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("_ai.mistral.vibe/recovery_projection"));
+    }
     let start = match provider {
         Provider::Junie => common::millis(&m["createdAt"]),
         Provider::MistralVibe => m["start_time"].as_str().and_then(crate::records::timestamp),
@@ -62,6 +71,9 @@ pub(crate) fn header(provider: Provider, id: &str, n: &Value) -> Value {
     h
 }
 pub(crate) fn convert(spool: &mut Spool, w: &mut Writer, input: &Value) -> Result<()> {
+    if input["_vibe_component"].is_string() {
+        return unified::convert(spool, w, input);
+    }
     let folded;
     let v = if matches!(w.provider, Provider::Tabnine | Provider::Junie) {
         folded = ingest::folded(spool, w.pos, input)?;

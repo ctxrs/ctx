@@ -1,5 +1,6 @@
 //! Cline/Roo native task arrays; API and UI stores are never joined by position.
 mod api;
+mod sdk;
 mod ui;
 use crate::{
     capture,
@@ -21,6 +22,11 @@ const FILES: &[&str] = &[
 ];
 
 pub(crate) fn inspect(dir: &Path, provider: Provider, limit: usize) -> Result<Option<Source>> {
+    if provider == Provider::Cline {
+        if let Some(source) = sdk::inspect(dir, limit)? {
+            return Ok(Some(source));
+        }
+    }
     if !FILES[..3].iter().any(|f| dir.join(f).is_file()) {
         return Ok(None);
     }
@@ -52,6 +58,9 @@ pub(crate) fn inspect(dir: &Path, provider: Provider, limit: usize) -> Result<Op
 }
 
 pub(crate) fn ingest(spool: &mut Spool, dir: &Path) -> Result<()> {
+    if sdk::ingest(spool, dir)? {
+        return Ok(());
+    }
     let api = if dir.join(FILES[0]).is_file() {
         FILES[0]
     } else {
@@ -144,11 +153,8 @@ pub(crate) fn convert(spool: &mut Spool, writer: &mut Writer, value: &Value) -> 
     } else {
         format!("{component}:{}", value["index"])
     };
-    writer.capture_identity(
-        &key,
-        !stable && component != "metadata",
-        component == "metadata",
-    );
+    let metadata = matches!(component, "metadata" | "sdk_metadata");
+    writer.capture_identity(&key, !stable && !metadata, metadata);
     let source = &value["row"];
     if source["type"] == "_gap" {
         writer.emit(
@@ -159,6 +165,7 @@ pub(crate) fn convert(spool: &mut Spool, writer: &mut Writer, value: &Value) -> 
     }
     match component {
         "api" => api::convert(spool, writer, source),
+        "sdk" => sdk::convert(spool, writer, source),
         "ui" => ui::convert(spool, writer, source),
         _ => {
             let mut v = json!({"type":format!("{}/task_metadata", writer.provider.domain()),"component":value["index"]});

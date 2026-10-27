@@ -96,12 +96,10 @@ pub(super) fn make(provider: Provider, id: &str, n: &Value) -> Value {
                 lineage["forkedFrom"] = json!({"session":from,"evidence":"native_field"});
                 lineage["inherits"] =
                     json!({"mode":"referenced","from":from,"evidence":"native_field"});
-                if let Some(last) = n
-                    .pointer("/_forkRef/parentLastUuid")
-                    .and_then(Value::as_str)
-                {
-                    lineage["inherits"]["throughId"] = json!(format!("messageId={last}"));
+                if let Some(last) = n["_forkThroughId"].as_str() {
+                    lineage["inherits"]["throughId"] = json!(last);
                 }
+                meta(&mut h, provider, "forkContextRef", &n["_forkRef"]);
             }
             if n["agentId"].as_str() == Some(id) {
                 h["native"] = json!({"record":{"sessionId":n["sessionId"],"agentId":id}});

@@ -186,6 +186,15 @@ pub(crate) fn header(provider: Provider, id: &str, n: &Value) -> Value {
             .push(json!({"id":"workspace","path":cwd}));
     }
     copy(&mut h, "startedAt", n, "startedAt");
+    if n["_sdk"] == true {
+        h["producer"]["source"]["format"] = json!("cline-sdk-session-v1");
+        copy(
+            &mut h["agent"],
+            "version",
+            &n["metadata"]["sessionHistoryOrigin"],
+            "version",
+        );
+    }
     h
 }
 

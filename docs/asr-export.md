@@ -51,7 +51,11 @@ of potentially sensitive history. Secret-question answers are removed, but
 export does not apply general-purpose secret or personal-data redaction.
 
 Repeat the command with the same destination to update the bundle. Unchanged
-JSONL sources are skipped; mixed SQLite stores are reread to capture current rows and lane facts. A changed session is spooled again; the exporter does not
+JSONL sources are skipped when their dependencies are unchanged. Claude parent
+boundaries are resolved from the current parent projection. Codex turn ownership
+is indexed across the selected sources before conversion, so a causal root is
+independent of session traversal order. Mixed SQLite stores are reread to capture
+current rows and lane facts. A changed session is spooled again; the exporter does not
 assume native files only append. Source positions are rebuilt from each capture;
 the destination's earlier observation order is never transcript order. Codex IDs derive from native
 segment, physical line, and emission slot; native ordinals can repeat on distinct
@@ -88,7 +92,7 @@ bundle writer. They do not open the searchable ctx store.
 | Provider | Native inputs | Mapping limits |
 | --- | --- | --- |
 | Junie | `sessions/index.jsonl`, `session-*/events.jsonl` | UI step growth is folded within its prompt scope. UI results remain display content; model rendering is unknown. |
-| Mistral Vibe | `meta.json`, `messages.jsonl` | Qualified with native 2.24.1 captures. The 3.0.3 generation/chunk/journal store is not discovered. Current metadata, instructions, configuration and cumulative statistics follow the supported journal. Image paths remain recorded references; referenced files are not opened. |
+| Mistral Vibe | Legacy `meta.json`/`messages.jsonl`; 3.0.3 unified `CURRENT`, committed generation, chunks and recovery journal | Legacy journals and unified checkpoint snapshots are supported. Only the generation selected by `CURRENT` is read. Checkpoint model messages and UI projection remain distinct. Recovery entries are retained natively; native-core replay is a declared loss. |
 | Tabnine CLI | Chat recording JSONL, including child journals | Repeated message IDs replace the whole earlier snapshot at its first position. Saved checkpoint files are outside this converter's input contract. |
 | Mux | `chat-archive.jsonl`, `chat.jsonl`, `partial.json`, `metadata.json`, `subagent-transcripts.json`, archived child journals | Archive precedes active history. A partial with the same `historySequence` and more parts replaces the effective row at the capture tail. Current metadata and archive index are also tail snapshots. |
 | Cursor | `projects/<workspace>/agent-transcripts/<id>/<id>.jsonl` | Uses ctx's strict Cursor parser. IDE `state.vscdb`, CLI blob-DAG `store.db`, and external tool-output files have no qualified decoder here. Selecting a database reports an unidentified source; no chat semantics are guessed. |
@@ -113,11 +117,15 @@ The authored regression fixtures verify mapping semantics, source rewrites,
 sidecar placement and missing information. They do not establish version-level
 producer conformance; that additionally requires authentic native captures.
 
-Pi uses JSONL session headers through version 3, including the OMP title-slot
-variant. Its ASR identity is the header ID. A native parent path establishes
+Pi uses JSONL session headers through version 4, including the v3 OMP title-slot
+variant and v4 lane mutations. Its ASR identity is the header ID. A native parent path establishes
 lineage only when the parent's header can be read; matching parent entry IDs
 establish copied records. A path or filename is never converted into a session
-ID. The newer version 4 lane backend is outside this converter's scope.
+ID. Version 4 uses the header ID and shared mutation sequence. Lane heads are
+resolved separately; operational records retain their lane and run identity.
+Usage ledger entries represent attempts and suppress duplicate message/compaction
+usage. A v4 compaction's retained tail remains native data; complete context replay
+from those inline messages is a declared loss.
 
 Grok Build reads persisted ACP v1 `session/update` and `_x.ai/session/update`
 notifications. Adjacent text chunks are folded, and tool patches become
@@ -126,8 +134,11 @@ model received. Optional xAI response-boundary events provide inference evidence
 older streams without those events have no invented model calls. ACP v1 message
 boundaries remain less precise than native message IDs.
 
-DeepSeek Harness reads logical session version 0 in plain `.jsonl` and concatenated
-`.jsonl.zstd` files. Its ASR agent name is `com.deepseek.harness` pending registry
+DeepSeek Harness reads logical session versions 0 and 4 in plain `.jsonl` and
+concatenated `.jsonl.zstd` files. Discovery selects the newest canonical
+`session.vN.jsonl[.zstd]` generation in each session directory. Version 4 uses
+direct tool-result messages and the last inherited `session/end-seed` marker
+for the copied prefix. Its ASR agent name is `com.deepseek.harness` pending registry
 registration. Message sources determine authorship; assistant tool blocks and
 execution-start events produce one request. Request headers provide instructions
 and call settings, while `request/context` supplies route/capacity metadata, not a
@@ -412,8 +423,27 @@ Grok's native `task` tool kind uses a vendor value in ASR. CodeBuddy CLI forks
 use the new writer's `session-meta` for ownership, and flat function calls
 use native `callId` values independently of message row IDs.
 
-Cline 3.0.74 CLI SDK session/message JSON is not yet discovered by the Cline
-extension-task converter. DeepSeek Harness 0.2.1-rc.2 writes compressed v4
-session journals that the existing converter does not discover. Mux 0.32.0 CLI deletes its temporary session directory
+Cline 3.0.74 CLI SDK `<id>.json` manifests and `<id>.messages.json` documents
+are supported alongside extension task arrays. Manifest and transcript IDs must
+agree; a stable installation `--namespace` is required. Message arrays stream
+through the bounded reader, and assistant metrics retain their reported cache
+components without guessing whether input totals include them.
+
+Scoped native captures qualify Cline 3.0.74, Mistral Vibe 3.0.3, DeepSeek Harness
+0.2.1-rc.2 (logical format 4), and Pi agent-core 0.84.2 (native no-model lane
+persistence and resume). Authored regression tests additionally exercise identity,
+usage, generation selection and repeat exports. These claims cover the observed
+formats and scenarios, including the limitations above.
+
+Codex `process_id` is preserved verbatim as `tool_result.exec.processId`.
+`exec.terminalId` is emitted only for a recorded terminal target. Collaboration
+UI items can establish native invocations even when no model-request row exists;
+missing complete arguments and requester identity stay unknown. Causal root turns
+use observed native ownership rather than the spawn-tree root. If the selected
+sources do not establish one owner, the scalar survives in
+`com.openai.codex/remainingFields.unboundRootTurn`; this has a declared ownership
+projection loss. Missing call targets remain unresolved references.
+
+Mux 0.32.0 CLI deletes its temporary session directory
 on exit; a live `chat.jsonl`/`partial.json` snapshot does not qualify its complete
 durable-event history. Empty exports must not be treated as qualification.

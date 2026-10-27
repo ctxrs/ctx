@@ -1,6 +1,7 @@
-//! DeepSeek Harness logical session format 0 (plain or concatenated zstd frames).
+//! DeepSeek Harness logical formats 0 and 4 (plain or concatenated zstd frames).
 mod audit;
 mod request;
+pub(crate) mod source;
 use crate::{
     content, jsonl,
     records::{copy, extras, meta, path, session_ref, Writer},
@@ -18,6 +19,17 @@ pub(crate) fn convert(
     let d = &v["data"];
     let kind = v["type"].as_str().unwrap_or("unknown");
     let time = jsonl::clock(P, v);
+    if let Some(seed) = spool.entity("deepseek:seed")?.and_then(|v| v.as_u64()) {
+        if v["seq"].as_u64().is_some_and(|seq| seq < seed) {
+            if let Some(parent) = spool
+                .entity("deepseek:parent")?
+                .and_then(|v| v.as_str().map(str::to_owned))
+            {
+                w.copied =
+                    Some(json!({"session":session_ref(P,&parent),"proof":"prefix_contract"}));
+            }
+        }
+    }
     if let Some(turn) = d["turn"].as_i64() {
         w.turn = Some(turn.to_string());
     }
@@ -67,7 +79,8 @@ pub(crate) fn convert(
             native(&mut r, v, &["provider", "model"]);
             w.emit(r, &time)?;
         }
-        "user/message" | "assistant/message" | "tool/result" => surface(spool, w, v, &time, cwd)?,
+        "system/message" | "developer/message" | "user/message" | "assistant/message"
+        | "tool/result" => surface(spool, w, v, &time, cwd)?,
         "tool/call" => request::call_started(spool, w, v, &time)?,
         "compaction/summary" | "compaction/prune" => {
             spool.save("deepseek:meter", v)?;
@@ -93,7 +106,17 @@ pub(crate) fn convert(
         }
     }
     if let (Some(seq), Some(header)) = (v["seq"].as_u64(), spool.entity("deepseek:header")?) {
-        if header["seedLength"].as_u64().is_some_and(|n| seq < n) {
+        if header["seedLength"]
+            .as_u64()
+            .or_else(|| {
+                spool
+                    .entity("deepseek:seed")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_u64())
+            })
+            .is_some_and(|n| seq < n)
+        {
             if let Some(last) = w.last.as_ref() {
                 spool.save("deepseek:copied_last", &json!(last))?;
             }
@@ -152,7 +175,10 @@ fn surface(
 ) -> Result<()> {
     let d = &v["data"];
     let kind = v["type"].as_str().unwrap_or("");
-    let m = if kind == "user/message" {
+    let m = if matches!(
+        kind,
+        "system/message" | "developer/message" | "user/message"
+    ) {
         d
     } else {
         &d["message"]
@@ -165,7 +191,11 @@ fn surface(
     };
     let mut r;
     if kind == "tool/result" {
-        let block = &m["content"][0];
+        let block = if m["content"][0]["type"] == "tool-result" {
+            &m["content"][0]
+        } else {
+            m
+        };
         let call = m["source"]["callId"]
             .as_str()
             .or_else(|| block["toolCallId"].as_str());
@@ -306,7 +336,7 @@ fn replacement(spool: &Spool, w: &mut Writer, v: &Value, m: &Value, time: &Value
         .and_then(|d| d["compactionId"].as_str())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("replace:{}", v["seq"]));
-    let mut r = json!({"type":"compaction","compactionId":id,"kind":if meter.as_ref().is_some_and(|m|m["type"]=="compaction/prune"){"mask"}else{"summary"},"status":"completed","summary":if v["type"]=="tool/result"{parts(&m["content"][0]["content"])}else{parts(&m["content"])},"historyRetained":true,"replaces":if missing{json!({"state":"unknown"})}else{json!({"ids":ids})}});
+    let mut r = json!({"type":"compaction","compactionId":id,"kind":if meter.as_ref().is_some_and(|m|m["type"]=="compaction/prune"){"mask"}else{"summary"},"status":"completed","summary":if v["type"]=="tool/result" && m["content"][0]["type"]=="tool-result"{parts(&m["content"][0]["content"])}else{parts(&m["content"])},"historyRetained":true,"replaces":if missing{json!({"state":"unknown"})}else{json!({"ids":ids})}});
     if d.and_then(|d| d["compactionId"].as_str()).is_none() {
         r["idSource"] = json!("derived");
     }

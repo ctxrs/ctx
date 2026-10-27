@@ -19,6 +19,9 @@ pub(crate) fn ingest(
     ) {
         return crate::conversation_source::ingest(spool, path, provider, segment, allocate);
     }
+    if provider == Provider::MistralVibe && path.is_dir() {
+        return crate::journals::ingest_unified(spool, path);
+    }
     if provider.journal() {
         return crate::journals::ingest::ingest(spool, path, provider, segment);
     }
@@ -79,6 +82,12 @@ pub(crate) fn ingest(
                     v.get("ordinal").map(Value::to_string)
                 ],
             )?;
+        }
+        if provider == Provider::DeepSeekHarness
+            && v["type"] == "session/end-seed"
+            && v["data"]["inherited"] == true
+        {
+            spool.save("deepseek:seed", &v["seq"])?;
         }
         crate::privacy::questions(spool, &v)?;
         let off = spool.bytes.stream_position()?;

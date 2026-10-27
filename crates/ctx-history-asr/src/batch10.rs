@@ -1,5 +1,5 @@
 //! Native document and event-store adapters. No projection through searchable Core.
-mod document;
+pub(crate) mod document;
 mod hooks;
 mod messages;
 mod metrics;

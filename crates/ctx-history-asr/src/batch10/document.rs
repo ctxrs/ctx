@@ -110,7 +110,7 @@ impl Cursor {
     }
 }
 
-pub(super) fn read(
+pub(crate) fn read(
     path: &Path,
     arrays: &[&str],
     limit: usize,
@@ -194,7 +194,7 @@ fn object(
     Ok(Value::Object(fields))
 }
 
-pub(super) fn decode(raw: &[u8]) -> Result<Value> {
+pub(crate) fn decode(raw: &[u8]) -> Result<Value> {
     let text =
         std::str::from_utf8(raw).map_err(|_| Error::Invalid("native JSON is not UTF-8".into()))?;
     ctx_history_asr_core::numbers::decode(text)

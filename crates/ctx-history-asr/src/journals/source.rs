@@ -34,6 +34,9 @@ pub(crate) fn visit(
     visitor: &mut dyn FnMut(Source) -> Result<()>,
     unidentified: &mut u64,
 ) -> Result<()> {
+    if input.provider == Provider::MistralVibe && input.path.join("CURRENT").is_file() {
+        return visitor(super::unified::inspect(&input.path, limit)?);
+    }
     if input.path.is_dir() {
         // The inventory is metadata only. Bodies are read one session/line at a time.
         let mut entries = fs::read_dir(&input.path)?.collect::<std::io::Result<Vec<_>>>()?;

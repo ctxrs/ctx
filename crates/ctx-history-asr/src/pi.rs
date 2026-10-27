@@ -1,5 +1,6 @@
-//! Pi JSONL v1-v3. The session header, never its filename, owns identity.
+//! Pi JSONL v1-v4. The session header, never its filename, owns identity.
 pub(crate) mod copies;
+pub(crate) mod lanes;
 mod parts;
 use crate::{
     content, jsonl,
@@ -16,6 +17,9 @@ pub(crate) fn convert(
     v: &Value,
     cwd: Option<&str>,
 ) -> Result<()> {
+    if v["kind"].is_string() && lanes::before(spool, w, v)? {
+        return Ok(());
+    }
     let kind = v["type"].as_str().unwrap_or("unknown");
     let id = v["id"]
         .as_str()
@@ -60,6 +64,7 @@ pub(crate) fn convert(
     Ok(())
 }
 pub(crate) fn finish(spool: &Spool, w: &mut Writer) -> Result<()> {
+    lanes::finish(spool, w)?;
     if let Some(title) = spool.entity("pi:title")? {
         // OMP rewrites this slot in place. Current state follows all source-positioned records.
         w.position(w.pos + 1);
@@ -125,6 +130,11 @@ fn message(
     if !matches!(role, "assistant" | "user" | "system" | "custom") {
         return w.vendor(v, "message");
     }
+    let ledger = if v["kind"] == "entry" {
+        spool.entity(&format!("pi:usage:{id}"))?
+    } else {
+        None
+    };
     let inference =
         if role == "assistant" && (m["responseId"].is_string() || m["usage"].is_object()) {
             Some(
@@ -136,6 +146,11 @@ fn message(
         } else {
             None
         };
+    let inference = ledger
+        .as_ref()
+        .and_then(|v| v["id"].as_str())
+        .map(str::to_owned)
+        .or(inference);
     let response = m["responseId"].as_str().or(inference.as_deref());
     let mut r = json!({"type":"message","messageId":id,"role":if role=="custom"{"user"}else{role},"content":parts::parts(&m["content"])});
     if role == "assistant" {
@@ -180,6 +195,9 @@ fn message(
         }
     }
     extras(&mut r, P, v, &["message", "id", "parentId"]);
+    if ledger.is_some() {
+        meta(&mut r, P, "usage", &m["usage"]);
+    }
     if m.get("content").is_none() {
         r["capture"] = json!({"content":{"state":"absent"}});
     }
@@ -219,7 +237,7 @@ fn message(
         )?;
         emit(spool, w, r, v, response, false)?;
     }
-    if let Some(inf) = inference {
+    if let Some(inf) = inference.filter(|_| ledger.is_none()) {
         w.slot(800_000);
         let mut r = json!({"type":"inference","inferenceId":inf,"purpose":"turn"});
         if !m["responseId"].is_string() {
@@ -296,7 +314,7 @@ fn compaction(spool: &Spool, w: &mut Writer, v: &Value, id: &str) -> Result<()> 
     }
     extras(&mut r, P, v, &["summary", "tokensBefore", "usage"]);
     emit(spool, w, r, v, None, true)?;
-    if v["usage"].is_object() {
+    if v["usage"].is_object() && spool.entity(&format!("pi:usage:{id}"))?.is_none() {
         let mut usage = json!({"type":"usage_summary","scope":"session","cumulative":false,"includesChildren":null,"usage":jsonl::usage(&v["usage"],true)});
         meta(&mut usage, P, "compactionUsage", &v["usage"]);
         w.emit(usage, v)?;

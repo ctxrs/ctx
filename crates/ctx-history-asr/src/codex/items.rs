@@ -56,7 +56,11 @@ pub(super) fn convert(
             writer.emit(r, v)?;
             Ok(())
         }
-        "CollabAgentToolCall" if p["tool"] == "spawn_agent" => {
+        "CollabAgentToolCall" => {
+            invocation(spool, writer, p, v, &id)?;
+            if p["tool"] != "spawn_agent" {
+                return writer.vendor(v, kind);
+            }
             for child in p["receiver_thread_ids"]
                 .as_array()
                 .into_iter()
@@ -72,6 +76,13 @@ pub(super) fn convert(
             Ok(())
         }
         "SubAgentActivity" => {
+            // These kinds use the invocation call_id in the native v2 writer.
+            if matches!(
+                p["kind"].as_str(),
+                Some("started" | "interacted" | "interrupted")
+            ) {
+                invocation(spool, writer, p, v, &id)?;
+            }
             let Some(child) = p["agent_thread_id"].as_str() else {
                 return writer.vendor(v, kind);
             };
@@ -80,6 +91,9 @@ pub(super) fn convert(
                 json!({"type":"subagent","childSession":session_ref(Provider::Codex,child)}),
             );
             r.as_object_mut().map(|o| o.remove("_record"));
+            if p["kind"] == "started" && p["id"].is_string() {
+                r["callId"] = json!(id);
+            }
             if let Some(status) = match p["kind"].as_str() {
                 Some("started") => Some("running"),
                 Some("completed") => Some("completed"),
@@ -101,6 +115,35 @@ pub(super) fn convert(
         _ => writer.vendor(v, kind),
     }
 }
+// Native UI records prove invocations even for nested code tools without a
+// response_item request. Neither complete arguments nor requester is recorded.
+fn invocation(spool: &Spool, writer: &mut Writer, p: &Value, v: &Value, id: &str) -> Result<()> {
+    if !p["id"].is_string()
+        || spool.entity(&format!("call:{id}"))?.is_some()
+        || spool.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM native_calls WHERE call_id=?1)",
+            [id],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Ok(());
+    }
+    let mut call = tools::call(
+        writer,
+        spool,
+        p,
+        id,
+        p["tool"].as_str(),
+        tools::Arguments::Json(Value::Null),
+        "code",
+    )?;
+    call.as_object_mut().unwrap().remove("requestedBy");
+    call["capture"]["input"] = json!({"state":"absent"});
+    call["native"] = json!({"record":p});
+    writer.emit(call, v)?;
+    Ok(())
+}
+
 fn execution(
     spool: &Spool,
     writer: &mut Writer,
@@ -189,7 +232,7 @@ fn execution(
             ("stdout", "stdout"),
             ("stderr", "stderr"),
             ("output", "aggregated_output"),
-            ("terminalId", "process_id"),
+            ("processId", "process_id"),
         ] {
             copy(&mut exec, dest, p, key);
         }

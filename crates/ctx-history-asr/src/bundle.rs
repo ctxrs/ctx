@@ -1,3 +1,5 @@
+mod boundaries;
+mod codex_owners;
 mod growth;
 mod header;
 use crate::{
@@ -186,14 +188,13 @@ pub fn export(options: &Options) -> Result<Summary> {
     let mut manifest = tempfile::NamedTempFile::new_in(&options.out)?;
     let mut output = BufWriter::new(manifest.as_file_mut());
     write!(output, "{{\"formatVersion\":\"0.1\",\"purpose\":\"archive\",\"producer\":{{\"name\":\"ctx\",\"version\":\"{}\"}},\"sessions\":[", env!("CARGO_PKG_VERSION"))?;
-    let mut previous = (String::new(), String::new());
+    boundaries::prepare(&db)?;
+    let codex_owners = codex_owners::prepare(&db, options.max_record_bytes)?;
     let mut comma = false;
     loop {
-        let next:Option<(String,String)>=db.query_row("SELECT agent,session FROM sources WHERE (agent,session)>(?1,?2) GROUP BY agent,session ORDER BY agent,session LIMIT 1",params![previous.0,previous.1],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        let Some((agent, session)) = next else {
+        let Some((agent, session)) = boundaries::next(&db)? else {
             break;
         };
-        previous = (agent.clone(), session.clone());
         let provider = Provider::from_agent(&agent)
             .ok_or_else(|| Error::Invalid("unknown ASR provider".into()))?;
         if provider.batch10() || provider.is_relational() {
@@ -208,6 +209,9 @@ pub fn export(options: &Options) -> Result<Summary> {
         }
         let mut hash = Sha256::new();
         hash.update(REVISION);
+        if provider == Provider::Codex {
+            hash.update(codex_owners.as_bytes());
+        }
         if provider.sqlite() {
             hash.update(b"sqlite-batch6-2");
         }
@@ -242,7 +246,8 @@ pub fn export(options: &Options) -> Result<Summary> {
             .as_ref()
             .map(|(_, raw)| serde_json::from_str::<Value>(raw))
             .transpose()?;
-        let unchanged = !provider.mixed()
+        let unchanged = provider != Provider::Claude
+            && !provider.mixed()
             && cached.as_ref().is_some_and(|(s, _)| *s == stamp)
             && old
                 .as_ref()
@@ -379,6 +384,18 @@ pub fn export(options: &Options) -> Result<Summary> {
                     source_header["_forkRef"] = spool.get(pos)?;
                 }
             }
+            if boundaries::defer(&db, provider, &session, &mut source_header)? {
+                continue;
+            }
+            if provider == Provider::DeepSeekHarness
+                && source_header["version"] == 4
+                && source_header["isSeeded"] == true
+            {
+                if let Some(seed) = spool.entity("deepseek:seed")? {
+                    source_header["_seedLength"] = seed;
+                    spool.save("deepseek:parent", &source_header["parentSession"])?;
+                }
+            }
             if provider == Provider::QwenCode {
                 crate::qwen::header(&mut spool, &mut source_header)?;
             }
@@ -492,6 +509,10 @@ pub fn export(options: &Options) -> Result<Summary> {
                         segment = current;
                     }
                 }
+                if provider == Provider::Codex {
+                    codex_owners::bind(&db, &spool, &value)?;
+                }
+                let count_before = writer.count;
                 match provider {
                     Provider::Claude => {
                         claude::convert(&mut spool, &mut writer, pos, &value, cwd, subagent)?
@@ -548,6 +569,13 @@ pub fn export(options: &Options) -> Result<Summary> {
                     | Provider::Devin => crate::batch8::convert(&mut spool, &mut writer, &value)?,
                     Provider::Fx => crate::fx::convert(&mut spool, &mut writer, &value)?,
                 }
+                if provider == Provider::Claude && writer.count > count_before {
+                    if let (Some(native), Some(last)) =
+                        (value["uuid"].as_str(), writer.last.as_deref())
+                    {
+                        spool.save(&format!("boundary:{native}"), &json!(last))?;
+                    }
+                }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
                 }
@@ -565,6 +593,12 @@ pub fn export(options: &Options) -> Result<Summary> {
             if provider == Provider::Pi {
                 crate::pi::finish(&spool, &mut writer)?;
             }
+            if provider == Provider::Codex && spool.entity("codex:unbound_root")?.is_some() {
+                stream_header["producer"]["lossy"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!("_com.openai.codex/root_turn_owner"));
+            }
             crate::jsonl::finish_header(&spool, provider, &source_header, &mut stream_header)?;
             if provider.journal() {
                 crate::journals::tail(&mut spool, &mut writer, &source_header)?;
@@ -577,6 +611,7 @@ pub fn export(options: &Options) -> Result<Summary> {
             } else {
                 false
             };
+            boundaries::remember(&db, &spool, provider, &session)?;
             spool.finish()?;
             writer.out.flush()?;
             let mut count = writer.count + 1;
@@ -696,6 +731,10 @@ pub fn export(options: &Options) -> Result<Summary> {
             .pointer("/_meta/rs.ctx~1bytes")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        db.execute(
+            "DELETE FROM pending_sessions WHERE agent=?1 AND session=?2",
+            params![agent, session],
+        )?;
         if comma {
             output.write_all(b",")?;
         }

@@ -126,3 +126,5 @@ mod v31;
 mod v32;
 
 mod authentic;
+
+mod round4;

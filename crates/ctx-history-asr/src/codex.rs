@@ -414,7 +414,28 @@ fn event(
                     .or_else(|| p.pointer("/turn_attribution/root_turn_id"))
                     .filter(|v| !v.is_null())
                 {
-                    r["rootTurn"] = json!({"session":writer.root_session,"turnId":root});
+                    let mapped = root
+                        .as_str()
+                        .map(|id| spool.entity(&format!("codex:root:{id}")))
+                        .transpose()?
+                        .flatten();
+                    let owner = mapped
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .map(|owner| crate::records::session_ref(Provider::Codex, owner));
+                    if let Some(owner) = owner {
+                        r["rootTurn"] = json!({"session":owner,"turnId":root});
+                    } else {
+                        // A scalar causal turn ID does not identify its session.
+                        // The spawn-tree root is not evidence of turn ownership.
+                        spool.save("codex:unbound_root", &json!(true))?;
+                        meta(
+                            &mut r,
+                            Provider::Codex,
+                            "unboundRootTurn",
+                            &json!({"turnId":root}),
+                        );
+                    }
                 }
             }
             if let Some(parent) = p.pointer("/turn_attribution/parent_turn_id") {

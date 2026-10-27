@@ -9,10 +9,16 @@ use serde_json::{json, Value};
 
 pub(crate) fn session_id(provider: Provider, v: &Value) -> Option<String> {
     let id = match provider {
+        Provider::Pi if v["kind"] == "header" && v["version"] == 4 => &v["id"],
+
         Provider::Pi if v["type"] == "session" && v["version"].as_u64().is_none_or(|v| v <= 3) => {
             &v["id"]
         }
-        Provider::DeepSeekHarness if v["type"] == "session" && v["version"] == 0 => &v["id"],
+        Provider::DeepSeekHarness
+            if v["type"] == "session" && matches!(v["version"].as_u64(), Some(0 | 4)) =>
+        {
+            &v["id"]
+        }
         Provider::GrokBuild
             if matches!(
                 v["method"].as_str(),
@@ -39,6 +45,8 @@ pub(crate) fn event_id(v: &Value) -> Option<&str> {
 pub(crate) use crate::records::{clock, millis};
 pub(crate) fn local(provider: Provider, v: &Value, physical: u64) -> String {
     let id = match provider {
+        Provider::Pi if v["kind"] == "header" => Some("header".into()),
+        Provider::Pi if v["kind"].is_string() => v["seq"].as_u64().map(|n| format!("seq:{n}")),
         Provider::Pi => v["id"].as_str().map(|s| format!("id:{s}")),
         Provider::GrokBuild => event_id(v).map(|s| format!("event:{s}")),
         Provider::DeepSeekHarness if v["type"] == "session" => Some("header".into()),
@@ -51,6 +59,9 @@ pub(crate) fn local(provider: Provider, v: &Value, physical: u64) -> String {
     id.unwrap_or_else(|| format!("l{physical}"))
 }
 pub(crate) fn index(spool: &Spool, provider: Provider, v: &Value, pos: u64) -> Result<()> {
+    if provider == Provider::Pi {
+        crate::pi::lanes::index(spool, v)?;
+    }
     let calls: Vec<&str> = match provider {
         Provider::Pi => v
             .pointer("/message/content")
@@ -207,7 +218,7 @@ pub(crate) fn header(p: Provider, id: &str, n: &Value, revision: &str) -> Value 
             roots.push(json!({"id":"workspace","path":cwd}));
         }
     }
-    let start = if p == Provider::DeepSeekHarness {
+    let start = if p == Provider::DeepSeekHarness || (p == Provider::Pi && n["version"] == 4) {
         millis(&n["createdAt"])
     } else if p == Provider::Pi {
         n["timestamp"].as_str().and_then(timestamp)
@@ -218,7 +229,17 @@ pub(crate) fn header(p: Provider, id: &str, n: &Value, revision: &str) -> Value 
         h["startedAt"] = json!(start);
     }
     if p == Provider::Pi {
-        if let Some(parent) = n["_parentId"].as_str() {
+        if n["kind"] == "header" {
+            h["producer"]["source"]["format"] = json!("pi-jsonl-v4");
+            h["producer"]["lossy"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("_io.github.badlogic.pi/retained_tail_context"));
+        }
+        if let Some(parent) = n["_parentId"]
+            .as_str()
+            .or_else(|| n["parentSessionId"].as_str())
+        {
             h["lineage"] =
                 json!({"forkedFrom":{"session":session_ref(p,parent),"evidence":"native_field"}});
         }
@@ -230,14 +251,17 @@ pub(crate) fn header(p: Provider, id: &str, n: &Value, revision: &str) -> Value 
                 h["lineage"]["spawnedBy"] =
                     json!({"session":session_ref(p,parent),"evidence":"native_field"});
             }
-            if let Some(seed) = n["seedLength"].as_u64() {
+            if let Some(seed) = n["seedLength"]
+                .as_u64()
+                .or_else(|| n["_seedLength"].as_u64())
+            {
                 h["lineage"]["inherits"] = if seed == 0 {
                     json!({"mode":"none","evidence":"native_field"})
                 } else {
                     json!({"mode":"copied","from":session_ref(p,parent),"throughOrdinal":seed-1,"evidence":"native_field"})
                 };
             }
-        } else if n["seedLength"] == 0 {
+        } else if n["seedLength"] == 0 || n["isSeeded"] == false {
             h["lineage"] = json!({"inherits":{"mode":"none","evidence":"native_field"}});
         }
         if n["origin"] == "subagent" {
@@ -256,6 +280,7 @@ pub(crate) fn header(p: Provider, id: &str, n: &Value, revision: &str) -> Value 
                 "createdAt",
                 "_parentId",
                 "_parentPath",
+                "_seedLength",
             ],
         );
     }
@@ -270,7 +295,10 @@ pub(crate) fn finish_header(
     if provider == Provider::DeepSeekHarness
         && h.pointer("/lineage/inherits/mode") == Some(&json!("copied"))
     {
-        if let Some(seed) = n["seedLength"].as_u64() {
+        if let Some(seed) = n["seedLength"]
+            .as_u64()
+            .or_else(|| n["_seedLength"].as_u64())
+        {
             if let Some(last) = spool.entity("deepseek:copied_last")? {
                 h["lineage"]["inherits"]["localThroughId"] = last;
             } else if seed > 0 {
