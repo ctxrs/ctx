@@ -10,6 +10,8 @@ fn codex_async_question_message_does_not_claim_a_tool_call() {
             json!({"type":"session_meta","payload":{"id":"test"}}),
             json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"display-question","delivery":"async","questions":[{"id":"choice","question":"Choose a color","options":[{"label":"blue"}]}]}}}),
             json!({"type":"response_item","payload":{"type":"function_call","call_id":"actual-call","name":"request_user_input","arguments":"{\"questions\":[{\"id\":\"tool-choice\",\"question\":\"Choose a shape\"}]}"}}),
+            json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"async-tool","delivery":"async","questions":[{"id":"async-choice","question":"Choose a size"}]}}}),
+            json!({"type":"response_item","payload":{"type":"function_call","call_id":"async-tool","name":"functions.request_user_input_async","arguments":"{\"questions\":[{\"id\":\"async-choice\",\"question\":\"Choose a size\"}]}"}}),
         ],
     );
     export(&o).unwrap();
@@ -21,9 +23,11 @@ fn codex_async_question_message_does_not_claim_a_tool_call() {
     assert_eq!(question["type"], "input_request");
     assert_eq!(question["blocking"], false);
     assert!(question.get("callId").is_none());
-    assert_eq!(r.iter().filter(|r| r["type"] == "tool_call").count(), 1);
+    assert_eq!(r.iter().filter(|r| r["type"] == "tool_call").count(), 2);
     let tool_question = r.iter().find(|r| r["requestId"] == "actual-call").unwrap();
     assert_eq!(tool_question["callId"], "actual-call");
+    let async_question = r.iter().find(|r| r["requestId"] == "async-tool").unwrap();
+    assert_eq!(async_question["callId"], "async-tool");
     assert_eq!(export(&o).unwrap().unchanged, 1);
 }
 

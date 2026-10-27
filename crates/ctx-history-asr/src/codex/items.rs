@@ -4,9 +4,10 @@ use crate::{
     spool::Spool,
     tools, Provider, Result,
 };
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 pub(super) fn convert(
-    spool: &Spool,
+    spool: &mut Spool,
     writer: &mut Writer,
     p: &Value,
     v: &Value,
@@ -28,8 +29,34 @@ pub(super) fn convert(
         "AgentMessage" if p["delivery"] == "async" && p["questions"].is_array() => {
             let mut input = p.clone();
             input["blocking"] = json!(false);
-            // This is a message-based question, not a recorded tool invocation.
-            tools::question(writer, spool, v, &id, None, &input, None)
+            // Message IDs alone do not establish a tool link. A matching native
+            // question invocation can also appear later in the captured stream.
+            let pos: Option<u64> = spool
+                .db
+                .query_row(
+                    "SELECT position FROM native_calls WHERE call_id=?1 ORDER BY position LIMIT 1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let call = pos.map(|pos| spool.get(pos)).transpose()?;
+            let name = call
+                .as_ref()
+                .and_then(|c| c["payload"]["name"].as_str())
+                .unwrap_or("");
+            let linked = matches!(
+                name.strip_prefix("functions.").unwrap_or(name),
+                "request_user_input" | "request_user_input_async"
+            );
+            tools::question(
+                writer,
+                spool,
+                v,
+                &id,
+                linked.then_some(id.as_str()),
+                &input,
+                None,
+            )
         }
         "AgentMessage" | "Reasoning" if spool.output(&id)?.is_some() => {
             // These are UI snapshots of the native model item, not another model message.
