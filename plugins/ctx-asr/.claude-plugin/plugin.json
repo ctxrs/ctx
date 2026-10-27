@@ -1,0 +1,8 @@
+{
+  "name": "ctx-asr",
+  "version": "0.1.0",
+  "description": "Local, metadata-only Agent Session Record observer for Claude Code hooks.",
+  "author": {"name": "ctx engineering inc", "url": "https://ctx.rs"},
+  "repository": "https://github.com/ctxrs/ctx",
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,11 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+py_test(
+    name = "observer_tests",
+    srcs = ["tests/test_observer.py"],
+    main = "tests/test_observer.py",
+    data = glob(["scripts/*.py", "hooks/*.json"]),
+    python_version = "PY3",
+)
