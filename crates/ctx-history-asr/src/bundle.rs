@@ -221,6 +221,7 @@ pub fn export(options: &Options) -> Result<Summary> {
             )?;
             let mut rows = stmt.query(params![agent, session])?;
             let mut source_header = None;
+            let mut captured = false;
             db.execute_batch("BEGIN")?;
             let mut last_pos: u64 = db.query_row(
                 "SELECT coalesce(max(pos),0) FROM positions WHERE agent=?1 AND session=?2",
@@ -235,6 +236,19 @@ pub fn export(options: &Options) -> Result<Summary> {
                 let segment: String = row.get(2)?;
                 let header: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
                 spool.save(&format!("segment:{segment}"), &header)?;
+                if provider.captures() {
+                    if std::mem::replace(&mut captured, true) {
+                        return Err(Error::Invalid("multiple native stores claim one session; export installations separately with distinct namespaces".into()));
+                    }
+                    match provider {
+                        Provider::Cline | Provider::Roo => {
+                            crate::task::ingest(&mut spool, Path::new(&path))?
+                        }
+                        Provider::Fx => crate::fx::ingest(&mut spool, Path::new(&path))?,
+                        _ => unreachable!(),
+                    }
+                    continue;
+                }
                 if provider.mixed() {
                     let mut header = header;
                     crate::native::ingest(
@@ -400,6 +414,10 @@ pub fn export(options: &Options) -> Result<Summary> {
                         crate::native::convert(&mut spool, &mut writer, &mut stream_header, &value)?
                     }
                     Provider::CodeBuddy | Provider::Continue | Provider::OpenHands | Provider::Auggie | Provider::RovoDev => crate::batch10::convert(&mut spool, &mut writer, &value)?,
+                    Provider::Cline | Provider::Roo => {
+                        crate::task::convert(&mut spool, &mut writer, &value)?
+                    }
+                    Provider::Fx => crate::fx::convert(&mut spool, &mut writer, &value)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -453,7 +471,8 @@ pub fn export(options: &Options) -> Result<Summary> {
                     session_ref(provider, &session).into_bytes()
                 })
             );
-            let default = format!("sessions/{agent}/{storage}.jsonl");
+            let storage_agent = provider.agent();
+            let default = format!("sessions/{storage_agent}/{storage}.jsonl");
             let prior = old
                 .as_ref()
                 .and_then(|v| v["path"].as_str())
@@ -598,4 +617,8 @@ fn append_prefix(path: &Path, new: &mut File) -> Result<bool> {
     std::io::copy(new, &mut old)?;
     old.flush()?;
     Ok(true)
+}
+
+fn capture_time() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }

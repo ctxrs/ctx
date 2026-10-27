@@ -101,3 +101,5 @@ mod sqlite;
 mod warp;
 mod mixed;
 mod batch10;
+mod fx;
+mod task;

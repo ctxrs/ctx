@@ -351,6 +351,12 @@ cargo_tools.spec(
 # Keep libgit2's declared header inputs on the exact patched tool version.
 cargo_tools.spec(
     default_features = False,
+    package = "libz-sys",
+    repositories = ["ctx_cargo_tools"],
+    version = "=1.1.29",
+)
+cargo_tools.spec(
+    default_features = False,
     package = "libssh2-sys",
     repositories = ["ctx_cargo_tools"],
     version = "=0.3.3",

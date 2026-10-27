@@ -3,6 +3,7 @@ mod antigravity;
 mod batch8;
 mod batch10;
 mod bundle;
+mod capture;
 mod claude;
 mod codex;
 mod content;
@@ -20,6 +21,7 @@ mod opencode;
 mod nanoclaw;
 mod native;
 mod openclaw;
+mod fx;
 mod privacy;
 mod qwen;
 mod records;
@@ -28,6 +30,7 @@ mod source;
 mod spool;
 mod opencode_source;
 mod sqlite;
+mod task;
 mod tools;
 mod tree;
 
@@ -78,6 +81,9 @@ pub enum Provider {
     Zed,
     OpenClaw,
     NanoClaw,
+    Cline,
+    Roo,
+    Fx,
 }
 impl Provider {
     pub(crate) const ALL: [Self; 20] = [Self::Claude,Self::Codex,Self::Pi,Self::GrokBuild,Self::DeepSeekHarness,Self::Gemini,Self::Antigravity,Self::QwenCode,Self::Copilot,Self::Droid,Self::Kimi,Self::Qoder,Self::OpenCode,Self::Kilo,Self::MiMoCode,Self::Kiro,Self::Hermes,Self::AstrBot,Self::Shelley,Self::Zed];
@@ -186,7 +192,16 @@ impl Provider {
             Self::OpenHands => "openhands",
             Self::Auggie => "auggie",
             Self::RovoDev => "com.atlassian.rovodev",
+            Self::Cline => "cline",
+            Self::Roo => "roo-code",
+            Self::Fx => "com.vercel.fx",
         }
+    }
+    pub(crate) fn needs_namespace(self) -> bool {
+        matches!(self, Self::Cline | Self::Roo)
+    }
+    pub(crate) fn captures(self) -> bool {
+        matches!(self, Self::Cline | Self::Roo | Self::Fx)
     }
     pub(crate) fn domain(self) -> &'static str {
         match self {
@@ -228,6 +243,9 @@ impl Provider {
             Self::OpenHands => "dev.all-hands.openhands",
             Self::Auggie => "com.augmentcode.auggie",
             Self::RovoDev => "com.atlassian.rovodev",
+            Self::Cline => "bot.cline",
+            Self::Roo => "com.roocode",
+            Self::Fx => "com.vercel.fx",
         }
     }
     pub(crate) fn format(self) -> &'static str {
@@ -264,6 +282,8 @@ impl Provider {
             Self::OpenHands => "openhands-events",
             Self::Auggie => "auggie-session-json",
             Self::RovoDev => "rovodev-session-context",
+            Self::Cline | Self::Roo => "cline-task",
+            Self::Fx => "fx-event-log-v3",
         }
     }
     pub fn is_sqlite(self) -> bool {
@@ -321,6 +341,9 @@ pub struct Options {
     pub namespace: Option<String>,
     pub out: PathBuf,
     /// Bound for a native line, SQLite row, and assembled content field.
+    /// Stable installation/profile identity for timestamp-keyed task stores.
+    pub namespace: Option<String>,
+    /// Bound for a native line and an assembled content field.
     pub max_record_bytes: usize,
 }
 impl Options {
@@ -330,6 +353,7 @@ impl Options {
             session: None,
             namespace: None,
             out,
+            namespace: None,
             max_record_bytes: ctx_history_source_io::MAX_PROVIDER_JSONL_LINE_BYTES,
         }
     }

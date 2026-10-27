@@ -76,6 +76,16 @@ impl Writer {
         self.capture_scope = false;
         self.native_emissions.clear();
     }
+    pub fn capture_identity(&mut self, key: &str, scoped: bool, snapshot: bool) {
+        use sha2::{Digest, Sha256};
+        self.identity = Some(format!("n{:x}", Sha256::digest(key.as_bytes())));
+        self.identity_offset = self.slot;
+        self.capture_scope = scoped;
+        self.snapshot = snapshot;
+    }
+    pub fn capture_scoped(&self) -> bool {
+        self.capture_scope
+    }
     pub fn slot(&mut self, slot: u64) {
         self.entity_key = None;
         self.slot = slot;
@@ -114,6 +124,18 @@ impl Writer {
         self.position(pos);
         self.identity = Some(crate::native::stable_id(identity));
         self.native_parts.clear();
+    }
+    /// Override one projection's identity without changing later turn subslots.
+    pub fn emit_identified(&mut self, value: Value, source: &Value, key: &str) -> Result<String> {
+        let previous = (
+            self.identity.clone(),
+            self.identity_offset,
+            self.capture_scope,
+        );
+        self.capture_identity(key, false, self.snapshot);
+        let result = self.emit(value, source);
+        (self.identity, self.identity_offset, self.capture_scope) = previous;
+        result
     }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
         if self.snapshot {
