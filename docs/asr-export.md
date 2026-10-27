@@ -1,6 +1,6 @@
 # ASR export
 
-`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Claude Code and Codex are the first supported converters.
+`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Converters are available for Claude Code, Codex, Junie, Mistral Vibe, Tabnine CLI, Mux, and Cursor CLI transcripts.
 
 ```sh
 ctx export asr --all --out ./asr
@@ -42,7 +42,39 @@ absence, capture states and declared losses distinguish unavailable facts from
 recorded empty values. The declared vendor loss categories cover over-limit
 native lines, metadata kept outside the selected transcripts, and native variants
 retained as vendor records without a standard semantic projection. Export does
-not read the live UI databases, global scheduler definitions or deleted backups.
+not read undocumented live UI databases, global scheduler definitions or deleted backups.
+
+## Journal converters
+
+Select `--provider junie`, `mistral-vibe`, `tabnine`, `mux`, or `cursor`.
+These adapters read native sources directly and use the same bounded spool and
+bundle writer. They do not open the searchable ctx store.
+
+| Provider | Native inputs | Mapping limits |
+| --- | --- | --- |
+| Junie | `sessions/index.jsonl`, `session-*/events.jsonl` | UI step growth is folded within its prompt scope. UI results remain display content; model rendering is unknown. |
+| Mistral Vibe | `meta.json`, `messages.jsonl` | Current metadata, instructions, configuration and cumulative statistics follow the journal. Image paths remain recorded references; referenced files are not opened. |
+| Tabnine CLI | Chat recording JSONL, including child journals | Repeated message IDs replace the whole earlier snapshot at its first position. Saved checkpoint files are outside this converter's input contract. |
+| Mux | `chat-archive.jsonl`, `chat.jsonl`, `partial.json`, `metadata.json`, `subagent-transcripts.json`, archived child journals | Archive precedes active history. A partial with the same `historySequence` and more parts replaces the effective row at the capture tail. Current metadata and archive index are also tail snapshots. |
+| Cursor | `projects/<workspace>/agent-transcripts/<id>/<id>.jsonl` | Uses ctx's strict Cursor parser. IDE `state.vscdb`, CLI blob-DAG `store.db`, and external tool-output files have no qualified decoder here. Selecting a database reports an unidentified source; no chat semantics are guessed. |
+
+Native message IDs survive source reordering. Positional identities in rewritable
+sources carry `idScope: capture`; their equality across captures says nothing
+about identity. Replacement captures have `observedAt`, while append and no-op
+exports preserve it. `seq` describes serialization order within one capture,
+not chronology across stores. Mutable sidecar records carry snapshot assembly.
+
+Tool names remain verbatim. Reused native call IDs produce unpaired results;
+no result is assigned to the latest call by position. Usage attributed to a
+message or group of calls remains a summary rather than a fabricated inference.
+Native values without a standard field remain under the provider's reverse-DNS
+metadata namespace. Unsafe integers use lossless JSON text; large content and
+metadata use content-addressed JSON blobs. Configuration credential values and
+secret-question answers are excluded before metadata or blob publication.
+
+The authored regression fixtures verify mapping semantics, source rewrites,
+sidecar placement and missing information. They do not establish version-level
+producer conformance; that additionally requires authentic native captures.
 
 ## Adding a converter
 

@@ -10,7 +10,7 @@ use std::{
 /// A bounded SQLite cache plus a byte spool, never a Vec of session bodies.
 pub(crate) struct Spool {
     pub db: Connection,
-    bytes: File,
+    pub(crate) bytes: File,
     _dir: tempfile::TempDir,
     pub source_bytes: u64,
     source_lines: u64,
@@ -55,6 +55,9 @@ impl Spool {
         segment: &str,
         allocate: &mut dyn FnMut(&str) -> Result<u64>,
     ) -> Result<()> {
+        if provider.journal() {
+            return crate::journals::ingest::ingest(self, path, provider, segment);
+        }
         let mut reader = source::reader(path)?;
         let mut bytes = Vec::new();
         let mut physical = 0;

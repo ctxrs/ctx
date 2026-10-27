@@ -12,15 +12,15 @@ use super::parser::{CursorSafePart, CursorSanitizedRecord};
 mod timestamp_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct CursorNativeOrder {
-    pub(crate) semantic_ordinal: u64,
-    pub(crate) physical_ordinal: u64,
-    pub(crate) part_ordinal: u32,
+pub struct CursorNativeOrder {
+    pub semantic_ordinal: u64,
+    pub physical_ordinal: u64,
+    pub part_ordinal: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum CursorEventBody {
+pub enum CursorEventBody {
     None,
     Text {
         text: String,
@@ -51,16 +51,16 @@ pub(crate) enum CursorEventBody {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CursorNativeEvent {
-    pub(crate) native_order: CursorNativeOrder,
-    pub(crate) event_type: EventType,
-    pub(crate) role: EventRole,
-    pub(crate) occurred_at: Option<DateTime<Utc>>,
-    pub(crate) body: CursorEventBody,
-    pub(crate) record_byte_start: u64,
-    pub(crate) record_byte_end_exclusive: u64,
-    pub(crate) record_sha256: [u8; 32],
-    pub(crate) provider_event_hash: [u8; 32],
+pub struct CursorNativeEvent {
+    pub native_order: CursorNativeOrder,
+    pub event_type: EventType,
+    pub role: EventRole,
+    pub occurred_at: Option<DateTime<Utc>>,
+    pub body: CursorEventBody,
+    pub record_byte_start: u64,
+    pub record_byte_end_exclusive: u64,
+    pub record_sha256: [u8; 32],
+    pub provider_event_hash: [u8; 32],
 }
 
 pub(super) fn project_cursor_record(
@@ -213,7 +213,7 @@ impl CursorTimestampState {
     }
 }
 
-fn embedded_cursor_timestamp(event: &CursorNativeEvent) -> Option<DateTime<Utc>> {
+pub(super) fn embedded_cursor_timestamp(event: &CursorNativeEvent) -> Option<DateTime<Utc>> {
     if event.role != EventRole::User {
         return None;
     }

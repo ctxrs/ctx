@@ -14,6 +14,11 @@ enum AsrProvider {
     #[value(alias = "claude-code")]
     Claude,
     Codex,
+    Junie,
+    MistralVibe,
+    Tabnine,
+    Mux,
+    Cursor,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -50,7 +55,20 @@ impl ExportArgs {
         let providers = match args.provider {
             Some(AsrProvider::Claude) => vec![Provider::Claude],
             Some(AsrProvider::Codex) => vec![Provider::Codex],
-            None => vec![Provider::Claude, Provider::Codex],
+            Some(AsrProvider::Junie) => vec![Provider::Junie],
+            Some(AsrProvider::MistralVibe) => vec![Provider::MistralVibe],
+            Some(AsrProvider::Tabnine) => vec![Provider::Tabnine],
+            Some(AsrProvider::Mux) => vec![Provider::Mux],
+            Some(AsrProvider::Cursor) => vec![Provider::Cursor],
+            None => vec![
+                Provider::Claude,
+                Provider::Codex,
+                Provider::Junie,
+                Provider::MistralVibe,
+                Provider::Tabnine,
+                Provider::Mux,
+                Provider::Cursor,
+            ],
         };
         let mut inputs = Vec::new();
         for provider in providers {
@@ -64,12 +82,21 @@ impl ExportArgs {
             let capture = match provider {
                 Provider::Claude => ctx_history_core::CaptureProvider::Claude,
                 Provider::Codex => ctx_history_core::CaptureProvider::Codex,
+                Provider::Junie => ctx_history_core::CaptureProvider::Junie,
+                Provider::MistralVibe => ctx_history_core::CaptureProvider::MistralVibe,
+                Provider::Tabnine => ctx_history_core::CaptureProvider::Tabnine,
+                Provider::Mux => ctx_history_core::CaptureProvider::Mux,
+                Provider::Cursor => ctx_history_core::CaptureProvider::Cursor,
             };
             let home = crate::identity::home_dir();
             let report =
                 ctx_history_cli::discovered_sources_for_provider_report(home.as_deref(), capture);
             for source in report.sources {
-                if source.source_format.contains("jsonl")
+                if (source.source_format.contains("jsonl")
+                    || matches!(
+                        provider,
+                        Provider::Junie | Provider::MistralVibe | Provider::Mux
+                    ))
                     && !source.source_format.contains("history_jsonl")
                 {
                     inputs.push(Input {

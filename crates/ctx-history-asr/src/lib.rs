@@ -3,6 +3,7 @@ mod bundle;
 mod claude;
 mod codex;
 mod content;
+mod journals;
 mod privacy;
 mod records;
 mod source;
@@ -32,24 +33,45 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Provider {
     Claude,
     Codex,
+    Junie,
+    MistralVibe,
+    Tabnine,
+    Mux,
+    Cursor,
 }
 impl Provider {
+    pub(crate) fn journal(self) -> bool {
+        !matches!(self, Self::Claude | Self::Codex)
+    }
     pub fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude-code",
             Self::Codex => "codex",
+            Self::Junie => "junie",
+            Self::MistralVibe => "ai.mistral.vibe",
+            Self::Tabnine => "com.tabnine.cli",
+            Self::Mux => "com.coder.mux",
+            Self::Cursor => "cursor",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
         match self {
             Self::Claude => "com.anthropic.claude-code",
             Self::Codex => "com.openai.codex",
+            Self::Junie => "com.jetbrains.junie",
+            Self::Cursor => "com.cursor.agent",
+            _ => self.agent(),
         }
     }
     pub(crate) fn format(self) -> &'static str {
         match self {
             Self::Claude => "claude-code-jsonl",
             Self::Codex => "codex-rollout",
+            Self::Junie => "junie-events-jsonl",
+            Self::MistralVibe => "mistral-vibe-session",
+            Self::Tabnine => "tabnine-chat-jsonl",
+            Self::Mux => "mux-chat-jsonl",
+            Self::Cursor => "cursor-cli-transcript",
         }
     }
 }

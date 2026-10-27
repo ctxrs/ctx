@@ -68,6 +68,9 @@ pub(crate) fn visit(
     visitor: &mut dyn FnMut(Source) -> Result<()>,
     unidentified: &mut u64,
 ) -> Result<()> {
+    if input.provider.journal() {
+        return crate::journals::source::visit(input, limit, visitor, unidentified);
+    }
     if input.path.is_file() {
         if input.path.is_symlink() {
             return visit(
@@ -201,6 +204,7 @@ fn inspect(
             };
             (id.to_owned(), v.clone())
         }
+        _ => return Err(Error::Invalid("unsupported source dispatch".into())),
     };
     if input.provider == Provider::Claude {
         let sidecar = input.path.with_extension("meta.json");
