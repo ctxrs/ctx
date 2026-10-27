@@ -1,6 +1,6 @@
 # ASR export
 
-`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Claude Code and Codex are the first supported converters.
+`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Native converters are available for Claude Code, Codex, Hermes Agent, AstrBot, Shelley, and Zed.
 
 ```sh
 ctx export asr --all --out ./asr
@@ -41,8 +41,56 @@ rollouts are decoded incrementally. Unknown native records remain vendor records
 absence, capture states and declared losses distinguish unavailable facts from
 recorded empty values. The declared vendor loss categories cover over-limit
 native lines, metadata kept outside the selected transcripts, and native variants
-retained as vendor records without a standard semantic projection. Export does
-not read the live UI databases, global scheduler definitions or deleted backups.
+retained as vendor records without a standard semantic projection. The JSONL converters do not read live UI databases, global scheduler definitions
+or deleted backups.
+
+## SQLite histories and rewritten captures
+
+```sh
+ctx export asr --all --provider hermes --path ./state.db --out ./hermes-asr
+ctx export asr --all --provider astrbot --path ./data_v4.db --out ./astrbot-asr
+ctx export asr --all --provider shelley --path ./shelley.db --out ./shelley-asr
+ctx export asr --all --provider zed --path ./threads.db --out ./zed-asr
+```
+
+These converters read SQLite through read-only transactions, including committed
+WAL changes. They retain native session IDs: Hermes `sessions.id`, AstrBot's public
+`conversation_id` (not its integer database key), Shelley's `conversation_id`,
+and Zed's thread `id`. Hermes uses its native `state_meta.store_instance_id` as
+an installation namespace. For older Hermes databases without that value, pass
+`--namespace STABLE_INSTALLATION_ID` and reuse it after moving the database.
+The same option can distinguish independent installations of the other SQLite
+providers. A source path never supplies session identity. Two selected databases
+claiming the same identity are rejected; select one representation of the store.
+
+Every changed SQLite source produces a new capture, with `observedAt` and
+capture-local sequence numbers. Stable native identities retain their record
+IDs. AstrBot array positions and Zed assistant-message positions have no stable
+identity across rewrites, so their IDs are capture-scoped. Unique native Zed user
+IDs and native tool identities survive replacement. Duplicate identities stay
+separate, and ambiguous tool results remain unpaired. An unchanged repeat keeps
+the current stream and manifest bytes. A database change currently causes every
+selected session in that database to be reconsidered. Reads are transactional per
+session; a bundle does not claim one atomic snapshot across all sessions.
+
+Hermes exports explicit branch, delegation and reset relations, current replay
+heads, participants, conversation lanes and recorded schedule/webhook triggers.
+Its delivery ledger records lanes without session ownership, so all-session
+exports retain those rows in manifest metadata. AstrBot's platform-message
+history has the same ownership limitation. Session-filtered exports omit these
+unassigned lane stores. Shelley preserves explicit fork-copy links, subagent
+parents, generations, usage and UI/model separation. Zed reads native JSON and
+zstd thread blobs (format `0.3.0`), including compaction and usage data. Missing
+historical revisions, unavailable timestamps and unmapped semantic details are
+declared as losses; raw native fields remain in provider metadata or JSON blobs.
+
+`--max-record-bytes` bounds each SQLite TEXT/BLOB value and the decoded AstrBot
+history or Zed thread. A row can contain several bounded values. Over-limit values
+produce a gap or metadata describing the omission; raise the limit for larger
+threads. Binary content over 64 KiB is stored in blobs. Export does not replay a
+provider, contact a model, fetch attachments, or read unrelated account/config
+and scheduler stores. Qualification is limited to the native versions and
+features exercised; see the converter source and authored regression tests.
 
 ## Adding a converter
 

@@ -18,6 +18,12 @@ pub(crate) struct Writer {
     pub turn: Option<String>,
     pub model: Option<String>,
     pub root_session: String,
+    /// Native snapshots separate record identity from capture-local serialization order.
+    pub native_identity: Option<String>,
+    pub capture_scope: bool,
+    pub native_snapshot: bool,
+    pub native_projection: Option<String>,
+    pub native_emissions: std::collections::BTreeMap<String, u64>,
 }
 impl Writer {
     pub fn new(file: File, provider: Provider, root_session: String) -> Self {
@@ -33,16 +39,39 @@ impl Writer {
             turn: None,
             model: None,
             root_session,
+            native_identity: None,
+            capture_scope: false,
+            native_snapshot: false,
+            native_projection: None,
+            native_emissions: Default::default(),
         }
     }
     pub fn position(&mut self, pos: u64) {
         self.pos = pos;
         self.slot = 0;
+        self.native_emissions.clear();
     }
     pub fn slot(&mut self, slot: u64) {
         self.slot = slot;
     }
     pub fn id(&self) -> String {
+        if let Some(key) = &self.native_identity {
+            use sha2::{Digest, Sha256};
+            return format!(
+                "r{:x}",
+                Sha256::digest(
+                    format!(
+                        "{}\0{}",
+                        self.root_session,
+                        self.native_projection
+                            .as_deref()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("{key}\0{}", self.slot))
+                    )
+                    .as_bytes()
+                )
+            );
+        }
         format!("r{}", self.pos * STRIDE + self.slot)
     }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
@@ -57,9 +86,21 @@ impl Writer {
                 "too many records for one native item".into(),
             ));
         }
-        let id = format!("r{seq}");
-        value["seq"] = json!(seq);
+        let id = self.id();
+        value["seq"] = json!(if self.native_identity.is_some() {
+            self.count + 1
+        } else {
+            seq
+        });
         value["id"] = json!(id);
+        if self.native_identity.is_some() {
+            if self.native_snapshot && value.get("assembly").is_none() {
+                value["assembly"] = json!({"mode":"snapshot"});
+            }
+            if self.capture_scope {
+                value["idScope"] = json!("capture");
+            }
+        }
         if let Some(ts) = source
             .get("timestamp")
             .and_then(Value::as_str)

@@ -5,6 +5,7 @@ mod codex;
 mod content;
 mod privacy;
 mod records;
+mod relational;
 mod source;
 mod spool;
 mod tools;
@@ -32,25 +33,47 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Provider {
     Claude,
     Codex,
+    Hermes,
+    AstrBot,
+    Shelley,
+    Zed,
 }
 impl Provider {
     pub fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude-code",
             Self::Codex => "codex",
+            Self::Hermes => "com.nousresearch.hermes",
+            Self::AstrBot => "app.astrbot",
+            Self::Shelley => "dev.exe.shelley",
+            Self::Zed => "zed",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
         match self {
             Self::Claude => "com.anthropic.claude-code",
             Self::Codex => "com.openai.codex",
+            Self::Hermes => "com.nousresearch.hermes",
+            Self::AstrBot => "app.astrbot",
+            Self::Shelley => "dev.exe.shelley",
+            Self::Zed => "dev.zed",
         }
     }
     pub(crate) fn format(self) -> &'static str {
         match self {
             Self::Claude => "claude-code-jsonl",
             Self::Codex => "codex-rollout",
+            Self::Hermes => "hermes-state-sqlite",
+            Self::AstrBot => "astrbot-data-v4-sqlite",
+            Self::Shelley => "shelley-sqlite",
+            Self::Zed => "zed-threads-sqlite",
         }
+    }
+    pub fn is_relational(self) -> bool {
+        matches!(
+            self,
+            Self::Hermes | Self::AstrBot | Self::Shelley | Self::Zed
+        )
     }
 }
 
@@ -64,6 +87,8 @@ pub struct Options {
     pub inputs: Vec<Input>,
     /// Exact native session ID; absent exports all selected sessions.
     pub session: Option<String>,
+    /// Stable installation namespace for native stores that do not record one.
+    pub namespace: Option<String>,
     pub out: PathBuf,
     /// Bound for a native line and an assembled content field.
     pub max_record_bytes: usize,
@@ -73,6 +98,7 @@ impl Options {
         Self {
             inputs,
             session: None,
+            namespace: None,
             out,
             max_record_bytes: ctx_history_source_io::MAX_PROVIDER_JSONL_LINE_BYTES,
         }

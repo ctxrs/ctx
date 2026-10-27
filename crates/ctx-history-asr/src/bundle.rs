@@ -15,7 +15,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-const REVISION: &str = "ctx-asr-6";
+const REVISION: &str = "ctx-asr-7";
 
 pub fn export(options: &Options) -> Result<Summary> {
     if options.max_record_bytes < 1024 {
@@ -45,20 +45,33 @@ pub fn export(options: &Options) -> Result<Summary> {
         CREATE TABLE IF NOT EXISTS exports(agent TEXT, session TEXT, stamp TEXT, entry TEXT, PRIMARY KEY(agent,session));
         CREATE TABLE IF NOT EXISTS positions(agent TEXT,session TEXT,segment TEXT,local TEXT,pos INTEGER,PRIMARY KEY(agent,session,segment,local));
         CREATE INDEX IF NOT EXISTS observation_order ON positions(agent,session,pos);
-        CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,path));
+        CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,session,path));
         CREATE INDEX source_sessions ON sources(agent,session,path);")?;
     let mut summary = Summary::default();
     for input in &options.inputs {
         source::visit(
             input,
             options.max_record_bytes,
-            &mut |s| {
+            &mut |mut s| {
                 if options.session.as_deref().is_none_or(|id| id == s.session) {
+                    if s.provider.is_relational() {
+                        if let Some(namespace) = options.namespace.as_deref() {
+                            if namespace.is_empty() {
+                                return Err(Error::Invalid(
+                                    "ASR namespace must be nonempty".into(),
+                                ));
+                            }
+                            s.header["_namespace"] = json!(namespace);
+                        }
+                        if s.provider == Provider::Hermes && !s.header["_namespace"].is_string() {
+                            return Err(Error::Invalid("Hermes store lacks state_meta.store_instance_id; supply a stable installation --namespace and reuse it after relocation".into()));
+                        }
+                    }
                     db.execute(
                         "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
                         params![
                             s.provider.agent(),
-                            s.session,
+                            crate::relational::storage_key(&s),
                             s.path.to_string_lossy(),
                             s.stamp,
                             serde_json::to_string(&s.header)?,
@@ -82,13 +95,30 @@ pub fn export(options: &Options) -> Result<Summary> {
             break;
         };
         previous = (agent.clone(), session.clone());
-        let provider = if agent == "codex" {
-            Provider::Codex
-        } else {
-            Provider::Claude
+        let provider = match agent.as_str() {
+            "codex" => Provider::Codex,
+            "claude-code" => Provider::Claude,
+            "com.nousresearch.hermes" => Provider::Hermes,
+            "app.astrbot" => Provider::AstrBot,
+            "dev.exe.shelley" => Provider::Shelley,
+            "zed" => Provider::Zed,
+            _ => return Err(Error::Invalid("unknown ASR provider".into())),
         };
+        if provider.is_relational() {
+            let sources: u64 = db.query_row(
+                "SELECT count(*) FROM sources WHERE agent=?1 AND session=?2",
+                params![agent, session],
+                |r| r.get(0),
+            )?;
+            if sources > 1 {
+                return Err(Error::Invalid("multiple native databases claim the same session; select one source, or export distinct installations with separate stable namespaces".into()));
+            }
+        }
         let mut hash = Sha256::new();
         hash.update(REVISION);
+        if provider.is_relational() {
+            hash.update(crate::relational::REVISION);
+        }
         hash.update(env!("CARGO_PKG_VERSION"));
         hash.update(options.max_record_bytes.to_le_bytes());
         let mut stmt = db.prepare(
@@ -153,17 +183,25 @@ pub fn export(options: &Options) -> Result<Summary> {
                 let segment: String = row.get(2)?;
                 let header: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
                 spool.save(&format!("segment:{segment}"), &header)?;
-                spool.ingest(Path::new(&path), provider, &segment, &mut |local| {
+                if provider.is_relational() {
+                    crate::relational::ingest(&mut spool, provider, Path::new(&path), &header)?;
+                } else {
+                    spool.ingest(Path::new(&path), provider, &segment, &mut |local| {
                     let old: Option<u64> = db.query_row("SELECT pos FROM positions WHERE agent=?1 AND session=?2 AND segment=?3 AND local=?4",params![agent,session,segment,local],|r|r.get(0)).optional()?;
                     if let Some(pos)=old { return Ok(pos); }
                     last_pos+=1;
                     db.execute("INSERT INTO positions VALUES(?1,?2,?3,?4,?5)",params![agent,session,segment,local,last_pos])?;
                     Ok(last_pos)
                 })?;
+                }
             }
             crate::privacy::prepare(&mut spool)?;
             db.execute_batch("COMMIT")?;
-            let mut source_header = source_header.unwrap_or(json!({}));
+            let mut source_header = if provider.is_relational() {
+                spool.entity("native_header")?.unwrap_or(json!({}))
+            } else {
+                source_header.unwrap_or(json!({}))
+            };
             crate::privacy::sanitize(&spool, &mut source_header)?;
             header::resolve(&db, provider, &session, &mut source_header)?;
             if provider == Provider::Claude {
@@ -184,9 +222,24 @@ pub fn export(options: &Options) -> Result<Summary> {
                 .get("session_id")
                 .and_then(Value::as_str)
                 .unwrap_or(&session);
-            let mut writer =
-                Writer::new(temporary.reopen()?, provider, session_ref(provider, root));
+            let mut writer = Writer::new(
+                temporary.reopen()?,
+                provider,
+                if provider.is_relational() {
+                    crate::relational::reference(
+                        provider,
+                        &source_header,
+                        source_header["_sessionId"].as_str().unwrap_or(root),
+                    )
+                } else {
+                    session_ref(provider, root)
+                },
+            );
             let mut stream_header = header::make(provider, &session, &source_header);
+            if provider.is_relational() {
+                stream_header["observedAt"] =
+                    json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
+            }
             let copied_boundary =
                 header::copied_boundary(&spool, provider, &session, &source_header)?;
             let mut copied_last = None;
@@ -214,6 +267,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                         claude::convert(&mut spool, &mut writer, pos, &value, cwd, subagent)?
                     }
                     Provider::Codex => codex::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    _ => {
+                        crate::relational::convert(&mut spool, &mut writer, &source_header, &value)?
+                    }
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -263,7 +319,8 @@ pub fn export(options: &Options) -> Result<Summary> {
             let path = if !target.exists() {
                 temporary.persist(&target).map_err(|e| e.error)?;
                 prior.to_string()
-            } else if append_prefix(&target, temporary.as_file_mut())? {
+            } else if !provider.is_relational() && append_prefix(&target, temporary.as_file_mut())?
+            {
                 prior.to_string()
             } else {
                 summary.snapshots += 1;
@@ -275,7 +332,11 @@ pub fn export(options: &Options) -> Result<Summary> {
                 path
             };
             summary.source_bytes += spool.source_bytes;
-            let entry = json!({"agent":agent,"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            let mut entry = json!({"agent":agent,"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            if provider.is_relational() {
+                entry["sessionId"] = source_header["_sessionId"].clone();
+                entry["namespace"] = source_header["_namespace"].clone();
+            }
             db.execute(
                 "INSERT OR REPLACE INTO exports VALUES(?1,?2,?3,?4)",
                 params![agent, session, stamp, serde_json::to_string(&entry)?],
@@ -294,7 +355,9 @@ pub fn export(options: &Options) -> Result<Summary> {
         comma = true;
         serde_json::to_writer(&mut output, &entry)?;
     }
-    output.write_all(b"]}\n")?;
+    output.write_all(b"]")?;
+    crate::relational::bundle_facts(options, &mut output)?;
+    output.write_all(b"}\n")?;
     output.flush()?;
     drop(output);
     if summary.sessions == 0 && options.session.is_some() {

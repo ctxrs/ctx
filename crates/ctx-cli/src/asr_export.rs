@@ -14,6 +14,10 @@ enum AsrProvider {
     #[value(alias = "claude-code")]
     Claude,
     Codex,
+    Hermes,
+    Astrbot,
+    Shelley,
+    Zed,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -28,6 +32,9 @@ pub(crate) struct AsrArgs {
     /// Read this native transcript or directory instead of automatic discovery.
     #[arg(long, requires = "provider")]
     path: Option<PathBuf>,
+    /// Stable installation namespace for native stores without a recorded identity.
+    #[arg(long, requires = "provider")]
+    namespace: Option<String>,
     /// Destination archive directory, including bundle.json and session streams.
     #[arg(long)]
     out: PathBuf,
@@ -50,7 +57,18 @@ impl ExportArgs {
         let providers = match args.provider {
             Some(AsrProvider::Claude) => vec![Provider::Claude],
             Some(AsrProvider::Codex) => vec![Provider::Codex],
-            None => vec![Provider::Claude, Provider::Codex],
+            Some(AsrProvider::Hermes) => vec![Provider::Hermes],
+            Some(AsrProvider::Astrbot) => vec![Provider::AstrBot],
+            Some(AsrProvider::Shelley) => vec![Provider::Shelley],
+            Some(AsrProvider::Zed) => vec![Provider::Zed],
+            None => vec![
+                Provider::Claude,
+                Provider::Codex,
+                Provider::Hermes,
+                Provider::AstrBot,
+                Provider::Shelley,
+                Provider::Zed,
+            ],
         };
         let mut inputs = Vec::new();
         for provider in providers {
@@ -64,13 +82,18 @@ impl ExportArgs {
             let capture = match provider {
                 Provider::Claude => ctx_history_core::CaptureProvider::Claude,
                 Provider::Codex => ctx_history_core::CaptureProvider::Codex,
+                Provider::Hermes => ctx_history_core::CaptureProvider::Hermes,
+                Provider::AstrBot => ctx_history_core::CaptureProvider::AstrBot,
+                Provider::Shelley => ctx_history_core::CaptureProvider::Shelley,
+                Provider::Zed => ctx_history_core::CaptureProvider::Zed,
             };
             let home = crate::identity::home_dir();
             let report =
                 ctx_history_cli::discovered_sources_for_provider_report(home.as_deref(), capture);
             for source in report.sources {
-                if source.source_format.contains("jsonl")
-                    && !source.source_format.contains("history_jsonl")
+                if provider.is_relational()
+                    || (source.source_format.contains("jsonl")
+                        && !source.source_format.contains("history_jsonl"))
                 {
                     inputs.push(Input {
                         provider,
@@ -81,6 +104,7 @@ impl ExportArgs {
         }
         let mut options = Options::new(inputs, args.out);
         options.session = args.session;
+        options.namespace = args.namespace;
         options.max_record_bytes = args.max_record_bytes;
         let result = ctx_history_asr::export(&options)?;
         crate::output::write_stdout_line(format_args!("{}", serde_json::to_string(&result)?));
