@@ -18,6 +18,7 @@ mod opencode;
 mod privacy;
 mod qwen;
 mod records;
+mod relational;
 mod source;
 mod spool;
 mod opencode_source;
@@ -62,9 +63,13 @@ pub enum Provider {
     Kilo,
     MiMoCode,
     Kiro,
+    Hermes,
+    AstrBot,
+    Shelley,
+    Zed,
 }
 impl Provider {
-    pub(crate) const ALL: [Self; 16] = [Self::Claude,Self::Codex,Self::Pi,Self::GrokBuild,Self::DeepSeekHarness,Self::Gemini,Self::Antigravity,Self::QwenCode,Self::Copilot,Self::Droid,Self::Kimi,Self::Qoder,Self::OpenCode,Self::Kilo,Self::MiMoCode,Self::Kiro];
+    pub(crate) const ALL: [Self; 20] = [Self::Claude,Self::Codex,Self::Pi,Self::GrokBuild,Self::DeepSeekHarness,Self::Gemini,Self::Antigravity,Self::QwenCode,Self::Copilot,Self::Droid,Self::Kimi,Self::Qoder,Self::OpenCode,Self::Kilo,Self::MiMoCode,Self::Kiro,Self::Hermes,Self::AstrBot,Self::Shelley,Self::Zed];
     pub(crate) fn cli_journal(self) -> bool {
         matches!(self, Self::Copilot | Self::Droid | Self::Kimi | Self::Qoder)
     Junie,
@@ -124,6 +129,10 @@ impl Provider {
             Self::Goose => "goose",
             Self::Lingma => "com.aliyun.lingma",
             Self::Warp => "warp",
+            Self::Hermes => "com.nousresearch.hermes",
+            Self::AstrBot => "app.astrbot",
+            Self::Shelley => "dev.exe.shelley",
+            Self::Zed => "zed",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
@@ -151,6 +160,10 @@ impl Provider {
             Self::Goose => "xyz.block.goose",
             Self::Lingma => "com.aliyun.lingma",
             Self::Warp => "dev.warp.agent",
+            Self::Hermes => "com.nousresearch.hermes",
+            Self::AstrBot => "app.astrbot",
+            Self::Shelley => "dev.exe.shelley",
+            Self::Zed => "dev.zed",
         }
     }
     pub(crate) fn format(self) -> &'static str {
@@ -199,6 +212,18 @@ impl Provider {
         .find(|p| p.agent() == agent)
         .ok_or_else(|| Error::Invalid("unknown ASR provider".into()))
     }
+            Self::Hermes => "hermes-state-sqlite",
+            Self::AstrBot => "astrbot-data-v4-sqlite",
+            Self::Shelley => "shelley-sqlite",
+            Self::Zed => "zed-threads-sqlite",
+        }
+    }
+    pub fn is_relational(self) -> bool {
+        matches!(
+            self,
+            Self::Hermes | Self::AstrBot | Self::Shelley | Self::Zed
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +238,7 @@ pub struct Options {
     pub session: Option<String>,
     /// Stable installation identity, required for directory-keyed Kiro stores.
     /// Stable installation/profile identity required for Goose local session counters.
+    /// Stable installation namespace for native stores that do not record one.
     pub namespace: Option<String>,
     pub out: PathBuf,
     /// Bound for a native line, SQLite row, and assembled content field.

@@ -25,6 +25,11 @@ pub(crate) struct Writer {
     pub root_session: String,
     pub copied: Option<Value>,
     last_seq: Option<u64>,
+    /// Native snapshots separate record identity from capture-local serialization order.
+    pub native_identity: Option<String>,
+    pub native_snapshot: bool,
+    pub native_projection: Option<String>,
+    pub native_emissions: std::collections::BTreeMap<String, u64>,
 }
 impl Writer {
     pub fn new(file: File, provider: Provider, root_session: String) -> Self {
@@ -47,6 +52,10 @@ impl Writer {
             root_session,
             copied: None,
             last_seq: None,
+            native_identity: None,
+            native_snapshot: false,
+            native_projection: None,
+            native_emissions: Default::default(),
         }
     }
     pub fn position(&mut self, pos: u64) {
@@ -56,6 +65,7 @@ impl Writer {
         self.identity = None;
         self.identity_offset = 0;
         self.capture_scope = false;
+        self.native_emissions.clear();
     }
     pub fn slot(&mut self, slot: u64) {
         self.entity_key = None;
@@ -66,6 +76,23 @@ impl Writer {
         self.identity_offset = self.slot;
     }
     pub fn id(&self) -> String {
+        if let Some(key) = &self.native_identity {
+            use sha2::{Digest, Sha256};
+            return format!(
+                "r{:x}",
+                Sha256::digest(
+                    format!(
+                        "{}\0{}",
+                        self.root_session,
+                        self.native_projection
+                            .as_deref()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("{key}\0{}", self.slot))
+                    )
+                    .as_bytes()
+                )
+            );
+        }
         self.identity
             .as_ref()
             .map(|id| format!("{id}-{}", self.slot - self.identity_offset))

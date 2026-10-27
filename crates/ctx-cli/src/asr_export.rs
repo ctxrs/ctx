@@ -44,6 +44,10 @@ enum AsrAgent {
     Goose,
     Lingma,
     Warp,
+    Hermes,
+    Astrbot,
+    Shelley,
+    Zed,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -60,6 +64,8 @@ pub(crate) struct AsrArgs {
     path: Option<PathBuf>,
     /// Stable Goose installation/profile identifier, reused across exports.
     #[arg(long)]
+    /// Stable installation namespace for native stores without a recorded identity.
+    #[arg(long, requires = "provider")]
     namespace: Option<String>,
     /// Destination archive directory, including bundle.json and session streams.
     #[arg(long)]
@@ -114,6 +120,10 @@ impl ExportArgs {
                 AsrAgent::Goose => (Provider::Goose, Capture::Goose),
                 AsrAgent::Lingma => (Provider::Lingma, Capture::Lingma),
                 AsrAgent::Warp => (Provider::Warp, Capture::Warp),
+                AsrAgent::Hermes => (Provider::Hermes, Capture::Hermes),
+                AsrAgent::AstrBot => (Provider::AstrBot, Capture::AstrBot),
+                AsrAgent::Shelley => (Provider::Shelley, Capture::Shelley),
+                AsrAgent::Zed => (Provider::Zed, Capture::Zed),
             };
             let paths = args.path.clone().map(|p| vec![p]).unwrap_or_else(|| {
                 ctx_history_cli::discovered_sources_for_provider_report(

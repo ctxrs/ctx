@@ -233,6 +233,28 @@ impl Spool {
         self.db.execute_batch("COMMIT;")?;
         Ok(())
     }
+    /// Native SQLite cursors already supply their deterministic serialization order.
+    pub fn push_native(
+        &mut self,
+        kind: &str,
+        key: &str,
+        value: &Value,
+        capture_scope: bool,
+    ) -> Result<()> {
+        crate::privacy::questions(self, value)?;
+        self.source_lines += 1;
+        let pos = self.source_lines;
+        let row = json!({"kind":kind,"key":key,"data":value,"capture_scope":capture_scope});
+        let bytes = serde_json::to_vec(&row)?;
+        self.source_bytes += bytes.len() as u64;
+        let off = self.bytes.stream_position()?;
+        self.bytes.write_all(&bytes)?;
+        self.db.execute(
+            "INSERT INTO rows(pos,off,len,kind,native_id) VALUES(?1,?2,?3,?4,?5)",
+            params![pos, off, bytes.len(), kind, key],
+        )?;
+        Ok(())
+    }
     pub fn get(&mut self, pos: u64) -> Result<Value> {
         let (off, len): (u64, usize) =
             self.db

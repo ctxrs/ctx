@@ -70,7 +70,7 @@ pub fn export(options: &Options) -> Result<Summary> {
             options.max_record_bytes,
             staging.path(),
             options.namespace.as_deref(),
-            &mut |s| {
+            &mut |mut s| {
                 if options.session.as_deref().is_none_or(|id| {
                     id == s.session
                         || (matches!(s.provider, Provider::Kimi | Provider::Copilot)
@@ -94,11 +94,24 @@ pub fn export(options: &Options) -> Result<Summary> {
                     if s.provider.sqlite() {
                         crate::sqlite::check_source(&db, &s, options.namespace.as_deref())?;
                     }
+                    if s.provider.is_relational() {
+                        if let Some(namespace) = options.namespace.as_deref() {
+                            if namespace.is_empty() {
+                                return Err(Error::Invalid(
+                                    "ASR namespace must be nonempty".into(),
+                                ));
+                            }
+                            s.header["_namespace"] = json!(namespace);
+                        }
+                        if s.provider == Provider::Hermes && !s.header["_namespace"].is_string() {
+                            return Err(Error::Invalid("Hermes store lacks state_meta.store_instance_id; supply a stable installation --namespace and reuse it after relocation".into()));
+                        }
+                    }
                     db.execute(
                         "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
                         params![
                             s.provider.agent(),
-                            s.session,
+                            crate::relational::storage_key(&s),
                             s.path.to_string_lossy(),
                             s.stamp,
                             serde_json::to_string(&s.header)?,
@@ -133,6 +146,9 @@ pub fn export(options: &Options) -> Result<Summary> {
         }
         if provider == Provider::Goose {
             hash.update(options.namespace.as_deref().unwrap_or_default());
+        }
+        if provider.is_relational() {
+            hash.update(crate::relational::REVISION);
         }
         hash.update(env!("CARGO_PKG_VERSION"));
         hash.update(options.max_record_bytes.to_le_bytes());
@@ -204,20 +220,28 @@ pub fn export(options: &Options) -> Result<Summary> {
                     source_header = spool.entity("sqlite:header")?;
                     continue;
                 }
-                spool.ingest(Path::new(&path), provider, &segment, &mut |local| {
+                if provider.is_relational() {
+                    crate::relational::ingest(&mut spool, provider, Path::new(&path), &header)?;
+                } else {
+                    spool.ingest(Path::new(&path), provider, &segment, &mut |local| {
                     let old: Option<u64> = db.query_row("SELECT pos FROM positions WHERE agent=?1 AND session=?2 AND segment=?3 AND local=?4",params![agent,session,segment,local],|r|r.get(0)).optional()?;
                     if let Some(pos)=old { return Ok(pos); }
                     last_pos+=1;
                     db.execute("INSERT INTO positions VALUES(?1,?2,?3,?4,?5)",params![agent,session,segment,local,last_pos])?;
                     Ok(last_pos)
                 })?;
+                }
             }
             if provider == Provider::Copilot {
                 spool.db.execute_batch("INSERT INTO native_calls SELECT call_id,position FROM journal_calls a WHERE kind=CASE WHEN (SELECT count(*) FROM journal_calls WHERE call_id=a.call_id AND kind='start') >= (SELECT count(*) FROM journal_calls WHERE call_id=a.call_id AND kind='request') THEN 'start' ELSE 'request' END;")?;
             }
             crate::privacy::prepare(&mut spool)?;
             db.execute_batch("COMMIT")?;
-            let mut source_header = source_header.unwrap_or(json!({}));
+            let mut source_header = if provider.is_relational() {
+                spool.entity("native_header")?.unwrap_or(json!({}))
+            } else {
+                source_header.unwrap_or(json!({}))
+            };
             crate::privacy::sanitize(&spool, &mut source_header)?;
             header::resolve(&db, provider, &session, &mut source_header)?;
             crate::jsonl::resolve(&db, provider, &mut source_header)?;
@@ -246,7 +270,7 @@ pub fn export(options: &Options) -> Result<Summary> {
                 .and_then(Value::as_str)
                 .unwrap_or(&session);
             let mut writer =
-                Writer::new(temporary.reopen()?, provider, session_ref(provider, root));
+                Writer::new(temporary.reopen()?, provider, if provider.is_relational() { crate::relational::reference(provider, &source_header, source_header["_sessionId"].as_str().unwrap_or(root)) } else {session_ref(provider, root)});
             // Every projection of a mutable transcript snapshot shares its
             // capture scope, including tools, usage, metadata and gaps.
             writer.snapshot = provider == Provider::Antigravity
@@ -331,6 +355,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                     }
                     Provider::Kiro => crate::kiro::convert(&mut spool, &mut writer, &value)?,
                     Provider::Crush | Provider::Goose | Provider::Lingma | Provider::Warp => crate::sqlite::convert(&mut spool, &mut writer, pos, &value)?,
+                    Provider::Hermes | Provider::AstrBot | Provider::Shelley | Provider::Zed => {
+                        crate::relational::convert(&mut spool, &mut writer, &source_header, &value)?
+                    }
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -442,6 +469,7 @@ pub fn export(options: &Options) -> Result<Summary> {
         output.write_all(b",\"_meta\":")?;
         serde_json::to_writer(&mut output, &context)?;
     }
+    crate::relational::bundle_facts(options, &mut output)?;
     output.write_all(b"}\n")?;
     output.flush()?;
     drop(output);

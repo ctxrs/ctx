@@ -50,6 +50,11 @@ pub(crate) fn questions(spool: &Spool, v: &Value) -> Result<()> {
                 questions(spool, x)?;
             }
         }
+        Value::String(s) if s.trim_start().starts_with('{') || s.trim_start().starts_with('[') => {
+            if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+                questions(spool, &parsed)?;
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -157,13 +162,42 @@ pub(crate) fn sanitize(spool: &Spool, v: &mut Value) -> Result<()> {
     match v {
         Value::String(s) => {
             if s.trim_start().starts_with('{') || s.trim_start().starts_with('[') {
-                if let Ok(mut parsed) = serde_json::from_str::<Value>(s) {
-                    let original = parsed.clone();
-                    sanitize(spool, &mut parsed)?;
-                    if parsed != original {
-                        *s = serde_json::to_string(&parsed)?;
-                        return Ok(());
+                // Redact JSON string tokens without parsing/re-serializing numbers:
+                // an unrelated secret answer must not round an unsafe native integer.
+                let bytes = s.as_bytes();
+                let (mut i, mut copied) = (0, 0);
+                let mut output = String::new();
+                while i < bytes.len() {
+                    if bytes[i] != b'"' {
+                        i += 1;
+                        continue;
                     }
+                    let start = i;
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    if i >= bytes.len() {
+                        break;
+                    }
+                    i += 1;
+                    if let Ok(text) = serde_json::from_str::<String>(&s[start..i]) {
+                        let mut token = Value::String(text.clone());
+                        sanitize(spool, &mut token)?;
+                        if token.as_str() != Some(text.as_str()) {
+                            output.push_str(&s[copied..start]);
+                            output.push_str(&serde_json::to_string(&token)?);
+                            copied = i;
+                        }
+                    }
+                }
+                if copied > 0 {
+                    output.push_str(&s[copied..]);
+                    *s = output;
+                    return Ok(());
                 }
             }
             let mut stmt = spool.db.prepare_cached(
