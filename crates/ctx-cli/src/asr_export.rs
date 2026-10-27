@@ -1,89 +1,62 @@
 //! Native ASR export is independent of the searchable Core store.
 use anyhow::Result;
-use clap::{Args, Subcommand, ValueEnum};
+use clap::ValueEnum;
+use ctx_cli_presentation::commands::asr_export::AsrProvider;
+pub(crate) use ctx_cli_presentation::commands::asr_export::ExportArgs;
 use ctx_history_asr::{Input, Options, Provider};
-use std::path::PathBuf;
+use ctx_history_core::CaptureProvider;
 
-#[derive(Debug, Subcommand)]
-pub(crate) enum ExportArgs {
-    /// Convert native sessions to an Agent Session Record 0.1 archive bundle.
-    Asr(AsrArgs),
-}
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum AsrProvider {
-    #[value(alias = "claude-code")]
-    Claude,
-    Codex,
-}
-#[derive(Debug, Args)]
-pub(crate) struct AsrArgs {
-    /// Exact native session ID (a Claude subagent uses its agentId).
-    #[arg(long, required_unless_present = "all", conflicts_with = "all")]
-    session: Option<String>,
-    /// Export every session from the selected supported converters.
-    #[arg(long)]
-    all: bool,
-    #[arg(long, value_enum)]
-    provider: Option<AsrProvider>,
-    /// Read this native transcript or directory instead of automatic discovery.
-    #[arg(long, requires = "provider")]
-    path: Option<PathBuf>,
-    /// Destination archive directory, including bundle.json and session streams.
-    #[arg(long)]
-    out: PathBuf,
-    /// Maximum bytes in a native line or assembled content field.
-    #[arg(long,default_value_t=16*1024*1024)]
-    max_record_bytes: usize,
-}
-impl ExportArgs {
-    pub(crate) fn run(self) -> i32 {
-        match self.execute() {
-            Ok(()) => 0,
-            Err(error) => {
-                crate::output::write_stderr_line(format_args!("ASR export failed: {error:#}"));
-                1
-            }
+pub(crate) fn run(args: ExportArgs) -> i32 {
+    match execute(args) {
+        Ok(()) => 0,
+        Err(error) => {
+            crate::output::write_stderr_line(format_args!("ASR export failed: {error:#}"));
+            1
         }
     }
-    fn execute(self) -> Result<()> {
-        let Self::Asr(args) = self;
-        let providers = match args.provider {
-            Some(AsrProvider::Claude) => vec![Provider::Claude],
-            Some(AsrProvider::Codex) => vec![Provider::Codex],
-            None => vec![Provider::Claude, Provider::Codex],
+}
+fn execute(args: ExportArgs) -> Result<()> {
+    let ExportArgs::Asr(args) = args;
+    let mut inputs = Vec::new();
+    for selected in AsrProvider::value_variants()
+        .iter()
+        .copied()
+        .filter(|p| args.provider.is_none_or(|selected| selected == *p))
+    {
+        let (provider, capture) = match selected {
+            AsrProvider::Claude => (Provider::Claude, CaptureProvider::Claude),
+            AsrProvider::Codex => (Provider::Codex, CaptureProvider::Codex),
+            AsrProvider::Firebender => (Provider::Firebender, CaptureProvider::Firebender),
+            AsrProvider::Forgecode => (Provider::ForgeCode, CaptureProvider::ForgeCode),
+            AsrProvider::Deepagents => (Provider::DeepAgents, CaptureProvider::DeepAgents),
+            AsrProvider::Devin => (Provider::Devin, CaptureProvider::Devin),
         };
-        let mut inputs = Vec::new();
-        for provider in providers {
-            if let Some(path) = &args.path {
+        if let Some(path) = &args.path {
+            inputs.push(Input {
+                provider,
+                path: path.clone(),
+            });
+            continue;
+        }
+        let home = crate::identity::home_dir();
+        let report =
+            ctx_history_cli::discovered_sources_for_provider_report(home.as_deref(), capture);
+        for source in report.sources {
+            if source.source_format.contains("sqlite")
+                || (source.source_format.contains("jsonl")
+                    && !source.source_format.contains("history_jsonl"))
+            {
                 inputs.push(Input {
                     provider,
-                    path: path.clone(),
+                    path: source.path,
                 });
-                continue;
-            }
-            let capture = match provider {
-                Provider::Claude => ctx_history_core::CaptureProvider::Claude,
-                Provider::Codex => ctx_history_core::CaptureProvider::Codex,
-            };
-            let home = crate::identity::home_dir();
-            let report =
-                ctx_history_cli::discovered_sources_for_provider_report(home.as_deref(), capture);
-            for source in report.sources {
-                if source.source_format.contains("jsonl")
-                    && !source.source_format.contains("history_jsonl")
-                {
-                    inputs.push(Input {
-                        provider,
-                        path: source.path,
-                    });
-                }
             }
         }
-        let mut options = Options::new(inputs, args.out);
-        options.session = args.session;
-        options.max_record_bytes = args.max_record_bytes;
-        let result = ctx_history_asr::export(&options)?;
-        crate::output::write_stdout_line(format_args!("{}", serde_json::to_string(&result)?));
-        Ok(())
     }
+    let mut options = Options::new(inputs, args.out);
+    options.session = args.session;
+    options.max_record_bytes = args.max_record_bytes;
+    let result = ctx_history_asr::export(&options)?;
+    crate::output::write_stdout_line(format_args!("{}", serde_json::to_string(&result)?));
+    Ok(())
 }

@@ -11,6 +11,9 @@ pub(crate) struct Writer {
     pub provider: Provider,
     pub pos: u64,
     slot: u64,
+    pub identity: Option<String>,
+    pub exact_id: Option<String>,
+    pub capture_scoped: bool,
     pub count: u64,
     pub last: Option<String>,
     pub gaps: u64,
@@ -26,6 +29,9 @@ impl Writer {
             provider,
             pos: 0,
             slot: 0,
+            identity: None,
+            exact_id: None,
+            capture_scoped: false,
             count: 0,
             last: None,
             gaps: 0,
@@ -37,13 +43,20 @@ impl Writer {
     }
     pub fn position(&mut self, pos: u64) {
         self.pos = pos;
+        self.exact_id = None;
         self.slot = 0;
     }
     pub fn slot(&mut self, slot: u64) {
         self.slot = slot;
     }
     pub fn id(&self) -> String {
-        format!("r{}", self.pos * STRIDE + self.slot)
+        if let Some(id) = &self.exact_id {
+            return id.clone();
+        }
+        self.identity
+            .as_ref()
+            .map(|key| format!("{key}-{}", self.slot))
+            .unwrap_or_else(|| format!("r{}", self.pos * STRIDE + self.slot))
     }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
         let seq = self
@@ -57,7 +70,16 @@ impl Writer {
                 "too many records for one native item".into(),
             ));
         }
-        let id = format!("r{seq}");
+        let id = self.id();
+        if self.provider.is_batch8() {
+            value.as_object_mut().map(|o| {
+                o.entry("assembly")
+                    .or_insert_with(|| json!({"mode":"snapshot"}))
+            });
+            if self.capture_scoped {
+                value["idScope"] = json!("capture");
+            }
+        }
         value["seq"] = json!(seq);
         value["id"] = json!(id);
         if let Some(ts) = source

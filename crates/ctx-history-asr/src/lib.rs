@@ -1,4 +1,5 @@
 //! Native history to Agent Session Record 0.1. No Core store or network access.
+mod batch8;
 mod bundle;
 mod claude;
 mod codex;
@@ -15,6 +16,10 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("ASR SQLite source: {0}")]
+    NativeSqlite(#[from] ctx_history_source_sqlite::SqliteSourceAccessError),
+    #[error("ASR source I/O: {0}")]
+    SourceIo(#[from] ctx_history_source_io::SourceIoError),
     #[error("ASR native source: {0}")]
     Provider(#[from] ctx_history_provider_codex::CaptureError),
     #[error("ASR I/O: {0}")]
@@ -32,24 +37,46 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Provider {
     Claude,
     Codex,
+    Firebender,
+    ForgeCode,
+    DeepAgents,
+    Devin,
 }
 impl Provider {
+    pub(crate) fn is_batch8(self) -> bool {
+        matches!(
+            self,
+            Self::Firebender | Self::ForgeCode | Self::DeepAgents | Self::Devin
+        )
+    }
     pub fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude-code",
             Self::Codex => "codex",
+            Self::Firebender => "com.firebender",
+            Self::ForgeCode => "dev.forgecode",
+            Self::DeepAgents => "com.langchain.deepagents",
+            Self::Devin => "ai.cognition.devin",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
         match self {
             Self::Claude => "com.anthropic.claude-code",
             Self::Codex => "com.openai.codex",
+            Self::Firebender => "com.firebender",
+            Self::ForgeCode => "dev.forgecode",
+            Self::DeepAgents => "com.langchain.deepagents",
+            Self::Devin => "ai.cognition.devin",
         }
     }
     pub(crate) fn format(self) -> &'static str {
         match self {
             Self::Claude => "claude-code-jsonl",
             Self::Codex => "codex-rollout",
+            Self::Firebender => "firebender-chat-history-sqlite",
+            Self::ForgeCode => "forgecode-sqlite",
+            Self::DeepAgents => "deepagents-langgraph-sqlite",
+            Self::Devin => "devin-cli-sessions-sqlite",
         }
     }
 }

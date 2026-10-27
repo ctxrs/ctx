@@ -86,5 +86,6 @@ fn codex_provenance_usage_and_incremental_ids() {
     assert_eq!(&after[..before.len()], &before);
 }
 
+mod batch8;
 mod incremental;
 mod mappings;

@@ -201,6 +201,7 @@ fn inspect(
             };
             (id.to_owned(), v.clone())
         }
+        _ => return Err(Error::Invalid("unsupported JSONL provider".into())),
     };
     if input.provider == Provider::Claude {
         let sidecar = input.path.with_extension("meta.json");

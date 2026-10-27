@@ -167,6 +167,27 @@ impl Spool {
         self.db.execute_batch("COMMIT;")?;
         Ok(())
     }
+    /// SQLite cursors supply capture-local order and a separately scoped native key.
+    pub fn push_native(&mut self, value: &Value) -> Result<()> {
+        self.source_lines += 1;
+        let off = self.bytes.stream_position()?;
+        let bytes = serde_json::to_vec(value)?;
+        self.source_bytes += bytes.len() as u64;
+        self.bytes.write_all(&bytes)?;
+        self.db.execute(
+            "INSERT INTO rows VALUES(?1,?2,?3,?4,?5,?6,?7,NULL,'',NULL,?1)",
+            params![
+                self.source_lines,
+                off,
+                bytes.len(),
+                value["type"].as_str(),
+                value["node"].as_str(),
+                value["response"].as_str(),
+                value["parent"].as_str()
+            ],
+        )?;
+        Ok(())
+    }
     pub fn get(&mut self, pos: u64) -> Result<Value> {
         let (off, len): (u64, usize) =
             self.db

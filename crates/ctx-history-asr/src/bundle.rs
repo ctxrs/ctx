@@ -15,7 +15,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-const REVISION: &str = "ctx-asr-6";
+const REVISION: &str = "ctx-asr-6-batch8-1";
 
 pub fn export(options: &Options) -> Result<Summary> {
     if options.max_record_bytes < 1024 {
@@ -45,31 +45,56 @@ pub fn export(options: &Options) -> Result<Summary> {
         CREATE TABLE IF NOT EXISTS exports(agent TEXT, session TEXT, stamp TEXT, entry TEXT, PRIMARY KEY(agent,session));
         CREATE TABLE IF NOT EXISTS positions(agent TEXT,session TEXT,segment TEXT,local TEXT,pos INTEGER,PRIMARY KEY(agent,session,segment,local));
         CREATE INDEX IF NOT EXISTS observation_order ON positions(agent,session,pos);
-        CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,path));
-        CREATE INDEX source_sessions ON sources(agent,session,path);")?;
+        CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,path,session));
+        CREATE INDEX source_sessions ON sources(agent,session,path);
+        CREATE TEMP TABLE native_databases(agent TEXT,path TEXT,PRIMARY KEY(agent,path));")?;
     let mut summary = Summary::default();
     for input in &options.inputs {
-        source::visit(
-            input,
-            options.max_record_bytes,
-            &mut |s| {
-                if options.session.as_deref().is_none_or(|id| id == s.session) {
-                    db.execute(
-                        "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
-                        params![
-                            s.provider.agent(),
-                            s.session,
-                            s.path.to_string_lossy(),
-                            s.stamp,
-                            serde_json::to_string(&s.header)?,
-                            s.segment
-                        ],
-                    )?;
+        let mut visitor = |s: source::Source| {
+            if options.session.as_deref().is_none_or(|id| id == s.session) {
+                if s.provider.is_batch8() {
+                    let collision: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sources WHERE agent=?1 AND session=?2 AND path<>?3)",
+                            params![s.provider.agent(),s.session,s.path.to_string_lossy()], |r|r.get(0))?;
+                    if collision {
+                        return Err(Error::Invalid("SQLite session identity occurs in multiple databases; export these sources separately".into()));
+                    }
                 }
-                Ok(())
-            },
-            &mut summary.unidentified_sources,
-        )?;
+                db.execute(
+                    "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
+                    params![
+                        s.provider.agent(),
+                        s.session,
+                        s.path.to_string_lossy(),
+                        s.stamp,
+                        serde_json::to_string(&s.header)?,
+                        s.segment
+                    ],
+                )?;
+            }
+            Ok(())
+        };
+        if input.provider.is_batch8() {
+            crate::batch8::visit(
+                input,
+                options.max_record_bytes,
+                &mut visitor,
+                &mut summary.unidentified_sources,
+                &mut |provider, path| {
+                    db.execute(
+                        "INSERT OR IGNORE INTO native_databases VALUES(?1,?2)",
+                        params![provider.agent(), path.to_string_lossy()],
+                    )?;
+                    Ok(())
+                },
+            )?;
+        } else {
+            source::visit(
+                input,
+                options.max_record_bytes,
+                &mut visitor,
+                &mut summary.unidentified_sources,
+            )?;
+        }
     }
     let mut manifest = tempfile::NamedTempFile::new_in(&options.out)?;
     let mut output = BufWriter::new(manifest.as_file_mut());
@@ -82,10 +107,14 @@ pub fn export(options: &Options) -> Result<Summary> {
             break;
         };
         previous = (agent.clone(), session.clone());
-        let provider = if agent == "codex" {
-            Provider::Codex
-        } else {
-            Provider::Claude
+        let provider = match agent.as_str() {
+            "codex" => Provider::Codex,
+            "claude-code" => Provider::Claude,
+            "com.firebender" => Provider::Firebender,
+            "dev.forgecode" => Provider::ForgeCode,
+            "com.langchain.deepagents" => Provider::DeepAgents,
+            "ai.cognition.devin" => Provider::Devin,
+            _ => return Err(Error::Invalid("unknown ASR provider".into())),
         };
         let mut hash = Sha256::new();
         hash.update(REVISION);
@@ -153,6 +182,11 @@ pub fn export(options: &Options) -> Result<Summary> {
                 let segment: String = row.get(2)?;
                 let header: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
                 spool.save(&format!("segment:{segment}"), &header)?;
+                if provider.is_batch8() {
+                    crate::batch8::ingest(&mut spool, Path::new(&path), provider, &header)?;
+                    source_header = spool.entity("batch8:header")?;
+                    continue;
+                }
                 spool.ingest(Path::new(&path), provider, &segment, &mut |local| {
                     let old: Option<u64> = db.query_row("SELECT pos FROM positions WHERE agent=?1 AND session=?2 AND segment=?3 AND local=?4",params![agent,session,segment,local],|r|r.get(0)).optional()?;
                     if let Some(pos)=old { return Ok(pos); }
@@ -214,6 +248,7 @@ pub fn export(options: &Options) -> Result<Summary> {
                         claude::convert(&mut spool, &mut writer, pos, &value, cwd, subagent)?
                     }
                     Provider::Codex => codex::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    _ => crate::batch8::convert(&mut spool, &mut writer, &value)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -228,6 +263,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                     )?;
                 }
             }
+            if provider.is_batch8() {
+                crate::batch8::finish(&mut spool, &mut writer, &source_header)?;
+            }
             spool.finish()?;
             writer.out.flush()?;
             let count = writer.count + 1;
@@ -236,6 +274,15 @@ pub fn export(options: &Options) -> Result<Summary> {
             if let Some(last) = copied_last {
                 stream_header["lineage"]["inherits"]["localThroughId"] = json!(last);
             }
+            let observation = if provider.is_batch8() {
+                Some(crate::batch8::capture::observation(
+                    &mut stream_header,
+                    temporary.as_file_mut(),
+                    old.as_ref(),
+                )?)
+            } else {
+                None
+            };
             let mut complete = tempfile::NamedTempFile::new_in(&options.out)?;
             stream_header["seq"] = json!(0);
             stream_header["id"] = json!("r0");
@@ -275,7 +322,12 @@ pub fn export(options: &Options) -> Result<Summary> {
                 path
             };
             summary.source_bytes += spool.source_bytes;
-            let entry = json!({"agent":agent,"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            let mut entry = json!({"agent":agent,"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            if let Some(Value::Object(meta)) = observation {
+                if let Some(fields) = entry["_meta"].as_object_mut() {
+                    fields.extend(meta);
+                }
+            }
             db.execute(
                 "INSERT OR REPLACE INTO exports VALUES(?1,?2,?3,?4)",
                 params![agent, session, stamp, serde_json::to_string(&entry)?],
@@ -294,7 +346,9 @@ pub fn export(options: &Options) -> Result<Summary> {
         comma = true;
         serde_json::to_writer(&mut output, &entry)?;
     }
-    output.write_all(b"]}\n")?;
+    output.write_all(b"]")?;
+    crate::batch8::application::write(&db, options, &mut output)?;
+    output.write_all(b"}\n")?;
     output.flush()?;
     drop(output);
     if summary.sessions == 0 && options.session.is_some() {
