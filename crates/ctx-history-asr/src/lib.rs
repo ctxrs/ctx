@@ -3,10 +3,13 @@ mod bundle;
 mod claude;
 mod codex;
 mod content;
+mod kiro;
+mod opencode;
 mod privacy;
 mod records;
 mod source;
 mod spool;
+mod sqlite;
 mod tools;
 
 pub use bundle::export;
@@ -32,25 +35,58 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Provider {
     Claude,
     Codex,
+    OpenCode,
+    Kilo,
+    MiMoCode,
+    Kiro,
 }
 impl Provider {
     pub fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude-code",
             Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+            Self::Kilo => "kilo",
+            Self::MiMoCode => "com.xiaomi.mimocode",
+            Self::Kiro => "kiro",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
         match self {
             Self::Claude => "com.anthropic.claude-code",
             Self::Codex => "com.openai.codex",
+            Self::OpenCode => "ai.opencode",
+            Self::Kilo => "ai.kilocode",
+            Self::MiMoCode => "com.xiaomi.mimocode",
+            Self::Kiro => "dev.kiro.cli",
         }
     }
     pub(crate) fn format(self) -> &'static str {
         match self {
             Self::Claude => "claude-code-jsonl",
             Self::Codex => "codex-rollout",
+            Self::OpenCode | Self::Kilo | Self::MiMoCode => "opencode-sqlite",
+            Self::Kiro => "kiro-cli-sqlite",
         }
+    }
+    pub fn is_sqlite(self) -> bool {
+        matches!(
+            self,
+            Self::OpenCode | Self::Kilo | Self::MiMoCode | Self::Kiro
+        )
+    }
+    pub(crate) fn from_agent(agent: &str) -> Result<Self> {
+        [
+            Self::Claude,
+            Self::Codex,
+            Self::OpenCode,
+            Self::Kilo,
+            Self::MiMoCode,
+            Self::Kiro,
+        ]
+        .into_iter()
+        .find(|p| p.agent() == agent)
+        .ok_or_else(|| Error::Invalid("unknown ASR provider".into()))
     }
 }
 
@@ -64,8 +100,10 @@ pub struct Options {
     pub inputs: Vec<Input>,
     /// Exact native session ID; absent exports all selected sessions.
     pub session: Option<String>,
+    /// Stable installation identity, required for directory-keyed Kiro stores.
+    pub namespace: Option<String>,
     pub out: PathBuf,
-    /// Bound for a native line and an assembled content field.
+    /// Bound for a native line, SQLite row, and assembled content field.
     pub max_record_bytes: usize,
 }
 impl Options {
@@ -73,6 +111,7 @@ impl Options {
         Self {
             inputs,
             session: None,
+            namespace: None,
             out,
             max_record_bytes: ctx_history_source_io::MAX_PROVIDER_JSONL_LINE_BYTES,
         }

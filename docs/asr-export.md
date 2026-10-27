@@ -1,6 +1,6 @@
 # ASR export
 
-`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Claude Code and Codex are the first supported converters.
+`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Converters include Claude Code, Codex, OpenCode, Kilo Code, MiMo Code, and Kiro CLI SQLite conversations.
 
 ```sh
 ctx export asr --all --out ./asr
@@ -10,7 +10,7 @@ ctx export asr --all --provider codex --path ./rollouts --out ./asr
 ```
 
 Automatic input selection uses ctx's existing provider-root discovery. `--path`
-selects a native transcript or directory and requires `--provider`. Session IDs
+selects a native transcript, database, or directory and requires `--provider`. Session IDs
 are native IDs, not ctx citation IDs; Claude subagents use their `agentId`.
 Export reads provider files without importing them into the search store.
 The JSON result reports sessions, unchanged sessions, records, bytes, gaps,
@@ -43,6 +43,48 @@ recorded empty values. The declared vendor loss categories cover over-limit
 native lines, metadata kept outside the selected transcripts, and native variants
 retained as vendor records without a standard semantic projection. Export does
 not read the live UI databases, global scheduler definitions or deleted backups.
+
+## SQLite conversations
+
+`--provider opencode|kilo|mimocode|kiro` selects a native SQLite converter.
+OpenCode, Kilo and MiMo share verified message/part and sequenced-message storage
+shapes. A single read transaction includes committed WAL state; bounded rows
+are staged to disk before conversion. The logical-content digest detects updates
+and deletions even when a writer keeps the same row IDs and modification times.
+SQLite no-op exports still read and stage the selected source contents. Their
+`source_bytes` counter measures staged JSON envelope bytes for converted sessions,
+not database file size or total discovery I/O.
+
+Native message, part and call IDs remain verbatim. A changed part is a snapshot
+of its current state, with no invented pending/running/completed history. Rewrites
+publish another stream snapshot while retaining earlier exported files. Kiro
+history-array positions carry `idScope: capture`, including in UUID-keyed v2
+conversations, because the native document is rewritten as a whole.
+
+Legacy Kiro `conversations` rows use their native working-directory key as the
+session ID, as specified by the current ASR registry. They require an explicit,
+stable installation/profile namespace:
+
+```sh
+ctx export asr --all --provider kiro --namespace my-kiro-installation --path ./data.sqlite3 --out ./asr
+```
+
+Reuse that namespace for the same installation across exports and relocations.
+It is not an input-file path or an output-directory identity. The legacy JSON may
+also contain a conversation UUID; it is retained as provider metadata rather than
+silently overriding the registry's directory-key rule. Kiro ACP/v3 session stores
+and older Kilo editor-extension task directories are separate formats.
+
+The native row bound defaults to 16 MiB, controlled by `--max-record-bytes`.
+An oversized row with a usable session identity yields a `conversion_loss` gap;
+this bounds a whole Kiro conversation document, not each history entry. OpenCode
+text folded across many parts can spill to a blob. Source facts not projected
+into standard records remain in provider metadata/vendor records with declared
+losses. In particular, session-level revert boundaries, unassociated Kiro display
+history/context state, and alternate migration representations need their vendor
+metadata to interpret completely. This is not a claim of complete semantic
+qualification for every provider release. Public tests identify authored inputs;
+fixture validation and version qualification are distinct.
 
 ## Adding a converter
 

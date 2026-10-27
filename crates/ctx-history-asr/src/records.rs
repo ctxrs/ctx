@@ -18,6 +18,7 @@ pub(crate) struct Writer {
     pub turn: Option<String>,
     pub model: Option<String>,
     pub root_session: String,
+    last_seq: Option<u64>,
 }
 impl Writer {
     pub fn new(file: File, provider: Provider, root_session: String) -> Self {
@@ -33,6 +34,7 @@ impl Writer {
             turn: None,
             model: None,
             root_session,
+            last_seq: None,
         }
     }
     pub fn position(&mut self, pos: u64) {
@@ -46,6 +48,14 @@ impl Writer {
         format!("r{}", self.pos * STRIDE + self.slot)
     }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
+        if self.provider.is_sqlite() {
+            if value.get("assembly").is_none() {
+                value["assembly"] = json!({"mode":"snapshot"});
+            }
+            if self.provider == Provider::Kiro {
+                value["idScope"] = json!("capture");
+            }
+        }
         let seq = self
             .pos
             .checked_mul(STRIDE)
@@ -57,6 +67,12 @@ impl Writer {
                 "too many records for one native item".into(),
             ));
         }
+        if self.last_seq.is_some_and(|previous| seq <= previous) {
+            return Err(Error::Invalid(
+                "native item exceeded its reserved ASR emission slots".into(),
+            ));
+        }
+        self.last_seq = Some(seq);
         let id = format!("r{seq}");
         value["seq"] = json!(seq);
         value["id"] = json!(id);

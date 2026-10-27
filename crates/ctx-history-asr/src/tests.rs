@@ -88,3 +88,4 @@ fn codex_provenance_usage_and_incremental_ids() {
 
 mod incremental;
 mod mappings;
+mod sqlite;
