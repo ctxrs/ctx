@@ -1,13 +1,19 @@
 //! Native history to Agent Session Record 0.1. No Core store or network access.
+mod antigravity;
 mod bundle;
 mod claude;
 mod codex;
 mod content;
+mod conversation_source;
+mod gemini;
+mod genai;
 mod privacy;
+mod qwen;
 mod records;
 mod source;
 mod spool;
 mod tools;
+mod tree;
 
 pub use bundle::export;
 use serde::{Deserialize, Serialize};
@@ -32,24 +38,36 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Provider {
     Claude,
     Codex,
+    Gemini,
+    Antigravity,
+    QwenCode,
 }
 impl Provider {
     pub fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude-code",
             Self::Codex => "codex",
+            Self::Gemini => "gemini-cli",
+            Self::Antigravity => "antigravity",
+            Self::QwenCode => "qwen-code",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
         match self {
             Self::Claude => "com.anthropic.claude-code",
             Self::Codex => "com.openai.codex",
+            Self::Gemini => "com.google.gemini-cli",
+            Self::Antigravity => "com.google.antigravity",
+            Self::QwenCode => "io.github.qwenlm.qwen-code",
         }
     }
     pub(crate) fn format(self) -> &'static str {
         match self {
             Self::Claude => "claude-code-jsonl",
             Self::Codex => "codex-rollout",
+            Self::Gemini => "gemini-cli-chat-recording",
+            Self::Antigravity => "antigravity-transcript-jsonl",
+            Self::QwenCode => "qwen-code-chat-jsonl",
         }
     }
 }

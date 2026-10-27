@@ -15,7 +15,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-const REVISION: &str = "ctx-asr-6";
+const REVISION: &str = "ctx-asr-batch2-2";
 
 pub fn export(options: &Options) -> Result<Summary> {
     if options.max_record_bytes < 1024 {
@@ -82,10 +82,12 @@ pub fn export(options: &Options) -> Result<Summary> {
             break;
         };
         previous = (agent.clone(), session.clone());
-        let provider = if agent == "codex" {
-            Provider::Codex
-        } else {
-            Provider::Claude
+        let provider = match agent.as_str() {
+            "codex" => Provider::Codex,
+            "gemini-cli" => Provider::Gemini,
+            "antigravity" => Provider::Antigravity,
+            "qwen-code" => Provider::QwenCode,
+            _ => Provider::Claude,
         };
         let mut hash = Sha256::new();
         hash.update(REVISION);
@@ -179,6 +181,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                     source_header["_forkRef"] = spool.get(pos)?;
                 }
             }
+            if provider == Provider::QwenCode {
+                crate::qwen::header(&mut spool, &mut source_header)?;
+            }
             let mut temporary = tempfile::NamedTempFile::new_in(&options.out)?;
             let root = source_header
                 .get("session_id")
@@ -186,6 +191,10 @@ pub fn export(options: &Options) -> Result<Summary> {
                 .unwrap_or(&session);
             let mut writer =
                 Writer::new(temporary.reopen()?, provider, session_ref(provider, root));
+            // Every projection of a mutable transcript snapshot shares its
+            // capture scope, including tools, usage, metadata and gaps.
+            writer.snapshot = provider == Provider::Antigravity
+                || (provider == Provider::Gemini && source_header["_snapshot"] == true);
             let mut stream_header = header::make(provider, &session, &source_header);
             let copied_boundary =
                 header::copied_boundary(&spool, provider, &session, &source_header)?;
@@ -198,14 +207,18 @@ pub fn export(options: &Options) -> Result<Summary> {
                 pos = next;
                 writer.position(pos);
                 let value = spool.get(pos)?;
-                if provider == Provider::Codex {
+                if matches!(provider, Provider::Codex | Provider::Gemini) {
                     let current: String = spool.db.query_row(
                         "SELECT segment FROM rows WHERE pos=?1",
                         [pos],
                         |r| r.get(0),
                     )?;
                     if current != segment {
-                        codex::segment(&spool, &mut writer, &current, &value)?;
+                        if provider == Provider::Codex {
+                            codex::segment(&spool, &mut writer, &current, &value)?;
+                        } else {
+                            crate::gemini::segment(&spool)?;
+                        }
                         segment = current;
                     }
                 }
@@ -214,6 +227,11 @@ pub fn export(options: &Options) -> Result<Summary> {
                         claude::convert(&mut spool, &mut writer, pos, &value, cwd, subagent)?
                     }
                     Provider::Codex => codex::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    Provider::Gemini => crate::gemini::convert(&mut spool, &mut writer, &value)?,
+                    Provider::Antigravity => {
+                        crate::antigravity::convert(&spool, &mut writer, &value)?
+                    }
+                    Provider::QwenCode => crate::qwen::convert(&spool, &mut writer, &value, cwd)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();

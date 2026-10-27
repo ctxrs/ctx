@@ -2,7 +2,7 @@ use crate::{records::Writer, spool::Spool, Result};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
-pub(super) fn emit(
+pub(crate) fn emit(
     spool: &Spool,
     writer: &mut Writer,
     mut record: Value,
@@ -43,7 +43,7 @@ pub(super) fn emit(
             }
             parent = next.flatten();
         }
-        if resolved != writer.tip {
+        if resolved != writer.tip || (parent.is_some() && resolved.is_none()) {
             let mut mechanical = injected;
             let mut node = writer.tip.clone();
             let parent_response: Option<String> = resolved
@@ -57,7 +57,7 @@ pub(super) fn emit(
                 })
                 .transpose()?
                 .flatten();
-            if !mechanical && resolved.is_some() {
+            if resolved.is_some() {
                 mechanical = true;
                 while node != resolved {
                     let Some(id) = node else {
@@ -76,7 +76,8 @@ pub(super) fn emit(
                         mechanical = false;
                         break;
                     };
-                    if !special
+                    if !injected
+                        && !special
                         && !(rk.is_some() && (rk.as_deref() == response || rk == parent_response))
                     {
                         mechanical = false;

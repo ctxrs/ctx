@@ -14,6 +14,10 @@ enum AsrProvider {
     #[value(alias = "claude-code")]
     Claude,
     Codex,
+    #[value(alias = "gemini-cli")]
+    Gemini,
+    Antigravity,
+    QwenCode,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -50,7 +54,16 @@ impl ExportArgs {
         let providers = match args.provider {
             Some(AsrProvider::Claude) => vec![Provider::Claude],
             Some(AsrProvider::Codex) => vec![Provider::Codex],
-            None => vec![Provider::Claude, Provider::Codex],
+            Some(AsrProvider::Gemini) => vec![Provider::Gemini],
+            Some(AsrProvider::Antigravity) => vec![Provider::Antigravity],
+            Some(AsrProvider::QwenCode) => vec![Provider::QwenCode],
+            None => vec![
+                Provider::Claude,
+                Provider::Codex,
+                Provider::Gemini,
+                Provider::Antigravity,
+                Provider::QwenCode,
+            ],
         };
         let mut inputs = Vec::new();
         for provider in providers {
@@ -64,6 +77,9 @@ impl ExportArgs {
             let capture = match provider {
                 Provider::Claude => ctx_history_core::CaptureProvider::Claude,
                 Provider::Codex => ctx_history_core::CaptureProvider::Codex,
+                Provider::Gemini => ctx_history_core::CaptureProvider::Gemini,
+                Provider::Antigravity => ctx_history_core::CaptureProvider::Antigravity,
+                Provider::QwenCode => ctx_history_core::CaptureProvider::QwenCode,
             };
             let home = crate::identity::home_dir();
             let report =

@@ -1,6 +1,6 @@
 # ASR export
 
-`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Claude Code and Codex are the first supported converters.
+`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Converters are available for Claude Code, Codex, Gemini CLI, Antigravity transcript logs and Qwen Code.
 
 ```sh
 ctx export asr --all --out ./asr
@@ -92,3 +92,33 @@ The ASR checkout is an optional external conformance oracle, not a dependency of
 ctx's build or ordinary tests. Qualification applies to the native versions and
 features actually exercised; preserved vendor data alone does not establish a
 complete semantic mapping.
+
+## Conversation-family converters
+
+`--provider gemini` accepts native chat JSONL and legacy whole-document JSON.
+The latter is read one message at a time; a migrated `.jsonl` sibling takes
+precedence over `.json`. Re-appended message IDs retain full replacements with
+`supersedes`. `$rewindTo` removes its named message too, so ASR targets the last
+remaining unit. The documented `<tool_output_masked>` function-response marker
+sets `capture.content.state` to `masked`; changed text alone does not.
+
+`--provider qwen-code` reads UUID/parentUuid chat journals. Native
+`parent_session`, `isSidechain`/`agentId` and `forkedFrom` fields establish
+separate spawning, ownership and copy facts. Tree branches use the shared
+mechanical-sibling rule. GenAI parts, tool responses, usage, titles, rewinds and
+compression metadata are preserved. Backend-dependent output-token inclusion
+is left unknown where the stored usage does not identify the backend.
+
+`--provider antigravity` reads
+`<conversation>/.system_generated/logs/transcript_full.jsonl`, preferring it over
+`transcript.jsonl`. The conversation directory supplies identity. This rendered
+trajectory dialect does not establish model-facing message content, tool-result
+pairing or lineage: display content and capture states preserve that distinction.
+
+These converters retain unsupported native fields in provider `_meta` and
+unmapped event kinds as vendor records. The history files do not establish every
+inference boundary, hidden instruction, or deleted revision. Gemini context
+replacement snapshots and Qwen compressed-history arrays can lack the identities
+needed to recover exact retained context; their native data and declared losses
+are retained. Qualification is limited to the formats exercised by semantic tests
+and existing fixtures, and is not a claim of coverage for every provider release.

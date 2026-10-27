@@ -103,6 +103,7 @@ pub(crate) fn visit(
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if !(name.ends_with(".jsonl")
+                || (input.provider == Provider::Gemini && name.ends_with(".json"))
                 || (input.provider == Provider::Codex && name.ends_with(".jsonl.zst")))
             {
                 continue;
@@ -138,6 +139,12 @@ fn inspect(
     visitor: &mut dyn FnMut(Source) -> Result<()>,
     unidentified: &mut u64,
 ) -> Result<()> {
+    if matches!(
+        input.provider,
+        Provider::Gemini | Provider::Antigravity | Provider::QwenCode
+    ) {
+        return crate::conversation_source::inspect(input, limit, visitor, unidentified);
+    }
     let mut input_reader = reader(&input.path)?;
     let mut buffer = Vec::new();
     let mut metas = Vec::new();
@@ -180,6 +187,7 @@ fn inspect(
                 .ok_or_else(|| Error::Invalid("missing native Claude identity".into()))?;
             (id.to_owned(), v)
         }
+        Provider::Gemini | Provider::Antigravity | Provider::QwenCode => unreachable!(),
         Provider::Codex => {
             use ctx_history_provider_codex::codex::catalog::{
                 codex_canonical_session_id_from_path, select_native_session_metadata,

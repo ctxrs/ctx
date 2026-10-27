@@ -10,10 +10,10 @@ use std::{
 /// A bounded SQLite cache plus a byte spool, never a Vec of session bodies.
 pub(crate) struct Spool {
     pub db: Connection,
-    bytes: File,
+    pub(crate) bytes: File,
     _dir: tempfile::TempDir,
     pub source_bytes: u64,
-    source_lines: u64,
+    pub(crate) source_lines: u64,
     pub limit: usize,
     pub has_secrets: bool,
     pub bundle: std::path::PathBuf,
@@ -55,6 +55,12 @@ impl Spool {
         segment: &str,
         allocate: &mut dyn FnMut(&str) -> Result<u64>,
     ) -> Result<()> {
+        if matches!(
+            provider,
+            Provider::Gemini | Provider::Antigravity | Provider::QwenCode
+        ) {
+            return crate::conversation_source::ingest(self, path, provider, segment, allocate);
+        }
         let mut reader = source::reader(path)?;
         let mut bytes = Vec::new();
         let mut physical = 0;
