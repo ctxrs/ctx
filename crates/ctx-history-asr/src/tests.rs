@@ -91,6 +91,6 @@ mod mappings;
 
 mod batch1;
 mod batch2;
-mod journals;
+mod cli_journals;
 
 mod journal_edges;

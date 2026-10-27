@@ -11,7 +11,7 @@ mod pi;
 mod conversation_source;
 mod gemini;
 mod genai;
-mod journals;
+mod cli_journals;
 mod privacy;
 mod qwen;
 mod records;
@@ -56,7 +56,7 @@ pub enum Provider {
 }
 impl Provider {
     pub(crate) const ALL: [Self; 12] = [Self::Claude,Self::Codex,Self::Pi,Self::GrokBuild,Self::DeepSeekHarness,Self::Gemini,Self::Antigravity,Self::QwenCode,Self::Copilot,Self::Droid,Self::Kimi,Self::Qoder];
-    pub(crate) fn journal(self) -> bool {
+    pub(crate) fn cli_journal(self) -> bool {
         matches!(self, Self::Copilot | Self::Droid | Self::Kimi | Self::Qoder)
     }
     pub fn agent(self) -> &'static str {

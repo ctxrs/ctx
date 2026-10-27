@@ -82,8 +82,8 @@ impl Spool {
                     continue;
                 }
             }
-            let local = if provider.journal() {
-                crate::journals::local(provider, &v, physical)
+            let local = if provider.cli_journal() {
+                crate::cli_journals::local(provider, &v, physical)
             } else if provider == Provider::Codex {
                 v["ordinal"]
                     .as_u64()
@@ -174,8 +174,8 @@ impl Spool {
                 }
             }
             crate::jsonl::index(self, provider, &v, pos)?;
-            if provider.journal() {
-                crate::journals::index(self, provider, &v, pos)?;
+            if provider.cli_journal() {
+                crate::cli_journals::index(self, provider, &v, pos)?;
             }
             // Segment and ordinal identify an observation, including overlapping revert suffixes.
             self.db.execute(

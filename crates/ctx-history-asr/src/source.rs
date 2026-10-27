@@ -148,8 +148,8 @@ fn inspect(
     ) {
         return crate::conversation_source::inspect(input, limit, visitor, unidentified);
         }
-    if input.provider.journal() {
-        return crate::journals::source::inspect(input, limit, visitor, unidentified);
+    if input.provider.cli_journal() {
+        return crate::cli_journals::source::inspect(input, limit, visitor, unidentified);
     }
     let mut input_reader = reader(&input.path)?;
     let mut buffer = Vec::new();

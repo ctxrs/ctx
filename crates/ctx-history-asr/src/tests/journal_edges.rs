@@ -1,5 +1,5 @@
 //! Authored boundary cases, independent of native release qualification.
-use super::journals::journal_fixture;
+use super::cli_journals::journal_fixture;
 use super::*;
 use std::io::Write;
 

@@ -259,7 +259,7 @@ pub fn export(options: &Options) -> Result<Summary> {
                         crate::antigravity::convert(&spool, &mut writer, &value)?
                     }
                     Provider::QwenCode => crate::qwen::convert(&spool, &mut writer, &value, cwd)?,
-                    Provider::Copilot | Provider::Droid | Provider::Kimi | Provider::Qoder => crate::journals::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    Provider::Copilot | Provider::Droid | Provider::Kimi | Provider::Qoder => crate::cli_journals::convert(&mut spool, &mut writer, pos, &value, cwd)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
