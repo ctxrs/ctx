@@ -160,7 +160,7 @@ pub(super) fn decode_warp_native_task(data: &[u8]) -> Result<WarpDecodedTask> {
     let mut task_id = None::<String>;
     let mut message_payloads = Vec::new();
     let mut counters = WarpDecodeCounters::default();
-    while let Some(field) = cursor.next()? {
+    while let Some(field) = cursor.next_field()? {
         match (field.number, field.value) {
             (1, WarpWireValue::LengthDelimited(value)) => {
                 task_id = Some(warp_text_owned(value)?);
@@ -194,7 +194,7 @@ fn decode_warp_native_message(
     let mut request_id = None::<String>;
     let mut timestamps = Vec::new();
     let mut selected_arm = None;
-    while let Some(field) = cursor.next()? {
+    while let Some(field) = cursor.next_field()? {
         match (field.number, field.value) {
             (1, WarpWireValue::LengthDelimited(value)) => {
                 message_id = Some(warp_text_owned(value)?);
@@ -394,7 +394,7 @@ fn decode_tool_call(payloads: &[Vec<u8>]) -> Result<WarpDecodedToolCall> {
     let mut selected_tool = None;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::LengthDelimited(value)) => call_id.observe(value),
                 (number, WarpWireValue::LengthDelimited(value)) if is_warp_tool_arm(number) => {
@@ -438,7 +438,7 @@ fn decode_mcp_tool_call(payloads: &[Vec<u8>]) -> Result<WarpMcpToolInvocation> {
     let mut server_id = WarpValidatedString::default();
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::LengthDelimited(value)) => name.observe(value),
                 (2, WarpWireValue::LengthDelimited(value)) => {
@@ -562,7 +562,7 @@ fn decode_tool_result_call_id(payloads: &[Vec<u8>]) -> Option<String> {
     let mut call_id = WarpValidatedString::default();
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Ok(Some(field)) = cursor.next() {
+        while let Ok(Some(field)) = cursor.next_field() {
             if let (1, WarpWireValue::LengthDelimited(value)) = (field.number, field.value) {
                 call_id.observe(value);
             }
@@ -590,7 +590,7 @@ fn select_message_oneof(selected: &mut Option<WarpSelectedMessage>, field: u32, 
 
 fn validate_message_payload(payload: &[u8]) -> Result<()> {
     let mut cursor = WarpWireCursor::new(payload);
-    while cursor.next()?.is_some() {}
+    while cursor.next_field()?.is_some() {}
     Ok(())
 }
 
@@ -674,7 +674,7 @@ fn classify_tool_result(payloads: &[Vec<u8>]) -> Result<WarpToolResultClassifica
     let mut variant = None;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::LengthDelimited(value)) => call_id.observe(value),
                 (1 | 11, _) => {}
@@ -760,7 +760,7 @@ fn decode_run_shell_result_occurrences(payloads: &[Vec<u8>]) -> Result<WarpClass
     let mut terminal = None;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::LengthDelimited(value)) => {
                     deprecated_output = Some(value.to_vec());

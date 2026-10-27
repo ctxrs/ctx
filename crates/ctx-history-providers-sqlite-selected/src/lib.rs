@@ -12,6 +12,8 @@ mod record_evidence;
 mod sqlite_common;
 
 pub use error::{CaptureError, Result};
+/// Native protobuf wire boundary shared by the search and archive projections.
+pub use providers::warp::wire as warp_wire;
 pub use providers::{
     devin_source_backed_driver, devin_source_backed_driver_scoped, firebender_source_backed_driver,
     firebender_source_backed_driver_scoped, goose_source_backed_driver,

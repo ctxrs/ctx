@@ -11,9 +11,11 @@ description = "Streaming native-history conversion to Agent Session Record bundl
 
 [dependencies]
 ctx-history-provider-claude-cursor = { path = "../ctx-history-provider-claude-cursor" }
+ctx-history-providers-sqlite-selected = { path = "../ctx-history-providers-sqlite-selected" }
 ctx-history-provider-codex = { path = "../ctx-history-provider-codex" }
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-source-io = { path = "../ctx-history-source-io" }
+base64.workspace = true
 chrono.workspace = true
 fs2.workspace = true
 rusqlite.workspace = true

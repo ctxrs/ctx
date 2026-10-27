@@ -2,7 +2,7 @@ mod devin;
 mod firebender;
 mod goose;
 mod kiro;
-mod warp;
+pub(crate) mod warp;
 
 pub use devin::{devin_source_backed_driver, devin_source_backed_driver_scoped};
 pub use firebender::{firebender_source_backed_driver, firebender_source_backed_driver_scoped};

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
-    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
 pub(crate) const REVISION: &str = "ctx-asr-integration-1";
@@ -61,6 +61,7 @@ pub fn export(options: &Options) -> Result<Summary> {
         CREATE INDEX IF NOT EXISTS observation_order ON positions(agent,session,pos);
         CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,session,path));
         CREATE INDEX source_sessions ON sources(agent,session,path);")?;
+    crate::sqlite::namespace(&db, options.namespace.as_deref())?;
     let mut summary = Summary::default();
     let staging = tempfile::tempdir_in(&options.out)?;
     for input in &options.inputs {
@@ -89,6 +90,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                             }
                             return Err(Error::Invalid("conflicting SQLite snapshots of one native session; select one source database".into()));
                         }
+                    }
+                    if s.provider.sqlite() {
+                        crate::sqlite::check_source(&db, &s, options.namespace.as_deref())?;
                     }
                     db.execute(
                         "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
@@ -124,6 +128,12 @@ pub fn export(options: &Options) -> Result<Summary> {
             .ok_or_else(|| Error::Invalid("unknown ASR provider".into()))?;
         let mut hash = Sha256::new();
         hash.update(REVISION);
+        if provider.sqlite() {
+            hash.update(b"sqlite-batch6-2");
+        }
+        if provider == Provider::Goose {
+            hash.update(options.namespace.as_deref().unwrap_or_default());
+        }
         hash.update(env!("CARGO_PKG_VERSION"));
         hash.update(options.max_record_bytes.to_le_bytes());
         let mut stmt = db.prepare(
@@ -189,6 +199,11 @@ pub fn export(options: &Options) -> Result<Summary> {
                 let segment: String = row.get(2)?;
                 let header: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
                 spool.save(&format!("segment:{segment}"), &header)?;
+                if provider.sqlite() {
+                    crate::sqlite::ingest(&mut spool, Path::new(&path), provider, &session)?;
+                    source_header = spool.entity("sqlite:header")?;
+                    continue;
+                }
                 spool.ingest(Path::new(&path), provider, &segment, &mut |local| {
                     let old: Option<u64> = db.query_row("SELECT pos FROM positions WHERE agent=?1 AND session=?2 AND segment=?3 AND local=?4",params![agent,session,segment,local],|r|r.get(0)).optional()?;
                     if let Some(pos)=old { return Ok(pos); }
@@ -240,6 +255,20 @@ pub fn export(options: &Options) -> Result<Summary> {
                 writer.bundle = Some(options.out.clone());
             }
             let mut stream_header = header::make(provider, &session, &source_header);
+            if provider.sqlite() {
+                crate::sqlite::capture_header(
+                    &mut stream_header,
+                    provider,
+                    &source_header,
+                    options.namespace.as_deref(),
+                );
+                if let Some(observed) = old
+                    .as_ref()
+                    .and_then(|v| v.pointer("/_meta/rs.ctx~1observedAt"))
+                {
+                    stream_header["observedAt"] = observed.clone();
+                }
+            }
             let copied_boundary = if provider == Provider::Kimi
                 && stream_header["lineage"]["forkedFrom"]["session"].is_string()
             {
@@ -301,6 +330,7 @@ pub fn export(options: &Options) -> Result<Summary> {
                         crate::opencode::convert(&mut spool, &mut writer, &value, cwd)?
                     }
                     Provider::Kiro => crate::kiro::convert(&mut spool, &mut writer, &value)?,
+                    Provider::Crush | Provider::Goose | Provider::Lingma | Provider::Warp => crate::sqlite::convert(&mut spool, &mut writer, pos, &value)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -406,7 +436,13 @@ pub fn export(options: &Options) -> Result<Summary> {
         comma = true;
         serde_json::to_writer(&mut output, &entry)?;
     }
-    output.write_all(b"]}\n")?;
+    output.write_all(b"]")?;
+    let context = crate::sqlite::manifest(&db, options, &mut summary)?;
+    if context.as_object().is_some_and(|v| !v.is_empty()) {
+        output.write_all(b",\"_meta\":")?;
+        serde_json::to_writer(&mut output, &context)?;
+    }
+    output.write_all(b"}\n")?;
     output.flush()?;
     drop(output);
     if summary.sessions == 0 && options.session.is_some() {

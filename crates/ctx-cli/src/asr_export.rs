@@ -40,6 +40,10 @@ enum AsrAgent {
     Mimocode,
     #[value(alias = "kiro-cli")]
     Kiro,
+    Crush,
+    Goose,
+    Lingma,
+    Warp,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -54,6 +58,9 @@ pub(crate) struct AsrArgs {
     /// Read this native transcript or directory instead of automatic discovery.
     #[arg(long, requires = "provider")]
     path: Option<PathBuf>,
+    /// Stable Goose installation/profile identifier, reused across exports.
+    #[arg(long)]
+    namespace: Option<String>,
     /// Destination archive directory, including bundle.json and session streams.
     #[arg(long)]
     out: PathBuf,
@@ -103,6 +110,10 @@ impl ExportArgs {
                 AsrAgent::Kilo => (Provider::Kilo, Capture::Kilo),
                 AsrAgent::MiMoCode => (Provider::MiMoCode, Capture::MiMoCode),
                 AsrAgent::Kiro => (Provider::Kiro, Capture::Kiro),
+                AsrAgent::Crush => (Provider::Crush, Capture::Crush),
+                AsrAgent::Goose => (Provider::Goose, Capture::Goose),
+                AsrAgent::Lingma => (Provider::Lingma, Capture::Lingma),
+                AsrAgent::Warp => (Provider::Warp, Capture::Warp),
             };
             let paths = args.path.clone().map(|p| vec![p]).unwrap_or_else(|| {
                 ctx_history_cli::discovered_sources_for_provider_report(
@@ -121,6 +132,7 @@ impl ExportArgs {
         }
         let mut options = Options::new(inputs, args.out);
         options.session = args.session;
+        options.namespace = args.namespace;
         options.max_record_bytes = args.max_record_bytes;
         options.namespace = args.namespace;
         let result = ctx_history_asr::export(&options)?;

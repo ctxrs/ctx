@@ -73,6 +73,9 @@ pub(crate) fn visit(
     if input.provider.journal() {
         return crate::journals::source::visit(input, limit, visitor, unidentified);
     }
+    if input.provider.sqlite() {
+        return crate::sqlite::visit(input, limit, visitor, unidentified);
+    }
     if input.path.is_file() {
         if input.path.is_symlink() {
             return visit(

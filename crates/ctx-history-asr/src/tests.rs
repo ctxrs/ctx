@@ -96,3 +96,5 @@ mod cli_journals;
 mod journal_edges;
 mod journals;
 mod opencode_source;
+mod sqlite;
+mod warp;

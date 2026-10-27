@@ -21,6 +21,7 @@ mod records;
 mod source;
 mod spool;
 mod opencode_source;
+mod sqlite;
 mod tools;
 mod tree;
 
@@ -75,6 +76,26 @@ impl Provider {
 impl Provider {
     pub(crate) fn journal(self) -> bool {
         matches!(self, Self::Junie | Self::MistralVibe | Self::Tabnine | Self::Mux | Self::Cursor)
+    Crush,
+    Goose,
+    Lingma,
+    Warp,
+}
+impl Provider {
+    pub(crate) fn sqlite(self) -> bool {
+        matches!(self, Self::Crush | Self::Goose | Self::Lingma | Self::Warp)
+    }
+    pub(crate) fn from_agent(agent: &str) -> Option<Self> {
+        [
+            Self::Claude,
+            Self::Codex,
+            Self::Crush,
+            Self::Goose,
+            Self::Lingma,
+            Self::Warp,
+        ]
+        .into_iter()
+        .find(|p| p.agent() == agent)
     }
     pub fn agent(self) -> &'static str {
         match self {
@@ -99,6 +120,10 @@ impl Provider {
             Self::Kilo => "kilo",
             Self::MiMoCode => "com.xiaomi.mimocode",
             Self::Kiro => "kiro",
+            Self::Crush => "crush",
+            Self::Goose => "goose",
+            Self::Lingma => "com.aliyun.lingma",
+            Self::Warp => "warp",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
@@ -122,6 +147,10 @@ impl Provider {
             Self::Kilo => "ai.kilocode",
             Self::MiMoCode => "com.xiaomi.mimocode",
             Self::Kiro => "dev.kiro.cli",
+            Self::Crush => "sh.charm.crush",
+            Self::Goose => "xyz.block.goose",
+            Self::Lingma => "com.aliyun.lingma",
+            Self::Warp => "dev.warp.agent",
         }
     }
     pub(crate) fn format(self) -> &'static str {
@@ -145,6 +174,10 @@ impl Provider {
             Self::Cursor => "cursor-cli-transcript",
             Self::OpenCode | Self::Kilo | Self::MiMoCode => "opencode-sqlite",
             Self::Kiro => "kiro-cli-sqlite",
+            Self::Crush => "crush-sqlite",
+            Self::Goose => "goose-sqlite",
+            Self::Lingma => "lingma-sqlite",
+            Self::Warp => "warp-sqlite",
         }
     }
     pub fn is_sqlite(self) -> bool {
@@ -179,6 +212,7 @@ pub struct Options {
     /// Exact native session ID; absent exports all selected sessions.
     pub session: Option<String>,
     /// Stable installation identity, required for directory-keyed Kiro stores.
+    /// Stable installation/profile identity required for Goose local session counters.
     pub namespace: Option<String>,
     pub out: PathBuf,
     /// Bound for a native line, SQLite row, and assembled content field.

@@ -58,6 +58,7 @@ impl Writer {
         self.capture_scope = false;
     }
     pub fn slot(&mut self, slot: u64) {
+        self.entity_key = None;
         self.slot = slot;
     }
     pub fn entity_identity(&mut self, identity: String) {
@@ -170,6 +171,7 @@ impl Writer {
         self.count += 1;
         self.last = Some(id.clone());
         self.slot += 1;
+        self.entity_key = None;
         Ok(id)
     }
     pub fn revise(

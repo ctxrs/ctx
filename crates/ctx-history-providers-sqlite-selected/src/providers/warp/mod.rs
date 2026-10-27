@@ -1,7 +1,7 @@
 mod nativepath;
 mod schema;
 mod source_backed;
-mod wire;
+pub mod wire;
 
 pub(crate) use source_backed::{project_warp_source_backed_v0_scoped, WarpSourceSelectionV0};
 
