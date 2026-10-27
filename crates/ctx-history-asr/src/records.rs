@@ -24,7 +24,7 @@ pub(crate) struct Writer {
     pub model: Option<String>,
     pub root_session: String,
     pub copied: Option<Value>,
-    pub snapshot: bool,
+    last_seq: Option<u64>,
 }
 impl Writer {
     pub fn new(file: File, provider: Provider, root_session: String) -> Self {
@@ -46,7 +46,7 @@ impl Writer {
             model: None,
             root_session,
             copied: None,
-            snapshot: false,
+            last_seq: None,
         }
     }
     pub fn position(&mut self, pos: u64) {
@@ -74,6 +74,14 @@ impl Writer {
         if self.snapshot {
             value["assembly"] = json!({"mode":"snapshot"});
         }
+        if self.provider.is_sqlite() {
+            if value.get("assembly").is_none() {
+                value["assembly"] = json!({"mode":"snapshot"});
+            }
+            if self.provider == Provider::Kiro {
+                value["idScope"] = json!("capture");
+            }
+        }
         let seq = self
             .pos
             .checked_mul(STRIDE)
@@ -92,6 +100,12 @@ impl Writer {
         if self.snapshot {
             value["assembly"] = json!({"mode":"snapshot"});
         }
+        if self.last_seq.is_some_and(|previous| seq <= previous) {
+            return Err(Error::Invalid(
+                "native item exceeded its reserved ASR emission slots".into(),
+            ));
+        }
+        self.last_seq = Some(seq);
         value["seq"] = json!(seq);
         value["id"] = json!(id);
         if let Some(copied) = &self.copied {

@@ -35,6 +35,11 @@ enum AsrAgent {
     Tabnine,
     Mux,
     Cursor,
+    Opencode,
+    Kilo,
+    Mimocode,
+    #[value(alias = "kiro-cli")]
+    Kiro,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -52,9 +57,12 @@ pub(crate) struct AsrArgs {
     /// Destination archive directory, including bundle.json and session streams.
     #[arg(long)]
     out: PathBuf,
-    /// Maximum bytes in a native line or assembled content field.
+    /// Maximum bytes in a native line, SQLite row, or assembled content field.
     #[arg(long,default_value_t=16*1024*1024)]
     max_record_bytes: usize,
+    /// Stable Kiro installation/profile identity (required for legacy directory keys).
+    #[arg(long)]
+    namespace: Option<String>,
 }
 impl ExportArgs {
     pub(crate) fn run(self) -> i32 {
@@ -91,6 +99,10 @@ impl ExportArgs {
                 AsrAgent::Tabnine => (Provider::Tabnine, Capture::Tabnine),
                 AsrAgent::Mux => (Provider::Mux, Capture::Mux),
                 AsrAgent::Cursor => (Provider::Cursor, Capture::Cursor),
+                AsrAgent::OpenCode => (Provider::OpenCode, Capture::OpenCode),
+                AsrAgent::Kilo => (Provider::Kilo, Capture::Kilo),
+                AsrAgent::MiMoCode => (Provider::MiMoCode, Capture::MiMoCode),
+                AsrAgent::Kiro => (Provider::Kiro, Capture::Kiro),
             };
             let paths = args.path.clone().map(|p| vec![p]).unwrap_or_else(|| {
                 ctx_history_cli::discovered_sources_for_provider_report(
@@ -110,6 +122,7 @@ impl ExportArgs {
         let mut options = Options::new(inputs, args.out);
         options.session = args.session;
         options.max_record_bytes = args.max_record_bytes;
+        options.namespace = args.namespace;
         let result = ctx_history_asr::export(&options)?;
         crate::output::write_stdout_line(format_args!("{}", serde_json::to_string(&result)?));
         Ok(())

@@ -65,6 +65,8 @@ pub(crate) struct Source {
 pub(crate) fn visit(
     input: &Input,
     limit: usize,
+    staging: &Path,
+    namespace: Option<&str>,
     visitor: &mut dyn FnMut(Source) -> Result<()>,
     unidentified: &mut u64,
 ) -> Result<()> {
@@ -79,11 +81,17 @@ pub(crate) fn visit(
                     path: fs::canonicalize(&input.path)?,
                 },
                 limit,
+                staging,
+                namespace,
                 visitor,
                 unidentified,
             );
         }
-        return inspect(input, limit, visitor, unidentified);
+        return if input.provider.is_sqlite() {
+            crate::sqlite::visit(input, limit, staging, namespace, visitor, unidentified)
+        } else {
+            inspect(input, limit, visitor, unidentified)
+        };
     }
     if !input.path.exists() {
         return Ok(());
@@ -98,6 +106,8 @@ pub(crate) fn visit(
                     path: entry.path(),
                 },
                 limit,
+                staging,
+                namespace,
                 visitor,
                 unidentified,
             )?;
@@ -108,7 +118,8 @@ pub(crate) fn visit(
             if !(name.ends_with(".jsonl")
                 || (input.provider == Provider::Codex && name.ends_with(".jsonl.zst"))
                 || (input.provider == Provider::DeepSeekHarness && name.ends_with(".jsonl.zstd"))
-                || (input.provider == Provider::Gemini && name.ends_with(".json")))
+                || (input.provider == Provider::Gemini && name.ends_with(".json"))
+                || (input.provider.is_sqlite() && (name.ends_with(".db") || name.ends_with(".sqlite") || name.ends_with(".sqlite3"))))
             {
                 continue;
             }
@@ -125,12 +136,14 @@ pub(crate) fn visit(
             {
                 continue;
             }
-            inspect(
+            visit(
                 &Input {
                     provider: input.provider,
                     path,
                 },
                 limit,
+                staging,
+                namespace,
                 visitor,
                 unidentified,
             )?;

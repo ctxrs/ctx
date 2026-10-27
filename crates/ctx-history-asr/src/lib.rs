@@ -13,11 +13,14 @@ mod gemini;
 mod genai;
 mod cli_journals;
 mod journals;
+mod kiro;
+mod opencode;
 mod privacy;
 mod qwen;
 mod records;
 mod source;
 mod spool;
+mod sqlite;
 mod tools;
 mod tree;
 
@@ -54,9 +57,13 @@ pub enum Provider {
     Droid,
     Kimi,
     Qoder,
+    OpenCode,
+    Kilo,
+    MiMoCode,
+    Kiro,
 }
 impl Provider {
-    pub(crate) const ALL: [Self; 12] = [Self::Claude,Self::Codex,Self::Pi,Self::GrokBuild,Self::DeepSeekHarness,Self::Gemini,Self::Antigravity,Self::QwenCode,Self::Copilot,Self::Droid,Self::Kimi,Self::Qoder];
+    pub(crate) const ALL: [Self; 16] = [Self::Claude,Self::Codex,Self::Pi,Self::GrokBuild,Self::DeepSeekHarness,Self::Gemini,Self::Antigravity,Self::QwenCode,Self::Copilot,Self::Droid,Self::Kimi,Self::Qoder,Self::OpenCode,Self::Kilo,Self::MiMoCode,Self::Kiro];
     pub(crate) fn cli_journal(self) -> bool {
         matches!(self, Self::Copilot | Self::Droid | Self::Kimi | Self::Qoder)
     Junie,
@@ -88,6 +95,10 @@ impl Provider {
             Self::Tabnine => "com.tabnine.cli",
             Self::Mux => "com.coder.mux",
             Self::Cursor => "cursor",
+            Self::OpenCode => "opencode",
+            Self::Kilo => "kilo",
+            Self::MiMoCode => "com.xiaomi.mimocode",
+            Self::Kiro => "kiro",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
@@ -107,6 +118,10 @@ impl Provider {
             Self::Junie => "com.jetbrains.junie",
             Self::Cursor => "com.cursor.agent",
             Self::MistralVibe | Self::Tabnine | Self::Mux => self.agent(),
+            Self::OpenCode => "ai.opencode",
+            Self::Kilo => "ai.kilocode",
+            Self::MiMoCode => "com.xiaomi.mimocode",
+            Self::Kiro => "dev.kiro.cli",
         }
     }
     pub(crate) fn format(self) -> &'static str {
@@ -128,7 +143,28 @@ impl Provider {
             Self::Tabnine => "tabnine-chat-jsonl",
             Self::Mux => "mux-chat-jsonl",
             Self::Cursor => "cursor-cli-transcript",
+            Self::OpenCode | Self::Kilo | Self::MiMoCode => "opencode-sqlite",
+            Self::Kiro => "kiro-cli-sqlite",
         }
+    }
+    pub fn is_sqlite(self) -> bool {
+        matches!(
+            self,
+            Self::OpenCode | Self::Kilo | Self::MiMoCode | Self::Kiro
+        )
+    }
+    pub(crate) fn from_agent(agent: &str) -> Result<Self> {
+        [
+            Self::Claude,
+            Self::Codex,
+            Self::OpenCode,
+            Self::Kilo,
+            Self::MiMoCode,
+            Self::Kiro,
+        ]
+        .into_iter()
+        .find(|p| p.agent() == agent)
+        .ok_or_else(|| Error::Invalid("unknown ASR provider".into()))
     }
 }
 
@@ -142,8 +178,10 @@ pub struct Options {
     pub inputs: Vec<Input>,
     /// Exact native session ID; absent exports all selected sessions.
     pub session: Option<String>,
+    /// Stable installation identity, required for directory-keyed Kiro stores.
+    pub namespace: Option<String>,
     pub out: PathBuf,
-    /// Bound for a native line and an assembled content field.
+    /// Bound for a native line, SQLite row, and assembled content field.
     pub max_record_bytes: usize,
 }
 impl Options {
@@ -151,6 +189,7 @@ impl Options {
         Self {
             inputs,
             session: None,
+            namespace: None,
             out,
             max_record_bytes: ctx_history_source_io::MAX_PROVIDER_JSONL_LINE_BYTES,
         }

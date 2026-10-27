@@ -18,6 +18,15 @@ use std::{
 pub(crate) const REVISION: &str = "ctx-asr-integration-1";
 
 pub fn export(options: &Options) -> Result<Summary> {
+    if options.namespace.as_ref().is_some_and(|n| n.is_empty())
+        || (options.namespace.is_some()
+            && options.inputs.iter().any(|i| i.provider != Provider::Kiro))
+    {
+        return Err(Error::Invalid(
+            "--namespace requires a nonempty Kiro installation identity and only Kiro inputs"
+                .into(),
+        ));
+    }
     if options.max_record_bytes < 1024 {
         return Err(Error::Invalid(
             "max record bytes must be at least 1024".into(),
@@ -40,7 +49,12 @@ pub fn export(options: &Options) -> Result<Summary> {
         .write(true)
         .open(options.out.join(".ctx-asr.lock"))?;
     lock.lock_exclusive()?;
-    let db = Connection::open(options.out.join(".ctx-asr.sqlite"))?;
+    let state_name = options
+        .namespace
+        .as_ref()
+        .map(|n| format!(".ctx-asr-{:x}.sqlite", Sha256::digest(n.as_bytes())))
+        .unwrap_or_else(|| ".ctx-asr.sqlite".into());
+    let db = Connection::open(options.out.join(state_name))?;
     db.execute_batch("PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
         CREATE TABLE IF NOT EXISTS exports(agent TEXT, session TEXT, stamp TEXT, entry TEXT, PRIMARY KEY(agent,session));
         CREATE TABLE IF NOT EXISTS positions(agent TEXT,session TEXT,segment TEXT,local TEXT,pos INTEGER,PRIMARY KEY(agent,session,segment,local));
@@ -48,16 +62,34 @@ pub fn export(options: &Options) -> Result<Summary> {
         CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,session,path));
         CREATE INDEX source_sessions ON sources(agent,session,path);")?;
     let mut summary = Summary::default();
+    let staging = tempfile::tempdir_in(&options.out)?;
     for input in &options.inputs {
         source::visit(
             input,
             options.max_record_bytes,
+            staging.path(),
+            options.namespace.as_deref(),
             &mut |s| {
                 if options.session.as_deref().is_none_or(|id| {
                     id == s.session
                         || (matches!(s.provider, Provider::Kimi | Provider::Copilot)
                             && (s.header["_nativeSession"] == id || s.header["_agent"] == id))
                 }) {
+                    if s.provider.is_sqlite() {
+                        let existing: Option<String> = db
+                            .query_row(
+                                "SELECT stamp FROM sources WHERE agent=?1 AND session=?2",
+                                params![s.provider.agent(), s.session],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        if let Some(existing) = existing {
+                            if existing == s.stamp {
+                                return Ok(());
+                            }
+                            return Err(Error::Invalid("conflicting SQLite snapshots of one native session; select one source database".into()));
+                        }
+                    }
                     db.execute(
                         "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
                         params![
@@ -99,7 +131,8 @@ pub fn export(options: &Options) -> Result<Summary> {
         )?;
         let mut rows = stmt.query(params![agent, session])?;
         while let Some(row) = rows.next()? {
-            for n in 0..2 {
+            // Staged SQLite paths are temporary; the transaction's logical digest is stable.
+            for n in if provider.is_sqlite() { 1..2 } else { 0..2 } {
                 hash.update(row.get::<_, String>(n)?.as_bytes());
                 hash.update([0]);
             }
@@ -264,6 +297,10 @@ pub fn export(options: &Options) -> Result<Summary> {
                     Provider::QwenCode => crate::qwen::convert(&spool, &mut writer, &value, cwd)?,
                     Provider::Copilot | Provider::Droid | Provider::Kimi | Provider::Qoder => crate::cli_journals::convert(&mut spool, &mut writer, pos, &value, cwd)?,
                     Provider::Junie | Provider::MistralVibe | Provider::Tabnine | Provider::Mux | Provider::Cursor => crate::journals::convert(&mut spool, &mut writer, &value)?,
+                    Provider::OpenCode | Provider::Kilo | Provider::MiMoCode => {
+                        crate::opencode::convert(&mut spool, &mut writer, &value, cwd)?
+                    }
+                    Provider::Kiro => crate::kiro::convert(&mut spool, &mut writer, &value)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -293,6 +330,9 @@ pub fn export(options: &Options) -> Result<Summary> {
             if let Some(last) = copied_last {
                 stream_header["lineage"]["inherits"]["localThroughId"] = json!(last);
             }
+            if let Some(namespace) = &options.namespace {
+                stream_header["namespace"] = json!(namespace);
+            }
             stream_header["seq"] = json!(0);
             stream_header["id"] = json!("r0");
             if let Some(at) = old
@@ -305,7 +345,11 @@ pub fn export(options: &Options) -> Result<Summary> {
             let (mut digest, mut size) = digest(complete.as_file_mut())?;
             let storage = format!(
                 "{:x}",
-                Sha256::digest(session_ref(provider, &session).as_bytes())
+                Sha256::digest(if options.namespace.is_some() {
+                    serde_json::to_vec(&(session_ref(provider, &session), &options.namespace))?
+                } else {
+                    session_ref(provider, &session).into_bytes()
+                })
             );
             let default = format!("sessions/{agent}/{storage}.jsonl");
             let prior = old

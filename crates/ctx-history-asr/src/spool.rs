@@ -70,7 +70,14 @@ impl Spool {
         let mut reader = source::reader(path)?;
         let mut bytes = Vec::new();
         let mut physical = 0;
-        while let Some((size, oversized)) = source::line(&mut *reader, &mut bytes, self.limit)? {
+        // The native SQLite cursor bounds values before decoding; its envelope and
+        // JSON escaping add bytes but are not another native truncation boundary.
+        let read_limit = if provider.is_sqlite() {
+            self.limit.saturating_mul(8).saturating_add(65536)
+        } else {
+            self.limit
+        };
+        while let Some((size, oversized)) = source::line(&mut *reader, &mut bytes, read_limit)? {
             physical += 1;
             self.source_bytes += size as u64;
             self.source_lines += 1;
@@ -128,12 +135,17 @@ impl Spool {
             } else {
                 v["uuid"].as_str()
             };
-            let response = if kind == "assistant" {
+            let response = if provider.is_sqlite() {
+                v["message_id"].as_str()
+            } else if kind == "assistant" {
                 v.pointer("/message/id").and_then(Value::as_str)
             } else {
                 None
             };
             let call = payload["call_id"].as_str();
+            if provider.is_sqlite() {
+                crate::sqlite::index_calls(self, &v, pos)?;
+            }
             if provider == Provider::Codex
                 && kind == "response_item"
                 && matches!(
