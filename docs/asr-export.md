@@ -154,9 +154,10 @@ publish another stream snapshot while retaining earlier exported files. Kiro
 history-array positions carry `idScope: capture`, including in UUID-keyed v2
 conversations, because the native document is rewritten as a whole.
 
-Legacy Kiro `conversations` rows use their native working-directory key as the
-session ID, as specified by the current ASR registry. They require an explicit,
-stable installation/profile namespace:
+Kiro `conversations_v2` and legacy `conversations` rows prefer the native
+`conversation_id`, including one nested in the JSON value. Only older rows
+without that UUID use their native working-directory key as the session ID and
+require an explicit, stable installation/profile namespace:
 
 ```sh
 ctx export asr --all --provider kiro --namespace my-kiro-installation --path ./data.sqlite3 --out ./asr
@@ -168,10 +169,10 @@ commands omit `--namespace`. Keep this state with a relocated export. A conflict
 namespace requires a separate destination. For Kimi and Copilot child conversations,
 installation and native container scope compose as compact JSON text
 `[installation, container]`; Kimi `main` remains its own conversation.
-It is not an input-file path or an output-directory identity. The legacy JSON may
-also contain a conversation UUID; it is retained as provider metadata rather than
-silently overriding the registry's directory-key rule. Kiro ACP/v3 session stores
-and older Kilo editor-extension task directories are separate formats.
+It is not an input-file path or an output-directory identity. The v3.2 identity
+migration retains the directory key as provenance and does not assert continuity
+between earlier directory identities and UUID identities. Kiro ACP/v3 session
+stores and older Kilo editor-extension task directories are separate formats.
 
 The native row bound defaults to 16 MiB, controlled by `--max-record-bytes`.
 An oversized row with a usable session identity yields a `conversion_loss` gap;
