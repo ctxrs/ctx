@@ -219,7 +219,9 @@ pub(crate) fn unsafe_number(v: &Value) -> bool {
 }
 
 pub(crate) fn retain(r: &mut Value, p: Provider, key: &str, v: &Value) {
-    if unsafe_number(v) {
+    if matches!(key, "row" | "audit") && r["type"].is_string() {
+        r["native"] = json!({"record":v});
+    } else if unsafe_number(v) {
         records::meta(
             r,
             p,

@@ -4,7 +4,7 @@
 mod kiro;
 mod opencode;
 use crate::{
-    records::{copy, meta, session_ref},
+    records::{copy, session_ref},
     source::Source,
     spool::Spool,
     Error, Input, Provider, Result,
@@ -225,7 +225,7 @@ pub(crate) fn header(provider: Provider, id: &str, n: &Value, revision: &str) ->
         h["lineage"]["forkedFrom"] =
             json!({"session":session_ref(provider,p),"evidence":"native_field"});
     }
-    meta(&mut h, provider, "session", n);
+    h["native"] = json!({"record":n});
     if provider == Provider::Kiro {
         if let Some(a) = h["producer"]["lossy"].as_array_mut() {
             a.extend([

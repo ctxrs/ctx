@@ -420,3 +420,22 @@ fn openclaw_state_discovery_ignores_export_trees_and_prefers_agent_database() {
     assert_eq!(export(&o).unwrap().sessions, 1);
     assert_eq!(records(&o)[0]["sessionId"], "window");
 }
+
+#[test]
+fn openclaw_release_schema_25_reads_shared_tables_without_cursor_columns() {
+    let (dir, options, db) = openclaw(&[event(
+        "m",
+        Value::Null,
+        json!({"role":"user","content":"hello"}),
+    )]);
+    db.execute_batch("PRAGMA user_version=25;").unwrap();
+    let state = dir.path().join("state/openclaw.sqlite");
+    fs::create_dir_all(state.parent().unwrap()).unwrap();
+    let shared = Connection::open(state).unwrap();
+    shared.execute_batch("CREATE TABLE skill_workshop_changes(change_id TEXT PRIMARY KEY,agent_id TEXT,session_key TEXT,run_id TEXT,created_at_ms INTEGER); INSERT INTO skill_workshop_changes VALUES('change','main','lane',NULL,1); CREATE TABLE cron_run_receipts(receipt_id TEXT PRIMARY KEY,agent_id TEXT,request_run_id TEXT,started_at_ms INTEGER);").unwrap();
+    assert_eq!(export(&options).unwrap().sessions, 1);
+    let first = records(&options);
+    assert_eq!(first[0]["producer"]["source"]["formatVersion"], "25");
+    assert!(first.iter().any(|r| r["type"] == "message"));
+    assert_eq!(export(&options).unwrap().unchanged, 1);
+}

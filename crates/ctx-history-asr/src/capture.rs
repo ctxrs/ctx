@@ -1,10 +1,5 @@
 //! Native capture boundaries shared by rewritten task documents and transactional logs.
-use crate::{
-    records::{copy, meta},
-    source::Source,
-    spool::Spool,
-    Error, Input, Provider, Result,
-};
+use crate::{records::copy, source::Source, spool::Spool, Error, Input, Provider, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -205,26 +200,21 @@ pub(crate) fn unsafe_numbers(v: &Value) -> bool {
 
 pub(crate) fn retain(
     record: &mut Value,
-    provider: Provider,
+    _provider: Provider,
     source: &Value,
     spool: &Spool,
 ) -> Result<()> {
     safe_data(record)?;
     externalize(record, spool)?;
     let bytes = ctx_history_asr_core::numbers::text(source).into_bytes();
-    if bytes.len() > 65536 {
+    if bytes.len() > 65536 || unsafe_numbers(source) {
         let mut file = tempfile::NamedTempFile::new_in(&spool.bundle)?;
         file.write_all(&bytes)?;
-        meta(record, provider, "sourceBlob", &spool.blob(file)?);
-    } else if unsafe_numbers(source) {
-        meta(
-            record,
-            provider,
-            "sourceJson",
-            &json!(String::from_utf8(bytes).map_err(|_| Error::Invalid("JSON UTF-8".into()))?),
-        );
+        let mut blob = spool.blob(file)?;
+        blob["mimeType"] = json!("application/json");
+        record["native"] = json!({"blob":blob});
     } else {
-        meta(record, provider, "source", source);
+        record["native"] = json!({"record":source});
     }
     Ok(())
 }

@@ -75,10 +75,16 @@ fn duplicate_calls_are_ambiguous_and_large_integers_stay_exact() {
     assert_eq!(result["linkage"], "ambiguous");
     assert!(result.get("callId").is_none());
     assert_eq!(result["status"], "unknown");
-    assert!(result["_meta"]["com.firebender/jsonText"]["source"]
+    let blob = result["native"]["blob"]["blob"]
         .as_str()
         .unwrap()
-        .contains("9007199254740993"));
+        .strip_prefix("sha256:")
+        .unwrap();
+    assert!(
+        std::fs::read_to_string(options.out.join("blobs/sha256").join(blob))
+            .unwrap()
+            .contains("9007199254740993")
+    );
 }
 
 #[test]
@@ -228,8 +234,14 @@ fn deepagents_messages_only_and_messagepack_extensions() {
         ],
     )
     .unwrap();
+    db.execute_batch("INSERT INTO writes VALUES('thread','','checkpoint','task',2,'branch:to:model','null',X'');").unwrap();
     export(&options).unwrap();
     let r = records(&options);
+    assert!(!r.iter().any(|r| r["type"] == "gap"));
+    assert!(r
+        .iter()
+        .any(|r| r["type"] == "com.langchain.deepagents/write"
+            && r["native"]["record"]["type"] == "null"));
     assert_eq!(r.iter().filter(|r| r["type"] == "message").count(), 1);
     assert_eq!(
         r.iter().find(|r| r["type"] == "message").unwrap()["content"][0]["text"],

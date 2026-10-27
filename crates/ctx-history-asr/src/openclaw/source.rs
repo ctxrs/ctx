@@ -84,9 +84,9 @@ pub(crate) fn visit(
         return Ok(());
     }
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if ![17, 19, 37].contains(&version) {
+    if ![17, 19, 25, 37].contains(&version) {
         return Err(Error::Invalid(format!(
-            "OpenClaw ASR supports schema 17, 19 and 37; found {version}"
+            "OpenClaw ASR supports schema 17, 19, 25 and 37; found {version}"
         )));
     }
     n::scan(

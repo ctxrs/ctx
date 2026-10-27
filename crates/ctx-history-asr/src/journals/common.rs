@@ -18,7 +18,9 @@ pub(super) fn retain(record: &mut Value, w: &Writer, key: &str, v: &Value) {
         o.remove("_asr_folded");
         o.remove("_asr_step_key");
     }
-    if unsafe_number(&v) {
+    if matches!(key, "nativeRecord" | "nativeToolCall" | "nativeToolResult") {
+        record["native"] = json!({"record":v});
+    } else if unsafe_number(&v) {
         let k = format!("{}/jsonText", w.provider.domain());
         record["_meta"][k][key] = json!(ctx_history_asr_core::numbers::text(&v));
     } else {

@@ -8,12 +8,7 @@ pub mod sqlite;
 mod tree;
 mod values;
 
-use crate::{
-    records::{meta, Writer},
-    source::Source,
-    spool::Spool,
-    Error, Input, Provider, Result,
-};
+use crate::{records::Writer, source::Source, spool::Spool, Error, Input, Provider, Result};
 use rusqlite::params;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -219,12 +214,7 @@ pub fn header(provider: Provider, id: &str, n: &Value) -> Value {
     if let Some(ts) = n["startedAt"].as_str() {
         h["startedAt"] = json!(ts);
     }
-    meta(
-        &mut h,
-        provider,
-        "partition",
-        &json!({"nativeSession":n["nativeSession"],"namespace":n.get("namespace")}),
-    );
+    h["_meta"] = json!({"rs.ctx/partition":{"nativeSession":n["nativeSession"],"namespace":n.get("namespace")}});
     h
 }
 pub fn finish(spool: &mut Spool, writer: &mut Writer, header: &Value) -> Result<()> {

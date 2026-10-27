@@ -98,7 +98,7 @@ pub fn numbers(out: &Path, record: &mut Value) -> Result<()> {
         if crate::numbers::safe(&record[&key]) {
             continue;
         }
-        let value = record.as_object_mut().unwrap().remove(&key).unwrap();
+        let mut value = record.as_object_mut().unwrap().remove(&key).unwrap();
         let text = crate::numbers::text(&value);
         if key == "input" {
             record["inputText"] = json!(text);
@@ -111,6 +111,11 @@ pub fn numbers(out: &Path, record: &mut Value) -> Result<()> {
             if key == "content" && record["type"] == "message" {
                 record["content"] = json!([]);
             }
+        } else if key == "native" && value.get("record").is_some() {
+            let text = crate::numbers::text(&value["record"]);
+            value.as_object_mut().unwrap().remove("record");
+            value["blob"] = store(out, text.as_bytes())?;
+            record["native"] = value;
         } else if key == "_meta" {
             // Namespaced JSON text is an explicit carrier, not a changed native value.
             record["_meta"] = json!({"rs.ctx/metadataJsonText":text});

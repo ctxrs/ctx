@@ -1,7 +1,4 @@
-use crate::{
-    records::{meta, session_ref},
-    Provider,
-};
+use crate::{records::session_ref, Provider};
 use serde_json::{json, Value};
 
 pub fn header(provider: Provider, id: &str, _row: &Value) -> Value {
@@ -95,16 +92,11 @@ pub fn capture_header(
             header["startedAt"] = json!(ts);
         }
     }
-    meta(
-        header,
-        provider,
-        "serialization",
-        &json!({"transcript":match provider {
+    header["_meta"]["rs.ctx/serialization"] = json!({"transcript":match provider {
             Provider::Crush => "messages: created_at, rowid",
             Provider::Goose => "messages: created_timestamp, id",
             Provider::Lingma => "chat_record: rowid",
             Provider::Warp => "task_id binary order, then repeated message field order; cross-task chronology unknown",
             _ => "unknown",
-        },"sideLogs":"separate table order, no timestamp merge","currentState":"capture tail"}),
-    );
+        },"sideLogs":"separate table order, no timestamp merge","currentState":"capture tail"});
 }

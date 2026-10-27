@@ -67,15 +67,19 @@ fn header(path: &Path, p: Provider, limit: usize) -> Result<Option<(String, Valu
             let mut r = crate::source::reader(path)?;
             let mut b = Vec::new();
             let mut n = json!({});
-            for _ in 0..64 {
-                let Some((_, large)) = crate::source::line(&mut *r, &mut b, limit)? else {
-                    break;
-                };
+            while let Some((_, large)) = crate::source::line(&mut *r, &mut b, limit)? {
                 if !large {
                     if let Ok(v) = document::decode(&b) {
                         if v["sessionId"].is_string() {
-                            n = v;
-                            break;
+                            // Forks retain the source sessionId on copied messages.
+                            // The new writer's session-meta establishes the owner.
+                            if v["type"] == "session-meta" {
+                                n = v;
+                                break;
+                            }
+                            if n.is_null() || n.as_object().is_some_and(|o| o.is_empty()) {
+                                n = v;
+                            }
                         }
                     }
                 }

@@ -28,7 +28,7 @@ pub(super) fn extra(v: &mut Value, p: Provider, key: &str, raw: &Value) {
         );
     }
 }
-pub(super) fn native(v: &mut Value, p: Provider, s: &Spool, key: &str, raw: &Value) -> Result<()> {
+pub(super) fn native(v: &mut Value, s: &Spool, raw: &Value) -> Result<()> {
     let mut raw = raw.clone();
     if let Some(o) = raw.as_object_mut() {
         for k in ["_sessionId", "_namespace", "_copySession", "_forkOwner"] {
@@ -36,17 +36,19 @@ pub(super) fn native(v: &mut Value, p: Provider, s: &Spool, key: &str, raw: &Val
         }
     }
     let bytes = ctx_history_asr_core::numbers::text(&raw).into_bytes();
-    if bytes.len() > 64 * 1024 {
+    if bytes.len() > 64 * 1024 || !safe(&raw) {
         let mut file = tempfile::NamedTempFile::new_in(&s.bundle)?;
         file.write_all(&bytes)?;
-        meta(v, p, &format!("{key}Blob"), &s.blob(file)?);
+        let mut blob = s.blob(file)?;
+        blob["mimeType"] = json!("application/json");
+        v["native"] = json!({"blob":blob});
     } else {
-        extra(v, p, key, &raw);
+        v["native"] = json!({"record":raw});
     }
     Ok(())
 }
 pub(super) fn emit(s: &Spool, w: &mut Writer, mut v: Value, n: &Value) -> Result<String> {
-    native(&mut v, w.provider, s, "source", n)?;
+    native(&mut v, s, n)?;
     if v.get("copiedFrom").is_none() {
         if let Some(copy) = s.entity("native_copy")?.filter(Value::is_object) {
             v["copiedFrom"] = copy;

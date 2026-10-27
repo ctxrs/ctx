@@ -57,9 +57,7 @@ fn native_json_duplicates_and_unrepresentable_numbers_stay_exact() {
     let native: Vec<Value> = rows
         .iter()
         .filter(|v| v["type"] == "gap")
-        .map(|v| {
-            serde_json::from_str(v["_meta"]["xyz.block.goose/rowJson"].as_str().unwrap()).unwrap()
-        })
+        .map(|v| v["native"]["record"].clone())
         .collect();
     assert_eq!(native[0]["content_json"], duplicate);
     let call = rows.iter().find(|r| r["type"] == "tool_call").unwrap();
@@ -155,7 +153,7 @@ fn large_binary_and_native_metadata_are_externalized() {
     export(&o).unwrap();
     let rows = records(&o);
     assert!(rows[1]["content"][0]["blob"].is_object());
-    assert!(rows[1]["_meta"]["sh.charm.crush/rowBlob"].is_object());
+    assert!(rows[1]["native"]["blob"].is_object());
     assert!(!std::fs::read_to_string(stream_path(&o))
         .unwrap()
         .contains(&data));

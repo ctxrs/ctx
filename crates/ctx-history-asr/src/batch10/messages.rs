@@ -10,9 +10,15 @@ fn decoded(v: &Value) -> Value {
     }
 }
 pub(super) fn call_id(v: &Value) -> Option<&str> {
+    if v["type"] == "function_call" {
+        return v["callId"].as_str();
+    }
     string(v, &["id", "tool_call_id", "toolCallId", "tool_use_id"])
 }
 pub(super) fn calls(v: &Value) -> Vec<Value> {
+    if v["type"] == "function_call" && v["callId"].is_string() {
+        return vec![v.clone()];
+    }
     if let Some(states) = v["toolCallStates"].as_array() {
         return states
             .iter()
@@ -275,6 +281,21 @@ pub(super) fn codebuddy(spool: &Spool, w: &mut Writer, row: &Value) -> Result<()
         return metadata(spool, w, row);
     }
     let n = &row["value"];
+    if n["type"] == "function_call" && n["callId"].is_string() {
+        return call(spool, w, row, n, true).map(|_| ());
+    }
+    if n["type"] == "function_call_result" && n["callId"].is_string() {
+        return result(
+            spool,
+            w,
+            row,
+            n["callId"].as_str(),
+            status(n),
+            n.get("output").map(|v| parts(v, w.provider)),
+            Some(n),
+        )
+        .map(|_| ());
+    }
     let mut m = decoded(n);
     if m.get("_ctx_native_json").is_some() {
         return emit(

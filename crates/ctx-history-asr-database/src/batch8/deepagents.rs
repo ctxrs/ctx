@@ -34,10 +34,10 @@ pub(super) fn ingest(spool: &mut Spool, db: &Connection, selector: &Value) -> Re
                     "conversion_loss",
                 );
             }
-            let decoded = if row["type"] == "msgpack" {
-                sqlite::blob(&row, "value").and_then(|b| decode(&b))
-            } else {
-                Err(Error::Invalid("unsupported LangGraph serialization".into()))
+            let decoded = match row["type"].as_str() {
+                Some("null") => Ok(Value::Null),
+                Some("msgpack") => sqlite::blob(&row, "value").and_then(|b| decode(&b)),
+                _ => Err(Error::Invalid("unsupported LangGraph serialization".into())),
             };
             let value = match decoded {
                 Ok(v) => v,

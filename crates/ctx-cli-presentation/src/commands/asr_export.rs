@@ -14,6 +14,7 @@ pub enum AsrProvider {
     Codex,
     Pi,
     GrokBuild,
+    #[value(name = "deepseek-harness", alias = "deep-seek-harness")]
     DeepSeekHarness,
     #[value(alias = "gemini-cli")]
     Gemini,

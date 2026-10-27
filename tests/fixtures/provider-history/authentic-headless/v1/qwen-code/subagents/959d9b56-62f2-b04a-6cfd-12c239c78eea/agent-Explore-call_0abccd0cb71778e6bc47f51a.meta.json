@@ -1,0 +1,29 @@
+{
+  "agentId": "Explore-call_0abccd0cb71778e6bc47f51a",
+  "agentType": "Explore",
+  "description": "Check greeting test consistency",
+  "parentSessionId": "959d9b56-62f2-b04a-6cfd-12c239c78eea",
+  "toolUseId": "call_0abccd0cb71778e6bc47f51a",
+  "parentAgentId": null,
+  "createdAt": "2026-10-27T14:23:52.516Z",
+  "status": "completed",
+  "isBackgrounded": false,
+  "lastUpdatedAt": "2026-10-27T14:24:07.131Z",
+  "resolvedApprovalMode": "yolo",
+  "persistedCliFlags": {
+    "approvalMode": "yolo",
+    "bare": false,
+    "safeMode": false,
+    "sandbox": null,
+    "screenReader": false,
+    "model": "gpt-6-astra",
+    "authType": "openai",
+    "baseUrl": "http://127.0.0.1:9999/v1",
+    "maxSessionTurns": -1,
+    "maxToolCalls": -1,
+    "maxSubagentDepth": 5
+  },
+  "subagentName": "Explore",
+  "resumeCount": 0,
+  "depth": 0
+}

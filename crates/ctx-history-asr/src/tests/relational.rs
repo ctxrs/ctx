@@ -395,10 +395,7 @@ fn hermes_receipt_log_precedes_mutable_snapshots() {
         .iter()
         .filter(|r| r["type"] == "com.nousresearch.hermes/worker_receipts")
         .collect();
-    assert_eq!(
-        receipt[0]["_meta"]["com.nousresearch.hermes/source"]["sequence"],
-        1
-    );
+    assert_eq!(receipt[0]["native"]["record"]["sequence"], 1);
     assert!(receipt.iter().all(|r| r.get("assembly").is_none()));
     let state = r
         .iter()

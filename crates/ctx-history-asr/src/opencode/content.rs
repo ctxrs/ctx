@@ -53,8 +53,7 @@ pub(super) fn fold(s: &mut Spool, w: &Writer, r: &mut Value, id: &str, d: &Value
         };
         pos = next;
         let p = s.get(pos)?;
-        if let Some(mut part) = part(&p["data"], w.provider) {
-            meta(&mut part, w.provider, "row", &p["row"]);
+        if let Some(part) = part(&p["data"], w.provider) {
             if count > 0 {
                 file.write_all(b",")?;
             }

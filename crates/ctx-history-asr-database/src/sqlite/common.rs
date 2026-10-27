@@ -23,7 +23,7 @@ pub(super) fn row_meta(
         object.retain(|k, _| !k.starts_with('_'));
     }
     // JSON text preserves signed/unsigned 64-bit integers without ASR rounding.
-    json_meta(spool, out, provider, "row", &native)?;
+    native_value(spool, out, &native)?;
     meta(
         out,
         provider,
@@ -35,28 +35,34 @@ pub(super) fn row_meta(
 pub(super) fn part_meta(
     spool: &Spool,
     out: &mut Value,
-    provider: Provider,
+    _provider: Provider,
     part: &Value,
 ) -> Result<()> {
-    json_meta(spool, out, provider, "part", part)
+    // Message rows retain their complete serialized parts. Content parts have
+    // no native envelope; only independently emitted records need one here.
+    if matches!(
+        out["type"].as_str(),
+        Some(
+            "text"
+                | "reasoning"
+                | "image"
+                | "audio"
+                | "resource"
+                | "resource_link"
+                | "data"
+                | "opaque"
+        )
+    ) {
+        return Ok(());
+    }
+    native_value(spool, out, part)
 }
-fn json_meta(
-    spool: &Spool,
-    out: &mut Value,
-    provider: Provider,
-    kind: &str,
-    value: &Value,
-) -> Result<()> {
-    let text = value.to_string();
-    if text.len() > 65536 {
-        meta(
-            out,
-            provider,
-            &format!("{kind}Blob"),
-            &blob(spool, text.as_bytes(), "application/json")?,
-        );
+fn native_value(spool: &Spool, out: &mut Value, value: &Value) -> Result<()> {
+    let text = ctx_history_asr_core::numbers::text(value);
+    if text.len() > 65536 || !safe(value) {
+        out["native"] = json!({"blob":blob(spool, text.as_bytes(), "application/json")?});
     } else {
-        meta(out, provider, &format!("{kind}Json"), &json!(text));
+        out["native"] = json!({"record":value});
     }
     Ok(())
 }
@@ -221,7 +227,7 @@ pub(super) fn link(
     spool: &Spool,
     out: &mut Value,
     id: Option<&str>,
-    provider: Provider,
+    _provider: Provider,
 ) -> Result<()> {
     if let Some(id) = id.filter(|s| !s.is_empty()) {
         let count: u64 = spool.db.query_row(
@@ -231,7 +237,7 @@ pub(super) fn link(
         )?;
         if count > 1 {
             out["linkage"] = json!("ambiguous");
-            meta(out, provider, "unpairedCallId", &json!(id));
+            out["nativeCallId"] = json!(id);
         } else {
             out["callId"] = json!(id);
             out["linkage"] = json!("exact");

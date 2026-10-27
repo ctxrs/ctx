@@ -19,7 +19,13 @@ pub(super) fn preserve(
     value: &Value,
 ) -> Result<()> {
     let raw = ctx_history_asr_core::numbers::text(value).into_bytes();
-    if raw.len() > 65_536 {
+    if key == "source" {
+        record["native"] = if raw.len() > 65_536 || !safe(value) {
+            json!({"blob":bytes(spool, &raw, "application/json")?})
+        } else {
+            json!({"record":value})
+        };
+    } else if raw.len() > 65_536 {
         meta(
             record,
             provider,
@@ -29,14 +35,14 @@ pub(super) fn preserve(
     } else if safe(value) {
         meta(record, provider, key, value);
     } else {
-        let field = format!("{}/jsonText", provider.domain());
+        let field = format!("{}/remainingFields", provider.domain());
         if record.get("_meta").is_none() {
             record["_meta"] = json!({});
         }
         if record["_meta"].get(&field).is_none() {
             record["_meta"][&field] = json!({});
         }
-        record["_meta"][&field][key] = json!(String::from_utf8_lossy(&raw));
+        record["_meta"][&field][key] = json!({"jsonText":String::from_utf8_lossy(&raw)});
     }
     Ok(())
 }
