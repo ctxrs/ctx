@@ -27,7 +27,7 @@ pub(super) fn message(s: &mut Spool, w: &Writer, group: &str) -> Result<Option<V
         cursor=pos;count+=1;let v=s.get(pos)?;
         let (normalized,id)=if w.provider==Provider::Kimi {(parts(&json!([v["event"]["part"]]),w.provider),v["event"]["uuid"].as_str())}else{(copilot_content(&v["data"]),v["id"].as_str())};
         if let Some(id)=id {ids_size+=id.len();if ids_size<=s.limit/8 {ids.push(id.to_owned());}}
-        for part in &normalized {if comma {blob.write_all(b",")?;}comma=true;serde_json::to_writer(blob.as_file_mut(),part)?;}
+        for part in &normalized {if comma {blob.write_all(b",")?;}comma=true;ctx_history_asr_core::numbers::write(blob.as_file_mut(),part)?;}
         size+=serde_json::to_vec(&normalized)?.len();if size<=s.limit {content.extend(normalized);}else{content.clear();}
     }
     blob.write_all(b"]")?;

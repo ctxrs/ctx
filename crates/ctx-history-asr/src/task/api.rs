@@ -65,7 +65,7 @@ pub(super) fn convert(spool: &Spool, w: &mut Writer, n: &Value) -> Result<()> {
                         } else {
                             "input"
                         }] = if capture::unsafe_numbers(input) {
-                            json!(serde_json::to_string(input)?)
+                            json!(ctx_history_asr_core::numbers::text(input))
                         } else {
                             input.clone()
                         };

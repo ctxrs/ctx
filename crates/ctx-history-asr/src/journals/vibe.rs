@@ -43,9 +43,9 @@ pub(super) fn convert(spool: &mut Spool, w: &mut Writer, v: &Value) -> Result<()
         m["origin"] = json!("injected");
     }
     if let Some(text) = v["reasoning_content"].as_str() {
-        m["content"]
-            .as_array_mut()
-            .map(|a| a.push(json!({"type":"reasoning","visibility":"full","text":text})));
+        if let Some(a) = m["content"].as_array_mut() {
+            a.push(json!({"type":"reasoning","visibility":"full","text":text}));
+        }
         m.get_mut("capture")
             .and_then(Value::as_object_mut)
             .map(|o| o.remove("content"));
@@ -64,9 +64,13 @@ pub(super) fn convert(spool: &mut Spool, w: &mut Writer, v: &Value) -> Result<()
                 .and_then(Value::as_str)
             {
                 // Native file references are locators, never automatically opened.
-                m["content"].as_array_mut().map(|a|a.push(json!({"type":"data","data":{"imagePath":path},"_meta":{"ai.mistral.vibe/image":image}})));
+                if let Some(a) = m["content"].as_array_mut() {
+                    a.push(json!({"type":"data","data":{"imagePath":path},"_meta":{"ai.mistral.vibe/image":image}}));
+                }
             } else {
-                m["content"].as_array_mut().map(|a| a.push(data(image)));
+                if let Some(a) = m["content"].as_array_mut() {
+                    a.push(data(image));
+                }
             }
         }
     }

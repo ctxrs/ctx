@@ -1,6 +1,6 @@
 # ASR export
 
-`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Supported converters include Claude Code, Codex, Pi, Grok Build DeepSeek Harness, Gemini CLI, Antigravity and Qwen Code.
+`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. The 43 converters cover Claude Code, Codex, Pi, Grok Build, DeepSeek Harness, Gemini CLI, Antigravity, Qwen Code, Copilot CLI, Droid, Kimi, Qoder, Junie, Mistral Vibe, Tabnine, Mux, Cursor, OpenCode, Kilo, MiMoCode, Kiro, Crush, Goose, Lingma, Warp, Hermes, AstrBot, Shelley, Zed, Firebender, ForgeCode, DeepAgents, Devin, OpenClaw, NanoClaw, CodeBuddy, Continue, OpenHands, Auggie, RovoDev, Cline, Roo and Fx.
 
 ```sh
 ctx export asr --all --out ./asr
@@ -54,12 +54,17 @@ export does not apply general-purpose secret or personal-data redaction.
 Repeat the command with the same destination to update the bundle. Unchanged
 JSONL sources are skipped; mixed SQLite stores are reread to capture current rows and lane facts. A changed session is spooled again; the exporter does not
 assume native files only append. The export database retains source-position assignments,
-so newly discovered segments and appended native records do not renumber earlier
-records. Keep this database with the destination when continuing an export.
+which are independent of capture-local `seq`. Codex IDs derive from native
+segment, ordinal (or physical line), and emission slot; provenance is retained at
+`com.openai.codex/position`. Segment headers provide creation order; ties use
+segment identity as a deterministic serialization and declare `order`. Keep this database with the destination when continuing an export.
 When the new stream has the previous stream as an exact prefix, only its suffix
-is appended. An incomplete output tail is removed before appending. If a folded
-response, rewritten source or converter change alters earlier bytes, a new
-snapshot is published and the earlier stream is retained. The manifest selects
+is appended. An incomplete output tail is removed before appending. Claude response growth appends full message and inference replacements with
+`supersedes` and growing folded `assembly.sourceIds`; existing bytes remain unchanged.
+The latest observation of a repeated UUID keeps its first-seen position before
+distinct response blocks are folded. Rewritten or deleted native positions,
+other changed snapshots, and converter changes publish a replacement capture
+with `observedAt`; earlier streams remain available. The manifest selects
 one snapshot per session. Concurrent writers to one destination are serialized.
 
 JSONL is read with a bounded line buffer; the default limit is 16 MiB and can be
@@ -313,3 +318,26 @@ replacement snapshots and Qwen compressed-history arrays can lack the identities
 needed to recover exact retained context; their native data and declared losses
 are retained. Qualification is limited to the formats exercised by semantic tests
 and existing fixtures, and is not a claim of coverage for every provider release.
+
+## Shared conversion rules
+
+`ctx-history-asr-core` owns the provider catalog, bounded spool, privacy filtering,
+record identities and serialization. `ctx-history-asr-database` owns native
+database acquisition and projection. `ctx-history-asr` owns journal conversion,
+discovery integration and capture publication.
+
+All sequences are increasing safe integers local to one capture. Mutable
+side-state projections follow recorded history with snapshot assembly; ordering
+across stores never claims timestamp chronology. Duplicate native call IDs leave
+results unpaired, with the recorded ID in provider-qualified `unpairedCallId`
+metadata. Missing external session, turn, or call targets are retained for the
+reference validator's warning-class resolution; structural targets are never
+invented to silence a diagnostic.
+
+Unsafe integers retain their exact JSON spelling: tool inputs use `inputText`
+without `input`, content and raw values use JSON blobs when needed, and other
+values use `rs.ctx/unsafeJsonText` (field to JSON string) or
+`rs.ctx/metadataJsonText` (the full metadata object as JSON text). Decoded image
+and audio data over 64 KiB use binary blobs. Codex host-cell IDs are metadata,
+not parent calls; a nearby `new_context` call does not establish a compaction
+trigger. Unknown enum values remain native metadata.

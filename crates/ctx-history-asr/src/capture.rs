@@ -164,7 +164,7 @@ pub(crate) fn array(
                 Some(
                     std::str::from_utf8(&retained)
                         .ok()
-                        .and_then(ctx_history_capture_model::exact_json_value)
+                        .and_then(ctx_history_asr_core::numbers::decode)
                         .unwrap_or_else(|| json!({"type":"_gap","reason":"unparseable"})),
                 )
             };
@@ -200,15 +200,7 @@ pub(crate) fn millis(v: &Value) -> Option<String> {
 }
 
 pub(crate) fn unsafe_numbers(v: &Value) -> bool {
-    match v {
-        Value::Number(n) => {
-            n.as_u64().is_some_and(|n| n > 9_007_199_254_740_991)
-                || n.as_i64().is_some_and(|n| n < -9_007_199_254_740_991)
-        }
-        Value::Array(v) => v.iter().any(unsafe_numbers),
-        Value::Object(v) => v.values().any(unsafe_numbers),
-        _ => false,
-    }
+    !ctx_history_asr_core::numbers::safe(v)
 }
 
 pub(crate) fn retain(
@@ -219,7 +211,7 @@ pub(crate) fn retain(
 ) -> Result<()> {
     safe_data(record)?;
     externalize(record, spool)?;
-    let bytes = serde_json::to_vec(source)?;
+    let bytes = ctx_history_asr_core::numbers::text(source).into_bytes();
     if bytes.len() > 65536 {
         let mut file = tempfile::NamedTempFile::new_in(&spool.bundle)?;
         file.write_all(&bytes)?;
@@ -238,7 +230,7 @@ pub(crate) fn retain(
 }
 fn safe_data(v: &mut Value) -> Result<()> {
     if v["type"] == "data" && unsafe_numbers(&v["data"]) {
-        *v = json!({"type":"opaque","format":"application/json","data":serde_json::to_string(&v["data"])?});
+        *v = json!({"type":"opaque","format":"application/json","data":ctx_history_asr_core::numbers::text(&v["data"])});
     } else if let Some(items) = v.as_array_mut() {
         for item in items {
             safe_data(item)?;

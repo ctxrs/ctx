@@ -1,0 +1,28 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "cargo_package_data",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+DEPS = [
+    "//crates/ctx-history-capture-model:lib",
+    "//crates/ctx-history-provider-codex:lib",
+    "//crates/ctx-history-source-io:lib",
+    "//crates/ctx-history-source-sqlite:lib",
+]
+
+rust_library(
+    name = "lib",
+    srcs = glob(["src/**/*.rs"], exclude = RUST_PROD_SRC_EXCLUDES),
+    crate_name = "ctx_history_asr_core",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+)

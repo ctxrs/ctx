@@ -2,9 +2,9 @@
 mod content;
 mod tools;
 use crate::{
+    opencode_source::millis,
     records::{copy, meta, Writer},
     spool::Spool,
-    opencode_source::millis,
     Result,
 };
 use rusqlite::OptionalExtension;

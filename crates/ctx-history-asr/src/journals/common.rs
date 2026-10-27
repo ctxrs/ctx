@@ -10,15 +10,7 @@ pub(super) fn millis(v: &Value) -> Option<String> {
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 pub(super) fn unsafe_number(v: &Value) -> bool {
-    match v {
-        Value::Number(n) => {
-            n.as_u64().is_some_and(|n| n > 9_007_199_254_740_991)
-                || n.as_i64().is_some_and(|n| n < -9_007_199_254_740_991)
-        }
-        Value::Array(a) => a.iter().any(unsafe_number),
-        Value::Object(o) => o.values().any(unsafe_number),
-        _ => false,
-    }
+    !ctx_history_asr_core::numbers::safe(v)
 }
 pub(super) fn retain(record: &mut Value, w: &Writer, key: &str, v: &Value) {
     let mut v = v.clone();
@@ -28,7 +20,7 @@ pub(super) fn retain(record: &mut Value, w: &Writer, key: &str, v: &Value) {
     }
     if unsafe_number(&v) {
         let k = format!("{}/jsonText", w.provider.domain());
-        record["_meta"][k][key] = json!(v.to_string());
+        record["_meta"][k][key] = json!(ctx_history_asr_core::numbers::text(&v));
     } else {
         meta(record, w.provider, key, &v);
     }
@@ -52,7 +44,7 @@ pub(super) fn parts(v: &Value) -> Vec<Value> {
 }
 pub(super) fn data(v: &Value) -> Value {
     if unsafe_number(v) {
-        json!({"type":"opaque","format":"application/json","data":v.to_string()})
+        json!({"type":"opaque","format":"application/json","data":ctx_history_asr_core::numbers::text(v)})
     } else {
         json!({"type":"data","data":v})
     }
@@ -116,7 +108,9 @@ pub(super) fn call(
     }
     match input {
         Some(Value::String(text)) => r["inputText"] = json!(text),
-        Some(v) if unsafe_number(v) => r["inputText"] = json!(v.to_string()),
+        Some(v) if unsafe_number(v) => {
+            r["inputText"] = json!(ctx_history_asr_core::numbers::text(v))
+        }
         Some(v) => r["input"] = v.clone(),
         None => r["capture"]["input"] = json!({"state":"absent"}),
     }

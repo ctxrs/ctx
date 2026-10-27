@@ -2,9 +2,9 @@
 //! History indexes identify positions in this capture, not durable messages.
 use crate::{
     content,
+    opencode_source::millis,
     records::{meta, Writer},
     spool::Spool,
-    opencode_source::millis,
     Result,
 };
 use serde_json::{json, Value};

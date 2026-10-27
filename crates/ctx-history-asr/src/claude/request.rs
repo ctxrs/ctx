@@ -10,7 +10,7 @@ pub(super) fn record(spool: &Spool, writer: &mut Writer, v: &Value) -> Result<()
         Some("api-request-blob") => {
             if let Some(hash) = v["hash"].as_str() {
                 let mut file = tempfile::NamedTempFile::new_in(&spool.bundle)?;
-                serde_json::to_writer(file.as_file_mut(), &v["message"])?;
+                ctx_history_asr_core::numbers::write(file.as_file_mut(), &v["message"])?;
                 let blob = spool.blob(file)?;
                 spool.save(&format!("request-blob:{hash}"), &blob)?;
                 writer.emit(json!({"type":"com.anthropic.claude-code/api-request-blob","hash":hash,"blob":blob}),v)?;

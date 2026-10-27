@@ -36,7 +36,7 @@ pub(super) fn convert(spool: &Spool, w: &mut Writer, n: &Value) -> Result<()> {
         .unwrap_or("unknown");
     let parsed = n["text"]
         .as_str()
-        .and_then(ctx_history_capture_model::exact_json_value);
+        .and_then(ctx_history_asr_core::numbers::decode);
     let mut r = match kind {
         "api_req_started" => {
             let mut r = json!({"type":"inference","inferenceId":w.id(),"idSource":"derived"});

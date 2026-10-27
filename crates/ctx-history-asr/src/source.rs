@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Read},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 pub(crate) fn reader(path: &Path) -> Result<Box<dyn BufRead>> {
@@ -48,19 +48,11 @@ pub(crate) fn line(
 pub(crate) fn decode(bytes: &[u8]) -> Option<Value> {
     std::str::from_utf8(bytes)
         .ok()
-        .and_then(ctx_history_capture_model::exact_json_value)
+        .and_then(ctx_history_asr_core::numbers::decode)
         .filter(Value::is_object)
 }
 
-#[derive(Clone)]
-pub(crate) struct Source {
-    pub provider: Provider,
-    pub path: PathBuf,
-    pub session: String,
-    pub header: Value,
-    pub stamp: String,
-    pub segment: String,
-}
+pub(crate) use ctx_history_asr_core::source::Source;
 
 pub(crate) fn visit(
     input: &Input,
@@ -134,7 +126,10 @@ pub(crate) fn visit(
                 || (input.provider == Provider::Codex && name.ends_with(".jsonl.zst"))
                 || (input.provider == Provider::DeepSeekHarness && name.ends_with(".jsonl.zstd"))
                 || (input.provider == Provider::Gemini && name.ends_with(".json"))
-                || (input.provider.is_sqlite() && (name.ends_with(".db") || name.ends_with(".sqlite") || name.ends_with(".sqlite3"))))
+                || (input.provider.is_sqlite()
+                    && (name.ends_with(".db")
+                        || name.ends_with(".sqlite")
+                        || name.ends_with(".sqlite3"))))
             {
                 continue;
             }
@@ -178,7 +173,7 @@ fn inspect(
         Provider::Gemini | Provider::Antigravity | Provider::QwenCode
     ) {
         return crate::conversation_source::inspect(input, limit, visitor, unidentified);
-        }
+    }
     if input.provider.cli_journal() {
         return crate::cli_journals::source::inspect(input, limit, visitor, unidentified);
     }

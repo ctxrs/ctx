@@ -313,7 +313,7 @@ pub(crate) fn ingest(
             }
         }
         h["asr"] = asr;
-        super::side::ingest(s, &db, path, id, lane, agent_id.unwrap_or(""), h, bundle)?;
+        super::side::ingest(s, &db, path, id, (lane, agent_id.unwrap_or("")), h, bundle)?;
         n::stage(s, "session_nodes", lane, node, true)?;
         n::stage(s, "session_windows", id, window, true)?;
         if n::has(&db, "session_transcript_index_state")? {

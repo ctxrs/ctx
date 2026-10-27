@@ -9,13 +9,10 @@ use crate::{
 };
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 pub(crate) use sqlite::*;
 use std::{io::Write, path::Path};
 
-pub(crate) fn stable_id(identity: &str) -> String {
-    format!("n{:x}", Sha256::digest(identity.as_bytes()))
-}
+pub(crate) use crate::records::stable_id;
 pub(crate) fn visit(
     input: &Input,
     limit: usize,
@@ -163,7 +160,7 @@ pub(crate) fn parse(v: &Value) -> Value {
 // Reject integer literals that serde_json would round through f64. Native
 // signed/unsigned 64-bit integers remain exact until ASR JSON-text projection.
 pub(crate) fn parse_json(text: &str) -> Option<Value> {
-    let value = ctx_history_capture_model::exact_json_value(text)?;
+    let value = ctx_history_asr_core::numbers::decode(text)?;
     let mut quoted = false;
     let mut escaped = false;
     let mut token = String::new();
@@ -218,35 +215,30 @@ fn large_binary(v: &Value) -> bool {
     }
 }
 pub(crate) fn unsafe_number(v: &Value) -> bool {
-    match v {
-        Value::Number(n) => {
-            n.as_i64()
-                .is_some_and(|x| !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&x))
-                || n.as_u64().is_some_and(|x| x > 9_007_199_254_740_991)
-                || n.as_f64()
-                    .is_some_and(|x| x.fract() == 0.0 && x.abs() > 9_007_199_254_740_991.0)
-        }
-        Value::Array(a) => a.iter().any(unsafe_number),
-        Value::Object(o) => o.values().any(unsafe_number),
-        _ => false,
-    }
+    !ctx_history_asr_core::numbers::safe(v)
 }
+
 pub(crate) fn retain(r: &mut Value, p: Provider, key: &str, v: &Value) {
     if unsafe_number(v) {
-        records::meta(r, p, &format!("{key}JsonText"), &json!(v.to_string()));
+        records::meta(
+            r,
+            p,
+            &format!("{key}JsonText"),
+            &json!(ctx_history_asr_core::numbers::text(v)),
+        );
     } else {
         records::meta(r, p, key, v);
     }
 }
 fn numbers(s: &Spool, p: Provider, r: &mut Value) -> Result<()> {
     if unsafe_number(&r["input"]) {
-        r["inputText"] = json!(r["input"].to_string());
+        r["inputText"] = json!(ctx_history_asr_core::numbers::text(&r["input"]));
         r.as_object_mut().map(|o| o.remove("input"));
     }
     for key in ["raw", "content", "displayContent"] {
         if unsafe_number(&r[key]) || large_binary(&r[key]) {
             let mut f = tempfile::NamedTempFile::new_in(&s.bundle)?;
-            serde_json::to_writer(&mut f, &r[key])?;
+            ctx_history_asr_core::numbers::write(&mut f, &r[key])?;
             let blob = s.blob(f)?;
             r.as_object_mut().map(|o| o.remove(key));
             if key == "content" && r["type"] == "message" {
@@ -265,10 +257,13 @@ fn numbers(s: &Spool, p: Provider, r: &mut Value) -> Result<()> {
             if let Some(v) = meta.remove(&key) {
                 if large_binary(&v) {
                     let mut file = tempfile::NamedTempFile::new_in(&s.bundle)?;
-                    serde_json::to_writer(&mut file, &v)?;
+                    ctx_history_asr_core::numbers::write(&mut file, &v)?;
                     meta.insert(format!("{key}JsonBlob"), s.blob(file)?);
                 } else {
-                    meta.insert(format!("{key}JsonText"), json!(v.to_string()));
+                    meta.insert(
+                        format!("{key}JsonText"),
+                        json!(ctx_history_asr_core::numbers::text(&v)),
+                    );
                 }
             }
         }
@@ -285,7 +280,12 @@ fn numbers(s: &Spool, p: Provider, r: &mut Value) -> Result<()> {
             .collect();
         for key in keys {
             if let Some(v) = r.as_object_mut().and_then(|o| o.remove(&key)) {
-                retain(r, p, &format!("{key}JsonText"), &json!(v.to_string()));
+                retain(
+                    r,
+                    p,
+                    &format!("{key}JsonText"),
+                    &json!(ctx_history_asr_core::numbers::text(&v)),
+                );
             }
         }
     }
@@ -301,7 +301,7 @@ pub(crate) fn lane_fact(
 ) -> Result<()> {
     let mut value = json!({"conversationKey":lane,"source":{"table":table,"key":key}});
     if unsafe_number(row) {
-        value["jsonText"] = json!(row.to_string());
+        value["jsonText"] = json!(ctx_history_asr_core::numbers::text(row));
     } else {
         value["record"] = row.clone();
     }
@@ -315,7 +315,11 @@ pub(crate) fn lane_fact(
     )?;
     Ok(())
 }
-pub(crate) fn manifest_facts(db: &Connection, out: &mut impl Write) -> Result<()> {
+pub(crate) fn manifest_facts(
+    db: &Connection,
+    out: &mut impl Write,
+    comma: &mut bool,
+) -> Result<()> {
     let mut stmt = db.prepare("SELECT provider,value FROM lane_facts ORDER BY provider,key")?;
     let mut rows = stmt.query([])?;
     let mut provider = String::new();
@@ -324,7 +328,10 @@ pub(crate) fn manifest_facts(db: &Connection, out: &mut impl Write) -> Result<()
         let p: String = row.get(0)?;
         if p != provider {
             if !any {
-                out.write_all(b",\"_meta\":{")?;
+                if *comma {
+                    out.write_all(b",")?;
+                }
+                *comma = true;
             } else {
                 out.write_all(b"],")?;
             }
@@ -338,7 +345,7 @@ pub(crate) fn manifest_facts(db: &Connection, out: &mut impl Write) -> Result<()
         out.write_all(row.get::<_, String>(1)?.as_bytes())?;
     }
     if any {
-        out.write_all(b"]}")?;
+        out.write_all(b"]")?;
     }
     Ok(())
 }

@@ -10,11 +10,12 @@ pub(super) fn make(provider: Provider, id: &str, n: &Value) -> Value {
     ) {
         return crate::jsonl::header(provider, id, n, super::REVISION);
     }
-    if matches!(provider,
+    if matches!(
+        provider,
         Provider::Gemini | Provider::Antigravity | Provider::QwenCode
     ) {
         return crate::conversation_source::header(provider, id, n, super::REVISION);
-        }
+    }
     if provider.cli_journal() {
         return crate::cli_journals::header(provider, id, n);
     }
@@ -42,7 +43,13 @@ pub(super) fn make(provider: Provider, id: &str, n: &Value) -> Value {
     if provider.captures() {
         return crate::capture::header(provider, id, n);
     }
-    let mut h = json!({"type":"session","formatVersion":"0.1","agent":{"name":provider.agent()},"sessionId":id,"producer":{"name":"ctx","version":env!("CARGO_PKG_VERSION"),"method":"converter","instance":super::REVISION,"source":{"format":provider.format()},"lossy":["native","display_content","message.author","cost","exec.exit_code","provider.identity","revision_history","_rs.ctx/native_line_limit","_rs.ctx/nontranscript_state","_rs.ctx/vendor_only"]},"profiles":["core","coding","lineage","usage"],"contentLevel":"full","workspace":{"roots":[{"id":"unknown","path":null}]}});
+    let mut h = json!({"type":"session","formatVersion":"0.1","agent":{"name":provider.agent()},"sessionId":id,"producer":{"name":"ctx","version":env!("CARGO_PKG_VERSION"),"method":"converter","instance":super::REVISION,"source":{"format":provider.format()},"lossy":["native","display_content","message.author","cost","exec.exit_code", "order","provider.identity","revision_history","_rs.ctx/native_line_limit","_rs.ctx/nontranscript_state","_rs.ctx/vendor_only"]},"profiles":["core","coding","lineage","usage"],"contentLevel":"full","workspace":{"roots":[{"id":"unknown","path":null}]}});
+    if provider == Provider::Codex {
+        h["producer"]["lossy"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("_com.openai.codex/compaction_structure"));
+    }
     let version = if provider == Provider::Claude {
         "version"
     } else {

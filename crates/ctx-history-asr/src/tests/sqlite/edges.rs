@@ -52,7 +52,7 @@ fn native_json_duplicates_and_unrepresentable_numbers_stay_exact() {
     for (id, raw) in [("large", huge), ("duplicate", duplicate)] {
         db.execute("INSERT INTO messages(message_id,session_id,role,content_json,created_timestamp) VALUES(?1,'20260101_1','assistant',?2,1)",params![id,raw]).unwrap();
     }
-    assert_eq!(export(&o).unwrap().gaps, 2);
+    assert_eq!(export(&o).unwrap().gaps, 1);
     let rows = records(&o);
     let native: Vec<Value> = rows
         .iter()
@@ -61,8 +61,10 @@ fn native_json_duplicates_and_unrepresentable_numbers_stay_exact() {
             serde_json::from_str(v["_meta"]["xyz.block.goose/rowJson"].as_str().unwrap()).unwrap()
         })
         .collect();
-    assert_eq!(native[0]["content_json"], huge);
-    assert_eq!(native[1]["content_json"], duplicate);
+    assert_eq!(native[0]["content_json"], duplicate);
+    let call = rows.iter().find(|r| r["type"] == "tool_call").unwrap();
+    assert_eq!(call["inputText"], r#"{"n":18446744073709551617}"#);
+    assert!(call.get("input").is_none());
 }
 #[test]
 fn goose_message_usage_is_attributed_only_when_ledger_is_absent() {

@@ -183,7 +183,13 @@ fn journals_repeat_append_rewrite_relocate_and_torn_tail() {
         assert_eq!(records(&o), after);
         std::fs::write(&o.inputs[0].path, &native).unwrap();
         assert_eq!(export(&o).unwrap().snapshots, 1);
-        assert_eq!(records(&o), before);
+        let mut replaced = records(&o);
+        assert!(replaced[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("observedAt")
+            .is_some());
+        assert_eq!(replaced, before);
         if p != Provider::Kimi {
             let moved = dir.path().join("moved.jsonl");
             std::fs::rename(&o.inputs[0].path, &moved).unwrap();
@@ -194,7 +200,13 @@ fn journals_repeat_append_rewrite_relocate_and_torn_tail() {
             o.inputs[0].path = moved.join("work/kimi-test/agents/main/wire.jsonl");
         }
         export(&o).unwrap();
-        assert_eq!(records(&o), before);
+        let mut replaced = records(&o);
+        assert!(replaced[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("observedAt")
+            .is_some());
+        assert_eq!(replaced, before);
     }
 }
 #[test]

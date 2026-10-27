@@ -93,9 +93,9 @@ pub(super) fn convert(s: &mut Spool, w: &mut Writer, v: &Value) -> Result<()> {
                 r["displayContent"] = json!(parts(body, w.provider));
             }
             if let Some(message) = output["message"].as_str() {
-                r["displayContent"]
-                    .as_array_mut()
-                    .map(|a| a.push(json!({"type":"text","text":message})));
+                if let Some(a) = r["displayContent"].as_array_mut() {
+                    a.push(json!({"type":"text","text":message}));
+                }
             }
             if output["truncated"] == true {
                 r["capture"]["displayContent"] =

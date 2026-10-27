@@ -3,7 +3,7 @@ pub(crate) mod coding;
 mod context;
 mod request;
 mod response;
-use crate::tree as structure;
+mod structure;
 mod usage;
 use crate::{
     content,
@@ -229,6 +229,8 @@ fn user(
         let ambiguous = spool.ambiguous_call(id)?;
         if ambiguous {
             r["linkage"] = json!("ambiguous");
+            r.as_object_mut().unwrap().remove("callId");
+            meta(&mut r, Provider::Claude, "unpairedCallId", &json!(id));
         }
         if spool.entity(&format!("secret:{id}"))?.is_some() {
             r["capture"] = json!({"content":{"state":"redacted","reason":"policy"},"raw":{"state":"redacted","reason":"policy"}});
@@ -257,7 +259,9 @@ fn user(
         structure::emit(spool, writer, r, v, response.as_deref(), first)?;
         first = false;
         tools::result_audit(writer, spool, v, id, raw, status, cwd)?;
-        coding::audit(writer, v, id, raw, cwd)?;
+        if !ambiguous {
+            coding::audit(writer, v, id, raw, cwd)?;
+        }
     }
     if let Some(mode) = v.get("permissionMode") {
         changed(

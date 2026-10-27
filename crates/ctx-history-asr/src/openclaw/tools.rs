@@ -176,11 +176,10 @@ pub(super) fn result(s: &Spool, h: &Value, m: &Value, nested: bool) -> Result<Ve
             && d["approvalId"].is_null()
             && s.entity(&format!("approval-call:{}", id.unwrap_or("")))?
                 .is_none()
+            && (d["approvalReviewOutcome"] == "approved"
+                || d["failureKind"] == "auto-review-denied")
         {
-            if d["approvalReviewOutcome"] == "approved" || d["failureKind"] == "auto-review-denied"
-            {
-                r["permission"] = json!({"decision":if d["approvalReviewOutcome"]=="approved"{"allow_once"}else{"reject_once"},"decidedBy":"classifier"});
-            }
+            r["permission"] = json!({"decision":if d["approvalReviewOutcome"]=="approved"{"allow_once"}else{"reject_once"},"decidedBy":"classifier"});
         }
     }
     let mut out = vec![r];

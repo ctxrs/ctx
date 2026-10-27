@@ -1,0 +1,24 @@
+[package]
+name = "ctx-history-asr-database"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Native database projections for ASR export"
+
+[dependencies]
+ctx-history-source-io = { path = "../ctx-history-source-io" }
+ctx-history-asr-core = { path = "../ctx-history-asr-core" }
+ctx-history-source-sqlite = { path = "../ctx-history-source-sqlite" }
+ctx-history-providers-sqlite-selected = { path = "../ctx-history-providers-sqlite-selected" }
+chrono.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+base64.workspace = true
+rmpv.workspace = true
+zstd.workspace = true

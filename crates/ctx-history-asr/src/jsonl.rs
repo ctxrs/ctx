@@ -36,29 +36,7 @@ pub(crate) fn event_id(v: &Value) -> Option<&str> {
         .or_else(|| v.pointer("/_meta/eventId"))
         .and_then(Value::as_str)
 }
-pub(crate) fn millis(v: &Value) -> Option<String> {
-    chrono::DateTime::from_timestamp_millis(v.as_i64()?)
-        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-}
-pub(crate) fn clock(provider: Provider, v: &Value) -> Value {
-    let mut source = json!({});
-    let ts = match provider {
-        Provider::DeepSeekHarness => millis(&v["time"]),
-        Provider::GrokBuild => v
-            .pointer("/params/_meta/agentTimestampMs")
-            .or_else(|| v.pointer("/_meta/agentTimestampMs"))
-            .and_then(millis)
-            .or_else(|| {
-                chrono::DateTime::from_timestamp(v["timestamp"].as_i64()?, 0)
-                    .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-            }),
-        _ => v["timestamp"].as_str().and_then(timestamp),
-    };
-    if let Some(ts) = ts {
-        source["timestamp"] = json!(ts);
-    }
-    source
-}
+pub(crate) use crate::records::{clock, millis};
 pub(crate) fn local(provider: Provider, v: &Value, physical: u64) -> String {
     let id = match provider {
         Provider::Pi => v["id"].as_str().map(|s| format!("id:{s}")),

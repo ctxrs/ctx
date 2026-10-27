@@ -53,6 +53,8 @@ pub(super) fn audit(
             } else if let Some(count) = diff["moreFiles"].as_u64() {
                 r["moreFiles"] = json!(count > 0);
                 meta(&mut r, Provider::Claude, "moreFilesCount", &json!(count));
+            } else if let Some(native) = diff.get("moreFiles") {
+                meta(&mut r, Provider::Claude, "moreFilesCount", native);
             }
             if let Some(patch) = hunks(&file["hunks"]) {
                 r["precision"] = json!("hunks");

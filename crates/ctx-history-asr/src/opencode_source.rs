@@ -185,7 +185,7 @@ impl Stage {
         }
         let bytes = serde_json::to_vec(&v)?;
         self.hash.update(&bytes);
-        self.hash.update([b'\n']);
+        self.hash.update(b"\n");
         self.file.write_all(&bytes)?;
         self.file.write_all(b"\n")?;
         Ok(())
@@ -210,9 +210,9 @@ pub(crate) fn header(provider: Provider, id: &str, n: &Value, revision: &str) ->
     let mut h = json!({"type":"session","formatVersion":"0.1","agent":{"name":provider.agent()},"sessionId":id,"producer":{"name":"ctx","version":env!("CARGO_PKG_VERSION"),"method":"converter","instance":revision,"source":{"format":provider.format()},"lossy":["native","revision_history","display_content","message.author","provider.identity","copies","branches","file_change","_rs.ctx/sqlite_row_limit","_rs.ctx/nontranscript_state","_rs.ctx/vendor_only"]},"profiles":["core","coding","lineage","usage"],"contentLevel":"full","workspace":{"roots":[{"id":"unknown","path":null}]},"extensions":[{"id":format!("{}/sqlite",provider.domain()),"version":"1","required":false}]});
     copy(&mut h["agent"], "version", n, "version");
     if let Some(cwd) = n["cwd"].as_str().filter(|p| p.starts_with('/')) {
-        h["workspace"]["roots"]
-            .as_array_mut()
-            .map(|a| a.push(json!({"id":"workspace","path":cwd})));
+        if let Some(a) = h["workspace"]["roots"].as_array_mut() {
+            a.push(json!({"id":"workspace","path":cwd}));
+        }
     }
     if let Some(t) = millis(&n["time_created"]) {
         h["startedAt"] = json!(t);
@@ -227,7 +227,7 @@ pub(crate) fn header(provider: Provider, id: &str, n: &Value, revision: &str) ->
     }
     meta(&mut h, provider, "session", n);
     if provider == Provider::Kiro {
-        h["producer"]["lossy"].as_array_mut().map(|a| {
+        if let Some(a) = h["producer"]["lossy"].as_array_mut() {
             a.extend([
                 json!("usage"),
                 json!("cost"),
@@ -235,8 +235,8 @@ pub(crate) fn header(provider: Provider, id: &str, n: &Value, revision: &str) ->
                 json!("inference"),
                 json!("_dev.kiro.cli/compaction_boundary"),
                 json!("_dev.kiro.cli/context_and_images_in_metadata"),
-            ])
-        });
+            ]);
+        }
     }
     h
 }

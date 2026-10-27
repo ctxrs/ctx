@@ -38,6 +38,9 @@ pub(super) fn convert(
             let mut display = p["content"].clone();
             if let Some(parts) = display.as_array_mut() {
                 for p in parts {
+                    if p["type"] == "image" && p["image_url"].is_string() {
+                        *p = json!({"type":"resource_link","uri":p["image_url"],"name":p.get("name").unwrap_or(&p["image_url"])});
+                    }
                     if p["type"] == "Text" {
                         p["type"] = json!("text");
                     }
@@ -151,7 +154,7 @@ fn execution(
             .or_else(|| p.get("cellId"))
             .and_then(Value::as_str)
         {
-            r["parentCallId"] = json!(cell);
+            meta(&mut r, Provider::Codex, "cellId", &json!(cell));
         }
         let mut connector = json!({});
         for k in [
@@ -191,7 +194,11 @@ fn execution(
             copy(&mut exec, dest, p, key);
         }
         if let Some(directory) = p["cwd"].as_str() {
-            exec["cwd"] = path(directory, cwd);
+            if let Some(path) = super::paths::reference(directory, cwd) {
+                exec["cwd"] = path;
+            } else {
+                meta(&mut r, Provider::Codex, "cwdUri", &json!(directory));
+            }
         }
         r["exec"] = exec;
         let mut command = json!({});
@@ -213,6 +220,11 @@ fn execution(
     } else if kind == "McpToolCall" {
         copy(&mut r, "raw", p, "result");
         copy(&mut r, "error", p, "error");
+    } else if kind == "DynamicToolCall" {
+        copy(&mut r, "raw", p, "content_items");
+        if let Some(error) = p["error"].as_str() {
+            r["error"] = json!({"message":error});
+        }
     } else if kind == "FileChange" {
         if let Some(value) = p.get("auto_approved") {
             meta(&mut r, Provider::Codex, "autoApproved", value);

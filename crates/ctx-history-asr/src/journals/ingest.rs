@@ -58,9 +58,9 @@ pub(crate) fn ingest(
                     if folded.get("_asr_folded").is_none() {
                         folded["_asr_folded"] = json!([]);
                     }
-                    folded["_asr_folded"]
-                        .as_array_mut()
-                        .map(|a| a.push(json!(format!("line:{pos}"))));
+                    if let Some(a) = folded["_asr_folded"].as_array_mut() {
+                        a.push(json!(format!("line:{pos}")));
+                    }
                     if let Some(ts) = v.get("timestampMs") {
                         folded["timestampMs"] = ts.clone();
                     }

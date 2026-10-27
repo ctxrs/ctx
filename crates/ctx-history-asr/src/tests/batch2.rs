@@ -455,11 +455,7 @@ fn gemini_metadata_patches_retain_prior_title_and_project() {
     );
     export(&o).unwrap();
     let r = records(&o);
-    let info = r
-        .iter()
-        .filter(|r| r["type"] == "session_info")
-        .last()
-        .unwrap();
+    let info = r.iter().rfind(|r| r["type"] == "session_info").unwrap();
     assert_eq!(info["title"], "title");
     assert_eq!(info["project"]["id"], "project");
 }

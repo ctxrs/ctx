@@ -78,7 +78,7 @@ impl Cursor {
             return Ok(None);
         }
         let text = std::str::from_utf8(&bytes).ok();
-        text.and_then(ctx_history_capture_model::exact_json_value)
+        text.and_then(ctx_history_asr_core::numbers::decode)
             .map(Some)
             .ok_or_else(|| Error::Invalid("invalid Gemini JSON value".into()))
     }

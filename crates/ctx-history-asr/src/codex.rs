@@ -1,4 +1,5 @@
 mod items;
+mod paths;
 mod structure;
 mod usage;
 use crate::{
@@ -8,7 +9,7 @@ use crate::{
     tools, Provider, Result,
 };
 use serde_json::{json, Value};
-pub(crate) use structure::segment;
+pub(crate) use structure::{segment, track};
 
 pub(crate) fn convert(
     spool: &mut Spool,
@@ -198,9 +199,7 @@ fn response(
                 .or_else(|| p.get("action"))
                 .cloned()
                 .unwrap_or(Value::Null);
-            let parsed = raw
-                .as_str()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok());
+            let parsed = raw.as_str().and_then(ctx_history_asr_core::numbers::parse);
             let text = raw.is_string() && parsed.is_none();
             let input = parsed.unwrap_or(raw);
             let mut r = tools::call(
@@ -234,9 +233,6 @@ fn response(
             let rid = writer.emit(r, v)?;
             if let Some(native) = p["id"].as_str() {
                 spool.set_output(native, &rid)?;
-            }
-            if name.is_some_and(|n| n == "new_context" || n.ends_with(".new_context")) {
-                spool.save("model-compaction", &json!(true))?;
             }
             tools::call_audit(writer, spool, v, &id, name.unwrap_or(""), &input, cwd)?;
             Ok(())
@@ -359,13 +355,18 @@ fn event(
                 r["stopReason"] = json!(if kind == "turn_aborted" {
                     match p["reason"].as_str() {
                         None | Some("interrupted") => "cancelled".to_owned(),
-                        Some(reason) => format!("_com.openai.codex/{reason}"),
+                        Some(_) => "cancelled".to_owned(),
                     }
                 } else if p.get("error").is_some_and(|v| !v.is_null()) {
                     "error".to_owned()
                 } else {
                     "end_turn".to_owned()
                 });
+            }
+            if kind == "turn_aborted" {
+                if let Some(reason) = p.get("reason") {
+                    meta(&mut r, Provider::Codex, "abortReason", reason);
+                }
             }
             if let Some(error) = p.get("error").filter(|v| !v.is_null()) {
                 r["error"] = json!({});
@@ -483,12 +484,6 @@ fn compaction(spool: &Spool, writer: &mut Writer, p: &Value, v: &Value) -> Resul
     if p.get("window_id").is_none() {
         r["idSource"] = json!("derived");
     }
-    if spool.entity("model-compaction")?.is_some() {
-        r["trigger"] = json!("model");
-        spool
-            .db
-            .execute("DELETE FROM entities WHERE key='model-compaction'", [])?;
-    }
     if let Some(summary) = p.get("message") {
         r["summary"] = json!(content::parts(summary, Provider::Codex));
     }
@@ -506,7 +501,7 @@ fn compaction(spool: &Spool, writer: &mut Writer, p: &Value, v: &Value) -> Resul
         });
         if let Some(retained) = retained {
             if let Some(native) = retained.pointer("/id/message_id").and_then(Value::as_str) {
-                if let Some(rid) = spool.output(native)? {
+                if let Some(rid) = structure::retained(spool, native)? {
                     let mut entry = json!({"ref":rid});
                     if retained["complete"] == false {
                         entry["capture"] = json!("truncated");
@@ -541,7 +536,9 @@ fn compaction(spool: &Spool, writer: &mut Writer, p: &Value, v: &Value) -> Resul
     }
     let mut details = json!({});
     for (key, value) in p.as_object().into_iter().flatten() {
-        if key == "retained_context"
+        if key == "replacement_history"
+            || key == "replacement_history_metadata"
+            || key == "retained_context"
             || key == "compaction_model_hash"
             || key.starts_with("guardian_")
         {

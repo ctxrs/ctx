@@ -77,7 +77,9 @@ pub(super) fn convert(
                         } else {
                             json!({"type":"data","data":b})
                         };
-                        r["content"].as_array_mut().map(|a| a.push(p));
+                        if let Some(a) = r["content"].as_array_mut() {
+                            a.push(p);
+                        }
                     } else {
                         r["capture"]["content"] =
                             json!({"state":"truncated","reason":"source_omitted"});

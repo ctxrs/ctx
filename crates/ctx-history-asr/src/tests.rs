@@ -1,6 +1,7 @@
 //! Authored semantic fixtures; these are not native harness captures.
 use super::*;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 fn fixture(provider: Provider, rows: &[Value]) -> (tempfile::TempDir, Options) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("source.jsonl");
@@ -94,12 +95,16 @@ mod batch1;
 mod batch2;
 mod cli_journals;
 
-mod journal_edges;
-mod journals;
-mod opencode_source;
-mod sqlite;
-mod warp;
-mod mixed;
 mod batch10;
 mod fx;
+mod journal_edges;
+mod journals;
+mod mixed;
+mod opencode_source;
+mod sqlite;
 mod task;
+mod warp;
+
+mod relational;
+
+mod v31;

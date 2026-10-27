@@ -16,9 +16,9 @@ pub(super) fn convert(spool: &mut Spool, w: &mut Writer, v: &Value) -> Result<()
     let mut m = message(w, v, v["id"].as_str(), role, &v["content"]);
     for thought in v["thoughts"].as_array().into_iter().flatten() {
         if let Some(text) = thought["description"].as_str() {
-            m["content"]
-                .as_array_mut()
-                .map(|a| a.push(json!({"type":"reasoning","text":text,"visibility":"full"})));
+            if let Some(a) = m["content"].as_array_mut() {
+                a.push(json!({"type":"reasoning","text":text,"visibility":"full"}));
+            }
         }
     }
     if m["content"].as_array().is_some_and(|a| !a.is_empty()) {

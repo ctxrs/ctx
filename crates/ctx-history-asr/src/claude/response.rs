@@ -37,18 +37,20 @@ pub(super) fn convert(spool: &mut Spool, writer: &mut Writer, pos: u64, v: &Valu
         {
             cursor = next.0;
             let row = spool.get(next.0)?;
-            if let Some(uuid) = row["uuid"].as_str() {
-                ids_size += uuid.len();
-                if ids_size <= spool.limit / 8 {
-                    ids.push(uuid.to_owned());
-                }
+            let id = row["uuid"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("line:{}", next.1));
+            ids_size += id.len();
+            if ids_size <= spool.limit / 8 {
+                ids.push(id);
             }
             for block in row["message"]["content"].as_array().into_iter().flatten() {
                 if comma {
                     native.write_all(b",")?;
                 }
                 comma = true;
-                serde_json::to_writer(native.as_file_mut(), block)?;
+                ctx_history_asr_core::numbers::write(native.as_file_mut(), block)?;
             }
             let normalized = content::parts(&row["message"]["content"], Provider::Claude);
             size += serde_json::to_vec(&normalized)?.len();
@@ -65,7 +67,7 @@ pub(super) fn convert(spool: &mut Spool, writer: &mut Writer, pos: u64, v: &Valu
         native.write_all(b"]")?;
         let mut m = json!({"type":"message","messageId":response,"inferenceId":response,"role":"assistant","author":"model","content":parts,"assembly":{"mode":"folded"}});
         if ids_size <= spool.limit / 8 {
-            m["assembly"]["sourceIds"] = json!(ids);
+            m["assembly"]["sourceIds"] = json!(&ids);
         }
         if size > spool.limit {
             m["capture"] = json!({"content":{"state":"external","reason":"size_limit","blob":spool.blob(native)?}});
@@ -97,6 +99,7 @@ pub(super) fn convert(spool: &mut Spool, writer: &mut Writer, pos: u64, v: &Valu
                 "thinkingDurationMs",
             ],
         );
+        spool.save(&format!("assembly:{response}"), &m["assembly"])?;
         // Slot 0 always belongs to the folded response; growth cannot renumber its usage or tools.
         super::structure::emit(spool, writer, m, v, Some(response), true)?;
         spool.save(&format!("response:{response}"), &json!(writer.tip))?;

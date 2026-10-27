@@ -1,6 +1,5 @@
 //! Native journal mappings. Similar-looking JSON from different providers is
 //! intentionally dispatched to distinct semantic adapters.
-pub(crate) mod blobs;
 mod common;
 mod cursor;
 pub(crate) mod ingest;
@@ -28,12 +27,12 @@ pub(crate) fn header(provider: Provider, id: &str, n: &Value) -> Value {
         h["startedAt"] = json!(start);
     }
     if provider == Provider::Tabnine {
-        h["producer"]["lossy"]
-            .as_array_mut()
-            .map(|a| a.push(json!("_com.tabnine.cli/checkpoints")));
+        if let Some(a) = h["producer"]["lossy"].as_array_mut() {
+            a.push(json!("_com.tabnine.cli/checkpoints"));
+        }
     }
     if provider == Provider::Cursor {
-        h["producer"]["lossy"].as_array_mut().map(|a| {
+        if let Some(a) = h["producer"]["lossy"].as_array_mut() {
             a.extend([
                 json!("usage"),
                 json!("timestamps"),
@@ -41,8 +40,8 @@ pub(crate) fn header(provider: Provider, id: &str, n: &Value) -> Value {
                 json!("reasoning"),
                 json!("_com.cursor.agent/ide_and_blob_stores"),
                 json!("_com.cursor.agent/external_tool_files"),
-            ])
-        });
+            ]);
+        }
     }
     if provider == Provider::MistralVibe {
         if let Some(parent) = m["parent_session_id"]

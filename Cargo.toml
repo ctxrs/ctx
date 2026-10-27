@@ -52,6 +52,8 @@ members = [
     "crates/ctx-history-core",
     "crates/ctx-history-archive",
     "crates/ctx-history-asr",
+    "crates/ctx-history-asr-core",
+    "crates/ctx-history-asr-database",
     "crates/ctx-history-server",
     "crates/ctx-history-sharing",
     "crates/ctx-history-platform",

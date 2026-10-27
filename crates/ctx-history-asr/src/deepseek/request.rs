@@ -128,7 +128,7 @@ pub(super) fn call(
         return Ok(None);
     };
     let args = block["arguments"].as_str().unwrap_or("");
-    let argument = ctx_history_capture_model::exact_json_value(args)
+    let argument = ctx_history_asr_core::numbers::decode(args)
         .map(tools::Arguments::Json)
         .unwrap_or_else(|| tools::Arguments::Text(args.into()));
     let mut r = tools::call(w, spool, v, id, block["name"].as_str(), argument, "model")?;

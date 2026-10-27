@@ -12,6 +12,9 @@ pub(super) fn inference(
 ) -> Result<()> {
     let message = &v["message"];
     let mut r = json!({"type":"inference","inferenceId":id});
+    if let Some(assembly) = spool.entity(&format!("assembly:{id}"))? {
+        r["assembly"] = assembly;
+    }
     if let Some(model) = message["model"].as_str() {
         r["model"] = json!({"id":model});
     }

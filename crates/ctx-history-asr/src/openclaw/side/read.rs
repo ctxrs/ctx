@@ -14,11 +14,11 @@ pub(crate) fn ingest(
     db: &Connection,
     path: &Path,
     id: &str,
-    lane: &str,
-    agent: &str,
+    scope: (&str, &str),
     h: &mut Value,
     bundle: &Connection,
 ) -> Result<()> {
+    let (lane, agent) = scope;
     let shared = path
         .ancestors()
         .find(|p| p.file_name().is_some_and(|s| s == "agents"))

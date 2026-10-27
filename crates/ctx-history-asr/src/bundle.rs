@@ -1,3 +1,4 @@
+mod growth;
 mod header;
 use crate::{
     claude, codex,
@@ -12,20 +13,14 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
-    io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
 pub(crate) const REVISION: &str = "ctx-asr-integration-1";
 
 pub fn export(options: &Options) -> Result<Summary> {
-    if options.namespace.as_ref().is_some_and(|n| n.is_empty())
-        || (options.namespace.is_some()
-            && options.inputs.iter().any(|i| i.provider != Provider::Kiro))
-    {
-        return Err(Error::Invalid(
-            "--namespace requires a nonempty Kiro installation identity and only Kiro inputs"
-                .into(),
-        ));
+    if options.namespace.as_deref().is_some_and(str::is_empty) {
+        return Err(Error::Invalid("ASR namespace must be nonempty".into()));
     }
     if options.max_record_bytes < 1024 {
         return Err(Error::Invalid(
@@ -60,6 +55,7 @@ pub fn export(options: &Options) -> Result<Summary> {
         CREATE TABLE IF NOT EXISTS positions(agent TEXT,session TEXT,segment TEXT,local TEXT,pos INTEGER,PRIMARY KEY(agent,session,segment,local));
         CREATE INDEX IF NOT EXISTS observation_order ON positions(agent,session,pos);
         CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,session,path));
+        CREATE TEMP TABLE native_databases(agent TEXT,path TEXT,PRIMARY KEY(agent,path));
         CREATE TEMP TABLE lane_facts(provider TEXT,key TEXT,value TEXT,PRIMARY KEY(provider,key));
         CREATE INDEX source_sessions ON sources(agent,session,path);")?;
     crate::sqlite::namespace(&db, options.namespace.as_deref())?;
@@ -74,64 +70,84 @@ pub fn export(options: &Options) -> Result<Summary> {
         if !seen_inputs.insert((normalized.provider.agent(), normalized.path.clone())) {
             continue;
         }
-        source::visit(
-            &normalized,
-            options.max_record_bytes,
-            staging.path(),
-            options.namespace.as_deref(),
-            &mut |mut s| {
-                if options.session.as_deref().is_none_or(|id| {
-                    id == s.session
-                        || (matches!(s.provider, Provider::Kimi | Provider::Copilot)
-                            && (s.header["_nativeSession"] == id || s.header["_agent"] == id))
-                }) {
-                    if s.provider.is_sqlite() {
-                        let existing: Option<String> = db
-                            .query_row(
-                                "SELECT stamp FROM sources WHERE agent=?1 AND session=?2",
-                                params![s.provider.agent(), s.session],
-                                |r| r.get(0),
-                            )
-                            .optional()?;
-                        if let Some(existing) = existing {
-                            if existing == s.stamp {
-                                return Ok(());
-                            }
-                            return Err(Error::Invalid("conflicting SQLite snapshots of one native session; select one source database".into()));
+        let mut visitor = |mut s: source::Source| {
+            if s.provider.needs_namespace() && options.namespace.is_none() {
+                return Err(Error::Invalid(
+                    "Cline/Roo task IDs require a stable installation --namespace".into(),
+                ));
+            }
+            if options.session.as_deref().is_none_or(|id| {
+                id == s.session
+                    || (matches!(s.provider, Provider::Kimi | Provider::Copilot)
+                        && (s.header["_nativeSession"] == id || s.header["_agent"] == id))
+            }) {
+                if s.provider.is_sqlite() {
+                    let existing: Option<String> = db
+                        .query_row(
+                            "SELECT stamp FROM sources WHERE agent=?1 AND session=?2",
+                            params![s.provider.agent(), s.session],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(existing) = existing {
+                        if existing == s.stamp {
+                            return Ok(());
                         }
+                        return Err(Error::Invalid("conflicting SQLite snapshots of one native session; select one source database".into()));
                     }
-                    if s.provider.sqlite() {
-                        crate::sqlite::check_source(&db, &s, options.namespace.as_deref())?;
-                    }
-                    if s.provider.is_relational() {
-                        if let Some(namespace) = options.namespace.as_deref() {
-                            if namespace.is_empty() {
-                                return Err(Error::Invalid(
-                                    "ASR namespace must be nonempty".into(),
-                                ));
-                            }
-                            s.header["_namespace"] = json!(namespace);
-                        }
-                        if s.provider == Provider::Hermes && !s.header["_namespace"].is_string() {
-                            return Err(Error::Invalid("Hermes store lacks state_meta.store_instance_id; supply a stable installation --namespace and reuse it after relocation".into()));
-                        }
-                    }
-                    db.execute(
-                        "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
-                        params![
-                            s.provider.agent(),
-                            crate::relational::storage_key(&s),
-                            s.path.to_string_lossy(),
-                            s.stamp,
-                            serde_json::to_string(&s.header)?,
-                            s.segment
-                        ],
-                    )?;
                 }
-                Ok(())
-            },
-            &mut summary.unidentified_sources,
-        )?;
+                if s.provider.sqlite() {
+                    crate::sqlite::check_source(&db, &s, options.namespace.as_deref())?;
+                }
+                if s.provider.is_relational() {
+                    if let Some(namespace) = options.namespace.as_deref() {
+                        if namespace.is_empty() {
+                            return Err(Error::Invalid("ASR namespace must be nonempty".into()));
+                        }
+                        s.header["_namespace"] = json!(namespace);
+                    }
+                    if s.provider == Provider::Hermes && !s.header["_namespace"].is_string() {
+                        return Err(Error::Invalid("Hermes store lacks state_meta.store_instance_id; supply a stable installation --namespace and reuse it after relocation".into()));
+                    }
+                }
+                db.execute(
+                    "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
+                    params![
+                        s.provider.agent(),
+                        crate::relational::storage_key(&s),
+                        s.path.to_string_lossy(),
+                        s.stamp,
+                        serde_json::to_string(&s.header)?,
+                        s.segment
+                    ],
+                )?;
+            }
+            Ok(())
+        };
+        if input.provider.is_batch8() {
+            crate::batch8::visit(
+                &normalized,
+                options.max_record_bytes,
+                &mut visitor,
+                &mut summary.unidentified_sources,
+                &mut |provider, path| {
+                    db.execute(
+                        "INSERT OR IGNORE INTO native_databases VALUES(?1,?2)",
+                        params![provider.agent(), path.to_string_lossy()],
+                    )?;
+                    Ok(())
+                },
+            )?;
+        } else {
+            source::visit(
+                &normalized,
+                options.max_record_bytes,
+                staging.path(),
+                options.namespace.as_deref(),
+                &mut visitor,
+                &mut summary.unidentified_sources,
+            )?;
+        }
     }
     let mut manifest = tempfile::NamedTempFile::new_in(&options.out)?;
     let mut output = BufWriter::new(manifest.as_file_mut());
@@ -144,18 +160,16 @@ pub fn export(options: &Options) -> Result<Summary> {
             break;
         };
         previous = (agent.clone(), session.clone());
-        let provider = Provider::ALL
-            .into_iter()
-            .find(|p| p.agent() == agent)
+        let provider = Provider::from_agent(&agent)
             .ok_or_else(|| Error::Invalid("unknown ASR provider".into()))?;
-        if provider.batch10() {
+        if provider.batch10() || provider.is_relational() {
             let count: u64 = db.query_row(
                 "SELECT count(*) FROM sources WHERE agent=?1 AND session=?2",
                 params![agent, session],
                 |r| r.get(0),
             )?;
             if count > 1 {
-                return Err(Error::Invalid("multiple native sources share a session ID; export each source to a separate bundle".into()));
+                return Err(Error::Invalid(if provider.is_relational() { "multiple native databases share a session ID; export each source separately" } else { "multiple native sources share a session ID; export each source separately" }.into()));
             }
         }
         let mut hash = Sha256::new();
@@ -217,7 +231,7 @@ pub fn export(options: &Options) -> Result<Summary> {
         } else {
             let mut spool = Spool::new(&options.out, options.max_record_bytes)?;
             let mut stmt = db.prepare(
-                "SELECT path,header,segment FROM sources WHERE agent=?1 AND session=?2 ORDER BY json_extract(header,'$.timestamp'),path",
+                "SELECT path,header,segment FROM sources WHERE agent=?1 AND session=?2 ORDER BY json_extract(header,'$.timestamp'),segment,path",
             )?;
             let mut rows = stmt.query(params![agent, session])?;
             let mut source_header = None;
@@ -228,6 +242,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                 params![agent, session],
                 |r| r.get(0),
             )?;
+            if provider == Provider::Codex {
+                last_pos = 0;
+            }
             while let Some(row) = rows.next()? {
                 let path: String = row.get(0)?;
                 if source_header.is_none() {
@@ -247,6 +264,11 @@ pub fn export(options: &Options) -> Result<Summary> {
                         Provider::Fx => crate::fx::ingest(&mut spool, Path::new(&path))?,
                         _ => unreachable!(),
                     }
+                    continue;
+                }
+                if provider.is_batch8() {
+                    crate::batch8::ingest(&mut spool, Path::new(&path), provider, &header)?;
+                    source_header = spool.entity("batch8:header")?;
                     continue;
                 }
                 if provider.mixed() {
@@ -270,13 +292,28 @@ pub fn export(options: &Options) -> Result<Summary> {
                 if provider.is_relational() {
                     crate::relational::ingest(&mut spool, provider, Path::new(&path), &header)?;
                 } else {
-                    spool.ingest(Path::new(&path), provider, &segment, &mut |local| {
-                    let old: Option<u64> = db.query_row("SELECT pos FROM positions WHERE agent=?1 AND session=?2 AND segment=?3 AND local=?4",params![agent,session,segment,local],|r|r.get(0)).optional()?;
-                    if let Some(pos)=old { return Ok(pos); }
-                    last_pos+=1;
-                    db.execute("INSERT INTO positions VALUES(?1,?2,?3,?4,?5)",params![agent,session,segment,local,last_pos])?;
-                    Ok(last_pos)
-                })?;
+                    crate::ingest::ingest(
+                        &mut spool,
+                        Path::new(&path),
+                        provider,
+                        &segment,
+                        &mut |local| {
+                            if provider == Provider::Codex {
+                                last_pos += 1;
+                                return Ok(last_pos);
+                            }
+                            let old: Option<u64> = db.query_row("SELECT pos FROM positions WHERE agent=?1 AND session=?2 AND segment=?3 AND local=?4",params![agent,session,segment,local],|r|r.get(0)).optional()?;
+                            if let Some(pos) = old {
+                                return Ok(pos);
+                            }
+                            last_pos += 1;
+                            db.execute(
+                                "INSERT INTO positions VALUES(?1,?2,?3,?4,?5)",
+                                params![agent, session, segment, local, last_pos],
+                            )?;
+                            Ok(last_pos)
+                        },
+                    )?;
                 }
             }
             if provider == Provider::Copilot {
@@ -316,17 +353,28 @@ pub fn export(options: &Options) -> Result<Summary> {
                 .get("session_id")
                 .and_then(Value::as_str)
                 .unwrap_or(&session);
-            let mut writer =
-                Writer::new(temporary.reopen()?, provider, if provider.is_relational() { crate::relational::reference(provider, &source_header, source_header["_sessionId"].as_str().unwrap_or(root)) } else {session_ref(provider, root)});
+            let mut writer = Writer::new(
+                temporary.reopen()?,
+                provider,
+                if provider.is_relational() {
+                    crate::relational::reference(
+                        provider,
+                        &source_header,
+                        source_header["_sessionId"].as_str().unwrap_or(root),
+                    )
+                } else {
+                    session_ref(provider, root)
+                },
+            );
             // Every projection of a mutable transcript snapshot shares its
             // capture scope, including tools, usage, metadata and gaps.
             writer.snapshot = provider == Provider::Antigravity
                 || (provider == Provider::Gemini && source_header["_snapshot"] == true);
-            if provider.journal() {
-                writer.bundle = Some(options.out.clone());
-            }
+            writer.bundle = Some(options.out.clone());
             let mut stream_header = header::make(provider, &session, &source_header);
-            if provider.batch10() { crate::batch10::prepare(&mut spool)?; }
+            if provider.batch10() {
+                crate::batch10::prepare(&mut spool)?;
+            }
             if provider.sqlite() {
                 crate::sqlite::capture_header(
                     &mut stream_header,
@@ -355,6 +403,11 @@ pub fn export(options: &Options) -> Result<Summary> {
             let mut copied_last = None;
             let cwd = source_header["cwd"].as_str();
             let subagent = source_header["agentId"].as_str() == Some(session.as_str());
+            if provider == Provider::Codex {
+                spool.db.execute_batch(
+                    "CREATE TABLE codex_active(pos INTEGER PRIMARY KEY,record TEXT);",
+                )?;
+            }
             let mut pos = 0;
             let mut segment = String::new();
             while let Some(next) = spool.next(pos)? {
@@ -374,6 +427,21 @@ pub fn export(options: &Options) -> Result<Summary> {
                         [pos],
                         |r| r.get(0),
                     )?;
+                    if provider == Provider::Codex {
+                        let (line, ordinal): (u64, Option<String>) = spool.db.query_row(
+                            "SELECT line,ordinal FROM native_positions WHERE pos=?1",
+                            [pos],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )?;
+                        let mut provenance = json!({"segmentId":current});
+                        if let Some(ordinal) = ordinal {
+                            provenance["ordinal"] = serde_json::from_str(&ordinal)?;
+                        } else {
+                            provenance["line"] = json!(line);
+                        }
+                        writer.identity = Some(crate::records::stable_id(&provenance.to_string()));
+                        writer.provenance = Some(provenance);
+                    }
                     if current != segment {
                         if provider == Provider::Codex {
                             codex::segment(&spool, &mut writer, &current, &value)?;
@@ -400,29 +468,50 @@ pub fn export(options: &Options) -> Result<Summary> {
                         crate::antigravity::convert(&spool, &mut writer, &value)?
                     }
                     Provider::QwenCode => crate::qwen::convert(&spool, &mut writer, &value, cwd)?,
-                    Provider::Copilot | Provider::Droid | Provider::Kimi | Provider::Qoder => crate::cli_journals::convert(&mut spool, &mut writer, pos, &value, cwd)?,
-                    Provider::Junie | Provider::MistralVibe | Provider::Tabnine | Provider::Mux | Provider::Cursor => crate::journals::convert(&mut spool, &mut writer, &value)?,
+                    Provider::Copilot | Provider::Droid | Provider::Kimi | Provider::Qoder => {
+                        crate::cli_journals::convert(&mut spool, &mut writer, pos, &value, cwd)?
+                    }
+                    Provider::Junie
+                    | Provider::MistralVibe
+                    | Provider::Tabnine
+                    | Provider::Mux
+                    | Provider::Cursor => {
+                        crate::journals::convert(&mut spool, &mut writer, &value)?
+                    }
                     Provider::OpenCode | Provider::Kilo | Provider::MiMoCode => {
                         crate::opencode::convert(&mut spool, &mut writer, &value, cwd)?
                     }
                     Provider::Kiro => crate::kiro::convert(&mut spool, &mut writer, &value)?,
-                    Provider::Crush | Provider::Goose | Provider::Lingma | Provider::Warp => crate::sqlite::convert(&mut spool, &mut writer, pos, &value)?,
+                    Provider::Crush | Provider::Goose | Provider::Lingma | Provider::Warp => {
+                        crate::sqlite::convert(&mut spool, &mut writer, pos, &value)?
+                    }
                     Provider::Hermes | Provider::AstrBot | Provider::Shelley | Provider::Zed => {
                         crate::relational::convert(&mut spool, &mut writer, &source_header, &value)?
                     }
                     Provider::OpenClaw | Provider::NanoClaw => {
                         crate::native::convert(&mut spool, &mut writer, &mut stream_header, &value)?
                     }
-                    Provider::CodeBuddy | Provider::Continue | Provider::OpenHands | Provider::Auggie | Provider::RovoDev => crate::batch10::convert(&mut spool, &mut writer, &value)?,
+                    Provider::CodeBuddy
+                    | Provider::Continue
+                    | Provider::OpenHands
+                    | Provider::Auggie
+                    | Provider::RovoDev => {
+                        crate::batch10::convert(&mut spool, &mut writer, &value)?
+                    }
                     Provider::Cline | Provider::Roo => {
                         crate::task::convert(&mut spool, &mut writer, &value)?
                     }
+                    Provider::Firebender
+                    | Provider::ForgeCode
+                    | Provider::DeepAgents
+                    | Provider::Devin => crate::batch8::convert(&mut spool, &mut writer, &value)?,
                     Provider::Fx => crate::fx::convert(&mut spool, &mut writer, &value)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
                 }
                 if provider == Provider::Codex {
+                    codex::track(&spool, &writer)?;
                     spool.save(
                         &format!(
                             "tip:{segment}:{}",
@@ -439,9 +528,17 @@ pub fn export(options: &Options) -> Result<Summary> {
             if provider.journal() {
                 crate::journals::tail(&mut spool, &mut writer, &source_header)?;
             }
+            if provider.is_batch8() {
+                crate::batch8::finish(&mut spool, &mut writer, &source_header)?;
+            }
+            let pure_growth = if provider == Provider::Claude {
+                growth::observe(&db, &mut spool, &agent, &session)?
+            } else {
+                false
+            };
             spool.finish()?;
             writer.out.flush()?;
-            let count = writer.count + 1;
+            let mut count = writer.count + 1;
             summary.gaps += writer.gaps;
             drop(writer);
             if let Some(last) = copied_last {
@@ -483,10 +580,25 @@ pub fn export(options: &Options) -> Result<Summary> {
                     .parent()
                     .ok_or_else(|| Error::Invalid("stream has no directory".into()))?,
             )?;
-            let path = if !target.exists() {
+            let enriched = if pure_growth && target.exists() {
+                growth::append(&options.out, &target, complete.as_file_mut())?
+            } else {
+                None
+            };
+            let path = if let Some(n) = enriched {
+                count = n;
+                (digest, size) = self::digest(&mut File::open(&target)?)?;
+                if old.as_ref().is_some_and(|v| v["digest"]["value"] == digest) {
+                    summary.unchanged += 1;
+                }
+                prior.to_string()
+            } else if !target.exists() {
                 complete.persist(&target).map_err(|e| e.error)?;
                 prior.to_string()
             } else if append_prefix(&target, complete.as_file_mut())? {
+                if old.as_ref().is_some_and(|v| v["digest"]["value"] == digest) {
+                    summary.unchanged += 1;
+                }
                 prior.to_string()
             } else {
                 summary.snapshots += 1;
@@ -501,6 +613,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                 }
                 path
             };
+            if provider == Provider::Claude {
+                growth::remember(&db, &agent, &session)?;
+            }
             summary.source_bytes += spool.source_bytes;
             let mut entry = json!({"agent":agent,"sessionId":stream_header["sessionId"],"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
             if let Some(namespace) = stream_header.get("namespace") {
@@ -508,6 +623,7 @@ pub fn export(options: &Options) -> Result<Summary> {
             }
             if let Some(at) = stream_header.get("observedAt") {
                 entry["_meta"]["rs.ctx/observedAt"] = at.clone();
+                entry["observedAt"] = at.clone();
             }
             db.execute(
                 "INSERT OR REPLACE INTO exports VALUES(?1,?2,?3,?4)",
@@ -528,13 +644,24 @@ pub fn export(options: &Options) -> Result<Summary> {
         serde_json::to_writer(&mut output, &entry)?;
     }
     output.write_all(b"]")?;
+    output.write_all(b",\"_meta\":{")?;
     let context = crate::sqlite::manifest(&db, options, &mut summary)?;
-    if context.as_object().is_some_and(|v| !v.is_empty()) {
-        output.write_all(b",\"_meta\":")?;
-        serde_json::to_writer(&mut output, &context)?;
+    let mut comma = false;
+    if let Some(fields) = context.as_object() {
+        for (key, value) in fields {
+            if comma {
+                output.write_all(b",")?;
+            }
+            comma = true;
+            serde_json::to_writer(&mut output, key)?;
+            output.write_all(b":")?;
+            serde_json::to_writer(&mut output, value)?;
+        }
     }
-    crate::relational::bundle_facts(options, &mut output)?;
-    crate::native::manifest_facts(&db, &mut output)?;
+    crate::relational::bundle_facts(options, &mut output, &mut comma)?;
+    crate::native::manifest_facts(&db, &mut output, &mut comma)?;
+    crate::batch8::application::write(&db, options, &mut output, &mut comma)?;
+    output.write_all(b"}")?;
     output.write_all(b"}\n")?;
     output.flush()?;
     drop(output);
@@ -617,8 +744,4 @@ fn append_prefix(path: &Path, new: &mut File) -> Result<bool> {
     std::io::copy(new, &mut old)?;
     old.flush()?;
     Ok(true)
-}
-
-fn capture_time() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }

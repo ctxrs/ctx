@@ -152,9 +152,9 @@ pub(crate) fn header(p: Provider, id: &str, n: &Value) -> Value {
         .as_str()
         .filter(|s| s.starts_with('/') || s.as_bytes().get(1) == Some(&b':'))
     {
-        h["workspace"]["roots"]
-            .as_array_mut()
-            .map(|a| a.push(json!({"id":"workspace","path":cwd.replace('\\',"/")})));
+        if let Some(a) = h["workspace"]["roots"].as_array_mut() {
+            a.push(json!({"id":"workspace","path":cwd.replace('\\',"/")}));
+        }
     }
     match p {
         Provider::Copilot => {
@@ -245,7 +245,7 @@ fn entity(r: &mut Value, key: &str, native: Option<&str>, derived: String) {
 fn input(r: &mut Value, v: Option<&Value>) {
     if let Some(v) = v {
         if let Some(text) = v.as_str() {
-            if let Some(parsed) = ctx_history_capture_model::exact_json_value(text) {
+            if let Some(parsed) = ctx_history_asr_core::numbers::decode(text) {
                 r["input"] = parsed;
             } else {
                 r["inputText"] = json!(text);

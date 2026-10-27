@@ -31,7 +31,7 @@ pub(super) fn state(spool: &Spool, w: &mut Writer, row: &Value) -> Result<()> {
             *counts.entry(id).or_insert(0usize) += 1;
         }
     }
-    let original = w.record_base.clone();
+    let original = w.identity.clone();
     for (bucket, m) in metrics {
         let entries = m["token_usages"].as_array();
         for (i, u) in entries.into_iter().flatten().enumerate() {
@@ -46,7 +46,7 @@ pub(super) fn state(spool: &Spool, w: &mut Writer, row: &Value) -> Result<()> {
             } else {
                 format!("metric:{bucket}:position:{i}")
             };
-            w.record_base = Some(format!("b{:x}", Sha256::digest(key.as_bytes())));
+            w.identity = Some(format!("b{:x}", Sha256::digest(key.as_bytes())));
             w.position(w.pos + 1);
             let mut v = json!({"type":"inference","usage":tokens(u)});
             entity(&mut v, "inferenceId", response, w);
@@ -85,7 +85,7 @@ pub(super) fn state(spool: &Spool, w: &mut Writer, row: &Value) -> Result<()> {
                 }
             }
         }
-        w.record_base = Some(format!(
+        w.identity = Some(format!(
             "b{:x}",
             Sha256::digest(format!("metrics:{bucket}").as_bytes())
         ));
@@ -100,6 +100,6 @@ pub(super) fn state(spool: &Spool, w: &mut Writer, row: &Value) -> Result<()> {
         let metric_row = json!({"snapshot":true,"value":{"bucket":bucket,"accumulated_token_usage":m["accumulated_token_usage"],"accumulated_cost":m["accumulated_cost"]}});
         emit(spool, w, v, &metric_row)?;
     }
-    w.record_base = original;
+    w.identity = original;
     Ok(())
 }

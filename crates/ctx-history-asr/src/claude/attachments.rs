@@ -40,12 +40,11 @@ pub(super) fn summary(spool: &Spool, writer: &mut Writer, v: &Value) -> Result<(
         }
     }
     copy(&mut r, "durationMs", metadata, "durationMs");
-    if let Some(trigger) = metadata["trigger"].as_str() {
-        r["trigger"] = json!(if matches!(trigger, "auto" | "manual" | "model") {
-            trigger.to_string()
-        } else {
-            format!("_com.anthropic.claude-code/{trigger}")
-        });
+    if let Some(trigger) = metadata["trigger"]
+        .as_str()
+        .filter(|t| matches!(*t, "auto" | "manual" | "model"))
+    {
+        r["trigger"] = json!(trigger);
     }
     meta(&mut r, Provider::Claude, "compactMetadata", metadata);
     super::structure::emit(spool, writer, r, v, None, false)?;

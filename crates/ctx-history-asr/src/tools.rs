@@ -21,6 +21,9 @@ pub(crate) fn call(
     requested: &str,
 ) -> Result<Value> {
     let (input, text) = match arguments {
+        Arguments::Json(v) if !ctx_history_asr_core::numbers::safe(&v) => {
+            (json!(ctx_history_asr_core::numbers::text(&v)), true)
+        }
         Arguments::Json(v) => (v, false),
         Arguments::Text(s) => (json!(s), true),
     };
@@ -49,10 +52,9 @@ pub(crate) fn call(
             });
         }
     }
-    for k in ["cell_id", "parent_call_id"] {
-        if let Some(parent) = source[k].as_str() {
-            v["parentCallId"] = json!(parent);
-        }
+    copy(&mut v, "parentCallId", source, "parent_call_id");
+    if let Some(cell) = source.get("cell_id").or_else(|| source.get("cellId")) {
+        meta(&mut v, writer.provider, "cellId", cell);
     }
     if let Some(value) = input.get("dangerouslyDisableSandbox") {
         meta(&mut v, writer.provider, "dangerouslyDisableSandbox", value);
@@ -371,6 +373,8 @@ pub(crate) fn result(
 ) -> Result<()> {
     if spool.ambiguous_call(id)? {
         value["linkage"] = json!("ambiguous");
+        value.as_object_mut().unwrap().remove("callId");
+        meta(&mut value, writer.provider, "unpairedCallId", &json!(id));
         writer.emit(value, source)?;
         return Ok(());
     }

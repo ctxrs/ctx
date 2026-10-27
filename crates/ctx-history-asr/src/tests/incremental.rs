@@ -17,8 +17,16 @@ fn folded_growth_keeps_usage_and_tool_record_ids() {
         .unwrap();
     writeln!(f,"{}",json!({"type":"assistant","uuid":"b","parentUuid":"a","sessionId":"test","message":{"id":"response","content":[{"type":"tool_use","id":"call","name":"Read","input":{"file_path":"a"}}],"usage":{"output_tokens":2}}})).unwrap();
     let result = export(&options).unwrap();
-    assert_eq!(result.snapshots, 1);
+    assert_eq!(result.snapshots, 0);
     let after = records(&options);
+    assert_eq!(&after[..before.len()], &before);
+    assert!(after
+        .iter()
+        .any(|r| r["type"] == "message" && r["supersedes"].is_string()));
+    assert!(after
+        .iter()
+        .any(|r| r["type"] == "inference" && r["supersedes"].is_string()));
+    assert_eq!(export(&options).unwrap().unchanged, 1);
     for r in before
         .iter()
         .filter(|r| r["type"] == "inference" || r["type"] == "message")

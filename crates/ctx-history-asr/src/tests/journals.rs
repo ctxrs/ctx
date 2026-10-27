@@ -278,7 +278,7 @@ fn large_content_is_external_and_numbers_beyond_u64_are_never_rounded() {
 fn mux_stale_partial_does_not_make_effective_call_ambiguous() {
     let call = json!({"type":"dynamic-tool","toolCallId":"c","toolName":"read","input":{},"state":"output-available","output":"ok"});
     let row = json!({"id":"m","role":"assistant","parts":[call],"metadata":{"historySequence":2}});
-    let (_d, o) = journal(Provider::Mux, &[row.clone()], json!({}));
+    let (_d, o) = journal(Provider::Mux, std::slice::from_ref(&row), json!({}));
     fs::write(
         o.inputs[0].path.with_file_name("partial.json"),
         row.to_string(),

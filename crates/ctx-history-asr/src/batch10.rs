@@ -132,7 +132,7 @@ pub(crate) fn convert(spool: &mut Spool, w: &mut Writer, row: &Value) -> Result<
     if collision {
         key = format!("position:{}", w.pos);
     }
-    w.record_base = Some(format!("b{:x}", Sha256::digest(key.as_bytes())));
+    w.identity = Some(format!("b{:x}", Sha256::digest(key.as_bytes())));
     let mut row = row.clone();
     row["captureScope"] = json!(collision || row["nativeId"].is_null());
     if row["kind"] == "gap" {

@@ -10,22 +10,18 @@ publish = false
 description = "Streaming native-history conversion to Agent Session Record bundles"
 
 [dependencies]
+ctx-history-asr-core = { path = "../ctx-history-asr-core" }
+ctx-history-asr-database = { path = "../ctx-history-asr-database" }
 ctx-history-provider-claude-cursor = { path = "../ctx-history-provider-claude-cursor" }
-ctx-history-providers-sqlite-selected = { path = "../ctx-history-providers-sqlite-selected" }
 ctx-history-provider-fx = { path = "../ctx-history-provider-fx" }
 base64.workspace = true
 ctx-history-provider-codex = { path = "../ctx-history-provider-codex" }
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
-ctx-history-source-sqlite = { path = "../ctx-history-source-sqlite" }
-ctx-history-source-io = { path = "../ctx-history-source-io" }
-base64.workspace = true
 rmpv.workspace = true
 chrono.workspace = true
 fs2.workspace = true
 rusqlite.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-thiserror.workspace = true
 zstd.workspace = true

@@ -142,7 +142,7 @@ fn codex_ui_images_use_asr_image_or_resource_link() {
     let message = result.iter().find(|r| r["messageId"] == "user").unwrap();
     assert_eq!(
         message["displayContent"][0],
-        json!({"type":"image","mimeType":"image/png","data":"AA=="})
+        json!({"type":"resource_link","name":"data:image/png;base64,AA==","uri":"data:image/png;base64,AA=="})
     );
     assert_eq!(message["displayContent"][1]["type"], "resource_link");
     assert_eq!(message["capture"]["content"]["state"], "absent");
@@ -193,7 +193,8 @@ fn codex_nested_mcp_and_compaction_retains() {
     let r = records(&options);
     let call = r.iter().find(|r| r["type"] == "tool_call").unwrap();
     assert_eq!(call["requestedBy"], "code");
-    assert_eq!(call["parentCallId"], "cell");
+    assert!(call.get("parentCallId").is_none());
+    assert_eq!(call["_meta"]["com.openai.codex/cellId"], "cell");
     assert_eq!(call["provider"]["kind"], "mcp");
     assert_eq!(call["provider"]["identity"], "exact");
     let original = r.iter().find(|r| r["messageId"] == "original").unwrap();
@@ -304,7 +305,11 @@ fn reused_native_call_ids_are_not_paired_by_order() {
             2
         );
         let result = records.iter().find(|r| r["type"] == "tool_result").unwrap();
-        assert_eq!(result["callId"], "reused");
+        assert!(result.get("callId").is_none());
+        assert_eq!(
+            result["_meta"][format!("{}/unpairedCallId", provider.domain())],
+            "reused"
+        );
         assert_eq!(result["linkage"], "ambiguous");
         assert!(result.get("exec").is_none());
     }
