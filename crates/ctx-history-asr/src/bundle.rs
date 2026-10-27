@@ -15,7 +15,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-const REVISION: &str = "ctx-asr-6";
+const REVISION: &str = "ctx-asr-6-batch11";
 
 pub fn export(options: &Options) -> Result<Summary> {
     if options.max_record_bytes < 1024 {
@@ -40,6 +40,9 @@ pub fn export(options: &Options) -> Result<Summary> {
         .write(true)
         .open(options.out.join(".ctx-asr.lock"))?;
     lock.lock_exclusive()?;
+    if options.namespace.as_deref().is_some_and(str::is_empty) {
+        return Err(Error::Invalid("ASR namespace must be nonempty".into()));
+    }
     let db = Connection::open(options.out.join(".ctx-asr.sqlite"))?;
     db.execute_batch("PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
         CREATE TABLE IF NOT EXISTS exports(agent TEXT, session TEXT, stamp TEXT, entry TEXT, PRIMARY KEY(agent,session));
@@ -53,11 +56,23 @@ pub fn export(options: &Options) -> Result<Summary> {
             input,
             options.max_record_bytes,
             &mut |s| {
+                let namespace = if s.provider.needs_namespace() {
+                    options.namespace.as_deref()
+                } else {
+                    None
+                };
+                if s.provider.needs_namespace() && namespace.is_none() {
+                    return Err(Error::Invalid("Cline/Roo task IDs require --namespace with a stable installation or profile identifier".into()));
+                }
                 if options.session.as_deref().is_none_or(|id| id == s.session) {
                     db.execute(
                         "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
                         params![
-                            s.provider.agent(),
+                            format!(
+                                "{}{}",
+                                s.provider.agent(),
+                                namespace.map(|n| format!(":{n}")).unwrap_or_default()
+                            ),
                             s.session,
                             s.path.to_string_lossy(),
                             s.stamp,
@@ -82,13 +97,22 @@ pub fn export(options: &Options) -> Result<Summary> {
             break;
         };
         previous = (agent.clone(), session.clone());
-        let provider = if agent == "codex" {
-            Provider::Codex
+        let provider = match agent.split(':').next().unwrap_or_default() {
+            "codex" => Provider::Codex,
+            "claude-code" => Provider::Claude,
+            "cline" => Provider::Cline,
+            "roo-code" => Provider::Roo,
+            "com.vercel.fx" => Provider::Fx,
+            _ => return Err(Error::Invalid("unknown ASR provider".into())),
+        };
+        let namespace = if provider.needs_namespace() {
+            options.namespace.as_deref()
         } else {
-            Provider::Claude
+            None
         };
         let mut hash = Sha256::new();
         hash.update(REVISION);
+        hash.update(namespace.unwrap_or_default());
         hash.update(env!("CARGO_PKG_VERSION"));
         hash.update(options.max_record_bytes.to_le_bytes());
         let mut stmt = db.prepare(
@@ -139,6 +163,7 @@ pub fn export(options: &Options) -> Result<Summary> {
             )?;
             let mut rows = stmt.query(params![agent, session])?;
             let mut source_header = None;
+            let mut captured = false;
             db.execute_batch("BEGIN")?;
             let mut last_pos: u64 = db.query_row(
                 "SELECT coalesce(max(pos),0) FROM positions WHERE agent=?1 AND session=?2",
@@ -153,6 +178,19 @@ pub fn export(options: &Options) -> Result<Summary> {
                 let segment: String = row.get(2)?;
                 let header: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
                 spool.save(&format!("segment:{segment}"), &header)?;
+                if provider.captures() {
+                    if std::mem::replace(&mut captured, true) {
+                        return Err(Error::Invalid("multiple native stores claim one session; export installations separately with distinct namespaces".into()));
+                    }
+                    match provider {
+                        Provider::Cline | Provider::Roo => {
+                            crate::task::ingest(&mut spool, Path::new(&path))?
+                        }
+                        Provider::Fx => crate::fx::ingest(&mut spool, Path::new(&path))?,
+                        _ => unreachable!(),
+                    }
+                    continue;
+                }
                 spool.ingest(Path::new(&path), provider, &segment, &mut |local| {
                     let old: Option<u64> = db.query_row("SELECT pos FROM positions WHERE agent=?1 AND session=?2 AND segment=?3 AND local=?4",params![agent,session,segment,local],|r|r.get(0)).optional()?;
                     if let Some(pos)=old { return Ok(pos); }
@@ -187,6 +225,23 @@ pub fn export(options: &Options) -> Result<Summary> {
             let mut writer =
                 Writer::new(temporary.reopen()?, provider, session_ref(provider, root));
             let mut stream_header = header::make(provider, &session, &source_header);
+            if let Some(namespace) = namespace {
+                stream_header["namespace"] = json!(namespace);
+            }
+            if provider.captures() {
+                // Keep observation time unchanged on re-observation of identical content.
+                let previous_time = old
+                    .as_ref()
+                    .and_then(|v| v["path"].as_str())
+                    .and_then(|p| File::open(options.out.join(p)).ok())
+                    .and_then(|f| {
+                        use std::io::BufRead;
+                        BufReader::new(f).lines().next()?.ok()
+                    })
+                    .and_then(|line| serde_json::from_str::<Value>(&line).ok())
+                    .and_then(|v| v["observedAt"].as_str().map(str::to_owned));
+                stream_header["observedAt"] = json!(previous_time.unwrap_or_else(capture_time));
+            }
             let copied_boundary =
                 header::copied_boundary(&spool, provider, &session, &source_header)?;
             let mut copied_last = None;
@@ -214,6 +269,10 @@ pub fn export(options: &Options) -> Result<Summary> {
                         claude::convert(&mut spool, &mut writer, pos, &value, cwd, subagent)?
                     }
                     Provider::Codex => codex::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    Provider::Cline | Provider::Roo => {
+                        crate::task::convert(&mut spool, &mut writer, &value)?
+                    }
+                    Provider::Fx => crate::fx::convert(&mut spool, &mut writer, &value)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -244,12 +303,41 @@ pub fn export(options: &Options) -> Result<Summary> {
             temporary.as_file_mut().rewind()?;
             std::io::copy(temporary.as_file_mut(), complete.as_file_mut())?;
             temporary = complete;
-            let (digest, size) = digest(temporary.as_file_mut())?;
+            let (mut digest_value, mut size) = digest(temporary.as_file_mut())?;
+            if provider.captures()
+                && old
+                    .as_ref()
+                    .is_some_and(|v| v["digest"]["value"].as_str() != Some(&digest_value))
+            {
+                stream_header["observedAt"] = json!(capture_time());
+                let mut replacement = tempfile::NamedTempFile::new_in(&options.out)?;
+                serde_json::to_writer(replacement.as_file_mut(), &stream_header)?;
+                replacement.write_all(b"\n")?;
+                temporary.as_file_mut().rewind()?;
+                let mut body = BufReader::new(temporary.as_file_mut());
+                {
+                    use std::io::BufRead;
+                    let mut ignored = String::new();
+                    body.read_line(&mut ignored)?;
+                }
+                std::io::copy(&mut body, replacement.as_file_mut())?;
+                temporary = replacement;
+                (digest_value, size) = digest(temporary.as_file_mut())?;
+            }
+            let digest = digest_value;
             let storage = format!(
                 "{:x}",
-                Sha256::digest(session_ref(provider, &session).as_bytes())
+                Sha256::digest(
+                    if namespace.is_some() {
+                        format!("{agent}:{session}")
+                    } else {
+                        session_ref(provider, &session)
+                    }
+                    .as_bytes()
+                )
             );
-            let default = format!("sessions/{agent}/{storage}.jsonl");
+            let storage_agent = provider.agent();
+            let default = format!("sessions/{storage_agent}/{storage}.jsonl");
             let prior = old
                 .as_ref()
                 .and_then(|v| v["path"].as_str())
@@ -263,11 +351,15 @@ pub fn export(options: &Options) -> Result<Summary> {
             let path = if !target.exists() {
                 temporary.persist(&target).map_err(|e| e.error)?;
                 prior.to_string()
-            } else if append_prefix(&target, temporary.as_file_mut())? {
+            } else if if provider.captures() {
+                old.as_ref().is_some_and(|v| v["digest"]["value"] == digest)
+            } else {
+                append_prefix(&target, temporary.as_file_mut())?
+            } {
                 prior.to_string()
             } else {
                 summary.snapshots += 1;
-                let path = format!("sessions/{agent}/{storage}-{digest}.jsonl");
+                let path = format!("sessions/{storage_agent}/{storage}-{digest}.jsonl");
                 let target = options.out.join(&path);
                 if !target.exists() {
                     temporary.persist(&target).map_err(|e| e.error)?;
@@ -275,7 +367,10 @@ pub fn export(options: &Options) -> Result<Summary> {
                 path
             };
             summary.source_bytes += spool.source_bytes;
-            let entry = json!({"agent":agent,"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            let mut entry = json!({"agent":provider.agent(),"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            if let Some(namespace) = namespace {
+                entry["namespace"] = json!(namespace);
+            }
             db.execute(
                 "INSERT OR REPLACE INTO exports VALUES(?1,?2,?3,?4)",
                 params![agent, session, stamp, serde_json::to_string(&entry)?],
@@ -368,4 +463,8 @@ fn append_prefix(path: &Path, new: &mut File) -> Result<bool> {
     std::io::copy(new, &mut old)?;
     old.flush()?;
     Ok(true)
+}
+
+fn capture_time() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }

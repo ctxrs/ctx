@@ -1505,9 +1505,11 @@ dependencies = [
 name = "ctx-history-asr"
 version = "2.3.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "ctx-history-capture-model",
  "ctx-history-provider-codex",
+ "ctx-history-provider-fx",
  "ctx-history-source-io",
  "fs2",
  "rusqlite",

@@ -26,7 +26,7 @@ pub(crate) fn questions(spool: &Spool, v: &Value) -> Result<()> {
                 }
             }
             for (key, x) in o {
-                if key == "arguments" {
+                if matches!(key.as_str(), "arguments" | "arguments_json" | "text") {
                     if let Some(s) = x.as_str() {
                         if let Ok(parsed) = serde_json::from_str::<Value>(s) {
                             questions(spool, &parsed)?;
@@ -66,7 +66,7 @@ fn strings(spool: &Spool, v: &Value) -> Result<()> {
     }
     Ok(())
 }
-fn answers(spool: &Spool, v: &Value) -> Result<()> {
+pub(crate) fn answers(spool: &Spool, v: &Value) -> Result<()> {
     match v {
         Value::Object(o) => {
             if let Some(a) = o.get("answers").and_then(Value::as_object) {

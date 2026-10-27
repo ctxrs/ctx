@@ -1,6 +1,6 @@
 # ASR export
 
-`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Claude Code and Codex are the first supported converters.
+`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Converters cover Claude Code, Codex, Cline/Roo task directories, and fx transactional schema-v3 logs.
 
 ```sh
 ctx export asr --all --out ./asr
@@ -92,3 +92,33 @@ The ASR checkout is an optional external conformance oracle, not a dependency of
 ctx's build or ordinary tests. Qualification applies to the native versions and
 features actually exercised; preserved vendor data alone does not establish a
 complete semantic mapping.
+
+## Task captures and transactional fx logs
+
+```sh
+ctx export asr --all --provider cline --namespace my-stable-installation --path ./tasks --out ./cline-asr
+ctx export asr --all --provider roo --namespace my-stable-installation --path ./tasks --out ./roo-asr
+ctx export asr --all --provider fx --path ./sessions --out ./fx-asr
+```
+
+Cline and Roo task IDs require an installation/profile namespace. Choose it once
+and reuse it when moving the same native task tree or making a fresh export.
+API arrays, UI arrays and task metadata retain their own order; timestamps never
+join separate stores. UI-only text stays display-only. Whole-document changes
+publish new captures with an observation timestamp. Unique native identities
+(including timestamp-keyed UI rows) remain stable; positional rows and collisions
+are marked capture-scoped. Sequence numbers apply only within each capture.
+
+fx schema-v3 export validates authority, log generation, committed sequence and
+byte watermark through the native replay reader. Uncommitted tails are excluded.
+It preserves the committed event log as audit evidence, maps configuration and
+usage events at their native positions, then emits current history/state as a
+snapshot. A replacement does not create invented message revisions. Existing
+native fx 0.0.6 fixtures qualify tool-free and read-file scenarios; task-array
+regressions are authored semantic cases. This cursor does not cover newer Cline
+SDK stores, fx schema-v4 conversation logs or legacy fx snapshot-only stores.
+Marked secret-question answers are removed before task/native blob projection.
+Unknown facts and source values are retained under provider metadata; preserved
+native data does not imply full semantic mapping. Non-UTF8 content and outside-task
+state/artifacts have declared losses. fx also retains the native replay limits
+(512 MiB committed bytes and 256 MiB aggregate strings/replacement state).

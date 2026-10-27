@@ -10,6 +10,8 @@ publish = false
 description = "Streaming native-history conversion to Agent Session Record bundles"
 
 [dependencies]
+ctx-history-provider-fx = { path = "../ctx-history-provider-fx" }
+base64.workspace = true
 ctx-history-provider-codex = { path = "../ctx-history-provider-codex" }
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-source-io = { path = "../ctx-history-source-io" }

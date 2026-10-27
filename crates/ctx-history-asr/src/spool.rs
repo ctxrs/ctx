@@ -163,6 +163,27 @@ impl Spool {
         self.bytes.flush()?;
         Ok(())
     }
+    /// Capture-local serialization positions; stable identity is carried separately.
+    pub fn push(&mut self, value: &Value, key: Option<&str>) -> Result<u64> {
+        crate::privacy::questions(self, value)?;
+        self.source_lines += 1;
+        let pos = self.source_lines;
+        let off = self.bytes.stream_position()?;
+        let bytes = serde_json::to_vec(value)?;
+        self.bytes.write_all(&bytes)?;
+        self.db.execute(
+            "INSERT INTO rows(pos,off,len,native_id) VALUES(?1,?2,?3,?4)",
+            params![pos, off, bytes.len(), key],
+        )?;
+        Ok(pos)
+    }
+    pub fn unique(&self, key: &str) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT count(*)=1 FROM rows WHERE native_id=?1",
+            [key],
+            |r| r.get(0),
+        )?)
+    }
     pub fn finish(&self) -> Result<()> {
         self.db.execute_batch("COMMIT;")?;
         Ok(())

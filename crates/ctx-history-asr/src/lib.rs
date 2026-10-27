@@ -1,12 +1,15 @@
 //! Native history to Agent Session Record 0.1. No Core store or network access.
 mod bundle;
+mod capture;
 mod claude;
 mod codex;
 mod content;
+mod fx;
 mod privacy;
 mod records;
 mod source;
 mod spool;
+mod task;
 mod tools;
 
 pub use bundle::export;
@@ -32,24 +35,41 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Provider {
     Claude,
     Codex,
+    Cline,
+    Roo,
+    Fx,
 }
 impl Provider {
     pub fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude-code",
             Self::Codex => "codex",
+            Self::Cline => "cline",
+            Self::Roo => "roo-code",
+            Self::Fx => "com.vercel.fx",
         }
+    }
+    pub(crate) fn needs_namespace(self) -> bool {
+        matches!(self, Self::Cline | Self::Roo)
+    }
+    pub(crate) fn captures(self) -> bool {
+        matches!(self, Self::Cline | Self::Roo | Self::Fx)
     }
     pub(crate) fn domain(self) -> &'static str {
         match self {
             Self::Claude => "com.anthropic.claude-code",
             Self::Codex => "com.openai.codex",
+            Self::Cline => "bot.cline",
+            Self::Roo => "com.roocode",
+            Self::Fx => "com.vercel.fx",
         }
     }
     pub(crate) fn format(self) -> &'static str {
         match self {
             Self::Claude => "claude-code-jsonl",
             Self::Codex => "codex-rollout",
+            Self::Cline | Self::Roo => "cline-task",
+            Self::Fx => "fx-event-log-v3",
         }
     }
 }
@@ -65,6 +85,8 @@ pub struct Options {
     /// Exact native session ID; absent exports all selected sessions.
     pub session: Option<String>,
     pub out: PathBuf,
+    /// Stable installation/profile identity for timestamp-keyed task stores.
+    pub namespace: Option<String>,
     /// Bound for a native line and an assembled content field.
     pub max_record_bytes: usize,
 }
@@ -74,6 +96,7 @@ impl Options {
             inputs,
             session: None,
             out,
+            namespace: None,
             max_record_bytes: ctx_history_source_io::MAX_PROVIDER_JSONL_LINE_BYTES,
         }
     }
