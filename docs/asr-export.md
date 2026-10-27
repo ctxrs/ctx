@@ -1,12 +1,13 @@
 # ASR export
 
-`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Claude Code and Codex are the first supported converters.
+`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Supported converters include Claude Code, Codex, Pi, Grok Build and DeepSeek Harness.
 
 ```sh
 ctx export asr --all --out ./asr
 ctx export asr --all --provider codex --out ./codex-asr
 ctx export asr --session NATIVE_SESSION_ID --provider claude --out ./session-asr
 ctx export asr --all --provider codex --path ./rollouts --out ./asr
+ctx export asr --all --provider deepseek-harness --path ./sessions --out ./asr
 ```
 
 Automatic input selection uses ctx's existing provider-root discovery. `--path`
@@ -43,6 +44,30 @@ recorded empty values. The declared vendor loss categories cover over-limit
 native lines, metadata kept outside the selected transcripts, and native variants
 retained as vendor records without a standard semantic projection. Export does
 not read the live UI databases, global scheduler definitions or deleted backups.
+
+Pi uses JSONL session headers through version 3, including the OMP title-slot
+variant. Its ASR identity is the header ID. A native parent path establishes
+lineage only when the parent's header can be read; matching parent entry IDs
+establish copied records. A path or filename is never converted into a session
+ID. The newer version 4 lane backend is outside this converter's scope.
+
+Grok Build reads persisted ACP v1 `session/update` and `_x.ai/session/update`
+notifications. Adjacent text chunks are folded, and tool patches become
+revisions. Tool UI output is `displayContent`; it does not establish what the
+model received. Optional xAI response-boundary events provide inference evidence;
+older streams without those events have no invented model calls. ACP v1 message
+boundaries remain less precise than native message IDs.
+
+DeepSeek Harness reads logical session version 0 in plain `.jsonl` and concatenated
+`.jsonl.zstd` files. Its ASR agent name is `com.deepseek.harness` pending registry
+registration. Message sources determine authorship; assistant tool blocks and
+execution-start events produce one request. Request headers provide instructions
+and call settings, while `request/context` supplies route/capacity metadata, not a
+complete request. Packed stream rows remain vendor audit records; assembled
+messages carry conversation content. Attachment references are retained, but
+external attachment bytes are not read. Copied seed prefixes are marked for
+accounting. A torn compressed frame can fail the export; the existing bundle
+remains available for retry after the native writer finishes.
 
 ## Adding a converter
 

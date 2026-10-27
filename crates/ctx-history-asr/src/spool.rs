@@ -72,6 +72,11 @@ impl Spool {
                     .as_u64()
                     .map(|n| format!("o{n}"))
                     .unwrap_or_else(|| format!("l{physical}"))
+            } else if matches!(
+                provider,
+                Provider::Pi | Provider::GrokBuild | Provider::DeepSeekHarness
+            ) {
+                crate::jsonl::local(provider, &v, physical)
             } else {
                 v["uuid"]
                     .as_str()
@@ -88,9 +93,18 @@ impl Spool {
             } else {
                 &v
             };
-            let kind = v["type"].as_str().unwrap_or("unknown");
+            let kind = if provider == Provider::GrokBuild {
+                crate::jsonl::update(&v)["sessionUpdate"].as_str()
+            } else {
+                v["type"].as_str()
+            }
+            .unwrap_or("unknown");
             let native = if provider == Provider::Codex {
                 payload["id"].as_str()
+            } else if provider == Provider::Pi {
+                v["id"].as_str()
+            } else if provider == Provider::GrokBuild {
+                crate::jsonl::event_id(&v)
             } else {
                 v["uuid"].as_str()
             };
@@ -142,6 +156,7 @@ impl Spool {
                     }
                 }
             }
+            crate::jsonl::index(self, provider, &v, pos)?;
             // Segment and ordinal identify an observation, including overlapping revert suffixes.
             self.db.execute(
                 "INSERT OR REPLACE INTO rows VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
@@ -152,10 +167,18 @@ impl Spool {
                     kind,
                     native,
                     response,
-                    v["parentUuid"].as_str(),
+                    if provider == Provider::Pi {
+                        v["parentId"].as_str()
+                    } else {
+                        v["parentUuid"].as_str()
+                    },
                     call,
                     segment,
-                    v["ordinal"].as_u64(),
+                    if provider == Provider::DeepSeekHarness {
+                        v["seq"].as_u64().or_else(|| v["seq0"].as_u64())
+                    } else {
+                        v["ordinal"].as_u64()
+                    },
                     self.source_lines
                 ],
             )?;

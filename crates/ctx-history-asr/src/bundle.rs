@@ -15,7 +15,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-const REVISION: &str = "ctx-asr-6";
+const REVISION: &str = "ctx-asr-7";
 
 pub fn export(options: &Options) -> Result<Summary> {
     if options.max_record_bytes < 1024 {
@@ -82,10 +82,13 @@ pub fn export(options: &Options) -> Result<Summary> {
             break;
         };
         previous = (agent.clone(), session.clone());
-        let provider = if agent == "codex" {
-            Provider::Codex
-        } else {
-            Provider::Claude
+        let provider = match agent.as_str() {
+            "codex" => Provider::Codex,
+            "claude-code" => Provider::Claude,
+            "pi" => Provider::Pi,
+            "grok-build" => Provider::GrokBuild,
+            "com.deepseek.harness" => Provider::DeepSeekHarness,
+            _ => return Err(Error::Invalid(format!("unknown ASR agent {agent}"))),
         };
         let mut hash = Sha256::new();
         hash.update(REVISION);
@@ -166,6 +169,10 @@ pub fn export(options: &Options) -> Result<Summary> {
             let mut source_header = source_header.unwrap_or(json!({}));
             crate::privacy::sanitize(&spool, &mut source_header)?;
             header::resolve(&db, provider, &session, &mut source_header)?;
+            crate::jsonl::resolve(&db, provider, &mut source_header)?;
+            if provider == Provider::Pi {
+                crate::pi::copies::prepare(&spool, &source_header)?;
+            }
             if provider == Provider::Claude {
                 let fork: Option<u64> = spool
                     .db
@@ -198,6 +205,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                 pos = next;
                 writer.position(pos);
                 let value = spool.get(pos)?;
+                if provider == Provider::Pi {
+                    writer.copied = crate::pi::copies::copy(&spool, &value)?;
+                }
                 if provider == Provider::Codex {
                     let current: String = spool.db.query_row(
                         "SELECT segment FROM rows WHERE pos=?1",
@@ -214,6 +224,13 @@ pub fn export(options: &Options) -> Result<Summary> {
                         claude::convert(&mut spool, &mut writer, pos, &value, cwd, subagent)?
                     }
                     Provider::Codex => codex::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    Provider::Pi => crate::pi::convert(&mut spool, &mut writer, &value, cwd)?,
+                    Provider::GrokBuild => {
+                        crate::grok::convert(&mut spool, &mut writer, &value, cwd)?
+                    }
+                    Provider::DeepSeekHarness => {
+                        crate::deepseek::convert(&mut spool, &mut writer, &value, cwd)?
+                    }
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -228,6 +245,10 @@ pub fn export(options: &Options) -> Result<Summary> {
                     )?;
                 }
             }
+            if provider == Provider::Pi {
+                crate::pi::finish(&spool, &mut writer)?;
+            }
+            crate::jsonl::finish_header(&spool, provider, &source_header, &mut stream_header)?;
             spool.finish()?;
             writer.out.flush()?;
             let count = writer.count + 1;

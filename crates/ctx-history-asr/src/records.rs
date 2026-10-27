@@ -18,6 +18,7 @@ pub(crate) struct Writer {
     pub turn: Option<String>,
     pub model: Option<String>,
     pub root_session: String,
+    pub copied: Option<Value>,
 }
 impl Writer {
     pub fn new(file: File, provider: Provider, root_session: String) -> Self {
@@ -33,11 +34,13 @@ impl Writer {
             turn: None,
             model: None,
             root_session,
+            copied: None,
         }
     }
     pub fn position(&mut self, pos: u64) {
         self.pos = pos;
         self.slot = 0;
+        self.copied = None;
     }
     pub fn slot(&mut self, slot: u64) {
         self.slot = slot;
@@ -60,6 +63,9 @@ impl Writer {
         let id = format!("r{seq}");
         value["seq"] = json!(seq);
         value["id"] = json!(id);
+        if let Some(copied) = &self.copied {
+            value["copiedFrom"] = copied.clone();
+        }
         if let Some(ts) = source
             .get("timestamp")
             .and_then(Value::as_str)
@@ -134,7 +140,8 @@ impl Writer {
                 }
             })
             .collect::<String>();
-        self.emit(json!({"type":format!("{}/{}",self.provider.domain(),if safe.is_empty(){"unknown"}else{&safe}),"native":{"record":value}}),value)?;
+        let clock = crate::jsonl::clock(self.provider, value);
+        self.emit(json!({"type":format!("{}/{}",self.provider.domain(),if safe.is_empty(){"unknown"}else{&safe}),"native":{"record":value}}),if matches!(self.provider, Provider::Pi | Provider::GrokBuild | Provider::DeepSeekHarness) { &clock } else { value })?;
         Ok(())
     }
 }

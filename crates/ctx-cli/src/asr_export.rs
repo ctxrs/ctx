@@ -2,6 +2,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use ctx_history_asr::{Input, Options, Provider};
+use ctx_history_core::CaptureProvider as Capture;
 use std::path::PathBuf;
 
 #[derive(Debug, Subcommand)]
@@ -9,11 +10,15 @@ pub(crate) enum ExportArgs {
     /// Convert native sessions to an Agent Session Record 0.1 archive bundle.
     Asr(AsrArgs),
 }
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum AsrProvider {
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+enum AsrAgent {
     #[value(alias = "claude-code")]
     Claude,
     Codex,
+    Pi,
+    GrokBuild,
+    #[value(name = "deepseek-harness")]
+    DeepSeekHarness,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -24,7 +29,7 @@ pub(crate) struct AsrArgs {
     #[arg(long)]
     all: bool,
     #[arg(long, value_enum)]
-    provider: Option<AsrProvider>,
+    provider: Option<AsrAgent>,
     /// Read this native transcript or directory instead of automatic discovery.
     #[arg(long, requires = "provider")]
     path: Option<PathBuf>,
@@ -47,37 +52,32 @@ impl ExportArgs {
     }
     fn execute(self) -> Result<()> {
         let Self::Asr(args) = self;
-        let providers = match args.provider {
-            Some(AsrProvider::Claude) => vec![Provider::Claude],
-            Some(AsrProvider::Codex) => vec![Provider::Codex],
-            None => vec![Provider::Claude, Provider::Codex],
-        };
         let mut inputs = Vec::new();
-        for provider in providers {
-            if let Some(path) = &args.path {
-                inputs.push(Input {
-                    provider,
-                    path: path.clone(),
-                });
+        for choice in AsrAgent::value_variants() {
+            if args.provider.is_some_and(|p| p != *choice) {
                 continue;
             }
-            let capture = match provider {
-                Provider::Claude => ctx_history_core::CaptureProvider::Claude,
-                Provider::Codex => ctx_history_core::CaptureProvider::Codex,
+            let (provider, capture) = match choice {
+                AsrAgent::Claude => (Provider::Claude, Capture::Claude),
+                AsrAgent::Codex => (Provider::Codex, Capture::Codex),
+                AsrAgent::Pi => (Provider::Pi, Capture::Pi),
+                AsrAgent::GrokBuild => (Provider::GrokBuild, Capture::GrokBuild),
+                AsrAgent::DeepSeekHarness => (Provider::DeepSeekHarness, Capture::DeepSeekHarness),
             };
-            let home = crate::identity::home_dir();
-            let report =
-                ctx_history_cli::discovered_sources_for_provider_report(home.as_deref(), capture);
-            for source in report.sources {
-                if source.source_format.contains("jsonl")
-                    && !source.source_format.contains("history_jsonl")
-                {
-                    inputs.push(Input {
-                        provider,
-                        path: source.path,
-                    });
-                }
-            }
+            let paths = args.path.clone().map(|p| vec![p]).unwrap_or_else(|| {
+                ctx_history_cli::discovered_sources_for_provider_report(
+                    crate::identity::home_dir().as_deref(),
+                    capture,
+                )
+                .sources
+                .into_iter()
+                .filter(|s| {
+                    s.source_format.contains("jsonl") && !s.source_format.contains("history_jsonl")
+                })
+                .map(|s| s.path)
+                .collect()
+            });
+            inputs.extend(paths.into_iter().map(|path| Input { provider, path }));
         }
         let mut options = Options::new(inputs, args.out);
         options.session = args.session;

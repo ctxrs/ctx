@@ -8,7 +8,7 @@ use std::{
 
 pub(crate) fn reader(path: &Path) -> Result<Box<dyn BufRead>> {
     let file = File::open(path)?;
-    if path.extension().is_some_and(|e| e == "zst") {
+    if path.extension().is_some_and(|e| e == "zst" || e == "zstd") {
         Ok(Box::new(BufReader::new(zstd::stream::read::Decoder::new(
             file,
         )?)))
@@ -103,7 +103,8 @@ pub(crate) fn visit(
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if !(name.ends_with(".jsonl")
-                || (input.provider == Provider::Codex && name.ends_with(".jsonl.zst")))
+                || (input.provider == Provider::Codex && name.ends_with(".jsonl.zst"))
+                || (input.provider == Provider::DeepSeekHarness && name.ends_with(".jsonl.zstd")))
             {
                 continue;
             }
@@ -115,7 +116,9 @@ pub(crate) fn visit(
                 // Alias filenames are not another native session/segment identity.
                 path = fs::canonicalize(path)?;
             }
-            if name.ends_with(".jsonl.zst") && path.with_extension("").is_file() {
+            if (name.ends_with(".jsonl.zst") || name.ends_with(".jsonl.zstd"))
+                && path.with_extension("").is_file()
+            {
                 continue;
             }
             inspect(
@@ -155,15 +158,21 @@ fn inspect(
         match input.provider {
             Provider::Codex if v["type"] == "session_meta" => metas.push(v),
             Provider::Claude if v["sessionId"].as_str().is_some_and(|s| !s.is_empty()) => {
-                claude = Some(v);
+                claude = Some((String::new(), v));
                 break;
+            }
+            Provider::Pi | Provider::GrokBuild | Provider::DeepSeekHarness => {
+                if let Some(id) = crate::jsonl::session_id(input.provider, &v) {
+                    claude = Some((id, v));
+                    break;
+                }
             }
             _ => {}
         }
     }
     let (session, mut header) = match input.provider {
         Provider::Claude => {
-            let Some(v) = claude else {
+            let Some((_, v)) = claude else {
                 *unidentified += 1;
                 return Ok(());
             };
@@ -201,6 +210,13 @@ fn inspect(
             };
             (id.to_owned(), v.clone())
         }
+        Provider::Pi | Provider::GrokBuild | Provider::DeepSeekHarness => {
+            let Some(value) = claude else {
+                *unidentified += 1;
+                return Ok(());
+            };
+            value
+        }
     };
     if input.provider == Provider::Claude {
         let sidecar = input.path.with_extension("meta.json");
@@ -226,7 +242,15 @@ fn inspect(
         .ok()
         .map(|m| format!("{}:{:?}", m.len(), m.modified().ok()))
         .unwrap_or_default();
-    let stamp = format!("{}:{modified}:{sidecar_stamp}", metadata.len());
+    let parent_stamp = if input.provider == Provider::Pi {
+        crate::jsonl::parent_header(&mut header, limit)?
+    } else {
+        String::new()
+    };
+    let stamp = format!(
+        "{}:{modified}:{sidecar_stamp}:{parent_stamp}",
+        metadata.len()
+    );
     let segment = segment_id(&input.path, &session, input.provider);
     visitor(Source {
         provider: input.provider,

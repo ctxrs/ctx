@@ -3,11 +3,16 @@ mod bundle;
 mod claude;
 mod codex;
 mod content;
+mod deepseek;
+mod grok;
+mod jsonl;
+mod pi;
 mod privacy;
 mod records;
 mod source;
 mod spool;
 mod tools;
+mod tree;
 
 pub use bundle::export;
 use serde::{Deserialize, Serialize};
@@ -32,24 +37,36 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Provider {
     Claude,
     Codex,
+    Pi,
+    GrokBuild,
+    DeepSeekHarness,
 }
 impl Provider {
     pub fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude-code",
             Self::Codex => "codex",
+            Self::Pi => "pi",
+            Self::GrokBuild => "grok-build",
+            Self::DeepSeekHarness => "com.deepseek.harness",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
         match self {
             Self::Claude => "com.anthropic.claude-code",
             Self::Codex => "com.openai.codex",
+            Self::Pi => "io.github.badlogic.pi",
+            Self::GrokBuild => "ai.x.grok-build",
+            Self::DeepSeekHarness => "com.deepseek.harness",
         }
     }
     pub(crate) fn format(self) -> &'static str {
         match self {
             Self::Claude => "claude-code-jsonl",
             Self::Codex => "codex-rollout",
+            Self::Pi => "pi-jsonl",
+            Self::GrokBuild => "grok-build-acp-v1-jsonl",
+            Self::DeepSeekHarness => "deepseek-harness-session-jsonl",
         }
     }
 }
