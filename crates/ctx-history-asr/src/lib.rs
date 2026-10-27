@@ -1,5 +1,6 @@
 //! Native history to Agent Session Record 0.1. No Core store or network access.
 mod antigravity;
+mod batch8;
 mod bundle;
 mod claude;
 mod codex;
@@ -32,6 +33,10 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("ASR SQLite source: {0}")]
+    NativeSqlite(#[from] ctx_history_source_sqlite::SqliteSourceAccessError),
+    #[error("ASR source I/O: {0}")]
+    SourceIo(#[from] ctx_history_source_io::SourceIoError),
     #[error("ASR native source: {0}")]
     Provider(#[from] ctx_history_provider_codex::CaptureError),
     #[error("ASR I/O: {0}")]
@@ -101,6 +106,17 @@ impl Provider {
         ]
         .into_iter()
         .find(|p| p.agent() == agent)
+    Firebender,
+    ForgeCode,
+    DeepAgents,
+    Devin,
+}
+impl Provider {
+    pub(crate) fn is_batch8(self) -> bool {
+        matches!(
+            self,
+            Self::Firebender | Self::ForgeCode | Self::DeepAgents | Self::Devin
+        )
     }
     pub fn agent(self) -> &'static str {
         match self {
@@ -133,6 +149,10 @@ impl Provider {
             Self::AstrBot => "app.astrbot",
             Self::Shelley => "dev.exe.shelley",
             Self::Zed => "zed",
+            Self::Firebender => "com.firebender",
+            Self::ForgeCode => "dev.forgecode",
+            Self::DeepAgents => "com.langchain.deepagents",
+            Self::Devin => "ai.cognition.devin",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
@@ -164,6 +184,10 @@ impl Provider {
             Self::AstrBot => "app.astrbot",
             Self::Shelley => "dev.exe.shelley",
             Self::Zed => "dev.zed",
+            Self::Firebender => "com.firebender",
+            Self::ForgeCode => "dev.forgecode",
+            Self::DeepAgents => "com.langchain.deepagents",
+            Self::Devin => "ai.cognition.devin",
         }
     }
     pub(crate) fn format(self) -> &'static str {
@@ -191,6 +215,10 @@ impl Provider {
             Self::Goose => "goose-sqlite",
             Self::Lingma => "lingma-sqlite",
             Self::Warp => "warp-sqlite",
+            Self::Firebender => "firebender-chat-history-sqlite",
+            Self::ForgeCode => "forgecode-sqlite",
+            Self::DeepAgents => "deepagents-langgraph-sqlite",
+            Self::Devin => "devin-cli-sessions-sqlite",
         }
     }
     pub fn is_sqlite(self) -> bool {

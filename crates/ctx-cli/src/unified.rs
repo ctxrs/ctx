@@ -33,7 +33,7 @@ impl UnifiedCommand {
 
     pub(crate) fn run(self, data_root: Option<PathBuf>) -> i32 {
         let args = match self {
-            Self::Export(args) => return args.run(),
+            Self::Export(args) => return crate::asr_export::run(args),
             Self::Graph(args) => {
                 return crate::engine_telemetry::observe_graph(data_root, |observer| {
                     ctx_graph::run_parsed_exit_observed(*args, observer)

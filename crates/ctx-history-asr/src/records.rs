@@ -16,6 +16,8 @@ pub(crate) struct Writer {
     pub capture_scope: bool,
     pub snapshot: bool,
     pub bundle: Option<std::path::PathBuf>,
+    pub exact_id: Option<String>,
+    pub capture_scoped: bool,
     pub count: u64,
     pub last: Option<String>,
     pub gaps: u64,
@@ -43,6 +45,8 @@ impl Writer {
             capture_scope: false,
             snapshot: false,
             bundle: None,
+            exact_id: None,
+            capture_scoped: false,
             count: 0,
             last: None,
             gaps: 0,
@@ -60,6 +64,7 @@ impl Writer {
     }
     pub fn position(&mut self, pos: u64) {
         self.pos = pos;
+        self.exact_id = None;
         self.slot = 0;
         self.copied = None;
         self.identity = None;
@@ -76,6 +81,9 @@ impl Writer {
         self.identity_offset = self.slot;
     }
     pub fn id(&self) -> String {
+        if let Some(id) = &self.exact_id {
+            return id.clone();
+        }
         if let Some(key) = &self.native_identity {
             use sha2::{Digest, Sha256};
             return format!(
@@ -134,6 +142,15 @@ impl Writer {
             ));
         }
         self.last_seq = Some(seq);
+        if self.provider.is_batch8() {
+            value.as_object_mut().map(|o| {
+                o.entry("assembly")
+                    .or_insert_with(|| json!({"mode":"snapshot"}))
+            });
+            if self.capture_scoped {
+                value["idScope"] = json!("capture");
+            }
+        }
         value["seq"] = json!(seq);
         value["id"] = json!(id);
         if let Some(copied) = &self.copied {

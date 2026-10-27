@@ -172,6 +172,41 @@ metadata to interpret completely. This is not a claim of complete semantic
 qualification for every provider release. Public tests identify authored inputs;
 fixture validation and version qualification are distinct.
 
+## SQLite converters
+
+`--provider firebender|forgecode|deepagents|devin` accepts a native SQLite
+file with `--path`, or uses the existing provider discovery rules. SQLite
+sources are copied through ctx's read-only source-snapshot facility; exports
+never create WAL or SHM files beside the source. Each session is a capture:
+stable native IDs survive replacements, while array positions without native
+IDs are marked `idScope: capture`. `observedAt` stays unchanged on a logical
+no-op, including relocation. The byte limit applies to the whole SQLite row;
+an oversized conversation becomes a gap rather than a partial transcript.
+
+These converters use reverse-DNS agent names until their short names are
+registered. Their native fields are retained in provider `_meta` values (large
+values use blobs). Global schema and application-state rows are retained under
+manifest `_meta["rs.ctx/sqliteApplicationState"]`, including on a single-session
+export; they are not assigned to a session. Independent database reads do not
+form one atomic capture. Native identities that collide across databases must
+be exported separately.
+
+Deep Agents projects chat only from the root namespace's `writes.messages`
+channel, including message-ID revisions and removal deltas; checkpoints and
+other channels remain native state. Non-root namespaces and Firebender child
+conversations are preserved as vendor records because they lack separate
+native session IDs. Devin retains the complete message forest, applies the
+mechanical-sibling rule and selects `main_chain_id` as primary head. A null or
+missing main head leaves the forest as audit data. Compaction retains both the
+old forest and regenerated prefix with an unknown replacement range; exact
+reconstruction of Devin's reinserted transcript is not claimed. Repeated Devin
+request IDs remain native evidence without duplicated usage attribution.
+
+Qualification is limited to the retained fixtures and authored semantic tests.
+Firebender's fixture is schema-derived, Deep Agents' fixture was written by
+AsyncSqliteSaver, and Devin's durable background heads have only authored
+coverage. These are conversion capabilities, not current-harness certification.
+
 ## Adding a converter
 
 `crates/ctx-history-asr` owns ASR semantics, output identity and bundle publication.

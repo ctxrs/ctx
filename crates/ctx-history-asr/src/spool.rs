@@ -234,7 +234,7 @@ impl Spool {
         Ok(())
     }
     /// Native SQLite cursors already supply their deterministic serialization order.
-    pub fn push_native(
+    pub fn push_relational(
         &mut self,
         kind: &str,
         key: &str,

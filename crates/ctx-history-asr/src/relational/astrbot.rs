@@ -27,10 +27,10 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
                 let key = native
                     .map(|id| format!("message:{id}"))
                     .unwrap_or_else(|| format!("content:{i}"));
-                s.push_native("message", &key, n, native.is_none())?;
+                s.push_relational("message", &key, n, native.is_none())?;
             }
         } else {
-            s.push_native(
+            s.push_relational(
                 "gap",
                 "content",
                 &json!({"reason":"unparseable","contentJsonText":raw}),
@@ -38,7 +38,7 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
             )?;
         }
     } else if row.get("_oversized").is_some() {
-        s.push_native(
+        s.push_relational(
             "gap",
             "content",
             &json!({"reason":"conversion_loss","sizes":row["_oversized"]}),
@@ -54,7 +54,7 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
             &[],
             s.limit,
             &mut |n| {
-                s.push_native(
+                s.push_relational(
                     "provider_stat",
                     &format!("stat:{}", c::id(&n["id"]).unwrap_or_default()),
                     &n,
@@ -63,7 +63,7 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
             },
         )?;
     }
-    s.push_native("session", "session", h, false)
+    s.push_relational("session", "session", h, false)
 }
 pub(super) fn header(h: &Value, v: &mut Value) {
     if let Some(t) = c::time(&h["created_at"]) {

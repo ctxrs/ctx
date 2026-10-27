@@ -37,10 +37,10 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
         .and_then(|b| std::str::from_utf8(b).ok())
         .and_then(c::parse);
     let Some(mut thread) = thread else {
-        return s.push_native("gap","thread",&json!({"reason":if row.get("_oversized").is_some(){"conversion_loss"}else{"unparseable"},"source":row}),true);
+        return s.push_relational("gap","thread",&json!({"reason":if row.get("_oversized").is_some(){"conversion_loss"}else{"unparseable"},"source":row}),true);
     };
     if thread["version"] != "0.3.0" {
-        return s.push_native(
+        return s.push_relational(
             "gap",
             "thread",
             &json!({"reason":"conversion_loss","source":thread}),
@@ -73,7 +73,7 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
             let id = n["User"]["id"]
                 .as_str()
                 .filter(|id| seen.get(*id) == Some(&1));
-            s.push_native(
+            s.push_relational(
                 "message",
                 &id.map(|id| format!("user:{id}"))
                     .unwrap_or_else(|| format!("messages:{i}")),
@@ -83,7 +83,7 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
         }
     }
     h["_thread"] = thread;
-    s.push_native("session", "session", h, false)
+    s.push_relational("session", "session", h, false)
 }
 pub(super) fn header(h: &Value, v: &mut Value) {
     v["profiles"].as_array_mut().unwrap().push(json!("coding"));

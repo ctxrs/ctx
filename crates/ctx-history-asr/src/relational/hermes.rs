@@ -51,7 +51,7 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
                 c::index_result(s, result_id(&n))?;
             }
             let key = format!("message:{}", c::id(&n["id"]).unwrap_or_default());
-            s.push_native("message", &key, &n, false)
+            s.push_relational("message", &key, &n, false)
         },
     )?;
     // Receipts are an immutable per-execution log. Serialize execution IDs in
@@ -71,7 +71,7 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
                 &[],
                 s.limit,
                 &mut |receipt| {
-                    s.push_native(
+                    s.push_relational(
                         "worker_receipts",
                         &format!("receipt:{execution}:{}", receipt["sequence"]),
                         &receipt,
@@ -108,13 +108,13 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
                         "session_admissions" => n["admission_id"].as_str().unwrap_or("").to_owned(),
                         _ => n["execution_id"].as_str().unwrap_or("").to_owned(),
                     };
-                    s.push_native(table, &format!("{table}:{identity}"), &n, false)?;
+                    s.push_relational(table, &format!("{table}:{identity}"), &n, false)?;
                     Ok(())
                 },
             )?;
         }
     }
-    s.push_native("session", "session", h, false)
+    s.push_relational("session", "session", h, false)
 }
 fn call_id(n: &Value, call: &Value) -> Option<String> {
     let id = call["id"].as_str()?;

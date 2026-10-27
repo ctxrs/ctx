@@ -16,6 +16,7 @@ DEPS = [
     "//crates/ctx-history-provider-codex:lib",
     "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-source-io:lib",
+    "//crates/ctx-history-source-sqlite:lib",
 ]
 
 rust_library(
@@ -31,6 +32,8 @@ rust_library(
 
 ctx_rust_test(
     name = "unit_tests",
+    data = ["//:public_test_fixtures"],
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-asr"},
     srcs = glob(["src/**/*.rs"]),
     crate_name = "ctx_history_asr",
     crate_root = "src/lib.rs",

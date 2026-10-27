@@ -56,10 +56,10 @@ pub(super) fn ingest(db: &Connection, s: &mut Spool, h: &mut Value) -> Result<()
                 }
             }
             let key = format!("message:{}", n["message_id"].as_str().unwrap_or(""));
-            s.push_native("message", &key, &n, false)
+            s.push_relational("message", &key, &n, false)
         },
     )?;
-    s.push_native("session", "session", h, false)
+    s.push_relational("session", "session", h, false)
 }
 pub(super) fn header(h: &Value, v: &mut Value) {
     v["profiles"].as_array_mut().unwrap().push(json!("coding"));

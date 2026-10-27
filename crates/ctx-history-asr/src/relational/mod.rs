@@ -186,7 +186,7 @@ pub(crate) fn ingest(spool: &mut Spool, p: Provider, path: &Path, source: &Value
                     return Ok(());
                 }
                 if let Some(child) = n[key].as_str() {
-                    spool.push_native(
+                    spool.push_relational(
                         "subagent",
                         &format!("child:{child}"),
                         &json!({"child":child,"parentField":parent}),

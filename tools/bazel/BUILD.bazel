@@ -107,6 +107,7 @@ package_group(
 package_group(
     name = "history_source_sqlite_consumers",
     packages = [
+        "//crates/ctx-history-asr",
         "//crates/ctx-history-provider-docproj",
         "//crates/ctx-history-provider-hermes",
         "//crates/ctx-history-provider-runtime",
