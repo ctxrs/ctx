@@ -88,7 +88,7 @@ pub(crate) fn visit(
             );
         }
         return if input.provider.is_sqlite() {
-            crate::sqlite::visit(input, limit, staging, namespace, visitor, unidentified)
+            crate::opencode_source::visit(input, limit, staging, namespace, visitor, unidentified)
         } else {
             inspect(input, limit, visitor, unidentified)
         };

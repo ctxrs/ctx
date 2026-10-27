@@ -9,7 +9,7 @@ use crate::{
     spool::Spool,
     Error, Input, Provider, Result,
 };
-use rusqlite::{params, types::ValueRef, Connection, OpenFlags};
+use ruopencode_source::{params, types::ValueRef, Connection, OpenFlags};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{io::Write, path::Path};
@@ -69,7 +69,7 @@ fn rows(
     db: &Connection,
     table: &str,
     suffix: &str,
-    values: &[&dyn rusqlite::ToSql],
+    values: &[&dyn ruopencode_source::ToSql],
     limit: usize,
     visit: &mut dyn FnMut(Value) -> Result<()>,
 ) -> Result<()> {

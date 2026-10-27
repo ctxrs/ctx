@@ -1,6 +1,6 @@
 use super::common::*;
 use crate::{records::Writer, spool::Spool, Result};
-use rusqlite::OptionalExtension;
+use ruopencode_source::OptionalExtension;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 pub(super) fn convert(spool: &mut Spool, w: &mut Writer, v: &Value, snapshot: bool) -> Result<()> {
@@ -156,7 +156,7 @@ pub(super) fn unique_message_id(spool: &mut Spool, id: &str) -> Result<bool> {
         .db
         .query_row(
             "SELECT pos FROM rows WHERE native_id=?1 AND pos>?2 ORDER BY pos LIMIT 1",
-            rusqlite::params![id, cursor],
+            ruopencode_source::params![id, cursor],
             |r| r.get::<_, u64>(0),
         )
         .optional()?

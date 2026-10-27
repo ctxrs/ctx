@@ -1,6 +1,6 @@
 //! Fold only source-defined response parts, spilling large content to a blob.
 use super::*;
-use rusqlite::OptionalExtension;
+use ruopencode_source::OptionalExtension;
 use std::io::Write;
 
 pub(super) fn message(s: &mut Spool, w: &Writer, group: &str) -> Result<Option<Value>> {

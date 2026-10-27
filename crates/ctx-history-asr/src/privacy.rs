@@ -1,6 +1,6 @@
 //! Secret answers are removed before any native/vendor/blob projection (ASR-283).
 use crate::{spool::Spool, Result};
-use rusqlite::params;
+use ruopencode_source::params;
 use serde_json::Value;
 
 pub(crate) fn questions(spool: &Spool, v: &Value) -> Result<()> {

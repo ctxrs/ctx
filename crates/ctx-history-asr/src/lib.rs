@@ -20,7 +20,7 @@ mod qwen;
 mod records;
 mod source;
 mod spool;
-mod sqlite;
+mod opencode_source;
 mod tools;
 mod tree;
 
@@ -35,7 +35,7 @@ pub enum Error {
     #[error("ASR I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("ASR index: {0}")]
-    Sql(#[from] rusqlite::Error),
+    Sql(#[from] ruopencode_source::Error),
     #[error("ASR JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("{0}")]

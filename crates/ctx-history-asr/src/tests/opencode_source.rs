@@ -1,6 +1,6 @@
 //! Authored native-schema cases, not harness captures.
 use super::*;
-use rusqlite::{params, Connection};
+use ruopencode_source::{params, Connection};
 fn database(provider: Provider) -> (tempfile::TempDir, Options, Connection) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("native.db");
@@ -111,7 +111,7 @@ fn sqlite_multiple_sessions_and_pinned_read_transaction() {
     .unwrap();
     let stage = tempfile::tempdir_in(d.path()).unwrap();
     let mut headers = Vec::new();
-    crate::sqlite::visit(
+    crate::opencode_source::visit(
         &o.inputs[0],
         o.max_record_bytes,
         stage.path(),

@@ -384,7 +384,7 @@ fn event(
             if kind == "task_started" {
                 spool.db.execute(
                     "INSERT OR IGNORE INTO turns VALUES(?1,?2)",
-                    rusqlite::params![writer.pos, serde_json::to_string(&writer.tip)?],
+                    ruopencode_source::params![writer.pos, serde_json::to_string(&writer.tip)?],
                 )?;
             }
             if let Some(turn) = writer.turn.as_ref() {

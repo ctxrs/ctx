@@ -1,5 +1,5 @@
 use crate::{source, Provider, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use ruopencode_source::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{
     fs::File,
@@ -144,7 +144,7 @@ impl Spool {
             };
             let call = payload["call_id"].as_str();
             if provider.is_sqlite() {
-                crate::sqlite::index_calls(self, &v, pos)?;
+                crate::opencode_source::index_calls(self, &v, pos)?;
             }
             if provider == Provider::Codex
                 && kind == "response_item"

@@ -22,7 +22,7 @@ pub(super) fn make(provider: Provider, id: &str, n: &Value) -> Value {
         return crate::journals::header(provider, id, n);
     }
     if provider.is_sqlite() {
-        return crate::sqlite::header(provider, id, n, super::REVISION);
+        return crate::opencode_source::header(provider, id, n, super::REVISION);
     }
     let mut h = json!({"type":"session","formatVersion":"0.1","agent":{"name":provider.agent()},"sessionId":id,"producer":{"name":"ctx","version":env!("CARGO_PKG_VERSION"),"method":"converter","instance":super::REVISION,"source":{"format":provider.format()},"lossy":["native","display_content","message.author","cost","exec.exit_code","provider.identity","revision_history","_rs.ctx/native_line_limit","_rs.ctx/nontranscript_state","_rs.ctx/vendor_only"]},"profiles":["core","coding","lineage","usage"],"contentLevel":"full","workspace":{"roots":[{"id":"unknown","path":null}]}});
     let version = if provider == Provider::Claude {
@@ -207,12 +207,12 @@ pub(super) fn make(provider: Provider, id: &str, n: &Value) -> Value {
 }
 
 pub(super) fn resolve(
-    db: &rusqlite::Connection,
+    db: &ruopencode_source::Connection,
     provider: Provider,
     session: &str,
     n: &mut Value,
 ) -> crate::Result<()> {
-    use rusqlite::OptionalExtension;
+    use ruopencode_source::OptionalExtension;
     if provider == Provider::Codex {
         if let Some(base) = n.pointer("/history_base/thread_id").and_then(Value::as_str) {
             let owner: Option<String> = db
@@ -239,7 +239,7 @@ pub(super) fn copied_boundary(
     session: &str,
     n: &Value,
 ) -> crate::Result<Option<u64>> {
-    use rusqlite::OptionalExtension;
+    use ruopencode_source::OptionalExtension;
     if provider != Provider::Codex
         || !n["history_base"].is_null()
         || !n["forked_from_id"].is_string()

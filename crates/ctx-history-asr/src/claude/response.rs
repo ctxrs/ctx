@@ -4,7 +4,7 @@ use crate::{
     spool::Spool,
     tools, Provider, Result,
 };
-use rusqlite::{params, OptionalExtension};
+use ruopencode_source::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::io::Write;
 

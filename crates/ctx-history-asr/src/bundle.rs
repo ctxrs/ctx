@@ -7,7 +7,7 @@ use crate::{
     Error, Options, Provider, Result, Summary,
 };
 use fs2::FileExt;
-use rusqlite::{params, Connection, OptionalExtension};
+use ruopencode_source::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{

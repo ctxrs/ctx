@@ -1,7 +1,7 @@
 mod audit;
 mod lifecycle;
 use super::*;
-use rusqlite::OptionalExtension;
+use ruopencode_source::OptionalExtension;
 
 pub(super) fn convert(
     s: &mut Spool,

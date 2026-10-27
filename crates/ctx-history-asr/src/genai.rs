@@ -64,7 +64,7 @@ pub(crate) fn revision(
         {
             spool.db.execute(
                 "INSERT OR IGNORE INTO gemini_nodes VALUES(?1,?2)",
-                rusqlite::params![owner, id],
+                ruopencode_source::params![owner, id],
             )?;
         }
     }

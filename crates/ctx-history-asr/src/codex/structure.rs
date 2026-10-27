@@ -1,5 +1,5 @@
 use crate::{records::Writer, spool::Spool, Result};
-use rusqlite::{params, OptionalExtension};
+use ruopencode_source::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 pub(crate) fn segment(spool: &Spool, writer: &mut Writer, id: &str, source: &Value) -> Result<()> {

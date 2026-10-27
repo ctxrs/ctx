@@ -4,7 +4,7 @@ use crate::{
     content,
     records::{meta, Writer},
     spool::Spool,
-    sqlite::millis,
+    opencode_source::millis,
     Result,
 };
 use serde_json::{json, Value};
