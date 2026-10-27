@@ -79,6 +79,9 @@ pub(crate) fn visit(
     if input.provider.is_relational() {
         return crate::relational::visit(input, limit, visitor, unidentified);
     }
+    if input.provider.mixed() {
+        return crate::native::visit(input, limit, visitor, unidentified);
+    }
     if input.path.is_file() {
         if input.path.is_symlink() {
             return visit(
@@ -203,6 +206,9 @@ fn inspect(
         }
     }
     let (session, mut header) = match input.provider {
+        Provider::OpenClaw | Provider::NanoClaw => {
+            unreachable!("mixed sources have their own cursor")
+        }
         Provider::Claude => {
             let Some((_, v)) = claude else {
                 *unidentified += 1;

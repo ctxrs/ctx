@@ -52,7 +52,7 @@ of potentially sensitive history. Secret-question answers are removed, but
 export does not apply general-purpose secret or personal-data redaction.
 
 Repeat the command with the same destination to update the bundle. Unchanged
-sources are skipped. A changed session is spooled again; the exporter does not
+JSONL sources are skipped; mixed SQLite stores are reread to capture current rows and lane facts. A changed session is spooled again; the exporter does not
 assume native files only append. The export database retains source-position assignments,
 so newly discovered segments and appended native records do not renumber earlier
 records. Keep this database with the destination when continuing an export.

@@ -16,6 +16,9 @@ mod cli_journals;
 mod journals;
 mod kiro;
 mod opencode;
+mod nanoclaw;
+mod native;
+mod openclaw;
 mod privacy;
 mod qwen;
 mod records;
@@ -72,6 +75,8 @@ pub enum Provider {
     AstrBot,
     Shelley,
     Zed,
+    OpenClaw,
+    NanoClaw,
 }
 impl Provider {
     pub(crate) const ALL: [Self; 20] = [Self::Claude,Self::Codex,Self::Pi,Self::GrokBuild,Self::DeepSeekHarness,Self::Gemini,Self::Antigravity,Self::QwenCode,Self::Copilot,Self::Droid,Self::Kimi,Self::Qoder,Self::OpenCode,Self::Kilo,Self::MiMoCode,Self::Kiro,Self::Hermes,Self::AstrBot,Self::Shelley,Self::Zed];
@@ -153,6 +158,8 @@ impl Provider {
             Self::ForgeCode => "dev.forgecode",
             Self::DeepAgents => "com.langchain.deepagents",
             Self::Devin => "ai.cognition.devin",
+            Self::OpenClaw => "openclaw",
+            Self::NanoClaw => "dev.nanoclaw",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
@@ -188,6 +195,8 @@ impl Provider {
             Self::ForgeCode => "dev.forgecode",
             Self::DeepAgents => "com.langchain.deepagents",
             Self::Devin => "ai.cognition.devin",
+            Self::OpenClaw => "ai.openclaw",
+            Self::NanoClaw => "dev.nanoclaw",
         }
     }
     pub(crate) fn format(self) -> &'static str {
@@ -251,6 +260,12 @@ impl Provider {
             self,
             Self::Hermes | Self::AstrBot | Self::Shelley | Self::Zed
         )
+            Self::OpenClaw => "openclaw-agent-sqlite",
+            Self::NanoClaw => "nanoclaw-session-sqlite",
+        }
+    }
+    pub(crate) fn mixed(self) -> bool {
+        matches!(self, Self::OpenClaw | Self::NanoClaw)
     }
 }
 

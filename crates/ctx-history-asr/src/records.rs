@@ -18,6 +18,7 @@ pub(crate) struct Writer {
     pub bundle: Option<std::path::PathBuf>,
     pub exact_id: Option<String>,
     pub capture_scoped: bool,
+    native_parts: std::collections::BTreeMap<String, u64>,
     pub count: u64,
     pub last: Option<String>,
     pub gaps: u64,
@@ -47,6 +48,7 @@ impl Writer {
             bundle: None,
             exact_id: None,
             capture_scoped: false,
+            native_parts: Default::default(),
             count: 0,
             last: None,
             gaps: 0,
@@ -106,6 +108,11 @@ impl Writer {
             .map(|id| format!("{id}-{}", self.slot - self.identity_offset))
             .unwrap_or_else(|| format!("r{}", self.pos * STRIDE + self.slot))
     }
+    pub fn native_position(&mut self, pos: u64, identity: &str) {
+        self.position(pos);
+        self.identity = Some(crate::native::stable_id(identity));
+        self.native_parts.clear();
+    }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
         if self.snapshot {
             value["assembly"] = json!({"mode":"snapshot"});
@@ -129,7 +136,29 @@ impl Writer {
                 "too many records for one native item".into(),
             ));
         }
-        let id = self.id();
+        let id = if let Some(identity) = self.identity.as_ref().filter(|_| self.provider.mixed()) {
+            let entity = [
+                "callId",
+                "inferenceId",
+                "messageId",
+                "requestId",
+                "compactionId",
+                "planId",
+            ]
+            .iter()
+            .find_map(|k| value.get(*k))
+            .unwrap_or(&Value::Null);
+            let key = json!([identity, value["type"], entity]).to_string();
+            let occurrence = self.native_parts.entry(key.clone()).or_default();
+            let id = crate::native::stable_id(&json!([key, *occurrence]).to_string());
+            if *occurrence > 0 {
+                value["idScope"] = json!("capture");
+            }
+            *occurrence += 1;
+            id
+        } else {
+            self.id()
+        };
         if self.capture_scope {
             value["idScope"] = json!("capture");
         }

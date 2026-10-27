@@ -60,6 +60,7 @@ pub fn export(options: &Options) -> Result<Summary> {
         CREATE TABLE IF NOT EXISTS positions(agent TEXT,session TEXT,segment TEXT,local TEXT,pos INTEGER,PRIMARY KEY(agent,session,segment,local));
         CREATE INDEX IF NOT EXISTS observation_order ON positions(agent,session,pos);
         CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,session,path));
+        CREATE TEMP TABLE lane_facts(provider TEXT,key TEXT,value TEXT,PRIMARY KEY(provider,key));
         CREATE INDEX source_sessions ON sources(agent,session,path);")?;
     crate::sqlite::namespace(&db, options.namespace.as_deref())?;
     let mut summary = Summary::default();
@@ -175,7 +176,8 @@ pub fn export(options: &Options) -> Result<Summary> {
             .as_ref()
             .map(|(_, raw)| serde_json::from_str::<Value>(raw))
             .transpose()?;
-        let unchanged = cached.as_ref().is_some_and(|(s, _)| *s == stamp)
+        let unchanged = !provider.mixed()
+            && cached.as_ref().is_some_and(|(s, _)| *s == stamp)
             && old
                 .as_ref()
                 .and_then(|e| e["path"].as_str())
@@ -215,6 +217,19 @@ pub fn export(options: &Options) -> Result<Summary> {
                 let segment: String = row.get(2)?;
                 let header: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
                 spool.save(&format!("segment:{segment}"), &header)?;
+                if provider.mixed() {
+                    let mut header = header;
+                    crate::native::ingest(
+                        &mut spool,
+                        provider,
+                        Path::new(&path),
+                        &session,
+                        &mut header,
+                        &db,
+                    )?;
+                    source_header = Some(header);
+                    continue;
+                }
                 if provider.sqlite() {
                     crate::sqlite::ingest(&mut spool, Path::new(&path), provider, &session)?;
                     source_header = spool.entity("sqlite:header")?;
@@ -311,8 +326,12 @@ pub fn export(options: &Options) -> Result<Summary> {
             let mut segment = String::new();
             while let Some(next) = spool.next(pos)? {
                 pos = next;
-                writer.position(pos);
                 let value = spool.get(pos)?;
+                if provider.mixed() {
+                    writer.native_position(pos, value["identity"].as_str().unwrap_or("unknown"));
+                } else {
+                    writer.position(pos);
+                }
                 if provider == Provider::Pi {
                     writer.copied = crate::pi::copies::copy(&spool, &value)?;
                 }
@@ -358,6 +377,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                     Provider::Hermes | Provider::AstrBot | Provider::Shelley | Provider::Zed => {
                         crate::relational::convert(&mut spool, &mut writer, &source_header, &value)?
                     }
+                    Provider::OpenClaw | Provider::NanoClaw => {
+                        crate::native::convert(&mut spool, &mut writer, &mut stream_header, &value)?
+                    }
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -386,6 +408,9 @@ pub fn export(options: &Options) -> Result<Summary> {
             drop(writer);
             if let Some(last) = copied_last {
                 stream_header["lineage"]["inherits"]["localThroughId"] = json!(last);
+            }
+            if provider.mixed() {
+                crate::native::finish_header(&spool, provider, &mut stream_header)?;
             }
             if let Some(namespace) = &options.namespace {
                 stream_header["namespace"] = json!(namespace);
@@ -470,6 +495,7 @@ pub fn export(options: &Options) -> Result<Summary> {
         serde_json::to_writer(&mut output, &context)?;
     }
     crate::relational::bundle_facts(options, &mut output)?;
+    crate::native::manifest_facts(&db, &mut output)?;
     output.write_all(b"}\n")?;
     output.flush()?;
     drop(output);

@@ -19,6 +19,26 @@ pub(crate) struct Spool {
     pub bundle: std::path::PathBuf,
 }
 impl Spool {
+    /// Native cursors spool one bounded row at a time. Positions are capture-local;
+    /// the cursor carries stable source identity independently of serialization order.
+    pub fn push_native(&mut self, value: &Value) -> Result<()> {
+        let key = format!("native-identity:{}", value["identity"]);
+        if self.entity(&key)?.is_some() {
+            return Err(crate::Error::Invalid(
+                "conflicting native row identities across selected sources".into(),
+            ));
+        }
+        self.save(&key, &json!(true))?;
+        self.source_lines += 1;
+        let pos = self.source_lines;
+        let off = self.bytes.stream_position()?;
+        let serialized = serde_json::to_vec(value)?;
+        self.source_bytes += serialized.len() as u64;
+        self.bytes.write_all(&serialized)?;
+        let event = &value["row"];
+        self.db.execute("INSERT INTO rows(pos,off,len,kind,native_id,parent,observed) VALUES(?1,?2,?3,?4,?5,?6,?1)", params![pos,off,serialized.len(),value["table"].as_str(),event["id"].as_str(),event["parentId"].as_str()])?;
+        Ok(())
+    }
     pub fn new(parent: &Path, limit: usize) -> Result<Self> {
         let dir = tempfile::tempdir_in(parent)?;
         let db = Connection::open(dir.path().join("index.sqlite"))?;
