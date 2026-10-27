@@ -67,7 +67,7 @@ pub(crate) fn emit(
             parent = next.flatten();
         }
         if resolved != writer.tip || (parent.is_some() && resolved.is_none()) {
-            let mut mechanical = false;
+            let mut mechanical = injected;
             let mut node = writer.tip.clone();
             let parent_response: Option<String> = resolved
                 .as_ref()

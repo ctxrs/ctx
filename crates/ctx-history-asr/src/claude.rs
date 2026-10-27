@@ -3,7 +3,7 @@ pub(crate) mod coding;
 mod context;
 mod request;
 mod response;
-mod structure;
+use crate::tree as structure;
 mod usage;
 use crate::{
     content,

@@ -1,4 +1,5 @@
 //! Native history to Agent Session Record 0.1. No Core store or network access.
+mod antigravity;
 mod bundle;
 mod claude;
 mod codex;
@@ -7,7 +8,11 @@ mod deepseek;
 mod grok;
 mod jsonl;
 mod pi;
+mod conversation_source;
+mod gemini;
+mod genai;
 mod privacy;
+mod qwen;
 mod records;
 mod source;
 mod spool;
@@ -40,6 +45,9 @@ pub enum Provider {
     Pi,
     GrokBuild,
     DeepSeekHarness,
+    Gemini,
+    Antigravity,
+    QwenCode,
 }
 impl Provider {
     pub fn agent(self) -> &'static str {
@@ -49,6 +57,9 @@ impl Provider {
             Self::Pi => "pi",
             Self::GrokBuild => "grok-build",
             Self::DeepSeekHarness => "com.deepseek.harness",
+            Self::Gemini => "gemini-cli",
+            Self::Antigravity => "antigravity",
+            Self::QwenCode => "qwen-code",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
@@ -58,6 +69,9 @@ impl Provider {
             Self::Pi => "io.github.badlogic.pi",
             Self::GrokBuild => "ai.x.grok-build",
             Self::DeepSeekHarness => "com.deepseek.harness",
+            Self::Gemini => "com.google.gemini-cli",
+            Self::Antigravity => "com.google.antigravity",
+            Self::QwenCode => "io.github.qwenlm.qwen-code",
         }
     }
     pub(crate) fn format(self) -> &'static str {
@@ -67,6 +81,9 @@ impl Provider {
             Self::Pi => "pi-jsonl",
             Self::GrokBuild => "grok-build-acp-v1-jsonl",
             Self::DeepSeekHarness => "deepseek-harness-session-jsonl",
+            Self::Gemini => "gemini-cli-chat-recording",
+            Self::Antigravity => "antigravity-transcript-jsonl",
+            Self::QwenCode => "qwen-code-chat-jsonl",
         }
     }
 }

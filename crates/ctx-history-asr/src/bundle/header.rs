@@ -10,6 +10,11 @@ pub(super) fn make(provider: Provider, id: &str, n: &Value) -> Value {
     ) {
         return crate::jsonl::header(provider, id, n, super::REVISION);
     }
+    if matches!(provider,
+        Provider::Gemini | Provider::Antigravity | Provider::QwenCode
+    ) {
+        return crate::conversation_source::header(provider, id, n, super::REVISION);
+    }
     let mut h = json!({"type":"session","formatVersion":"0.1","agent":{"name":provider.agent()},"sessionId":id,"producer":{"name":"ctx","version":env!("CARGO_PKG_VERSION"),"method":"converter","instance":super::REVISION,"source":{"format":provider.format()},"lossy":["native","display_content","message.author","cost","exec.exit_code","provider.identity","revision_history","_rs.ctx/native_line_limit","_rs.ctx/nontranscript_state","_rs.ctx/vendor_only"]},"profiles":["core","coding","lineage","usage"],"contentLevel":"full","workspace":{"roots":[{"id":"unknown","path":null}]}});
     let version = if provider == Provider::Claude {
         "version"
@@ -24,6 +29,7 @@ pub(super) fn make(provider: Provider, id: &str, n: &Value) -> Value {
     }
     let mut lineage = json!({});
     match provider {
+        Provider::Gemini | Provider::Antigravity | Provider::QwenCode => unreachable!(),
         Provider::Claude => {
             if n["agentId"].as_str() == Some(id) {
                 h["scope"] = json!("subagent");

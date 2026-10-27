@@ -15,6 +15,10 @@ enum AsrAgent {
     #[value(alias = "claude-code")]
     Claude,
     Codex,
+    #[value(alias = "gemini-cli")]
+    Gemini,
+    Antigravity,
+    QwenCode,
     Pi,
     GrokBuild,
     #[value(name = "deepseek-harness")]
@@ -60,6 +64,9 @@ impl ExportArgs {
             let (provider, capture) = match choice {
                 AsrAgent::Claude => (Provider::Claude, Capture::Claude),
                 AsrAgent::Codex => (Provider::Codex, Capture::Codex),
+                AsrAgent::Gemini => (Provider::Gemini, Capture::Gemini),
+                AsrAgent::Antigravity => (Provider::Antigravity, Capture::Antigravity),
+                AsrAgent::QwenCode => (Provider::QwenCode, Capture::QwenCode),
                 AsrAgent::Pi => (Provider::Pi, Capture::Pi),
                 AsrAgent::GrokBuild => (Provider::GrokBuild, Capture::GrokBuild),
                 AsrAgent::DeepSeekHarness => (Provider::DeepSeekHarness, Capture::DeepSeekHarness),
@@ -72,7 +79,7 @@ impl ExportArgs {
                 .sources
                 .into_iter()
                 .filter(|s| {
-                    s.source_format.contains("jsonl") && !s.source_format.contains("history_jsonl")
+                    !s.source_format.contains("history_jsonl")
                 })
                 .map(|s| s.path)
                 .collect()

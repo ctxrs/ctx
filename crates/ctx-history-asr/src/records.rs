@@ -19,6 +19,7 @@ pub(crate) struct Writer {
     pub model: Option<String>,
     pub root_session: String,
     pub copied: Option<Value>,
+    pub snapshot: bool,
 }
 impl Writer {
     pub fn new(file: File, provider: Provider, root_session: String) -> Self {
@@ -35,6 +36,7 @@ impl Writer {
             model: None,
             root_session,
             copied: None,
+            snapshot: false,
         }
     }
     pub fn position(&mut self, pos: u64) {
@@ -49,6 +51,9 @@ impl Writer {
         format!("r{}", self.pos * STRIDE + self.slot)
     }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
+        if self.snapshot {
+            value["assembly"] = json!({"mode":"snapshot"});
+        }
         let seq = self
             .pos
             .checked_mul(STRIDE)
@@ -88,7 +93,8 @@ impl Writer {
                 value["turnId"] = json!(turn);
             }
         }
-        if let (Some(session), Some(id)) = (
+        if let (true, Some(session), Some(id)) = (
+            matches!(self.provider, Provider::Claude | Provider::QwenCode),
             source
                 .pointer("/forkedFrom/sessionId")
                 .and_then(Value::as_str),
@@ -97,6 +103,12 @@ impl Writer {
                 .and_then(Value::as_str),
         ) {
             value["copiedFrom"] = json!({"session":session_ref(self.provider,session),"record":format!("messageId={id}"),"proof":"native_field"});
+            if self.provider == Provider::QwenCode && value["type"] != "message" {
+                value["copiedFrom"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("record");
+            }
         }
         if context(&value) && value.get("supersedes").is_none() {
             self.tip = Some(id.clone());
