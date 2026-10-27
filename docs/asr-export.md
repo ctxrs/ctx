@@ -1,6 +1,6 @@
 # ASR export
 
-`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Claude Code and Codex are the first supported converters.
+`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Converters are available for Claude Code, Codex, OpenClaw and NanoClaw.
 
 ```sh
 ctx export asr --all --out ./asr
@@ -22,7 +22,7 @@ of potentially sensitive history. Secret-question answers are removed, but
 export does not apply general-purpose secret or personal-data redaction.
 
 Repeat the command with the same destination to update the bundle. Unchanged
-sources are skipped. A changed session is spooled again; the exporter does not
+JSONL sources are skipped; mixed SQLite stores are reread to capture current rows and lane facts. A changed session is spooled again; the exporter does not
 assume native files only append. The export database retains source-position assignments,
 so newly discovered segments and appended native records do not renumber earlier
 records. Keep this database with the destination when continuing an export.
@@ -92,3 +92,63 @@ The ASR checkout is an optional external conformance oracle, not a dependency of
 ctx's build or ordinary tests. Qualification applies to the native versions and
 features actually exercised; preserved vendor data alone does not establish a
 complete semantic mapping.
+
+## OpenClaw and NanoClaw
+
+```sh
+ctx export asr --all --provider openclaw --path /path/to/openclaw-state --out ./openclaw-asr
+ctx export asr --all --provider nanoclaw --path /path/to/nanoclaw --out ./nanoclaw-asr
+```
+
+OpenClaw reads agent SQLite schemas 17, 19 and 37 directly, independently of
+Core's older schema admission. Schema 37 JSON/zstd transcripts and legacy
+session JSONL are supported. Pass the state directory to include the shared
+`state/openclaw.sqlite` when present, or an agent database to select that agent.
+The shared database is located relative to the native `agents/<agent>/agent`
+layout. PostgreSQL and cold-archive bodies are not converted. Compressed
+trajectory side events produce a declared gap; uncompressed trajectory events
+remain vendor data. Unselected side tables and request context have declared
+losses. Select one authoritative representation when a legacy transcript and a
+database contain the same window; conflicting native identities are rejected.
+
+NanoClaw reads the 2.2 v2 catalog (`data/v2.db`) and the
+`data/v2-sessions/<group>/<session>/{inbound,outbound}.db` tree. A direct `v2.db`
+path is also accepted. Its ASR agent name is `dev.nanoclaw`, pending registration
+of a short name. IO rows become display messages; they do not establish a model
+prompt, inference, tool execution, token usage or cost. Explicit
+`continuation:claude` and `continuation:codex` state supplies backing-session
+links. Missing session databases produce gaps. Workspace harness transcripts
+are not recursively imported.
+
+Both converters use separate read-only transactions for independent databases;
+a capture does not imply an atomic cross-store snapshot. OpenClaw serializes
+transcript positions, immutable audit and skill logs, then trajectory positions,
+followed by mutable current rows with snapshot assembly. NanoClaw serializes
+inbound then outbound rows (each by native seq and ID), followed by catalog and
+state snapshots. Its host and container do not share one reliably chronological
+sequence allocator. Neither converter merges stores by timestamp. The `order`
+and `revision_history` losses make these limitations explicit.
+
+A changed mixed-store export creates a replacement capture with header
+`observedAt`; an unchanged export preserves bytes and observation time. Stable
+native row identities keep record IDs even when capture-local sequence values
+move. IDs without a durable native key carry `idScope: capture`. Ambiguous call
+IDs never pick a result by position. OpenClaw facts belonging only to a
+conversation lane appear once in manifest `ai.openclaw/unassignedLaneFacts`,
+not on a guessed window. Keep the manifest with the streams.
+
+Integers outside JSON's safe range use `inputText`, JSON blobs or documented
+vendor JSON-text fields. Integer literals wider than native 64-bit storage are
+rejected by the bounded decoder rather than rounded. Large binary content is
+externalized as JSON content blobs. Malformed transcript positions become gaps;
+over-limit SQLite rows fail the export with an explicit limit error. Known
+secret tool values and question answers are omitted; this is not general
+credential redaction. Only selected session-node settings are exported.
+
+Qualification includes authored boundary tests, a schema-37 native OpenClaw
+writer fixture compared with its native ASR exporter, and NanoClaw's native
+catalog/IO writers. NanoClaw's container writer evidence uses its in-memory test
+connection seam; it does not qualify container mounts or disk locking. Schema
+17/19 compatibility is tested with authored minimal schemas, not live old
+releases. These checks do not establish complete coverage of every side table
+or provider feature.

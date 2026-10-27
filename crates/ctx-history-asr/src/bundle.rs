@@ -15,7 +15,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-const REVISION: &str = "ctx-asr-6";
+const REVISION: &str = "ctx-asr-7-batch9";
 
 pub fn export(options: &Options) -> Result<Summary> {
     if options.max_record_bytes < 1024 {
@@ -45,7 +45,8 @@ pub fn export(options: &Options) -> Result<Summary> {
         CREATE TABLE IF NOT EXISTS exports(agent TEXT, session TEXT, stamp TEXT, entry TEXT, PRIMARY KEY(agent,session));
         CREATE TABLE IF NOT EXISTS positions(agent TEXT,session TEXT,segment TEXT,local TEXT,pos INTEGER,PRIMARY KEY(agent,session,segment,local));
         CREATE INDEX IF NOT EXISTS observation_order ON positions(agent,session,pos);
-        CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,path));
+        CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,session,path));
+        CREATE TEMP TABLE lane_facts(provider TEXT,key TEXT,value TEXT,PRIMARY KEY(provider,key));
         CREATE INDEX source_sessions ON sources(agent,session,path);")?;
     let mut summary = Summary::default();
     for input in &options.inputs {
@@ -82,10 +83,11 @@ pub fn export(options: &Options) -> Result<Summary> {
             break;
         };
         previous = (agent.clone(), session.clone());
-        let provider = if agent == "codex" {
-            Provider::Codex
-        } else {
-            Provider::Claude
+        let provider = match agent.as_str() {
+            "codex" => Provider::Codex,
+            "openclaw" => Provider::OpenClaw,
+            "dev.nanoclaw" => Provider::NanoClaw,
+            _ => Provider::Claude,
         };
         let mut hash = Sha256::new();
         hash.update(REVISION);
@@ -113,7 +115,8 @@ pub fn export(options: &Options) -> Result<Summary> {
             .as_ref()
             .map(|(_, raw)| serde_json::from_str::<Value>(raw))
             .transpose()?;
-        let unchanged = cached.as_ref().is_some_and(|(s, _)| *s == stamp)
+        let unchanged = !provider.mixed()
+            && cached.as_ref().is_some_and(|(s, _)| *s == stamp)
             && old
                 .as_ref()
                 .and_then(|e| e["path"].as_str())
@@ -153,6 +156,19 @@ pub fn export(options: &Options) -> Result<Summary> {
                 let segment: String = row.get(2)?;
                 let header: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
                 spool.save(&format!("segment:{segment}"), &header)?;
+                if provider.mixed() {
+                    let mut header = header;
+                    crate::native::ingest(
+                        &mut spool,
+                        provider,
+                        Path::new(&path),
+                        &session,
+                        &mut header,
+                        &db,
+                    )?;
+                    source_header = Some(header);
+                    continue;
+                }
                 spool.ingest(Path::new(&path), provider, &segment, &mut |local| {
                     let old: Option<u64> = db.query_row("SELECT pos FROM positions WHERE agent=?1 AND session=?2 AND segment=?3 AND local=?4",params![agent,session,segment,local],|r|r.get(0)).optional()?;
                     if let Some(pos)=old { return Ok(pos); }
@@ -187,6 +203,9 @@ pub fn export(options: &Options) -> Result<Summary> {
             let mut writer =
                 Writer::new(temporary.reopen()?, provider, session_ref(provider, root));
             let mut stream_header = header::make(provider, &session, &source_header);
+            if let Some(time) = old.as_ref().and_then(|v| v.get("observedAt")) {
+                stream_header["observedAt"] = time.clone();
+            }
             let copied_boundary =
                 header::copied_boundary(&spool, provider, &session, &source_header)?;
             let mut copied_last = None;
@@ -196,8 +215,12 @@ pub fn export(options: &Options) -> Result<Summary> {
             let mut segment = String::new();
             while let Some(next) = spool.next(pos)? {
                 pos = next;
-                writer.position(pos);
                 let value = spool.get(pos)?;
+                if provider.mixed() {
+                    writer.native_position(pos, value["identity"].as_str().unwrap_or("unknown"));
+                } else {
+                    writer.position(pos);
+                }
                 if provider == Provider::Codex {
                     let current: String = spool.db.query_row(
                         "SELECT segment FROM rows WHERE pos=?1",
@@ -214,6 +237,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                         claude::convert(&mut spool, &mut writer, pos, &value, cwd, subagent)?
                     }
                     Provider::Codex => codex::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    Provider::OpenClaw | Provider::NanoClaw => {
+                        crate::native::convert(&mut spool, &mut writer, &mut stream_header, &value)?
+                    }
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -236,15 +262,13 @@ pub fn export(options: &Options) -> Result<Summary> {
             if let Some(last) = copied_last {
                 stream_header["lineage"]["inherits"]["localThroughId"] = json!(last);
             }
-            let mut complete = tempfile::NamedTempFile::new_in(&options.out)?;
+            if provider.mixed() {
+                crate::native::finish_header(&spool, provider, &mut stream_header)?;
+            }
             stream_header["seq"] = json!(0);
             stream_header["id"] = json!("r0");
-            serde_json::to_writer(complete.as_file_mut(), &stream_header)?;
-            complete.write_all(b"\n")?;
-            temporary.as_file_mut().rewind()?;
-            std::io::copy(temporary.as_file_mut(), complete.as_file_mut())?;
-            temporary = complete;
-            let (digest, size) = digest(temporary.as_file_mut())?;
+            let mut complete = capture(&options.out, &stream_header, temporary.as_file_mut())?;
+            let (mut digest_value, mut size) = digest(complete.as_file_mut())?;
             let storage = format!(
                 "{:x}",
                 Sha256::digest(session_ref(provider, &session).as_bytes())
@@ -261,21 +285,36 @@ pub fn export(options: &Options) -> Result<Summary> {
                     .ok_or_else(|| Error::Invalid("stream has no directory".into()))?,
             )?;
             let path = if !target.exists() {
-                temporary.persist(&target).map_err(|e| e.error)?;
+                complete.persist(&target).map_err(|e| e.error)?;
                 prior.to_string()
-            } else if append_prefix(&target, temporary.as_file_mut())? {
+            } else if (!provider.mixed()
+                || old
+                    .as_ref()
+                    .is_some_and(|v| v["digest"]["value"] == digest_value))
+                && append_prefix(&target, complete.as_file_mut())?
+            {
                 prior.to_string()
             } else {
                 summary.snapshots += 1;
-                let path = format!("sessions/{agent}/{storage}-{digest}.jsonl");
+                stream_header["observedAt"] =
+                    json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+                complete = capture(&options.out, &stream_header, temporary.as_file_mut())?;
+                (digest_value, size) = digest(complete.as_file_mut())?;
+                let path = format!("sessions/{agent}/{storage}-{digest_value}.jsonl");
                 let target = options.out.join(&path);
                 if !target.exists() {
-                    temporary.persist(&target).map_err(|e| e.error)?;
+                    complete.persist(&target).map_err(|e| e.error)?;
                 }
                 path
             };
             summary.source_bytes += spool.source_bytes;
-            let entry = json!({"agent":agent,"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            let mut entry = json!({"agent":agent,"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest_value},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            if let Some(time) = stream_header.get("observedAt") {
+                entry["observedAt"] = time.clone();
+            }
+            if provider.mixed() && old.as_ref().is_some_and(|v| v["digest"] == entry["digest"]) {
+                summary.unchanged += 1;
+            }
             db.execute(
                 "INSERT OR REPLACE INTO exports VALUES(?1,?2,?3,?4)",
                 params![agent, session, stamp, serde_json::to_string(&entry)?],
@@ -294,7 +333,9 @@ pub fn export(options: &Options) -> Result<Summary> {
         comma = true;
         serde_json::to_writer(&mut output, &entry)?;
     }
-    output.write_all(b"]}\n")?;
+    output.write_all(b"]")?;
+    crate::native::manifest_facts(&db, &mut output)?;
+    output.write_all(b"}\n")?;
     output.flush()?;
     drop(output);
     if summary.sessions == 0 && options.session.is_some() {
@@ -306,6 +347,14 @@ pub fn export(options: &Options) -> Result<Summary> {
         .persist(options.out.join("bundle.json"))
         .map_err(|e| e.error)?;
     Ok(summary)
+}
+fn capture(out: &Path, header: &Value, body: &mut File) -> Result<tempfile::NamedTempFile> {
+    let mut complete = tempfile::NamedTempFile::new_in(out)?;
+    serde_json::to_writer(complete.as_file_mut(), header)?;
+    complete.write_all(b"\n")?;
+    body.rewind()?;
+    std::io::copy(body, complete.as_file_mut())?;
+    Ok(complete)
 }
 fn digest(file: &mut File) -> Result<(String, u64)> {
     file.rewind()?;

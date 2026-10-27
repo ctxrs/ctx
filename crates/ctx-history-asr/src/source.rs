@@ -68,6 +68,9 @@ pub(crate) fn visit(
     visitor: &mut dyn FnMut(Source) -> Result<()>,
     unidentified: &mut u64,
 ) -> Result<()> {
+    if input.provider.mixed() {
+        return crate::native::visit(input, limit, visitor, unidentified);
+    }
     if input.path.is_file() {
         if input.path.is_symlink() {
             return visit(
@@ -162,6 +165,9 @@ fn inspect(
         }
     }
     let (session, mut header) = match input.provider {
+        Provider::OpenClaw | Provider::NanoClaw => {
+            unreachable!("mixed sources have their own cursor")
+        }
         Provider::Claude => {
             let Some(v) = claude else {
                 *unidentified += 1;

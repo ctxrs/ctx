@@ -3,6 +3,9 @@ mod bundle;
 mod claude;
 mod codex;
 mod content;
+mod nanoclaw;
+mod native;
+mod openclaw;
 mod privacy;
 mod records;
 mod source;
@@ -32,25 +35,36 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Provider {
     Claude,
     Codex,
+    OpenClaw,
+    NanoClaw,
 }
 impl Provider {
     pub fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude-code",
             Self::Codex => "codex",
+            Self::OpenClaw => "openclaw",
+            Self::NanoClaw => "dev.nanoclaw",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
         match self {
             Self::Claude => "com.anthropic.claude-code",
             Self::Codex => "com.openai.codex",
+            Self::OpenClaw => "ai.openclaw",
+            Self::NanoClaw => "dev.nanoclaw",
         }
     }
     pub(crate) fn format(self) -> &'static str {
         match self {
             Self::Claude => "claude-code-jsonl",
             Self::Codex => "codex-rollout",
+            Self::OpenClaw => "openclaw-agent-sqlite",
+            Self::NanoClaw => "nanoclaw-session-sqlite",
         }
+    }
+    pub(crate) fn mixed(self) -> bool {
+        matches!(self, Self::OpenClaw | Self::NanoClaw)
     }
 }
 

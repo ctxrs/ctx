@@ -14,6 +14,8 @@ enum AsrProvider {
     #[value(alias = "claude-code")]
     Claude,
     Codex,
+    Openclaw,
+    Nanoclaw,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -50,7 +52,14 @@ impl ExportArgs {
         let providers = match args.provider {
             Some(AsrProvider::Claude) => vec![Provider::Claude],
             Some(AsrProvider::Codex) => vec![Provider::Codex],
-            None => vec![Provider::Claude, Provider::Codex],
+            Some(AsrProvider::Openclaw) => vec![Provider::OpenClaw],
+            Some(AsrProvider::Nanoclaw) => vec![Provider::NanoClaw],
+            None => vec![
+                Provider::Claude,
+                Provider::Codex,
+                Provider::OpenClaw,
+                Provider::NanoClaw,
+            ],
         };
         let mut inputs = Vec::new();
         for provider in providers {
@@ -64,13 +73,16 @@ impl ExportArgs {
             let capture = match provider {
                 Provider::Claude => ctx_history_core::CaptureProvider::Claude,
                 Provider::Codex => ctx_history_core::CaptureProvider::Codex,
+                Provider::OpenClaw => ctx_history_core::CaptureProvider::OpenClaw,
+                Provider::NanoClaw => ctx_history_core::CaptureProvider::NanoClaw,
             };
             let home = crate::identity::home_dir();
             let report =
                 ctx_history_cli::discovered_sources_for_provider_report(home.as_deref(), capture);
             for source in report.sources {
-                if source.source_format.contains("jsonl")
-                    && !source.source_format.contains("history_jsonl")
+                if (source.source_format.contains("jsonl")
+                    && !source.source_format.contains("history_jsonl"))
+                    || matches!(provider, Provider::OpenClaw | Provider::NanoClaw)
                 {
                     inputs.push(Input {
                         provider,

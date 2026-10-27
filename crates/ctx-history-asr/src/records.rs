@@ -11,6 +11,8 @@ pub(crate) struct Writer {
     pub provider: Provider,
     pub pos: u64,
     slot: u64,
+    identity: Option<String>,
+    native_parts: std::collections::BTreeMap<String, u64>,
     pub count: u64,
     pub last: Option<String>,
     pub gaps: u64,
@@ -26,6 +28,8 @@ impl Writer {
             provider,
             pos: 0,
             slot: 0,
+            identity: None,
+            native_parts: Default::default(),
             count: 0,
             last: None,
             gaps: 0,
@@ -43,7 +47,15 @@ impl Writer {
         self.slot = slot;
     }
     pub fn id(&self) -> String {
+        if let Some(identity) = &self.identity {
+            return format!("{identity}-{}", self.slot);
+        }
         format!("r{}", self.pos * STRIDE + self.slot)
+    }
+    pub fn native_position(&mut self, pos: u64, identity: &str) {
+        self.position(pos);
+        self.identity = Some(crate::native::stable_id(identity));
+        self.native_parts.clear();
     }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
         let seq = self
@@ -57,7 +69,29 @@ impl Writer {
                 "too many records for one native item".into(),
             ));
         }
-        let id = format!("r{seq}");
+        let id = if let Some(identity) = &self.identity {
+            let entity = [
+                "callId",
+                "inferenceId",
+                "messageId",
+                "requestId",
+                "compactionId",
+                "planId",
+            ]
+            .iter()
+            .find_map(|k| value.get(*k))
+            .unwrap_or(&Value::Null);
+            let key = json!([identity, value["type"], entity]).to_string();
+            let occurrence = self.native_parts.entry(key.clone()).or_default();
+            let id = crate::native::stable_id(&json!([key, *occurrence]).to_string());
+            if *occurrence > 0 {
+                value["idScope"] = json!("capture");
+            }
+            *occurrence += 1;
+            id
+        } else {
+            self.id()
+        };
         value["seq"] = json!(seq);
         value["id"] = json!(id);
         if let Some(ts) = source
