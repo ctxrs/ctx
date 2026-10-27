@@ -56,6 +56,7 @@ ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-client-observability = { path = "../ctx-client-observability" }
 ctx-companion-bridge = { path = "../ctx-companion-bridge" }
 ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-asr = { path = "../ctx-history-asr" }
 ctx-history-archive = { path = "../ctx-history-archive" }
 ctx-history-server = { path = "../ctx-history-server" }
 ctx-history-sharing = { path = "../ctx-history-sharing" }

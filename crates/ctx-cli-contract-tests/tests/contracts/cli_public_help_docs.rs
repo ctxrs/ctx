@@ -1300,7 +1300,6 @@ fn removed_public_commands_are_rejected() {
         .unwrap_or(&root_help);
     for removed in [
         "context",
-        "export",
         "validate",
         "materialize",
         "related",
@@ -1312,6 +1311,12 @@ fn removed_public_commands_are_rejected() {
             "removed {removed} command appeared in root help\n{root_help}"
         );
     }
+
+    ctx(&temp)
+        .args(["export", "asr", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--session").and(predicate::str::contains("--out")));
 
     for args in [
         vec!["context", "onboarding", "--format=json"],

@@ -252,7 +252,6 @@ fn read_codex_session_meta_from_reader(
     let mut line = Vec::new();
     let mut first_session_meta = None;
     let mut metadata = Vec::new();
-    let mut identities = Vec::new();
     for _ in 0..MAX_CODEX_SESSION_META_PREFIX_RECORDS {
         match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
             ProviderJsonlLineRead::Eof => break,
@@ -271,20 +270,32 @@ fn read_codex_session_meta_from_reader(
         if first_session_meta.is_none() {
             first_session_meta = Some(value.clone());
         }
-        if let Some(identity) = codex_session_meta_identity(&value) {
-            metadata.push(value);
-            identities.push(identity);
-        }
+        metadata.push(value);
     }
-    if identities.is_empty() {
-        return Ok(first_session_meta);
+    select_native_session_metadata(&metadata, expected_owner)
+        .map(|selected| selected.or(first_session_meta))
+}
+
+/// Selects native rollout metadata using the same ownership rules as history import.
+/// The caller owns bounded decoding and supplies complete native session_meta records.
+pub fn select_native_session_metadata(
+    metadata: &[Value],
+    expected_owner: Option<&str>,
+) -> Result<Option<Value>> {
+    let candidates: Vec<_> = metadata
+        .iter()
+        .filter_map(|v| codex_session_meta_identity(v).map(|id| (v, id)))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
     }
+    let identities: Vec<_> = candidates.iter().map(|(_, id)| id.clone()).collect();
     let owner = select_codex_session_meta_owner(&identities, expected_owner).ok_or_else(|| {
         CaptureError::InvalidPayload(
             "Codex catalog prefix contains conflicting session_meta owners".to_owned(),
         )
     })?;
-    Ok(metadata.get(owner).cloned())
+    Ok(Some(candidates[owner].0.clone()))
 }
 
 fn codex_session_meta_identity(value: &Value) -> Option<CodexSessionMetaIdentity> {
@@ -485,7 +496,7 @@ pub(crate) fn codex_session_id_from_path(path: &Path) -> Option<String> {
     (!stem.trim().is_empty()).then(|| stem.to_owned())
 }
 
-pub(crate) fn codex_canonical_session_id_from_path(path: &Path) -> Option<String> {
+pub fn codex_canonical_session_id_from_path(path: &Path) -> Option<String> {
     let stem = codex_session_file_stem(path)?;
     let bytes = stem.as_bytes();
     let tail = codex_uuid_suffix(bytes)?;
@@ -500,7 +511,7 @@ pub(crate) fn codex_canonical_session_id_from_path(path: &Path) -> Option<String
 
 /// A revert keeps its thread owner but has a separate provider rollout ID.
 /// Raw and compressed representations intentionally produce the same ID.
-pub(crate) fn codex_revert_rollout_id<'a>(path: &'a Path, owner: &str) -> Option<&'a str> {
+pub fn codex_revert_rollout_id<'a>(path: &'a Path, owner: &str) -> Option<&'a str> {
     let (prefix, rollout) = codex_session_file_stem(path)?.rsplit_once('_')?;
     uuid::Uuid::try_parse(owner).ok()?;
     uuid::Uuid::try_parse(rollout).ok()?;

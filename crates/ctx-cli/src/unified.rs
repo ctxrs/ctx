@@ -16,6 +16,9 @@ pub(crate) struct EngineArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum UnifiedCommand {
+    /// Export native agent sessions to portable formats.
+    #[command(subcommand)]
+    Export(crate::asr_export::ExportArgs),
     /// Index and navigate code and document relationships.
     Graph(Box<ctx_graph::GraphArgs>),
     /// Sift command output before it reaches an agent.
@@ -30,6 +33,7 @@ impl UnifiedCommand {
 
     pub(crate) fn run(self, data_root: Option<PathBuf>) -> i32 {
         let args = match self {
+            Self::Export(args) => return args.run(),
             Self::Graph(args) => {
                 return crate::engine_telemetry::observe_graph(data_root, |observer| {
                     ctx_graph::run_parsed_exit_observed(*args, observer)

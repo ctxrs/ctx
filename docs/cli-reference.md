@@ -10,6 +10,11 @@ Optional portable backups and hosted history use `ctx archive`, `ctx server`
 and `ctx remote`. See [Back up and share history](hosted-history.md) for setup,
 permissions, source selection and recovery.
 
+`ctx export asr --all --out ./asr` converts native Claude Code and Codex
+histories into an Agent Session Record bundle without opening the search store.
+See [ASR export](asr-export.md) for session selection, incremental export and
+converter development.
+
 ## Global Options
 
 ```bash

@@ -1,0 +1,24 @@
+[package]
+name = "ctx-history-asr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Streaming native-history conversion to Agent Session Record bundles"
+
+[dependencies]
+ctx-history-provider-codex = { path = "../ctx-history-provider-codex" }
+ctx-history-capture-model = { path = "../ctx-history-capture-model" }
+ctx-history-source-io = { path = "../ctx-history-source-io" }
+chrono.workspace = true
+fs2.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+zstd.workspace = true

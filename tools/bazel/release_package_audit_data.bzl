@@ -36,6 +36,7 @@ RELEASE_PACKAGE_AUDIT_PACKAGE_DATA = [
     "//crates/ctx-history-providers-sqlite-selected:cargo_package_data",
     "//crates/ctx-history-providers-sqlite-logical:cargo_package_data",
     "//crates/ctx-history-archive:cargo_package_data",
+    "//crates/ctx-history-asr:cargo_package_data",
     "//crates/ctx-history-server:cargo_package_data",
     "//crates/ctx-history-sharing:cargo_package_data",
     "//crates/ctx-history-core:cargo_package_data",

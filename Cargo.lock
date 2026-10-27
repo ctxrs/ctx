@@ -905,6 +905,7 @@ dependencies = [
  "ctx-graph",
  "ctx-graph-core",
  "ctx-history-archive",
+ "ctx-history-asr",
  "ctx-history-capture",
  "ctx-history-cli",
  "ctx-history-core",
@@ -1498,6 +1499,24 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "ctx-history-asr"
+version = "2.3.0"
+dependencies = [
+ "chrono",
+ "ctx-history-capture-model",
+ "ctx-history-provider-codex",
+ "ctx-history-source-io",
+ "fs2",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zstd 0.13.3",
 ]
 
 [[package]]

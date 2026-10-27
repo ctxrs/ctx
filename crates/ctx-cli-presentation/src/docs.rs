@@ -111,6 +111,15 @@ const MAN_PAGE_COMPATIBILITY_ALIASES: &[(&str, &str)] = &[
 
 const TOPICS: &[DocTopic] = &[
     DocTopic {
+        id: "asr-export",
+        title: "ASR Export",
+        audience: "human-agent",
+        summary: "Export native Claude Code and Codex sessions to Agent Session Record bundles.",
+        tags: &["export", "asr", "claude", "codex"],
+        source_path: "docs/asr-export.md",
+        body: include_str!("../../../docs/asr-export.md"),
+    },
+    DocTopic {
         id: "hosted-history",
         title: "Back Up and Share History",
         audience: "human-agent",

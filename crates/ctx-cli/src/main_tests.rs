@@ -164,7 +164,7 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
     // command nodes without changing the existing local paths.
     assert_eq!(
         paths.len(),
-        159,
+        161,
         "unexpected public CLI grammar depth: {paths:?}"
     );
 

@@ -92,7 +92,7 @@ scan_docs() {
   fi
 }
 
-unsupported_surface_pattern='dashboard|shim|shims|ctx pr([^[:alnum:]_]|$)|ctx publish|ctx evidence|ctx skill (install|status)([^[:alnum:]_]|$)|ctx update|\bADE\b|automatic summar|\bMVP\b|recover prior decisions|ctx remembers everything|privacy-first|ctx context|ctx export|ctx validate|normalized-only|normalized only|normalized_import_only|normalized provider JSONL|CTX_PROVIDER_NORMALIZED_IMPORT_DEV|[W]ork Recorder|[w]ork recorder|\bwork-[r]ecord\b'
+unsupported_surface_pattern='dashboard|shim|shims|ctx pr([^[:alnum:]_]|$)|ctx publish|ctx evidence|ctx skill (install|status)([^[:alnum:]_]|$)|ctx update|\bADE\b|automatic summar|\bMVP\b|recover prior decisions|ctx remembers everything|privacy-first|ctx context|ctx validate|normalized-only|normalized only|normalized_import_only|normalized provider JSONL|CTX_PROVIDER_NORMALIZED_IMPORT_DEV|[W]ork Recorder|[w]ork recorder|\bwork-[r]ecord\b'
 private_path_pattern='/home/[^[:space:]/]+/(code|Documents|Desktop)|/Users/[^[:space:]/]+/(code|Documents|Desktop)'
 private_path_pattern+='|multi[-_]repo[-_]workspace'
 private_path_pattern+='|(conformance|internal)[^[:space:]/]*/[^[:space:]/]*(proof|evidence)[-_](packet|packets|bundle)'
@@ -124,6 +124,8 @@ from scripts.check_mcp_tool_call_attribution_capabilities_lib import public_boun
 
 for name in sys.argv[1:]:
     text = Path(name).read_text(encoding="utf-8")
+    if re.search(r"\bctx export\b(?![ \t]+asr\b)", text, re.IGNORECASE):
+        raise SystemExit(f"{name}: only ctx export asr is supported")
     # The hosted uninstaller is supported; there is no native uninstall command.
     # Permit that explicit distinction while rejecting runnable recommendations.
     command_text = re.sub(r"There is no\s+native\s+`ctx uninstall`\s+command\.", "", text)

@@ -31,6 +31,7 @@ macro_rules! eprintln {
 mod analytics;
 mod analytics_delivery;
 mod analytics_outbox;
+mod asr_export;
 use ctx_client_observability::analytics::state as analytics_state;
 mod analytics_summary;
 mod cli;
