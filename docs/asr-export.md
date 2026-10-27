@@ -1,16 +1,17 @@
 # ASR export
 
-`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Claude Code and Codex are the first supported converters.
+`ctx export asr` converts native history into an [Agent Session Record](https://agentsessionrecord.org) 0.1 archive bundle. Converters are available for Claude Code, Codex, Crush, Goose, Lingma and Warp.
 
 ```sh
 ctx export asr --all --out ./asr
 ctx export asr --all --provider codex --out ./codex-asr
 ctx export asr --session NATIVE_SESSION_ID --provider claude --out ./session-asr
 ctx export asr --all --provider codex --path ./rollouts --out ./asr
+ctx export asr --all --provider goose --path ./sessions.db --namespace laptop-profile --out ./goose-asr
 ```
 
 Automatic input selection uses ctx's existing provider-root discovery. `--path`
-selects a native transcript or directory and requires `--provider`. Session IDs
+selects a native transcript, SQLite database or directory and requires `--provider`. Session IDs
 are native IDs, not ctx citation IDs; Claude subagents use their `agentId`.
 Export reads provider files without importing them into the search store.
 The JSON result reports sessions, unchanged sessions, records, bytes, gaps,
@@ -42,7 +43,42 @@ absence, capture states and declared losses distinguish unavailable facts from
 recorded empty values. The declared vendor loss categories cover over-limit
 native lines, metadata kept outside the selected transcripts, and native variants
 retained as vendor records without a standard semantic projection. Export does
-not read the live UI databases, global scheduler definitions or deleted backups.
+not read deleted backups or global scheduler definitions.
+
+## SQLite captures
+
+Crush, Goose, Lingma and Warp use read-only SQLite transactions and a bounded
+row cursor. `--max-record-bytes` also limits hydrated rows; larger rows produce
+a gap. Database and WAL changes trigger another read. Rewritten or deleted rows
+produce a new capture, preserving the previous stream. Unique native identities
+keep their record IDs; positional identities have `idScope: capture`. Sequence
+numbers describe serialization within one capture. Unchanged captures retain
+both their bytes and `observedAt`.
+
+Goose's session counters require a caller-supplied `--namespace` identifying the
+installation or profile. Reuse it when moving the database or updating an export.
+Export colliding session IDs from different installations to separate bundles.
+Current settings, titles, read-file state and aggregate usage appear at the tail
+of each capture. Side logs retain separate table order; timestamps do not join
+or interleave independent stores.
+
+Crush exports message/tool parts, summary flags and file-version checkpoints;
+consecutive file versions describe net changes without inferred tool attribution.
+Goose exports messages, tools, approvals, forms and per-call usage. When a usage
+ledger exists, message-level usage remains native metadata to avoid counting the
+same call twice without a native join. Session-owned thread mirrors stay vendor
+records. Unassigned Goose thread state and Warp queries are manifest context
+blobs; selecting a session still includes these database-scoped facts, without
+assigning them to that session.
+
+Lingma's local reader contract supplies prompts and partial answer summaries;
+it does not establish full assistant answers. Warp decodes cached protobuf task
+blobs with `authority: remote_cache`; raw bytes remain available, and unsupported
+variants stay vendor records. Server-rendered tool input is not reconstructed.
+Native JSON metadata uses documented provider `rowJson`/`partJson` keys, or
+`rowBlob`/`partBlob` for values above 64 KiB. Unsafe integers stay JSON text or
+blob content. Authored tests and existing fixture validation do not establish
+complete producer-version qualification.
 
 ## Adding a converter
 

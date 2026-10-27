@@ -14,6 +14,10 @@ enum AsrProvider {
     #[value(alias = "claude-code")]
     Claude,
     Codex,
+    Crush,
+    Goose,
+    Lingma,
+    Warp,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -28,6 +32,9 @@ pub(crate) struct AsrArgs {
     /// Read this native transcript or directory instead of automatic discovery.
     #[arg(long, requires = "provider")]
     path: Option<PathBuf>,
+    /// Stable Goose installation/profile identifier, reused across exports.
+    #[arg(long)]
+    namespace: Option<String>,
     /// Destination archive directory, including bundle.json and session streams.
     #[arg(long)]
     out: PathBuf,
@@ -50,7 +57,18 @@ impl ExportArgs {
         let providers = match args.provider {
             Some(AsrProvider::Claude) => vec![Provider::Claude],
             Some(AsrProvider::Codex) => vec![Provider::Codex],
-            None => vec![Provider::Claude, Provider::Codex],
+            Some(AsrProvider::Crush) => vec![Provider::Crush],
+            Some(AsrProvider::Goose) => vec![Provider::Goose],
+            Some(AsrProvider::Lingma) => vec![Provider::Lingma],
+            Some(AsrProvider::Warp) => vec![Provider::Warp],
+            None => vec![
+                Provider::Claude,
+                Provider::Codex,
+                Provider::Crush,
+                Provider::Goose,
+                Provider::Lingma,
+                Provider::Warp,
+            ],
         };
         let mut inputs = Vec::new();
         for provider in providers {
@@ -64,13 +82,21 @@ impl ExportArgs {
             let capture = match provider {
                 Provider::Claude => ctx_history_core::CaptureProvider::Claude,
                 Provider::Codex => ctx_history_core::CaptureProvider::Codex,
+                Provider::Crush => ctx_history_core::CaptureProvider::Crush,
+                Provider::Goose => ctx_history_core::CaptureProvider::Goose,
+                Provider::Lingma => ctx_history_core::CaptureProvider::Lingma,
+                Provider::Warp => ctx_history_core::CaptureProvider::Warp,
             };
             let home = crate::identity::home_dir();
             let report =
                 ctx_history_cli::discovered_sources_for_provider_report(home.as_deref(), capture);
             for source in report.sources {
-                if source.source_format.contains("jsonl")
-                    && !source.source_format.contains("history_jsonl")
+                if (source.source_format.contains("jsonl")
+                    && !source.source_format.contains("history_jsonl"))
+                    || matches!(
+                        source.source_format,
+                        "crush_sqlite" | "goose_sessions_sqlite" | "lingma_sqlite" | "warp_sqlite"
+                    )
                 {
                     inputs.push(Input {
                         provider,
@@ -81,6 +107,7 @@ impl ExportArgs {
         }
         let mut options = Options::new(inputs, args.out);
         options.session = args.session;
+        options.namespace = args.namespace;
         options.max_record_bytes = args.max_record_bytes;
         let result = ctx_history_asr::export(&options)?;
         crate::output::write_stdout_line(format_args!("{}", serde_json::to_string(&result)?));

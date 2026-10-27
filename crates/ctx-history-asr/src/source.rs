@@ -68,6 +68,9 @@ pub(crate) fn visit(
     visitor: &mut dyn FnMut(Source) -> Result<()>,
     unidentified: &mut u64,
 ) -> Result<()> {
+    if input.provider.sqlite() {
+        return crate::sqlite::visit(input, limit, visitor, unidentified);
+    }
     if input.path.is_file() {
         if input.path.is_symlink() {
             return visit(
@@ -201,6 +204,7 @@ fn inspect(
             };
             (id.to_owned(), v.clone())
         }
+        _ => return Err(Error::Invalid("SQLite source reached JSONL reader".into())),
     };
     if input.provider == Provider::Claude {
         let sidecar = input.path.with_extension("meta.json");

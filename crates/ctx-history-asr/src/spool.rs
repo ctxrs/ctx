@@ -163,6 +163,14 @@ impl Spool {
         self.bytes.flush()?;
         Ok(())
     }
+    /// Adds one bounded native SQLite row in capture-local serialization order.
+    pub fn push_sqlite(&mut self, pos: u64, value: &Value) -> Result<()> {
+        let off = self.bytes.stream_position()?;
+        let serialized = serde_json::to_vec(value)?;
+        self.bytes.write_all(&serialized)?;
+        self.db.execute("INSERT INTO rows(pos,off,len,kind,native_id,segment,observed) VALUES(?1,?2,?3,?4,?5,'sqlite',?1)", params![pos,off,serialized.len(),value["_table"].as_str(),value["_key"].as_str()])?;
+        Ok(())
+    }
     pub fn finish(&self) -> Result<()> {
         self.db.execute_batch("COMMIT;")?;
         Ok(())

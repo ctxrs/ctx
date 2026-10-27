@@ -1,7 +1,7 @@
 use crate::{CaptureError, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum WarpMessageArm {
+pub enum WarpMessageArm {
     UserQuery,
     AgentOutput,
     ToolCall,
@@ -14,7 +14,7 @@ pub(super) enum WarpMessageArm {
     ReceivedMessages,
 }
 
-pub(super) fn warp_message_arm(field: u32) -> Option<WarpMessageArm> {
+pub fn warp_message_arm(field: u32) -> Option<WarpMessageArm> {
     match field {
         2 => Some(WarpMessageArm::UserQuery),
         3 => Some(WarpMessageArm::AgentOutput),
@@ -30,7 +30,7 @@ pub(super) fn warp_message_arm(field: u32) -> Option<WarpMessageArm> {
     }
 }
 
-pub(super) fn warp_tool_name(field: u32) -> &'static str {
+pub fn warp_tool_name(field: u32) -> &'static str {
     match field {
         2 => "run_shell_command",
         3 => "search_codebase",
@@ -61,11 +61,11 @@ pub(super) fn warp_tool_name(field: u32) -> &'static str {
     }
 }
 
-pub(super) fn is_warp_tool_arm(field: u32) -> bool {
+pub fn is_warp_tool_arm(field: u32) -> bool {
     matches!(field, 2..=28 | 30..=32 | 34..=38)
 }
 
-pub(super) fn warp_tool_result_name(field: u32) -> &'static str {
+pub fn warp_tool_result_name(field: u32) -> &'static str {
     match field {
         2 => "run_shell_command",
         3 => "search_codebase",
@@ -108,12 +108,12 @@ pub(super) fn warp_tool_result_name(field: u32) -> &'static str {
     }
 }
 
-pub(super) fn is_warp_tool_result_arm(field: u32) -> bool {
+pub fn is_warp_tool_result_arm(field: u32) -> bool {
     matches!(field, 2..=10 | 14..=32 | 34..=36 | 38..=42)
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum WarpWireValue<'a> {
+pub enum WarpWireValue<'a> {
     Varint(u64),
     Fixed64(u64),
     LengthDelimited(&'a [u8]),
@@ -121,22 +121,22 @@ pub(super) enum WarpWireValue<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct WarpWireField<'a> {
-    pub(super) number: u32,
-    pub(super) value: WarpWireValue<'a>,
+pub struct WarpWireField<'a> {
+    pub number: u32,
+    pub value: WarpWireValue<'a>,
 }
 
-pub(super) struct WarpWireCursor<'a> {
+pub struct WarpWireCursor<'a> {
     data: &'a [u8],
     position: usize,
 }
 
 impl<'a> WarpWireCursor<'a> {
-    pub(super) fn new(data: &'a [u8]) -> Self {
+    pub fn new(data: &'a [u8]) -> Self {
         Self { data, position: 0 }
     }
 
-    pub(super) fn next(&mut self) -> Result<Option<WarpWireField<'a>>> {
+    pub fn next_field(&mut self) -> Result<Option<WarpWireField<'a>>> {
         if self.position == self.data.len() {
             return Ok(None);
         }
@@ -196,7 +196,7 @@ impl<'a> WarpWireCursor<'a> {
     }
 }
 
-pub(super) fn warp_wire_text(data: &[u8]) -> Result<&str> {
+pub fn warp_wire_text(data: &[u8]) -> Result<&str> {
     std::str::from_utf8(data).map_err(|error| {
         CaptureError::InvalidPayload(format!("invalid UTF-8 in Warp protobuf: {error}"))
     })

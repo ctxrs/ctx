@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
-    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
 const REVISION: &str = "ctx-asr-6";
@@ -45,8 +45,9 @@ pub fn export(options: &Options) -> Result<Summary> {
         CREATE TABLE IF NOT EXISTS exports(agent TEXT, session TEXT, stamp TEXT, entry TEXT, PRIMARY KEY(agent,session));
         CREATE TABLE IF NOT EXISTS positions(agent TEXT,session TEXT,segment TEXT,local TEXT,pos INTEGER,PRIMARY KEY(agent,session,segment,local));
         CREATE INDEX IF NOT EXISTS observation_order ON positions(agent,session,pos);
-        CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,path));
+        CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,session,path));
         CREATE INDEX source_sessions ON sources(agent,session,path);")?;
+    crate::sqlite::namespace(&db, options.namespace.as_deref())?;
     let mut summary = Summary::default();
     for input in &options.inputs {
         source::visit(
@@ -54,6 +55,9 @@ pub fn export(options: &Options) -> Result<Summary> {
             options.max_record_bytes,
             &mut |s| {
                 if options.session.as_deref().is_none_or(|id| id == s.session) {
+                    if s.provider.sqlite() {
+                        crate::sqlite::check_source(&db, &s, options.namespace.as_deref())?;
+                    }
                     db.execute(
                         "INSERT OR IGNORE INTO sources VALUES(?1,?2,?3,?4,?5,?6)",
                         params![
@@ -82,13 +86,16 @@ pub fn export(options: &Options) -> Result<Summary> {
             break;
         };
         previous = (agent.clone(), session.clone());
-        let provider = if agent == "codex" {
-            Provider::Codex
-        } else {
-            Provider::Claude
-        };
+        let provider = Provider::from_agent(&agent)
+            .ok_or_else(|| Error::Invalid("unknown ASR provider".into()))?;
         let mut hash = Sha256::new();
         hash.update(REVISION);
+        if provider.sqlite() {
+            hash.update(b"sqlite-batch6-2");
+        }
+        if provider == Provider::Goose {
+            hash.update(options.namespace.as_deref().unwrap_or_default());
+        }
         hash.update(env!("CARGO_PKG_VERSION"));
         hash.update(options.max_record_bytes.to_le_bytes());
         let mut stmt = db.prepare(
@@ -153,6 +160,11 @@ pub fn export(options: &Options) -> Result<Summary> {
                 let segment: String = row.get(2)?;
                 let header: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
                 spool.save(&format!("segment:{segment}"), &header)?;
+                if provider.sqlite() {
+                    crate::sqlite::ingest(&mut spool, Path::new(&path), provider, &session)?;
+                    source_header = spool.entity("sqlite:header")?;
+                    continue;
+                }
                 spool.ingest(Path::new(&path), provider, &segment, &mut |local| {
                     let old: Option<u64> = db.query_row("SELECT pos FROM positions WHERE agent=?1 AND session=?2 AND segment=?3 AND local=?4",params![agent,session,segment,local],|r|r.get(0)).optional()?;
                     if let Some(pos)=old { return Ok(pos); }
@@ -187,6 +199,20 @@ pub fn export(options: &Options) -> Result<Summary> {
             let mut writer =
                 Writer::new(temporary.reopen()?, provider, session_ref(provider, root));
             let mut stream_header = header::make(provider, &session, &source_header);
+            if provider.sqlite() {
+                crate::sqlite::capture_header(
+                    &mut stream_header,
+                    provider,
+                    &source_header,
+                    options.namespace.as_deref(),
+                );
+                if let Some(observed) = old
+                    .as_ref()
+                    .and_then(|v| v.pointer("/_meta/rs.ctx~1observedAt"))
+                {
+                    stream_header["observedAt"] = observed.clone();
+                }
+            }
             let copied_boundary =
                 header::copied_boundary(&spool, provider, &session, &source_header)?;
             let mut copied_last = None;
@@ -214,6 +240,7 @@ pub fn export(options: &Options) -> Result<Summary> {
                         claude::convert(&mut spool, &mut writer, pos, &value, cwd, subagent)?
                     }
                     Provider::Codex => codex::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    _ => crate::sqlite::convert(&mut spool, &mut writer, pos, &value)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -244,7 +271,31 @@ pub fn export(options: &Options) -> Result<Summary> {
             temporary.as_file_mut().rewind()?;
             std::io::copy(temporary.as_file_mut(), complete.as_file_mut())?;
             temporary = complete;
-            let (digest, size) = digest(temporary.as_file_mut())?;
+            let (mut digest, mut size) = digest(temporary.as_file_mut())?;
+            if provider.sqlite() && old.is_some() {
+                if old
+                    .as_ref()
+                    .and_then(|v| v.pointer("/digest/value"))
+                    .and_then(Value::as_str)
+                    == Some(digest.as_str())
+                {
+                    summary.unchanged += 1;
+                } else {
+                    stream_header["observedAt"] = json!(
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+                    );
+                    let mut replacement = tempfile::NamedTempFile::new_in(&options.out)?;
+                    serde_json::to_writer(replacement.as_file_mut(), &stream_header)?;
+                    replacement.write_all(b"\n")?;
+                    temporary.as_file_mut().rewind()?;
+                    let mut reader = BufReader::new(temporary.as_file_mut());
+                    let mut first = Vec::new();
+                    reader.read_until(b'\n', &mut first)?;
+                    std::io::copy(&mut reader, replacement.as_file_mut())?;
+                    temporary = replacement;
+                    (digest, size) = self::digest(temporary.as_file_mut())?;
+                }
+            }
             let storage = format!(
                 "{:x}",
                 Sha256::digest(session_ref(provider, &session).as_bytes())
@@ -275,7 +326,13 @@ pub fn export(options: &Options) -> Result<Summary> {
                 path
             };
             summary.source_bytes += spool.source_bytes;
-            let entry = json!({"agent":agent,"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            let mut entry = json!({"agent":agent,"sessionId":session,"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
+            if provider.sqlite() {
+                entry["_meta"]["rs.ctx/observedAt"] = stream_header["observedAt"].clone();
+            }
+            if provider == Provider::Goose {
+                entry["namespace"] = json!(options.namespace);
+            }
             db.execute(
                 "INSERT OR REPLACE INTO exports VALUES(?1,?2,?3,?4)",
                 params![agent, session, stamp, serde_json::to_string(&entry)?],
@@ -294,7 +351,13 @@ pub fn export(options: &Options) -> Result<Summary> {
         comma = true;
         serde_json::to_writer(&mut output, &entry)?;
     }
-    output.write_all(b"]}\n")?;
+    output.write_all(b"]")?;
+    let context = crate::sqlite::manifest(&db, options, &mut summary)?;
+    if context.as_object().is_some_and(|v| !v.is_empty()) {
+        output.write_all(b",\"_meta\":")?;
+        serde_json::to_writer(&mut output, &context)?;
+    }
+    output.write_all(b"}\n")?;
     output.flush()?;
     drop(output);
     if summary.sessions == 0 && options.session.is_some() {

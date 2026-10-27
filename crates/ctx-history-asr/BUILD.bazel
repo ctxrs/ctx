@@ -11,6 +11,7 @@ filegroup(
 )
 
 DEPS = [
+    "//crates/ctx-history-providers-sqlite-selected:lib",
     "//crates/ctx-history-provider-codex:lib",
     "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-source-io:lib",

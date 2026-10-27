@@ -13,7 +13,7 @@ pub(super) fn decode_protobuf_struct_map(data: &[u8], depth: usize) -> Result<Ma
     ensure_value_depth(depth)?;
     let mut cursor = WarpWireCursor::new(data);
     let mut object = Map::new();
-    while let Some(field) = cursor.next()? {
+    while let Some(field) = cursor.next_field()? {
         let (1, WarpWireValue::LengthDelimited(entry)) = (field.number, field.value) else {
             continue;
         };
@@ -28,7 +28,7 @@ fn decode_protobuf_struct_entry(data: &[u8], depth: usize) -> Result<(String, Va
     let mut cursor = WarpWireCursor::new(data);
     let mut key = WarpValidatedString::default();
     let mut value = None::<WarpProtobufValueKind>;
-    while let Some(field) = cursor.next()? {
+    while let Some(field) = cursor.next_field()? {
         match (field.number, field.value) {
             (1, WarpWireValue::LengthDelimited(raw)) => key.observe(raw),
             (2, WarpWireValue::LengthDelimited(raw)) => {
@@ -63,7 +63,7 @@ fn decode_protobuf_value_kind(data: &[u8], depth: usize) -> Result<Option<WarpPr
     ensure_value_depth(depth)?;
     let mut cursor = WarpWireCursor::new(data);
     let mut selected = None;
-    while let Some(field) = cursor.next()? {
+    while let Some(field) = cursor.next_field()? {
         match (field.number, field.value) {
             (1, WarpWireValue::Varint(_)) => selected = Some(WarpProtobufValueKind::Null),
             (2, WarpWireValue::Fixed64(bits)) => {
@@ -144,7 +144,7 @@ fn decode_protobuf_list(data: &[u8], depth: usize) -> Result<Vec<Value>> {
     ensure_value_depth(depth)?;
     let mut cursor = WarpWireCursor::new(data);
     let mut values = Vec::new();
-    while let Some(field) = cursor.next()? {
+    while let Some(field) = cursor.next_field()? {
         if let (1, WarpWireValue::LengthDelimited(raw)) = (field.number, field.value) {
             values.push(decode_protobuf_value(raw, depth + 1)?);
         }
@@ -166,7 +166,7 @@ pub(super) fn decode_timestamp_occurrences(payloads: &[&[u8]]) -> Result<Option<
     let mut nanos = 0_u32;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::Varint(value)) => seconds = Some(value as i64),
                 (2, WarpWireValue::Varint(value)) => {
@@ -227,7 +227,7 @@ pub(super) fn decode_received_messages_occurrences(payloads: &[Vec<u8>]) -> Resu
     let mut parts = Vec::new();
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             let (1, WarpWireValue::LengthDelimited(received)) = (field.number, field.value) else {
                 continue;
             };
@@ -249,7 +249,7 @@ fn select_nested_oneof_occurrences(payloads: &[Vec<u8>]) -> Result<Option<WarpSe
     let mut selected = None;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             if let WarpWireValue::LengthDelimited(value) = field.value {
                 validate_message_payload(value)?;
                 select_message_oneof(&mut selected, field.number, value);
@@ -266,7 +266,7 @@ pub(super) fn decode_last_nested_text_occurrences(
     let mut selected = WarpValidatedString::default();
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             if let (number, WarpWireValue::LengthDelimited(value)) = (field.number, field.value) {
                 if number == desired_field {
                     selected.observe(value);
@@ -285,7 +285,7 @@ pub(super) fn validate_string_fields_occurrences(
     let mut valid = WarpValidatedString::default();
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             if let (number, WarpWireValue::LengthDelimited(value)) = (field.number, field.value) {
                 if fields.contains(&number) {
                     valid.observe(value);
@@ -309,7 +309,7 @@ pub(super) fn last_length_delimited_value(
 ) -> Result<Option<&[u8]>> {
     let mut cursor = WarpWireCursor::new(data);
     let mut selected = None;
-    while let Some(field) = cursor.next()? {
+    while let Some(field) = cursor.next_field()? {
         if let (number, WarpWireValue::LengthDelimited(value)) = (field.number, field.value) {
             if number == desired_field {
                 selected = Some(value);
@@ -326,7 +326,7 @@ pub(super) fn last_length_delimited_value_occurrences(
     let mut selected = None;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             if let (number, WarpWireValue::LengthDelimited(value)) = (field.number, field.value) {
                 if number == desired_field {
                     selected = Some(value);
@@ -343,7 +343,7 @@ pub(super) fn last_length_delimited_field_occurrences(
     let mut selected = None;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             if let WarpWireValue::LengthDelimited(value) = field.value {
                 selected = Some((field.number, value));
             }

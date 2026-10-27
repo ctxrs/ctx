@@ -11,6 +11,9 @@ pub(crate) struct Writer {
     pub provider: Provider,
     pub pos: u64,
     slot: u64,
+    snapshot_key: Option<String>,
+    capture_scoped: bool,
+    entity_key: Option<String>,
     pub count: u64,
     pub last: Option<String>,
     pub gaps: u64,
@@ -26,6 +29,9 @@ impl Writer {
             provider,
             pos: 0,
             slot: 0,
+            snapshot_key: None,
+            capture_scoped: false,
+            entity_key: None,
             count: 0,
             last: None,
             gaps: 0,
@@ -38,12 +44,35 @@ impl Writer {
     pub fn position(&mut self, pos: u64) {
         self.pos = pos;
         self.slot = 0;
+        self.entity_key = None;
+    }
+    pub fn snapshot_position(&mut self, pos: u64, key: &str, capture_scoped: bool) {
+        use sha2::{Digest, Sha256};
+        self.position(pos);
+        self.snapshot_key = Some(format!("s{:x}", Sha256::digest(key.as_bytes())));
+        self.capture_scoped = capture_scoped;
+    }
+    pub fn keyed(&mut self, key: &str) {
+        use sha2::{Digest, Sha256};
+        if let Some(row) = &self.snapshot_key {
+            self.entity_key = Some(format!(
+                "e{:x}",
+                Sha256::digest(format!("{row}:{key}").as_bytes())
+            ));
+        }
     }
     pub fn slot(&mut self, slot: u64) {
+        self.entity_key = None;
         self.slot = slot;
     }
     pub fn id(&self) -> String {
-        format!("r{}", self.pos * STRIDE + self.slot)
+        if let Some(key) = &self.entity_key {
+            return key.clone();
+        }
+        match &self.snapshot_key {
+            Some(key) => format!("{key}-{}", self.slot),
+            None => format!("r{}", self.pos * STRIDE + self.slot),
+        }
     }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
         let seq = self
@@ -57,7 +86,13 @@ impl Writer {
                 "too many records for one native item".into(),
             ));
         }
-        let id = format!("r{seq}");
+        let id = self.id();
+        if self.snapshot_key.is_some() {
+            value["assembly"] = json!({"mode":"snapshot"});
+            if self.capture_scoped || (self.slot >= 100 && self.entity_key.is_none()) {
+                value["idScope"] = json!("capture");
+            }
+        }
         value["seq"] = json!(seq);
         value["id"] = json!(id);
         if let Some(ts) = source
@@ -106,6 +141,7 @@ impl Writer {
         self.count += 1;
         self.last = Some(id.clone());
         self.slot += 1;
+        self.entity_key = None;
         Ok(id)
     }
     pub fn revise(

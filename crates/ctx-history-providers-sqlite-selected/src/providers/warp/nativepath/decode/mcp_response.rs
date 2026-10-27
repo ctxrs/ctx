@@ -28,7 +28,7 @@ pub(super) fn decode_mcp_tool_result_response(
     let mut payload_complete = true;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (number @ (1 | 2), WarpWireValue::LengthDelimited(value)) => {
                     validate_message_payload(value)?;
@@ -83,7 +83,7 @@ fn decode_success_payload(payloads: &[Vec<u8>]) -> Result<ActivityJsonCapture> {
     let mut complete = true;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::LengthDelimited(result)) => {
                     let (value, value_complete) = decode_result_payload(result)?;
@@ -110,7 +110,7 @@ fn decode_error_payload(payloads: &[Vec<u8>]) -> Result<ActivityJsonCapture> {
     let mut complete = true;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::LengthDelimited(value)) => message.observe(value),
                 _ => complete = false,
@@ -133,7 +133,7 @@ fn decode_result_payload(data: &[u8]) -> Result<(Option<Value>, bool)> {
     let mut selected = None;
     let mut complete = true;
     let mut cursor = WarpWireCursor::new(data);
-    while let Some(field) = cursor.next()? {
+    while let Some(field) = cursor.next_field()? {
         match (field.number, field.value) {
             (number @ (1..=3), WarpWireValue::LengthDelimited(value)) => {
                 validate_message_payload(value)?;
@@ -172,7 +172,7 @@ fn decode_text_payload(payloads: &[Vec<u8>]) -> Result<(Value, bool)> {
     let mut complete = true;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::LengthDelimited(value)) => text.observe(value),
                 _ => complete = false,
@@ -191,7 +191,7 @@ fn decode_resource_payload(payloads: &[Vec<u8>]) -> Result<(Option<Value>, bool)
     let mut complete = true;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::LengthDelimited(value)) => uri.observe(value),
                 (number @ (2 | 3), WarpWireValue::LengthDelimited(value)) => {
@@ -236,7 +236,7 @@ fn decode_resource_text_payload(payloads: &[Vec<u8>]) -> Result<(Value, bool)> {
     let mut complete = true;
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::LengthDelimited(value)) => content.observe(value),
                 (2, WarpWireValue::LengthDelimited(value)) => mime_type.observe(value),
@@ -260,7 +260,7 @@ fn decode_mcp_success_text_occurrences(payloads: &[Vec<u8>]) -> Result<Option<St
     let mut parts = Vec::new();
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             let (1, WarpWireValue::LengthDelimited(result)) = (field.number, field.value) else {
                 continue;
             };
@@ -277,7 +277,7 @@ fn decode_mcp_success_text_occurrences(payloads: &[Vec<u8>]) -> Result<Option<St
 fn decode_mcp_result_content_text(data: &[u8]) -> Result<Option<String>> {
     let mut cursor = WarpWireCursor::new(data);
     let mut selected = None;
-    while let Some(field) = cursor.next()? {
+    while let Some(field) = cursor.next_field()? {
         if let (number @ (1..=3), WarpWireValue::LengthDelimited(value)) =
             (field.number, field.value)
         {
@@ -303,7 +303,7 @@ fn decode_mcp_resource_text_occurrences(payloads: &[Vec<u8>]) -> Result<Option<S
     let mut uri = WarpValidatedString::default();
     for payload in payloads {
         let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
+        while let Some(field) = cursor.next_field()? {
             match (field.number, field.value) {
                 (1, WarpWireValue::LengthDelimited(value)) => uri.observe(value),
                 (number @ (2 | 3), WarpWireValue::LengthDelimited(value)) => {
