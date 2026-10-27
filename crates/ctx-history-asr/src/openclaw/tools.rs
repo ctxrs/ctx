@@ -127,7 +127,7 @@ pub(super) fn result(s: &Spool, h: &Value, m: &Value, nested: bool) -> Result<Ve
     let mut r = json!({"type":"tool_result","linkage":if ambiguous{"ambiguous"}else if id.is_some(){"exact"}else{"none"},"status":status});
     if let Some(id) = id {
         if ambiguous {
-            meta(&mut r, P, "toolCallId", &json!(id));
+            r["nativeCallId"] = json!(id);
         } else {
             r["callId"] = json!(id);
         }

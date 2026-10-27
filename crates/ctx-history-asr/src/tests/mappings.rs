@@ -306,10 +306,7 @@ fn reused_native_call_ids_are_not_paired_by_order() {
         );
         let result = records.iter().find(|r| r["type"] == "tool_result").unwrap();
         assert!(result.get("callId").is_none());
-        assert_eq!(
-            result["_meta"][format!("{}/unpairedCallId", provider.domain())],
-            "reused"
-        );
+        assert_eq!(result["nativeCallId"], "reused");
         assert_eq!(result["linkage"], "ambiguous");
         assert!(result.get("exec").is_none());
     }

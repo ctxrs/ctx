@@ -144,10 +144,10 @@ fn gemini_legacy_snapshot_migration_relocation_and_bounds() {
     assert!(before
         .iter()
         .skip(1)
-        .all(|r| r["assembly"]["mode"] == "snapshot"));
+        .all(|r| r["assembly"]["mode"] != "snapshot"));
     assert_eq!(
         before.iter().find(|r| r["messageId"] == "u").unwrap()["assembly"]["mode"],
-        "snapshot"
+        Value::Null
     );
     let new = d.path().join("moved");
     std::fs::create_dir(&new).unwrap();
@@ -358,7 +358,7 @@ fn antigravity_directory_owns_identity_and_full_transcript_wins() {
     assert!(r
         .iter()
         .skip(1)
-        .all(|r| r["assembly"]["mode"] == "snapshot"));
+        .all(|r| r["assembly"]["mode"] != "snapshot"));
     assert!(r[0].get("lineage").is_none());
     assert_eq!(r.iter().filter(|v| v["type"] == "message").count(), 1);
     assert_eq!(

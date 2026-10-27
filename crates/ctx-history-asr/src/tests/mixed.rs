@@ -89,6 +89,7 @@ fn openclaw_current_schema_usage_secrets_and_ambiguous_calls() {
         .contains("9007199254740993"));
     let result = rs.iter().find(|r| r["linkage"] == "ambiguous").unwrap();
     assert!(result.get("callId").is_none());
+    assert_eq!(result["nativeCallId"], "dup");
     assert_eq!(result["raw"]["exitSignal"], 15);
     assert!(result["exec"].get("signal").is_none());
     assert!(!serde_json::to_string(&rs)
@@ -166,19 +167,24 @@ fn openclaw_capture_tail_rewrite_compression_and_noop() {
 }
 #[test]
 fn openclaw_lane_facts_are_not_assigned_by_time_and_survive_repeat() {
-    let (_d, o, db) = openclaw(&[]);
+    let (_d, mut o, db) = openclaw(&[]);
     db.execute_batch("CREATE TABLE conversation_deliveries(operation_id TEXT,source_session_key TEXT,status TEXT,queue_id TEXT); INSERT INTO conversation_deliveries VALUES('delivery','lane','sent',NULL);").unwrap();
     export(&o).unwrap();
     let path = o.out.join("bundle.json");
     let before = std::fs::read(&path).unwrap();
     let manifest: Value = serde_json::from_slice(&before).unwrap();
     assert_eq!(
-        manifest["_meta"]["ai.openclaw/unassignedLaneFacts"][0]["record"]["operation_id"],
+        manifest["_meta"]["ai.openclaw/unassigned"][0]["record"]["operation_id"],
         "delivery"
     );
     assert!(!records(&o).iter().any(|r| r["type"] == "delivery"));
     export(&o).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), before);
+    o.session = Some("unselected".into());
+    export(&o).unwrap();
+    let subset: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(subset["sessions"], json!([]));
+    assert_eq!(subset["_meta"], manifest["_meta"]);
 }
 #[test]
 fn nanoclaw_separate_stores_display_and_delivery() {
@@ -222,7 +228,7 @@ fn nanoclaw_separate_stores_display_and_delivery() {
     assert_eq!(msgs[0]["messageId"], "in");
     assert_eq!(msgs[1]["messageId"], "out");
     assert_eq!(msgs[0]["content"], json!([]));
-    assert_eq!(msgs[0]["assembly"]["mode"], "snapshot");
+    assert!(msgs[0].get("assembly").is_none());
     assert_eq!(
         rs[0]["lineage"]["executedBy"][0]["session"],
         "claude-code:native-session"
@@ -317,7 +323,7 @@ fn native_number_parser_never_rounds_large_integer_literals() {
         r#"{"ok":true,"no":false,"none":null,"a":18446744073709551615}"#
     )
     .is_some());
-    assert!(crate::native::parse_json(r#"{"a":18446744073709551616}"#).is_none());
+    assert!(crate::native::parse_json(r#"{"a":18446744073709551616}"#).is_some());
     assert!(crate::native::parse_json(r#"{"a":1,"a":2}"#).is_none());
 }
 #[test]

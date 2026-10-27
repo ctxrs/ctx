@@ -213,17 +213,20 @@ fn astrbot_duplicate_ids_and_unassigned_lane_facts() {
     assert_eq!(r[1]["idScope"], "capture");
     let manifest: Value =
         serde_json::from_slice(&std::fs::read(o.out.join("bundle.json")).unwrap()).unwrap();
-    assert!(
-        manifest["_meta"]["app.astrbot/unassignedFacts"][0]["rowJsonText"]
-            .as_str()
-            .unwrap()
-            .contains("lane-only")
-    );
+    assert!(manifest["_meta"]["app.astrbot/unassigned"][0]["record"]
+        .to_string()
+        .contains("lane-only"));
     o.session = Some("s".into());
     export(&o).unwrap();
     let manifest: Value =
         serde_json::from_slice(&std::fs::read(o.out.join("bundle.json")).unwrap()).unwrap();
-    assert!(manifest["_meta"].as_object().is_none_or(|v| v.is_empty()));
+    assert_eq!(
+        manifest["_meta"]["app.astrbot/unassigned"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -396,7 +399,7 @@ fn hermes_receipt_log_precedes_mutable_snapshots() {
         .filter(|r| r["type"] == "com.nousresearch.hermes/worker_receipts")
         .collect();
     assert_eq!(
-        receipt[0]["_meta"]["com.nousresearch.hermes/source"]["sequence"],
+        receipt[0]["_meta"]["com.nousresearch.hermes/remainingFields"]["source"]["sequence"],
         1
     );
     assert!(receipt.iter().all(|r| r.get("assembly").is_none()));

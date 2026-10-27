@@ -43,7 +43,7 @@ fn task_rewrite_keeps_timestamp_identity_with_capture_local_order() {
         let before = records(&options);
         let original = ui_text(&before, "partial");
         assert!(original.get("idScope").is_none());
-        assert_eq!(original["assembly"]["mode"], "snapshot");
+        assert!(original.get("assembly").is_none());
         assert_eq!(original["capture"]["content"]["state"], "absent");
         let manifest = fs::read(options.out.join("bundle.json")).unwrap();
         let old: Value = serde_json::from_slice(&manifest).unwrap();
@@ -129,7 +129,7 @@ fn task_large_integer_input_is_exact_json_text() {
     let call = r.iter().find(|v| v["type"] == "tool_call").unwrap();
     assert!(call.get("input").is_none());
     assert_eq!(call["inputText"], "{\"value\":9007199254740993}");
-    assert!(call.pointer("/_meta/bot.cline~1sourceJson").is_some());
+    assert!(call["_meta"]["bot.cline/jsonText"]["/_meta/bot.cline~1remainingFields"].is_string());
     let inference = r.iter().find(|v| v["type"] == "inference").unwrap();
     assert!(inference.get("cost").is_none());
     assert!(inference.to_string().contains("9007199254740993"));
@@ -258,7 +258,7 @@ fn task_large_binary_is_blobbed_without_mutating_native_metadata() {
     let m = r.iter().find(|v| v["type"] == "message").unwrap();
     assert!(m["content"][0].get("data").is_none());
     assert_eq!(m["content"][0]["blob"]["size"], 65537);
-    let source = m.pointer("/_meta/bot.cline~1sourceBlob").unwrap();
+    let source = &m["_meta"]["bot.cline/remainingFields"]["source"];
     let hash = source["blob"]
         .as_str()
         .unwrap()

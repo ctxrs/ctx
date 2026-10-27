@@ -23,7 +23,17 @@ pub(super) fn row_meta(
         object.retain(|k, _| !k.starts_with('_'));
     }
     // JSON text preserves signed/unsigned 64-bit integers without ASR rounding.
-    json_meta(spool, out, provider, "row", &native)?;
+    let text = ctx_history_asr_core::numbers::text(&native);
+    if out.get("native").is_none() {
+        out["native"] = json!({"format":provider.format()});
+        if text.len() > 65536 {
+            out["native"]["blob"] = blob(spool, text.as_bytes(), "application/json")?;
+        } else {
+            out["native"]["record"] = native;
+        }
+    } else {
+        meta(out, provider, "row", &native);
+    }
     meta(
         out,
         provider,
@@ -47,16 +57,16 @@ fn json_meta(
     kind: &str,
     value: &Value,
 ) -> Result<()> {
-    let text = value.to_string();
+    let text = ctx_history_asr_core::numbers::text(value);
     if text.len() > 65536 {
         meta(
             out,
             provider,
-            &format!("{kind}Blob"),
+            kind,
             &blob(spool, text.as_bytes(), "application/json")?,
         );
     } else {
-        meta(out, provider, &format!("{kind}Json"), &json!(text));
+        meta(out, provider, kind, value);
     }
     Ok(())
 }

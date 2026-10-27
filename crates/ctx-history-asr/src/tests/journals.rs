@@ -58,7 +58,8 @@ fn vibe_preserves_roles_calls_large_integers_and_metadata_tail() {
     let result = r.iter().find(|r| r["type"] == "tool_result").unwrap();
     assert_eq!(result["durationMs"], 250.0);
     assert_eq!(result["status"], "unknown");
-    assert!(result.get("raw").is_none());
+    assert!(result.get("raw").is_some());
+    assert_eq!(result["capture"]["content"]["state"], "absent");
     let first_snapshot = r
         .iter()
         .position(|r| r["assembly"]["mode"] == "snapshot")
@@ -268,7 +269,7 @@ fn large_content_is_external_and_numbers_beyond_u64_are_never_rounded() {
     assert!(serde_json::to_string(&r)
         .unwrap()
         .contains("123456789012345678901234567890"));
-    assert!(r.iter().any(|r| r["type"] == "ai.mistral.vibe/record"));
+    assert!(r.iter().filter(|r| r["type"] == "message").count() >= 3);
     assert!(serde_json::to_string(&r)
         .unwrap()
         .contains("-9223372036854775809"));

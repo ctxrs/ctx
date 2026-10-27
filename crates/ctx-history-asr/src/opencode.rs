@@ -11,6 +11,7 @@ use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 pub(crate) fn convert(s: &mut Spool, w: &mut Writer, n: &Value, cwd: Option<&str>) -> Result<()> {
+    w.snapshot = !(n["type"] == "event" && n["row"]["seq"].is_number());
     let d = &n["data"];
     match n["type"].as_str().unwrap_or("") {
         "_gap" => {
@@ -85,7 +86,7 @@ pub(crate) fn convert(s: &mut Spool, w: &mut Writer, n: &Value, cwd: Option<&str
                             .filter_map(Value::as_str)
                             .map(|p| {
                                 let mut p = crate::records::path(p, cwd);
-                                p["op"] = json!("_ai.opencode/changed");
+                                p["op"] = json!("unknown");
                                 p
                             })
                             .collect();
@@ -292,7 +293,27 @@ fn usage(t: &Value) -> Value {
 }
 fn inference(w: &mut Writer, d: &Value, row: &Value, id: &str) -> Result<()> {
     let mut r = json!({"type":"inference","inferenceId":format!("step:{id}"),"idSource":"derived"});
-    let u = usage(&d["tokens"]);
+    let reported = d["finish"].is_string()
+        || d["reason"].is_string()
+        || [
+            "/input",
+            "/output",
+            "/reasoning",
+            "/cache/read",
+            "/cache/write",
+        ]
+        .iter()
+        .any(|p| {
+            d["tokens"]
+                .pointer(p)
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n > 0)
+        });
+    let u = if reported {
+        usage(&d["tokens"])
+    } else {
+        json!({})
+    };
     if u.as_object().is_some_and(|o| !o.is_empty()) {
         r["usage"] = u;
     }
@@ -306,7 +327,7 @@ fn inference(w: &mut Writer, d: &Value, row: &Value, id: &str) -> Result<()> {
             "reason"
         },
     );
-    if let Some(cost) = d["cost"].as_f64() {
+    if let Some(cost) = d["cost"].as_f64().filter(|n| reported || *n != 0.0) {
         r["cost"] = json!({"amount":cost,"currency":"USD","source":"harness_estimated"});
     }
     // The native model ref records request selection, not provider resolution.

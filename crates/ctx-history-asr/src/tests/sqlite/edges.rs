@@ -57,9 +57,7 @@ fn native_json_duplicates_and_unrepresentable_numbers_stay_exact() {
     let native: Vec<Value> = rows
         .iter()
         .filter(|v| v["type"] == "gap")
-        .map(|v| {
-            serde_json::from_str(v["_meta"]["xyz.block.goose/rowJson"].as_str().unwrap()).unwrap()
-        })
+        .map(|v| v["native"]["record"].clone())
         .collect();
     assert_eq!(native[0]["content_json"], duplicate);
     let call = rows.iter().find(|r| r["type"] == "tool_call").unwrap();
@@ -122,7 +120,10 @@ fn goose_thread_mirrors_preserve_secret_redaction_without_duplicate_calls() {
     let manifest: Value =
         serde_json::from_slice(&std::fs::read(o.out.join("bundle.json")).unwrap()).unwrap();
     assert_eq!(
-        manifest["_meta"]["xyz.block.goose/unassignedContext"][0]["rows"],
+        manifest["_meta"]["xyz.block.goose/unassigned"]
+            .as_array()
+            .unwrap()
+            .len(),
         2
     );
     fn inspect(path: &std::path::Path) {
@@ -155,8 +156,26 @@ fn large_binary_and_native_metadata_are_externalized() {
     export(&o).unwrap();
     let rows = records(&o);
     assert!(rows[1]["content"][0]["blob"].is_object());
-    assert!(rows[1]["_meta"]["sh.charm.crush/rowBlob"].is_object());
+    assert!(rows[1]["native"]["blob"].is_object());
     assert!(!std::fs::read_to_string(stream_path(&o))
         .unwrap()
         .contains(&data));
+}
+
+#[test]
+fn crush_initial_usage_defaults_do_not_claim_a_report() {
+    let (_dir, options, db) = database(Provider::Crush, CRUSH);
+    db.execute_batch("UPDATE sessions SET prompt_tokens=0,completion_tokens=0,cost=0")
+        .unwrap();
+    export(&options).unwrap();
+    assert!(!records(&options)
+        .iter()
+        .any(|r| r["type"] == "usage_summary"));
+    db.execute_batch("UPDATE sessions SET prompt_tokens=2")
+        .unwrap();
+    export(&options).unwrap();
+    let rows = records(&options);
+    let usage = rows.iter().find(|r| r["type"] == "usage_summary").unwrap();
+    assert_eq!(usage["usage"]["input"]["total"], 2);
+    assert_eq!(usage["usage"]["output"]["total"], 0);
 }

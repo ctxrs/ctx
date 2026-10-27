@@ -32,7 +32,7 @@ pub(crate) fn convert(spool: &Spool, w: &mut Writer, v: &Value) -> Result<()> {
         .as_u64()
         .map(|n| format!("step:{n}"))
         .unwrap_or_else(|| format!("step:{}", w.pos));
-    let mut r = json!({"type":"message","messageId":id,"idSource":"derived","content":[],"displayContent":genai::parts(&v["content"],Provider::Antigravity),"capture":{"content":{"state":"absent"},"role":{"state":"absent"}},"assembly":{"mode":"snapshot"}});
+    let mut r = json!({"type":"message","messageId":id,"idSource":"derived","content":[],"displayContent":genai::parts(&v["content"],Provider::Antigravity),"capture":{"content":{"state":"absent"},"role":{"state":"absent"}}});
     meta(&mut r, Provider::Antigravity, "stepType", &v["type"]);
     if !v["step_index"].is_u64() {
         r["idScope"] = json!("capture");
@@ -69,7 +69,6 @@ pub(crate) fn convert(spool: &Spool, w: &mut Writer, v: &Value) -> Result<()> {
         if !matches!(v["source"].as_str(), Some("planner" | "assistant")) {
             r.as_object_mut().unwrap().remove("requestedBy");
         }
-        r["assembly"] = json!({"mode":"snapshot"});
         meta(
             &mut r,
             Provider::Antigravity,

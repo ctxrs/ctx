@@ -264,7 +264,7 @@ pub(crate) fn convert(spool: &mut Spool, w: &mut Writer, value: &Value) -> Resul
             } else {
                 format!("history:{}", value["index"])
             };
-            w.capture_identity(&key, !stable, true);
+            w.capture_identity(&key, !stable, false);
             mapping::turn(spool, w, n)?;
         }
         _ => {

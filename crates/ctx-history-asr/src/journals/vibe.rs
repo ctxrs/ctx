@@ -17,6 +17,7 @@ pub(super) fn convert(spool: &mut Spool, w: &mut Writer, v: &Value) -> Result<()
         let mut r = result(spool, w, v["tool_call_id"].as_str(), status)?;
         if !v["content"].is_null() {
             r["content"] = json!(parts(&v["content"]));
+            r["raw"] = v["content"].clone();
         } else {
             r["capture"]["content"] = json!({"state":"absent"});
         }

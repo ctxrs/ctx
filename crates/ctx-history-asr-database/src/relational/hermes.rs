@@ -232,7 +232,6 @@ pub(super) fn header(h: &Value, v: &mut Value) {
     for loss in [
         "branches",
         "copies",
-        "_com.nousresearch.hermes/unassigned_facts",
         "_com.nousresearch.hermes/turn_triggers",
         "content.binary",
     ] {

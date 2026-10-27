@@ -223,7 +223,8 @@ fn batch10_large_integer_native_data_is_preserved_as_json_text() {
     export(&o).unwrap();
     let bytes = serde_json::to_string(&records(&o)).unwrap();
     assert!(bytes.contains("184467440737095516170"));
-    assert!(bytes.contains("numeric_record"));
+    assert!(bytes.contains("/jsonText"));
+    assert!(bytes.contains("body"));
 }
 #[test]
 fn batch10_document_cursor_bounds_each_item_not_whole_session() {
@@ -317,9 +318,13 @@ fn batch10_nested_rovo_document_and_large_sdk_image() {
 #[test]
 fn batch10_decimal_unsafe_numbers_preserve_lexical_value() {
     for number in ["9007199254740992.0", "9.007199254740993e15", "1e309"] {
-        assert!(crate::batch10::unsafe_native_number(number));
+        assert!(!ctx_history_asr_core::numbers::safe(
+            &ctx_history_asr_core::numbers::decode(number).unwrap()
+        ));
     }
-    assert!(!crate::batch10::unsafe_native_number("100.0"));
+    assert!(ctx_history_asr_core::numbers::safe(
+        &ctx_history_asr_core::numbers::decode("100.0").unwrap()
+    ));
 }
 
 #[test]

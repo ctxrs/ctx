@@ -169,7 +169,7 @@ pub(crate) fn ingest(s: &mut Spool, path: &Path, id: &str, h: &mut Value) -> Res
                         }
                     }
                 }
-                n::stage(s, table, key, r.clone(), true)
+                n::stage(s, table, key, r.clone(), false)
             },
         )?;
     }

@@ -29,7 +29,10 @@ There is one `<native-session-id>.asr.jsonl` per session. Subagent tool callback
 use `agent_id` as their session ID, while start/stop announcements live in the
 parent stream. A resumed session appends to its existing stream when its index
 is intact. The header declares `producer.method: observer`,
-`producer.source.format: claude-code-hooks`, and all known losses.
+`producer.source.format: claude-code-hooks`, protocol version `2.1.305`, and all known losses.
+It qualifies as an observer of that hook protocol. ACP recorder obligations do not
+apply to this protocol. The `events` loss declares the risk of callbacks never
+observed; measured drops and observed gaps remain separate evidence.
 The containing session ID does not establish the direct spawner of a nested
 child or internal agent, so no header lineage edge is invented from it.
 
@@ -110,7 +113,7 @@ refusal exposed a request but no decision hook; `dontAsk` exposed neither.
 
 ## Native transcript associations
 
-Each projected record carries `_meta["rs.ctx.claude-asr/source"]` with the event,
+Each projected record carries `_meta["com.anthropic.claude-code/remainingFields"]` with the event,
 native session ID and supplied prompt/tool/agent/display IDs. The optional
 `rs.ctx.claude-asr/hooks` extension documents this metadata and its vendor
 values. Generic ASR readers can ignore it; the reference validator reports it
@@ -119,7 +122,7 @@ as an unsupported optional extension, separately from schema/semantic errors.
 Record IDs and derived entity IDs are capture-scoped (`idScope: capture`). They
 derive from observer positions and are stable while this stream is appended;
 they must not be compared across independent captures. Native tool and prompt
-IDs remain verbatim. `MessageDisplay.message_id` is a display ID explicitly
+IDs remain verbatim; tool results also retain `nativeCallId` when pairing is ambiguous. `MessageDisplay.message_id` is a display ID explicitly
 unrelated to native transcript message IDs, so it is never used as `messageId`.
 
 After a session, explicitly associate native UUIDs offline:

@@ -130,6 +130,7 @@ pub(super) fn convert(spool: &mut Spool, writer: &mut Writer, row: &Value) -> Re
             }
             _ => {
                 let mut r = json!({"type":"tool_result","status":match data["is_error"].as_bool(){Some(true)=>"failed",Some(false)=>"completed",None=>"unknown"}});
+                r["raw"] = data.clone();
                 link(spool, &mut r, data["tool_call_id"].as_str(), P)?;
                 result_identity(
                     writer,
@@ -211,6 +212,13 @@ fn file(spool: &Spool, writer: &mut Writer, row: &Value) -> Result<()> {
 }
 fn session(spool: &Spool, writer: &mut Writer, row: &Value) -> Result<()> {
     session_tail(spool, writer, row)?;
+    // These columns start at zero before any provider reports usage.
+    if ["prompt_tokens", "completion_tokens", "total_tokens", "cost"]
+        .iter()
+        .all(|key| row[key].is_null() || row[key].as_f64() == Some(0.0))
+    {
+        return Ok(());
+    }
     let usage = usage(row, "prompt_tokens", "completion_tokens", "total_tokens");
     if usage.as_object().is_some_and(|o| !o.is_empty()) || row["cost"].is_number() {
         let mut out = json!({"type":"usage_summary","scope":"session","cumulative":true,"includesChildren":null,"counter":"session","usage":usage});

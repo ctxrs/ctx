@@ -108,12 +108,12 @@ fn fx_native_tool_identity_survives_replacement_and_duplicate_ids_stay_ambiguous
     let before = records(&options);
     let result = before.iter().find(|v| v["type"] == "tool_result").unwrap();
     assert!(result.get("exec").is_none());
-    assert!(result
-        .pointer("/_meta/com.vercel.fx~1sourceJson")
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .contains("9007199254740993"));
+    assert!(
+        result["_meta"]["com.vercel.fx/jsonText"]["/_meta/com.vercel.fx~1remainingFields"]
+            .as_str()
+            .unwrap()
+            .contains("9007199254740993")
+    );
     replacement(
         &options.inputs[0].path,
         4,

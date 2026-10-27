@@ -42,7 +42,7 @@ pub(crate) fn ingest(
         )?;
         if n::has(state, "skill_workshop_changes")? {
             n::scan(state,"SELECT * FROM skill_workshop_changes WHERE agent_id=?1 AND session_key=?2 ORDER BY cursor_id",[agent,lane],s.limit,|r|{
-                if owned(s,&r["run_id"])?{n::stage(s,"skill_workshop_changes",r["change_id"].as_str().unwrap_or(""),r.clone(),false)?;}else{n::lane_fact(bundle,P,lane,"skill_workshop_changes",r["change_id"].as_str().unwrap_or(""),&r)?;n::loss(s,"_ai.openclaw/unassigned_facts")?;}Ok(())
+                if owned(s,&r["run_id"])?{n::assigned_fact(bundle,P,lane,"skill_workshop_changes",r["change_id"].as_str().unwrap_or(""))?;n::stage(s,"skill_workshop_changes",r["change_id"].as_str().unwrap_or(""),r.clone(),false)?;}else{n::lane_fact(bundle,P,lane,"skill_workshop_changes",r["change_id"].as_str().unwrap_or(""),&r)?;}Ok(())
             })?;
         }
     }
@@ -85,7 +85,6 @@ pub(crate) fn ingest(
                         }
                     } else {
                         n::lane_fact(bundle, P, lane, "delivery_queue_entries", key, &r)?;
-                        n::loss(s, "_ai.openclaw/unassigned_facts")?;
                     }
                     Ok(())
                 },
@@ -177,7 +176,7 @@ pub(crate) fn ingest(
         n::scan(db,"SELECT * FROM conversation_deliveries WHERE source_session_key=?1 ORDER BY operation_id",[lane],s.limit,|r|{
             let queue=r["queue_id"].as_str().unwrap_or("");let owner=s.entity(&format!("queue-owner:{queue}"))?;
             if owner.as_ref().and_then(Value::as_str)==Some(id){s.save(&format!("delivered-queue:{queue}"),&json!(true))?;n::stage(s,"conversation_deliveries",r["operation_id"].as_str().unwrap_or(""),r.clone(),true)?;}
-            else if owner.is_none(){n::lane_fact(bundle,P,lane,"conversation_deliveries",r["operation_id"].as_str().unwrap_or(""),&r)?;n::loss(s,"_ai.openclaw/unassigned_facts")?;}Ok(())
+            else if owner.is_none(){n::lane_fact(bundle,P,lane,"conversation_deliveries",r["operation_id"].as_str().unwrap_or(""),&r)?;}Ok(())
         })?;
     }
     for (table, order) in [
@@ -209,8 +208,9 @@ pub(crate) fn ingest(
                 [lane],
                 s.limit,
                 |r| {
-                    n::lane_fact(bundle, P, lane, table, lane, &r)?;
-                    n::loss(s, "_ai.openclaw/unassigned_facts")
+                    let key = crate::records::stable_id(&ctx_history_asr_core::numbers::text(&r));
+                    n::lane_fact(bundle, P, lane, table, &key, &r)?;
+                    Ok(())
                 },
             )?;
         }

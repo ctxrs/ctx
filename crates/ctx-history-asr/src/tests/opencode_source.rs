@@ -71,7 +71,7 @@ fn sqlite_family_rewrites_without_native_clock_changes_keep_identity_and_prior_b
         assert_eq!(a["seq"], b["seq"]);
         assert_eq!(a["content"][0]["text"], "first second");
         assert_eq!(
-            a["content"][0]["_meta"][format!("{}/row", provider.domain())]["id"],
+            a["content"][0]["_meta"][format!("{}/remainingFields", provider.domain())]["row"]["id"],
             "p"
         );
         assert_eq!(a["assembly"]["mode"], "snapshot");
@@ -92,7 +92,9 @@ fn sqlite_relocation_and_append_do_not_change_existing_ids() {
     part(&c, "q", "v", json!({"type":"text","text":"reply"}));
     export(&o).unwrap();
     let after = records(&o);
-    assert_eq!(&after[..before.len()], before);
+    let before_message = before.iter().find(|r| r["messageId"] == "u").unwrap();
+    let after_message = after.iter().find(|r| r["messageId"] == "u").unwrap();
+    assert_eq!(before_message, after_message);
     c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
     drop(c);
     let relocated = d.path().join("relocated.db");
@@ -230,9 +232,9 @@ fn kiro(legacy: bool) -> (tempfile::TempDir, Options, Connection) {
     (d, o, c)
 }
 #[test]
-fn kiro_directory_keys_require_stable_namespace_and_capture_scoped_ids() {
+fn kiro_uuid_precedence_and_legacy_namespace_custody() {
     let (_d, mut o, c) = kiro(true);
-    c.execute("INSERT INTO conversations VALUES('/workspace',?1)",[json!({"conversation_id":"internal-uuid","history":[{"user":{"content":{"Prompt":{"prompt":"hello"}}},"assistant":{"Response":{"content":"reply"}}}]}).to_string()]).unwrap();
+    c.execute("INSERT INTO conversations VALUES('/workspace',?1)",[json!({"history":[{"user":{"content":{"Prompt":{"prompt":"hello"}}},"assistant":{"Response":{"content":"reply"}}}]}).to_string()]).unwrap();
     assert!(export(&o).unwrap_err().to_string().contains("namespace"));
     o.namespace = Some("installation".into());
     export(&o).unwrap();
@@ -247,9 +249,9 @@ fn kiro_directory_keys_require_stable_namespace_and_capture_scoped_ids() {
         [json!({"conversation_id":"new-uuid","history":[]}).to_string()],
     )
     .unwrap();
-    assert_eq!(export(&o).unwrap().snapshots, 1);
+    export(&o).unwrap();
+    assert_eq!(records(&o)[0]["sessionId"], "new-uuid");
     assert_eq!(std::fs::read(old).unwrap(), bytes);
-    assert_eq!(records(&o)[0]["sessionId"], "/workspace");
 }
 #[test]
 fn kiro_native_request_and_tool_results_keep_source_truth() {

@@ -26,7 +26,14 @@ pub fn externalize(out: &Path, record: &mut Value) -> Result<()> {
         }
     }
     if let Some(meta) = record.get_mut("_meta").and_then(Value::as_object_mut) {
-        for value in meta.values_mut() {
+        for (key, value) in meta {
+            if matches!(
+                key.as_str(),
+                "ai.cognition.devin/replacementParent" | "ai.cognition.devin/usage"
+            ) && !value.is_object()
+            {
+                *value = store(out, &serde_json::to_vec(value)?)?;
+            }
             let bytes = serde_json::to_vec(value)?;
             if bytes.len() > INLINE_LIMIT {
                 *value = store(out, &bytes)?;
@@ -88,7 +95,19 @@ pub fn binaries(out: &Path, value: &mut Value) -> Result<()> {
     Ok(())
 }
 /// Preserve whole affected values as JSON text or JSON blobs, including native facts.
-pub fn numbers(out: &Path, record: &mut Value) -> Result<()> {
+pub fn numbers(out: &Path, record: &mut Value, provider: crate::Provider) -> Result<()> {
+    let text_key = format!("{}/jsonText", provider.domain());
+    if let Some(meta) = record.get_mut("_meta").and_then(Value::as_object_mut) {
+        let keys: Vec<_> = meta.keys().cloned().collect();
+        for key in keys {
+            if !crate::numbers::safe(&meta[&key]) {
+                let value = meta.remove(&key).unwrap();
+                let pointer = format!("/_meta/{}", crate::registry::pointer(&key));
+                meta.entry(text_key.clone()).or_insert_with(|| json!({}))[pointer] =
+                    json!(crate::numbers::text(&value));
+            }
+        }
+    }
     let keys: Vec<String> = record
         .as_object()
         .into_iter()
@@ -111,11 +130,28 @@ pub fn numbers(out: &Path, record: &mut Value) -> Result<()> {
             if key == "content" && record["type"] == "message" {
                 record["content"] = json!([]);
             }
-        } else if key == "_meta" {
-            // Namespaced JSON text is an explicit carrier, not a changed native value.
-            record["_meta"] = json!({"rs.ctx/metadataJsonText":text});
+        } else if key == "native" {
+            let blob = store(out, crate::numbers::text(&value["record"]).as_bytes())?;
+            record["native"] = value;
+            record["native"].as_object_mut().unwrap().remove("record");
+            record["native"]["blob"] = blob;
+        } else if matches!(
+            key.as_str(),
+            "seq"
+                | "formatVersion"
+                | "type"
+                | "id"
+                | "sessionId"
+                | "changes"
+                | "replaces"
+                | "revision"
+        ) {
+            return Err(crate::Error::Invalid(format!(
+                "unsafe required ASR field: {key}"
+            )));
         } else {
-            record["_meta"]["rs.ctx/unsafeJsonText"][&key] = json!(text);
+            record["_meta"][&text_key][format!("/{}", crate::registry::pointer(&key))] =
+                json!(text);
         }
     }
     Ok(())

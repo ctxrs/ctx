@@ -145,7 +145,7 @@ pub(super) fn diffs(w: &mut Writer, v: &Value, time: &Value, cwd: Option<&str>) 
             continue;
         };
         let mut change = path(file, cwd);
-        change["op"] = json!("_com.deepseek.harness/diff");
+        change["op"] = json!("unknown");
         let mut r = json!({"type":"file_change","status":match m["content"][0]["isError"].as_bool(){Some(false)=>"applied",Some(true)=>"failed",None=>"unknown"},"precision":"snippet","changes":[change]});
         if let Some(call) = call {
             r["cause"] = json!({"callId":call});

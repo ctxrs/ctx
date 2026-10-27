@@ -22,7 +22,7 @@ pub(super) fn convert(spool: &Spool, w: &mut Writer, n: &Value) -> Result<()> {
         let scoped = w.capture_scoped();
         for (index, block) in blocks.iter().enumerate() {
             w.slot(index as u64 * 10);
-            w.capture_identity(&format!("{basis}:block:{index}"), scoped, true);
+            w.capture_identity(&format!("{basis}:block:{index}"), scoped, false);
             let (table, id, tag) = match block["type"].as_str() {
                 Some("tool_use" | "server_tool_use") => {
                     ("native_calls", block["id"].as_str(), "call")
@@ -42,7 +42,7 @@ pub(super) fn convert(spool: &Spool, w: &mut Writer, n: &Value) -> Result<()> {
                     |r| r.get(0),
                 )?;
                 if count == 1 && calls == 1 {
-                    w.capture_identity(&format!("{tag}:{id}"), false, true);
+                    w.capture_identity(&format!("{tag}:{id}"), false, false);
                 }
             }
             match block["type"].as_str() {

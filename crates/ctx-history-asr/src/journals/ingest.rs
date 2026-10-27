@@ -220,44 +220,6 @@ fn call_ids(provider: Provider, v: &Value) -> Vec<String> {
     ids
 }
 
-// serde_json preserves i64/u64 exactly, but larger lexical integers can become
-// floats. Keep the entire source as JSON text before that conversion can occur.
 pub(super) fn decode(bytes: &[u8]) -> Option<Value> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    if !ctx_history_capture_model::raw_object_keys_are_unique(bytes) {
-        return None;
-    }
-    let mut quoted = false;
-    let mut escaped = false;
-    let mut token = String::new();
-    for c in text.chars().chain(std::iter::once(' ')) {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                quoted = false;
-            }
-            continue;
-        }
-        if c == '"' {
-            quoted = true;
-        }
-        if c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E') {
-            token.push(c);
-        } else if !token.is_empty() {
-            if !token.contains(['.', 'e', 'E'])
-                && if token.starts_with('-') {
-                    token.parse::<i64>().is_err()
-                } else {
-                    token.parse::<u64>().is_err()
-                }
-            {
-                return Some(json!({"_asr_json_text":text}));
-            }
-            token.clear();
-        }
-    }
     source::decode(bytes)
 }

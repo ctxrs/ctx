@@ -101,13 +101,14 @@ fn message(
             return w.vendor(v, "message");
         };
         let mut r = json!({"type":"tool_result","callId":call,"linkage":if spool.ambiguous_call(call)?{"ambiguous"}else{"exact"},"status":jsonl::result_status(&m["isError"]),"content":parts::parts(&m["content"])});
+        copy(&mut r, "raw", m, "content");
         extras(&mut r, P, m, &["role", "toolCallId", "isError", "content"]);
         extras(&mut r, P, v, &["message"]);
         if m.get("content").is_none() {
             r["capture"] = json!({"content":{"state":"absent"}});
         }
         if m.pointer("/details/truncation/truncated") == Some(&json!(true)) {
-            r["capture"] = json!({"content":{"state":"truncated","reason":"source_truncated"}});
+            r["capture"] = json!({"raw":{"state":"truncated","reason":"source_truncated"}});
         }
         let call_data = if spool.ambiguous_call(call)? {
             None
@@ -236,13 +237,25 @@ fn message(
             r["model"] = model;
         }
         let usage = jsonl::usage(&m["usage"], true);
-        if usage.as_object().is_some_and(|o| !o.is_empty()) {
+        let placeholder = matches!(m["stopReason"].as_str(), Some("error" | "aborted"))
+            && ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]
+                .iter()
+                .all(|k| m["usage"][*k].as_u64().unwrap_or(0) == 0);
+        if !placeholder && usage.as_object().is_some_and(|o| !o.is_empty()) {
             r["usage"] = usage;
         }
-        if let Some(n) = m.pointer("/usage/cacheWrite1h").and_then(Value::as_u64) {
+        if let Some(n) = m
+            .pointer("/usage/cacheWrite1h")
+            .filter(|_| !placeholder)
+            .and_then(Value::as_u64)
+        {
             r["usage"]["input"]["cacheWriteByTtl"] = json!({"1h":n});
         }
-        if let Some(cost) = m.pointer("/usage/cost/total").and_then(Value::as_f64) {
+        if let Some(cost) = m
+            .pointer("/usage/cost/total")
+            .filter(|_| !placeholder)
+            .and_then(Value::as_f64)
+        {
             r["cost"] = json!({"amount":cost,"currency":"USD","source":"harness_estimated"});
         }
         if let Some(cost) = m.pointer("/usage/cost") {

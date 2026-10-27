@@ -144,7 +144,11 @@ pub(crate) fn convert(spool: &mut Spool, writer: &mut Writer, value: &Value) -> 
     } else {
         format!("{component}:{}", value["index"])
     };
-    writer.capture_identity(&key, !stable && component != "metadata", true);
+    writer.capture_identity(
+        &key,
+        !stable && component != "metadata",
+        component == "metadata",
+    );
     let source = &value["row"];
     if source["type"] == "_gap" {
         writer.emit(

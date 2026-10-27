@@ -177,6 +177,7 @@ pub(super) fn gap(spool: &mut Spool, key: Value, raw: &Value, reason: &str) -> R
 }
 pub fn convert(spool: &mut Spool, writer: &mut Writer, v: &Value) -> Result<()> {
     writer.capture_scope = v["captureScoped"] == true;
+    writer.snapshot = matches!(v["type"].as_str(), Some("state" | "devinState"));
     writer.identity = Some(format!(
         "r{:x}",
         Sha256::digest(v["key"].to_string().as_bytes())
@@ -204,7 +205,7 @@ pub fn convert(spool: &mut Spool, writer: &mut Writer, v: &Value) -> Result<()> 
 pub fn header(provider: Provider, id: &str, n: &Value) -> Value {
     let mut h = json!({"type":"session","formatVersion":"0.1","agent":{"name":provider.agent()},"sessionId":id,
         "producer":{"name":"ctx","version":env!("CARGO_PKG_VERSION"),"method":"converter","instance":"ctx-asr-batch8-1","source":{"format":provider.format()},
-        "lossy":["timestamps","order","message.author","display_content","revision_history","inference","lineage","copies","file_change","provider.identity","_rs.ctx/sqlite_row_limit","_rs.ctx/vendor_semantics","_rs.ctx/unprojected_lanes","_rs.ctx/compaction_context"]},
+        "lossy":["timestamps","order","message.author","display_content","revision_history","inference","lineage","copies","file_change","provider.identity","_rs.ctx/sqlite_row_limit","_rs.ctx/vendor_semantics","_rs.ctx/compaction_context"]},
         "profiles":["core","lineage","usage"],"contentLevel":"full",
         "workspace":{"roots":[{"id":"unknown","path":null}]},
         "extensions":[{"id":format!("{}/sqlite",provider.domain()),"version":"1","required":false}]});

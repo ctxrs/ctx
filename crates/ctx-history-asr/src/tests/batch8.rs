@@ -75,10 +75,12 @@ fn duplicate_calls_are_ambiguous_and_large_integers_stay_exact() {
     assert_eq!(result["linkage"], "ambiguous");
     assert!(result.get("callId").is_none());
     assert_eq!(result["status"], "unknown");
-    assert!(result["_meta"]["com.firebender/jsonText"]["source"]
-        .as_str()
-        .unwrap()
-        .contains("9007199254740993"));
+    assert!(
+        result["_meta"]["com.firebender/jsonText"]["/_meta/com.firebender~1remainingFields"]
+            .as_str()
+            .unwrap()
+            .contains("9007199254740993")
+    );
 }
 
 #[test]
@@ -468,7 +470,21 @@ fn application_state_is_unowned_and_unsafe_json_is_not_rounded() {
     db.execute_batch("INSERT INTO sessions VALUES('s','/synthetic',1,NULL,'title','model','normal'); CREATE TABLE app_state(key TEXT PRIMARY KEY,value TEXT); INSERT INTO app_state VALUES('selected','{\"n\":9007199254740993}')").unwrap();
     export(&options).unwrap();
     let manifest = std::fs::read_to_string(options.out.join("bundle.json")).unwrap();
-    assert!(manifest.contains("9007199254740993"));
+    let manifest: Value = serde_json::from_str(&manifest).unwrap();
+    let facts = manifest["_meta"]["ai.cognition.devin/unassigned"]
+        .as_array()
+        .unwrap();
+    let blob = facts.iter().find_map(|fact| fact.get("blob")).unwrap();
+    let hash = blob["blob"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("sha256:")
+        .unwrap();
+    assert!(
+        std::fs::read_to_string(options.out.join("blobs/sha256").join(hash))
+            .unwrap()
+            .contains("9007199254740993")
+    );
     assert!(!serde_json::to_string(&records(&options))
         .unwrap()
         .contains("selected"));
@@ -476,9 +492,12 @@ fn application_state_is_unowned_and_unsafe_json_is_not_rounded() {
     assert!(crate::batch8::sqlite::exact_json("{\"n\":18446744073709551615}").is_some());
     db.execute_batch("DELETE FROM sessions").unwrap();
     assert_eq!(export(&options).unwrap().sessions, 0);
-    assert!(std::fs::read_to_string(options.out.join("bundle.json"))
-        .unwrap()
-        .contains("9007199254740993"));
+    let again: Value =
+        serde_json::from_slice(&std::fs::read(options.out.join("bundle.json")).unwrap()).unwrap();
+    assert_eq!(
+        again["_meta"]["ai.cognition.devin/unassigned"],
+        manifest["_meta"]["ai.cognition.devin/unassigned"]
+    );
 }
 
 #[test]
@@ -512,7 +531,7 @@ fn forgecode_native_usage_reasoning_and_tool_output() {
     assert_eq!(call["inferenceId"], inference["inferenceId"]);
     let result = r.iter().find(|r| r["type"] == "tool_result").unwrap();
     assert_eq!(result["status"], "completed");
-    assert_eq!(result["content"][1]["text"], "child result");
+    assert_eq!(result["raw"]["values"][1]["ai"]["value"], "child result");
     assert!(result.to_string().contains("native-child"));
 }
 

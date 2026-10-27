@@ -28,12 +28,10 @@ pub fn parse(raw: &str) -> Option<Value> {
 /// Keep exact values outside serde_json's integer range local to ASR. Enabling
 /// arbitrary_precision globally would alter every existing custom JSON visitor.
 pub fn decode(raw: &str) -> Option<Value> {
-    if !ctx_history_capture_model::raw_object_keys_are_unique(raw.as_bytes()) {
-        return None;
-    }
     if let Ok(value) = serde_json::from_str::<Value>(raw) {
         if safe(&value) {
-            return Some(value);
+            return ctx_history_capture_model::raw_object_keys_are_unique(raw.as_bytes())
+                .then_some(value);
         }
     }
     exact(raw).ok()
@@ -43,11 +41,11 @@ fn exact(raw: &str) -> serde_json::Result<Value> {
     let raw: &RawValue = serde_json::from_str(raw)?;
     let source = raw.get();
     if source.starts_with('{') {
-        let fields: serde_json::Map<String, Value> =
-            serde_json::from_str::<std::collections::BTreeMap<String, &RawValue>>(source)?
-                .into_iter()
-                .map(|(k, v)| Ok((k, exact(v.get())?)))
-                .collect::<serde_json::Result<_>>()?;
+        let fields: serde_json::Map<String, Value> = serde_json::from_str::<Unique>(source)?
+            .0
+            .into_iter()
+            .map(|(k, v)| Ok((k, exact(v.get())?)))
+            .collect::<serde_json::Result<_>>()?;
         if fields.contains_key(RAW) {
             return Ok(serde_json::json!({(RAW):source}));
         }
@@ -101,4 +99,30 @@ pub fn write(mut out: impl std::io::Write, value: &Value) -> crate::Result<()> {
         out.write_all(text(value).as_bytes())?;
     }
     Ok(())
+}
+
+struct Unique<'a>(std::collections::BTreeMap<String, &'a RawValue>);
+impl<'de> serde::Deserialize<'de> for Unique<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Unique<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("unique object keys")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut fields = std::collections::BTreeMap::new();
+                while let Some((key, value)) = map.next_entry::<String, &RawValue>()? {
+                    if fields.insert(key, value).is_some() {
+                        return Err(serde::de::Error::custom("duplicate JSON key"));
+                    }
+                }
+                Ok(Unique(fields))
+            }
+        }
+        d.deserialize_map(Visitor)
+    }
 }

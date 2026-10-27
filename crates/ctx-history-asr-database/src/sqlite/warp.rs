@@ -33,7 +33,7 @@ pub(super) fn ingest(spool: &mut Spool, pos: &mut u64, mut row: Value) -> Result
     // Preserve the entire binary, including all fields outside this projection.
     let mut audit = row.clone();
     audit["_table"] = json!("warp_task");
-    store::push(spool, pos, audit)?;
+    spool.save(&format!("warp-audit:{task}"), &audit)?;
     let mut ids = std::collections::HashMap::<String, usize>::new();
     for message in fields.all(5) {
         if let Ok(f) = Fields::parse(message) {

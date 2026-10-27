@@ -12,8 +12,7 @@ pub(super) fn message(s: &mut Spool, w: &Writer, group: &str) -> Result<Option<V
     if first != w.pos {
         return Ok(None);
     }
-    let mut r =
-        json!({"type":"message","role":"assistant","author":"model","assembly":{"mode":"folded"}});
+    let mut r = json!({"type":"message","role":"assistant","author":"model","content":[],"assembly":{"mode":"folded"}});
     let mut content = Vec::new();
     let mut ids = Vec::new();
     let mut size = 0;

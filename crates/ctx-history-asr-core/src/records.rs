@@ -9,6 +9,7 @@ pub const STRIDE: u64 = 1_000_000;
 pub struct Writer {
     pub out: BufWriter<File>,
     pub provider: Provider,
+    pub installation: Option<String>,
     pub pos: u64,
     slot: u64,
     pub identity: Option<String>,
@@ -39,6 +40,7 @@ impl Writer {
         Self {
             out: BufWriter::new(file),
             provider,
+            installation: None,
             pos: 0,
             slot: 0,
             identity: None,
@@ -149,13 +151,36 @@ impl Writer {
         result
     }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
-        if self.provider.is_sqlite() {
-            if value.get("assembly").is_none() {
-                value["assembly"] = json!({"mode":"snapshot"});
+        if value["type"] == "tool_result"
+            && value["callId"].is_string()
+            && value["linkage"] != "derived"
+            && value.get("nativeCallId").is_none()
+        {
+            value["nativeCallId"] = value["callId"].clone();
+        }
+        if value["type"] == "tool_result" && value["linkage"] == "ambiguous" {
+            if let Some(id) = value.as_object_mut().unwrap().remove("callId") {
+                value["nativeCallId"] = id;
             }
-            if self.provider == Provider::Kiro {
-                value["idScope"] = json!("capture");
+        }
+        if value["type"] == "tool_result" && !self.provider.model_result() {
+            if let Some(content) = value.as_object_mut().unwrap().remove("content") {
+                if value.get("raw").is_none() && value.pointer("/capture/raw").is_none() {
+                    let capture = value.pointer("/capture/content").cloned();
+                    if !capture.as_ref().is_some_and(|c| {
+                        matches!(c["state"].as_str(), Some("absent" | "omitted" | "redacted"))
+                    }) {
+                        value["raw"] = content;
+                    }
+                    if let Some(capture) = capture {
+                        value["capture"]["raw"] = capture;
+                    }
+                }
+                value["capture"]["content"] = json!({"state":"absent"});
             }
+        }
+        if self.provider == Provider::Kiro {
+            value["idScope"] = json!("capture");
         }
         let seq = self
             .count
@@ -202,15 +227,6 @@ impl Writer {
             ));
         }
         self.last_seq = Some(seq);
-        if self.provider.is_batch8() {
-            value.as_object_mut().map(|o| {
-                o.entry("assembly")
-                    .or_insert_with(|| json!({"mode":"snapshot"}))
-            });
-            if self.capture_scope {
-                value["idScope"] = json!("capture");
-            }
-        }
         value["seq"] = json!(seq);
         if let Some(position) = &self.provenance {
             let mut position = position.clone();
@@ -258,13 +274,35 @@ impl Writer {
                 .pointer("/forkedFrom/messageUuid")
                 .and_then(Value::as_str),
         ) {
-            value["copiedFrom"] = json!({"session":session_ref(self.provider,session),"record":format!("messageId={id}"),"proof":"native_field"});
-            if self.provider == Provider::QwenCode && value["type"] != "message" {
-                value["copiedFrom"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("record");
+            value["copiedFrom"] =
+                json!({"session":session_ref(self.provider,session),"proof":"native_field"});
+            let entity = if self.provider == Provider::Claude {
+                match value["type"].as_str() {
+                    Some("message") if source["type"] == "assistant" => value["messageId"]
+                        .as_str()
+                        .map(|v| format!("messageId={v}")),
+                    Some("message") => Some(format!("messageId={id}")),
+                    Some("inference") => value["inferenceId"]
+                        .as_str()
+                        .map(|v| format!("inferenceId={v}")),
+                    Some("tool_call") if value["callIdSource"] != "derived" => {
+                        value["callId"].as_str().map(|v| format!("callId={v}"))
+                    }
+                    _ => None,
+                }
+            } else {
+                (value["type"] == "message").then(|| format!("messageId={id}"))
+            };
+            if let Some(entity) = entity {
+                value["copiedFrom"]["record"] = json!(entity);
             }
+            // A native row UUID is not an ASR message ID after folding or splitting.
+            meta(
+                &mut value,
+                self.provider,
+                "forkedFrom",
+                &source["forkedFrom"],
+            );
         }
         if context(&value) && value.get("supersedes").is_none() {
             self.tip = Some(id.clone());
@@ -275,12 +313,14 @@ impl Writer {
         if value["type"] == "gap" {
             self.gaps += 1;
         }
+        crate::registry::normalize(&mut value, self.provider);
+        if let Some(installation) = &self.installation {
+            crate::scope::qualify(&mut value, self.provider, installation)?;
+        }
         if let Some(out) = &self.bundle {
             crate::blobs::binaries(out, &mut value)?;
-            crate::blobs::numbers(out, &mut value)?;
-            if self.provider.journal() {
-                crate::blobs::externalize(out, &mut value)?;
-            }
+            crate::blobs::numbers(out, &mut value, self.provider)?;
+            crate::blobs::externalize(out, &mut value)?;
         }
         serde_json::to_writer(&mut self.out, &value)?;
         self.out.write_all(b"\n")?;
@@ -344,6 +384,10 @@ pub fn copy(target: &mut Value, dest: &str, source: &Value, key: &str) {
     }
 }
 pub fn meta(target: &mut Value, provider: Provider, key: &str, value: &Value) {
+    if matches!(key, "nativeCallId" | "unpairedCallId") && target["type"] == "tool_result" {
+        target["nativeCallId"] = value.clone();
+        return;
+    }
     if target.get("_meta").is_none() {
         target["_meta"] = json!({});
     }

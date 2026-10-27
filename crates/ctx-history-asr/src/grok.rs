@@ -252,7 +252,7 @@ fn call(spool: &Spool, w: &mut Writer, v: &Value, time: &Value, cwd: Option<&str
                 };
                 let mut change = path(file, cwd);
                 // ACP v1 carries snippets; a null oldText alone does not prove creation.
-                change["op"] = json!("_ai.x.grok-build/diff");
+                change["op"] = json!("unknown");
                 let mut r = json!({"type":"file_change","cause":{"callId":id},"status":match status{"completed"=>"applied","failed"=>"failed","cancelled"=>"unknown",_=>"proposed"},"precision":"snippet","changes":[change]});
                 meta(&mut r, P, "diff", diff);
                 w.revise(spool, &format!("grok:diff:{id}:{i}"), r, time)?;

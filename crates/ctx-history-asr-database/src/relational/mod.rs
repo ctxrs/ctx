@@ -245,10 +245,6 @@ pub fn convert(s: &mut Spool, w: &mut Writer, h: &Value, row: &Value) -> Result<
 }
 pub fn bundle_facts(options: &Options, out: &mut dyn Write, comma: &mut bool) -> Result<()> {
     // Session filtering cannot assign lane records by copied checkpoints, time or text.
-    // Only an all-session export includes the unassigned lane store.
-    if options.session.is_some() {
-        return Ok(());
-    }
     let mut seen = std::collections::BTreeSet::new();
     for (provider, table, order) in [
         (Provider::Hermes, "delivery_obligations", "obligation_id"),
@@ -281,17 +277,25 @@ pub fn bundle_facts(options: &Options, out: &mut dyn Write, comma: &mut bool) ->
                             *comma = true;
                             serde_json::to_writer(
                                 &mut *out,
-                                &format!("{}/unassignedFacts", provider.domain()),
+                                &format!("{}/unassigned", provider.domain()),
                             )?;
                             out.write_all(b":[")?;
                             first_row = false;
                         } else {
                             out.write_all(b",")?;
                         }
-                        serde_json::to_writer(
-                            &mut *out,
-                            &json!({"namespace":ns,"table":table,"rowJsonText":row.to_string()}),
-                        )?;
+                        let mut entry = json!({"source":{"table":table},"record":row});
+                        if !ns.is_null() {
+                            entry["namespace"] = ns.clone();
+                        }
+                        if !ctx_history_asr_core::numbers::safe(&row) {
+                            entry["blob"] = ctx_history_asr_core::blobs::store(
+                                &options.out,
+                                ctx_history_asr_core::numbers::text(&row).as_bytes(),
+                            )?;
+                            entry.as_object_mut().unwrap().remove("record");
+                        }
+                        serde_json::to_writer(&mut *out, &entry)?;
                         Ok(())
                     },
                 )

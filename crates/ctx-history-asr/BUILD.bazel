@@ -16,7 +16,6 @@ DEPS = [
     "//crates/ctx-history-provider-claude-cursor:lib",
     "//crates/ctx-history-provider-fx:lib",
     "//crates/ctx-history-provider-codex:lib",
-    "//crates/ctx-history-capture-model:lib",
 ]
 
 rust_library(

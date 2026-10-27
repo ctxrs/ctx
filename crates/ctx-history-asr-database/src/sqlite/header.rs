@@ -10,12 +10,12 @@ pub fn header(provider: Provider, id: &str, _row: &Value) -> Value {
         "order",
         "message.author",
         "copies",
+        "usage",
         "branches",
         "display_content",
         "exec.exit_code",
         "_rs.ctx/native_row_limit",
         "_rs.ctx/vendor_only",
-        "_rs.ctx/unassigned_context",
     ];
     if provider != Provider::Goose {
         losses.push("inference");
@@ -43,7 +43,7 @@ pub fn header(provider: Provider, id: &str, _row: &Value) -> Value {
     }
     json!({"type":"session","formatVersion":"0.1","agent":{"name":provider.agent()},"sessionId":id,
         "producer":{"name":"ctx","version":env!("CARGO_PKG_VERSION"),"method":if provider==Provider::Warp {"decoded"} else {"converter"},"instance":"ctx-asr-sqlite-batch6-2","source":{"format":provider.format()},"lossy":losses},
-        "profiles":["core","coding","lineage","usage"],"contentLevel":"full","authority":if provider==Provider::Warp {"remote_cache"} else {"local"},"workspace":{"roots":[{"id":"unknown","path":null}]},"assembly":{"mode":"snapshot"}})
+        "profiles":["core","coding","lineage","usage"],"contentLevel":"full","authority":if provider==Provider::Warp {"remote_cache"} else {"local"},"workspace":{"roots":[{"id":"unknown","path":null}]}})
 }
 pub fn capture_header(
     header: &mut Value,

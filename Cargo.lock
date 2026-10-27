@@ -1509,7 +1509,6 @@ dependencies = [
  "chrono",
  "ctx-history-asr-core",
  "ctx-history-asr-database",
- "ctx-history-capture-model",
  "ctx-history-provider-claude-cursor",
  "ctx-history-provider-codex",
  "ctx-history-provider-fx",

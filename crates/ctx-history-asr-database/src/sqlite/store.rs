@@ -398,6 +398,17 @@ pub fn ingest(spool: &mut Spool, path: &Path, provider: Provider, session: &str)
             },
         )?;
     }
+    if provider == Provider::Warp {
+        let mut key = String::from("warp-audit:");
+        loop {
+            let next: Option<(String,String)> = spool.db.query_row("SELECT key,value FROM entities WHERE key LIKE 'warp-audit:%' AND key>?1 ORDER BY key LIMIT 1", [&key], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+            let Some((next, value)) = next else {
+                break;
+            };
+            key = next;
+            push(spool, &mut pos, serde_json::from_str(&value)?)?;
+        }
+    }
     if provider != Provider::Lingma {
         header["_key"] = json!("session-current-state");
         header["_capture"] = json!(true);

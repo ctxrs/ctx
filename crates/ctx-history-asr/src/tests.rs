@@ -15,6 +15,20 @@ fn fixture(provider: Provider, rows: &[Value]) -> (tempfile::TempDir, Options) {
     (dir, options)
 }
 fn records(options: &Options) -> Vec<Value> {
+    if let Some(validator) = std::env::var_os("ASR_VALIDATOR") {
+        let output = std::process::Command::new("node")
+            .arg(validator)
+            .arg(&options.out)
+            .args(["--streaming", "--format", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let manifest: Value =
         serde_json::from_slice(&std::fs::read(options.out.join("bundle.json")).unwrap()).unwrap();
     std::fs::read_to_string(
@@ -108,3 +122,5 @@ mod warp;
 mod relational;
 
 mod v31;
+
+mod v32;

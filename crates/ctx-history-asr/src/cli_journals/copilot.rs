@@ -208,7 +208,7 @@ fn message(s: &mut Spool, w: &mut Writer, v: &Value) -> Result<()> {
     retain(&mut r, w.provider, v, &[]);
     if !user && d["chunkIndex"].is_number() && d["messageId"].is_string() {
         if let Some(folded) = fold::message(s, w, d["messageId"].as_str().unwrap())? {
-            r.as_object_mut().unwrap().remove("content");
+            r["content"] = json!([]);
             r.as_object_mut()
                 .unwrap()
                 .extend(folded.as_object().unwrap().clone());

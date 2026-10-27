@@ -19,6 +19,14 @@ pub fn convert(spool: &mut Spool, writer: &mut Writer, pos: u64, row: &Value) ->
         row["_key"].as_str().unwrap_or("unknown"),
         row["_capture"] == true,
     );
+    writer.snapshot = !matches!(
+        (writer.provider, row["_table"].as_str()),
+        (
+            crate::Provider::Goose | crate::Provider::Crush,
+            Some("messages")
+        ) | (crate::Provider::Goose, Some("usage_ledger"))
+            | (crate::Provider::Warp, Some("warp_message" | "agent_tasks"))
+    );
     if row["_gap"].is_string() {
         let mut gap = json!({"type":"gap","reason":row["_gap"],"count":1});
         common::row_meta(spool, &mut gap, writer.provider, row)?;

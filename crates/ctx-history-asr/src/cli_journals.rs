@@ -276,6 +276,9 @@ fn result(
     }
     if let Some(body) = body.filter(|b| !b.is_null()) {
         r["content"] = json!(parts(body, p));
+        if !p.model_result() {
+            r["raw"] = body.clone();
+        }
     } else {
         r["capture"] = json!({"content":{"state":"absent"}});
     }

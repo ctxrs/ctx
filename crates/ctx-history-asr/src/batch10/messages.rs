@@ -92,6 +92,9 @@ pub(super) fn result(
         false
     };
     let mut v = json!({"type":"tool_result","status":status,"linkage":if ambiguous{"ambiguous"}else if id.is_some(){"exact"}else{"none"}});
+    if let Some(id) = id {
+        v["nativeCallId"] = json!(id);
+    }
     if !ambiguous {
         if let Some(id) = id {
             v["callId"] = json!(id);

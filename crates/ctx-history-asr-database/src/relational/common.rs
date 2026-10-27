@@ -17,17 +17,9 @@ pub(super) fn id(v: &Value) -> Option<String> {
         .or_else(|| v.as_u64().map(|n| n.to_string()))
 }
 pub(super) fn extra(v: &mut Value, p: Provider, key: &str, raw: &Value) {
-    if safe(raw) {
-        meta(v, p, key, raw);
-    } else {
-        meta(
-            v,
-            p,
-            &format!("{key}JsonText"),
-            &json!(ctx_history_asr_core::numbers::text(raw)),
-        );
-    }
+    meta(v, p, key, raw);
 }
+
 pub(super) fn native(v: &mut Value, p: Provider, s: &Spool, key: &str, raw: &Value) -> Result<()> {
     let mut raw = raw.clone();
     if let Some(o) = raw.as_object_mut() {
@@ -39,7 +31,7 @@ pub(super) fn native(v: &mut Value, p: Provider, s: &Spool, key: &str, raw: &Val
     if bytes.len() > 64 * 1024 {
         let mut file = tempfile::NamedTempFile::new_in(&s.bundle)?;
         file.write_all(&bytes)?;
-        meta(v, p, &format!("{key}Blob"), &s.blob(file)?);
+        meta(v, p, key, &s.blob(file)?);
     } else {
         extra(v, p, key, &raw);
     }
@@ -217,10 +209,13 @@ pub(super) fn result(s: &Spool, w: &Writer, id: Option<&str>, body: &Value) -> R
     let mut parts = parts(body, w.provider);
     binaries(s, &mut parts)?;
     let mut v = json!({"type":"tool_result","linkage":"none","status":"unknown","content":parts});
+    if !w.provider.model_result() && !body.is_null() {
+        v["raw"] = body.clone();
+    }
     if let Some(id) = id {
         if s.ambiguous_call(id)? {
             v["linkage"] = json!("ambiguous");
-            extra(&mut v, w.provider, "callId", &json!(id));
+            v["nativeCallId"] = json!(id);
         } else {
             v["linkage"] = json!("exact");
             v["callId"] = json!(id);

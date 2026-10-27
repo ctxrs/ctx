@@ -193,13 +193,6 @@ fn user(
             meta(&mut m, Provider::Claude, k, value);
         }
     }
-    if let Some(fork) = v.get("forkedFrom") {
-        if let (Some(session), Some(id)) =
-            (fork["sessionId"].as_str(), fork["messageUuid"].as_str())
-        {
-            m["copiedFrom"] = json!({"session":session_ref(Provider::Claude,session),"record":format!("messageId={id}"),"proof":"native_field"});
-        }
-    }
     let mut first = true;
     if !m["content"].as_array().is_some_and(Vec::is_empty) || !source.is_array() {
         content::capture_content(&mut m, source);

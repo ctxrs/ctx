@@ -21,7 +21,23 @@ pub(super) fn inference(
     copy(&mut r, "stopReason", message, "stop_reason");
     let usage = &message["usage"];
     if usage.is_object() {
-        r["usage"] = tokens(usage);
+        let placeholder = message["model"]
+            .as_str()
+            .is_some_and(|m| m == "<synthetic>")
+            || (message["stop_reason"].is_null()
+                && [
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                ]
+                .iter()
+                .all(|key| usage[*key].as_u64().unwrap_or(0) == 0));
+        if placeholder {
+            meta(&mut r, Provider::Claude, "usage", usage);
+        } else {
+            r["usage"] = tokens(usage);
+        }
     }
     if let Some(tier) = usage.get("service_tier") {
         r["params"] = json!({"serviceTier":tier});

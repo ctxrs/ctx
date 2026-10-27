@@ -245,10 +245,10 @@ fn journal_duplicate_call_ids_stay_ambiguous() {
         .unwrap();
         export(&o).unwrap();
         let records = records(&o);
-        let key = format!("{}/nativeCallId", p.domain());
+        let key = "nativeCallId";
         let results: Vec<_> = records
             .iter()
-            .filter(|r| r["type"] == "tool_result" && r["_meta"][&key] == "call")
+            .filter(|r| r["type"] == "tool_result" && r[key] == "call")
             .collect();
         assert!(!results.is_empty(), "{p:?}");
         assert!(results

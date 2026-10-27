@@ -16,7 +16,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
-pub(crate) const REVISION: &str = "ctx-asr-integration-1";
+pub(crate) const REVISION: &str = "ctx-asr-v32-1";
 
 pub fn export(options: &Options) -> Result<Summary> {
     if options.namespace.as_deref().is_some_and(str::is_empty) {
@@ -44,6 +44,28 @@ pub fn export(options: &Options) -> Result<Summary> {
         .write(true)
         .open(options.out.join(".ctx-asr.lock"))?;
     lock.lock_exclusive()?;
+    let mut configured = options.clone();
+    let custody = options.out.join(".ctx-asr-namespace");
+    if let Some(namespace) = &options.namespace {
+        match fs::read_to_string(&custody) {
+            Ok(saved) if saved != *namespace => {
+                return Err(Error::Invalid(
+                    "destination has a different saved namespace".into(),
+                ))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::write(&custody, namespace)?,
+            Err(e) => return Err(e.into()),
+        }
+    } else {
+        match fs::read_to_string(&custody) {
+            Ok(saved) if !saved.is_empty() => configured.namespace = Some(saved),
+            Ok(_) => return Err(Error::Invalid("saved namespace is empty".into())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let options = &configured;
     let state_name = options
         .namespace
         .as_ref()
@@ -52,11 +74,12 @@ pub fn export(options: &Options) -> Result<Summary> {
     let db = Connection::open(options.out.join(state_name))?;
     db.execute_batch("PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
         CREATE TABLE IF NOT EXISTS exports(agent TEXT, session TEXT, stamp TEXT, entry TEXT, PRIMARY KEY(agent,session));
-        CREATE TABLE IF NOT EXISTS positions(agent TEXT,session TEXT,segment TEXT,local TEXT,pos INTEGER,PRIMARY KEY(agent,session,segment,local));
-        CREATE INDEX IF NOT EXISTS observation_order ON positions(agent,session,pos);
+        CREATE TEMP TABLE positions(agent TEXT,session TEXT,segment TEXT,local TEXT,pos INTEGER,PRIMARY KEY(agent,session,segment,local));
+        CREATE INDEX observation_order ON positions(agent,session,pos);
         CREATE TEMP TABLE sources(agent TEXT,session TEXT,path TEXT,stamp TEXT,header TEXT,segment TEXT,PRIMARY KEY(agent,session,path));
         CREATE TEMP TABLE native_databases(agent TEXT,path TEXT,PRIMARY KEY(agent,path));
         CREATE TEMP TABLE lane_facts(provider TEXT,key TEXT,value TEXT,PRIMARY KEY(provider,key));
+        CREATE TEMP TABLE assigned_facts(provider TEXT,key TEXT,PRIMARY KEY(provider,key));
         CREATE INDEX source_sessions ON sources(agent,session,path);")?;
     crate::sqlite::namespace(&db, options.namespace.as_deref())?;
     let mut summary = Summary::default();
@@ -120,6 +143,17 @@ pub fn export(options: &Options) -> Result<Summary> {
                         serde_json::to_string(&s.header)?,
                         s.segment
                     ],
+                )?;
+            } else if s.provider == Provider::OpenClaw {
+                // Lane facts belong to the selected source, independently of session filtering.
+                let mut spool = Spool::new(&options.out, options.max_record_bytes)?;
+                crate::native::ingest(
+                    &mut spool,
+                    s.provider,
+                    &s.path,
+                    &s.session,
+                    &mut s.header,
+                    &db,
                 )?;
             }
             Ok(())
@@ -368,9 +402,11 @@ pub fn export(options: &Options) -> Result<Summary> {
             );
             // Every projection of a mutable transcript snapshot shares its
             // capture scope, including tools, usage, metadata and gaps.
-            writer.snapshot = provider == Provider::Antigravity
-                || (provider == Provider::Gemini && source_header["_snapshot"] == true);
+            writer.snapshot = false;
             writer.bundle = Some(options.out.clone());
+            if matches!(provider, Provider::Kimi | Provider::Copilot) {
+                writer.installation = options.namespace.clone();
+            }
             let mut stream_header = header::make(provider, &session, &source_header);
             if provider.batch10() {
                 crate::batch10::prepare(&mut spool)?;
@@ -418,6 +454,11 @@ pub fn export(options: &Options) -> Result<Summary> {
                     writer.native_position(pos, value["identity"].as_str().unwrap_or("unknown"));
                 } else {
                     writer.position(pos);
+                }
+                if provider.is_sqlite() {
+                    if let Some(key) = value["uuid"].as_str() {
+                        writer.capture_identity(key, provider == Provider::Kiro, false);
+                    }
                 }
                 if provider == Provider::Pi {
                     writer.copied = crate::pi::copies::copy(&spool, &value)?;
@@ -548,7 +589,23 @@ pub fn export(options: &Options) -> Result<Summary> {
                 crate::native::finish_header(&spool, provider, &mut stream_header)?;
             }
             if let Some(namespace) = &options.namespace {
-                stream_header["namespace"] = json!(namespace);
+                if matches!(provider, Provider::Kimi | Provider::Copilot) {
+                    ctx_history_asr_core::scope::qualify(&mut stream_header, provider, namespace)?;
+                    stream_header["namespace"] = stream_header["namespace"]
+                        .as_str()
+                        .map(|container| json!([namespace, container]).to_string())
+                        .map(Value::String)
+                        .unwrap_or_else(|| json!(namespace));
+                } else {
+                    stream_header["namespace"] = json!(namespace);
+                }
+            }
+            if !provider.model_result() {
+                if let Some(losses) = stream_header["producer"]["lossy"].as_array_mut() {
+                    if !losses.contains(&json!("tool_result.content")) {
+                        losses.push(json!("tool_result.content"));
+                    }
+                }
             }
             stream_header["seq"] = json!(0);
             stream_header["id"] = json!("r0");
@@ -558,6 +615,8 @@ pub fn export(options: &Options) -> Result<Summary> {
             {
                 stream_header["observedAt"] = at.clone();
             }
+            ctx_history_asr_core::registry::normalize(&mut stream_header, provider);
+            ctx_history_asr_core::blobs::numbers(&options.out, &mut stream_header, provider)?;
             let mut complete = capture(&options.out, &stream_header, temporary.as_file_mut())?;
             let (mut digest, mut size) = digest(complete.as_file_mut())?;
             let storage = format!(
@@ -645,31 +704,15 @@ pub fn export(options: &Options) -> Result<Summary> {
     }
     output.write_all(b"]")?;
     output.write_all(b",\"_meta\":{")?;
-    let context = crate::sqlite::manifest(&db, options, &mut summary)?;
     let mut comma = false;
-    if let Some(fields) = context.as_object() {
-        for (key, value) in fields {
-            if comma {
-                output.write_all(b",")?;
-            }
-            comma = true;
-            serde_json::to_writer(&mut output, key)?;
-            output.write_all(b":")?;
-            serde_json::to_writer(&mut output, value)?;
-        }
-    }
+    crate::sqlite::manifest(options, &mut summary, &mut output, &mut comma)?;
     crate::relational::bundle_facts(options, &mut output, &mut comma)?;
-    crate::native::manifest_facts(&db, &mut output, &mut comma)?;
+    crate::native::manifest_facts(&db, &mut output, &mut comma, &options.out)?;
     crate::batch8::application::write(&db, options, &mut output, &mut comma)?;
     output.write_all(b"}")?;
     output.write_all(b"}\n")?;
     output.flush()?;
     drop(output);
-    if summary.sessions == 0 && options.session.is_some() {
-        return Err(Error::Invalid(
-            "native session ID was not found in selected sources".into(),
-        ));
-    }
     manifest
         .persist(options.out.join("bundle.json"))
         .map_err(|e| e.error)?;

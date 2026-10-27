@@ -169,7 +169,12 @@ pub(super) fn convert(s: &mut Spool, w: &mut Writer, _pos: u64, v: &Value) -> Re
                 Some("cancelled") => "cancelled",
                 _ => "_com.moonshot.kimi-code/unknown",
             };
-            let mut r = json!({"type":"permission","requestId":format!("permission:{}",w.id()),"idSource":"derived","subject":{"callId":v["toolCallId"]},"decision":decision,"decidedBy":"user"});
+            let mut r = json!({"type":"permission","requestId":format!("permission:{}",w.id()),"idSource":"derived","decision":decision,"decidedBy":"user"});
+            if let Some(call) = v["toolCallId"].as_str() {
+                if !s.ambiguous_call(call)? {
+                    r["subject"] = json!({"callId":call});
+                }
+            }
             retain(&mut r, w.provider, v, &[]);
             emit(w, r, v)?;
         }

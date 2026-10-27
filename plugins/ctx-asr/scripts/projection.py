@@ -8,8 +8,8 @@ import hashlib
 import hmac
 import re
 
-VERSION = "0.1.0"
-META = "rs.ctx.claude-asr/source"
+VERSION = "0.2.0"
+META = "com.anthropic.claude-code/remainingFields"
 EVENTS = set("""SessionStart Setup UserPromptSubmit UserPromptExpansion PreToolUse
 PermissionRequest PermissionDenied PostToolUse PostToolUseFailure PostToolBatch
 Notification MessageDisplay SubagentStart SubagentStop TaskCreated TaskCompleted
@@ -29,7 +29,7 @@ TaskOutput TaskStop CronCreate CronDelete CronList ScheduleWakeup Monitor
 SendMessage SubagentHandback""".split())
 PERMISSIONS = set("default plan acceptEdits auto dontAsk bypassPermissions".split())
 EFFORTS = set("low medium high xhigh max".split())
-LOSSES = ["inference", "usage", "cost", "timestamps", "reasoning",
+LOSSES = ["events", "inference", "usage", "cost", "timestamps", "reasoning",
           "reasoning.signature", "reasoning.opaque", "message.author",
           "tool_result.content", "tool_result.raw", "exec.exit_code",
           "display_content", "content.binary", "branches", "copies",
@@ -85,7 +85,7 @@ def project(session, parent, event, state, observed):
                       sessionId=session, namespace=None, profiles=["core"],
                       contentLevel="metadata", producer={"name": "claude-code-asr",
                           "version": VERSION, "method": "observer", "instance": state["instance"],
-                          "source": {"format": "claude-code-hooks"}, "lossy": LOSSES},
+                          "source": {"format": "claude-code-hooks", "formatVersion": "2.1.305"}, "lossy": LOSSES},
                       extensions=[{"id": "rs.ctx.claude-asr/hooks", "version": "1", "required": False}])
         if session != parent:
             header["scope"] = "subagent"
@@ -167,7 +167,11 @@ def project(session, parent, event, state, observed):
         record = emit("tool_result", linkage="none", status=status,
                       capture={"content": {"state": "absent"}, "raw": omitted()})
         if call:
-            record.update(callId=call, linkage="ambiguous" if state["calls"].get(call, 0) > 1 else "exact")
+            record["nativeCallId"] = call
+            if state["calls"].get(call, 0) > 1:
+                record["linkage"] = "ambiguous"
+            else:
+                record.update(callId=call, linkage="exact")
         duration = event.get("duration_ms")
         if type(duration) in (int, float) and 0 <= duration <= 2**53 - 1:
             record["durationMs"] = duration

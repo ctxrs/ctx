@@ -96,8 +96,8 @@ fn crush_snapshot_rewrite_truncation_and_file_versions() {
     assert!(!after.iter().any(|v| v["type"] == "tombstone"));
     assert!(after
         .iter()
-        .skip(1)
-        .all(|v| v["assembly"]["mode"] == "snapshot"));
+        .filter(|v| v["type"] == "message")
+        .all(|v| v.get("assembly").is_none()));
 }
 #[test]
 fn crush_duplicate_calls_and_large_integer_arguments() {
@@ -126,7 +126,7 @@ fn crush_duplicate_calls_and_large_integer_arguments() {
     let result = rows.iter().find(|v| v["type"] == "tool_result").unwrap();
     assert_eq!(result["linkage"], "ambiguous");
     assert!(result.get("callId").is_none());
-    assert_eq!(result["_meta"]["sh.charm.crush/unpairedCallId"], "same");
+    assert_eq!(result["nativeCallId"], "same");
 }
 #[test]
 fn goose_reinserted_rows_keep_native_identity_and_native_display_order() {

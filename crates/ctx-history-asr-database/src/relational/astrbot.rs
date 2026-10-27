@@ -77,11 +77,7 @@ pub(super) fn header(h: &Value, v: &mut Value) {
         &json!({"platform_id":h["platform_id"],"user_id":h["user_id"]}),
     );
     c::extra(v, P, "persona", &h["persona_id"]);
-    for loss in [
-        "timestamps",
-        "display_content",
-        "_app.astrbot/unassigned_facts",
-    ] {
+    for loss in ["timestamps", "display_content"] {
         v["producer"]["lossy"]
             .as_array_mut()
             .unwrap()

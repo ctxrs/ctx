@@ -5,6 +5,8 @@ pub mod content;
 pub mod numbers;
 pub mod privacy;
 pub mod records;
+pub mod registry;
+pub mod scope;
 pub mod source;
 pub mod spool;
 use serde::{Deserialize, Serialize};
@@ -198,7 +200,7 @@ impl Provider {
             Self::Hermes => "com.nousresearch.hermes",
             Self::AstrBot => "app.astrbot",
             Self::Shelley => "dev.exe.shelley",
-            Self::Zed => "dev.zed",
+            Self::Zed => "dev.zed.agent",
             Self::Firebender => "com.firebender",
             Self::ForgeCode => "dev.forgecode",
             Self::DeepAgents => "com.langchain.deepagents",
@@ -303,6 +305,21 @@ impl Provider {
     }
     pub fn captures(self) -> bool {
         matches!(self, Self::Cline | Self::Roo | Self::Fx)
+    }
+    /// Registry-qualified persisted model views; other stored results default to raw.
+    pub fn model_result(self) -> bool {
+        matches!(
+            self,
+            Self::Claude
+                | Self::Codex
+                | Self::Copilot
+                | Self::Qoder
+                | Self::Shelley
+                | Self::Gemini
+                | Self::Kiro
+                | Self::Cline
+                | Self::Roo
+        )
     }
     pub fn needs_namespace(self) -> bool {
         matches!(self, Self::Cline | Self::Roo)

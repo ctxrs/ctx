@@ -77,7 +77,7 @@ pub(super) fn state(spool: &Spool, w: &mut Writer, row: &Value) -> Result<()> {
                     }
                 }
             }
-            let metric_row = json!({"snapshot":true,"value":{"bucket":bucket,"token_usage":u,"response_latencies":m["response_latencies"].as_array().into_iter().flatten().filter(|l| l["response_id"].as_str()==response).collect::<Vec<_>>()}});
+            let metric_row = json!({"snapshot":true,"kind":"state","value":{"bucket":bucket,"token_usage":u,"response_latencies":m["response_latencies"].as_array().into_iter().flatten().filter(|l| l["response_id"].as_str()==response).collect::<Vec<_>>()}});
             let id = emit(spool, w, v, &metric_row)?;
             if unique {
                 if let Some(response) = response {
@@ -97,7 +97,7 @@ pub(super) fn state(spool: &Spool, w: &mut Writer, row: &Value) -> Result<()> {
         if let Some(c) = m.get("accumulated_cost").filter(|v| v.is_number()) {
             v["cost"] = json!({"amount":c,"currency":"USD","source":"harness_estimated"});
         }
-        let metric_row = json!({"snapshot":true,"value":{"bucket":bucket,"accumulated_token_usage":m["accumulated_token_usage"],"accumulated_cost":m["accumulated_cost"]}});
+        let metric_row = json!({"snapshot":true,"kind":"state","value":{"bucket":bucket,"accumulated_token_usage":m["accumulated_token_usage"],"accumulated_cost":m["accumulated_cost"]}});
         emit(spool, w, v, &metric_row)?;
     }
     w.identity = original;

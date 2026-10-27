@@ -10,6 +10,7 @@ use crate::{
 use serde_json::{json, Value};
 
 pub(crate) fn convert(s: &mut Spool, w: &mut Writer, n: &Value) -> Result<()> {
+    w.snapshot = n["type"] != "kiro_entry";
     match n["type"].as_str().unwrap_or("") {
         "_gap" => {
             w.emit(

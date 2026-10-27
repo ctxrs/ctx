@@ -27,8 +27,7 @@ namespaced by their containing native session ID.
 Copilot schedules become turn `trigger` objects only when the native message
 identifies a scheduled firing that begins that turn. Creating a schedule is
 retained as a vendor event. Tool names and IDs remain verbatim; repeated IDs
-produce ambiguous result linkage with the native ID in metadata and no paired
-`callId`. Display output and raw sidecars remain
+produce ambiguous result linkage with `nativeCallId` and no paired `callId`. Display output and raw sidecars remain
 separate from model-facing content. Kimi request records identify inference
 attempts; step completion revises the final request of the same native turn/step.
 Droid and Qoder message IDs are not treated as inference IDs.
@@ -53,8 +52,8 @@ export does not apply general-purpose secret or personal-data redaction.
 
 Repeat the command with the same destination to update the bundle. Unchanged
 JSONL sources are skipped; mixed SQLite stores are reread to capture current rows and lane facts. A changed session is spooled again; the exporter does not
-assume native files only append. The export database retains source-position assignments,
-which are independent of capture-local `seq`. Codex IDs derive from native
+assume native files only append. Source positions are rebuilt from each capture;
+the destination's earlier observation order is never transcript order. Codex IDs derive from native
 segment, physical line, and emission slot; native ordinals can repeat on distinct
 rows and remain provenance at `com.openai.codex/position` alongside the line.
 Segment headers provide creation order; ties use
@@ -104,8 +103,10 @@ Tool names remain verbatim. Reused native call IDs produce unpaired results;
 no result is assigned to the latest call by position. Usage attributed to a
 message or group of calls remains a summary rather than a fabricated inference.
 Native values without a standard field remain under the provider's reverse-DNS
-metadata namespace. Unsafe integers use lossless JSON text; large content and
-metadata use content-addressed JSON blobs. Configuration credential values and
+metadata namespace. Unsafe native numbers use `<agent-namespace>/jsonText` keyed by the displaced
+JSON Pointer, `inputText` for tool arguments, or whole-value JSON blobs. Required
+numeric fields cannot use text substitutes. Large content and metadata also use
+content-addressed JSON blobs. Configuration credential values and
 secret-question answers are excluded before metadata or blob publication.
 
 The authored regression fixtures verify mapping semantics, source rewrites,
@@ -162,6 +163,11 @@ ctx export asr --all --provider kiro --namespace my-kiro-installation --path ./d
 ```
 
 Reuse that namespace for the same installation across exports and relocations.
+The destination persists it in `.ctx-asr-namespace` and reuses it when subsequent
+commands omit `--namespace`. Keep this state with a relocated export. A conflicting
+namespace requires a separate destination. For Kimi and Copilot child conversations,
+installation and native container scope compose as compact JSON text
+`[installation, container]`; Kimi `main` remains its own conversation.
 It is not an input-file path or an output-directory identity. The legacy JSON may
 also contain a conversation UUID; it is retained as provider metadata rather than
 silently overriding the registry's directory-key rule. Kiro ACP/v3 session stores
@@ -342,3 +348,51 @@ values use `rs.ctx/unsafeJsonText` (field to JSON string) or
 and audio data over 64 KiB use binary blobs. Codex host-cell IDs are metadata,
 not parent calls; a nearby `new_context` call does not establish a compaction
 trigger. Unknown enum values remain native metadata.
+
+## Accounting and representation policy
+
+The v3.2 converters keep source-defined transcript positions, including native
+array order and qualified SQL reader order. Mutable settings and side-store
+snapshots follow the transcript. Arbitrary SQL ordering only determines snapshot
+serialization. Record equality across replacement captures does not establish
+historical chronology.
+
+Stored tool output is `raw` unless the supported format explicitly identifies the
+model-facing representation. That exception covers Claude transcript result blocks,
+Codex function/custom output items, Copilot `result.content`, Qoder transcript blocks
+(excluding raw/UI sidecars), Shelley model messages, Gemini function responses,
+Kiro tool-use results, and Cline/Roo API histories. Other converters declare missing
+`tool_result.content`, retaining raw/native and display evidence. This policy does
+not qualify untested versions or infer model delivery from storage alone.
+
+Accounting selects native identities and source contracts, never equal counts,
+model names or nearby timestamps. Effective revisions replace earlier observations
+of the same report; readers must not sum revision history or add cumulative totals
+to per-call reports. Unknown inclusion of cache or child usage stays unknown.
+
+| Agent | Selection policy |
+| --- | --- |
+| Claude Code | Last effective usage for a native response ID after folding its blocks; cost-state remains a separate cumulative session report. Synthetic/uncompleted placeholder zeros stay native; explicit completed zero reports remain values. |
+| Codex | Response accounting identity and effective native reports; snapshots and cumulative totals stay distinct from per-response usage. |
+| Pi | Assistant response report, with derived accounting identity only where the message contract supports it; error/aborted all-zero placeholders stay native. Compaction reports remain separately scoped summaries. |
+| Copilot | `apiCallId` per-call reports; the native cost multiplier is never USD. |
+| Kimi | Qualified request/step identity; final completion revises its request. Unattributed usage stays native. |
+| OpenCode, Kilo, MiMoCode | Native completed step/response evidence; default all-zero unfinished counters stay native. |
+| Goose | Prefer session ledger entries; without a ledger use qualified message reports. Retain overlapping message usage natively. Current-context and accumulated snapshots are separate counters; nullable native counters preserve reported zeros. Partial ledger coverage declares `usage`. |
+| OpenHands | Unique response IDs join event and Metrics reports; duplicated/unjoinable reports remain native. Accumulated metrics remain cumulative summaries. |
+| Cline, Roo | API request/report identity where present; UI request usage stays distinct from cumulative task state. |
+| ForgeCode, DeepAgents, Gemini, Qwen Code, Mistral Vibe, Mux, Tabnine, Fx | Project only the format's explicit call, message, or aggregate reports at their recorded scope; preserve unjoinable native components without attributing them to another call. |
+| Crush, Hermes, AstrBot, Shelley, Zed | Explicit ledger/message or current-state accounting at its native scope; current totals do not establish individual model calls. Crush all-zero schema defaults stay native. |
+| OpenClaw | Native response/run accounting only with explicit identity; backing-harness and unjoined reports remain native with declared incomplete coverage. |
+| Grok Build, DeepSeek Harness, Droid, Qoder, Junie, Antigravity, Cursor, Kiro, Lingma, Warp, Firebender, Devin, NanoClaw, CodeBuddy, Continue, Auggie, RovoDev | Retain explicit native usage as available; absent or unqualified accounting stays unknown. No report is manufactured from message counts, defaults, or matching timestamps. |
+
+Fx current-state history totals initialized to zero stay native until a nonzero total is recorded; explicit event reports retain zero values.
+
+Unassigned lane facts use manifest `_meta["<agent-namespace>/unassigned"]`, each
+with `source`, optional `namespace`/`lane`, and one of `record` or `blob`. Source
+selection includes these facts independently of the selected sessions, including
+an empty session subset. They are not copied to every session, and unknown
+ownership alone is not a loss. Unattributed source-file counts remain in the
+command's summary. OpenClaw session filtering still reads other sessions to
+resolve run ownership before collecting lane facts; this keeps selection from
+changing ownership and adds source reads for filtered exports.

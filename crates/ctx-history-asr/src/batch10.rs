@@ -1,7 +1,5 @@
 //! Native document and event-store adapters. No projection through searchable Core.
 mod document;
-#[cfg(test)]
-pub(crate) use document::unsafe_numbers as unsafe_native_number;
 mod hooks;
 mod messages;
 mod metrics;
@@ -165,7 +163,7 @@ pub(crate) fn convert(spool: &mut Spool, w: &mut Writer, row: &Value) -> Result<
     }
 }
 pub(super) fn emit(spool: &Spool, w: &mut Writer, mut v: Value, row: &Value) -> Result<String> {
-    if row["snapshot"] == true {
+    if row["snapshot"] == true && matches!(row["kind"].as_str(), Some("metadata" | "state")) {
         v["assembly"] = json!({"mode":"snapshot"});
     }
     if row["captureScope"] == true {
@@ -209,22 +207,7 @@ fn externalize(spool: &Spool, v: &mut Value) -> Result<()> {
             }
         }
     }
-    for field in ["_meta", "raw"] {
-        if let Some(data) = v.get(field) {
-            let raw = serde_json::to_vec(data)?;
-            if raw.len() > spool.limit / 2 {
-                let mut f = tempfile::NamedTempFile::new_in(&spool.bundle)?;
-                f.write_all(&raw)?;
-                let blob = spool.blob(f)?;
-                if field == "_meta" {
-                    v[field] = json!({"rs.ctx/nativeMetadataBlob":blob});
-                } else {
-                    v[field] = json!({"blob":blob});
-                    v["capture"]["raw"] = json!({"state":"external","blob":blob});
-                }
-            }
-        }
-    }
+    ctx_history_asr_core::blobs::externalize(&spool.bundle, v)?;
     Ok(())
 }
 pub(super) fn entity(v: &mut Value, key: &str, native: Option<&str>, w: &Writer) {

@@ -21,20 +21,28 @@ pub(super) fn visit(
         }
         rows(db, t, "ORDER BY key,rowid", &[], limit, &mut |mut row| {
             let legacy = t == "conversations";
-            if legacy && namespace.is_none() {
-                return Err(Error::Invalid("directory-keyed Kiro conversations require --namespace with a stable installation identity (ASR-054/055); a file path or export timestamp is not a namespace".into()));
+            let mut body = data(&mut row, "value");
+            let uuid = row["conversation_id"]
+                .as_str()
+                .or_else(|| body.as_ref().and_then(|v| v["conversation_id"].as_str()))
+                .filter(|id| !id.is_empty());
+            if legacy && uuid.is_none() && namespace.is_none() {
+                return Err(Error::Invalid(
+                    "directory-keyed Kiro conversations require a stable installation namespace"
+                        .into(),
+                ));
             }
-            let Some(id) = (if legacy {
-                row["key"].as_str().or_else(|| row["_key"].as_str())
-            } else {
-                row["conversation_id"].as_str()
-            })
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned) else {
+            let id = uuid
+                .or_else(|| {
+                    legacy
+                        .then(|| row["key"].as_str().or_else(|| row["_key"].as_str()))
+                        .flatten()
+                })
+                .map(str::to_owned);
+            let Some(id) = id.filter(|id| !id.is_empty()) else {
                 *unidentified += 1;
                 return Ok(());
             };
-            let mut body = data(&mut row, "value");
             if body.is_none() && row.get("_gap").is_none() {
                 row["_gap"] = json!("unparseable");
             }
@@ -47,7 +55,7 @@ pub(super) fn visit(
             let mut stage = Stage::new(staging, provider, &id, h)?;
             if let Some(mut body) = body.take() {
                 let history = body.as_object_mut().and_then(|o| o.remove("history"));
-                stage.push("session", "kiro_state", row, body, None)?;
+
                 match history {
                     Some(Value::Array(entries)) => {
                         for (i, entry) in entries.into_iter().enumerate() {
@@ -69,6 +77,7 @@ pub(super) fn visit(
                     )?,
                     None => {}
                 }
+                stage.push("session", "kiro_state", row, body, None)?;
             } else {
                 stage.push("session", "_gap", row, Value::Null, None)?;
             }

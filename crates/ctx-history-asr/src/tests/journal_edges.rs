@@ -111,8 +111,7 @@ fn droid_same_row_duplicate_ids_and_missing_result_ids() {
     let r = records(&o);
     assert_eq!(
         r.iter()
-            .find(|r| r["type"] == "tool_result"
-                && r["_meta"]["ai.factory.droid/nativeCallId"] == "same-row")
+            .find(|r| r["type"] == "tool_result" && r["nativeCallId"] == "same-row")
             .unwrap()["linkage"],
         "ambiguous"
     );

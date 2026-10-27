@@ -190,7 +190,6 @@ fn message(spool: &Spool, w: &mut Writer, v: &Value) -> Result<()> {
         ],
     );
     if v["_snapshot"] == true {
-        r["assembly"] = json!({"mode":"snapshot"});
         r["idScope"] = json!("capture");
     }
     if let Some(parts) = v["content"].as_array() {

@@ -197,66 +197,8 @@ fn object(
 pub(super) fn decode(raw: &[u8]) -> Result<Value> {
     let text =
         std::str::from_utf8(raw).map_err(|_| Error::Invalid("native JSON is not UTF-8".into()))?;
-    if !ctx_history_capture_model::raw_object_keys_are_unique(raw) {
-        return Err(Error::Invalid(
-            "invalid or duplicate-key native JSON".into(),
-        ));
-    }
-    // Keep non-I-JSON numeric values verbatim. Never let a float parser round a large integer.
-    if unsafe_numbers(text) {
-        return Ok(serde_json::json!({"_ctx_native_json":text}));
-    }
-    Ok(serde_json::from_str(text)?)
-}
-pub(crate) fn unsafe_numbers(text: &str) -> bool {
-    let b = text.as_bytes();
-    let mut i = 0;
-    let mut string = false;
-    let mut escape = false;
-    while i < b.len() {
-        let x = b[i];
-        if string {
-            if escape {
-                escape = false;
-            } else if x == b'\\' {
-                escape = true;
-            } else if x == b'"' {
-                string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if x == b'"' {
-            string = true;
-            i += 1;
-            continue;
-        }
-        if x == b'-' || x.is_ascii_digit() {
-            let start = i;
-            i += 1;
-            while i < b.len()
-                && (b[i].is_ascii_digit() || matches!(b[i], b'.' | b'e' | b'E' | b'+' | b'-'))
-            {
-                i += 1;
-            }
-            let n = &text[start..i];
-            if !n.contains(['.', 'e', 'E']) {
-                if n.parse::<i128>()
-                    .map_or(true, |v| v.unsigned_abs() > 9_007_199_254_740_991)
-                {
-                    return true;
-                }
-            } else if n.parse::<f64>().map_or(true, |v| {
-                !v.is_finite() || v.abs() > 9_007_199_254_740_991.0
-            }) {
-                // Preserve large decimal/exponent spellings too, without binary64 rounding.
-                return true;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    false
+    ctx_history_asr_core::numbers::decode(text)
+        .ok_or_else(|| Error::Invalid("invalid native JSON".into()))
 }
 pub(super) fn whole(path: &Path, limit: usize) -> Result<Value> {
     use std::io::Read;

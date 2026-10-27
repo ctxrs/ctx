@@ -272,6 +272,8 @@ pub(crate) fn result_audit(
             let mut change = path(file, cwd);
             change["op"] = json!(if output["type"] == "create" {
                 "add"
+            } else if name == "Write" && output["type"] != "update" {
+                "unknown"
             } else {
                 "modify"
             });

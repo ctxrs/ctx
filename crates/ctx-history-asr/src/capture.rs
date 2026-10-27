@@ -209,36 +209,14 @@ pub(crate) fn retain(
     source: &Value,
     spool: &Spool,
 ) -> Result<()> {
-    safe_data(record)?;
     externalize(record, spool)?;
     let bytes = ctx_history_asr_core::numbers::text(source).into_bytes();
     if bytes.len() > 65536 {
         let mut file = tempfile::NamedTempFile::new_in(&spool.bundle)?;
         file.write_all(&bytes)?;
-        meta(record, provider, "sourceBlob", &spool.blob(file)?);
-    } else if unsafe_numbers(source) {
-        meta(
-            record,
-            provider,
-            "sourceJson",
-            &json!(String::from_utf8(bytes).map_err(|_| Error::Invalid("JSON UTF-8".into()))?),
-        );
+        meta(record, provider, "source", &spool.blob(file)?);
     } else {
         meta(record, provider, "source", source);
-    }
-    Ok(())
-}
-fn safe_data(v: &mut Value) -> Result<()> {
-    if v["type"] == "data" && unsafe_numbers(&v["data"]) {
-        *v = json!({"type":"opaque","format":"application/json","data":ctx_history_asr_core::numbers::text(&v["data"])});
-    } else if let Some(items) = v.as_array_mut() {
-        for item in items {
-            safe_data(item)?;
-        }
-    } else if let Some(items) = v.as_object_mut() {
-        for item in items.values_mut() {
-            safe_data(item)?;
-        }
     }
     Ok(())
 }

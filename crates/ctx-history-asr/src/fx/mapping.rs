@@ -63,7 +63,7 @@ pub(super) fn turn(spool: &Spool, w: &mut Writer, n: &Value) -> Result<()> {
             tool(spool, w, call)?;
         }
         for result in step["tool_results"].as_array().into_iter().flatten() {
-            let mut r = json!({"type":"tool_result","status":match result["status"].as_str(){Some("success")=>"completed",Some("failure")=>"failed",_=>"unknown"},"linkage":"none","content":content::parts(&result["output"],w.provider)});
+            let mut r = json!({"type":"tool_result","status":match result["status"].as_str(){Some("success")=>"completed",Some("failure")=>"failed",_=>"unknown"},"linkage":"none","raw":result["output"],"content":content::parts(&result["output"],w.provider)});
             if let Some(id) = result["tool_call_id"].as_str() {
                 let count: u64 = spool.db.query_row(
                     "SELECT count(*) FROM native_calls WHERE call_id=?1",
@@ -172,7 +172,12 @@ pub(super) fn state(spool: &Spool, w: &mut Writer, n: &Value) -> Result<()> {
     let u = &n["usage"];
     w.slot(20);
     let r = json!({"type":"usage_summary","scope":"session","cumulative":true,"includesChildren":null,"counter":"history","usage":super::usage::usage(n,"total_input_tokens","total_output_tokens")});
-    emit(spool, w, r, &json!({}))?;
+    if ["total_input_tokens", "total_output_tokens"]
+        .iter()
+        .any(|key| n[key].as_u64().is_some_and(|v| v > 0))
+    {
+        emit(spool, w, r, &json!({}))?;
+    }
     w.slot(30);
     if u.is_object() {
         emit(spool, w, super::usage::summary(u), u)?;

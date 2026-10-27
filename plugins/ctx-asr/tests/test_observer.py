@@ -74,6 +74,12 @@ class ObserverTests(unittest.TestCase):
         self.dispatch(event("SessionEnd"))
         rows = self.rows()
         self.assertEqual(rows[0]["producer"]["method"], "observer")
+        self.assertEqual(rows[0]["producer"]["source"]["formatVersion"], "2.1.305")
+        self.assertIn("events", rows[0]["producer"]["lossy"])
+        if validator := os.environ.get("ASR_VALIDATOR"):
+            checked = subprocess.run(["node", validator, str(self.out / (SESSION + ".asr.jsonl")),
+                                      "--streaming", "--format", "json"], capture_output=True)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
         self.assertNotIn("startedAt", rows[0])
         self.assertNotIn("lineage", rows[0])
         self.assertEqual(rows[0]["contentLevel"], "metadata")
@@ -83,6 +89,7 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(calls[0]["callId"], CALL)
         self.assertNotIn("requestedBy", calls[0])
         self.assertEqual((results[0]["linkage"], results[0]["durationMs"]), ("exact", 0))
+        self.assertEqual(results[0]["nativeCallId"], CALL)
         self.assertEqual(results[0]["capture"]["content"]["state"], "absent")
         self.assertNotIn("permission", results[0])
         self.assertEqual(rows[-1]["state"], "ended")

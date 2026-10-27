@@ -1,5 +1,5 @@
 //! Unowned database facts belong to the manifest, never the nearest session.
-use super::{sqlite, values};
+use super::sqlite;
 use crate::{spool::Spool, Options, Provider, Result};
 use rusqlite::Connection;
 use serde_json::json;
@@ -13,7 +13,8 @@ pub fn write(
 ) -> Result<()> {
     let mut sources = db.prepare("SELECT agent,path FROM native_databases ORDER BY agent,path")?;
     let mut rows = sources.query([])?;
-    let mut first = true;
+    let mut current = String::new();
+    let mut first_row = true;
     while let Some(row) = rows.next()? {
         let agent: String = row.get(0)?;
         let path: String = row.get(1)?;
@@ -23,15 +24,17 @@ pub fn write(
             "com.langchain.deepagents" => Provider::DeepAgents,
             _ => Provider::Devin,
         };
-        if first {
-            if *comma {
+        if agent != current {
+            if !current.is_empty() {
+                out.write_all(b"],")?;
+            } else if *comma {
                 out.write_all(b",")?;
             }
             *comma = true;
-            out.write_all(b"\"rs.ctx/sqliteApplicationState\":[")?;
-            first = false;
-        } else {
-            out.write_all(b",")?;
+            serde_json::to_writer(&mut *out, &format!("{}/unassigned", provider.domain()))?;
+            out.write_all(b":[")?;
+            current = agent;
+            first_row = true;
         }
         let mut spool = Spool::new(&options.out, options.max_record_bytes)?;
         sqlite::read(Path::new(&path), |native| {
@@ -66,28 +69,27 @@ pub fn write(
             Ok(())
         })?;
         crate::privacy::prepare(&mut spool)?;
-        write!(
-            out,
-            "{{\"agent\":{},\"rows\":[",
-            serde_json::to_string(provider.agent())?
-        )?;
         let mut pos = 0;
-        let mut comma = false;
         while let Some(next) = spool.next(pos)? {
             pos = next;
             let v = spool.get(pos)?;
-            let mut entry = json!({"table":v["table"]});
-            values::preserve(&spool, &mut entry, provider, "row", &v["row"])?;
-            if comma {
+            let mut entry = json!({"source":{"table":v["table"]},"record":v["row"]});
+            if !ctx_history_asr_core::numbers::safe(&v["row"]) {
+                entry["blob"] = ctx_history_asr_core::blobs::store(
+                    &options.out,
+                    ctx_history_asr_core::numbers::text(&v["row"]).as_bytes(),
+                )?;
+                entry.as_object_mut().unwrap().remove("record");
+            }
+            if !first_row {
                 out.write_all(b",")?;
             }
-            comma = true;
+            first_row = false;
             serde_json::to_writer(&mut *out, &entry)?;
         }
         spool.finish()?;
-        out.write_all(b"]}")?;
     }
-    if !first {
+    if !current.is_empty() {
         out.write_all(b"]")?;
     }
     Ok(())

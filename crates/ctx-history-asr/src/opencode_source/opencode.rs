@@ -35,18 +35,6 @@ pub(super) fn visit(
             };
             h["cwd"] = h["directory"].clone();
             let mut stage = Stage::new(staging, provider, &id, h.clone())?;
-            stage.push("session", "session_state", h, Value::Null, None)?;
-            if name == "session_v2" && table(db, "session")? {
-                rows(db, "session", "WHERE id=?1", &[&id], limit, &mut |row| {
-                    stage.push(
-                        "legacy_session",
-                        "legacy_session_state",
-                        row,
-                        Value::Null,
-                        None,
-                    )
-                })?;
-            }
             let current = if has_rows(db, "session_message", &id)? {
                 Some("session_message")
             } else if has_rows(db, "session_entry", &id)? {
@@ -143,6 +131,18 @@ pub(super) fn visit(
                         Ok(())
                     },
                 )?;
+            }
+            stage.push("session", "session_state", h, Value::Null, None)?;
+            if name == "session_v2" && table(db, "session")? {
+                rows(db, "session", "WHERE id=?1", &[&id], limit, &mut |row| {
+                    stage.push(
+                        "legacy_session",
+                        "legacy_session_state",
+                        row,
+                        Value::Null,
+                        None,
+                    )
+                })?;
             }
             // Session-owned supporting state stays scoped to its native owner.
             if table(db, "part")? && table(db, "message")? {

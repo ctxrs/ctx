@@ -37,6 +37,7 @@ pub(super) fn tool(
     let output = state.get("content").or_else(|| state.get("output"));
     if let Some(output) = output {
         result["content"] = json!(content::output(output, w.provider));
+        result["raw"] = output.clone();
     } else {
         result["capture"]["content"] = json!({"state":"absent"});
     }
@@ -103,7 +104,7 @@ pub(super) fn shell(s: &Spool, w: &mut Writer, n: &Value) -> Result<()> {
     timestamp(&mut call, d, &n["row"]);
     w.emit(call, &json!({}))?;
     if let Some(output) = d.get("output") {
-        let mut r = json!({"type":"tool_result","callId":id,"linkage":if s.ambiguous_call(id)?{"ambiguous"}else{"exact"},"status":"unknown","content":content::output(output,w.provider)});
+        let mut r = json!({"type":"tool_result","callId":id,"linkage":if s.ambiguous_call(id)?{"ambiguous"}else{"exact"},"status":"unknown","raw":output,"content":content::output(output,w.provider)});
         if let Some(t) = d.pointer("/time/completed").and_then(millis) {
             r["completedAt"] = json!(t);
         }

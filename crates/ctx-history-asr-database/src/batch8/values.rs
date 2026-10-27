@@ -26,17 +26,8 @@ pub(super) fn preserve(
             key,
             &bytes(spool, &raw, "application/json")?,
         );
-    } else if safe(value) {
-        meta(record, provider, key, value);
     } else {
-        let field = format!("{}/jsonText", provider.domain());
-        if record.get("_meta").is_none() {
-            record["_meta"] = json!({});
-        }
-        if record["_meta"].get(&field).is_none() {
-            record["_meta"][&field] = json!({});
-        }
-        record["_meta"][&field][key] = json!(String::from_utf8_lossy(&raw));
+        meta(record, provider, key, value);
     }
     Ok(())
 }

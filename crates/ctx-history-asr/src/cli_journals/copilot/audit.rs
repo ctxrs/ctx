@@ -48,7 +48,9 @@ pub(super) fn convert(s: &Spool, w: &mut Writer, v: &Value) -> Result<bool> {
                 .as_str()
                 .or_else(|| d["permissionRequest"]["toolCallId"].as_str())
             {
-                r["subject"] = json!({"callId":call});
+                if !s.ambiguous_call(call)? {
+                    r["subject"] = json!({"callId":call});
+                }
             }
             if kind == "permission.requested" {
                 if d["resolvedByHook"] != true {

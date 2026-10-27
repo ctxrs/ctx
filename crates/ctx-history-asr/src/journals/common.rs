@@ -18,13 +18,9 @@ pub(super) fn retain(record: &mut Value, w: &Writer, key: &str, v: &Value) {
         o.remove("_asr_folded");
         o.remove("_asr_step_key");
     }
-    if unsafe_number(&v) {
-        let k = format!("{}/jsonText", w.provider.domain());
-        record["_meta"][k][key] = json!(ctx_history_asr_core::numbers::text(&v));
-    } else {
-        meta(record, w.provider, key, &v);
-    }
+    meta(record, w.provider, key, &v);
 }
+
 pub(super) fn parts(v: &Value) -> Vec<Value> {
     match v {
         Value::Null => vec![],
@@ -43,11 +39,7 @@ pub(super) fn parts(v: &Value) -> Vec<Value> {
     }
 }
 pub(super) fn data(v: &Value) -> Value {
-    if unsafe_number(v) {
-        json!({"type":"opaque","format":"application/json","data":ctx_history_asr_core::numbers::text(v)})
-    } else {
-        json!({"type":"data","data":v})
-    }
+    json!({"type":"data","data":v})
 }
 pub(super) fn message(
     w: &Writer,
