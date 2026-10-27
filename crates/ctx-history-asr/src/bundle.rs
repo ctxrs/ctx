@@ -434,13 +434,12 @@ pub fn export(options: &Options) -> Result<Summary> {
                             [pos],
                             |r| Ok((r.get(0)?, r.get(1)?)),
                         )?;
-                        let mut provenance = json!({"segmentId":current});
+                        // Native ordinals can repeat on distinct journal rows.
+                        let mut provenance = json!({"segmentId":current,"line":line});
+                        writer.identity = Some(crate::records::stable_id(&provenance.to_string()));
                         if let Some(ordinal) = ordinal {
                             provenance["ordinal"] = serde_json::from_str(&ordinal)?;
-                        } else {
-                            provenance["line"] = json!(line);
                         }
-                        writer.identity = Some(crate::records::stable_id(&provenance.to_string()));
                         writer.provenance = Some(provenance);
                     }
                     if current != segment {

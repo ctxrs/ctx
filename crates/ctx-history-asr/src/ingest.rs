@@ -169,7 +169,7 @@ pub(crate) fn ingest(
         if provider.cli_journal() {
             crate::cli_journals::index(spool, provider, &v, pos)?;
         }
-        // Segment and ordinal identify an observation, including overlapping revert suffixes.
+        // Preserve every observation; a native ordinal can repeat on distinct rows.
         spool.db.execute(
             "INSERT OR REPLACE INTO rows VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![

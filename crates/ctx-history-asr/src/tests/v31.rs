@@ -167,3 +167,51 @@ fn codex_native_trigger_and_uri_contracts() {
         "future_native_reason"
     );
 }
+
+#[test]
+fn codex_reused_ordinals_preserve_distinct_rows_and_appends() {
+    let (_dir, o) = fixture(
+        Provider::Codex,
+        &[
+            json!({"type":"session_meta","ordinal":0,"payload":{"id":"test","source":"cli"}}),
+            json!({"type":"event_msg","ordinal":7,"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}}),
+            json!({"type":"turn_context","ordinal":7,"payload":{"turn_id":"synthetic-turn","model":"synthetic-model"}}),
+            json!({"type":"event_msg","ordinal":7,"payload":{"type":"task_started","turn_id":"synthetic-turn"}}),
+            json!({"type":"response_item","ordinal":7,"payload":{"type":"message","id":"synthetic-message","role":"user","content":[{"type":"input_text","text":"synthetic input"}]}}),
+        ],
+    );
+    export(&o).unwrap();
+    let before = records(&o);
+    let ids: std::collections::HashSet<_> =
+        before.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids.len(), before.len());
+    for (kind, line) in [
+        ("usage_summary", 2),
+        ("config_change", 3),
+        ("state", 4),
+        ("message", 5),
+    ] {
+        let row = before.iter().find(|r| r["type"] == kind).unwrap();
+        let position = &row["_meta"]["com.openai.codex/position"];
+        assert_eq!(position["ordinal"], 7);
+        assert_eq!(position["line"], line);
+    }
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(o.out.join("bundle.json")).unwrap()).unwrap();
+    let path = o
+        .out
+        .join(manifest["sessions"][0]["path"].as_str().unwrap());
+    let bytes = std::fs::read(&path).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&o.inputs[0].path)
+        .unwrap();
+    writeln!(f, "{}", json!({"type":"event_msg","ordinal":7,"payload":{"type":"task_complete","turn_id":"synthetic-turn"}})).unwrap();
+    assert_eq!(export(&o).unwrap().snapshots, 0);
+    assert!(std::fs::read(path).unwrap().starts_with(&bytes));
+    let after = records(&o);
+    let ids: std::collections::HashSet<_> =
+        after.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids.len(), after.len());
+    assert_eq!(&after[..before.len()], &before);
+}

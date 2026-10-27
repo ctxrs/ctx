@@ -55,8 +55,9 @@ Repeat the command with the same destination to update the bundle. Unchanged
 JSONL sources are skipped; mixed SQLite stores are reread to capture current rows and lane facts. A changed session is spooled again; the exporter does not
 assume native files only append. The export database retains source-position assignments,
 which are independent of capture-local `seq`. Codex IDs derive from native
-segment, ordinal (or physical line), and emission slot; provenance is retained at
-`com.openai.codex/position`. Segment headers provide creation order; ties use
+segment, physical line, and emission slot; native ordinals can repeat on distinct
+rows and remain provenance at `com.openai.codex/position` alongside the line.
+Segment headers provide creation order; ties use
 segment identity as a deterministic serialization and declare `order`. Keep this database with the destination when continuing an export.
 When the new stream has the previous stream as an exact prefix, only its suffix
 is appended. An incomplete output tail is removed before appending. Claude response growth appends full message and inference replacements with
