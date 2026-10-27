@@ -6,6 +6,15 @@ use serde_json::Value;
 pub(crate) fn questions(spool: &Spool, v: &Value) -> Result<()> {
     match v {
         Value::Object(o) => {
+            if o.get("secret") == Some(&Value::Bool(true))
+                || o.get("isSecret") == Some(&Value::Bool(true))
+            {
+                if let Some(id) = o.get("requestId").and_then(Value::as_str) {
+                    spool
+                        .db
+                        .execute("INSERT OR IGNORE INTO secret_questions VALUES(?1)", [id])?;
+                }
+            }
             if let Some(qs) = o.get("questions").and_then(Value::as_array) {
                 for (i, q) in qs.iter().enumerate() {
                     if q["secret"] == true || q["isSecret"] == true {
@@ -69,6 +78,20 @@ fn strings(spool: &Spool, v: &Value) -> Result<()> {
 fn answers(spool: &Spool, v: &Value) -> Result<()> {
     match v {
         Value::Object(o) => {
+            if let Some(id) = o.get("requestId").and_then(Value::as_str) {
+                let secret: bool = spool.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM secret_questions WHERE id=?1)",
+                    [id],
+                    |r| r.get(0),
+                )?;
+                if secret {
+                    for key in ["answer", "response"] {
+                        if let Some(value) = o.get(key) {
+                            strings(spool, value)?;
+                        }
+                    }
+                }
+            }
             if let Some(a) = o.get("answers").and_then(Value::as_object) {
                 for (key, value) in a {
                     let secret: bool = spool.db.query_row(

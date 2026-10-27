@@ -23,6 +23,13 @@ enum AsrAgent {
     GrokBuild,
     #[value(name = "deepseek-harness")]
     DeepSeekHarness,
+    #[value(name = "copilot", alias = "copilot-cli")]
+    Copilot,
+    #[value(alias = "factory-droid")]
+    Droid,
+    #[value(alias = "kimi-code")]
+    Kimi,
+    Qoder,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -70,6 +77,10 @@ impl ExportArgs {
                 AsrAgent::Pi => (Provider::Pi, Capture::Pi),
                 AsrAgent::GrokBuild => (Provider::GrokBuild, Capture::GrokBuild),
                 AsrAgent::DeepSeekHarness => (Provider::DeepSeekHarness, Capture::DeepSeekHarness),
+                AsrAgent::Copilot => (Provider::Copilot, Capture::CopilotCli),
+                AsrAgent::Droid => (Provider::Droid, Capture::FactoryAiDroid),
+                AsrAgent::Kimi => (Provider::Kimi, Capture::KimiCodeCli),
+                AsrAgent::Qoder => (Provider::Qoder, Capture::Qoder),
             };
             let paths = args.path.clone().map(|p| vec![p]).unwrap_or_else(|| {
                 ctx_history_cli::discovered_sources_for_provider_report(

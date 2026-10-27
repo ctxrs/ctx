@@ -147,6 +147,9 @@ fn inspect(
         Provider::Gemini | Provider::Antigravity | Provider::QwenCode
     ) {
         return crate::conversation_source::inspect(input, limit, visitor, unidentified);
+        }
+    if input.provider.journal() {
+        return crate::journals::source::inspect(input, limit, visitor, unidentified);
     }
     let mut input_reader = reader(&input.path)?;
     let mut buffer = Vec::new();
@@ -225,6 +228,7 @@ fn inspect(
             };
             value
         }
+        _ => return Err(Error::Invalid("unexpected journal provider".into())),
     };
     if input.provider == Provider::Claude {
         let sidecar = input.path.with_extension("meta.json");

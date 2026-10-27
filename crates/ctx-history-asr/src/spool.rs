@@ -27,7 +27,10 @@ impl Spool {
             CREATE INDEX segment_ordinals ON rows(segment,ordinal); CREATE INDEX responses ON rows(response,pos); CREATE INDEX native_ids ON rows(native_id); CREATE INDEX calls ON rows(call_id);
             CREATE TABLE entities(key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE structure(id TEXT PRIMARY KEY, parent TEXT, response TEXT, mechanical INTEGER);
-            CREATE TABLE native_calls(call_id TEXT,position INTEGER); CREATE INDEX native_call_ids ON native_calls(call_id); CREATE TABLE tool_results(call_id TEXT,position INTEGER); CREATE INDEX tool_result_ids ON tool_results(call_id);
+            CREATE TABLE journal_parts(group_id TEXT,position INTEGER,PRIMARY KEY(group_id,position));
+            CREATE INDEX journal_part_positions ON journal_parts(position);
+            CREATE TABLE journal_calls(kind TEXT,call_id TEXT,position INTEGER,PRIMARY KEY(kind,call_id,position)); CREATE INDEX journal_call_ids ON journal_calls(call_id,kind); CREATE INDEX journal_call_positions ON journal_calls(position);
+            CREATE TABLE native_calls(call_id TEXT,position INTEGER); CREATE INDEX native_call_ids ON native_calls(call_id); CREATE INDEX native_call_positions ON native_calls(position); CREATE TABLE tool_results(call_id TEXT,position INTEGER); CREATE INDEX tool_result_ids ON tool_results(call_id);
             CREATE TABLE secret_questions(id TEXT PRIMARY KEY); CREATE TABLE secrets(value TEXT PRIMARY KEY);
             CREATE TABLE turns(position INTEGER PRIMARY KEY, tip TEXT);
             CREATE TABLE outputs(native_id TEXT PRIMARY KEY, record_id TEXT);
@@ -73,7 +76,15 @@ impl Spool {
             }
             let value = (!oversized).then(|| source::decode(&bytes)).flatten();
             let v = value.unwrap_or_else(|| json!({"type":"_gap", "reason":if oversized {"conversion_loss"} else {"unparseable"}}));
-            let local = if provider == Provider::Codex {
+            if provider == Provider::Copilot {
+                let child = serde_json::from_str::<(String, String)>(segment).ok();
+                if v["agentId"].as_str() != child.as_ref().map(|(_, id)| id.as_str()) {
+                    continue;
+                }
+            }
+            let local = if provider.journal() {
+                crate::journals::local(provider, &v, physical)
+            } else if provider == Provider::Codex {
                 v["ordinal"]
                     .as_u64()
                     .map(|n| format!("o{n}"))
@@ -163,6 +174,9 @@ impl Spool {
                 }
             }
             crate::jsonl::index(self, provider, &v, pos)?;
+            if provider.journal() {
+                crate::journals::index(self, provider, &v, pos)?;
+            }
             // Segment and ordinal identify an observation, including overlapping revert suffixes.
             self.db.execute(
                 "INSERT OR REPLACE INTO rows VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",

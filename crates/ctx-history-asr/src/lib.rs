@@ -11,6 +11,7 @@ mod pi;
 mod conversation_source;
 mod gemini;
 mod genai;
+mod journals;
 mod privacy;
 mod qwen;
 mod records;
@@ -48,8 +49,16 @@ pub enum Provider {
     Gemini,
     Antigravity,
     QwenCode,
+    Copilot,
+    Droid,
+    Kimi,
+    Qoder,
 }
 impl Provider {
+    pub(crate) const ALL: [Self; 12] = [Self::Claude,Self::Codex,Self::Pi,Self::GrokBuild,Self::DeepSeekHarness,Self::Gemini,Self::Antigravity,Self::QwenCode,Self::Copilot,Self::Droid,Self::Kimi,Self::Qoder];
+    pub(crate) fn journal(self) -> bool {
+        matches!(self, Self::Copilot | Self::Droid | Self::Kimi | Self::Qoder)
+    }
     pub fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude-code",
@@ -60,6 +69,10 @@ impl Provider {
             Self::Gemini => "gemini-cli",
             Self::Antigravity => "antigravity",
             Self::QwenCode => "qwen-code",
+            Self::Copilot => "copilot-cli",
+            Self::Droid => "droid",
+            Self::Kimi => "com.moonshot.kimi-code",
+            Self::Qoder => "com.qoder.cli",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
@@ -72,6 +85,10 @@ impl Provider {
             Self::Gemini => "com.google.gemini-cli",
             Self::Antigravity => "com.google.antigravity",
             Self::QwenCode => "io.github.qwenlm.qwen-code",
+            Self::Copilot => "com.github.copilot-cli",
+            Self::Droid => "ai.factory.droid",
+            Self::Kimi => "com.moonshot.kimi-code",
+            Self::Qoder => "com.qoder.cli",
         }
     }
     pub(crate) fn format(self) -> &'static str {
@@ -84,6 +101,10 @@ impl Provider {
             Self::Gemini => "gemini-cli-chat-recording",
             Self::Antigravity => "antigravity-transcript-jsonl",
             Self::QwenCode => "qwen-code-chat-jsonl",
+            Self::Copilot => "copilot-cli-events",
+            Self::Droid => "factory-droid-jsonl",
+            Self::Kimi => "kimi-code-wire-jsonl",
+            Self::Qoder => "qoder-transcript-jsonl",
         }
     }
 }
