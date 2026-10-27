@@ -34,3 +34,20 @@ mod tests {
         assert!(sources.contains("event.event_type == EventType::Message"));
     }
 }
+
+/// Native transcript projection for archival converters. Uses the same strict
+/// admission and ambiguity checks as history import; does not carry timestamps
+/// from earlier messages or manufacture missing native fields.
+pub fn parse_transcript_record(
+    bytes: &[u8],
+) -> ctx_history_provider_runtime::Result<Option<Vec<CursorNativeEvent>>> {
+    parser::project_cursor_jsonl_record(bytes, 0, 0, 0, bytes.len() as u64)
+}
+pub use projection::{CursorEventBody, CursorNativeEvent, CursorNativeOrder};
+
+/// A prompt's own embedded clock, with no timestamp propagation to later events.
+pub fn transcript_embedded_timestamp(
+    event: &CursorNativeEvent,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    projection::embedded_cursor_timestamp(event)
+}

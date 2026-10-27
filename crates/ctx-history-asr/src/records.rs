@@ -11,6 +11,11 @@ pub(crate) struct Writer {
     pub provider: Provider,
     pub pos: u64,
     slot: u64,
+    pub identity: Option<String>,
+    identity_offset: u64,
+    pub capture_scope: bool,
+    pub snapshot: bool,
+    pub bundle: Option<std::path::PathBuf>,
     pub count: u64,
     pub last: Option<String>,
     pub gaps: u64,
@@ -28,6 +33,11 @@ impl Writer {
             provider,
             pos: 0,
             slot: 0,
+            identity: None,
+            identity_offset: 0,
+            capture_scope: false,
+            snapshot: false,
+            bundle: None,
             count: 0,
             last: None,
             gaps: 0,
@@ -43,12 +53,22 @@ impl Writer {
         self.pos = pos;
         self.slot = 0;
         self.copied = None;
+        self.identity = None;
+        self.identity_offset = 0;
+        self.capture_scope = false;
     }
     pub fn slot(&mut self, slot: u64) {
         self.slot = slot;
     }
+    pub fn entity_identity(&mut self, identity: String) {
+        self.identity = Some(identity);
+        self.identity_offset = self.slot;
+    }
     pub fn id(&self) -> String {
-        format!("r{}", self.pos * STRIDE + self.slot)
+        self.identity
+            .as_ref()
+            .map(|id| format!("{id}-{}", self.slot - self.identity_offset))
+            .unwrap_or_else(|| format!("r{}", self.pos * STRIDE + self.slot))
     }
     pub fn emit(&mut self, mut value: Value, source: &Value) -> Result<String> {
         if self.snapshot {
@@ -65,7 +85,13 @@ impl Writer {
                 "too many records for one native item".into(),
             ));
         }
-        let id = format!("r{seq}");
+        let id = self.id();
+        if self.capture_scope {
+            value["idScope"] = json!("capture");
+        }
+        if self.snapshot {
+            value["assembly"] = json!({"mode":"snapshot"});
+        }
         value["seq"] = json!(seq);
         value["id"] = json!(id);
         if let Some(copied) = &self.copied {
@@ -121,6 +147,9 @@ impl Writer {
         }
         if value["type"] == "gap" {
             self.gaps += 1;
+        }
+        if let Some(out) = &self.bundle {
+            crate::journals::blobs::externalize(out, &mut value)?;
         }
         serde_json::to_writer(&mut self.out, &value)?;
         self.out.write_all(b"\n")?;

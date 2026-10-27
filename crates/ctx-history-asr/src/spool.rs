@@ -63,6 +63,9 @@ impl Spool {
             Provider::Gemini | Provider::Antigravity | Provider::QwenCode
         ) {
             return crate::conversation_source::ingest(self, path, provider, segment, allocate);
+    }
+        if provider.journal() {
+            return crate::journals::ingest::ingest(self, path, provider, segment);
         }
         let mut reader = source::reader(path)?;
         let mut bytes = Vec::new();

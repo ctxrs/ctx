@@ -12,6 +12,7 @@ mod conversation_source;
 mod gemini;
 mod genai;
 mod cli_journals;
+mod journals;
 mod privacy;
 mod qwen;
 mod records;
@@ -58,6 +59,15 @@ impl Provider {
     pub(crate) const ALL: [Self; 12] = [Self::Claude,Self::Codex,Self::Pi,Self::GrokBuild,Self::DeepSeekHarness,Self::Gemini,Self::Antigravity,Self::QwenCode,Self::Copilot,Self::Droid,Self::Kimi,Self::Qoder];
     pub(crate) fn cli_journal(self) -> bool {
         matches!(self, Self::Copilot | Self::Droid | Self::Kimi | Self::Qoder)
+    Junie,
+    MistralVibe,
+    Tabnine,
+    Mux,
+    Cursor,
+}
+impl Provider {
+    pub(crate) fn journal(self) -> bool {
+        matches!(self, Self::Junie | Self::MistralVibe | Self::Tabnine | Self::Mux | Self::Cursor)
     }
     pub fn agent(self) -> &'static str {
         match self {
@@ -73,6 +83,11 @@ impl Provider {
             Self::Droid => "droid",
             Self::Kimi => "com.moonshot.kimi-code",
             Self::Qoder => "com.qoder.cli",
+            Self::Junie => "junie",
+            Self::MistralVibe => "ai.mistral.vibe",
+            Self::Tabnine => "com.tabnine.cli",
+            Self::Mux => "com.coder.mux",
+            Self::Cursor => "cursor",
         }
     }
     pub(crate) fn domain(self) -> &'static str {
@@ -89,6 +104,9 @@ impl Provider {
             Self::Droid => "ai.factory.droid",
             Self::Kimi => "com.moonshot.kimi-code",
             Self::Qoder => "com.qoder.cli",
+            Self::Junie => "com.jetbrains.junie",
+            Self::Cursor => "com.cursor.agent",
+            Self::MistralVibe | Self::Tabnine | Self::Mux => self.agent(),
         }
     }
     pub(crate) fn format(self) -> &'static str {
@@ -105,6 +123,11 @@ impl Provider {
             Self::Droid => "factory-droid-jsonl",
             Self::Kimi => "kimi-code-wire-jsonl",
             Self::Qoder => "qoder-transcript-jsonl",
+            Self::Junie => "junie-events-jsonl",
+            Self::MistralVibe => "mistral-vibe-session",
+            Self::Tabnine => "tabnine-chat-jsonl",
+            Self::Mux => "mux-chat-jsonl",
+            Self::Cursor => "cursor-cli-transcript",
         }
     }
 }

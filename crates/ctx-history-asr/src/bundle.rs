@@ -203,6 +203,9 @@ pub fn export(options: &Options) -> Result<Summary> {
             // capture scope, including tools, usage, metadata and gaps.
             writer.snapshot = provider == Provider::Antigravity
                 || (provider == Provider::Gemini && source_header["_snapshot"] == true);
+            if provider.journal() {
+                writer.bundle = Some(options.out.clone());
+            }
             let mut stream_header = header::make(provider, &session, &source_header);
             let copied_boundary = if provider == Provider::Kimi
                 && stream_header["lineage"]["forkedFrom"]["session"].is_string()
@@ -260,6 +263,7 @@ pub fn export(options: &Options) -> Result<Summary> {
                     }
                     Provider::QwenCode => crate::qwen::convert(&spool, &mut writer, &value, cwd)?,
                     Provider::Copilot | Provider::Droid | Provider::Kimi | Provider::Qoder => crate::cli_journals::convert(&mut spool, &mut writer, pos, &value, cwd)?,
+                    Provider::Junie | Provider::MistralVibe | Provider::Tabnine | Provider::Mux | Provider::Cursor => crate::journals::convert(&mut spool, &mut writer, &value)?,
                 }
                 if copied_boundary.is_some_and(|n| pos <= n) {
                     copied_last = writer.last.clone();
@@ -278,6 +282,9 @@ pub fn export(options: &Options) -> Result<Summary> {
                 crate::pi::finish(&spool, &mut writer)?;
             }
             crate::jsonl::finish_header(&spool, provider, &source_header, &mut stream_header)?;
+            if provider.journal() {
+                crate::journals::tail(&mut spool, &mut writer, &source_header)?;
+            }
             spool.finish()?;
             writer.out.flush()?;
             let count = writer.count + 1;
@@ -286,15 +293,16 @@ pub fn export(options: &Options) -> Result<Summary> {
             if let Some(last) = copied_last {
                 stream_header["lineage"]["inherits"]["localThroughId"] = json!(last);
             }
-            let mut complete = tempfile::NamedTempFile::new_in(&options.out)?;
             stream_header["seq"] = json!(0);
             stream_header["id"] = json!("r0");
-            serde_json::to_writer(complete.as_file_mut(), &stream_header)?;
-            complete.write_all(b"\n")?;
-            temporary.as_file_mut().rewind()?;
-            std::io::copy(temporary.as_file_mut(), complete.as_file_mut())?;
-            temporary = complete;
-            let (digest, size) = digest(temporary.as_file_mut())?;
+            if let Some(at) = old
+                .as_ref()
+                .and_then(|v| v.pointer("/_meta/rs.ctx~1observedAt"))
+            {
+                stream_header["observedAt"] = at.clone();
+            }
+            let mut complete = capture(&options.out, &stream_header, temporary.as_file_mut())?;
+            let (mut digest, mut size) = digest(complete.as_file_mut())?;
             let storage = format!(
                 "{:x}",
                 Sha256::digest(session_ref(provider, &session).as_bytes())
@@ -311,16 +319,20 @@ pub fn export(options: &Options) -> Result<Summary> {
                     .ok_or_else(|| Error::Invalid("stream has no directory".into()))?,
             )?;
             let path = if !target.exists() {
-                temporary.persist(&target).map_err(|e| e.error)?;
+                complete.persist(&target).map_err(|e| e.error)?;
                 prior.to_string()
-            } else if append_prefix(&target, temporary.as_file_mut())? {
+            } else if append_prefix(&target, complete.as_file_mut())? {
                 prior.to_string()
             } else {
                 summary.snapshots += 1;
+                stream_header["observedAt"] =
+                    json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+                complete = capture(&options.out, &stream_header, temporary.as_file_mut())?;
+                (digest, size) = self::digest(complete.as_file_mut())?;
                 let path = format!("sessions/{agent}/{storage}-{digest}.jsonl");
                 let target = options.out.join(&path);
                 if !target.exists() {
-                    temporary.persist(&target).map_err(|e| e.error)?;
+                    complete.persist(&target).map_err(|e| e.error)?;
                 }
                 path
             };
@@ -328,6 +340,9 @@ pub fn export(options: &Options) -> Result<Summary> {
             let mut entry = json!({"agent":agent,"sessionId":stream_header["sessionId"],"status":"present","path":path,"digest":{"alg":"sha256","value":digest},"recordCount":count,"_meta":{"rs.ctx/bytes":size}});
             if let Some(namespace) = stream_header.get("namespace") {
                 entry["namespace"] = namespace.clone();
+            }
+            if let Some(at) = stream_header.get("observedAt") {
+                entry["_meta"]["rs.ctx/observedAt"] = at.clone();
             }
             db.execute(
                 "INSERT OR REPLACE INTO exports VALUES(?1,?2,?3,?4)",
@@ -359,6 +374,14 @@ pub fn export(options: &Options) -> Result<Summary> {
         .persist(options.out.join("bundle.json"))
         .map_err(|e| e.error)?;
     Ok(summary)
+}
+fn capture(out: &Path, header: &Value, body: &mut File) -> Result<tempfile::NamedTempFile> {
+    let mut file = tempfile::NamedTempFile::new_in(out)?;
+    serde_json::to_writer(file.as_file_mut(), header)?;
+    file.write_all(b"\n")?;
+    body.rewind()?;
+    std::io::copy(body, file.as_file_mut())?;
+    Ok(file)
 }
 fn digest(file: &mut File) -> Result<(String, u64)> {
     file.rewind()?;

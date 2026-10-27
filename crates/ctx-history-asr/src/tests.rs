@@ -94,3 +94,4 @@ mod batch2;
 mod cli_journals;
 
 mod journal_edges;
+mod journals;

@@ -1507,6 +1507,7 @@ version = "2.3.0"
 dependencies = [
  "chrono",
  "ctx-history-capture-model",
+ "ctx-history-provider-claude-cursor",
  "ctx-history-provider-codex",
  "ctx-history-source-io",
  "fs2",

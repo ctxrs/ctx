@@ -30,6 +30,11 @@ enum AsrAgent {
     #[value(alias = "kimi-code")]
     Kimi,
     Qoder,
+    Junie,
+    MistralVibe,
+    Tabnine,
+    Mux,
+    Cursor,
 }
 #[derive(Debug, Args)]
 pub(crate) struct AsrArgs {
@@ -81,6 +86,11 @@ impl ExportArgs {
                 AsrAgent::Droid => (Provider::Droid, Capture::FactoryAiDroid),
                 AsrAgent::Kimi => (Provider::Kimi, Capture::KimiCodeCli),
                 AsrAgent::Qoder => (Provider::Qoder, Capture::Qoder),
+                AsrAgent::Junie => (Provider::Junie, Capture::Junie),
+                AsrAgent::MistralVibe => (Provider::MistralVibe, Capture::MistralVibe),
+                AsrAgent::Tabnine => (Provider::Tabnine, Capture::Tabnine),
+                AsrAgent::Mux => (Provider::Mux, Capture::Mux),
+                AsrAgent::Cursor => (Provider::Cursor, Capture::Cursor),
             };
             let paths = args.path.clone().map(|p| vec![p]).unwrap_or_else(|| {
                 ctx_history_cli::discovered_sources_for_provider_report(

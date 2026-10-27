@@ -123,6 +123,10 @@ fn answers(spool: &Spool, v: &Value) -> Result<()> {
     Ok(())
 }
 pub(crate) fn prepare(spool: &mut Spool) -> Result<()> {
+    let partial = spool.entity("journal:partial")?;
+    if let Some(p) = &partial {
+        questions(spool, p)?;
+    }
     let has_questions: bool =
         spool
             .db
@@ -137,6 +141,9 @@ pub(crate) fn prepare(spool: &mut Spool) -> Result<()> {
         pos = next;
         let value = spool.get(pos)?;
         answers(spool, &value)?;
+    }
+    if let Some(p) = &partial {
+        answers(spool, p)?;
     }
     spool.has_secrets = spool
         .db
