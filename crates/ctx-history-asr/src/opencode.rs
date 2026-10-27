@@ -66,6 +66,10 @@ pub(crate) fn convert(s: &mut Spool, w: &mut Writer, n: &Value, cwd: Option<&str
                         w.vendor(n, "ignored_part")?;
                     } else if content::part(d, w.provider).is_none() {
                         w.vendor(n, "unmapped_part")?;
+                    } else {
+                        // Folding several parts into a message must not discard
+                        // their individual SQL rows or invent metadata destinations.
+                        w.vendor(n, "part")?;
                     }
                 } // folded into the owning message unless source excludes it
                 "tool" => tools::tool(s, w, d, n, cwd, 0)?,
@@ -248,8 +252,8 @@ fn message(s: &mut Spool, w: &mut Writer, n: &Value, split: bool) -> Result<()> 
     }
     Ok(())
 }
-pub(super) fn preserve(r: &mut Value, w: &Writer, n: &Value) {
-    meta(r, w.provider, "native", n);
+pub(super) fn preserve(r: &mut Value, _w: &Writer, n: &Value) {
+    r["native"] = json!({"record":n});
 }
 pub(super) fn timestamp(r: &mut Value, d: &Value, row: &Value) {
     if let Some(t) = d.pointer("/time/created").and_then(millis) {

@@ -161,7 +161,11 @@ pub(crate) fn parse_json(text: &str) -> Option<Value> {
     ctx_history_asr_core::numbers::decode(text)
 }
 pub(crate) fn retain(r: &mut Value, p: Provider, key: &str, v: &Value) {
-    records::meta(r, p, key, v);
+    if matches!(key, "row" | "audit") && r["type"].is_string() {
+        r["native"] = json!({"record":v});
+    } else {
+        records::meta(r, p, key, v);
+    }
 }
 fn numbers(s: &Spool, p: Provider, r: &mut Value) -> Result<()> {
     ctx_history_asr_core::registry::normalize(r, p);

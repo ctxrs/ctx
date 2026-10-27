@@ -399,7 +399,12 @@ pub fn extras(target: &mut Value, provider: Provider, source: &Value, covered: &
             if !covered.contains(&key.as_str())
                 && !matches!(key.as_str(), "timestamp" | "type" | "_sidecar")
             {
-                meta(target, provider, key, v);
+                if matches!(provider, Provider::QwenCode | Provider::GrokBuild) {
+                    let destination = format!("{}/remainingFields", provider.domain());
+                    target["_meta"][destination][key] = v.clone();
+                } else {
+                    meta(target, provider, key, v);
+                }
             }
         }
     }

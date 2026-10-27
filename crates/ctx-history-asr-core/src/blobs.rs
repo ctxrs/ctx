@@ -130,7 +130,7 @@ pub fn numbers(out: &Path, record: &mut Value, provider: crate::Provider) -> Res
             if key == "content" && record["type"] == "message" {
                 record["content"] = json!([]);
             }
-        } else if key == "native" {
+        } else if key == "native" && value.get("record").is_some() {
             let blob = store(out, crate::numbers::text(&value["record"]).as_bytes())?;
             record["native"] = value;
             record["native"].as_object_mut().unwrap().remove("record");

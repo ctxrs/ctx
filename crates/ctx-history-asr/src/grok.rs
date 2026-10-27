@@ -275,6 +275,25 @@ fn call_record(u: &Value, v: &Value, id: &str, cwd: Option<&str>) -> Value {
     if r.get("kind").is_none() {
         copy(&mut r, "kind", tool, "kind");
     }
+    if let Some(kind) = r["kind"].as_str() {
+        if !matches!(
+            kind,
+            "read"
+                | "edit"
+                | "delete"
+                | "move"
+                | "search"
+                | "execute"
+                | "think"
+                | "fetch"
+                | "switch_mode"
+                | "other"
+                | "unknown"
+        ) && !kind.starts_with('_')
+        {
+            r["kind"] = json!(format!("_ai.x.grok-build/{kind}"));
+        }
+    }
     if tool["namespace"] == "grok_build" {
         r["provider"] = json!({"kind":"builtin","identity":"exact"});
     }

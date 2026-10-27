@@ -41,7 +41,15 @@ pub(crate) fn ingest(
             false,
         )?;
         if n::has(state, "skill_workshop_changes")? {
-            n::scan(state,"SELECT * FROM skill_workshop_changes WHERE agent_id=?1 AND session_key=?2 ORDER BY cursor_id",[agent,lane],s.limit,|r|{
+            let order = if n::columns(state, "skill_workshop_changes")?
+                .iter()
+                .any(|c| c == "cursor_id")
+            {
+                "cursor_id"
+            } else {
+                "created_at_ms,rowid"
+            };
+            n::scan(state,&format!("SELECT * FROM skill_workshop_changes WHERE agent_id=?1 AND session_key=?2 ORDER BY {order}"),[agent,lane],s.limit,|r|{
                 if owned(s,&r["run_id"])?{n::assigned_fact(bundle,P,lane,"skill_workshop_changes",r["change_id"].as_str().unwrap_or(""))?;n::stage(s,"skill_workshop_changes",r["change_id"].as_str().unwrap_or(""),r.clone(),false)?;}else{n::lane_fact(bundle,P,lane,"skill_workshop_changes",r["change_id"].as_str().unwrap_or(""),&r)?;}Ok(())
             })?;
         }
@@ -91,9 +99,17 @@ pub(crate) fn ingest(
             )?;
         }
         if n::has(state, "cron_run_receipts")? {
+            let order = if n::columns(state, "cron_run_receipts")?
+                .iter()
+                .any(|c| c == "cursor_id")
+            {
+                "cursor_id"
+            } else {
+                "started_at_ms,rowid"
+            };
             n::scan(
                 state,
-                "SELECT * FROM cron_run_receipts WHERE agent_id=?1 ORDER BY cursor_id",
+                &format!("SELECT * FROM cron_run_receipts WHERE agent_id=?1 ORDER BY {order}"),
                 [agent],
                 s.limit,
                 |r| {

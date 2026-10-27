@@ -266,13 +266,13 @@ fn large_content_is_external_and_numbers_beyond_u64_are_never_rounded() {
     let r = records(&o);
     let m = r.iter().find(|v| v["messageId"] == "large").unwrap();
     assert_eq!(m["capture"]["content"]["state"], "external");
-    assert!(serde_json::to_string(&r)
+    let blobs = fs::read_dir(o.out.join("blobs/sha256"))
         .unwrap()
-        .contains("123456789012345678901234567890"));
+        .map(|p| fs::read_to_string(p.unwrap().path()).unwrap())
+        .collect::<String>();
+    assert!(blobs.contains("123456789012345678901234567890"));
     assert!(r.iter().filter(|r| r["type"] == "message").count() >= 3);
-    assert!(serde_json::to_string(&r)
-        .unwrap()
-        .contains("-9223372036854775809"));
+    assert!(blobs.contains("-9223372036854775809"));
 }
 
 #[test]

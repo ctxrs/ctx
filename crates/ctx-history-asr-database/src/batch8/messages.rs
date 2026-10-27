@@ -1,6 +1,6 @@
 use super::{tree, values};
 use crate::{
-    records::{copy, meta, Writer},
+    records::{copy, Writer},
     spool::Spool,
     Provider, Result,
 };
@@ -375,7 +375,7 @@ fn inference(spool: &Spool, writer: &mut Writer, v: &Value, _m: &Value) -> Resul
         r["stopReason"] = json!(reason);
     }
     values::preserve(spool, &mut r, writer.provider, "usage", u)?;
-    meta(&mut r, writer.provider, "messageKey", &v["key"]);
+    r["_meta"]["rs.ctx/messageKey"] = v["key"].clone();
     if writer.provider == Provider::DeepAgents && v["messageId"].is_string() {
         r["inferenceId"] = json!(format!("message:{}", v["messageId"].as_str().unwrap_or("")));
         writer.revise(

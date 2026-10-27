@@ -88,7 +88,7 @@ bundle writer. They do not open the searchable ctx store.
 | Provider | Native inputs | Mapping limits |
 | --- | --- | --- |
 | Junie | `sessions/index.jsonl`, `session-*/events.jsonl` | UI step growth is folded within its prompt scope. UI results remain display content; model rendering is unknown. |
-| Mistral Vibe | `meta.json`, `messages.jsonl` | Current metadata, instructions, configuration and cumulative statistics follow the journal. Image paths remain recorded references; referenced files are not opened. |
+| Mistral Vibe | `meta.json`, `messages.jsonl` | Qualified with native 2.24.1 captures. The 3.0.3 generation/chunk/journal store is not discovered. Current metadata, instructions, configuration and cumulative statistics follow the supported journal. Image paths remain recorded references; referenced files are not opened. |
 | Tabnine CLI | Chat recording JSONL, including child journals | Repeated message IDs replace the whole earlier snapshot at its first position. Saved checkpoint files are outside this converter's input contract. |
 | Mux | `chat-archive.jsonl`, `chat.jsonl`, `partial.json`, `metadata.json`, `subagent-transcripts.json`, archived child journals | Archive precedes active history. A partial with the same `historySequence` and more parts replaces the effective row at the capture tail. Current metadata and archive index are also tail snapshots. |
 | Cursor | `projects/<workspace>/agent-transcripts/<id>/<id>.jsonl` | Uses ctx's strict Cursor parser. IDE `state.vscdb`, CLI blob-DAG `store.db`, and external tool-output files have no qualified decoder here. Selecting a database reports an unidentified source; no chat semantics are guessed. |
@@ -245,8 +245,8 @@ Document arrays are read one item at a time. The size limit applies to each
 item and retained document metadata; an oversized document value stops that
 capture without publishing a partial session. Large image/audio content moves
 to binary blobs, and unsafe JSON numbers remain exact JSON text. Whole native
-items accompany projections under provider metadata keys; unknown variants are
-retained with declared semantic loss.
+items accompany projections in `native.record` or `native.blob`; unknown variants
+are retained with declared semantic loss.
 
 ## Adding a converter
 
@@ -337,8 +337,8 @@ discovery integration and capture publication.
 All sequences are increasing safe integers local to one capture. Mutable
 side-state projections follow recorded history with snapshot assembly; ordering
 across stores never claims timestamp chronology. Duplicate native call IDs leave
-results unpaired, with the recorded ID in provider-qualified `unpairedCallId`
-metadata. Missing external session, turn, or call targets are retained for the
+results unpaired; SQLite projections retain the recorded ID in `nativeCallId`,
+and other converters use their documented provider metadata. Missing external session, turn, or call targets are retained for the
 reference validator's warning-class resolution; structural targets are never
 invented to silence a diagnostic.
 
@@ -397,3 +397,23 @@ ownership alone is not a loss. Unattributed source-file counts remain in the
 command's summary. OpenClaw session filtering still reads other sessions to
 resolve run ownership before collecting lane facts; this keeps selection from
 changing ownership and adds source reads for filtered exports.
+
+## Authentic capture coverage
+
+Sanitized Qwen Code 0.26.1 and Continue CLI 1.5.47 transcripts under
+`tests/fixtures/provider-history/authentic-headless/v1` cover real file edits and
+shell tools. Their fixture README states the narrower claim for each producer. A successful schema validation
+alone does not establish semantic completeness or support for every release.
+
+OpenClaw agent database schema 25 is accepted alongside the existing pinned
+schemas; shared-state rows without cursor columns use their timestamp/rowid
+order. Deep Agents' LangGraph `null` writes are valid audit values, not gaps.
+Grok's native `task` tool kind uses a vendor value in ASR. CodeBuddy CLI forks
+use the new writer's `session-meta` for ownership, and flat function calls
+use native `callId` values independently of message row IDs.
+
+Cline 3.0.74 CLI SDK session/message JSON is not yet discovered by the Cline
+extension-task converter. DeepSeek Harness 0.2.1-rc.2 writes compressed v4
+session journals that the existing converter does not discover. Mux 0.32.0 CLI deletes its temporary session directory
+on exit; a live `chat.jsonl`/`partial.json` snapshot does not qualify its complete
+durable-event history. Empty exports must not be treated as qualification.

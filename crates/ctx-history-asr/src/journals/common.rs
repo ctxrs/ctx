@@ -18,7 +18,11 @@ pub(super) fn retain(record: &mut Value, w: &Writer, key: &str, v: &Value) {
         o.remove("_asr_folded");
         o.remove("_asr_step_key");
     }
-    meta(record, w.provider, key, &v);
+    if matches!(key, "nativeRecord" | "nativeToolCall" | "nativeToolResult") {
+        record["native"] = json!({"record":v});
+    } else {
+        meta(record, w.provider, key, &v);
+    }
 }
 
 pub(super) fn parts(v: &Value) -> Vec<Value> {

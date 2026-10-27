@@ -1,0 +1,276 @@
+{
+  "sessionId": "b02d7032-004c-7fd3-c693-ba365de9d34d",
+  "title": "Untitled Session",
+  "workspaceDirectory": "/fixture/continue/workspace",
+  "history": [
+    {
+      "message": {
+        "role": "user",
+        "content": "Read greeting.py and test_greeting.py. Add a second assertion testing greet(\"Lin\") equals \"Hello, Lin!\", then run python3 test_greeting.py. Keep the function unchanged and report the result briefly."
+      },
+      "contextItems": [],
+      "editorState": "Read greeting.py and test_greeting.py. Add a second assertion testing greet(\"Lin\") equals \"Hello, Lin!\", then run python3 test_greeting.py. Keep the function unchanged and report the result briefly."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_070341eacd162750109a521e",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"filepath\":\"greeting.py\"}"
+            }
+          }
+        ],
+        "usage": {
+          "completion_tokens": 19,
+          "total_tokens": 2184,
+          "prompt_tokens": 2165,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_creation_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "gpt-6-astra",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_070341eacd162750109a521e",
+          "toolCall": {
+            "id": "call_070341eacd162750109a521e",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"filepath\":\"greeting.py\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "filepath": "greeting.py"
+          },
+          "output": [
+            {
+              "content": "Content of greeting.py:\ndef greet(name):\n    return \"Hello, \" + name + \"!\"\n",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_7b5a6303ea517073af4020de",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"filepath\":\"test_greeting.py\"}"
+            }
+          }
+        ],
+        "usage": {
+          "completion_tokens": 20,
+          "total_tokens": 2234,
+          "prompt_tokens": 2214,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_creation_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "gpt-6-astra",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_7b5a6303ea517073af4020de",
+          "toolCall": {
+            "id": "call_7b5a6303ea517073af4020de",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"filepath\":\"test_greeting.py\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "filepath": "test_greeting.py"
+          },
+          "output": [
+            {
+              "content": "Content of test_greeting.py:\nfrom greeting import greet\nassert greet(\"Ada\") == \"Hello, Ada!\"\n",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_ceb4edae25ae0ac57cafe63f",
+            "type": "function",
+            "function": {
+              "name": "MultiEdit",
+              "arguments": "{\"file_path\":\"/fixture/continue/workspace/test_greeting.py\",\"edits\":[{\"old_string\":\"assert greet(\\\"Ada\\\") == \\\"Hello, Ada!\\\"\",\"new_string\":\"assert greet(\\\"Ada\\\") == \\\"Hello, Ada!\\\"\\nassert greet(\\\"Lin\\\") == \\\"Hello, Lin!\\\"\"}]}"
+            }
+          }
+        ],
+        "usage": {
+          "completion_tokens": 83,
+          "total_tokens": 2350,
+          "prompt_tokens": 2267,
+          "prompt_tokens_details": {
+            "cached_tokens": 2048,
+            "cache_write_tokens": 0,
+            "cached_creation_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "gpt-6-astra",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_ceb4edae25ae0ac57cafe63f",
+          "toolCall": {
+            "id": "call_ceb4edae25ae0ac57cafe63f",
+            "type": "function",
+            "function": {
+              "name": "MultiEdit",
+              "arguments": "{\"file_path\":\"/fixture/continue/workspace/test_greeting.py\",\"edits\":[{\"old_string\":\"assert greet(\\\"Ada\\\") == \\\"Hello, Ada!\\\"\",\"new_string\":\"assert greet(\\\"Ada\\\") == \\\"Hello, Ada!\\\"\\nassert greet(\\\"Lin\\\") == \\\"Hello, Lin!\\\"\"}]}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "file_path": "/fixture/continue/workspace/test_greeting.py",
+            "edits": [
+              {
+                "old_string": "assert greet(\"Ada\") == \"Hello, Ada!\"",
+                "new_string": "assert greet(\"Ada\") == \"Hello, Ada!\"\nassert greet(\"Lin\") == \"Hello, Lin!\""
+              }
+            ]
+          },
+          "output": [
+            {
+              "content": "Successfully edited /fixture/continue/workspace/test_greeting.py with 1 edit\nDiff:\nIndex: /fixture/continue/workspace/test_greeting.py\n===================================================================\n--- /fixture/continue/workspace/test_greeting.py\n+++ /fixture/continue/workspace/test_greeting.py\n@@ -1,2 +1,3 @@\n from greeting import greet\n assert greet(\"Ada\") == \"Hello, Ada!\"\n+assert greet(\"Lin\") == \"Hello, Lin!\"\n",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_029a56fa3ebe6e2090d719a7",
+            "type": "function",
+            "function": {
+              "name": "Bash",
+              "arguments": "{\"command\":\"python3 test_greeting.py\"}"
+            }
+          }
+        ],
+        "usage": {
+          "completion_tokens": 23,
+          "total_tokens": 2501,
+          "prompt_tokens": 2478,
+          "prompt_tokens_details": {
+            "cached_tokens": 2176,
+            "cache_write_tokens": 0,
+            "cached_creation_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "gpt-6-astra",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_029a56fa3ebe6e2090d719a7",
+          "toolCall": {
+            "id": "call_029a56fa3ebe6e2090d719a7",
+            "type": "function",
+            "function": {
+              "name": "Bash",
+              "arguments": "{\"command\":\"python3 test_greeting.py\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "command": "python3 test_greeting.py"
+          },
+          "output": [
+            {
+              "content": "",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "{\"change\":\"Added assert greet(\\\"Lin\\\") == \\\"Hello, Lin!\\\" to test_greeting.py.\",\"function\":\"Unchanged.\",\"result\":\"python3 test_greeting.py passed both assertions.\"}",
+        "usage": {
+          "completion_tokens": 44,
+          "total_tokens": 2556,
+          "prompt_tokens": 2512,
+          "prompt_tokens_details": {
+            "cached_tokens": 2304,
+            "cache_write_tokens": 0,
+            "cached_creation_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "gpt-6-astra",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    }
+  ],
+  "usage": {
+    "totalCost": 0.012014,
+    "promptTokens": 11636,
+    "completionTokens": 189,
+    "promptTokensDetails": {
+      "cachedTokens": 0,
+      "cacheWriteTokens": 0
+    }
+  }
+}

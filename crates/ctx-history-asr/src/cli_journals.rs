@@ -219,6 +219,10 @@ pub(crate) fn header(p: Provider, id: &str, n: &Value) -> Value {
 /// Preserve native facts once on the nearest projection, including invalid or
 /// future values. A grouped key avoids illegal _meta keys from arbitrary JSON.
 fn retain(r: &mut Value, p: Provider, v: &Value, covered: &[&str]) {
+    if p == Provider::Kimi {
+        r["native"] = json!({"record":v});
+        return;
+    }
     let mut rest = v.clone();
     if let Some(o) = rest.as_object_mut() {
         for k in covered {
@@ -226,7 +230,7 @@ fn retain(r: &mut Value, p: Provider, v: &Value, covered: &[&str]) {
         }
         o.remove("timestamp");
         if !o.is_empty() {
-            meta(r, p, "details", &rest);
+            meta(r, p, "remainingFields", &rest);
         }
     }
 }

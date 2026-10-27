@@ -1,4 +1,4 @@
-//! OpenClaw v17/v19 JSON and v37 JSON/zstd storage, read independently of Core.
+//! OpenClaw v17/v19 JSON and v25/v37 JSON/zstd storage, read independently of Core.
 mod messages;
 mod side;
 mod source;
@@ -85,7 +85,7 @@ pub(crate) fn convert(s: &mut Spool, w: &mut Writer, h: &mut Value, v: &Value) -
         }
         _ => {
             n::loss(s, "_ai.openclaw/vendor_only")?;
-            vec![json!({"type":"ai.openclaw/custom","_meta":{"ai.openclaw/entry":e}})]
+            vec![json!({"type":"ai.openclaw/custom","native":{"record":e}})]
         }
     };
     let response = e["message"]["responseId"]

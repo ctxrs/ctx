@@ -222,8 +222,12 @@ fn batch10_large_integer_native_data_is_preserved_as_json_text() {
     fs::write(&o.inputs[0].path,"{\"sessionId\":\"large-number\",\"history\":[{\"message\":{\"role\":\"user\",\"content\":\"body\"},\"value\":184467440737095516170}]}").unwrap();
     export(&o).unwrap();
     let bytes = serde_json::to_string(&records(&o)).unwrap();
-    assert!(bytes.contains("184467440737095516170"));
-    assert!(bytes.contains("/jsonText"));
+    let blobs = fs::read_dir(o.out.join("blobs/sha256"))
+        .unwrap()
+        .map(|p| fs::read_to_string(p.unwrap().path()).unwrap())
+        .collect::<String>();
+    assert!(blobs.contains("184467440737095516170"));
+    assert!(bytes.contains("\"native\":{\"blob\":"));
     assert!(bytes.contains("body"));
 }
 #[test]

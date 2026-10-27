@@ -19,7 +19,13 @@ pub(super) fn preserve(
     value: &Value,
 ) -> Result<()> {
     let raw = ctx_history_asr_core::numbers::text(value).into_bytes();
-    if raw.len() > 65_536 {
+    if key == "source" {
+        record["native"] = if raw.len() > 65_536 || !safe(value) {
+            json!({"blob":bytes(spool, &raw, "application/json")?})
+        } else {
+            json!({"record":value})
+        };
+    } else if raw.len() > 65_536 {
         meta(
             record,
             provider,

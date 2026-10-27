@@ -170,7 +170,7 @@ pub(super) fn emit(spool: &Spool, w: &mut Writer, mut v: Value, row: &Value) -> 
         v["idScope"] = json!("capture");
     }
     let native = &row["value"];
-    meta(&mut v, w.provider, "source", native);
+    crate::capture::retain(&mut v, w.provider, native, spool)?;
     let time = string(native, &["timestamp", "created_at", "createdAt"]);
     let source = time.map(|s| json!({"timestamp":s})).unwrap_or(json!({}));
     externalize(spool, &mut v)?;

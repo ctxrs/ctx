@@ -129,7 +129,13 @@ fn task_large_integer_input_is_exact_json_text() {
     let call = r.iter().find(|v| v["type"] == "tool_call").unwrap();
     assert!(call.get("input").is_none());
     assert_eq!(call["inputText"], "{\"value\":9007199254740993}");
-    assert!(call["_meta"]["bot.cline/jsonText"]["/_meta/bot.cline~1remainingFields"].is_string());
+    let hash = call["native"]["blob"]["blob"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("sha256:")
+        .unwrap();
+    let native = fs::read_to_string(options.out.join("blobs/sha256").join(hash)).unwrap();
+    assert!(native.contains("9007199254740993"));
     let inference = r.iter().find(|v| v["type"] == "inference").unwrap();
     assert!(inference.get("cost").is_none());
     assert!(inference.to_string().contains("9007199254740993"));
@@ -258,7 +264,7 @@ fn task_large_binary_is_blobbed_without_mutating_native_metadata() {
     let m = r.iter().find(|v| v["type"] == "message").unwrap();
     assert!(m["content"][0].get("data").is_none());
     assert_eq!(m["content"][0]["blob"]["size"], 65537);
-    let source = &m["_meta"]["bot.cline/remainingFields"]["source"];
+    let source = m.pointer("/native/blob").unwrap();
     let hash = source["blob"]
         .as_str()
         .unwrap()

@@ -70,10 +70,11 @@ fn sqlite_family_rewrites_without_native_clock_changes_keep_identity_and_prior_b
         assert_eq!(a["id"], b["id"]);
         assert_eq!(a["seq"], b["seq"]);
         assert_eq!(a["content"][0]["text"], "first second");
-        assert_eq!(
-            a["content"][0]["_meta"][format!("{}/remainingFields", provider.domain())]["row"]["id"],
-            "p"
-        );
+        let part = after
+            .iter()
+            .find(|r| r["native"]["record"]["row"]["id"] == "p")
+            .unwrap();
+        assert_eq!(part["native"]["record"]["data"]["text"], "first second");
         assert_eq!(a["assembly"]["mode"], "snapshot");
         assert!(!after.iter().any(|r| r.get("supersedes").is_some()));
         let result = after.iter().find(|r| r["type"] == "tool_result").unwrap();
