@@ -177,6 +177,20 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PrimeProjector<R> {
         _worker: &mut JsonlFamilyWorkerContext<R>,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
+        if record.evidence().physical_ordinal() == 0 {
+            let header: Value = serde_json::from_slice(record.bytes())
+                .map_err(|_| CaptureError::source_changed())?;
+            if selected_entry(&header).map_err(|_| CaptureError::source_changed())?
+                != self.binding.header
+            {
+                return Err(CaptureError::source_changed());
+            }
+        }
+        if record.oversized() {
+            self.rejections
+                .malformed(record, "Prime Agent record exceeds the physical byte limit");
+            return Ok(());
+        }
         let parsed = serde_json::from_slice::<Value>(record.bytes())
             .map_err(invalid)
             .and_then(|value| self.records(&value, record.evidence().physical_ordinal()));
@@ -237,7 +251,7 @@ fn selected_content(value: &Value) -> Result<Value> {
     Ok(Value::Array(selected))
 }
 
-fn selected_entry(value: &Value) -> Result<Value> {
+pub(super) fn selected_entry(value: &Value) -> Result<Value> {
     let mut selected = select(
         value,
         &[

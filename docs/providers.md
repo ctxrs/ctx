@@ -229,6 +229,13 @@ source probe. Symlinks are not followed. Other one-shot `--session-dir`
 locations and old working directories require an exact `--path`; named roots
 can persist an explicitly selected history directory.
 
+Automatic and named-source imports keep readable sessions when a sibling
+transcript is unreadable, and report that file separately. Explicit directory
+import has a shared preflight that can stop on an unreadable sibling. Register
+the directory with `ctx sources add` or select a readable transcript directly
+when this occurs. Native declared file paths and diffs can appear as blame
+evidence; an arbitrary Python cell does not establish a proven producer.
+
 The location rules follow Prime Agent's
 [CLI selectors](https://github.com/PrimeIntellect-ai/prime-agent/blob/c6d4da9421e6087e3fc1a763e947cf37153cd76f/crates/pa-cli/src/config.rs),
 [settings selection](https://github.com/PrimeIntellect-ai/prime-agent/blob/c6d4da9421e6087e3fc1a763e947cf37153cd76f/crates/pa-cli/src/lib.rs),

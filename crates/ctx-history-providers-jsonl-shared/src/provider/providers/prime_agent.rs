@@ -10,7 +10,8 @@ use ctx_history_core::{
 use ctx_history_jsonl::{
     observe_opened_file, probe_records_until, JsonlFamilyAdapter, JsonlFamilyAppendMode,
     JsonlFamilyError, JsonlFamilyMembershipObservation, JsonlFamilyProjector,
-    JsonlFamilyRejectedLeaf, JsonlRecordRef,
+    JsonlFamilyRejectedLeaf, JsonlOversizedRecordPolicy, JsonlProbe, JsonlRecordRef,
+    JsonlRuntimeLookup,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,22 +29,25 @@ mod tests;
 
 const SOURCE_FORMAT: &str = "prime_agent_session_jsonl";
 const SCHEMA: &str = "prime-agent-session-v3";
-const PARSER_REVISION: &str = "prime-agent-jsonl-v1";
+const PARSER_REVISION: &str = "prime-agent-jsonl-v2";
 const EVENT_REVISION: &str = "prime-agent-entry-v1";
 
 pub(crate) fn adapter<R: JsonlProviderRuntime>(
     source_root_lineage: Option<[u8; 32]>,
+    automatic_role: Option<&[u8]>,
 ) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
     Arc::new(PrimeAdapter::<R> {
         scope: source_root_lineage
             .map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
         runtime: PhantomData,
+        automatic_role: automatic_role.map(<[u8]>::to_vec),
     })
 }
 
 struct PrimeAdapter<R> {
     scope: SourceAnchorScope,
     runtime: PhantomData<fn() -> R>,
+    automatic_role: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,6 +58,7 @@ struct Binding {
     parent: Option<StableEntityId>,
     relationship: Option<ProviderNativeSessionRelationship>,
     agent_scope: Option<AgentScope>,
+    header: Value,
 }
 
 impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
@@ -78,6 +83,10 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
         JsonlFamilyAppendMode::CertifiedSuffix
     }
 
+    fn oversized_record_policy(&self) -> JsonlOversizedRecordPolicy {
+        JsonlOversizedRecordPolicy::RejectRecord
+    }
+
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
         let metadata = match fs::symlink_metadata(root) {
             Ok(metadata) => metadata,
@@ -98,7 +107,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
         let authority = Arc::new(ProviderSourceRoot::open(directory)?);
         let mut leaves = Vec::new();
         let mut rejected = Vec::new();
-        for path in inventory::paths(root)? {
+        for path in inventory::paths(root, self.automatic_role.as_deref())? {
             let path = std::path::absolute(path)?;
             let relative = path
                 .strip_prefix(authority.named_path())
@@ -130,16 +139,17 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
                 parse_header(record, &path, self.scope)
             });
             match parsed {
-                Ok(Some((binding, _probe))) => {
-                    let source = source_key(&binding.native_id, self.scope)?;
-                    // Keep the header in the physical stream: its structured
-                    // metadata represents even a new, otherwise empty session.
-                    leaves.push(JsonlFamilyLeaf::observe(
-                        source,
+                Ok(Some((binding, probe))) => {
+                    // Retain the proof that authorized identity and context.
+                    // Replay the header as metadata under that retained authority,
+                    // including otherwise empty header-only sessions.
+                    leaves.push(bind_leaf(
                         path,
-                        Arc::clone(&authority),
                         relative,
-                        TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(invalid)?,
+                        Arc::clone(&authority),
+                        binding,
+                        probe,
+                        self.scope,
                     )?);
                 }
                 Ok(None) => {
@@ -185,7 +195,10 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
         if opening.root_missing() {
             return JsonlFamilyMembershipObservation::observe(root, opening);
         }
-        JsonlFamilyMembershipObservation::observe_selected_paths(opening, inventory::paths(root)?)
+        JsonlFamilyMembershipObservation::observe_selected_paths(
+            opening,
+            inventory::paths(root, self.automatic_role.as_deref())?,
+        )
     }
 
     fn projector(
@@ -202,6 +215,24 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
             leaf, binding,
         )?))
     }
+}
+
+fn bind_leaf(
+    path: std::path::PathBuf,
+    relative: std::path::PathBuf,
+    authority: Arc<ProviderSourceRoot>,
+    binding: Binding,
+    probe: JsonlProbe,
+    scope: SourceAnchorScope,
+) -> Result<JsonlFamilyLeaf> {
+    JsonlFamilyLeaf::observe_replaying_identity_probe(
+        source_key(&binding.native_id, scope)?,
+        path,
+        authority,
+        relative,
+        TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(invalid)?,
+        probe,
+    )
 }
 
 fn rejected_source(path: &Path, scope: SourceAnchorScope) -> Result<SourceKey> {
@@ -289,14 +320,12 @@ fn parse_header(
                 AgentScope::Subagent
             }
         }),
+        header: projection::selected_entry(&value)?,
     }))
 }
 
 fn safe_session_id(id: &str) -> bool {
-    !id.trim().is_empty()
-        && !matches!(id, "." | "..")
-        && !id.contains(['/', '\\', ':', '\0'])
-        && id.len() <= 65536
+    ctx_history_source_io::provider_safe_path_segment(id) && !id.contains(':')
 }
 
 fn parent_native_id(value: &str) -> Option<String> {

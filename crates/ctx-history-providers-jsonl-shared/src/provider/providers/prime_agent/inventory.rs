@@ -26,7 +26,7 @@ pub(super) fn session_filename(path: &Path) -> bool {
         )
 }
 
-pub(super) fn paths(root: &Path) -> Result<Vec<PathBuf>> {
+pub(super) fn paths(root: &Path, role: Option<&[u8]>) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     match open_provider_source_path(root)? {
         OpenedProviderSourcePath::File(_) => {
@@ -37,16 +37,28 @@ pub(super) fn paths(root: &Path) -> Result<Vec<PathBuf>> {
         }
         OpenedProviderSourcePath::Directory(directory) => {
             let mut remaining = PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES;
-            let layout = if root.ends_with(".t3/userdata/prime-agent") {
+            let layout = if role == Some(b"selected-sessions") {
+                Layout::Sessions
+            } else if role == Some(b"t3-store") || root.ends_with(".t3/userdata/prime-agent") {
                 Layout::T3
-            } else if root
-                .file_name()
-                .is_some_and(|name| name == "session-artifacts")
+            } else if role == Some(b"rlm-artifacts")
+                || root
+                    .file_name()
+                    .is_some_and(|name| name == "session-artifacts")
             {
                 Layout::Artifacts
             } else {
                 Layout::Sessions
             };
+            if role.is_none() && !matches!(layout, Layout::Sessions) {
+                walk(
+                    root,
+                    &directory,
+                    Layout::Sessions,
+                    &mut remaining,
+                    &mut paths,
+                )?;
+            }
             walk(root, &directory, layout, &mut remaining, &mut paths)?;
             directory.authority_root().revalidate()?;
         }

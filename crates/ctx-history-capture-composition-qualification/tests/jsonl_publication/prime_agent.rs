@@ -216,3 +216,122 @@ fn prime_agent_unreadable_sibling_does_not_hide_readable_history() {
     );
     assert!(!outcome.logical_source_failures.is_empty());
 }
+
+#[test]
+fn prime_agent_oversized_physical_row_is_local_and_repairable() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let path = root.join("session.jsonl");
+    let rows = [
+        header("session"),
+        message("before", "before oracle"),
+        message("large", &"x".repeat(17 * 1024 * 1024)),
+        message("after", "after oracle"),
+    ];
+    write_openclaw_lifecycle_transcript(&path, &rows);
+    let index = temp.path().join("index");
+    let registry = registry(&root);
+    let first = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert!(first.failed_routes.is_empty());
+    assert_eq!(first.record_rejections.total(), 1);
+    let records = all_indexed_records(&index);
+    assert_eq!(records.len(), 3);
+    for text in ["before oracle", "after oracle"] {
+        assert!(records
+            .iter()
+            .any(|record| record.content.normalized_body.as_deref() == Some(text)));
+    }
+    let again = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_eq!(again.commit.generation_id, first.commit.generation_id);
+    let mut repaired = rows;
+    repaired[2] = message("large", "repaired oracle");
+    write_openclaw_lifecycle_transcript(&path, &repaired);
+    let repair = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert!(repair.failed_routes.is_empty());
+    assert_eq!(repair.record_rejections.total(), 0);
+    assert_eq!(all_indexed_records(&index).len(), 4);
+}
+
+#[test]
+fn prime_agent_selected_and_explicit_flat_roots_ignore_reserved_directory_names() {
+    use ctx_history_source_discovery::{
+        discover_provider_sources_for_provider_with_context, DiscoveryContext, DiscoveryPlatform,
+        DiscoveryPlatformDirs,
+    };
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    for (index_number, suffix) in ["session-artifacts", ".t3/userdata/prime-agent"]
+        .iter()
+        .enumerate()
+    {
+        let root = temp.path().join("custom").join(suffix);
+        write_openclaw_lifecycle_transcript(&root.join("selected.jsonl"), &[header("selected")]);
+        write_openclaw_lifecycle_transcript(
+            &root.join("parent/sub-one/decoy.jsonl"),
+            &[header("rlm-decoy")],
+        );
+        write_openclaw_lifecycle_transcript(
+            &root.join("instance/thread/decoy.jsonl"),
+            &[header("t3-decoy")],
+        );
+        let context = DiscoveryContext::new(
+            temp.path().join("home"),
+            temp.path().join("cwd"),
+            DiscoveryPlatform::Linux,
+            DiscoveryPlatformDirs::default(),
+        )
+        .with_env("PRIME_AGENT_SESSION_DIR", root.as_os_str());
+        let report = discover_provider_sources_for_provider_with_context(
+            &crate::test_provider_probes(),
+            &context,
+            CaptureProvider::PrimeAgent,
+        );
+        assert_eq!(report.sources.len(), 1);
+        let mut automatic = SourceBackedProviderRegistry::new();
+        register_landed_source_backed_route(
+            &mut automatic,
+            report.sources[0].clone(),
+            SourceBackedRouteSelection::Automatic,
+        )
+        .unwrap();
+        let index = temp.path().join(format!("automatic-{index_number}"));
+        refresh_source_backed_generation(&index, &automatic, writer_options()).unwrap();
+        assert_eq!(all_indexed_records(&index).len(), 1);
+        assert_eq!(
+            published_session(&all_indexed_records(&index), "selected").len(),
+            1
+        );
+        let index = temp.path().join(format!("explicit-{index_number}"));
+        refresh_source_backed_generation(&index, &registry(&root), writer_options()).unwrap();
+        assert_eq!(
+            published_session(&all_indexed_records(&index), "selected").len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn prime_agent_header_only_and_changed_context_are_republished() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let path = root.join("session.jsonl");
+    let mut first_header = header("session");
+    write_openclaw_lifecycle_transcript(&path, &[first_header.clone()]);
+    let index = temp.path().join("index");
+    let registry = registry(&root);
+    refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    let first = all_indexed_records(&index);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].content.normalized_body, None);
+    first_header["cwd"] = json!("/workspace/changed");
+    first_header["parentSession"] = json!("new-parent");
+    write_openclaw_lifecycle_transcript(&path, &[first_header]);
+    refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    let changed = all_indexed_records(&index);
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].event_id, first[0].event_id);
+    assert_ne!(changed[0].parent_session_id, first[0].parent_session_id);
+    assert_eq!(
+        changed[0].content.structured_content.as_ref().unwrap()["cwd"],
+        "/workspace/changed"
+    );
+}

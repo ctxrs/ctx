@@ -275,6 +275,17 @@ pub(super) fn source_from_location(
     location: &ProviderDefaultLocation,
     path: PathBuf,
 ) -> ProviderSource {
+    source_from_location_with_probe(probes, data_root, spec, location, path, None)
+}
+
+pub(super) fn source_from_location_with_probe(
+    probes: &StaticProviderProbeCatalog,
+    data_root: Option<&Path>,
+    spec: &ProviderSourceSpec,
+    location: &ProviderDefaultLocation,
+    path: PathBuf,
+    selected_probe: Option<BoundedProbe>,
+) -> ProviderSource {
     let presence = path_presence(&path);
     let exists = !matches!(presence, PathPresence::Missing);
     let (status, unsupported_reason, blocked_auth_or_encryption) =
@@ -302,13 +313,15 @@ pub(super) fn source_from_location(
                     false,
                 ),
                 PathPresence::Present => {
-                    match default_location_import_probe(
-                        probes,
-                        data_root,
-                        spec.provider,
-                        location,
-                        &path,
-                    ) {
+                    match selected_probe.unwrap_or_else(|| {
+                        default_location_import_probe(
+                            probes,
+                            data_root,
+                            spec.provider,
+                            location,
+                            &path,
+                        )
+                    }) {
                         BoundedProbe::Found => (
                             ProviderSourceStatus::Available,
                             spec.unsupported_reason,

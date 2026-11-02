@@ -247,7 +247,8 @@
       "limitations": [
         "Only session format version 3 is admitted. One-shot --session-dir, historical working directories, and unregistered host stores require exact --path. There is no ancestor or arbitrary project-tree search.",
         "Malformed, unreadable, unsafe, or unreconstructible winning selectors suppress stale CLI defaults. Probes reject symlinks and stop at fixed entry and header-byte limits. Wrong-typed/null sessionDir settings behave as unset, matching Prime; an empty string resolves against the exact CWD.",
-        "Python tool payloads are retained as tool content; dynamic Python code is not treated as exact file-touch or shell-command attribution. Missing parent identity does not justify inferred lineage."
+        "Python tool payloads are retained as tool content; dynamic Python code is not treated as exact file-touch or shell-command attribution. Missing parent identity does not justify inferred lineage.",
+        "Automatic and registered-source imports isolate unreadable transcripts. Explicit directory import has a shared preflight that can stop on an unreadable sibling; register the directory as a named source or select a readable transcript directly."
       ],
       "public_docs": "docs/providers.md"
     },

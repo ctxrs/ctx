@@ -228,6 +228,9 @@ fn explicit_files_require_first_line_v3_header_and_reject_ledgers_caches_and_bad
         ("id", json!("../escape")),
         ("id", json!("")),
         ("id", json!("C:escape")),
+        ("id", json!(" leading")),
+        ("id", json!("NUL")),
+        ("id", json!("trailing.")),
         ("timestamp", json!("not-a-time")),
         ("cwd", json!(null)),
         ("rlmDepth", json!(-1)),
@@ -331,8 +334,8 @@ fn fixed_layouts_do_not_search_deeper_unrelated_trees() {
     session(&artifacts.join("not-a-child.jsonl"));
     session(&artifacts.join("parent/sub/deeper/history.jsonl"));
     assert_eq!(
-        provider_source_for_path(CaptureProvider::PrimeAgent, artifacts).status,
-        ProviderSourceStatus::Empty
+        crate::provider_sources::prime_agent::probe_for_role(&artifacts, Some(b"rlm-artifacts")),
+        crate::provider_sources::probes::BoundedProbe::NotFound
     );
     let t3 = temp.path().join(".t3/userdata/prime-agent");
     session(&t3.join("prime/thread/unrelated/deeper/history.jsonl"));
@@ -404,4 +407,39 @@ fn symlink_files_roots_ancestors_and_project_selectors_are_not_followed() {
     let report = resolve_provider(&context(&home, &cwd), CaptureProvider::PrimeAgent);
     assert!(report.sources.is_empty());
     assert_eq!(report.issues.len(), 1);
+}
+
+#[test]
+fn selected_flat_layout_is_independent_of_directory_name() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("project");
+    for suffix in ["session-artifacts", ".t3/userdata/prime-agent"] {
+        let root = temp.path().join("custom").join(suffix);
+        session(&root.join("direct.jsonl"));
+        let selected = context(&home, &cwd).with_env("PRIME_AGENT_SESSION_DIR", root.as_os_str());
+        assert_eq!(
+            resolve_provider(&selected, CaptureProvider::PrimeAgent).sources[0].status,
+            ProviderSourceStatus::Available
+        );
+        write_fixture(
+            &cwd.join(".prime/agent/settings.json"),
+            json!({"sessionDir":root}).to_string(),
+        );
+        assert_eq!(
+            resolve_provider(&context(&home, &cwd), CaptureProvider::PrimeAgent).sources[0].status,
+            ProviderSourceStatus::Available
+        );
+        assert_eq!(
+            provider_source_for_path(CaptureProvider::PrimeAgent, root.clone()).status,
+            ProviderSourceStatus::Available
+        );
+        fs::remove_file(root.join("direct.jsonl")).unwrap();
+        session(&root.join("parent/sub-one/decoy.jsonl"));
+        session(&root.join("instance/thread/decoy.jsonl"));
+        assert_eq!(
+            resolve_provider(&selected, CaptureProvider::PrimeAgent).sources[0].status,
+            ProviderSourceStatus::Empty
+        );
+    }
 }

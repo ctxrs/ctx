@@ -234,7 +234,13 @@ pub(super) fn register_prime_agent_route(
         Ok::<_, crate::CaptureError>(
             ctx_history_providers_jsonl_shared::adapters::prime_agent_with_source_root_lineage::<
                 crate::provider::source_backed::family::jsonl::JsonlFamilyRuntime,
-            >(source_root_lineage)
+            >(
+                source_root_lineage,
+                source
+                    .route_provenance
+                    .automatic_route_role()
+                    .map(|role| role.as_bytes())
+            )
         )
     )
 }

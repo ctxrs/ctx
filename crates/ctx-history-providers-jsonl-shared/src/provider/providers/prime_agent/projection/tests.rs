@@ -17,6 +17,8 @@ fn projector() -> PrimeProjector<()> {
             parent: None,
             relationship: None,
             agent_scope: Some(AgentScope::Primary),
+            header: json!({"type":"session", "version":3, "id":"session", "cwd":"/work/project",
+                "timestamp":"2026-10-01T12:00:00Z", "rlmDepth":0}),
         },
         runtime: PhantomData,
     }

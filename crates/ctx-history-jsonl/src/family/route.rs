@@ -624,6 +624,7 @@ pub struct JsonlFamilyLeaf<E: JsonlFamilyError> {
     binding: TypedKey,
     terminal_dependencies: JsonlFamilyLeafTerminalDependencies<E>,
     identity_probe: Option<JsonlProbe>,
+    replayed_identity_probe: Option<JsonlProbe>,
     identity_probe_rejected_records: u64,
     whole_record: bool,
     freeze_observation_at_scan: bool,

@@ -5,16 +5,15 @@ use std::path::{Path, PathBuf};
 
 use crate::provider_sources::{
     context::{DiscoveryContext, DiscoveryPlatform},
-    prime_agent::{path_without_links, FORMAT},
+    prime_agent::{path_without_links, probe_for_role, FORMAT},
     selectors::{SelectorFormat, SelectorReader},
-    types::{DiscoveryReport, ProviderSourceSpec},
+    types::{DiscoveryReport, ProviderDefaultLocation, ProviderSourceKind, ProviderSourceSpec},
     StaticProviderProbeCatalog,
 };
 
 use super::{
-    add_manual_issue, add_source_with_route_provenance, path_presence, read_optional, structured,
-    OptionalDocument, PathPresence, INVALID_SELECTOR_REASON, MANUAL_SELECTOR_REASON,
-    UNSAFE_SELECTOR_REASON,
+    add_manual_issue, path_presence, read_optional, structured, OptionalDocument, PathPresence,
+    INVALID_SELECTOR_REASON, MANUAL_SELECTOR_REASON, UNSAFE_SELECTOR_REASON,
 };
 use ctx_history_capture_model::{ProviderRouteRole, ProviderSourceRouteProvenance};
 
@@ -79,16 +78,25 @@ fn add_source(
     role: &'static str,
 ) {
     if path_without_links(&path) {
-        add_source_with_route_provenance(
+        let location = ProviderDefaultLocation {
+            path_components: &[],
+            source_format: FORMAT,
+            source_kind: ProviderSourceKind::NativeHistory,
+        };
+        let selected_probe = probe_for_role(&path, Some(role.as_bytes()));
+        let mut source = super::super::source_from_location_with_probe(
             probes,
-            report,
+            None,
             spec,
+            &location,
             path,
-            FORMAT,
-            ProviderSourceRouteProvenance::Automatic {
-                route_role: ProviderRouteRole::from_static(role),
-            },
+            Some(selected_probe),
         );
+        source.route_provenance = ProviderSourceRouteProvenance::Automatic {
+            route_role: ProviderRouteRole::from_static(role),
+        };
+        // Prime has exactly three independently bounded automatic roles.
+        report.sources.push(source);
     } else {
         add_manual_issue(report, spec.provider, UNSAFE_SELECTOR_REASON);
     }

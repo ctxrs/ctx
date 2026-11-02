@@ -26,6 +26,9 @@ fn v3_admission_rejects_other_versions_and_unsafe_ids() {
         json!({"version":4}),
         json!({"id":"../elsewhere"}),
         json!({"id":""}),
+        json!({"id":" leading"}),
+        json!({"id":"NUL"}),
+        json!({"id":"trailing."}),
         json!({"timestamp":"invalid"}),
         json!({"cwd":null}),
     ] {
@@ -80,4 +83,86 @@ fn source_and_parent_identity_respect_configured_root_lineage() {
         session_identity("parent", SourceAnchorScope::Lineage([1; 32])).unwrap(),
         session_identity("parent", SourceAnchorScope::Lineage([2; 32])).unwrap()
     );
+}
+
+#[test]
+fn identity_probe_rejects_header_rewrites_and_object_replacement() {
+    for (field, replacement, replace_object) in [
+        ("id", "bravo", false),
+        ("cwd", "/work/changed", false),
+        ("parentSession", "other-parent", false),
+        ("id", "bravo", true),
+    ] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        let mut value = json!({"type":"session", "version":3, "id":"alpha",
+            "cwd":"/work/project", "parentSession":"first-parent",
+            "timestamp":"2026-10-01T12:00:00Z", "rlmDepth":0});
+        fs::write(&path, format!("{value}\n")).unwrap();
+        // Establish a distinct observation even on filesystems whose clock
+        // does not tick between the two writes in this deterministic test.
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        let authority = Arc::new(ProviderSourceRoot::open(temp.path()).unwrap());
+        let opened = Arc::new(authority.open_file(Path::new("session.jsonl")).unwrap());
+        let (binding, probe) = probe_records_until(&path, &opened, 1, |record| {
+            parse_header(record, &path, SourceAnchorScope::Unqualified)
+        })
+        .unwrap()
+        .unwrap();
+        value[field] = json!(replacement);
+        let output = if replace_object {
+            temp.path().join("replacement.jsonl")
+        } else {
+            path.clone()
+        };
+        fs::write(&output, format!("{value}\n")).unwrap();
+        if replace_object {
+            fs::rename(output, &path).unwrap();
+        }
+        assert!(
+            bind_leaf(
+                path,
+                "session.jsonl".into(),
+                authority,
+                binding,
+                probe,
+                SourceAnchorScope::Unqualified
+            )
+            .is_err(),
+            "{field}, replacement={replace_object}"
+        );
+    }
+}
+
+#[test]
+fn replayed_header_remains_inside_the_logical_boundary() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("session.jsonl");
+    let value = json!({"type":"session", "version":3, "id":"session",
+        "cwd":"/work/project", "timestamp":"2026-10-01T12:00:00Z"});
+    let bytes = format!("{value}\n");
+    fs::write(&path, &bytes).unwrap();
+    let authority = Arc::new(ProviderSourceRoot::open(temp.path()).unwrap());
+    let opened = Arc::new(authority.open_file(Path::new("session.jsonl")).unwrap());
+    let (binding, probe) = probe_records_until(&path, &opened, 1, |record| {
+        parse_header(record, &path, SourceAnchorScope::Unqualified)
+    })
+    .unwrap()
+    .unwrap();
+    let leaf = bind_leaf(
+        path,
+        "session.jsonl".into(),
+        authority,
+        binding,
+        probe,
+        SourceAnchorScope::Unqualified,
+    )
+    .unwrap();
+    assert!(leaf.clone().with_logical_eof(0).is_err());
+    assert!(leaf.clone().with_logical_eof(bytes.len() as u64).is_ok());
 }

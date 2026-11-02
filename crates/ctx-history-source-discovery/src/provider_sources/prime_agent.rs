@@ -35,6 +35,10 @@ struct Budget {
 }
 
 pub(super) fn probe(path: &Path) -> BoundedProbe {
+    probe_for_role(path, None)
+}
+
+pub(super) fn probe_for_role(path: &Path, role: Option<&[u8]>) -> BoundedProbe {
     if !path_without_links(path) {
         return BoundedProbe::IoError;
     }
@@ -55,17 +59,31 @@ pub(super) fn probe(path: &Path) -> BoundedProbe {
             }
         }
         OpenedProviderSourcePath::Directory(directory) => {
-            let layout = if path.ends_with(".t3/userdata/prime-agent") {
+            let layout = if role == Some(b"selected-sessions") {
+                Layout::Sessions
+            } else if role == Some(b"t3-store") || path.ends_with(".t3/userdata/prime-agent") {
                 Layout::T3
-            } else if path
-                .file_name()
-                .is_some_and(|name| name == "session-artifacts")
+            } else if role == Some(b"rlm-artifacts")
+                || path
+                    .file_name()
+                    .is_some_and(|name| name == "session-artifacts")
             {
                 Layout::Artifacts
             } else {
                 Layout::Sessions
             };
-            directory_probe(&directory, layout, &mut budget)
+            // Explicit/named roots authorize flat transcripts even when their
+            // basename resembles a native tree. Automatic roles stay exact.
+            let flat = if role.is_none() && !matches!(layout, Layout::Sessions) {
+                directory_probe(&directory, Layout::Sessions, &mut budget)
+            } else {
+                BoundedProbe::NotFound
+            };
+            if flat == BoundedProbe::Found {
+                flat
+            } else {
+                combine(flat, directory_probe(&directory, layout, &mut budget))
+            }
         }
     };
     if path_without_links(path) {
