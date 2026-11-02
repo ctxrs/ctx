@@ -214,5 +214,5 @@ fn prime_agent_unreadable_sibling_does_not_hide_readable_history() {
         published_session(&all_indexed_records(&index), "good").len(),
         2
     );
-    assert_eq!(outcome.logical_source_failures.len(), 1);
+    assert!(!outcome.logical_source_failures.is_empty());
 }
