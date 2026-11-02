@@ -186,7 +186,7 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
             identity_probe,
             0,
         )?;
-        leaf.replayed_identity_probe = leaf.identity_probe.take();
+        leaf.replayed_identity_probe = leaf.identity_probe.take().map(Box::new);
         Ok(leaf)
     }
 
@@ -249,7 +249,7 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
         if self
             .identity_probe
             .as_ref()
-            .or(self.replayed_identity_probe.as_ref())
+            .or(self.replayed_identity_probe.as_deref())
             .is_some_and(|probe| probe.complete_prefix_end > logical_eof)
         {
             return Err(E::invalid_payload(
@@ -428,7 +428,7 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
         if let Some(probe) = leaf
             .identity_probe
             .as_mut()
-            .or(leaf.replayed_identity_probe.as_mut())
+            .or(leaf.replayed_identity_probe.as_deref_mut())
         {
             revalidate_frozen_prefix(
                 &leaf.source_path,
