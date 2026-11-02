@@ -64,6 +64,23 @@ fn default_agent_artifacts_and_t3_coexist_without_project_tree_scanning() {
     let report = resolve_provider(&context(&home, &cwd), CaptureProvider::PrimeAgent);
     assert!(report.issues.is_empty());
     assert_eq!(report.sources.len(), 3);
+    let roles = report
+        .sources
+        .iter()
+        .map(|source| {
+            source
+                .route_provenance
+                .automatic_route_role()
+                .unwrap()
+                .as_bytes()
+                .to_vec()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        roles.len(),
+        3,
+        "coexisting stores must have separate automatic routes"
+    );
     for path in [sessions, artifacts, t3] {
         let source = report
             .sources

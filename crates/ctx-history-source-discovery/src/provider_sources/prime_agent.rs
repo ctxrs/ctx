@@ -215,7 +215,10 @@ fn header(file: &OpenedProviderSourceFile, budget: &mut Budget) -> BoundedProbe 
             .get("timestamp")
             .and_then(Value::as_str)
             .is_some_and(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_ok())
-        && value.get("cwd").and_then(Value::as_str).is_some()
+        && value
+            .get("cwd")
+            .and_then(Value::as_str)
+            .is_some_and(|cwd| !cwd.is_empty())
         && value
             .get("parentSession")
             .is_none_or(|parent| parent.is_null() || parent.is_string())

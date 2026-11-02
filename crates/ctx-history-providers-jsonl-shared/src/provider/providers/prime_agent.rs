@@ -9,7 +9,8 @@ use ctx_history_core::{
 };
 use ctx_history_jsonl::{
     observe_opened_file, probe_records_until, JsonlFamilyAdapter, JsonlFamilyAppendMode,
-    JsonlFamilyProjector, JsonlFamilyRejectedLeaf, JsonlRecordRef,
+    JsonlFamilyError, JsonlFamilyMembershipObservation, JsonlFamilyProjector,
+    JsonlFamilyRejectedLeaf, JsonlRecordRef,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,6 +21,7 @@ use crate::{
     CaptureError, JsonlProviderRuntime, Result,
 };
 
+mod inventory;
 mod projection;
 #[cfg(test)]
 mod tests;
@@ -96,21 +98,31 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
         let authority = Arc::new(ProviderSourceRoot::open(directory)?);
         let mut leaves = Vec::new();
         let mut rejected = Vec::new();
-        super::native_jsonl::visit_native_jsonl_files(root, self.provider(), &mut |path| {
-            // These are topology/usage journals, never transcripts, even though
-            // Prime stores them beside the sessions using the same extension.
-            if matches!(
-                path.file_name().and_then(|s| s.to_str()),
-                Some("semantic-edges.jsonl" | "rlm-subagents.jsonl")
-            ) {
-                return Ok(());
-            }
-            let path = fs::canonicalize(path)?;
+        for path in inventory::paths(root)? {
+            let path = std::path::absolute(path)?;
             let relative = path
                 .strip_prefix(authority.named_path())
                 .map_err(|_| invalid("Prime Agent transcript escaped its authority"))?
                 .to_path_buf();
-            let opened = Arc::new(authority.open_file(&relative)?);
+            let opened = match authority.open_file(&relative) {
+                Ok(opened) => Arc::new(opened),
+                Err(error)
+                    if error.is_source_unavailable() || error.is_ignorable_membership_entry() =>
+                {
+                    let detail = error.to_string();
+                    rejected.push(
+                        JsonlFamilyRejectedLeaf::bind_unobserved(
+                            path.clone(),
+                            relative,
+                            TypedKey::utf8(detail.clone()).map_err(invalid)?,
+                            0,
+                        )
+                        .with_logical_source_failure(rejected_source(&path, self.scope)?, detail),
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let observation = observe_opened_file(&path, opened.as_ref())?;
             let parsed = probe_records_until(&path, &opened, 1, |record| {
                 parse_header(record, &path, self.scope)
@@ -139,16 +151,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
                     ));
                 }
                 Err(CaptureError::InvalidPayload(detail)) => {
-                    let source = SourceKey::derive_provider_native_scoped(
-                        self.provider().as_str(),
-                        SOURCE_FORMAT,
-                        SCHEMA,
-                        1,
-                        "prime-agent.invalid-file",
-                        TypedKey::utf8(path.to_string_lossy()).map_err(invalid)?,
-                        self.scope,
-                    )
-                    .map_err(invalid)?;
+                    let source = rejected_source(&path, self.scope)?;
                     rejected.push(
                         JsonlFamilyRejectedLeaf::bind_observed(
                             path,
@@ -162,8 +165,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
                 }
                 Err(error) => return Err(error),
             }
-            Ok(())
-        })?;
+        }
         JsonlFamilyInventory::present_with_rejected(
             self.provider(),
             root,
@@ -171,6 +173,17 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
             leaves,
             rejected,
         )
+    }
+
+    fn observe_terminal_membership(
+        &self,
+        root: &Path,
+        opening: &JsonlFamilyInventory,
+    ) -> Result<JsonlFamilyMembershipObservation<CaptureError>> {
+        if opening.root_missing() {
+            return JsonlFamilyMembershipObservation::observe(root, opening);
+        }
+        JsonlFamilyMembershipObservation::observe_selected_paths(opening, inventory::paths(root)?)
     }
 
     fn projector(
@@ -187,6 +200,19 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
             leaf, binding,
         )?))
     }
+}
+
+fn rejected_source(path: &Path, scope: SourceAnchorScope) -> Result<SourceKey> {
+    SourceKey::derive_provider_native_scoped(
+        CaptureProvider::PrimeAgent.as_str(),
+        SOURCE_FORMAT,
+        SCHEMA,
+        1,
+        "prime-agent.invalid-file",
+        TypedKey::utf8(path.to_string_lossy()).map_err(invalid)?,
+        scope,
+    )
+    .map_err(invalid)
 }
 
 fn parse_header(
@@ -218,6 +244,14 @@ fn parse_header(
         .filter(|cwd| !cwd.is_empty())
         .ok_or_else(|| invalid("missing Prime Agent session cwd"))?;
     let depth = value.get("rlmDepth").and_then(Value::as_u64);
+    if value.get("rlmDepth").is_some_and(|depth| {
+        !depth.is_null() && depth.as_u64().is_none_or(|depth| depth == u64::MAX)
+    }) || value
+        .get("parentSession")
+        .is_some_and(|parent| !parent.is_null() && !parent.is_string())
+    {
+        return Err(invalid("invalid Prime Agent lineage metadata"));
+    }
     let header_parent = value
         .get("parentSession")
         .and_then(Value::as_str)

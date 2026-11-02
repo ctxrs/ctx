@@ -12,10 +12,11 @@ use crate::provider_sources::{
 };
 
 use super::{
-    add_manual_issue, add_source as add_safe_source, path_presence, read_optional, structured,
+    add_manual_issue, add_source_with_route_provenance, path_presence, read_optional, structured,
     OptionalDocument, PathPresence, INVALID_SELECTOR_REASON, MANUAL_SELECTOR_REASON,
     UNSAFE_SELECTOR_REASON,
 };
+use ctx_history_capture_model::{ProviderRouteRole, ProviderSourceRouteProvenance};
 
 pub(super) fn resolve(
     probes: &StaticProviderProbeCatalog,
@@ -25,7 +26,7 @@ pub(super) fn resolve(
     let mut report = DiscoveryReport::default();
     let agent_dir = agent_dir(context);
     match session_dir(context, agent_dir.as_deref().map_err(|reason| *reason)) {
-        Ok(sessions) => add_source(probes, &mut report, spec, sessions, FORMAT),
+        Ok(sessions) => add_source(probes, &mut report, spec, sessions, "selected-sessions"),
         Err(reason) => add_manual_issue(&mut report, spec.provider, reason),
     }
 
@@ -38,6 +39,7 @@ pub(super) fn resolve(
             &mut report,
             spec,
             agent_dir.join("session-artifacts"),
+            "rlm-artifacts",
         ),
         Err(reason) if report.issues.is_empty() => {
             add_manual_issue(&mut report, spec.provider, reason)
@@ -52,6 +54,7 @@ pub(super) fn resolve(
         &mut report,
         spec,
         context.home().join(".t3/userdata/prime-agent"),
+        "t3-store",
     );
     report
 }
@@ -61,9 +64,10 @@ fn add_existing(
     report: &mut DiscoveryReport,
     spec: &ProviderSourceSpec,
     path: PathBuf,
+    role: &'static str,
 ) {
     if !matches!(path_presence(&path), PathPresence::Missing) {
-        add_source(probes, report, spec, path, FORMAT);
+        add_source(probes, report, spec, path, role);
     }
 }
 
@@ -72,10 +76,19 @@ fn add_source(
     report: &mut DiscoveryReport,
     spec: &ProviderSourceSpec,
     path: PathBuf,
-    format: &'static str,
+    role: &'static str,
 ) {
     if path_without_links(&path) {
-        add_safe_source(probes, report, spec, path, format);
+        add_source_with_route_provenance(
+            probes,
+            report,
+            spec,
+            path,
+            FORMAT,
+            ProviderSourceRouteProvenance::Automatic {
+                route_role: ProviderRouteRole::from_static(role),
+            },
+        );
     } else {
         add_manual_issue(report, spec.provider, UNSAFE_SELECTOR_REASON);
     }

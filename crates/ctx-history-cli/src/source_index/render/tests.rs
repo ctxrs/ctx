@@ -470,6 +470,15 @@ fn strip_ansi(rendered: &str) -> String {
 }
 
 #[test]
+fn prime_agent_show_uses_human_provider_name() {
+    let mut value = show_value();
+    value["provider"] = json!("prime_agent");
+    let text = render_show_document(&value, &context(80, ColorMode::Never)).render_plain();
+    assert!(text.contains("Provider          Prime Agent"), "{text}");
+    assert_eq!(value["provider"], "prime_agent");
+}
+
+#[test]
 fn primary_renderers_match_reference_goldens_at_80_columns() {
     let context = context(80, ColorMode::Never);
     assert_eq!(

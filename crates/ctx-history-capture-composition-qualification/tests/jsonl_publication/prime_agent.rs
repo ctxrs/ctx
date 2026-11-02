@@ -33,6 +33,58 @@ fn message(id: &str, text: &str) -> Value {
 }
 
 #[test]
+fn prime_agent_automatic_import_keeps_cli_artifacts_and_t3_together() {
+    use ctx_history_source_discovery::{
+        discover_provider_sources_for_provider_with_context, DiscoveryContext, DiscoveryPlatform,
+        DiscoveryPlatformDirs,
+    };
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("project");
+    let cases = [
+        ("cli", ".prime/agent/sessions/cli.jsonl"),
+        (
+            "child",
+            ".prime/agent/session-artifacts/cli/sub-one/child.jsonl",
+        ),
+        ("t3", ".t3/userdata/prime-agent/prime/thread/t3.jsonl"),
+    ];
+    for (id, path) in cases {
+        write_openclaw_lifecycle_transcript(&home.join(path), &[header(id), message("event", id)]);
+    }
+    let context = DiscoveryContext::new(
+        &home,
+        &cwd,
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    );
+    let report = discover_provider_sources_for_provider_with_context(
+        &crate::test_provider_probes(),
+        &context,
+        CaptureProvider::PrimeAgent,
+    );
+    assert_eq!(report.sources.len(), 3);
+    let mut registry = SourceBackedProviderRegistry::new();
+    for source in report.sources {
+        register_landed_source_backed_route(
+            &mut registry,
+            source,
+            SourceBackedRouteSelection::Automatic,
+        )
+        .unwrap();
+    }
+    let index = temp.path().join("index");
+    let first = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert!(first.failed_routes.is_empty());
+    assert_eq!(all_indexed_records(&index).len(), 6);
+    for (id, _) in cases {
+        assert_eq!(published_session(&all_indexed_records(&index), id).len(), 2);
+    }
+    let again = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_eq!(again.commit.generation_id, first.commit.generation_id);
+}
+
+#[test]
 fn prime_agent_cold_append_rewrite_and_torn_tail_keep_stable_identity() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
@@ -47,6 +99,11 @@ fn prime_agent_cold_append_rewrite_and_torn_tail_keep_stable_identity() {
     )
     .unwrap();
     fs::write(root.join("session.window-cache.json"), "private cache").unwrap();
+    fs::write(root.join("rlm-ledger.jsonl"), "not a transcript\n").unwrap();
+    write_openclaw_lifecycle_transcript(
+        &root.join("unrelated/project/nested.jsonl"),
+        &[header("unrelated"), message("ignored", "unrelated oracle")],
+    );
     let index = temp.path().join("index");
     let registry = registry(&root);
     let cold = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
@@ -90,8 +147,8 @@ fn prime_agent_cold_append_rewrite_and_torn_tail_keep_stable_identity() {
 #[test]
 fn prime_agent_bad_sibling_and_deleted_parent_do_not_hide_child_history() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let root = temp.path().join("agent");
-    let parent = root.join("sessions/parent.jsonl");
+    let root = temp.path().join(".t3/userdata/prime-agent");
+    let parent = root.join("prime/thread/parent.jsonl");
     write_openclaw_lifecycle_transcript(
         &parent,
         &[header("parent"), message("p", "parent oracle")],
@@ -100,7 +157,7 @@ fn prime_agent_bad_sibling_and_deleted_parent_do_not_hide_child_history() {
     child_header["parentSession"] = json!(parent.to_string_lossy());
     child_header["rlmDepth"] = json!(1);
     write_openclaw_lifecycle_transcript(
-        &root.join("session-artifacts/parent/sub-test/child.jsonl"),
+        &root.join("prime/session-artifacts/parent/sub-test/child.jsonl"),
         &[child_header, message("c", "child oracle")],
     );
     let index = temp.path().join("index");
@@ -121,7 +178,7 @@ fn prime_agent_bad_sibling_and_deleted_parent_do_not_hide_child_history() {
     let child_id = child_record.session_id;
     fs::remove_file(parent).unwrap();
     fs::write(
-        root.join("bad.jsonl"),
+        root.join("prime/thread/bad.jsonl"),
         "{\"type\":\"session\",\"version\":99}\n",
     )
     .unwrap();
@@ -130,4 +187,32 @@ fn prime_agent_bad_sibling_and_deleted_parent_do_not_hide_child_history() {
     assert_eq!(published_session(&records, "child").len(), 2);
     assert_eq!(published_session(&records, "child")[0].session_id, child_id);
     assert!(!refreshed.failed_routes.is_empty() || !refreshed.logical_source_failures.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn prime_agent_unreadable_sibling_does_not_hide_readable_history() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    write_openclaw_lifecycle_transcript(
+        &root.join("good.jsonl"),
+        &[header("good"), message("first", "readable oracle")],
+    );
+    let denied = root.join("denied.jsonl");
+    write_openclaw_lifecycle_transcript(&denied, &[header("denied")]);
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&denied).is_ok() {
+        // A privileged test runner cannot exercise permission denial.
+        return;
+    }
+    let index = temp.path().join("index");
+    let outcome =
+        refresh_source_backed_generation(&index, &registry(&root), writer_options()).unwrap();
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        published_session(&all_indexed_records(&index), "good").len(),
+        2
+    );
+    assert_eq!(outcome.logical_source_failures.len(), 1);
 }

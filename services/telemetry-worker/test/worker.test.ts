@@ -496,7 +496,7 @@ describe("static telemetry contracts", () => {
       })
     )), INGEST_OPTIONS);
 
-    expect(plan.rows).toHaveLength(49);
+    expect(plan.rows).toHaveLength(50);
     expect(plan.rows.map((row) => row.provider_id)).toEqual(CLOSED_PROVIDERS);
   });
 

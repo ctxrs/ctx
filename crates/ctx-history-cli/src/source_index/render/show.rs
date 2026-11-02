@@ -249,7 +249,10 @@ fn render_session_header(document: &mut Document, context: &RenderContext, value
         document,
         context,
         "Provider",
-        value["provider"].as_str(),
+        value["provider"]
+            .as_str()
+            .map(crate::provider_display_name)
+            .as_deref(),
         Token::Accent,
     );
     push_optional_field(
@@ -313,7 +316,10 @@ fn render_event_header(document: &mut Document, context: &RenderContext, value: 
         document,
         context,
         "Provider",
-        selected["provider"].as_str(),
+        selected["provider"]
+            .as_str()
+            .map(crate::provider_display_name)
+            .as_deref(),
         Token::Accent,
     );
     push_optional_field(

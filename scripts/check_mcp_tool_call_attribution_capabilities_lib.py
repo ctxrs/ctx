@@ -816,7 +816,7 @@ def validate_public_docs(
     normalized_main = " ".join(main.split())
     required = (
         "Codex `codex_session_jsonl_tree` / `codex-nativepath-jsonl-v0`",
-        "52 capability lanes: three `exact`, 48 `not-qualified`, and one `excluded`",
+        "53 capability lanes: three `exact`, 49 `not-qualified`, and one `excluded`",
         "`activity.invocation`",
         "`provider_call_id`",
         "`protocol` equal to `mcp`",
