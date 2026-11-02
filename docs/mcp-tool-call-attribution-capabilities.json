@@ -52,17 +52,17 @@
     "exact_requires_source_commits": false
   },
   "expected_counts": {
-    "providers": 43,
-    "base_routes": 48,
-    "capability_lanes": 52,
+    "providers": 44,
+    "base_routes": 49,
+    "capability_lanes": 53,
     "lane_statuses": {
       "exact": 3,
-      "not-qualified": 48,
+      "not-qualified": 49,
       "excluded": 1
     },
     "provider_statuses": {
       "exact": 3,
-      "not-qualified": 40,
+      "not-qualified": 41,
       "excluded": 0
     }
   },
@@ -83,6 +83,29 @@
     "outside_local_only_boundary": "The evidence source is a hosted remote trace rather than local agent history."
   },
   "routes": [
+    {
+      "provider_id": "prime_agent",
+      "route": "native_import",
+      "source_format": "prime_agent_session_jsonl",
+      "source_schema": "prime-agent-session-v3",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.10.2"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "c6d4da9421e6087e3fc1a763e947cf37153cd76f"
+        ],
+        "unknown_generations": "not-qualified"
+      },
+      "status": "not-qualified",
+      "reason": "no_server_field",
+      "detail": "Prime Agent stores Python cell calls and results with exact call IDs. The session does not expose an authoritative call-local MCP server alias; ctx does not infer MCP identity from Python source or configuration.",
+      "evidence": [
+        "https://github.com/PrimeIntellect-ai/prime-agent/blob/c6d4da9421e6087e3fc1a763e947cf37153cd76f/crates/pa-types/src/session.rs"
+      ]
+    },
     {
       "provider_id": "codex", "route": "native_import", "source_format": "codex_session_jsonl_tree", "source_schema": "codex-nativepath-jsonl-v0",
       "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},

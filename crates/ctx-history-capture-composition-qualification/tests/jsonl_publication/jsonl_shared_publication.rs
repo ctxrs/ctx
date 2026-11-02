@@ -1356,3 +1356,6 @@ fn pi_declared_missing_parent_keeps_normalized_direct_lineage() {
         record.content.normalized_body.as_deref() == Some("controlled parent prompt")
     }));
 }
+
+#[path = "prime_agent.rs"]
+mod prime_agent;

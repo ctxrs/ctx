@@ -98,6 +98,7 @@ fn register_landed_source_backed_route_inner(
         | CaptureProvider::DeepSeekHarness
         | CaptureProvider::Claude
         | CaptureProvider::Pi
+        | CaptureProvider::PrimeAgent
         | CaptureProvider::Antigravity
         | CaptureProvider::Tabnine
         | CaptureProvider::Gemini
