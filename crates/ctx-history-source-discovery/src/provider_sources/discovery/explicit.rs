@@ -111,6 +111,16 @@ fn provider_source_for_path_with_optional_data_root(
     {
         return unsupported_source(spec, path, PI_INVALID_JSONL_REASON);
     }
+    if provider == CaptureProvider::PrimeAgent
+        && observed == Ok(SourcePathKind::File)
+        && super::super::prime_agent::probe(&path) == BoundedProbe::NotFound
+    {
+        return unsupported_source(
+            spec,
+            path,
+            "Prime Agent JSONL requires a valid version 3 session header",
+        );
+    }
     if provider == CaptureProvider::DeepSeekHarness
         && matches!(
             observed,
@@ -151,6 +161,7 @@ fn provider_source_for_path_with_optional_data_root(
         CaptureProvider::DeepSeekHarness if is_directory => "deepseek_harness_session_jsonl_tree",
         CaptureProvider::DeepSeekHarness => "deepseek_harness_session_jsonl",
         CaptureProvider::Pi => "pi_session_jsonl",
+        CaptureProvider::PrimeAgent => "prime_agent_session_jsonl",
         CaptureProvider::Claude => "claude_projects_jsonl_tree",
         CaptureProvider::OpenCode => "opencode_sqlite",
         CaptureProvider::Kilo => "kilo_sqlite",
@@ -212,7 +223,9 @@ fn provider_source_for_path_with_optional_data_root(
     } else {
         ProviderSourceKind::DetectionOnly
     };
-    let exact_fx_status = if provider == CaptureProvider::Fx && observed.is_ok() {
+    let exact_fx_status = if matches!(provider, CaptureProvider::Fx | CaptureProvider::PrimeAgent)
+        && observed.is_ok()
+    {
         let location = ProviderDefaultLocation {
             path_components: &[],
             source_format,

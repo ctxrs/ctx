@@ -18,7 +18,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MATRIX_PATH = REPO_ROOT / "docs/provider-support-matrix.json"
 ALLOWED_STATUSES = {"supported"}
-EXPECTED_SUPPORTED_PROVIDER_COUNT = 43
+EXPECTED_SUPPORTED_PROVIDER_COUNT = 44
 ALLOWED_PATH_KINDS = {"native_import"}
 ALLOWED_FIDELITY = {
     "imported",
@@ -48,6 +48,7 @@ OPENHANDS_CONFIGURED_ROOT_KINDS = {
 EXPECTED_PROVIDER_LINEAGE_SUPPORT = {
     "codex": ("exact_relationship", "unknown"),
     "pi": ("exact_relationship", "unknown"),
+    "prime_agent": ("exact_relationship", "unknown"),
     "open_code": ("exact_relationship", "explicit_no_copy"),
     "crush": ("exact_relationship", "explicit_no_copy"),
     "goose": ("exact_relationship", "unknown"),
@@ -128,6 +129,8 @@ PUBLIC_COVERAGE_PATHS = {
     "crates/ctx-history-source-discovery-qualification/tests/env_discovery.rs",
     "crates/ctx-history-source-discovery-qualification/tests/manual_unsupported.rs",
     "crates/ctx-history-source-discovery/src/provider_sources/resolvers/simple_tests.rs",
+    "crates/ctx-history-source-discovery/src/provider_sources/resolvers/config_project/prime_agent_tests.rs",
+    "crates/ctx-cli-contract-tests/tests/contracts/provider_support_conformance.rs",
 }
 
 

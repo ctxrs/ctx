@@ -195,6 +195,63 @@
       "public_docs": "docs/providers.md"
     },
     {
+      "id": "prime_agent",
+      "display_name": "Prime Agent",
+      "status": "supported",
+      "capture_provider": "prime_agent",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "prime_agent_session_jsonl",
+          "route_role": "prime-agent-sessions"
+        }
+      },
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "prime_agent_session_jsonl",
+          "fidelity": "imported",
+          "notes": [
+            "Reads version 3 Prime Agent session JSONL with native session identity, conversation and custom messages, Python tool calls and results, and parentSession relationships.",
+            "Uses the selected CLI sessions directory, supported RLM child transcripts under the selected agent directory, and the coexisting current T3 instance/thread store. Ledgers, caches, and binary artifacts are not session transcripts."
+          ]
+        }
+      ],
+      "history_locations": [
+        "CLI winner: PRIME_AGENT_SESSION_DIR, otherwise PRIME_AGENT_CODING_AGENT_SESSION_DIR, then exact-CWD .prime/agent/settings.json sessionDir over global settings.json, then <agent-dir>/sessions. An empty current session variable suppresses the legacy variable.",
+        "Agent directory: PRIME_AGENT_CODING_AGENT_DIR or ~/.prime/agent. RLM children: <agent-dir>/session-artifacts/<parent-session-id>/<child-id>/<session-id>.jsonl, independent of sessionDir.",
+        "Coexisting T3 store: ~/.t3/userdata/prime-agent/<instance>/<thread>/*.jsonl; supported instance session-artifacts children are also probed."
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "exact_relationship",
+        "event_origin": "unknown"
+      },
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": true
+      },
+      "limitations": [
+        "Only session format version 3 is admitted. One-shot --session-dir, historical working directories, and unregistered host stores require exact --path. There is no ancestor or arbitrary project-tree search.",
+        "Malformed, unreadable, unsafe, or unreconstructible winning selectors suppress stale CLI defaults. Probes reject symlinks and stop at fixed entry and header-byte limits. Wrong-typed/null sessionDir settings behave as unset, matching Prime; an empty string resolves against the exact CWD.",
+        "Python tool payloads are retained as tool content; dynamic Python code is not treated as exact file-touch or shell-command attribution. Missing parent identity does not justify inferred lineage."
+      ],
+      "public_docs": "docs/providers.md"
+    },
+    {
       "id": "pi",
       "display_name": "Pi",
       "status": "supported",

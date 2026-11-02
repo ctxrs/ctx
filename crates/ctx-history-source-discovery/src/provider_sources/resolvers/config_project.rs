@@ -24,6 +24,7 @@ use super::{
 
 mod crush;
 mod pi;
+mod prime_agent;
 mod qwen;
 mod roo;
 mod rovo;
@@ -62,6 +63,7 @@ pub(super) fn resolve(
 ) -> DiscoveryReport {
     let report = match spec.provider {
         CaptureProvider::Pi => pi::resolve(probes, context, spec),
+        CaptureProvider::PrimeAgent => prime_agent::resolve(probes, context, spec),
         CaptureProvider::Crush => crush::resolve(probes, context, spec),
         CaptureProvider::QwenCode => qwen::resolve(probes, context, spec),
         CaptureProvider::MistralVibe => vibe::resolve(probes, context, spec),

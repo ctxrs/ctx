@@ -157,7 +157,8 @@ pub(super) fn resolver_group(provider: CaptureProvider) -> Option<ResolverGroup>
         | CaptureProvider::Zed
         | CaptureProvider::CopilotCli
         | CaptureProvider::Antigravity => Some(ResolverGroup::Platform),
-        CaptureProvider::Pi
+        CaptureProvider::PrimeAgent
+        | CaptureProvider::Pi
         | CaptureProvider::Crush
         | CaptureProvider::QwenCode
         | CaptureProvider::MistralVibe
@@ -592,14 +593,14 @@ mod tests {
     #[test]
     fn every_registered_provider_has_exactly_one_grouped_dispatch_lane() {
         let specs = provider_source_specs();
-        assert_eq!(specs.len(), 43);
+        assert_eq!(specs.len(), 44);
         assert!(specs
             .iter()
             .all(|spec| resolver_group(spec.provider).is_some()));
         for (group, expected) in [
             (ResolverGroup::Simple, 18),
             (ResolverGroup::Platform, 7),
-            (ResolverGroup::ConfigProject, 6),
+            (ResolverGroup::ConfigProject, 7),
             (ResolverGroup::ProfileProject, 6),
             (ResolverGroup::ManualUnsupported, 6),
         ] {

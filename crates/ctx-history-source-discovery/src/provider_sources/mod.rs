@@ -2,6 +2,7 @@ mod configured_roots;
 mod context;
 mod discovery;
 mod lingma;
+mod prime_agent;
 mod probes;
 mod reasons;
 mod resolvers;

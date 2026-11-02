@@ -24,6 +24,12 @@ pub(super) const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
+        provider: CaptureProvider::PrimeAgent,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
         provider: CaptureProvider::Pi,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
