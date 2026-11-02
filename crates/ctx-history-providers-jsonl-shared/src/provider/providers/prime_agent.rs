@@ -107,7 +107,9 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
             let opened = match authority.open_file(&relative) {
                 Ok(opened) => Arc::new(opened),
                 Err(error)
-                    if error.is_source_unavailable() || error.is_ignorable_membership_entry() =>
+                    if error.is_source_unavailable()
+                        || error.is_ignorable_membership_entry()
+                        || matches!(&error, CaptureError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied) =>
                 {
                     let detail = error.to_string();
                     rejected.push(
