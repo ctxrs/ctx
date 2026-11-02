@@ -8,6 +8,16 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
+## 2.4.0
+
+Released: 2026-11-01
+
+### Added
+
+- Prime Agent is a supported history provider, separate from Pi. ctx discovers version 3 sessions in the selected Prime directory, RLM child sessions, and T3 Code's local Prime session store.
+- Search and show preserve conversation and custom messages, Python tool calls and results, and session relationships. Explicit imports accept `--provider prime-agent --path PATH`; `prime` and `prime_agent` are aliases.
+- Structured file references and tool diffs remain available to history and Blame. Dynamic Python source does not establish exact file ownership or MCP server identity.
+
 ## 2.2.3
 
 Released: 2026-09-30
