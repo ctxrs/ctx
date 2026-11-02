@@ -15,6 +15,14 @@ shipped.
 - Pi local import is supported when matching local session JSONL files exist
   under `~/.pi/agent/sessions`, or when an explicit Pi session JSONL file is
   passed with `--path`.
+- Prime Agent supports local version 3 session JSONL, selected CLI and RLM
+  stores, and the current T3 instance/thread store. Other one-shot session
+  directories require `--path`. Ledgers, caches, binary artifacts, and future
+  session versions are excluded; Python code is not exact shell/file attribution.
+  Automatic and registered-source imports isolate unreadable transcripts.
+  Explicit directory import still uses a shared preflight that can stop on an
+  unreadable sibling; register that directory as a named source or select a
+  readable transcript directly.
 - Additional supported agent harnesses are listed in the provider matrix and are
   imported only when their documented local history paths exist and match the
   supported native formats.

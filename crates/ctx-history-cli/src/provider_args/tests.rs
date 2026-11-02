@@ -3,12 +3,12 @@ use std::collections::BTreeSet;
 use super::*;
 
 #[test]
-fn provider_vocabulary_keeps_all_42_recognized_native_providers_importable() {
+fn provider_vocabulary_keeps_all_44_recognized_native_providers_importable() {
     let recognized = native_provider_cli_specs()
         .iter()
         .map(|spec| spec.provider.as_str())
         .collect::<BTreeSet<_>>();
-    assert_eq!(recognized.len(), 43, "recognized provider count changed");
+    assert_eq!(recognized.len(), 44, "recognized provider count changed");
     let registered = ctx_history_capture::provider_source_specs()
         .iter()
         .map(|spec| spec.provider.as_str())
@@ -19,7 +19,7 @@ fn provider_vocabulary_keeps_all_42_recognized_native_providers_importable() {
         .iter()
         .filter(|provider| parse_native_provider_name(provider).is_some_and(provider_is_importable))
         .collect::<BTreeSet<_>>();
-    assert_eq!(importable.len(), 43, "importable provider count changed");
+    assert_eq!(importable.len(), 44, "importable provider count changed");
     assert!(provider_is_importable(CaptureProvider::Hermes));
     assert!(cli_supported_provider(CaptureProvider::Hermes));
     assert!(provider_is_importable(CaptureProvider::Fx));
@@ -88,6 +88,8 @@ fn mcp_names_include_primary_and_storage_names_without_duplicates() {
     assert!(names.contains(&"grok_build"));
     assert!(names.contains(&"deepseek-harness"));
     assert!(names.contains(&"deepseek_harness"));
+    assert!(names.contains(&"prime-agent"));
+    assert!(names.contains(&"prime_agent"));
     assert!(names.contains(&"fx"));
     assert!(names.contains(&"custom"));
 }
@@ -150,4 +152,19 @@ fn invalid_provider_names_are_rejected_by_every_public_parser() {
         assert!(parse_provider(name).is_err(), "{name:?}");
         assert!(parse_native_provider(name).is_err(), "{name:?}");
     }
+}
+
+#[test]
+fn prime_agent_uses_distinct_storage_identity_and_cli_aliases() {
+    for name in ["prime-agent", "prime", "prime_agent"] {
+        assert_eq!(
+            parse_native_provider_name(name),
+            Some(CaptureProvider::PrimeAgent)
+        );
+    }
+    assert_eq!(
+        provider_cli_name(CaptureProvider::PrimeAgent),
+        "prime-agent"
+    );
+    assert_ne!(CaptureProvider::PrimeAgent, CaptureProvider::Pi);
 }

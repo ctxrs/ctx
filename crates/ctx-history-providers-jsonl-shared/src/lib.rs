@@ -155,6 +155,13 @@ pub mod adapters {
         ))
     }
 
+    pub fn prime_agent_with_source_root_lineage<R: JsonlProviderRuntime>(
+        source_root_lineage: Option<[u8; 32]>,
+        automatic_role: Option<&[u8]>,
+    ) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
+        provider::providers::prime_agent::adapter::<R>(source_root_lineage, automatic_role)
+    }
+
     pub fn deepseek_harness<R: JsonlProviderRuntime>(
         source_format: &'static str,
     ) -> Result<Arc<dyn JsonlFamilyAdapter<Runtime = R>>> {

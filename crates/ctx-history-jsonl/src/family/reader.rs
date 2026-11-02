@@ -347,7 +347,51 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             direct_append_resume: used_direct_append,
             semantic_preflight_binding: None,
             oversized_record_policy: JsonlOversizedRecordPolicy::RejectSource,
+            replayed_identity_probe: None,
         })
+    }
+
+    // Admission authority is independent of whether projection consumes the
+    // probed records. Retain the original observation: the leaf's observation
+    // may already have advanced after an append or a change-time-only update.
+    pub(super) fn bind_replayed_identity_probe(&mut self, probe: JsonlProbe) -> JsonlResult<(), E> {
+        if self.whole_record || probe.complete_prefix_end > self.admitted_length() {
+            return Err(E::source_changed());
+        }
+        self.replayed_identity_probe = Some(Box::new(probe));
+        self.revalidate_replayed_identity_probe()
+    }
+
+    fn revalidate_replayed_identity_probe(&self) -> JsonlResult<(), E> {
+        if let Some(probe) = self.replayed_identity_probe.as_deref() {
+            revalidate_frozen_prefix(
+                self.identity.source_path(),
+                self.source_file.as_ref(),
+                &probe.observation,
+                probe.complete_prefix_end,
+                prefix_digest(&probe.prefix_hasher),
+            )?;
+        }
+        Ok(())
+    }
+
+    // Compare the bytes actually replayed as well as the retained file. A
+    // rewrite after reader opening must not acquire authority merely because
+    // the reader computed a fresh checkpoint over the rewritten bytes.
+    fn validate_replayed_identity_frontier(&self) -> JsonlResult<(), E> {
+        if let (Some(probe), Some(physical)) = (
+            self.replayed_identity_probe.as_deref(),
+            self.physical.as_ref(),
+        ) {
+            if physical.next_physical_ordinal() == probe.next_physical_ordinal
+                && (physical.complete_prefix_end() != probe.complete_prefix_end
+                    || prefix_digest(physical.digest().complete_hasher())
+                        != prefix_digest(&probe.prefix_hasher))
+            {
+                return Err(E::source_changed());
+            }
+        }
+        Ok(())
     }
 
     pub fn set_oversized_record_policy(&mut self, policy: JsonlOversizedRecordPolicy) {
@@ -385,6 +429,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             .as_mut()
             .ok_or_else(|| E::system_invariant("semantic JSONL input lost its physical stream"))?
             .next_record()?;
+        self.validate_replayed_identity_frontier()?;
         match record {
             None => self.finish(true)?,
             Some(record) if !record.complete => self.finish(false)?,
@@ -584,6 +629,8 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                 let position = physical.position();
                 (position, physical.next_record().map_err(V::from)?)
             };
+            self.validate_replayed_identity_frontier()
+                .map_err(V::from)?;
             let Some(record) = record else {
                 self.finish(true).map_err(V::from)?;
                 break;
@@ -747,6 +794,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
     }
 
     fn finish(&mut self, terminal: bool) -> JsonlResult<(), E> {
+        self.revalidate_replayed_identity_probe()?;
         if let Some(expected) = self.semantic_preflight_binding.as_ref() {
             let physical = self.physical.as_ref().ok_or_else(|| {
                 E::system_invariant("semantic JSONL input lost its physical stream")

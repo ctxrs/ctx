@@ -24,6 +24,8 @@ pub enum ProviderId {
     ClaudeCode,
     ClaudeCliCrp,
     Pi,
+    #[serde(alias = "prime-agent", alias = "prime")]
+    PrimeAgent,
     OpenCode,
     Cursor,
     AntigravityCli,
@@ -102,13 +104,14 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 53] = [
+    pub const ALL: [Self; 54] = [
         Self::Codex,
         Self::GrokBuild,
         Self::DeepSeekHarness,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
         Self::Pi,
+        Self::PrimeAgent,
         Self::OpenCode,
         Self::Cursor,
         Self::AntigravityCli,
@@ -360,6 +363,7 @@ mod tests {
             ProviderId::OpenClaw,
             ProviderId::OpenHands,
             ProviderId::Pi,
+            ProviderId::PrimeAgent,
             ProviderId::QwenCode,
             ProviderId::RooCode,
             ProviderId::Shelley,
@@ -388,6 +392,11 @@ mod tests {
                 "Hermes Agent",
             ),
             (ProviderId::Pi, ProviderSupportStatus::Supported, "Pi"),
+            (
+                ProviderId::PrimeAgent,
+                ProviderSupportStatus::Supported,
+                "Prime Agent",
+            ),
             (ProviderId::Fx, ProviderSupportStatus::Supported, "fx"),
         ] {
             let entry = parsed

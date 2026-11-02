@@ -7,6 +7,7 @@
     { "id": "deepseek_harness", "status": "current" },
     { "id": "claude", "status": "current" },
     { "id": "pi", "status": "current" },
+    { "id": "prime_agent", "status": "current" },
     { "id": "opencode", "status": "current" },
     { "id": "kilo", "status": "current" },
     { "id": "kiro_cli", "status": "current" },

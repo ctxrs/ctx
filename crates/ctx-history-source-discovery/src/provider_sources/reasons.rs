@@ -20,6 +20,7 @@ pub(super) fn empty_source_reason(provider: CaptureProvider) -> Option<&'static 
     match provider {
         CaptureProvider::Codex => Some("path exists but no Codex JSONL sessions were found"),
         CaptureProvider::Pi => Some("path exists but no Pi session JSONL files were found"),
+        CaptureProvider::PrimeAgent => Some("path exists but no supported Prime Agent v3 session headers were found"),
         CaptureProvider::Claude => {
             Some("path exists but no Claude project JSONL transcripts were found")
         }
@@ -120,6 +121,9 @@ pub(super) fn unknown_source_reason(provider: CaptureProvider) -> Option<&'stati
         CaptureProvider::Codex => {
             Some("path exists but the Codex session transcript probe hit its scan budget")
         }
+        CaptureProvider::PrimeAgent => {
+            Some("path exists but the Prime Agent session probe hit its scan budget")
+        }
         CaptureProvider::Pi => {
             Some("path exists but the Pi session transcript probe hit its scan budget")
         }
@@ -200,6 +204,7 @@ pub(super) fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'stati
         CaptureProvider::Codex => {
             Some("path exists but Codex session transcripts could not be read; check permissions")
         }
+        CaptureProvider::PrimeAgent => Some("path exists but Prime Agent sessions could not be read safely"),
         CaptureProvider::Pi => {
             Some("path exists but Pi session transcripts could not be read; check permissions")
         }

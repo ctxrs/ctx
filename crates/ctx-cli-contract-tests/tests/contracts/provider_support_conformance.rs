@@ -20,6 +20,12 @@ struct ProviderCase {
 
 const ADAPTER_CASES: &[ProviderCase] = &[
     ProviderCase {
+        matrix_id: "prime_agent",
+        provider: "prime_agent",
+        user_text: "primeagentuseroracle",
+        assistant_text: "primeagentassistantoracle",
+    },
+    ProviderCase {
         matrix_id: "codex",
         provider: "codex",
         user_text: "codexuseroracle",
@@ -296,7 +302,7 @@ fn supported_provider_defaults_conform_to_the_public_matrix() {
         .collect::<Vec<_>>();
     assert_eq!(
         provider_cases.len(),
-        43,
+        44,
         "support conformance must not be vacuous"
     );
     let temp = tempdir();
@@ -408,7 +414,7 @@ fn assert_closed_world_case_ids() -> BTreeSet<String> {
     );
     assert_eq!(
         supported_ids.len(),
-        43,
+        44,
         "support conformance must execute 43 rows"
     );
     supported_ids

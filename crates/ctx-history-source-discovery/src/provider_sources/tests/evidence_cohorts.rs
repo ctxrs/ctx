@@ -77,6 +77,10 @@ const PROVIDER_EVIDENCE_COHORTS: &[(CaptureProvider, EvidenceCohort)] = &[
         EvidenceCohort::SharedNativeJsonl,
     ),
     (CaptureProvider::Pi, EvidenceCohort::ContentBlockJsonl),
+    (
+        CaptureProvider::PrimeAgent,
+        EvidenceCohort::ContentBlockJsonl,
+    ),
     (CaptureProvider::Claude, EvidenceCohort::ContentBlockJsonl),
     (
         CaptureProvider::OpenCode,
@@ -198,7 +202,7 @@ fn every_registered_provider_is_routed_to_one_evidence_cohort() {
     let registered = provider_source_specs();
     assert_eq!(
         registered.len(),
-        43,
+        44,
         "update the evidence matrix deliberately"
     );
     assert_eq!(PROVIDER_EVIDENCE_COHORTS.len(), registered.len());

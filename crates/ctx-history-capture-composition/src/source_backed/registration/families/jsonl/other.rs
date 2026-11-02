@@ -220,3 +220,27 @@ pub fn register_custom_history_source_backed_route(
     .map_err(|error| invalid_route(provider, error.to_string()))?;
     registry.register_provider_route(registration)
 }
+
+pub(super) fn register_prime_agent_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
+) -> SourceBackedCoordinatorResult<()> {
+    register_shared_jsonl_route!(
+        registry,
+        source,
+        selection,
+        Ok::<_, crate::CaptureError>(
+            ctx_history_providers_jsonl_shared::adapters::prime_agent_with_source_root_lineage::<
+                crate::provider::source_backed::family::jsonl::JsonlFamilyRuntime,
+            >(
+                source_root_lineage,
+                source
+                    .route_provenance
+                    .automatic_route_role()
+                    .map(|role| role.as_bytes())
+            )
+        )
+    )
+}
