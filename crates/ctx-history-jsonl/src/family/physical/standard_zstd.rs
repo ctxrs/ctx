@@ -143,7 +143,7 @@ pub(super) fn decode_standard_zstd_jsonl<E: JsonlFamilyError>(
         }
         plaintext.write_all(&buffer[..read])?;
     }
-    drop(decoder.finish());
+    drop(decoder.into_inner());
     if logical_length == 0 {
         return Err(invalid_standard_zstd::<E>(
             "decoded stream contains no JSONL records",

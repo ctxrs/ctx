@@ -163,7 +163,7 @@ ureq-semantic = { package = "ureq", version = "3.3", default-features = false, f
 unicode-width = "0.2"
 unicode-segmentation = "1.12"
 xz2 = "0.1"
-zstd = "0.13"
+zstd = "0.14.3"
 
 [patch.crates-io]
 # `ort` 2.0.0-rc.12 lacks FreeBSD dynamic loading and can recursively deadlock

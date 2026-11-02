@@ -1289,7 +1289,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "uuid",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -1575,7 +1575,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -1759,7 +1759,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "uuid",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -1829,7 +1829,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "uuid",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -1955,7 +1955,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -2036,7 +2036,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "uuid",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -2409,7 +2409,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiktoken-rs",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -2455,7 +2455,7 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "xz2",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -5171,9 +5171,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags 2.13.0",
  "getopts",
@@ -6407,7 +6407,7 @@ dependencies = [
  "unwrap-infallible",
  "uuid",
  "winapi",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -6484,7 +6484,7 @@ dependencies = [
  "tantivy-bitpacker",
  "tantivy-common",
  "tantivy-fst",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -8251,29 +8251,11 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
-dependencies = [
- "zstd-safe 7.2.4",
-]
-
-[[package]]
-name = "zstd"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe 8.2.0",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
-dependencies = [
- "zstd-sys",
+ "zstd-safe",
 ]
 
 [[package]]

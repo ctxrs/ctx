@@ -24,7 +24,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "net", "signal", "time"] }
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
 tempfile = "3"
-pulldown-cmark = "0.13"
+pulldown-cmark = "0.13.5"
 scraper = "0.27"
 yaml_serde = "0.10.7"
 lopdf = { version = "0.45", default-features = false }
