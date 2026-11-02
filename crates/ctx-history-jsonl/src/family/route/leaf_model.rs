@@ -409,18 +409,15 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
         if current == self.observation {
             return Ok((self.clone(), Arc::new(opened)));
         }
-        if self.observation.differs_only_by_change_identity(&current) {
-            let mut leaf = self.clone();
-            leaf.observation = current;
-            return Ok((leaf, Arc::new(opened)));
-        }
-        if self.whole_record
-            || current.length() <= self.observation.length()
-            || !self.observation.admits_frozen_prefix_in(&current)
+        let change_time_only = self.observation.differs_only_by_change_identity(&current);
+        if !change_time_only
+            && (self.whole_record
+                || current.length() <= self.observation.length()
+                || !self.observation.admits_frozen_prefix_in(&current))
         {
             return Err(E::source_changed());
         }
-        if self.freeze_observation_at_scan {
+        if self.freeze_observation_at_scan && !change_time_only {
             return Ok((self.clone(), Arc::new(opened)));
         }
         let mut leaf = self.clone();
