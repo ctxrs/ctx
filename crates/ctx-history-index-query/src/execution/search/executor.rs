@@ -213,7 +213,7 @@ impl VerifiedIndex {
                 LexicalMode::Search(_) => {
                     while let Some(doc) = next_body_doc(&prepared.body_postings) {
                         // Once an omitted match is known, skip whole posting
-                        // intervals that cannot reach the heap's coverage.
+                        // intervals whose rank bounds cannot beat the heap.
                         // Before then, inspect pruning witnesses individually
                         // so filtered-out rows cannot imply truncation.
                         if retained_truncated {
@@ -224,6 +224,32 @@ impl VerifiedIndex {
                                 }
                                 if next != doc {
                                     if !seek_body_postings(&mut prepared, next, &mut meter) {
+                                        break 'segments;
+                                    }
+                                    continue;
+                                }
+                                let Some((end, coverage, score, prefix)) =
+                                    super::blocks::block_rank_bound(
+                                        &mut prepared,
+                                        &body_weights,
+                                        &mut meter,
+                                    )?
+                                else {
+                                    break 'segments;
+                                };
+                                let rank = compare_primary_rank(coverage, score, worst);
+                                if rank == Ordering::Less
+                                    || (rank == Ordering::Equal
+                                        && compare_identity_prefix_ascending(
+                                            prefix,
+                                            worst.order.event_identity_digest(),
+                                        ) == Ordering::Less)
+                                {
+                                    if !seek_body_postings(
+                                        &mut prepared,
+                                        end.saturating_add(1),
+                                        &mut meter,
+                                    ) {
                                         break 'segments;
                                     }
                                     continue;
@@ -676,7 +702,7 @@ fn seek_body_postings(
 
 /// Before the kth cursor, fewer than k terms can match any document. This
 /// is a coverage bound, independent of BM25 and of segment-local statistics.
-fn coverage_pivot(postings: &[Option<SegmentPostings>], minimum: u8) -> DocId {
+fn coverage_pivot(postings: &[Option<BodyPostings>], minimum: u8) -> DocId {
     if minimum <= 1 {
         return next_body_doc(postings).unwrap_or(TERMINATED);
     }

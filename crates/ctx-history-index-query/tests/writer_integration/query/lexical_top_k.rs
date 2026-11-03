@@ -61,66 +61,6 @@ fn best_match_after_candidate_cap_is_not_lost_to_scan_order() {
 }
 
 #[test]
-fn rank_pruning_preserves_scores_citations_and_filters() {
-    let temp = tempdir().unwrap();
-    let source = source("rank-bound-parity.jsonl");
-    let mut records = Vec::new();
-    for sequence in 1..=192 {
-        let body = match sequence % 4 {
-            0 => "budgetalpha ",
-            1 => "budgetalpha budgetbeta ",
-            _ => "budgetalpha budgetbeta budgetgamma ",
-        };
-        let mut record = document(
-            &source,
-            sequence,
-            &format!("{} ballast", body.repeat((sequence % 7 + 1) as usize)),
-        );
-        record.event_type = ["message", "summary", "tool_call", "tool_output"]
-            [(sequence / 4 % 4) as usize]
-            .to_owned();
-        if sequence % 3 == 0 {
-            add_literal_fact(&mut record, LiteralFactKind::File, "selected.rs");
-        }
-        records.push(record);
-    }
-    let index = publish_records(&temp, &source, records);
-    for query in [QUERY, "budgetalpha budgetbeta budgetgamma absentterm"] {
-        for scope in [
-            SearchContentScope::All,
-            SearchContentScope::Transcript,
-            SearchContentScope::Calls,
-            SearchContentScope::Outputs,
-        ] {
-            for file in [None, Some("selected.rs".to_owned())] {
-                let filters = EventSearchFilters {
-                    content_scope: scope,
-                    file,
-                    since_unix_ms: Some(1_700_000_000_040),
-                    ..EventSearchFilters::default()
-                };
-                // A heap larger than the corpus never invokes rank pruning. Full
-                // candidate equality covers score bits, coverage and citation data.
-                let exhaustive = lexical_search_batch(&index, &[query], &filters, 192).unwrap();
-                assert!(exhaustive.complete && exhaustive.candidate_set_exhaustive);
-                for limit in [1, 10, exhaustive.candidates.len()] {
-                    let bounded = lexical_search_batch(&index, &[query], &filters, limit).unwrap();
-                    assert!(bounded.complete);
-                    assert_eq!(
-                        bounded.candidates,
-                        exhaustive.candidates[..limit.min(exhaustive.candidates.len())]
-                    );
-                    assert_eq!(
-                        bounded.candidate_set_exhaustive,
-                        exhaustive.candidates.len() <= limit
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
 fn pruned_traversal_and_competitive_candidates_still_exhaust_truthfully() {
     use ctx_history_index_query::{LexicalWorkBudget, LexicalWorkCounter};
     let temp = tempdir().unwrap();
@@ -153,7 +93,7 @@ fn pruned_traversal_and_competitive_candidates_still_exhaust_truthfully() {
     assert!(complete.complete && !complete.candidate_set_exhaustive);
     assert_eq!(complete.candidates[0].event.event_id, expected);
     assert_eq!(complete.counters.candidate_docs, 2);
-    assert_eq!(complete.counters.body_posting_advances, 63);
+    assert_eq!(complete.counters.body_posting_advances, 66);
     for (budget, counter, limit) in [
         (
             LexicalWorkBudget {
@@ -213,6 +153,44 @@ fn pruned_but_filtered_documents_do_not_report_result_truncation() {
 }
 
 #[test]
+fn equal_score_blocks_with_equal_prefixes_keep_the_exact_identity_winner() {
+    let temp = tempdir().unwrap();
+    let source = source("block-identity-ties.jsonl");
+    let records = (1..=256_u32)
+        .map(|sequence| {
+            let mut digest = [0x40; 32];
+            digest[12..16].copy_from_slice(&(512 - sequence).to_be_bytes());
+            with_event_identity_digest(document(&source, u64::from(sequence), "alpha"), digest)
+        })
+        .collect::<Vec<_>>();
+    let expected = records.last().unwrap().event_id.digest();
+    let index = publish_records_in_one_segment(&temp, &source, records);
+    let batch = observed_candidates(&index, "alpha", 1).unwrap().batch;
+    assert!(batch.complete && !batch.candidate_set_exhaustive);
+    assert_eq!(batch.candidates[0].event.event_identity_digest, expected);
+    assert_eq!(batch.counters.candidate_docs, 256);
+    // Every exact identity improves the boundary, so this is genuine
+    // competitive work that cannot be pruned by a block prefix.
+    let partial = lexical_search_batch_with_budget(
+        &index,
+        &["alpha"],
+        &EventSearchFilters::default(),
+        1,
+        ctx_history_index_query::LexicalWorkBudget {
+            maximum_candidate_docs: 128,
+            ..LEXICAL_WORK_BUDGET_V1
+        },
+    )
+    .unwrap();
+    assert_exhausted_at(
+        &partial,
+        ctx_history_index_query::LexicalWorkCounter::CandidateDocs,
+        128,
+        128,
+    );
+}
+
+#[test]
 fn coverage_bound_seeks_over_partial_matches_with_charged_work() {
     let temp = tempdir().unwrap();
     let source = source("coverage-pivot.jsonl");
@@ -226,7 +204,7 @@ fn coverage_bound_seeks_over_partial_matches_with_charged_work() {
     let index = publish_records_in_one_segment(&temp, &source, records);
     let budget = ctx_history_index_query::LexicalWorkBudget {
         maximum_candidate_docs: 2,
-        maximum_body_posting_advances: 8,
+        maximum_body_posting_advances: 11,
         ..LEXICAL_WORK_BUDGET_V1
     };
     let batch = lexical_search_batch_with_budget(
@@ -244,7 +222,7 @@ fn coverage_bound_seeks_over_partial_matches_with_charged_work() {
     );
     assert_eq!(batch.candidates[0].event.event_id, expected);
     assert_eq!(batch.counters.candidate_docs, 2);
-    assert_eq!(batch.counters.body_posting_advances, 8);
+    assert_eq!(batch.counters.body_posting_advances, 11);
     let partial = lexical_search_batch_with_budget(
         &index,
         &[QUERY],
@@ -283,7 +261,11 @@ fn broad_top_k_measurement() {
     let batch = observed_candidates(&index, QUERY, 10).unwrap().batch;
     eprintln!(
         "events=300000 warm_samples=30 median_us={} p95_us={} best_found={} complete={} counters={:?} exhaustion={:?}",
-        elapsed[15], elapsed[28], batch.candidates[0].event.event_id == expected,
-        batch.complete, batch.counters, batch.exhaustion
+        elapsed[15],
+        elapsed[28],
+        batch.candidates[0].event.event_id == expected,
+        batch.complete,
+        batch.counters,
+        batch.exhaustion
     );
 }

@@ -120,7 +120,9 @@ pub struct LexicalWorkBudget {
     /// Documents requiring candidate examination after top-k rank pruning.
     /// List mode has no relevance bound and charges every visited document.
     pub maximum_candidate_docs: u64,
-    /// Body cursor movements, including positive-filter seeks and advances.
+    /// Body cursor movements and uncached block-bound inspections. Each
+    /// inspection visits at most 128 native postings; each seek/advance is
+    /// separately precharged, including rank and positive-filter skips.
     pub maximum_body_posting_advances: u64,
     pub maximum_exact_filter_terms: u64,
     pub maximum_filter_input_bytes: u64,
@@ -171,7 +173,9 @@ pub struct LexicalWorkCounters {
     /// Documents not pruned by the current top-k rank bound (all visited
     /// documents in List mode). Pruned traversal still charges body movements.
     pub candidate_docs: u64,
-    /// Body cursor movements, including positive-filter seeks and advances.
+    /// Body cursor movements and uncached block-bound inspections. Each
+    /// inspection visits at most 128 native postings; each seek/advance is
+    /// separately precharged, including rank and positive-filter skips.
     pub body_posting_advances: u64,
     pub analyzed_tokens: u64,
     pub exact_filter_terms: u64,

@@ -20,11 +20,7 @@ impl EventCandidateQueryReceipt {
 
 use ctx_history_index_format::BODY_ANALYZER;
 use std::sync::Arc;
-use tantivy::{
-    fieldnorm::FieldNormReader,
-    postings::{Postings as _, TermInfo},
-    query::Bm25Weight,
-};
+use tantivy::{fieldnorm::FieldNormReader, postings::TermInfo, query::Bm25Weight};
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -37,6 +33,8 @@ thread_local! {
 
 const EVENT_RANGE_ORDER_FAST_FIELD: &str = "event_range_order";
 
+mod blocks;
+use blocks::BodyPostings;
 mod executor;
 mod semantic_projection;
 
@@ -49,7 +47,7 @@ struct PreparedBodySegment {
 
 struct PreparedSegment {
     context: LexicalSegmentContext,
-    body_postings: Vec<Option<SegmentPostings>>,
+    body_postings: Vec<Option<BodyPostings>>,
     fieldnorms: Option<FieldNormReader>,
     filters: SegmentFilters,
     classes: SegmentClasses,
@@ -59,7 +57,7 @@ struct PreparedSegment {
 impl PreparedSegment {
     fn new(
         context: LexicalSegmentContext,
-        body_postings: Vec<Option<SegmentPostings>>,
+        body_postings: Vec<Option<BodyPostings>>,
         fieldnorms: Option<FieldNormReader>,
         filters: SegmentFilters,
         classes: SegmentClasses,
@@ -450,7 +448,7 @@ fn open_body_postings(
     term_infos: &[Option<TermInfo>],
     meter: &mut LexicalWorkMeter,
     segment: &LexicalSegmentContext,
-) -> Result<Option<Vec<Option<SegmentPostings>>>> {
+) -> Result<Option<Vec<Option<BodyPostings>>>> {
     let mut inverted = None;
     let mut postings = Vec::with_capacity(term_infos.len());
     for term_info in term_infos {
@@ -467,11 +465,7 @@ fn open_body_postings(
             Some(inverted) => inverted,
             None => inverted.insert(manual_inverted_index(reader, field)?),
         };
-        postings.push(Some(manual_read_postings(
-            inverted,
-            term_info,
-            IndexRecordOption::WithFreqs,
-        )?));
+        postings.push(Some(BodyPostings::open(inverted, term_info)?));
     }
     Ok(Some(postings))
 }
@@ -793,7 +787,7 @@ fn posting_contains(
     Some(false)
 }
 
-fn next_body_doc(postings: &[Option<SegmentPostings>]) -> Option<DocId> {
+fn next_body_doc(postings: &[Option<BodyPostings>]) -> Option<DocId> {
     postings
         .iter()
         .filter_map(|postings| postings.as_ref().map(|postings| postings.doc()))

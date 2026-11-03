@@ -221,9 +221,13 @@ events.
 Lexical retrieval keeps a bounded top-k heap ordered by term coverage,
 class-weighted BM25, and stable event identity. Once full, it prunes documents
 that cannot beat the current boundary before charging the candidate-examination
-budget, and seeks past intervals with insufficient term coverage. Posting
-traversal, filter work, and materialization retain separate
-fixed ceilings. A completed pass returns the exact best candidates for its
+budget. Native posting blocks are skipped when coverage, a global BM25 score
+bound, and an identity-prefix bound prove they cannot win. Equal prefixes still
+receive the full identity comparison. Block bounds use the same global scorer
+as individual documents, so differing segment length distributions cannot
+underestimate a bound. Each uncached bound inspects at most 128 postings and is
+charged to body posting work, separately from cursor movements. Filter work and
+materialization retain separate fixed ceilings. A completed pass returns the exact best candidates for its
 retained limit; adversarial or larger queries can still exhaust a work ceiling.
 JSON reports that separately through `truncation.lexical.work_complete` and
 `truncation.lexical.exhaustion`, and text output retains the bounded-work warning.
