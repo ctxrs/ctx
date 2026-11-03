@@ -232,6 +232,7 @@ impl VerifiedIndex {
                                     super::blocks::block_rank_bound(
                                         &mut prepared,
                                         &body_weights,
+                                        reader,
                                         &mut meter,
                                     )?
                                 else {
@@ -305,7 +306,8 @@ impl VerifiedIndex {
                         } else {
                             false
                         };
-                        if !pruned
+                        if !deleted
+                            && !pruned
                             && !meter.charge(
                                 LexicalWorkCounter::CandidateDocs,
                                 1,

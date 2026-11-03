@@ -6,7 +6,7 @@ use tantivy::postings::BlockSegmentPostings;
 pub(super) struct BodyPostings {
     blocks: BlockSegmentPostings,
     offset: usize,
-    bound: Option<(Score, u64)>,
+    bound: Option<[(Score, u64); 4]>,
 }
 
 impl BodyPostings {
@@ -60,16 +60,22 @@ impl BodyPostings {
     /// Compute the exact per-term maximum with the SAME global weight and
     /// quantized norms as candidate scoring instead. This also handles tails.
     /// The minimum identity prefix bounds every document in the block, even
-    /// when its score is below the maximum. Including deleted/filtered/earlier
-    /// documents only loosens these bounds.
+    /// when its score is below the maximum. Deleted rows are unverified and
+    /// excluded before reading any score or identity fields. Filtered rows
+    /// can only loosen the bound. Class cursors may have passed earlier rows
+    /// in this block, so inspect only the remaining suffix. Cached bounds
+    /// still bound every later suffix of this block.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn rank_bound(
         &mut self,
         weight: &Bm25Weight,
         norms: &FieldNormReader,
         fields: &ManualCandidateFastFields,
         context: &LexicalSegmentContext,
+        classes: &SegmentClasses,
+        reader: &SegmentReader,
         meter: &mut LexicalWorkMeter,
-    ) -> Result<Option<(Score, u64)>> {
+    ) -> Result<Option<[(Score, u64); 4]>> {
         if let Some(bound) = self.bound {
             return Ok(Some(bound));
         }
@@ -81,27 +87,48 @@ impl BodyPostings {
         ) {
             return Ok(None);
         }
-        let mut score = 0.0_f32;
-        let mut prefix = u64::MAX;
-        for (&doc, &frequency) in self.blocks.docs().iter().zip(self.blocks.freqs()) {
-            score = score.max(weight.score(norms.fieldnorm_id(doc), frequency));
-            prefix = prefix.min(fields.event_id_high(doc)? >> 16);
+        let docs = &self.blocks.docs()[self.offset..];
+        let Some(classes) = classes.block_classes(docs, reader, meter, context) else {
+            return Ok(None);
+        };
+        let mut bounds = [(0.0_f32, u64::MAX); 4];
+        for ((&doc, &frequency), class) in docs
+            .iter()
+            .zip(&self.blocks.freqs()[self.offset..])
+            .zip(classes)
+        {
+            if reader.is_deleted(doc) {
+                continue;
+            }
+            let (score, prefix) = &mut bounds[class];
+            *score = score.max(weight.score(norms.fieldnorm_id(doc), frequency));
+            *prefix = (*prefix).min(fields.event_id_high(doc)? >> 16);
         }
-        self.bound = Some((score, prefix));
+        self.bound = Some(bounds);
         Ok(self.bound)
     }
 }
 
-/// Bounds the intersection of the current native block ranges. Summing term
-/// maxima in query order bounds the exact f32 sum, including when maxima come
-/// from different documents. Class multipliers are <= 1. Missing terms cannot
-/// add coverage. Identity uses a conservative minimum over the whole union;
-/// equal prefixes must still reach the exact digest comparison.
+/// Bounds the intersection of the current native block ranges, separately
+/// for each effective class. Nonnegative maxima summed in query order bound
+/// the exact f32 sum; multiplying AFTER summing preserves that bound under
+/// the scorer's rounding. Taking the best class rank bounds their union.
+/// Missing terms cannot add coverage. Identity uses a conservative minimum
+/// across the class; equal prefixes still reach the exact digest comparison.
 pub(super) fn block_rank_bound(
     prepared: &mut PreparedSegment,
     weights: &[Bm25Weight],
+    reader: &SegmentReader,
     meter: &mut LexicalWorkMeter,
 ) -> Result<Option<(DocId, u8, Score, u64)>> {
+    let first = next_body_doc(&prepared.body_postings).unwrap_or(TERMINATED);
+    if prepared
+        .classes
+        .prepare_bounds(first, meter, &prepared.context)
+        .is_none()
+    {
+        return Ok(None);
+    }
     let end = prepared
         .body_postings
         .iter()
@@ -114,9 +141,7 @@ pub(super) fn block_rank_bound(
         .fieldnorms
         .as_ref()
         .ok_or(IndexError::InvalidStoredDocumentField("body_search"))?;
-    let mut coverage = 0;
-    let mut score = 0.0;
-    let mut prefix = u64::MAX;
+    let mut bounds = [(0_u8, 0.0_f32, u64::MAX); 4];
     for (posting, weight) in prepared.body_postings.iter_mut().zip(weights) {
         let Some(posting) = posting else {
             continue;
@@ -124,19 +149,37 @@ pub(super) fn block_rank_bound(
         if posting.doc() == TERMINATED || posting.doc() > end {
             continue;
         }
-        let Some((maximum, minimum_prefix)) = posting.rank_bound(
+        let Some(term_bounds) = posting.rank_bound(
             weight,
             norms,
             &prepared.candidate_fields,
             &prepared.context,
+            &prepared.classes,
+            reader,
             meter,
         )?
         else {
             return Ok(None);
         };
-        coverage += 1;
-        score += maximum;
-        prefix = prefix.min(minimum_prefix);
+        for ((coverage, score, prefix), (maximum, minimum_prefix)) in
+            bounds.iter_mut().zip(term_bounds)
+        {
+            *coverage += u8::from(minimum_prefix != u64::MAX);
+            *score += maximum;
+            *prefix = (*prefix).min(minimum_prefix);
+        }
     }
-    Ok(Some((end, coverage, score, prefix)))
+    let mut best = (0, 0.0_f32, u64::MAX);
+    for ((coverage, sum, prefix), weight) in bounds.into_iter().zip(super::classes::WEIGHTS) {
+        let score = sum * weight;
+        if coverage
+            .cmp(&best.0)
+            .then_with(|| score.total_cmp(&best.1))
+            .then_with(|| best.2.cmp(&prefix))
+            == Ordering::Greater
+        {
+            best = (coverage, score, prefix);
+        }
+    }
+    Ok(Some((end, best.0, best.1, best.2)))
 }

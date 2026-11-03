@@ -1,25 +1,36 @@
 use super::*;
 use tantivy::fieldnorm::FieldNormReader;
 
-const TERMS: [&str; 4] = ["alpha", "beta", "delta", "gamma"];
+pub(super) const TERMS: [&str; 4] = ["alpha", "beta", "delta", "gamma"];
 
-struct ModelRow {
-    record: CoreRecord,
-    frequencies: [u32; 4],
-    length: u32,
-    selected: bool,
+pub(super) struct ModelRow {
+    pub(super) record: CoreRecord,
+    pub(super) frequencies: [u32; 4],
+    pub(super) length: u32,
+    pub(super) selected: bool,
+    pub(super) deleted: bool,
 }
 
-fn random(state: &mut u64, bound: u64) -> u64 {
+pub(super) fn random(state: &mut u64, bound: u64) -> u64 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
     *state ^= *state << 17;
     *state % bound
 }
 
-// Fixture-only publication: keep three segments with different term densities.
-fn publish_model(temp: &TempDir, source: &SourceKey, rows: &[ModelRow]) -> VerifiedIndex {
-    let records = rows.iter().map(|row| row.record.clone()).collect();
+// Fixture-only publication: preserve authored segment topology and tombstones.
+pub(super) fn publish_model(
+    temp: &TempDir,
+    source: &SourceKey,
+    rows: &[ModelRow],
+    sizes: &[usize],
+    malformed: bool,
+) -> VerifiedIndex {
+    let records = rows
+        .iter()
+        .filter(|row| !row.deleted)
+        .map(|row| row.record.clone())
+        .collect();
     drop(publish_records(temp, source, records));
     let (_, manifest) = open_unverified_generation(temp.path());
     let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
@@ -27,13 +38,16 @@ fn publish_model(temp: &TempDir, source: &SourceKey, rows: &[ModelRow]) -> Verif
     let fields = fields_from_schema(&index.schema()).unwrap();
     let generation_id = manifest.generation_id().unwrap();
     let mut writer = index
-        .writer_with_num_threads::<TantivyDocument>(1, 128 * 1024 * 1024)
+        .writer_with_num_threads::<TantivyDocument>(1, 1024 * 1024 * 1024)
         .unwrap();
     writer.set_merge_policy(Box::<NoMergePolicy>::default());
     writer.delete_all_documents().unwrap();
     writer.commit().unwrap();
     let mut sessions = HashSet::new();
-    for chunk in rows.chunks(rows.len() / 3) {
+    let mut start = 0;
+    for &size in sizes {
+        let chunk = &rows[start..start + size];
+        start += size;
         for row in chunk {
             let authority = ctx_history_index_format::SessionAuthorityKey::exact(
                 row.record.session_id,
@@ -41,8 +55,17 @@ fn publish_model(temp: &TempDir, source: &SourceKey, rows: &[ModelRow]) -> Verif
             )
             .unwrap();
             let mut document = indexed_document(row.record.clone());
-            if sessions.insert(row.record.session_id) {
+            if !row.deleted && sessions.insert(row.record.session_id) {
                 document.add_bytes(fields.session_authority, authority.as_bytes());
+            }
+            if malformed && row.deleted {
+                let mut replacement = TantivyDocument::default();
+                for (field, value) in document.iter_fields_and_values() {
+                    if field != fields.event_id_high {
+                        replacement.add_field_value(field, value);
+                    }
+                }
+                document = replacement;
             }
             writer.add_document(document).unwrap();
         }
@@ -56,8 +79,18 @@ fn publish_model(temp: &TempDir, source: &SourceKey, rows: &[ModelRow]) -> Verif
         );
         prepared.commit().unwrap();
     }
+    writer.delete_term(Term::from_field_text(fields.body_search, "graveyard"));
+    let mut prepared = writer.prepare_commit().unwrap();
+    prepared.set_payload(
+        &serde_json::to_string(&CommitPayload {
+            version: COMMIT_PAYLOAD_VERSION,
+            generation_id: generation_id.clone(),
+        })
+        .unwrap(),
+    );
+    prepared.commit().unwrap();
     writer.wait_merging_threads().unwrap();
-    assert_eq!(index.load_metas().unwrap().segments.len(), 3);
+    assert_eq!(index.load_metas().unwrap().segments.len(), sizes.len());
     let pointer = load_active_generation_pointer(temp.path())
         .unwrap()
         .unwrap();
@@ -80,7 +113,7 @@ fn publish_model(temp: &TempDir, source: &SourceKey, rows: &[ModelRow]) -> Verif
 
 // Independent exhaustive oracle: authored token counts, documented BM25 f32
 // formula and full sorting. No production scorer, pruning, heap or filter helper.
-fn exhaustive(
+pub(super) fn exhaustive(
     rows: &[ModelRow],
     query: &[usize],
     filters: &EventSearchFilters,
@@ -96,10 +129,13 @@ fn exhaustive(
         let allowed = match filters.content_scope {
             SearchContentScope::All => true,
             SearchContentScope::Transcript => matches!(class, "message" | "summary"),
-            SearchContentScope::Calls => class == "tool_call",
-            SearchContentScope::Outputs => class == "tool_output",
+            SearchContentScope::Calls => matches!(class, "tool_call" | "command_started"),
+            SearchContentScope::Outputs => {
+                matches!(class, "tool_output" | "command_output" | "command_finished")
+            }
         };
-        if !allowed
+        if row.deleted
+            || !allowed
             || (filters.file.is_some() && !row.selected)
             || filters.since_unix_ms.is_some_and(|since| {
                 row.record
@@ -142,7 +178,7 @@ fn exhaustive(
             _ => match class {
                 "message" => 1.0,
                 "summary" => 0.9,
-                "tool_output" => 0.6,
+                "tool_output" | "command_output" | "command_finished" => 0.6,
                 _ => 0.8,
             },
         };
@@ -218,13 +254,14 @@ fn randomized_top_k_matches_independent_exhaustive_bm25() {
             digest[12..16].copy_from_slice(&((offset + 1) as u32).to_be_bytes());
             record = with_event_identity_digest(record, digest);
             rows.push(ModelRow {
+                deleted: false,
                 record,
                 frequencies,
                 length: frequencies.iter().sum::<u32>() + filler + u32::from(selected),
                 selected,
             });
         }
-        let index = publish_model(&temp, &source, &rows);
+        let index = publish_model(&temp, &source, &rows, &[rows.len() / 3; 3], false);
         for query in [
             vec![0],
             vec![0, 1],
@@ -337,6 +374,7 @@ fn top_k_block_bounds_use_global_statistics_when_the_local_winner_changes() {
             "ballast ".repeat((length - frequency) as usize)
         );
         rows.push(ModelRow {
+            deleted: false,
             record: document(&source, offset + 1, &body),
             frequencies: [frequency, 0, 0, 0],
             length,
@@ -355,7 +393,7 @@ fn top_k_block_bounds_use_global_statistics_when_the_local_winner_changes() {
     assert_ne!(local[0].0, seed);
     assert_eq!(global[0].0, target);
     assert_eq!(global[1].0, seed);
-    let index = publish_model(&temp, &source, &rows);
+    let index = publish_model(&temp, &source, &rows, &[rows.len() / 3; 3], false);
     let batch = lexical_search_batch(&index, &["alpha"], &filters, 1).unwrap();
     assert!(batch.complete, "{:?}", batch.exhaustion);
     assert_eq!(batch.candidates[0].event.event_identity_digest, target);

@@ -3,17 +3,20 @@ use ctx_history_index_query::{LexicalWorkBudget, LEXICAL_WORK_BUDGET_V1};
 
 #[test]
 fn dense_top_k_skips_blocks_beyond_a_posting_cap() {
-    dense_measurement(4096, false);
+    for class in ["message", "summary", "tool_call", "tool_output"] {
+        dense_measurement(4096, false, class);
+    }
 }
 
 #[test]
 #[ignore = "large synthetic lexical latency and work measurement"]
 fn dense_top_k_measurement() {
-    dense_measurement(800_000, true);
-    dense_measurement(3_000_000, true);
+    dense_measurement(800_000, true, "message");
+    dense_measurement(800_000, true, "tool_output");
+    dense_measurement(3_000_000, true, "message");
 }
 
-fn dense_measurement(count: u64, measure: bool) {
+fn dense_measurement(count: u64, measure: bool, event_type: &str) {
     const QUERY: &str = "and from the with";
     let temp = tempdir().unwrap();
     let source = source("review-dense-common-words.jsonl");
@@ -35,16 +38,17 @@ fn dense_measurement(count: u64, measure: bool) {
         } else {
             &noise
         };
-        writer
-            .add_core_record(document(&source, sequence, body))
-            .unwrap();
+        let mut row = document(&source, sequence, body);
+        row.event_type = event_type.to_owned();
+        writer.add_core_record(row).unwrap();
     }
-    let best = document_for_session(
+    let mut best = document_for_session(
         &source,
         "final-target",
         count,
         &format!("{QUERY} {QUERY} {QUERY}"),
     );
+    best.event_type = event_type.to_owned();
     let expected = best.event_id.as_uuid();
     let target_session = best.session_id.as_uuid();
     writer.add_core_record(best).unwrap();
@@ -87,7 +91,7 @@ fn dense_measurement(count: u64, measure: bool) {
         samples.sort_unstable();
         let batch = run();
         eprintln!(
-            "dense_top_k events={count} matching_events={} terms={} median_us={} p95_us={} best_found={} complete={} exhaustive={} counters={:?} exhaustion={:?}",
+            "dense_top_k class={event_type} events={count} matching_events={} terms={} median_us={} p95_us={} best_found={} complete={} exhaustive={} counters={:?} exhaustion={:?}",
             count - (count - 1) / 10,
             query.split_whitespace().count(),
             samples[samples.len() / 2],

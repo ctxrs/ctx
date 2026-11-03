@@ -93,7 +93,8 @@ fn pruned_traversal_and_competitive_candidates_still_exhaust_truthfully() {
     assert!(complete.complete && !complete.candidate_set_exhaustive);
     assert_eq!(complete.candidates[0].event.event_id, expected);
     assert_eq!(complete.counters.candidate_docs, 2);
-    assert_eq!(complete.counters.body_posting_advances, 66);
+    // 63 body movements, three score inspections and six class inspections.
+    assert_eq!(complete.counters.body_posting_advances, 72);
     for (budget, counter, limit) in [
         (
             LexicalWorkBudget {
@@ -204,7 +205,7 @@ fn coverage_bound_seeks_over_partial_matches_with_charged_work() {
     let index = publish_records_in_one_segment(&temp, &source, records);
     let budget = ctx_history_index_query::LexicalWorkBudget {
         maximum_candidate_docs: 2,
-        maximum_body_posting_advances: 11,
+        maximum_body_posting_advances: 14,
         ..LEXICAL_WORK_BUDGET_V1
     };
     let batch = lexical_search_batch_with_budget(
@@ -222,7 +223,8 @@ fn coverage_bound_seeks_over_partial_matches_with_charged_work() {
     );
     assert_eq!(batch.candidates[0].event.event_id, expected);
     assert_eq!(batch.counters.candidate_docs, 2);
-    assert_eq!(batch.counters.body_posting_advances, 11);
+    // Eight movements, three score inspections and three class inspections.
+    assert_eq!(batch.counters.body_posting_advances, 14);
     let partial = lexical_search_batch_with_budget(
         &index,
         &[QUERY],

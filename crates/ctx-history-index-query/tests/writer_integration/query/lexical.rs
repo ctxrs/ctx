@@ -1488,3 +1488,6 @@ fn manual_body_and_list_execution_ignore_deleted_source_revisions() {
 mod top_k_oracle;
 #[path = "lexical_top_k_scaling.rs"]
 mod top_k_scaling;
+
+#[path = "lexical_top_k_regressions.rs"]
+mod top_k_regressions;

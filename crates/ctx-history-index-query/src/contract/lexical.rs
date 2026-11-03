@@ -117,12 +117,13 @@ pub const MAX_LEXICAL_QUERY_RESULTS: usize = 4_096;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexicalWorkBudget {
     pub maximum_segments: u64,
-    /// Documents requiring candidate examination after top-k rank pruning.
+    /// Live documents requiring candidate examination after top-k rank pruning.
     /// List mode has no relevance bound and charges every visited document.
     pub maximum_candidate_docs: u64,
     /// Body cursor movements and uncached block-bound inspections. Each
-    /// inspection visits at most 128 native postings; each seek/advance is
-    /// separately precharged, including rank and positive-filter skips.
+    /// inspection visits at most 128 body postings or checks up to 128 class
+    /// memberships. Each body seek/advance is separately precharged, including
+    /// rank and positive-filter skips; class-block seeks charge filter work.
     pub maximum_body_posting_advances: u64,
     pub maximum_exact_filter_terms: u64,
     pub maximum_filter_input_bytes: u64,
@@ -170,12 +171,13 @@ pub const LEXICAL_WORK_BUDGET_V1: LexicalWorkBudget = LexicalWorkBudget {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LexicalWorkCounters {
     pub segments: u64,
-    /// Documents not pruned by the current top-k rank bound (all visited
+    /// Live documents not pruned by the current top-k rank bound (all visited
     /// documents in List mode). Pruned traversal still charges body movements.
     pub candidate_docs: u64,
     /// Body cursor movements and uncached block-bound inspections. Each
-    /// inspection visits at most 128 native postings; each seek/advance is
-    /// separately precharged, including rank and positive-filter skips.
+    /// inspection visits at most 128 body postings or checks up to 128 class
+    /// memberships. Each body seek/advance is separately precharged, including
+    /// rank and positive-filter skips; class-block seeks charge filter work.
     pub body_posting_advances: u64,
     pub analyzed_tokens: u64,
     pub exact_filter_terms: u64,
