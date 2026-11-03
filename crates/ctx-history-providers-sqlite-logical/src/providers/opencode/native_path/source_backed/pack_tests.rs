@@ -26,6 +26,8 @@ use crate::{
 mod current_schema;
 #[path = "tests/projection_contract.rs"]
 mod projection_contract;
+#[path = "tests/snapshot_equivalence.rs"]
+mod snapshot_equivalence;
 #[path = "tests/snapshot_memory.rs"]
 mod snapshot_memory;
 #[path = "tests/sqlite_diagnostics.rs"]

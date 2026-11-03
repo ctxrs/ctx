@@ -446,11 +446,12 @@ fn create_bounded_schema(
     }
     let mut indexes = source
         .prepare(
-            "SELECT i.name, i.origin, s.sql FROM pragma_index_list(?1) i
+            "SELECT i.name, i.origin, s.sql,
+             (SELECT min(seqno) FROM pragma_index_xinfo(i.name)
+              WHERE key=1 AND (cid<0 OR name=?2 COLLATE NOCASE))
+         FROM pragma_index_list(?1) i
          LEFT JOIN sqlite_schema s ON s.type='index' AND s.name=i.name
-         WHERE i.partial=0 AND NOT EXISTS(
-             SELECT 1 FROM pragma_index_xinfo(i.name)
-             WHERE key=1 AND (cid<0 OR name=?2 COLLATE NOCASE))",
+         WHERE i.partial=0",
         )
         .map_err(source_error)?;
     let mut rows = indexes.query([table, payload]).map_err(source_error)?;
@@ -467,11 +468,12 @@ fn create_bounded_schema(
     while let Some(row) = rows.next().map_err(source_error)? {
         let name: String = row.get(0).map_err(source_error)?;
         let origin: String = row.get(1).map_err(source_error)?;
-        if origin == "c" {
+        let omitted_key: Option<i64> = row.get(3).map_err(source_error)?;
+        if origin == "c" && omitted_key.is_none() {
             secondary.push(row.get::<_, String>(2).map_err(source_error)?);
             continue;
         }
-        if origin == "pk" && primary_columns == 1 {
+        if origin == "pk" && primary_columns == 1 && omitted_key.is_none() {
             if let Some(column) = integer_primary {
                 // INTEGER PRIMARY KEY DESC is SQLite's non-rowid-alias case.
                 declarations[column].push_str(" PRIMARY KEY DESC");
@@ -480,11 +482,12 @@ fn create_bounded_schema(
         }
         let mut keys = source
             .prepare(
-                "SELECT name, coll, desc FROM pragma_index_xinfo(?1) WHERE key=1 ORDER BY seqno",
+                "SELECT name, coll, desc FROM pragma_index_xinfo(?1)
+                 WHERE key=1 AND (?2 IS NULL OR seqno<?2) ORDER BY seqno",
             )
             .map_err(source_error)?;
         let keys = keys
-            .query_map([name], |row| {
+            .query_map(rusqlite::params![name, omitted_key], |row| {
                 Ok(format!(
                     "{} COLLATE {} {}",
                     quote_identifier(&row.get::<_, String>(0)?),
@@ -499,6 +502,35 @@ fn create_bounded_schema(
             .map_err(source_error)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(source_error)?;
+        if omitted_key.is_some() {
+            // Keep a covering index's safe lookup prefix for schema admission
+            // and joins. Shortening a UNIQUE index must not impose uniqueness.
+            if !keys.is_empty() {
+                // SQLite reserves automatic index names. Pick a private name
+                // that cannot collide with any of the native schema objects.
+                let mut name = name;
+                if origin != "c" {
+                    name = format!("__ctx_{name}");
+                    while source
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1 COLLATE NOCASE)",
+                            [&name],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .map_err(source_error)?
+                    {
+                        name.push('_');
+                    }
+                }
+                secondary.push(format!(
+                    "CREATE INDEX {} ON {} ({})",
+                    quote_identifier(&name),
+                    quote_identifier(table),
+                    keys.join(",")
+                ));
+            }
+            continue;
+        }
         declarations.push(format!(
             "{} ({})",
             if origin == "pk" {

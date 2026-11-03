@@ -601,3 +601,91 @@ fn bounded_payload_integer_primary_key_desc_keeps_native_rowids() {
     assert_eq!(directory_file_state(temp.path()), before);
     assert_eq!(staging_entries(data.path()), 0);
 }
+
+#[test]
+fn bounded_covering_indexes_keep_safe_nonunique_lookup_prefixes() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let path = temp.path().join("provider.sqlite");
+    let source = Connection::open(&path).unwrap();
+    source.execute_batch(
+        "CREATE TABLE messages(parent TEXT, id TEXT, body TEXT,
+             UNIQUE(parent COLLATE NOCASE DESC,id COLLATE RTRIM,body));
+         CREATE UNIQUE INDEX covering ON messages(parent COLLATE NOCASE DESC,id COLLATE RTRIM,body);
+         CREATE INDEX expression ON messages(parent COLLATE BINARY,id DESC,json_extract(body,'$.type'));
+         INSERT INTO messages VALUES('same','id','{\"type\":\"one\"}'),('SAME','id ','{\"type\":\"two\"}');"
+    ).unwrap();
+    let before = directory_file_state(temp.path());
+    let authority = retain_parent_in_data_root(data.path(), temp.path());
+    let snapshot = authority
+        .open_bounded_tables_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            &["messages"],
+            Some(SqliteSourceColumnBound {
+                tables: &["messages"],
+                column: "body",
+                maximum_bytes: 4,
+            }),
+            |_| Ok::<(), ()>(()),
+        )
+        .unwrap();
+    let copied = snapshot.connection().unwrap();
+    let automatic: String = copied.query_row(
+        "SELECT name FROM pragma_index_list('messages') WHERE name NOT IN ('covering','expression')",
+        [], |row| row.get(0),
+    ).unwrap();
+    for (index, expected) in [
+        (
+            automatic.as_str(),
+            vec![
+                ("parent".to_owned(), "NOCASE".to_owned(), true),
+                ("id".to_owned(), "RTRIM".to_owned(), false),
+            ],
+        ),
+        (
+            "covering",
+            vec![
+                ("parent".to_owned(), "NOCASE".to_owned(), true),
+                ("id".to_owned(), "RTRIM".to_owned(), false),
+            ],
+        ),
+        (
+            "expression",
+            vec![
+                ("parent".to_owned(), "BINARY".to_owned(), false),
+                ("id".to_owned(), "BINARY".to_owned(), true),
+            ],
+        ),
+    ] {
+        let keys = copied
+            .prepare("SELECT name,coll,desc FROM pragma_index_xinfo(?1) WHERE key=1 ORDER BY seqno")
+            .unwrap()
+            .query_map([index], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(keys, expected);
+        assert!(!copied
+            .query_row(
+                "SELECT \"unique\" FROM pragma_index_list('messages') WHERE name=?1",
+                [index],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap());
+    }
+    assert_eq!(copied.query_row(
+        "SELECT count(*) FROM messages INDEXED BY covering WHERE parent='same' COLLATE NOCASE AND body='' AND __ctx_original_bytes=14",
+        [], |row| row.get::<_,i64>(0),
+    ).unwrap(), 2);
+    snapshot.finish().unwrap();
+    assert_eq!(directory_file_state(temp.path()), before);
+}
