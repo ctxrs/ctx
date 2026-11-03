@@ -239,6 +239,7 @@ pub fn render_status_human(
         .collect::<Vec<_>>();
     document.push_blank();
     document.append(section("History", fields(context, &history_fields)));
+    super::status_storage::append_storage(context, &mut document, report);
 
     super::append_previous_refresh_failure(context, &mut document, report);
     super::append_attribution(context, &mut document, report);

@@ -20,7 +20,7 @@ mod writer_support;
 
 pub use ctx_history_index_generation::{
     active_generation_storage_metadata, durable_atomic_replace_file,
-    ActiveGenerationStorageMetadata,
+    ActiveGenerationStorageMetadata, GenerationStorageSize,
 };
 
 /// Repairs legacy generation control permissions before a mutating refresh
