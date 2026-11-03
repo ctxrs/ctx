@@ -106,7 +106,7 @@ pub fn probe_records_until<T, E>(
     source_file: &Arc<ctx_history_jsonl::OpenedProviderSourceFile<CaptureError>>,
     max_records: usize,
     mut visit: impl FnMut(ctx_history_jsonl::JsonlRecordRef<'_>) -> std::result::Result<Option<T>, E>,
-) -> std::result::Result<Option<(T, ctx_history_jsonl::JsonlProbe)>, E>
+) -> std::result::Result<ctx_history_jsonl::JsonlProbeOutcome<T>, E>
 where
     E: From<CaptureError>,
 {

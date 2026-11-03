@@ -2,7 +2,6 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    fs, io,
     marker::PhantomData,
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
@@ -31,17 +30,13 @@ use ctx_history_capture_model::file_references::visit_provider_file_reference_dr
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
-    provider::{
-        providers::native_jsonl::visit_native_jsonl_files,
-        source_backed::{
-            family::jsonl::{
-                observe_opened_file, probe_records_until, JsonlFamilyAdapter,
-                JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-                JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
-                JsonlFileObservation, JsonlRecordRef,
-            },
-            FallbackEventIdentityState,
+    provider::source_backed::{
+        family::jsonl::{
+            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
+            JsonlFileObservation, JsonlRecordRef,
         },
+        FallbackEventIdentityState,
     },
     CaptureError, Result,
 };
@@ -51,6 +46,8 @@ use super::super::{
     text::{pi_entry_text, pi_event_role, pi_result_content},
     PI_SOURCE_FORMAT,
 };
+
+mod discovery;
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "pi.session";
 const NATIVE_SESSION_NAMESPACE: &str = "pi.session";
@@ -125,7 +122,9 @@ impl<R> Default for PiJsonlAdapter<R> {
 #[derive(Clone)]
 struct CachedBinding {
     observation: JsonlFileObservation,
+    source: SourceKey,
     binding: Binding,
+    binding_key: TypedKey,
     identity_probe: crate::provider::source_backed::family::jsonl::JsonlProbe,
     leading_rejections: SourceBackedRecordRejectionDrafts,
 }
@@ -144,16 +143,6 @@ struct Binding {
 struct ParentSessionHeader {
     #[serde(rename = "parentSession")]
     parent_session: Option<String>,
-}
-
-struct DiscoveredPiSource {
-    path: PathBuf,
-    relative_path: PathBuf,
-    observation: JsonlFileObservation,
-    source: SourceKey,
-    binding: Binding,
-    identity_probe: crate::provider::source_backed::family::jsonl::JsonlProbe,
-    leading_rejections: SourceBackedRecordRejectionDrafts,
 }
 
 impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
@@ -184,156 +173,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
-        match fs::symlink_metadata(root) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return JsonlFamilyInventory::missing(self.provider(), root);
-            }
-            Err(error) => return Err(error.into()),
-        }
-        let canonical_root = fs::canonicalize(root)?;
-        let authority_path = if fs::symlink_metadata(root)?.is_file() {
-            canonical_root
-                .parent()
-                .ok_or(CaptureError::InvalidProviderTranscriptPath {
-                    path: canonical_root.clone(),
-                    reason: "selected Pi transcript has no authority directory",
-                })?
-                .to_path_buf()
-        } else {
-            canonical_root
-        };
-        let authority = Arc::new(ProviderSourceRoot::open(&authority_path)?);
-        let mut paths = BTreeSet::new();
-        visit_native_jsonl_files(root, self.provider(), &mut |path| {
-            paths.insert(fs::canonicalize(path)?);
-            Ok(())
-        })?;
-
-        let previous = self
-            .bindings
-            .lock()
-            .map_err(|_| contract("Pi binding catalog lock was poisoned"))?
-            .clone();
-        let mut next = HashMap::with_capacity(paths.len());
-        let mut discovered = Vec::with_capacity(paths.len());
-        for path in paths {
-            let relative_path = relative_to_authority(&authority, &path)?;
-            let opened = Arc::new(authority.open_file(&relative_path)?);
-            let observation = observe_opened_file(&path, opened.as_ref())?;
-            let (binding, identity_probe, leading_rejections) = match previous.get(&path) {
-                Some(cached) if cached.observation == observation => (
-                    cached.binding.clone(),
-                    cached.identity_probe.clone(),
-                    cached.leading_rejections.clone(),
-                ),
-                _ => {
-                    let mut leading_rejection_details = Vec::new();
-                    let (binding, probe) = probe_records_until(
-                        &path,
-                        &opened,
-                        MAX_HEADER_PROBE_RECORDS,
-                        |record| -> Result<Option<Binding>> {
-                            let Some(mut binding) =
-                                parse_header_binding(record, self.source_anchor_scope)?
-                            else {
-                                if !is_omp_title_slot(record) {
-                                    leading_rejection_details.push((
-                                        record.evidence().physical_ordinal().saturating_add(1),
-                                        leading_rejection_detail(record),
-                                    ));
-                                }
-                                return Ok(None);
-                            };
-                            binding.leading_rejected_records =
-                                u64::try_from(leading_rejection_details.len()).map_err(|_| {
-                                    CaptureError::SystemInvariant(
-                                        "Pi identity rejection count does not fit u64",
-                                    )
-                                })?;
-                            Ok(Some(binding))
-                        },
-                    )?
-                    .ok_or_else(|| {
-                        CaptureError::InvalidPayload(
-                            "Pi source has no valid session header within the bounded identity probe"
-                                .to_owned(),
-                        )
-                    })?;
-                    let source =
-                        source_key_scoped(&binding.native_session_id, self.source_anchor_scope)?;
-                    let leading_rejections =
-                        pi_leading_rejection_drafts(&source, &path, leading_rejection_details)?;
-                    (binding, probe, leading_rejections)
-                }
-            };
-            let source = source_key_scoped(&binding.native_session_id, self.source_anchor_scope)?;
-            discovered.push(DiscoveredPiSource {
-                path,
-                relative_path,
-                observation,
-                source,
-                binding,
-                identity_probe,
-                leading_rejections,
-            });
-        }
-        let mut sources = HashMap::<[u8; 32], JsonlFileObservation>::new();
-        let mut leaves = Vec::with_capacity(discovered.len());
-        for discovered in discovered {
-            let DiscoveredPiSource {
-                path,
-                relative_path,
-                observation,
-                source,
-                binding,
-                identity_probe,
-                leading_rejections,
-            } = discovered;
-            let source_digest = source.exact_descriptor_digest();
-            if let Some(selected) = sources.get(&source_digest) {
-                if selected == &observation {
-                    next.insert(
-                        path,
-                        CachedBinding {
-                            observation,
-                            binding,
-                            identity_probe,
-                            leading_rejections,
-                        },
-                    );
-                    continue;
-                }
-                return Err(CaptureError::InvalidPayload(
-                    "Pi inventory repeats a native session identity".to_owned(),
-                ));
-            }
-            sources.insert(source_digest, observation.clone());
-            next.insert(
-                path.clone(),
-                CachedBinding {
-                    observation,
-                    binding: binding.clone(),
-                    identity_probe: identity_probe.clone(),
-                    leading_rejections,
-                },
-            );
-            let binding_key = TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?;
-            leaves.push(JsonlFamilyLeaf::observe_after_identity_probe(
-                source,
-                path,
-                Arc::clone(&authority),
-                relative_path,
-                binding_key,
-                identity_probe,
-                binding.leading_rejected_records,
-            )?);
-        }
-        *self
-            .bindings
-            .lock()
-            .map_err(|_| contract("Pi binding catalog lock was poisoned"))? = next;
-        JsonlFamilyInventory::present(self.provider(), root, authority, leaves)
+        discovery::discover(self, root)
     }
 
     fn projector(
