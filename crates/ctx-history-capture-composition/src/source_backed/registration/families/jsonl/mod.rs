@@ -44,6 +44,9 @@ pub(super) fn register_route(
         CaptureProvider::DeepSeekHarness => {
             other::register_deepseek_harness_route(registry, source, selection, source_root_lineage)
         }
+        CaptureProvider::PrimeAgent => {
+            other::register_prime_agent_route(registry, source, selection, source_root_lineage)
+        }
         CaptureProvider::Pi => {
             other::register_pi_route(registry, source, selection, source_root_lineage)
         }

@@ -123,7 +123,12 @@ pub(super) fn request_daemon_autostart_with(
     };
     let launch = launch?;
     match spawn_daemon_profile(host, launch, profile, checkpoint) {
-        Ok(child) => Ok(DaemonAutostartRequest::Spawned(child)),
+        Ok(child) => {
+            if profile == DaemonLaunchProfile::Persistent {
+                host.persistent_daemon_spawned(data_root);
+            }
+            Ok(DaemonAutostartRequest::Spawned(child))
+        }
         Err(error) => {
             let _ = write_daemon_autostart_status(
                 data_root,

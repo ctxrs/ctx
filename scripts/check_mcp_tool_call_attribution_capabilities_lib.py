@@ -44,12 +44,12 @@ PUBLIC_DOC_PATHS = (
 )
 ALLOWED_STATUSES = {"exact", "not-qualified", "excluded"}
 EXACT_PROVIDERS = {"codex", "copilot_cli", "warp"}
-EXPECTED_PROVIDER_STATUS_COUNTS = {"exact": 3, "not-qualified": 40, "excluded": 0}
-EXPECTED_LANE_STATUS_COUNTS = {"exact": 3, "not-qualified": 48, "excluded": 1}
+EXPECTED_PROVIDER_STATUS_COUNTS = {"exact": 3, "not-qualified": 41, "excluded": 0}
+EXPECTED_LANE_STATUS_COUNTS = {"exact": 3, "not-qualified": 49, "excluded": 1}
 EXPECTED_COUNTS = {
-    "providers": 43,
-    "base_routes": 48,
-    "capability_lanes": 52,
+    "providers": 44,
+    "base_routes": 49,
+    "capability_lanes": 53,
     "lane_statuses": EXPECTED_LANE_STATUS_COUNTS,
     "provider_statuses": EXPECTED_PROVIDER_STATUS_COUNTS,
 }
@@ -68,6 +68,7 @@ EXPECTED_NOT_QUALIFIED_REASONS = {
     "grok_build": "no_server_field",
     "deepseek_harness": "no_server_field",
     "pi": "no_server_field",
+    "prime_agent": "no_server_field",
     "claude_code": "lossy_composite",
     "open_code": "lossy_composite",
     "kilo": "lossy_composite",
@@ -815,7 +816,7 @@ def validate_public_docs(
     normalized_main = " ".join(main.split())
     required = (
         "Codex `codex_session_jsonl_tree` / `codex-nativepath-jsonl-v0`",
-        "52 capability lanes: three `exact`, 48 `not-qualified`, and one `excluded`",
+        "53 capability lanes: three `exact`, 49 `not-qualified`, and one `excluded`",
         "`activity.invocation`",
         "`provider_call_id`",
         "`protocol` equal to `mcp`",
@@ -900,8 +901,8 @@ def validate_contract(
         if provider_id in support_by_id:
             fail(f"duplicate support provider: {provider_id}")
         support_by_id[provider_id] = row
-    if len(support_by_id) != 43:
-        fail(f"support matrix must contain 43 providers, found {len(support_by_id)}")
+    if len(support_by_id) != 44:
+        fail(f"support matrix must contain 44 providers, found {len(support_by_id)}")
 
     rows, lane_statuses, provider_statuses = validate_routes(capability, support_by_id)
     exact_suites, exact_tests, exact_links = validate_exact_checks(

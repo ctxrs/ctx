@@ -5,6 +5,10 @@ mod compound_root_lifecycle;
 #[path = "execution_path/configured_root_moves.rs"]
 mod configured_root_moves;
 
+#[cfg(unix)]
+#[path = "execution_path/maintenance_io.rs"]
+mod maintenance_io;
+
 use super::*;
 use ctx_history_capture::{SourceBackedRoute, SourceBackedRouteDriver};
 use ctx_history_index::{

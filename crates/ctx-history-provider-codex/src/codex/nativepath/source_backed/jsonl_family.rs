@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, marker::PhantomData, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
+    sync::Mutex,
+};
 
 use super::*;
 use crate::provider::source_backed::{ProviderBaseEventLookup, ProviderRuntimeBinding};
@@ -410,26 +414,49 @@ impl<B: ProviderRuntimeBinding> CodexSessionJsonlFamilyAdapterV0<B> {
             .rejected_leaves
             .iter()
             .map(|leaf| {
-                rejected_catalog_leaf_v0(
-                    &leaf.source_path,
-                    leaf.authority_path.clone(),
-                    &leaf.observation,
-                    leaf.jsonl_observation.clone(),
-                    None,
-                    leaf.reason,
-                )
-                .and_then(|rejected| {
-                    Ok(rejected.with_logical_source_failure(
+                let (rejected, source) = match &leaf.observation {
+                    Some((observation, jsonl_observation)) => (
+                        rejected_catalog_leaf_v0(
+                            &leaf.source_path,
+                            leaf.authority_path.clone(),
+                            observation,
+                            jsonl_observation.clone(),
+                            None,
+                            "missing or conflicting Codex session owner",
+                        )?,
                         codex_quarantined_rollout_source_key(
                             leaf.source_root_lineage,
-                            &leaf.observation,
+                            observation,
                         )?,
-                        format!(
-                            "Codex session ownership is ambiguous or conflicting; quarantined rollout file {}",
-                            leaf.source_path.display()
-                        ),
-                    ))
-                })
+                    ),
+                    None => {
+                        let path = TypedKey::bytes(
+                            leaf.source_path.as_os_str().as_encoded_bytes().to_vec(),
+                        )
+                        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                        let source = SourceKey::derive_provider_native_scoped(
+                            CaptureProvider::Codex.as_str(),
+                            CODEX_SESSION_SOURCE_FORMAT,
+                            CODEX_SOURCE_SCHEMA_VARIANT,
+                            1,
+                            "codex.unreadable-rollout-path.v1",
+                            path.clone(),
+                            leaf.source_root_lineage
+                                .map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+                        )
+                        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                        (
+                            JsonlFamilyRejectedLeaf::bind_unobserved(
+                                leaf.source_path.clone(),
+                                leaf.authority_path.clone(),
+                                path,
+                                0,
+                            ),
+                            source,
+                        )
+                    }
+                };
+                Ok(rejected.with_logical_source_error(source, leaf.failure.clone()))
             })
             .collect::<Result<Vec<_>>>()?;
         let mut ordered_sources = (0..plans.len()).collect::<Vec<_>>();
@@ -697,8 +724,16 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexSessionJsonlFamilyAd
         self.run_pending_stage_observer()?;
         if self.generation.is_session_tree() {
             let mut observation = JsonlFamilyMembershipObservation::observe_authorities(opening)?;
+            let rejected_paths = opening
+                .quarantined_leaves()
+                .map(JsonlFamilyRejectedLeaf::source_path)
+                .collect::<BTreeSet<_>>();
             let candidates = observation
                 .unbound_routes()
+                // Rejected members already have a diagnostic. In particular,
+                // an unopened member must remain fenced by parent enumeration,
+                // never reopened to guess its native session identity.
+                .filter(|(path, _, _)| !rejected_paths.contains(path))
                 .map(|(path, authority, authority_path)| {
                     (path.to_path_buf(), authority, authority_path.to_path_buf())
                 })

@@ -12,6 +12,7 @@ impl<E: JsonlFamilyError> Clone for JsonlFamilyLeaf<E> {
             binding: self.binding.clone(),
             terminal_dependencies: self.terminal_dependencies.clone(),
             identity_probe: self.identity_probe.clone(),
+            replayed_identity_probe: self.replayed_identity_probe.clone(),
             identity_probe_rejected_records: self.identity_probe_rejected_records,
             whole_record: self.whole_record,
             freeze_observation_at_scan: self.freeze_observation_at_scan,
@@ -60,6 +61,7 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
             binding,
             terminal_dependencies: JsonlFamilyLeafTerminalDependencies::default(),
             identity_probe: None,
+            replayed_identity_probe: None,
             identity_probe_rejected_records: 0,
             whole_record: false,
             freeze_observation_at_scan: false,
@@ -84,6 +86,7 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
             binding,
             terminal_dependencies: JsonlFamilyLeafTerminalDependencies::default(),
             identity_probe: None,
+            replayed_identity_probe: None,
             identity_probe_rejected_records: 0,
             whole_record: false,
             freeze_observation_at_scan: true,
@@ -161,10 +164,35 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
             binding,
             terminal_dependencies: JsonlFamilyLeafTerminalDependencies::default(),
             identity_probe: Some(identity_probe),
+            replayed_identity_probe: None,
             identity_probe_rejected_records,
             whole_record: false,
             freeze_observation_at_scan: false,
         })
+    }
+
+    /// Authenticates the identity prefix while replaying it through ordinary
+    /// projection. This preserves metadata-only header records and their
+    /// physical/rejection accounting without discarding admission authority.
+    pub fn observe_replaying_identity_probe(
+        source: SourceKey,
+        source_path: PathBuf,
+        authority: Arc<ProviderSourceRoot<E>>,
+        authority_path: PathBuf,
+        binding: TypedKey,
+        identity_probe: JsonlProbe,
+    ) -> JsonlResult<Self, E> {
+        let mut leaf = Self::observe_after_identity_probe(
+            source,
+            source_path,
+            authority,
+            authority_path,
+            binding,
+            identity_probe,
+            0,
+        )?;
+        leaf.replayed_identity_probe = leaf.identity_probe.take().map(Box::new);
+        Ok(leaf)
     }
 
     fn observe_with_framing(
@@ -188,6 +216,7 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
             binding,
             terminal_dependencies: JsonlFamilyLeafTerminalDependencies::default(),
             identity_probe: None,
+            replayed_identity_probe: None,
             identity_probe_rejected_records: 0,
             whole_record,
             freeze_observation_at_scan: false,
@@ -225,6 +254,7 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
         if self
             .identity_probe
             .as_ref()
+            .or(self.replayed_identity_probe.as_deref())
             .is_some_and(|probe| probe.complete_prefix_end > logical_eof)
         {
             return Err(E::invalid_payload(
@@ -388,29 +418,26 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
         if current == self.observation {
             return Ok((self.clone(), Arc::new(opened)));
         }
-        if self.observation.differs_only_by_change_identity(&current) {
-            let mut leaf = self.clone();
-            leaf.observation = current;
-            return Ok((leaf, Arc::new(opened)));
-        }
-        if self.whole_record
-            || current.length() < self.observation.length()
-            || (current.length() == self.observation.length()
-                && self
-                    .identity_probe
-                    .as_ref()
-                    .and_then(|probe| probe.mutable_first_record)
-                    .is_none())
-            || !self.observation.admits_frozen_prefix_in(&current)
+        let change_time_only = self.observation.differs_only_by_change_identity(&current);
+        if !change_time_only
+            && (self.whole_record
+                || current.length() < self.observation.length()
+                || (current.length() == self.observation.length()
+                    && mutable_first_record.is_none())
+                || !self.observation.admits_frozen_prefix_in(&current))
         {
             return Err(E::source_changed());
         }
-        if self.freeze_observation_at_scan {
+        if self.freeze_observation_at_scan && !change_time_only {
             return Ok((self.clone(), Arc::new(opened)));
         }
         let mut leaf = self.clone();
         leaf.observation = current.clone();
-        if let Some(probe) = leaf.identity_probe.as_mut() {
+        if let Some(probe) = leaf
+            .identity_probe
+            .as_mut()
+            .or(leaf.replayed_identity_probe.as_deref_mut())
+        {
             revalidate_frozen_prefix(
                 &leaf.source_path,
                 &opened,

@@ -153,6 +153,7 @@ fn render_result(
         push_wrapped(document, context, CARD_INDENT, line, Token::Text);
     }
 
+    super::archive::fields(document, context, result, CARD_INDENT);
     let provider = result_provider_label(result);
     push_field(
         document,

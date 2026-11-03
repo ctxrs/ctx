@@ -192,6 +192,20 @@
       ]
     },
     {
+      "path": "crates/ctx-daemon-cli/src/daemon/registered_tests.rs",
+      "purpose": "Verify read-only registered-daemon inventory preserves retired settings while observing saved indexing mode.",
+      "controls": [
+        "upgrade.allow_rfc2544_fake_ip"
+      ]
+    },
+    {
+      "path": "crates/ctx-daemon-cli/tests/contracts/daemon_rendering.rs",
+      "purpose": "Verify daemon inventory bypasses configuration migration for the selected data root.",
+      "controls": [
+        "upgrade.allow_rfc2544_fake_ip"
+      ]
+    },
+    {
       "path": "crates/ctx-cli/src/process_environment.rs",
       "purpose": "Strip retired release-authority variables from child processes and test that containment.",
       "controls": [

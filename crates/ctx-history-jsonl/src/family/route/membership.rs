@@ -62,6 +62,63 @@ impl<E: JsonlFamilyError> JsonlFamilyMembershipObservation<E> {
         Self::observe_authorities_with_snapshots(opening, true)
     }
 
+    /// Observes a provider's freshly enumerated, bounded physical workset.
+    /// The provider must include every selected route, including new and
+    /// unreadable members. This preserves a finite native layout without
+    /// recursively opening unrelated directories under its root authority.
+    pub fn observe_selected_paths(
+        opening: &JsonlFamilyInventory<E>,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> JsonlResult<Self, E> {
+        let mut routes = BTreeMap::new();
+        let unobserved = unobserved_membership_routes(opening)?;
+        for path in paths {
+            let path = std::path::absolute(path)?;
+            check_membership_path::<E>(&path)?;
+            if routes.len() >= ctx_history_source_io::PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS {
+                return Err(E::invalid_payload(
+                    "JSONL selected membership exceeds the inventory bound".to_owned(),
+                ));
+            }
+            let mut candidates = opening.authorities.iter().filter_map(|authority| {
+                path.strip_prefix(authority.named_path())
+                    .ok()
+                    .map(|relative| (authority, relative))
+            });
+            let (authority, relative) = candidates.next().ok_or_else(|| {
+                E::invalid_payload(
+                    "JSONL selected member escaped its retained authority".to_owned(),
+                )
+            })?;
+            if candidates.next().is_some() {
+                return Err(E::invalid_payload(
+                    "JSONL selected member has ambiguous authorities".to_owned(),
+                ));
+            }
+            if unobserved
+                .get(authority.named_path())
+                .is_some_and(|paths| paths.contains(relative))
+            {
+                observe_unopened_member(authority, relative)?;
+            } else {
+                authority.open_file(relative)?.revalidate_same_object()?;
+            }
+            let route = JsonlFamilyMembershipRoute {
+                authority: Arc::clone(authority),
+                authority_path: relative.to_path_buf(),
+            };
+            if routes.insert(path, route).is_some() {
+                return Err(E::invalid_payload(
+                    "JSONL selected membership contains a duplicate route".to_owned(),
+                ));
+            }
+        }
+        for authority in &opening.authorities {
+            authority.revalidate_same_object()?;
+        }
+        Self::from_routes(routes, opening)
+    }
+
     fn observe_authorities_with_snapshots(
         opening: &JsonlFamilyInventory<E>,
         frozen: bool,

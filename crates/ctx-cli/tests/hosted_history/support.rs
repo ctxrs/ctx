@@ -209,6 +209,13 @@ pub fn failure(command: &mut Command) -> Value {
 
 /// A committed synthetic Core generation, with no native provider or daemon.
 pub fn seed_history(sandbox: &Sandbox) -> ctx_history_core::CoreRecord {
+    seed_history_with(sandbox, |record| vec![record]).remove(0)
+}
+
+pub fn seed_history_with(
+    sandbox: &Sandbox,
+    records: impl FnOnce(ctx_history_core::CoreRecord) -> Vec<ctx_history_core::CoreRecord>,
+) -> Vec<ctx_history_core::CoreRecord> {
     use ctx_history_core::{
         derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
         NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
@@ -256,6 +263,7 @@ pub fn seed_history(sandbox: &Sandbox) -> ctx_history_core::CoreRecord {
     record.role = Some("user".to_owned());
     record.content.structured_content = Some(serde_json::json!({"synthetic": ["complete", 7]}));
     record.validate_contract().unwrap();
+    let records = records(record);
     let root = sandbox.path("history");
     ctx_history_platform::platform_security::create_private_directory_all(&root).unwrap();
     fs::write(
@@ -274,7 +282,11 @@ pub fn seed_history(sandbox: &Sandbox) -> ctx_history_core::CoreRecord {
     .into_writer()
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_core_record(record.clone()).unwrap();
+    let mut bytes = 0;
+    for record in &records {
+        bytes += serde_json::to_vec(record).unwrap().len() as u64;
+        writer.add_core_record(record.clone()).unwrap();
+    }
     let observation = SourceObservation::new(source, "synthetic-v1", vec![1]).unwrap();
     writer
         .certify_source(
@@ -284,10 +296,10 @@ pub fn seed_history(sandbox: &Sandbox) -> ctx_history_core::CoreRecord {
                 "synthetic-hosted-cli-v1",
                 [7; 32],
                 ScannedSourceCounts {
-                    complete_records: 1,
-                    retained_records: 1,
-                    indexed_documents: 1,
-                    certified_bytes: serde_json::to_vec(&record).unwrap().len() as u64,
+                    complete_records: records.len() as u64,
+                    retained_records: records.len() as u64,
+                    indexed_documents: records.len() as u64,
+                    certified_bytes: bytes,
                     ..ScannedSourceCounts::default()
                 },
             )
@@ -295,5 +307,5 @@ pub fn seed_history(sandbox: &Sandbox) -> ctx_history_core::CoreRecord {
         )
         .unwrap();
     writer.commit(|_| true).unwrap();
-    record
+    records
 }

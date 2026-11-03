@@ -536,6 +536,8 @@ pub(super) fn hash_prefix<E: JsonlFamilyError, H: JsonlPrefixHasher>(
                 E::from(error)
             }
         })?;
+        #[cfg(all(unix, any(test, feature = "test-support")))]
+        ctx_history_source_io::read_metrics::record_source_read(file, prefix.len());
         if !policy.validates_wire(&prefix) {
             return Err(E::source_changed());
         }
@@ -549,6 +551,8 @@ pub(super) fn hash_prefix<E: JsonlFamilyError, H: JsonlPrefixHasher>(
         let requested = usize::try_from(remaining.min(buffer.len() as u64))
             .map_err(|_| E::system_invariant("JSONL prefix length exceeds usize"))?;
         let read = file.read(&mut buffer[..requested])?;
+        #[cfg(all(unix, any(test, feature = "test-support")))]
+        ctx_history_source_io::read_metrics::record_source_read(file, read);
         if read == 0 {
             return Err(E::source_changed());
         }

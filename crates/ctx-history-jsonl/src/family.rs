@@ -255,6 +255,7 @@ pub struct JsonlReader<E: JsonlFamilyError> {
     direct_append_resume: bool,
     semantic_preflight_binding: Option<JsonlSemanticPreflightBinding>,
     oversized_record_policy: JsonlOversizedRecordPolicy,
+    replayed_identity_probe: Option<Box<JsonlProbe>>,
 }
 
 struct JsonlSemanticAppendResume {
@@ -401,10 +402,11 @@ where
             ))
         })?;
         if ordinal == 0 {
-            if let Some(policy) =
-                first_record_policy.filter(|policy| policy.validates_framing(&buffer, end))
+            if let Some((policy, initial_hasher)) = first_record_policy
+                .filter(|policy| policy.validates_framing(&buffer, end))
+                .zip(before_first_record)
             {
-                hasher = before_first_record.expect("first-record policy retained its hash state");
+                hasher = initial_hasher;
                 hasher.update(&JsonlMutableFirstRecord::MASK);
                 mutable_first_record = Some(policy);
             }

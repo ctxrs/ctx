@@ -32,7 +32,9 @@ fn overwrite_title(path: &Path, title: &str, change_header: bool) {
 
 #[test]
 fn title_changes_between_discovery_classification_and_scan_preserve_exact_header() {
-    for change_header in [false, true] {
+    for (change_header, restore_mtime) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("session.jsonl");
         let mut bytes = vec![b' '; 256];
@@ -75,9 +77,33 @@ fn title_changes_between_discovery_classification_and_scan_preserve_exact_header
         )
         .unwrap();
 
+        let original_modified = fs::metadata(&path).unwrap().modified().unwrap();
+        if restore_mtime {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         overwrite_title(&path, "before classification", change_header);
+        if restore_mtime {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(original_modified)
+                .unwrap();
+        }
         classify_incomplete_first_records(&TestAdapter, &mut opening).unwrap();
         overwrite_title(&path, "before scan", false);
+        if restore_mtime {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(original_modified)
+                .unwrap();
+            let leaf = opening.accepted_leaves().next().unwrap();
+            let opened = leaf.authority.open_file(&leaf.authority_path).unwrap();
+            let current = crate::family::observe_opened_file_allow_append(&path, &opened).unwrap();
+            assert!(leaf.observation.differs_only_by_change_identity(&current));
+        }
         let scanned = opening.accepted_leaves().next().unwrap().open_for_scan();
         if change_header {
             assert!(matches!(

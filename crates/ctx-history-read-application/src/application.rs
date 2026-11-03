@@ -222,6 +222,7 @@ impl SearchApplicationResult {
 
     pub fn render_read_model(&self, input: SearchApplicationReadModelInput<'_>) -> Result<Value> {
         render_search_json(SearchJsonInput {
+            provenance: self.generation.archive_provenance(),
             request: &self.query.request,
             index: self.generation.index(),
             collection: &self.query.collection,

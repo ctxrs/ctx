@@ -71,6 +71,7 @@ pub(super) fn default_location_import_probe(
         }),
         CaptureProvider::DeepSeekHarness => has_deepseek_harness_session_file(path, 10_000),
         CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |_| true),
+        CaptureProvider::PrimeAgent => super::prime_agent::probe(path),
         CaptureProvider::OpenCode => path_is_file_probe(path),
         CaptureProvider::Kilo => path_is_file_probe(path),
         CaptureProvider::MiMoCode => path_is_file_probe(path),

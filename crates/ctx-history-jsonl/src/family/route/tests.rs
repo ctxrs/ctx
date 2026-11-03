@@ -40,6 +40,9 @@ mod behavior;
 mod checkpoint_lifecycle;
 #[path = "tests/compound_input.rs"]
 mod compound_input;
+#[cfg(unix)]
+#[path = "tests/replayed_probe.rs"]
+mod replayed_probe;
 
 const TEST_SOURCE_FORMAT: &str = "terminal_witness_jsonl";
 const TEST_SCHEMA: &str = "terminal-witness-v1";

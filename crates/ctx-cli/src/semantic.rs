@@ -9,7 +9,7 @@ use std::{io::Write, path::Path, thread, time::Duration};
 
 use anyhow::{Context, Result};
 use ctx_client_observability::analytics::PublicEventV1;
-use ctx_daemon_cli::{DaemonConfig, DaemonMode, DaemonRuntimeConfig};
+use ctx_daemon_cli::DaemonRuntimeConfig;
 
 pub(crate) use ctx_daemon_cli::{
     begin_daemon_upgrade_handoff, begin_daemon_upgrade_handoff_for_installation,
@@ -144,6 +144,7 @@ struct CtxDaemonCliHost {
 static HOST: CtxDaemonCliHost = CtxDaemonCliHost {
     telemetry: crate::product_runtime::DaemonCollector::new(),
 };
+
 const ATTRIBUTION_MAINTENANCE_WAKE_RUNNING: u8 = 1;
 const ATTRIBUTION_MAINTENANCE_WAKE_PENDING: u8 = 2;
 static ATTRIBUTION_MAINTENANCE_WAKE_STATE: AtomicU8 = AtomicU8::new(0);
@@ -403,65 +404,7 @@ fn daemon_cli_config_with_automatic_upgrade_eligibility(
     config: &ctx_app_config::AppConfig,
     automatic_upgrade_eligible: bool,
 ) -> DaemonRuntimeConfig {
-    DaemonRuntimeConfig::new(
-        config.analytics.enabled,
-        automatic_upgrade_eligible,
-        config.upgrade.channel.clone(),
-        config.upgrade.interval,
-        DaemonConfig {
-            enabled: config.automatic_indexing_enabled(),
-            mode: match config.daemon.mode {
-                ctx_app_config::DaemonMode::Full => DaemonMode::Full,
-                ctx_app_config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
-            },
-        },
-        config.semantic_search_enabled(),
-        config.semantic_search_source(),
-    )
-    .with_semantic_embedding_executor(config.semantic_embedding_executor().clone())
-    .with_semantic_builtin_throttling(
-        config.semantic_builtin_throttling_configured(),
-        config.semantic_builtin_throttling_source(),
-    )
-    .with_automatic_provider_discovery(config.automatic_source_discovery_enabled())
-    .with_provider_roots(config.provider_root_definitions())
-}
-
-fn owned_daemon_cli_config(config: ctx_app_config::AppConfig) -> DaemonRuntimeConfig {
-    let analytics_enabled = config.analytics.enabled;
-    let automatic_upgrade_enabled = crate::upgrade::automatic_upgrade_eligible_hint(&config);
-    let upgrade_interval = config.upgrade.interval;
-    let daemon_enabled = config.automatic_indexing_enabled();
-    let daemon_mode = match config.daemon.mode {
-        ctx_app_config::DaemonMode::Full => DaemonMode::Full,
-        ctx_app_config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
-    };
-    let semantic_enabled = config.semantic_search_enabled();
-    let semantic_source = config.semantic_search_source();
-    let semantic_builtin_throttling_configured = config.semantic_builtin_throttling_configured();
-    let semantic_builtin_throttling_source = config.semantic_builtin_throttling_source();
-    let semantic_executor = config.semantic_embedding_executor().clone();
-    let automatic_provider_discovery = config.automatic_source_discovery_enabled();
-    let provider_roots = config.provider_root_definitions();
-    DaemonRuntimeConfig::new(
-        analytics_enabled,
-        automatic_upgrade_enabled,
-        config.upgrade.channel,
-        upgrade_interval,
-        DaemonConfig {
-            enabled: daemon_enabled,
-            mode: daemon_mode,
-        },
-        semantic_enabled,
-        semantic_source,
-    )
-    .with_semantic_embedding_executor(semantic_executor)
-    .with_semantic_builtin_throttling(
-        semantic_builtin_throttling_configured,
-        semantic_builtin_throttling_source,
-    )
-    .with_automatic_provider_discovery(automatic_provider_discovery)
-    .with_provider_roots(provider_roots)
+    DaemonRuntimeConfig::from_app_config(config, automatic_upgrade_eligible)
 }
 
 fn daemon_trigger(
@@ -640,12 +583,19 @@ pub(crate) fn run_daemon_command(
 }
 
 impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
+    fn persistent_daemon_spawned(&self, data_root: &Path) {
+        ctx_cli_presentation::commands::search::persistent_daemon_spawned(
+            data_root,
+            ctx_history_platform::managed_data_root().ok().as_deref(),
+        );
+    }
+
     fn load_config(&self, data_root: &Path) -> Result<DaemonRuntimeConfig> {
         let config = ctx_app_config::AppConfig::load(data_root)?;
         if !config.analytics.enabled {
             crate::analytics::send_batch(data_root, &[]);
         }
-        Ok(owned_daemon_cli_config(config))
+        Ok(daemon_cli_config(&config))
     }
 
     fn home_dir(&self) -> Option<std::path::PathBuf> {

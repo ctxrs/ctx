@@ -22,6 +22,8 @@ use super::{
 };
 
 pub(crate) mod control;
+mod registered;
+pub use registered::collect as registered_daemon_status;
 #[cfg(test)]
 mod seam_tests;
 pub use control::{run_daemon_command, update_indexing_mode};

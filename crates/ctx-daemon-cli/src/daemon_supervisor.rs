@@ -39,6 +39,10 @@ impl CliDaemonApplicationHost<'_> {
 }
 
 impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<'_> {
+    fn persistent_daemon_spawned(&self, data_root: &Path) {
+        crate::composition::host().persistent_daemon_spawned(data_root);
+    }
+
     fn hosted_uninstall_active(&self) -> Result<bool> {
         ctx_upgrade_engine::installation_hosted_uninstall_is_active()
     }
@@ -75,6 +79,19 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
         // Mutating control operations persist a new mode before asking the
         // application layer to apply it, so their snapshot must be reloaded.
         let config = crate::composition::load_runtime_config(data_root)?;
+        Ok(daemon_config_snapshot(&config))
+    }
+
+    fn observe_daemon_config(
+        &self,
+        data_root: &Path,
+    ) -> Result<ctx_daemon_application::DaemonConfigSnapshot> {
+        if !self.reload_persisted_config {
+            if let Some(config) = self.run_config {
+                return Ok(daemon_config_snapshot(config));
+            }
+        }
+        let config = crate::composition::observe_runtime_config(data_root)?;
         Ok(daemon_config_snapshot(&config))
     }
 

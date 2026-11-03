@@ -76,3 +76,58 @@ fn generation_read_lease_preserves_directory_open_errors() {
     ));
     assert_eq!(fs::read(directory).unwrap(), b"not a generation directory");
 }
+
+#[cfg(unix)]
+#[test]
+fn existing_coordinator_permissions_recover_without_replacing_its_inode() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let root = tempdir().unwrap();
+    ensure_generation_read_lease_coordinator(root.path()).unwrap();
+    let paths = [
+        read_lease::COORDINATOR_FILE,
+        read_lease::COORDINATOR_INITIALIZATION_FILE,
+    ];
+    let before = paths.map(|name| {
+        let path = root.path().join(name);
+        let metadata = fs::metadata(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        (metadata.dev(), metadata.ino(), fs::read(path).unwrap())
+    });
+    ensure_generation_read_lease_coordinator(root.path()).unwrap();
+    for (name, (device, inode, bytes)) in paths.into_iter().zip(before) {
+        let path = root.path().join(name);
+        let metadata = fs::metadata(&path).unwrap();
+        assert_eq!((metadata.dev(), metadata.ino()), (device, inode));
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn released_private_coordinator_with_extended_acl_recovers_in_place() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let root = tempdir().unwrap();
+    ensure_generation_read_lease_coordinator(root.path()).unwrap();
+    for name in [
+        read_lease::COORDINATOR_FILE,
+        read_lease::COORDINATOR_INITIALIZATION_FILE,
+    ] {
+        let path = root.path().join(name);
+        let before = fs::metadata(&path).unwrap();
+        assert!(Command::new("/bin/chmod")
+            .args(["+a", "everyone deny delete"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        ensure_generation_read_lease_coordinator(root.path()).unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        verify_private_file(&path).unwrap();
+    }
+}

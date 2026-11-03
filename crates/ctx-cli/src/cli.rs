@@ -256,8 +256,8 @@ pub(crate) enum DaemonCommand {
         long_about = "Run ctx background maintenance in the foreground until stopped. This command blocks the terminal and does not change the configured indexing mode."
     )]
     Run(DaemonRunArgs),
-    #[command(about = "Show ctx daemon status", hide = true)]
-    Status(FormatArgs),
+    #[command(about = "Show ctx daemon status")]
+    Status(DaemonStatusArgs),
     #[command(
         about = "Use automatic indexing and enable persistent maintenance",
         hide = true
@@ -268,6 +268,14 @@ pub(crate) enum DaemonCommand {
         hide = true
     )]
     Disable(DaemonDisableArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct DaemonStatusArgs {
+    #[arg(long, help = "List registered data roots for this installation")]
+    pub(crate) all: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args, Clone)]

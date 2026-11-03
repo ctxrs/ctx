@@ -29,7 +29,7 @@ fn current_supervisor_environment_snapshot(
     data_root: &Path,
 ) -> Result<SupervisorEnvironmentSnapshot> {
     let mut snapshot = supervisor_environment_snapshot(host)?;
-    let config = host.daemon_config(data_root)?;
+    let config = host.observe_daemon_config(data_root)?;
     if !config.semantic_enabled || config.semantic_executor == "builtin" {
         snapshot = snapshot.without_semantic_embedding_auth();
     }
@@ -116,23 +116,21 @@ pub(super) fn revalidated_supervisor_report_with(
         }
     }
 
-    let installation_lock = SupervisorInstallationLock::acquire(data_root);
+    // Status is a point-in-time observation. It must not create or wait on a
+    // lifecycle lock; concurrent installation can simply appear unverified.
     let executable = report
         .get("executable_path")
         .and_then(Value::as_str)
         .map(PathBuf::from);
-    let (registration_verified, live_owner, error) = match (installation_lock, executable) {
-        (Ok(_installation_lock), Some(executable)) => {
-            match backend.verify_registration(data_root, &executable) {
-                Ok(()) => match backend.verify_live_owner(data_root, &executable) {
-                    Ok(owner_pid) => (true, Some(owner_pid), None),
-                    Err(error) => (true, None, Some(error)),
-                },
-                Err(error) => (false, None, Some(error)),
-            }
-        }
-        (Err(error), _) => (false, None, Some(error)),
-        (Ok(_installation_lock), None) => (
+    let (registration_verified, live_owner, error) = match executable {
+        Some(executable) => match backend.verify_registration(data_root, &executable) {
+            Ok(()) => match backend.verify_live_owner(data_root, &executable) {
+                Ok(owner_pid) => (true, Some(owner_pid), None),
+                Err(error) => (true, None, Some(error)),
+            },
+            Err(error) => (false, None, Some(error)),
+        },
+        None => (
             false,
             None,
             Some(anyhow!(

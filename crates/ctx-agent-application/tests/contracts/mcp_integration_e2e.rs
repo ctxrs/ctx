@@ -1206,7 +1206,7 @@ fn fake_zed_project(project: &Path) -> Option<CommandServer> {
 }
 
 fn fake_goose_global(xdg_config: &Path) -> Option<GooseExtension> {
-    let root: serde_yaml::Value = serde_yaml::from_str(
+    let root: yaml_serde::Value = yaml_serde::from_str(
         &fs::read_to_string(xdg_config.join("goose").join("config.yaml")).unwrap(),
     )
     .unwrap();
@@ -1313,13 +1313,13 @@ fn json_opencode_server(path: &Path) -> Option<OpenCodeServer> {
 }
 
 fn continue_yaml_server(path: &Path) -> Option<CommandServer> {
-    let root: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let root: yaml_serde::Value = yaml_serde::from_str(&fs::read_to_string(path).unwrap()).unwrap();
     let servers = yaml_mapping_get(&root, "mcpServers")?.as_sequence()?;
     let server = servers.iter().find(|server| {
-        yaml_mapping_get(server, "name").and_then(serde_yaml::Value::as_str) == Some("ctx")
+        yaml_mapping_get(server, "name").and_then(yaml_serde::Value::as_str) == Some("ctx")
     })?;
     assert_eq!(
-        yaml_mapping_get(server, "type").and_then(serde_yaml::Value::as_str),
+        yaml_mapping_get(server, "type").and_then(yaml_serde::Value::as_str),
         Some("stdio")
     );
     let command = yaml_mapping_get(server, "command")?.as_str()?.to_owned();
@@ -1331,10 +1331,10 @@ fn continue_yaml_server(path: &Path) -> Option<CommandServer> {
     Some(CommandServer { command, args })
 }
 
-fn yaml_mapping_get<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a serde_yaml::Value> {
+fn yaml_mapping_get<'a>(value: &'a yaml_serde::Value, key: &str) -> Option<&'a yaml_serde::Value> {
     value
         .as_mapping()?
-        .get(serde_yaml::Value::String(key.to_owned()))
+        .get(yaml_serde::Value::String(key.to_owned()))
 }
 
 fn read_json_leaked(path: &Path) -> &'static Value {

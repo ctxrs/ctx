@@ -1358,3 +1358,5 @@ fn pi_declared_missing_parent_keeps_normalized_direct_lineage() {
 
 #[path = "pi_omp_title_slot.rs"]
 mod pi_omp_title_slot;
+#[path = "prime_agent.rs"]
+mod prime_agent;

@@ -14,6 +14,9 @@ mod mapped_io;
 mod ordinary_file;
 mod path_identity;
 
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub mod read_metrics;
+
 pub use bounded_tree::*;
 pub use error::ProviderJsonlInventoryLimit as SourceIoJsonlInventoryLimit;
 pub use error::{

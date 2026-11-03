@@ -214,7 +214,7 @@ pub(super) fn toml_manifest(f: &mut Facts, source: &str) -> Result<()> {
 }
 
 pub(super) fn apm_manifest(f: &mut Facts, source: &str) -> Result<()> {
-    let data: Value = serde_yaml_ng::from_str(source)?;
+    let data: Value = yaml_serde::from_str(source)?;
     let root = f.root("apm", json!({}));
     let Some(name) = data["name"].as_str() else {
         return Ok(());
@@ -713,4 +713,33 @@ pub(super) fn xml_config(f: &mut Facts, source: &str, ecosystem: &str) -> Result
         f.edge(&root, &id, "references", 1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apm_yaml_preserves_aliases_and_both_dependency_forms() {
+        for dependencies in ["{first: '1', second: '2'}", "[first, {second: '2'}]"] {
+            let source = format!(
+                "label: &label example\nname: *label\nversion: '1.0'\ndependencies: {dependencies}\n"
+            );
+            let facts = parse("apm.yaml", &source, "hash").unwrap().unwrap();
+            assert!(facts.diagnostics.is_empty());
+            let package = facts.nodes.iter().find(|n| n.kind == "package").unwrap();
+            assert_eq!(package.label, "example");
+            assert_eq!(package.metadata["version"], "1.0");
+            let mut dependencies: Vec<_> =
+                facts.references.iter().map(|r| r.label.as_str()).collect();
+            dependencies.sort_unstable();
+            assert_eq!(dependencies, ["first", "second"]);
+        }
+        let malformed = parse("apm.yml", "name: example\ndependencies: [", "hash")
+            .unwrap()
+            .unwrap();
+        assert!(malformed.nodes.is_empty());
+        assert!(malformed.references.is_empty());
+        assert_eq!(malformed.diagnostics.len(), 1);
+    }
 }

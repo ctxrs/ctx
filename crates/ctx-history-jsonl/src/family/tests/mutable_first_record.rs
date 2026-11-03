@@ -43,6 +43,20 @@ fn a_stale_identity_probe_accepts_only_the_title_update() {
                 .unwrap();
         }
         file.sync_all().unwrap();
+        // Fast writes can share the filesystem's timestamp tick. Make the
+        // stale observation deterministic before checking prefix authentication.
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_ne!(
+            probe.observation,
+            observe_metadata::<CaptureError>(
+                &path,
+                source_file.file(),
+                &source_file.file().metadata().unwrap()
+            )
+            .unwrap(),
+            "test mutation must change the observed file version"
+        );
         let reader = JsonlReader::open(
             semantic_identity(&path, "mutable-title-probe-v1"),
             source_file,
@@ -50,10 +64,11 @@ fn a_stale_identity_probe_accepts_only_the_title_update() {
             Some(probe),
         );
         if change_header {
-            assert!(matches!(
-                reader,
-                Err(CaptureError::SourceChangedDuringCapture)
-            ));
+            assert!(
+                matches!(reader, Err(CaptureError::SourceChangedDuringCapture)),
+                "unexpected reader error: {:?}",
+                reader.as_ref().err()
+            );
         } else {
             assert_eq!(
                 drain(&mut reader.unwrap()).unwrap(),

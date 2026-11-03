@@ -150,7 +150,7 @@
         "dependency_closure_sha256"
       ],
       "properties": {
-        "version": { "const": "0.26.1" },
+        "version": { "const": "0.27.0" },
         "default_features": { "const": false },
         "features": {
           "const": [

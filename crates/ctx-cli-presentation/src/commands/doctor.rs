@@ -6,4 +6,9 @@ use crate::output::JsonOutputFormat;
 pub struct DoctorArgs {
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub format: JsonOutputFormat,
+    #[arg(
+        long,
+        help = "Repair history lease metadata while preserving verified history"
+    )]
+    pub repair: bool,
 }

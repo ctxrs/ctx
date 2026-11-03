@@ -227,6 +227,7 @@ pub(in crate::source_index) fn render_session_truncated_document(
 
 fn render_session_header(document: &mut Document, context: &RenderContext, value: &Value) {
     push_heading(document, "Session", Token::Heading);
+    super::archive::fields(document, context, value, 2);
     let session = &value["session"];
     push_session_lineage(
         document,
@@ -248,7 +249,10 @@ fn render_session_header(document: &mut Document, context: &RenderContext, value
         document,
         context,
         "Provider",
-        value["provider"].as_str(),
+        value["provider"]
+            .as_str()
+            .map(crate::provider_display_name)
+            .as_deref(),
         Token::Accent,
     );
     push_optional_field(
@@ -312,7 +316,10 @@ fn render_event_header(document: &mut Document, context: &RenderContext, value: 
         document,
         context,
         "Provider",
-        selected["provider"].as_str(),
+        selected["provider"]
+            .as_str()
+            .map(crate::provider_display_name)
+            .as_deref(),
         Token::Accent,
     );
     push_optional_field(
@@ -440,6 +447,7 @@ fn render_event(document: &mut Document, context: &RenderContext, position: usiz
 }
 
 fn render_event_identity(document: &mut Document, context: &RenderContext, event: &Value) {
+    super::archive::fields(document, context, event, EVENT_INDENT);
     let Some(event_id) = event["ctx_event_id"].as_str() else {
         return;
     };

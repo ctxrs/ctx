@@ -28,6 +28,7 @@ pub struct GenerationReadRequest {
 /// policy remains outside this crate.
 pub struct GenerationRead {
     index: VerifiedIndex,
+    archive_provenance: crate::ArchiveProvenanceMap,
     retained_peer: Option<VerifiedIndex>,
 }
 
@@ -35,8 +36,14 @@ impl GenerationRead {
     pub fn new(index: VerifiedIndex, retained_peer: Option<VerifiedIndex>) -> Self {
         Self {
             index,
+            archive_provenance: crate::ArchiveProvenanceMap::default(),
             retained_peer,
         }
+    }
+
+    pub fn with_archive_provenance(mut self, provenance: crate::ArchiveProvenanceMap) -> Self {
+        self.archive_provenance = provenance;
+        self
     }
 
     pub const fn index(&self) -> &VerifiedIndex {
@@ -95,6 +102,7 @@ pub enum GenerationReadError<PortError> {
 
 pub(crate) struct PinnedGenerationRead {
     index: VerifiedIndex,
+    archive_provenance: crate::ArchiveProvenanceMap,
     retained_peer: Option<VerifiedIndex>,
     deferred_peer: bool,
     target: GenerationReadTarget,
@@ -107,6 +115,7 @@ impl PinnedGenerationRead {
     ) -> Result<Self, GenerationReadError<Port::Error>> {
         let GenerationRead {
             index,
+            archive_provenance,
             retained_peer,
         } = port
             .read_generation(&request)
@@ -128,10 +137,15 @@ impl PinnedGenerationRead {
         }
         Ok(Self {
             index,
+            archive_provenance,
             retained_peer,
             deferred_peer: request.retained_peer == RetainedPeerRead::Deferred,
             target: request.target,
         })
+    }
+
+    pub(crate) fn archive_provenance(&self) -> &crate::ArchiveProvenanceMap {
+        &self.archive_provenance
     }
 
     pub(crate) const fn index(&self) -> &VerifiedIndex {

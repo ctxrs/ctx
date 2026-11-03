@@ -43,6 +43,48 @@ That transport is an optional cross-construction input, not a requirement for
 the installed-SDK native route above. Native builds do not claim byte identity
 with the cross factory or carry a release signature.
 
+## Reproducing the licensed SDK transport
+
+The factory pin uses macOS SDK **26.2**, build **25C57**, from Xcode **26.2**,
+build **17C52**. On the licensed Mac, verify `xcodebuild -version`,
+`xcrun --sdk macosx --show-sdk-version`, and the SDK's
+`System/Library/CoreServices/SystemVersion.plist` before exporting it.
+Copy the complete installed `MacOSX.sdk` directory through private storage,
+preserving regular-file contents, file/directory modes and symlink targets.
+Do not dereference its symlinks or publish the directory or archive.
+
+For example, Apple's tar can stream the directory to a private receiver with
+`COPYFILE_DISABLE=1` and `--no-xattrs --no-acls --no-fflags`; these exclude
+host-specific extended attributes without changing SDK file contents. Verify
+the receiver's complete file hashes and symlink targets against the installed
+SDK. The transfer archive is not the factory transport.
+
+On Ubuntu 24.04, use **GNU tar 1.35** and **gzip 1.12** to package that copy:
+
+```sh
+set -euo pipefail
+umask 077
+# SDK_PARENT contains the copied MacOSX.sdk directory.
+# SDK_ARCHIVE names a new private output outside that directory.
+env -u TAR_OPTIONS -u POSIXLY_CORRECT LC_ALL=C tar \
+  --sort=name --format=gnu --mtime=@0 \
+  --owner=0 --group=0 --numeric-owner --hard-dereference \
+  -C "$SDK_PARENT" -cf - MacOSX.sdk | \
+  env -u GZIP gzip -n -9 > "$SDK_ARCHIVE"
+sha256sum "$SDK_ARCHIVE"
+stat -c '%s' "$SDK_ARCHIVE"
+```
+
+This fixes member ordering, tar format, ownership, timestamps and gzip headers.
+Hard-linked regular files are stored independently; symbolic links are retained.
+Package twice to separate output files and compare their sizes and SHA-256s.
+Check the archive's complete file contents, modes and symlink targets against
+the source copy; symlink permission bits are not portable between macOS and
+Linux. Both outputs must match `macos_sdk` in
+`contracts/release-factory-inputs-v1.json` before factory use. SDK version alone
+does not prove transport identity. A different transport requires a reviewed
+pin change; keep acquisition provenance and licensed bytes in private storage.
+
 ## Signed five-target factory
 
 `scripts/release/build-public-candidate-on-linux.sh` builds all five binaries

@@ -103,7 +103,7 @@ agent_application_binary_contract(
     name = "mcp_integration_e2e_tests",
     src = "tests/contracts/mcp_integration_e2e.rs",
     extra_crates = [
-        "serde_yaml",
+        "yaml_serde",
         "toml_edit",
     ],
     tags = ["integration"],
