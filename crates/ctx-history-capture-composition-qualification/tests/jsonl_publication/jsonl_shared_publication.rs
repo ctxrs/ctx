@@ -967,8 +967,12 @@ fn pi_parent_target_changes_do_not_affect_child_publication() {
         Some("child retained message")
     );
     assert_eq!(
-        child.content.structured_content.as_ref().unwrap()["message"]["content"],
+        child.content.structured_content.as_ref().unwrap()["entry"]["message"]["content"],
         "child retained message"
+    );
+    assert_eq!(
+        child.content.structured_content.as_ref().unwrap()["session_parent_claim_present"],
+        true
     );
     assert_eq!(child.provider_session_id.as_deref(), Some("pi-child"));
 
