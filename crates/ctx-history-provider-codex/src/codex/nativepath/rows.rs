@@ -439,19 +439,20 @@ fn codex_result_activity(
     let call_id = call_id
         .filter(|value| !value.is_empty() && value.len() <= MAX_CODEX_DURABLE_METADATA_BYTES)?;
     let provider_call_id = TypedKey::utf8(call_id).ok()?;
-    let result_unavailable = audit.selector_ambiguous(SelectorGroup::Result);
+    let result_unavailable = audit.selector_ambiguous(SelectorGroup::Result)
+        || audit.selector_ambiguous(SelectorGroup::Type);
     let value = (!result_unavailable)
         .then(|| result_content.cloned())
         .flatten();
     let text = if result_unavailable {
         ActivityTextCapture::Unavailable
     } else {
-        match value.as_ref() {
-            Some(Value::String(value)) if !value.is_empty() => ActivityTextCapture::Present {
-                value: value.clone(),
-            },
-            Some(_) | None => ActivityTextCapture::Absent,
-        }
+        value
+            .as_ref()
+            .and_then(codex_result_text)
+            .map_or(ActivityTextCapture::Absent, |value| {
+                ActivityTextCapture::Present { value }
+            })
     };
     let invocation = codex_mcp_terminal_invocation(payload, audit, occurred_at);
     Some(CoreActivity {
@@ -475,6 +476,23 @@ fn codex_result_activity(
         }),
         facts,
     })
+}
+
+// Preserve text items in provider order; keep the complete native array in the
+// structured channel, including images and unknown future item kinds.
+pub(super) fn codex_result_text(value: &Value) -> Option<String> {
+    let text = match value {
+        Value::String(value) => value.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| {
+                (item.get("type")?.as_str()? == "input_text").then(|| item.get("text")?.as_str())?
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
 }
 
 fn codex_exact_tool_identity(
@@ -571,7 +589,7 @@ fn codex_selector_group(key: &str) -> Option<SelectorGroup> {
         "callId" => Some(SelectorGroup::CallIdAlias),
         "name" => Some(SelectorGroup::ToolName),
         "arguments" | "input" | "args" => Some(SelectorGroup::Arguments),
-        "output" | "result" => Some(SelectorGroup::Result),
+        "output" | "result" | "text" => Some(SelectorGroup::Result),
         "protocol" => Some(SelectorGroup::Protocol),
         "server" => Some(SelectorGroup::Server),
         "tool" => Some(SelectorGroup::McpTool),

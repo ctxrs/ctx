@@ -8,7 +8,9 @@ use ctx_history_core::{
 };
 use serde_json::Value;
 
+mod code_mode;
 mod file_invocation;
+mod js_syntax;
 
 use file_invocation::{FileInvocationExtraction, exact_file_invocations};
 
@@ -23,6 +25,7 @@ const MAX_PENDING_INVOCATIONS: usize = 256;
 const MAX_CODEX_EXEC_COMMAND_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_CODEX_EXEC_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_CODEX_EXEC_COMMAND_WORKDIR_BYTES: usize = 16 * 1024;
+const CODEX_CODE_MODE_REVISION: &str = "codex-nativepath-core-activity-v17-code-mode-output";
 const CODEX_CORE_ACTIVITY_REVISION: &str =
     "codex-nativepath-core-activity-v16-audited-primary-lineage";
 const CODEX_RELEASED_V15_REVISION: &str = "codex-nativepath-core-activity-v15-revert-lineage";
@@ -36,6 +39,7 @@ enum CodexExecCommandExtraction {
     Exact {
         command: String,
         workdir: Option<String>,
+        output: Option<code_mode::Output>,
     },
     Rejected,
 }
@@ -47,6 +51,7 @@ struct PendingInvocation {
     command: Option<String>,
     session_cwd: Option<String>,
     declared_workdir: Option<String>,
+    code_mode_output: Option<code_mode::Output>,
 }
 
 /// Stateful, source-scoped adapter from neutral Core activity into repository
@@ -90,7 +95,7 @@ impl CoreRepositoryEvidenceAdapter {
         };
 
         if let Some(invocation) = activity.invocation.as_ref() {
-            reconcile_codex_exec_command(record, invocation, &mut facts);
+            let code_mode_output = reconcile_codex_exec_command(record, invocation, &mut facts);
             reconcile_pi_bash_command(record, invocation, &mut facts);
             match exact_file_invocations(record, invocation) {
                 FileInvocationExtraction::Exact(evidence) => {
@@ -107,6 +112,7 @@ impl CoreRepositoryEvidenceAdapter {
                 command: facts.command.clone(),
                 session_cwd: facts.session_cwd.clone(),
                 declared_workdir: facts.declared_tool_workdir.clone(),
+                code_mode_output,
             };
             match self.pending_results.remove(&call_id) {
                 Some(Some(result)) => apply_linked_result(&mut facts, &pending, &result),
@@ -215,6 +221,16 @@ fn apply_linked_result(
     let Some(command) = origin.command.as_deref() else {
         return;
     };
+    let output;
+    let result_output = if let Some(projection) = origin.code_mode_output {
+        let Some(projected) = projection.result(&result.result_output) else {
+            return;
+        };
+        output = projected;
+        &output
+    } else {
+        &result.result_output
+    };
     let Some(linked) = linked_outcome_evidence(LinkedOutcomeInput {
         provider: "core",
         command,
@@ -227,7 +243,7 @@ fn apply_linked_result(
         result_record_sha256: result.result_record_sha256,
         observed_at_unix_ms: result.observed_at_unix_ms,
         result_succeeded: result.result_succeeded,
-        result_output: &result.result_output,
+        result_output,
         structured_commit_oid: None,
         output_repository_path: None,
     }) else {
@@ -240,19 +256,27 @@ fn reconcile_codex_exec_command(
     record: &CoreRecord,
     invocation: &ctx_history_core::ActivityInvocation,
     facts: &mut NeutralRepositoryFacts,
-) {
+) -> Option<code_mode::Output> {
     match exact_codex_exec_command(record, invocation) {
         CodexExecCommandExtraction::NotApplicable => {}
         CodexExecCommandExtraction::Rejected => {
             facts.command = None;
             facts.declared_tool_workdir = None;
-            facts.provider_native_context_ambiguous = true;
+            // An unsupported JS wrapper has no command authority. Independent
+            // file-tool extraction may still prove an apply_patch invocation.
+            if invocation.tool != "exec" {
+                facts.provider_native_context_ambiguous = true;
+            }
         }
-        CodexExecCommandExtraction::Exact { command, workdir } => {
+        CodexExecCommandExtraction::Exact {
+            command,
+            workdir,
+            output,
+        } => {
             if facts.provider_native_context_ambiguous {
                 facts.command = None;
                 facts.declared_tool_workdir = None;
-                return;
+                return None;
             }
             let command_conflicts = facts
                 .command
@@ -267,14 +291,16 @@ fn reconcile_codex_exec_command(
                 facts.command = None;
                 facts.declared_tool_workdir = None;
                 facts.provider_native_context_ambiguous = true;
-                return;
+                return None;
             }
             facts.command.get_or_insert(command);
             if let Some(workdir) = workdir {
                 facts.declared_tool_workdir.get_or_insert(workdir);
             }
+            return output;
         }
     }
+    None
 }
 
 fn exact_codex_exec_command(
@@ -286,11 +312,12 @@ fn exact_codex_exec_command(
         && source.source_format() == "codex_session_jsonl"
         && source.schema_variant() == "codex-nativepath-jsonl-v0"
         && source.provider_identity_version() == 1
-        && (record.parser_revision == CODEX_CORE_ACTIVITY_REVISION
+        && (record.parser_revision == CODEX_CODE_MODE_REVISION
+            || record.parser_revision == CODEX_CORE_ACTIVITY_REVISION
             || record.parser_revision == CODEX_RELEASED_V15_REVISION
             || record.parser_revision == CODEX_RELEASED_V14_REVISION
             || record.parser_revision == CODEX_RELEASED_V11_REVISION);
-    if !exact_codex_source || invocation.tool != "exec_command" {
+    if !exact_codex_source || !matches!(invocation.tool.as_str(), "exec_command" | "exec") {
         return CodexExecCommandExtraction::NotApplicable;
     }
     if invocation.protocol.is_some() || invocation.server.is_some() {
@@ -305,11 +332,16 @@ fn exact_codex_exec_command(
     if arguments.len() > MAX_CODEX_EXEC_COMMAND_ARGUMENT_BYTES {
         return CodexExecCommandExtraction::Rejected;
     }
-    let Some(decoded) = exact_json_value(arguments) else {
-        return CodexExecCommandExtraction::Rejected;
-    };
-    let Some(object) = decoded.as_object() else {
-        return CodexExecCommandExtraction::Rejected;
+    let (object, output) = if invocation.tool == "exec" {
+        let Some((arguments, output)) = code_mode::arguments(arguments) else {
+            return CodexExecCommandExtraction::Rejected;
+        };
+        (arguments, Some(output))
+    } else {
+        let Some(Value::Object(object)) = exact_json_value(arguments) else {
+            return CodexExecCommandExtraction::Rejected;
+        };
+        (object, None)
     };
     let Some(command) = object.get("cmd").and_then(Value::as_str) else {
         return CodexExecCommandExtraction::Rejected;
@@ -332,6 +364,7 @@ fn exact_codex_exec_command(
     CodexExecCommandExtraction::Exact {
         command: command.to_owned(),
         workdir,
+        output,
     }
 }
 

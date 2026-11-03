@@ -29,6 +29,7 @@ const ZED_SCHEMA_VARIANT_DIGEST: [u8; 32] = [
     0x3d, 0x6f, 0xe4, 0xba, 0xba, 0xe9, 0xfa, 0x24, 0x5f, 0xc6, 0xb6, 0x3e, 0x04, 0xa5, 0xb5, 0xba,
     0xf4, 0x8a, 0xa8, 0x89, 0xfe, 0xc2, 0x55, 0x1d, 0x98, 0x1a, 0xf6, 0x02, 0x98, 0x58, 0x2f, 0x2d,
 ];
+const CODEX_CODE_MODE_REVISION: &str = "codex-nativepath-core-activity-v17-code-mode-output";
 const CODEX_CORE_ACTIVITY_REVISION: &str =
     "codex-nativepath-core-activity-v16-audited-primary-lineage";
 const CODEX_RELEASED_V15_REVISION: &str = "codex-nativepath-core-activity-v15-revert-lineage";
@@ -97,6 +98,7 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
             .root_session_id
             .is_none_or(|root| root == record.session_id);
     let codex_contract = [
+        CODEX_CODE_MODE_REVISION,
         CODEX_CORE_ACTIVITY_REVISION,
         CODEX_RELEASED_V15_REVISION,
         CODEX_RELEASED_V14_REVISION,
@@ -117,7 +119,10 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
     let codex = native_identity
         && codex_contract
         && ((primary
-            && record.parser_revision == CODEX_CORE_ACTIVITY_REVISION
+            && matches!(
+                record.parser_revision.as_str(),
+                CODEX_CORE_ACTIVITY_REVISION | CODEX_CODE_MODE_REVISION
+            )
             && record.session_relationship == Some(ProviderNativeSessionRelationship::Root))
             || child
                 && matches!(
