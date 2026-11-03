@@ -207,7 +207,7 @@ fn selected_schema_values_and_native_rowids_are_preserved() {
     let path = temp.path().join("provider.sqlite");
     let source = Connection::open(&path).unwrap();
     source.execute_batch("PRAGMA foreign_keys=OFF; CREATE TABLE messages (
-        id TEXT PRIMARY KEY, body TEXT, integer_value INTEGER, real_value REAL, bytes BLOB,
+        id TEXT PRIMARY KEY, body TEXT UNIQUE, integer_value INTEGER, real_value REAL, bytes BLOB,
         parent TEXT REFERENCES omitted(id), CHECK(json_valid(body)));
         CREATE INDEX by_body ON messages(body COLLATE NOCASE DESC) WHERE body IS NOT NULL;
         CREATE TABLE omitted(id TEXT PRIMARY KEY);
@@ -329,8 +329,11 @@ fn bounded_cells_keep_byte_lengths_types_and_native_metadata_cannot_spoof_them()
     let source = Connection::open(&path).unwrap();
     source
         .execute_batch(
-            "CREATE TABLE messages(body, sibling TEXT);
+            "CREATE TABLE messages(body UNIQUE CHECK(octet_length(body)>0),
+            sibling TEXT COLLATE NOCASE PRIMARY KEY);
         CREATE INDEX by_sibling ON messages(sibling);
+        CREATE INDEX by_expression ON messages(length(body));
+        CREATE INDEX by_partial ON messages(sibling) WHERE body != '';
         INSERT INTO messages(rowid,body,sibling) VALUES
         (-7,CAST(x'c3a900ff' AS TEXT),'exact'), (9,'ééé','multibyte'),
         (11,CAST(x'0000000000' AS TEXT),'nul'), (13,x'0001020304','blob'),
@@ -392,6 +395,37 @@ fn bounded_cells_keep_byte_lengths_types_and_native_metadata_cannot_spoof_them()
             .unwrap(),
         1
     );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT sibling FROM messages INDEXED BY by_sibling WHERE sibling='EXACT'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "exact"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM pragma_index_list('messages') WHERE origin='pk'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type='index'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2,
+        "keep only the primary identity and ordinary sibling index"
+    );
     snapshot.finish().unwrap();
     assert_eq!(directory_file_state(temp.path()), before);
     source
@@ -424,4 +458,66 @@ fn bounded_cells_keep_byte_lengths_types_and_native_metadata_cannot_spoof_them()
     );
     exact.finish().unwrap();
     assert_eq!(staging_entries(data.path()), 0);
+}
+
+#[test]
+fn bounded_schema_preserves_rowid_aliases_and_strict_column_types() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    for (schema, rowid) in [
+        ("id INTEGER PRIMARY KEY, body TEXT", 7),
+        ("id INTEGER PRIMARY KEY DESC, body TEXT", -3),
+        ("id INTEGER, body TEXT, PRIMARY KEY(id DESC)", 7),
+        ("id INTEGER, body TEXT, PRIMARY KEY(id, body)", -3),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let path = temp.path().join("provider.sqlite");
+        let source = Connection::open(&path).unwrap();
+        source
+            .execute_batch(&format!(
+                "CREATE TABLE messages(sibling ANY UNIQUE, {schema}) STRICT;
+             INSERT INTO messages(rowid,id,body,sibling) VALUES({rowid},7,'oversized','000123');"
+            ))
+            .unwrap();
+        let authority = retain_parent_in_data_root(data.path(), temp.path());
+        let snapshot = authority
+            .open_bounded_tables_snapshot_with_progress(
+                OsStr::new("provider.sqlite"),
+                &["messages"],
+                Some(SqliteSourceColumnBound {
+                    tables: &["messages"],
+                    column: "body",
+                    maximum_bytes: 4,
+                }),
+                |_| Ok::<(), ()>(()),
+            )
+            .unwrap();
+        let copied = snapshot.connection().unwrap();
+        assert_eq!(
+            copied
+                .query_row("SELECT rowid,id,body,sibling FROM messages", [], |row| Ok(
+                    (
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    )
+                ),)
+                .unwrap(),
+            (rowid, 7, "".to_owned(), "000123".to_owned())
+        );
+        assert_eq!(
+            copied
+                .query_row(
+                    "SELECT count(*) FROM pragma_index_list('messages') WHERE origin='u'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        snapshot.finish().unwrap();
+    }
 }

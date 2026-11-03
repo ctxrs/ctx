@@ -860,7 +860,7 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
                         "session_entry",
                     ],
                     Some(SqliteSourceColumnBound {
-                        tables: &["message", "part", "session_message", "session_entry"],
+                        tables: super::schema::PAYLOAD_TABLES,
                         column: "data",
                         maximum_bytes: MAX_PROVIDER_SQLITE_VALUE_BYTES,
                     }),

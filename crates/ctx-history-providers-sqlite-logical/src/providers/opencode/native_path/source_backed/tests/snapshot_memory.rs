@@ -178,3 +178,48 @@ fn bounded_and_full_snapshots_keep_the_same_records_bytes_and_rejections() {
         );
     }
 }
+
+fn assert_indexed_payload_rejections(index: &str, oversized_rows: usize) {
+    let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type":"text","text":"valid sibling"}),
+    );
+    connection.execute_batch(index).unwrap();
+    for i in 0..oversized_rows {
+        let payload = json!({"type":"text","text":format!("{i}{}", "x".repeat(16 * 1024 * 1024))})
+            .to_string();
+        connection
+            .execute(
+                "INSERT INTO part(id,message_id,session_id,time_created,time_updated,data)
+             SELECT ?1,message_id,session_id,time_created+1,time_updated+1,?2 FROM part LIMIT 1",
+                rusqlite::params![format!("large-{i}"), payload],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    let (_, _, records, rejections) =
+        scan_current_schema_result_with_rejections(&database, data.path(), 1024 * 1024 * 1024)
+            .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(rejections.len(), oversized_rows);
+    for rejection in rejections {
+        assert!(rejection.detail.contains("retained-content size limit"));
+    }
+}
+
+#[test]
+fn expression_index_retains_record_local_rejection() {
+    assert_indexed_payload_rejections(
+        "CREATE INDEX part_payload_kind ON part(json_extract(data,'$.type'))",
+        1,
+    );
+}
+
+#[test]
+fn unique_payload_index_retains_record_local_rejection() {
+    assert_indexed_payload_rejections("CREATE UNIQUE INDEX part_payload_unique ON part(data)", 2);
+}

@@ -9,6 +9,8 @@ use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 use super::model::OpenCodeNativeSchemaFamily;
 use crate::provider::providers::opencode::OpenCodeSqliteDialect;
 
+pub(super) const PAYLOAD_TABLES: &[&str] = &["session_message", "session_entry", "message", "part"];
+
 const MAX_NATIVE_IDENTITY_BYTES: i64 = 4 * 1024;
 const JSON_HINT_BYTES: usize = 256;
 const CONVERSATION_ROLES: &str =
@@ -648,17 +650,16 @@ fn capability_digest(
         let mut columns = statement
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        if bounded_payloads
-            && ["message", "part", "session_message", "session_entry"].contains(&table.as_str())
-        {
+        if bounded_payloads && PAYLOAD_TABLES.contains(&table.as_str()) {
             columns.retain(|column| {
                 column != crate::provider_sources::SqliteSourceColumnBound::BYTES_COLUMN
             });
         }
         tables.insert(table.clone(), columns);
     }
-    let candidate_families = ["session_message", "session_entry", "message", "part"]
-        .into_iter()
+    let candidate_families = PAYLOAD_TABLES
+        .iter()
+        .copied()
         .filter(|table| table_names.contains(*table))
         .collect::<Vec<_>>();
     let mut populated = BTreeMap::new();

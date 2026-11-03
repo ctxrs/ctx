@@ -36,6 +36,8 @@ impl SqliteSourceDirectoryAuthority {
     }
 
     /// Applies an explicit column bound before SQLite materializes selected cells.
+    /// Bounded tables retain column types/collations and ordinary keys, omitting
+    /// payload-dependent constraints, expression indexes, and partial indexes.
     /// Platforms without the no-write reader retain full-family capture.
     pub fn open_bounded_tables_snapshot_with_progress<E>(
         &self,
@@ -262,16 +264,21 @@ fn copy_table<E>(
         }
         .into());
     }
-    execute_schema(target, table, &schema)?;
-    let mut indexes = source
-        .prepare(
-            "SELECT sql FROM sqlite_schema WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL",
-        )
-        .map_err(source_error)?;
-    let mut rows = indexes.query([table]).map_err(source_error)?;
-    while let Some(row) = rows.next().map_err(source_error)? {
-        let sql: String = row.get(0).map_err(source_error)?;
-        execute_schema(target, table, &sql)?;
+    let bound = bound.filter(|bound| bound.tables.contains(&table));
+    if let Some(bound) = bound {
+        create_bounded_schema(source, target, table, bound.column)?;
+    } else {
+        execute_schema(target, table, &schema)?;
+        let mut indexes = source
+            .prepare(
+                "SELECT sql FROM sqlite_schema WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL",
+            )
+            .map_err(source_error)?;
+        let mut rows = indexes.query([table]).map_err(source_error)?;
+        while let Some(row) = rows.next().map_err(source_error)? {
+            let sql: String = row.get(0).map_err(source_error)?;
+            execute_schema(target, table, &sql)?;
+        }
     }
     let selection = bounded_selection(source, target, table, bound)
         .map_err(SqliteSourceProgressError::Source)?;
@@ -394,6 +401,138 @@ pub(in crate::sqlite_source) fn execute_schema(
 }
 
 #[cfg(target_os = "linux")]
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+#[cfg(target_os = "linux")]
+fn create_bounded_schema(
+    source: &Connection,
+    target: &Connection,
+    table: &str,
+    payload: &str,
+) -> SqliteSourceAccessResult<()> {
+    // The private projection cannot enforce constraints on omitted values.
+    // Reconstruct stored columns and payload-independent keys from SQLite's
+    // metadata instead of parsing or editing native CREATE TABLE statements.
+    let mut columns = source
+        .prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info(?1) ORDER BY cid")
+        .map_err(source_error)?;
+    let mut rows = columns.query([table]).map_err(source_error)?;
+    let mut declarations = Vec::new();
+    let mut integer_primary = None;
+    let mut primary_columns = 0;
+    while let Some(row) = rows.next().map_err(source_error)? {
+        let name: String = row.get(0).map_err(source_error)?;
+        let declared_type: String = row.get(1).map_err(source_error)?;
+        let not_null: bool = row.get(2).map_err(source_error)?;
+        let primary: i64 = row.get(3).map_err(source_error)?;
+        if primary > 0 {
+            primary_columns += 1;
+            if declared_type.eq_ignore_ascii_case("INTEGER") {
+                integer_primary = Some(declarations.len());
+            }
+        }
+        let (_, collation, _, _, _) = source
+            .column_metadata(Some("main"), table, name.as_str())
+            .map_err(source_error)?;
+        declarations.push(format!(
+            "{} {} COLLATE {} {}",
+            quote_identifier(&name),
+            quote_identifier(&declared_type),
+            quote_identifier(&collation.unwrap_or(c"BINARY").to_string_lossy()),
+            if not_null { "NOT NULL" } else { "" },
+        ));
+    }
+    let mut indexes = source
+        .prepare(
+            "SELECT i.name, i.origin, s.sql FROM pragma_index_list(?1) i
+         LEFT JOIN sqlite_schema s ON s.type='index' AND s.name=i.name
+         WHERE i.partial=0 AND NOT EXISTS(
+             SELECT 1 FROM pragma_index_xinfo(i.name)
+             WHERE key=1 AND (cid<0 OR name=?2 COLLATE NOCASE))",
+        )
+        .map_err(source_error)?;
+    let mut rows = indexes.query([table, payload]).map_err(source_error)?;
+    let mut secondary = Vec::new();
+    let mut primary_index = false;
+    while let Some(row) = rows.next().map_err(source_error)? {
+        let name: String = row.get(0).map_err(source_error)?;
+        let origin: String = row.get(1).map_err(source_error)?;
+        if origin == "c" {
+            secondary.push(row.get::<_, String>(2).map_err(source_error)?);
+            continue;
+        }
+        if origin == "pk" {
+            primary_index = true;
+            if primary_columns == 1 {
+                if let Some(column) = integer_primary {
+                    // INTEGER PRIMARY KEY DESC is SQLite's non-rowid-alias case.
+                    declarations[column].push_str(" PRIMARY KEY DESC");
+                    continue;
+                }
+            }
+        }
+        let mut keys = source
+            .prepare(
+                "SELECT name, coll, desc FROM pragma_index_xinfo(?1) WHERE key=1 ORDER BY seqno",
+            )
+            .map_err(source_error)?;
+        let keys = keys
+            .query_map([name], |row| {
+                Ok(format!(
+                    "{} COLLATE {} {}",
+                    quote_identifier(&row.get::<_, String>(0)?),
+                    quote_identifier(&row.get::<_, String>(1)?),
+                    if row.get::<_, bool>(2)? {
+                        "DESC"
+                    } else {
+                        "ASC"
+                    },
+                ))
+            })
+            .map_err(source_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(source_error)?;
+        declarations.push(format!(
+            "{} ({})",
+            if origin == "pk" {
+                "PRIMARY KEY"
+            } else {
+                "UNIQUE"
+            },
+            keys.join(",")
+        ));
+    }
+    if primary_columns == 1 && !primary_index {
+        if let Some(column) = integer_primary {
+            declarations[column].push_str(" PRIMARY KEY");
+        }
+    }
+    let strict: bool = source
+        .query_row(
+            "SELECT strict FROM pragma_table_list WHERE schema='main' AND name=?1",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(source_error)?;
+    execute_schema(
+        target,
+        table,
+        &format!(
+            "CREATE TABLE {} ({}) {}",
+            quote_identifier(table),
+            declarations.join(","),
+            if strict { "STRICT" } else { "" }
+        ),
+    )?;
+    for sql in secondary {
+        execute_schema(target, table, &sql)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn bounded_selection(
     source: &Connection,
     target: &Connection,
@@ -403,8 +542,7 @@ fn bounded_selection(
     let Some(bound) = bound.filter(|bound| bound.tables.contains(&table)) else {
         return Ok("rowid, *".into());
     };
-    let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
-    let table = quote(table);
+    let table = quote_identifier(table);
     let columns = source
         .prepare(&format!("SELECT * FROM {table} LIMIT 0"))
         .map_err(source_error)?;
@@ -424,7 +562,7 @@ fn bounded_selection(
     {
         return Ok("rowid, *".into());
     }
-    let bytes = quote(SqliteSourceColumnBound::BYTES_COLUMN);
+    let bytes = quote_identifier(SqliteSourceColumnBound::BYTES_COLUMN);
     target
         .execute(
             &format!("ALTER TABLE {table} ADD COLUMN {bytes} INTEGER"),
@@ -433,7 +571,7 @@ fn bounded_selection(
         .map_err(private_error)?;
     let mut selection = vec!["rowid".to_owned()];
     for name in names {
-        let column = quote(name);
+        let column = quote_identifier(name);
         selection.push(if name.eq_ignore_ascii_case(bound.column) {
             // octet_length reads the record header, including for TEXT with NUL
             // or multibyte characters. CASE never loads an oversized payload.
@@ -447,7 +585,7 @@ fn bounded_selection(
             column
         });
     }
-    let column = quote(bound.column);
+    let column = quote_identifier(bound.column);
     selection.push(format!("octet_length({column}) AS {bytes}"));
     Ok(selection.join(","))
 }
