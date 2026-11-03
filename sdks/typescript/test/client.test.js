@@ -38,6 +38,19 @@ function mockClient(handler) {
   return { client, calls };
 }
 
+test("normalizes shared CLI storage fixtures for status and init", async () => {
+  const fixtures = join(repoRoot, "contracts", "agent-history-v2", "fixtures");
+  const cases = JSON.parse(await readFile(join(fixtures, "cli", "status-storage.json"), "utf8"));
+  for (const [name, raw] of Object.entries(cases)) {
+    const expected = JSON.parse(await readFile(join(fixtures, name), "utf8")).status;
+    const { client } = mockClient(() => ({ stdout: JSON.stringify(raw) }));
+    for (const response of [await client.status(), await client.init()]) {
+      assert.deepEqual(response.status.lexical, expected.lexical, name);
+      assert.equal(response.status.initialized, expected.initialized, name);
+    }
+  }
+});
+
 test("removes generic status locality from old CLI values and fallback status", async () => {
   for (const flags of [{}, { local_only: true }, { localOnly: false }, { local_only: null, localOnly: "legacy" }]) {
     const raw = { schema_version: 2, ...flags, lexical: { generation_id: "ready" },

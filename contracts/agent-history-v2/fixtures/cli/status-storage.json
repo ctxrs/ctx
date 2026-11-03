@@ -1,0 +1,71 @@
+{
+  "status.ready.json": {
+    "initialized": true,
+    "lexical": {
+      "status": "ready",
+      "generation_id": "fixture-generation",
+      "indexed_documents": 3,
+      "certified_sources": 1,
+      "storage": {
+        "docstore_bytes": 1024,
+        "terms_bytes": 128,
+        "postings_bytes": 256,
+        "positions_bytes": 512,
+        "fast_fields_bytes": 64,
+        "other_bytes": 16,
+        "total_bytes": 2000
+      }
+    },
+    "schema_version": 3
+  },
+  "status.counter-boundary.json": {
+    "initialized": true,
+    "lexical": {
+      "status": "ready",
+      "generation_id": "fixture-counter-boundary",
+      "storage": {
+        "docstore_bytes": 9007199254740991,
+        "terms_bytes": 0,
+        "postings_bytes": 0,
+        "positions_bytes": 0,
+        "fast_fields_bytes": 0,
+        "other_bytes": 0,
+        "total_bytes": 9007199254740991
+      }
+    },
+    "schema_version": 3
+  },
+  "status.storage-empty.json": {
+    "initialized": true,
+    "lexical": {
+      "status": "ready",
+      "generation_id": "fixture-empty-generation",
+      "storage": {
+        "docstore_bytes": 0,
+        "terms_bytes": 0,
+        "postings_bytes": 0,
+        "positions_bytes": 0,
+        "fast_fields_bytes": 0,
+        "other_bytes": 128,
+        "total_bytes": 128
+      }
+    },
+    "schema_version": 3
+  },
+  "status.storage-missing.json": {
+    "initialized": false,
+    "lexical": {
+      "status": "missing"
+    },
+    "schema_version": 3
+  },
+  "status.storage-unavailable.json": {
+    "initialized": true,
+    "lexical": {
+      "status": "ready",
+      "generation_id": "fixture-generation",
+      "storage_error": "size_unavailable"
+    },
+    "schema_version": 3
+  }
+}

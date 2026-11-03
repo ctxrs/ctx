@@ -1256,7 +1256,8 @@ internal static class Program
             switch (operation)
             {
                 case "status":
-                    True((await ClientFor(node["status"]).StatusAsync()).Status.Initialized, $"{path} status not initialized");
+                    Equal(node["status"]!["initialized"]!.GetValue<bool>(),
+                        (await ClientFor(node["status"]).StatusAsync()).Status.Initialized);
                     break;
                 case "init":
                     True((await ClientFor(node["status"]).InitAsync()).Status.Initialized, $"{path} init not initialized");

@@ -470,7 +470,7 @@ fn lexical_report(
             let generation_matches =
                 published_generation.map(|generation| generation == index.generation_id());
             let (status, reason) = lexical_state(policy_matches);
-            let value = compact_json(json!({
+            let mut value = compact_json(json!({
                 "status": status,
                 "reason": reason,
                 "path": path,
@@ -492,6 +492,15 @@ fn lexical_report(
                     "matches_current": policy_matches,
                 },
             }));
+            match ctx_history_index::active_generation_storage_metadata(&path) {
+                Ok(Some(storage))
+                    if storage.generation_id() == index.generation_id()
+                        && storage.logical_bytes() <= MAX_SAFE_PUBLIC_JSON_COUNTER =>
+                {
+                    value["storage"] = json!(storage.size());
+                }
+                _ => value["storage_error"] = json!("size_unavailable"),
+            }
             (value, Some(index))
         }
         Err(ctx_history_index::IndexError::MissingActiveGenerationPointer) => {
