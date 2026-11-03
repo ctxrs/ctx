@@ -66,7 +66,7 @@ pub struct CertifiedPhysicalIntegrity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveGenerationStorageMetadata {
     generation_id: String,
-    logical_bytes: u64,
+    size: crate::GenerationStorageSize,
 }
 
 impl ActiveGenerationStorageMetadata {
@@ -75,7 +75,11 @@ impl ActiveGenerationStorageMetadata {
     }
 
     pub fn logical_bytes(&self) -> u64 {
-        self.logical_bytes
+        self.size.total_bytes
+    }
+
+    pub fn size(&self) -> &crate::GenerationStorageSize {
+        &self.size
     }
 }
 
@@ -341,20 +345,20 @@ pub fn active_generation_storage_metadata(
     {
         return Err(IndexError::ChecksumMismatch);
     }
-    let logical_bytes = certification
-        .artifacts
-        .iter()
-        .try_fold(0_u64, |total, artifact| {
-            total
-                .checked_add(artifact.artifact.identity.length())
-                .ok_or(IndexError::CountOverflow)
-        })?;
+    let size = crate::GenerationStorageSize::from_artifacts(certification.artifacts.iter().map(
+        |artifact| {
+            (
+                artifact.artifact.path.as_str(),
+                artifact.artifact.identity.length(),
+            )
+        },
+    ))?;
     if load_active_generation_pointer(root)?.as_ref() != Some(&pointer) {
         return Err(IndexError::ConcurrentGenerationChange);
     }
     Ok(Some(ActiveGenerationStorageMetadata {
         generation_id: slot.generation_id().to_owned(),
-        logical_bytes,
+        size,
     }))
 }
 

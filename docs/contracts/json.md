@@ -128,6 +128,36 @@ stop requiring or reading that property. Semantic executor diagnostics,
 standalone stats, and uninstall receipts retain their separate locality fields.
 
 `history_epoch` and `lexical` identify the verified searchable Core generation.
+When its size metadata is available, `lexical.storage` adds these integer byte
+counts without changing schema version 3:
+
+| Field | Meaning |
+| --- | --- |
+| `docstore_bytes` | Compressed stored Core records and their block index (`.store`). |
+| `terms_bytes` | Inverted term dictionaries (`.term`). |
+| `postings_bytes` | Inverted postings (`.idx`). |
+| `positions_bytes` | Token positions (`.pos`). |
+| `fast_fields_bytes` | Columnar fast fields (`.fast`). |
+| `other_bytes` | Field norms, deletion bitsets, and Tantivy `meta.json`. |
+| `total_bytes` | Sum of the six components above. |
+
+These are logical file lengths, including component headers and footers, for
+the generation named by `lexical.generation_id`. They include bytes occupied
+by deleted documents until compaction. Core records live in the docstore;
+there is no separate Core store to add to the total. Retained older generations,
+unreferenced files, ctx manifests/certifications, lock/control files, semantic
+and attribution indexes, and filesystem allocation overhead are excluded.
+Shared or cloned files are counted at their logical length, so this is not a
+measurement of unique allocated disk space or total data-root usage.
+
+Status reads the bounded publication-time file-size inventory; it does not scan
+documents, postings, provider histories, or generation directories. With no
+verified generation, `storage` is omitted. If the inventory cannot be read,
+exceeds the exact JSON integer range (`0..2^53-1`), or names a different
+generation after concurrent publication, `storage` is omitted and
+`lexical.storage_error` is `"size_unavailable"`; lexical readiness is unchanged.
+A verified empty generation has zero segment bytes and nonzero metadata bytes.
+
 `refresh` reports the latest observed daemon-owned refresh request and its exact
 generation binding. A generation-bound published refresh with deterministic
 record rejections but zero source failures has `refresh.status: "ready"`; its

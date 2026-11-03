@@ -369,6 +369,41 @@ def validate_status_counter_domain(schema: dict) -> None:
             raise AssertionError(f"status.{key}: accepted out-of-domain value {rejected}")
 
 
+def validate_status_storage(schema: dict) -> None:
+    status_schema = schema["$defs"]["status"]
+    path = "status.lexical"
+    invalid = load_json_exact(ADVERSARIAL_FIXTURES / "invalid-status-storage.json")
+    populated = load_json_exact(FIXTURES / "status.ready.json")["status"]["lexical"]
+    counters = (
+        "docstoreBytes", "termsBytes", "postingsBytes", "positionsBytes",
+        "fastFieldsBytes", "otherBytes", "totalBytes",
+    )
+
+    def check(lexical, accepted):
+        candidate = {"initialized": True, "lexical": lexical}
+        require(
+            schema_accepts(candidate, status_schema, schema, path) == accepted,
+            f"{path}: {'rejected valid' if accepted else 'accepted invalid'} {lexical!r}",
+        )
+
+    # Optional storage and ordinary additive diagnostic fields stay supported.
+    check({}, True)
+    check({**populated, "futureDiagnostic": True}, True)
+    check({"storage": dict.fromkeys(counters, 0)}, True)
+    for storage in invalid["storage"]:
+        check({"storage": storage}, False)
+    for key in counters:
+        storage = populated["storage"]
+        check({"storage": {k: v for k, v in storage.items() if k != key}}, False)
+        check({"storage": {**storage, key: 9_007_199_254_740_991}}, True)
+        for value in invalid["byteCounters"]:
+            check({"storage": {**storage, key: value}}, False)
+    for value in invalid["storageError"]:
+        check({"storageError": value}, False)
+    check({"storageError": "size_unavailable"}, True)
+    check({**populated, "storageError": "size_unavailable"}, False)
+
+
 def validate_show_events(result: dict, path: Path) -> None:
     events = result.get("events")
     require(isinstance(events, list) and events, f"{path}: missing events[]")
@@ -619,6 +654,7 @@ def main() -> int:
     schema = load_json_exact(CONTRACT / "schema.json")
     require(schema.get("$id"), "schema missing $id")
     validate_status_counter_domain(schema)
+    validate_status_storage(schema)
     validate_mcp_tool_call_schema(schema)
     validate_mcp_exchange_schema(schema)
     for definition in ("searchHit", "eventResult", "sessionResult", "event", "citation"):

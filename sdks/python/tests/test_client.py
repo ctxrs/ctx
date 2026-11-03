@@ -40,6 +40,19 @@ import dogfood_local
 
 
 class LocalCliAdapterTests(unittest.TestCase):
+    def test_status_storage_normalizes_shared_cli_fixtures(self) -> None:
+        fixtures = Path(__file__).resolve().parents[3] / "contracts/agent-history-v2/fixtures"
+        cases = json.loads((fixtures / "cli/status-storage.json").read_text(encoding="utf-8"))
+        for name, raw in cases.items():
+            with self.subTest(fixture=name):
+                expected = json.loads((fixtures / name).read_text(encoding="utf-8"))["status"]
+                completed = subprocess.CompletedProcess([], 0, stdout=json.dumps(raw), stderr="")
+                with mock.patch("ctx_agent_history.transport.run_local_cli", return_value=completed):
+                    client = AgentHistoryClient.local(ctx_binary="ctx")
+                    for response in (client.status(), client.init()):
+                        self.assertEqual(response["status"]["lexical"], expected["lexical"])
+                        self.assertEqual(response["status"]["initialized"], expected["initialized"])
+
     def test_status_removes_both_generic_spellings_and_preserves_nested_values(self) -> None:
         for flags in ({}, {"local_only": True}, {"localOnly": False}, {"local_only": None, "localOnly": "legacy"}):
             raw = {"schema_version": 2, **flags, "lexical": {"generation_id": "ready"},

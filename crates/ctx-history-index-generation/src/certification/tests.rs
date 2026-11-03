@@ -130,6 +130,53 @@ fn active_storage_metadata_sums_only_certified_artifacts_without_hashing() {
 
     assert_eq!(actual.generation_id(), fixture.slot.generation_id());
     assert_eq!(actual.logical_bytes(), expected);
+    let generation_path = slot_path(fixture.root(), &fixture.slot);
+    let component_bytes = |extension: &str| {
+        active_index_files(&fixture.index)
+            .unwrap()
+            .iter()
+            .filter(|path| path.extension().is_some_and(|value| value == extension))
+            .map(|path| fs::metadata(generation_path.join(path)).unwrap().len())
+            .sum::<u64>()
+    };
+    let size = actual.size();
+    assert_eq!(size.docstore_bytes, component_bytes("store"));
+    assert_eq!(size.terms_bytes, component_bytes("term"));
+    assert_eq!(size.postings_bytes, component_bytes("idx"));
+    assert_eq!(size.positions_bytes, component_bytes("pos"));
+    assert_eq!(size.fast_fields_bytes, component_bytes("fast"));
+    assert_eq!(
+        size.other_bytes,
+        component_bytes("fieldnorm")
+            + component_bytes("del")
+            + fs::metadata(generation_path.join("meta.json"))
+                .unwrap()
+                .len()
+    );
+    assert_eq!(size.total_bytes, expected);
+    // Retired and unrelated files are not active segment bytes.
+    fs::write(generation_path.join("retired.store"), [0; 4096]).unwrap();
+    fs::create_dir_all(
+        fixture
+            .root()
+            .join(INDEX_GENERATIONS_DIRECTORY)
+            .join("retained"),
+    )
+    .unwrap();
+    fs::write(
+        fixture
+            .root()
+            .join(INDEX_GENERATIONS_DIRECTORY)
+            .join("retained/old.store"),
+        [0; 8192],
+    )
+    .unwrap();
+    assert_eq!(
+        active_generation_storage_metadata(fixture.root())
+            .unwrap()
+            .unwrap(),
+        actual
+    );
     assert_eq!(crate::checksum_walks(), 0);
     assert_eq!(crate::hashed_artifact_bytes(), 0);
     assert_eq!(alias_entries.get(), 0);

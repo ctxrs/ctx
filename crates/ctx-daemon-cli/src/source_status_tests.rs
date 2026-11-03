@@ -311,6 +311,22 @@ fn semantic_status_reports_ready_only_with_exact_projected_and_filtered_counts()
     let config = crate::composition::load_runtime_config(&data_root).unwrap();
     let status = source_epoch_status_report(&data_root, &config).unwrap();
     let semantic = &status.report["semantic"];
+    let size = &status.report["lexical"]["storage"];
+    let components = [
+        "docstore_bytes",
+        "terms_bytes",
+        "postings_bytes",
+        "positions_bytes",
+        "fast_fields_bytes",
+        "other_bytes",
+    ];
+    let mut total = 0;
+    for field in components {
+        let bytes = size[field].as_u64().unwrap();
+        assert!(bytes > 0, "{field}: {size}");
+        total += bytes;
+    }
+    assert_eq!(size["total_bytes"], total);
     assert_eq!(semantic["status"], "ready");
     assert_eq!(
         semantic["builtin_throttling"],
@@ -377,6 +393,8 @@ fn pristine_source_status_is_read_only_and_exposes_stable_paths() {
         json!(data_root.join("search/semantic"))
     );
     assert!(status.report.get("prior_epoch").is_none());
+    assert!(status.report["lexical"].get("storage").is_none());
+    assert!(status.report["lexical"].get("storage_error").is_none());
 }
 
 #[test]

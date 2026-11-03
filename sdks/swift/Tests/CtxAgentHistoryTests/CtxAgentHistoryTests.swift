@@ -856,12 +856,15 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertFalse(fixtureURLs.isEmpty)
 
         for url in fixtureURLs {
-            let envelope = try decoder.decode(AgentHistoryEnvelope.self, from: Data(contentsOf: url))
+            let data = try Data(contentsOf: url)
+            let envelope = try decoder.decode(AgentHistoryEnvelope.self, from: data)
             XCTAssertEqual(envelope.contractVersion, AGENT_HISTORY_V2_VERSION, url.lastPathComponent)
             XCTAssertEqual(envelope.schemaVersion, 1, url.lastPathComponent)
             switch envelope.operation {
             case .status:
-                XCTAssertEqual(envelope.status?.initialized, true, url.lastPathComponent)
+                let expected = try decoder.decode(JSONValue.self, from: data)
+                XCTAssertEqual(envelope.status?.initialized,
+                               expected["status"]?["initialized"]?.boolValue, url.lastPathComponent)
             case .sources:
                 XCTAssertEqual(envelope.sources?.first?.provider, "codex", url.lastPathComponent)
             case .importHistory:

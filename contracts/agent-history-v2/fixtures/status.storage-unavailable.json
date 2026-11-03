@@ -1,0 +1,17 @@
+{
+  "contractVersion": "agent-history-v2",
+  "schemaVersion": 1,
+  "operation": "status",
+  "status": {
+    "initialized": true,
+    "lexical": {
+      "status": "ready",
+      "generationId": "fixture-generation",
+      "storageError": "size_unavailable"
+    }
+  },
+  "backend": {
+    "kind": "local",
+    "dataRoot": "/tmp/ctx-sdk-fixture"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "contractVersion": "agent-history-v2",
+  "schemaVersion": 1,
+  "operation": "status",
+  "status": {
+    "initialized": false,
+    "lexical": {
+      "status": "missing"
+    }
+  },
+  "backend": {
+    "kind": "local",
+    "dataRoot": "/tmp/ctx-sdk-fixture"
+  }
+}
