@@ -363,9 +363,13 @@ impl CodexNativeScanner {
         let normalized_body = if audit.selector_ambiguous(SelectorGroup::Result) {
             "Codex tool result".to_owned()
         } else {
-            match result_content.unwrap_or(&decoded.payload) {
+            let value = result_content.unwrap_or(&decoded.payload);
+            match value {
                 Value::String(value) => value.clone(),
-                value => serde_json::to_string(value)?,
+                value => match super::super::rows::codex_result_text(value) {
+                    Some(text) => text,
+                    None => serde_json::to_string(value)?,
+                },
             }
         };
         let content_exceeds_core = normalized_body.len() > ctx_history_core::MAX_CORE_CONTENT_BYTES;
