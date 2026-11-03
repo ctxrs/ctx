@@ -19,7 +19,7 @@ use ctx_history_index::{
     GenerationStateEnvelope, GenerationWriter, RevalidationTarget, WriterOptions,
 };
 
-const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v16-audited-primary-lineage";
+const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v17-code-mode-output";
 
 #[path = "codex_child_independence/incremental_admission.rs"]
 mod incremental_admission;

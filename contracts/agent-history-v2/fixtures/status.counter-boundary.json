@@ -15,7 +15,16 @@
     "indexedSources": 9007199254740991,
     "lexical": {
       "status": "ready",
-      "generationId": "fixture-counter-boundary"
+      "generationId": "fixture-counter-boundary",
+      "storage": {
+        "docstoreBytes": 9007199254740991,
+        "termsBytes": 0,
+        "postingsBytes": 0,
+        "positionsBytes": 0,
+        "fastFieldsBytes": 0,
+        "otherBytes": 0,
+        "totalBytes": 9007199254740991
+      }
     },
     "refresh": {
       "status": "ready",

@@ -18,6 +18,8 @@ mod physical;
 mod publication_probe;
 mod read_root;
 mod retention;
+mod storage_size;
+pub use storage_size::GenerationStorageSize;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use certification::managed_links::{ManagedUnlinkStage, ManagedUnlinkTestGuard};

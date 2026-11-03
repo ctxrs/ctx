@@ -23,7 +23,16 @@
       "status": "ready",
       "generationId": "fixture-generation",
       "indexedDocuments": 3,
-      "certifiedSources": 1
+      "certifiedSources": 1,
+      "storage": {
+        "docstoreBytes": 1024,
+        "termsBytes": 128,
+        "postingsBytes": 256,
+        "positionsBytes": 512,
+        "fastFieldsBytes": 64,
+        "otherBytes": 16,
+        "totalBytes": 2000
+      }
     },
     "refresh": {
       "status": "ready",

@@ -61,11 +61,25 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
         oversized.content.policy_status,
         ctx_history_core::CoreContentPolicyStatus::Selected
     ));
-    assert!(oversized
+    assert_eq!(
+        oversized.content.normalized_body.as_deref(),
+        Some(content_marker)
+    );
+    // The complete payload remains in the result channel when the duplicate
+    // outer structured payload is omitted to fit the aggregate Core budget.
+    let result = oversized
         .content
-        .normalized_body
+        .activity
         .as_ref()
-        .is_some_and(|body| body.len() > 9 * 1024 * 1024));
+        .unwrap()
+        .result
+        .as_ref()
+        .unwrap();
+    let ctx_history_core::ActivityJsonCapture::Present { value } = &result.structured_content
+    else {
+        panic!("complete image result must be retained");
+    };
+    assert_eq!(value[1]["image_url"], image_url);
     assert!(oversized.encoded_json_len().unwrap() > 8 * 1024 * 1024);
     let oversized_record = oversized.clone();
     assert!(source_records_contain(
