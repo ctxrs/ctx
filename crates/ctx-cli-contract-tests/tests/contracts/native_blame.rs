@@ -249,11 +249,47 @@ fn imported_commit_case(provider: &str, case: &str) {
                     "tool_use_id":result_id, "is_error":case == "failed", "content":output}]}}),
             ],
         )
+    } else if provider == "custom" {
+        let present = |value| json!({"capture_status":"present", "value":value});
+        (
+            source.join("history.jsonl"),
+            vec![
+                json!({"record_type":"manifest", "schema_version":"ctx-history-jsonl-v2"}),
+                json!({"record_type":"source", "source_id":"export", "provider_key":"copied-history",
+                "source_format":"transcript-copy", "trust":"unknown", "fidelity":"imported"}),
+                json!({"record_type":"session", "source_id":"export", "provider_session_id":"copy",
+                "started_at":timestamp, "cwd":repository}),
+                json!({"record_type":"event", "source_id":"export", "provider_session_id":"copy",
+                "event_index":0, "occurred_at":timestamp, "event_type":"tool_call",
+                "payload":{"text":"Imported history", "activity":{"revision":1,
+                    "provider_call_id":{"Utf8":"commit-call"},
+                    "invocation":{"tool":"bash", "arguments":present(json!({"command":command}))},
+                    "facts":[{"kind":"command", "value":command}]}}}),
+                json!({"record_type":"event", "source_id":"export", "provider_session_id":"copy",
+                "event_index":1, "occurred_at":timestamp, "event_type":"tool_output",
+                "payload":{"text":"Imported history", "activity":{"revision":1,
+                    "provider_call_id":{"Utf8":"commit-call"}, "result":{"status":"success",
+                        "text":present(json!(output)), "structured_content":{"capture_status":"absent"}}}}}),
+            ],
+        )
     } else {
         let mut header = json!({"type":"session", "version":3, "id":"primary",
             "cwd":repository, "timestamp":timestamp});
         if case == "child" {
             header["parentSession"] = json!("parent-session");
+        }
+        if case == "fork_custom_path" {
+            let parent = temp.path().join("original.jsonl");
+            fs::write(
+                &parent,
+                format!(
+                    "{}\n",
+                    json!({"type":"session", "version":3,
+                "id":"original", "cwd":repository, "timestamp":timestamp})
+                ),
+            )
+            .unwrap();
+            header["parentSession"] = json!(parent);
         }
         // The already supported message-level invocation carrier isolates the
         // authority regression from nested content[] tool-call parsing (#1143).
@@ -267,10 +303,38 @@ fn imported_commit_case(provider: &str, case: &str) {
                         "id":"commit-call", "name":"bash", "arguments":{"command":command}}]}}),
                 json!({"type":"message", "id":"result-event", "timestamp":timestamp,
                 "message":{"role":"toolResult", "toolCallId":result_id, "toolName":"bash",
-                    "isError":case == "failed", "content":[{"type":"text", "text":output}]}}),
+                    "isError":case.starts_with("failed"), "content":[{"type":"text", "text":output}]}}),
             ],
         )
     };
+    if case == "fork_custom_path" {
+        let mut original = rows.clone();
+        original[0]["id"] = json!("original");
+        original[0].as_object_mut().unwrap().remove("parentSession");
+        fs::write(
+            temp.path().join("original.jsonl"),
+            original
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+    }
+    if case == "failed_large_details" {
+        rows.last_mut().unwrap()["message"]["details"] =
+            json!({"diagnostic":"x".repeat(9 * 1024 * 1024)});
+    }
+    if case == "primary_no_error_flag" {
+        let message = &mut rows.last_mut().unwrap()["message"];
+        if provider == "claude" {
+            message["content"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("is_error");
+        } else {
+            message.as_object_mut().unwrap().remove("isError");
+        }
+    }
     if case == "missing_result" {
         rows.pop();
     }
@@ -294,12 +358,69 @@ fn imported_commit_case(provider: &str, case: &str) {
     } else {
         source
     };
-    ctx(&temp)
-        .args(["import", "--provider", provider, "--path"])
-        .arg(&import_root)
-        .args(["--progress", "none"])
-        .assert()
-        .success();
+    let mut import = ctx(&temp);
+    import.arg("import");
+    if provider == "custom" {
+        import
+            .args(["--input-format", "ctx-history-jsonl-v2", "--path"])
+            .arg(&path);
+    } else {
+        import
+            .args(["--provider", provider, "--path"])
+            .arg(&import_root);
+    }
+    import.args(["--progress", "none"]).assert().success();
+    if matches!(case, "failed_large_details" | "fork_custom_path") {
+        let generation = ctx_history_snapshot_reader::load_active_generation_id(&root)
+            .unwrap()
+            .unwrap();
+        let snapshot =
+            CoreSnapshot::open(&root, &generation, &SnapshotContract::current().unwrap()).unwrap();
+        let sources = snapshot.source_manifest_page(None, 8).unwrap();
+        assert!(sources.terminal);
+        let records = snapshot
+            .records_with_default_bounds(sources.items[0].source.clone())
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let result = records
+            .iter()
+            .find(|record| {
+                record
+                    .content
+                    .activity
+                    .as_ref()
+                    .is_some_and(|activity| activity.result.is_some())
+            })
+            .unwrap();
+        if case == "failed_large_details" {
+            use ctx_attribution::protocol::{ActivityJsonCapture, ActivityTextCapture};
+            let activity = result
+                .content
+                .activity
+                .as_ref()
+                .unwrap()
+                .result
+                .as_ref()
+                .unwrap();
+            assert!(
+                matches!(&activity.structured_content, ActivityJsonCapture::Omitted { reason, .. } if reason == "size_limit")
+            );
+            assert!(
+                matches!(&activity.text, ActivityTextCapture::Present { value } if value == &output)
+            );
+            assert_eq!(
+                result.content.structured_content.as_ref().unwrap()["entry"]["message"]["isError"],
+                true
+            );
+        } else {
+            assert!(result.parent_session_id.is_none());
+            assert_eq!(
+                result.content.structured_content.as_ref().unwrap()["session_parent_claim_present"],
+                true
+            );
+        }
+    }
     let status = json_output(ctx(&temp).args(["status", "--format", "json"]));
     assert_eq!(
         status["attribution"]["currentness"], "current",
@@ -310,7 +431,7 @@ fn imported_commit_case(provider: &str, case: &str) {
     blame
         .current_dir(&repository)
         .args(["blame", "commit", &oid, "--format", "json"]);
-    if case == "primary" {
+    if case.starts_with("primary") {
         assert_eq!(status["attribution"]["materialized_coverage"], "complete");
         assert_eq!(*count, 1, "{provider}: {status:#}");
         assert_eq!(status["attribution"]["availability"]["commit_blame"], true);
@@ -383,5 +504,27 @@ fn pi_fork_and_nonproducing_results_stay_unattributed() {
         "missing_result",
     ] {
         imported_commit_case("pi", case);
+    }
+}
+
+#[test]
+fn unknown_origin_import_stays_unattributed() {
+    imported_commit_case("custom", "unknown_origin");
+}
+
+#[test]
+fn pi_unresolved_parent_stays_unattributed() {
+    imported_commit_case("pi", "fork_custom_path");
+}
+
+#[test]
+fn pi_omitted_failed_envelope_stays_unattributed() {
+    imported_commit_case("pi", "failed_large_details");
+}
+
+#[test]
+fn complete_native_results_with_no_error_field_still_attribute() {
+    for provider in ["claude", "pi"] {
+        imported_commit_case(provider, "primary_no_error_flag");
     }
 }

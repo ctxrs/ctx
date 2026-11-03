@@ -479,10 +479,16 @@ fn native_result_allows_success(
         _ => return true,
     };
     match &result.structured_content {
-        ActivityJsonCapture::Present { value } => value
-            .get(error_field)
-            .is_none_or(|error| error.as_bool() == Some(false)),
-        _ => true,
+        ActivityJsonCapture::Present { value } => value.as_object().is_some_and(|envelope| {
+            envelope
+                .get(error_field)
+                .is_none_or(|error| error.as_bool() == Some(false))
+        }),
+        // A missing field in a complete object is different from a missing
+        // envelope: omission may have hidden an explicit failure flag.
+        ActivityJsonCapture::Absent
+        | ActivityJsonCapture::Unavailable
+        | ActivityJsonCapture::Omitted { .. } => false,
     }
 }
 

@@ -6,6 +6,65 @@ use crate::protocol::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn pi_requires_captured_parent_absence_and_native_source_ownership() -> TestResult {
+    let mut record = provider_record("gemini", false)?;
+    record.source = SourceKey::derive_provider_native(
+        "pi",
+        "pi_session_jsonl",
+        "pi-nativepath-jsonl-v1",
+        1,
+        "pi.session",
+        TypedKey::utf8("child")?,
+    )?;
+    record.parser_revision = "pi-shared-jsonl-v12-parent-claim-presence".to_owned();
+    record.agent_scope = None;
+    record.parent_session_id = None;
+    record.session_relationship = None;
+    for (carrier, expected) in [
+        (None, false),
+        (Some(serde_json::json!({})), false),
+        (
+            Some(serde_json::json!({"session_parent_claim_present":true})),
+            false,
+        ),
+        (
+            Some(serde_json::json!({"session_parent_claim_present":null})),
+            false,
+        ),
+        (
+            Some(serde_json::json!({"session_parent_claim_present":false})),
+            true,
+        ),
+    ] {
+        record.content.structured_content = carrier;
+        assert_eq!(
+            producer_authority_disposition(&record).permits_positive_authority(),
+            expected
+        );
+    }
+    for revision in ["pi-shared-jsonl-v11-omp-parent-lineage", "unknown"] {
+        record.parser_revision = revision.to_owned();
+        assert_eq!(
+            producer_authority_disposition(&record),
+            ProducerAuthorityDisposition::AbstainUnknown
+        );
+    }
+    record.parser_revision = "pi-shared-jsonl-v12-parent-claim-presence".to_owned();
+    record.source = SourceKey::derive(
+        "pi",
+        "pi_session_jsonl",
+        "pi-nativepath-jsonl-v1",
+        1,
+        SourceAnchor::CatalogLineage([1; 32]),
+    )?;
+    assert_eq!(
+        producer_authority_disposition(&record),
+        ProducerAuthorityDisposition::AbstainUnknown
+    );
+    Ok(())
+}
+
 macro_rules! current_positive {
     ($name:ident, $provider:literal) => {
         #[test]
@@ -49,13 +108,7 @@ fn current_provider_contracts_and_released_support_keep_exact_boundaries() -> Te
                 }
                 assert_eq!(
                     producer_authority_disposition(&miss),
-                    if provider == "gemini" && !released && missing == "scope" {
-                        // Removing its only child claim makes this a native
-                        // unparented witness, independent of the child contract.
-                        ProducerAuthorityDisposition::EligibleUnique
-                    } else {
-                        ProducerAuthorityDisposition::AbstainUnknown
-                    },
+                    ProducerAuthorityDisposition::AbstainUnknown,
                     "{provider} {missing}"
                 );
             }
@@ -195,7 +248,7 @@ fn only_current_mux_openclaw_allow_missing_root_and_no_provider_invents_relation
 }
 
 #[test]
-fn native_unparented_records_do_not_require_child_contracts() -> TestResult {
+fn reviewed_provider_primary_shapes_do_not_require_child_lineage() -> TestResult {
     for provider in PROVIDERS {
         for released in [false, true] {
             let mut primary = provider_record(provider, released)?;
@@ -213,41 +266,32 @@ fn native_unparented_records_do_not_require_child_contracts() -> TestResult {
             primary.root_session_id = None;
             primary.session_relationship = None;
             primary.validate_contract()?;
-            // Native unparented occurrences are independent of child-contract
-            // tuples and optional search scope. Parser updates do not revoke
-            // the same retained identity and ownership evidence.
-            for scope in [None, Some(AgentScope::Primary)] {
-                for relationship in [None, Some(ProviderNativeSessionRelationship::Root)] {
-                    for root in [None, Some(primary.session_id)] {
-                        primary.agent_scope = scope;
-                        primary.session_relationship = relationship;
-                        primary.root_session_id = root;
-                        assert_eq!(
-                            producer_authority_disposition(&primary),
-                            ProducerAuthorityDisposition::EligibleUnique,
-                            "{provider} released={released}"
-                        );
-                    }
-                }
-            }
-            primary.parser_revision.push_str("-future");
+            // The current reviewed emitters distinguish a native primary from
+            // unknown lineage. Older child-only contracts and Gemini v2 remain
+            // outside this proof; a provider label alone is not admission.
+            let expected = if !released && provider != "gemini" {
+                ProducerAuthorityDisposition::EligibleUnique
+            } else {
+                ProducerAuthorityDisposition::AbstainUnknown
+            };
             assert_eq!(
                 producer_authority_disposition(&primary),
-                ProducerAuthorityDisposition::EligibleUnique
+                expected,
+                "{provider} released={released}"
             );
             for missing in [
-                "subagent",
+                "scope",
                 "parent",
                 "root",
                 "relationship",
                 "session",
                 "event",
                 "null-event",
-                "empty-session",
+                "revision",
             ] {
                 let mut miss = primary.clone();
                 match missing {
-                    "subagent" => miss.agent_scope = Some(AgentScope::Subagent),
+                    "scope" => miss.agent_scope = None,
                     "parent" => miss.parent_session_id = Some(other_session),
                     "root" => miss.root_session_id = Some(other_session),
                     "relationship" => {
@@ -257,7 +301,7 @@ fn native_unparented_records_do_not_require_child_contracts() -> TestResult {
                     "session" => miss.provider_session_id = None,
                     "event" => miss.native_event_id = None,
                     "null-event" => miss.native_event_id = Some(TypedKey::Null),
-                    "empty-session" => miss.provider_session_id = Some(String::new()),
+                    "revision" => miss.parser_revision.push_str("-unknown"),
                     _ => unreachable!(),
                 }
                 assert_eq!(
@@ -317,11 +361,7 @@ fn opencode_retained_and_migrated_tuples_preserve_native_primary_and_child_admis
             record.parser_revision.push_str("-unknown");
             assert_eq!(
                 producer_authority_disposition(&record),
-                if primary {
-                    ProducerAuthorityDisposition::EligibleUnique
-                } else {
-                    ProducerAuthorityDisposition::AbstainUnknown
-                }
+                ProducerAuthorityDisposition::AbstainUnknown
             );
         }
     }

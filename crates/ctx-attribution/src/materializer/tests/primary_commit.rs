@@ -16,7 +16,7 @@ use crate::query::{
 };
 use std::path::Path;
 
-const PREDECESSOR: &str = "2026.10.01.2+audited-primary-producer";
+const PREDECESSOR: &str = "2026.11.03.1+native-unparented-producer";
 
 fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Vec<CoreRecord>> {
     let provider = match mode {
@@ -35,7 +35,16 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
         provider_contract.as_mut().unwrap().parser_revision =
             "opencode-family-source-backed-v13-bounded-oversized-content".to_owned();
     }
-    let source = if let Some(contract) = &provider_contract {
+    let source = if mode == "pi-lossy" {
+        SourceKey::derive_provider_native(
+            "pi",
+            "pi_session_jsonl",
+            "pi-nativepath-jsonl-v1",
+            1,
+            "pi.session",
+            TypedKey::utf8("primary-commit")?,
+        )?
+    } else if let Some(contract) = &provider_contract {
         contract.source.clone()
     } else {
         SourceKey::derive(
@@ -64,7 +73,9 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
             source.clone(),
             sequence,
             if is_call { "tool_call" } else { "tool_output" },
-            if let Some(contract) = &provider_contract {
+            if mode == "pi-lossy" {
+                "pi-shared-jsonl-v11-omp-parent-lineage"
+            } else if let Some(contract) = &provider_contract {
                 &contract.parser_revision
             } else {
                 match mode {
@@ -138,7 +149,7 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
                 },
                 structured_content: ActivityJsonCapture::Absent,
             }),
-            // Literal command/workdir keeps the provider-neutral witnesses from
+            // Literal command/workdir keeps the unknown-provider controls from
             // merely failing the Codex argument decoder before the origin gate.
             facts: if is_call {
                 vec![
@@ -159,6 +170,20 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
                 Vec::new()
             },
         });
+        if mode == "pi-lossy" {
+            record.agent_scope = None;
+            record.session_relationship = None;
+            record.root_session_id = None;
+            let activity = record.content.activity.as_mut().unwrap();
+            if let Some(invocation) = &mut activity.invocation {
+                invocation.tool = "bash".to_owned();
+            }
+            if let Some(result) = &mut activity.result {
+                result.structured_content = ActivityJsonCapture::Present {
+                    value: serde_json::json!({"isError":false}),
+                };
+            }
+        }
         match mode {
             "copied" => {
                 record.event_copy = Some(ProviderNativeEventCopy {
@@ -349,6 +374,7 @@ fn primary_native_commit_call_and_output_reach_blame_with_exact_controls() -> Te
     let (output, oid) = real_commit(&repository)?;
     for mode in [
         "primary",
+        "pi-lossy",
         "optional-root",
         "v11",
         "v14",
@@ -403,8 +429,6 @@ fn primary_native_commit_call_and_output_reach_blame_with_exact_controls() -> Te
                     | "opencode-v13-child"
                     | "opencode-v14-child"
                     | "zed"
-                    | "gemini"
-                    | "provider"
             ) {
                 vec![AttributionOutcome::Possible]
             } else {
@@ -430,7 +454,7 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
     let (output, oid) = real_commit(&repository)?;
     for mode in [
         "primary",
-        "provider",
+        "pi-lossy",
         "v11",
         "v14",
         "v15",
@@ -449,6 +473,7 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
         "mismatched-call",
         "mismatched-output",
         "duplicate-call",
+        "provider",
     ] {
         let records = primary_records(&repository, &output, mode)?;
         let original = records
@@ -466,6 +491,8 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
             PREDECESSOR,
             if mode == "copied" {
                 IndexedCoreEventOriginKind::CopiedFromAncestor
+            } else if matches!(mode, "pi-lossy" | "provider" | "gemini") {
+                IndexedCoreEventOriginKind::UniqueToSession
             } else {
                 IndexedCoreEventOriginKind::Unknown
             },
@@ -487,8 +514,6 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
                 | "opencode-v13-child"
                 | "opencode-v14-child"
                 | "zed"
-                | "gemini"
-                | "provider"
         ) {
             vec![AttributionOutcome::Possible]
         } else {
