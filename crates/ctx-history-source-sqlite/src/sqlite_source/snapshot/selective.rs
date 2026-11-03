@@ -455,7 +455,15 @@ fn create_bounded_schema(
         .map_err(source_error)?;
     let mut rows = indexes.query([table, payload]).map_err(source_error)?;
     let mut secondary = Vec::new();
-    let mut primary_index = false;
+    // A filtered payload primary index still means the native INTEGER key
+    // was not a rowid alias (notably INTEGER PRIMARY KEY DESC).
+    let primary_index: bool = source
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_index_list(?1) WHERE origin='pk')",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(source_error)?;
     while let Some(row) = rows.next().map_err(source_error)? {
         let name: String = row.get(0).map_err(source_error)?;
         let origin: String = row.get(1).map_err(source_error)?;
@@ -463,14 +471,11 @@ fn create_bounded_schema(
             secondary.push(row.get::<_, String>(2).map_err(source_error)?);
             continue;
         }
-        if origin == "pk" {
-            primary_index = true;
-            if primary_columns == 1 {
-                if let Some(column) = integer_primary {
-                    // INTEGER PRIMARY KEY DESC is SQLite's non-rowid-alias case.
-                    declarations[column].push_str(" PRIMARY KEY DESC");
-                    continue;
-                }
+        if origin == "pk" && primary_columns == 1 {
+            if let Some(column) = integer_primary {
+                // INTEGER PRIMARY KEY DESC is SQLite's non-rowid-alias case.
+                declarations[column].push_str(" PRIMARY KEY DESC");
+                continue;
             }
         }
         let mut keys = source

@@ -35,14 +35,10 @@ pub(super) fn source_backed_event_order_sql(schema: &OpenCodeNativeSchema) -> &'
         | OpenCodeNativeSchemaFamily::LegacyMessage => {
             " order by x.session_id collate binary, x.time_created, x.id collate binary"
         }
-        OpenCodeNativeSchemaFamily::MessagePart if schema.message_part_indexed_streaming => {
-            " order by m.session_id collate binary, m.time_created,
-                       m.id collate binary, p.time_created, p.id collate binary"
-        }
         OpenCodeNativeSchemaFamily::MessagePart => {
             " order by p.session_id collate binary,
                        coalesce(m.time_created, p.time_created),
-                       p.message_id collate binary,
+                       coalesce(m.id, p.message_id) collate binary,
                        p.time_created, p.id collate binary"
         }
     }
@@ -101,7 +97,7 @@ fn row_event_source_sql(
 }
 
 fn part_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
-    part_event_source_sql_with_payload(schema, schema.message_part_indexed_streaming, false)
+    part_event_source_sql_with_payload(schema, schema.message_part_indexed_streaming)
 }
 
 pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema) -> String {
@@ -118,20 +114,6 @@ pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema)
         OpenCodeNativeSchemaFamily::LegacyMessage => {
             row_sort_key_sql(schema, "message", "x.time_created")
         }
-        OpenCodeNativeSchemaFamily::MessagePart if schema.message_part_indexed_streaming => {
-            format!(
-                "select p.rowid, {}, m.time_created,
-                    {}, p.time_created, {},
-                    {} + {}
-               from message m
-               cross join part p on p.message_id = m.id",
-                bounded_identity("m.session_id"),
-                bounded_identity("m.id"),
-                bounded_identity("p.id"),
-                hydrated_payload_bytes(schema, "p"),
-                hydrated_payload_bytes(schema, "m"),
-            )
-        }
         OpenCodeNativeSchemaFamily::MessagePart => format!(
             "select p.rowid, {},
                     coalesce(m.time_created, p.time_created),
@@ -140,7 +122,9 @@ pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema)
                from part p
                left join message m on m.id = p.message_id",
             bounded_identity("p.session_id"),
-            bounded_identity("p.message_id"),
+            // Relationship spelling can differ under native collations. Use
+            // the parent's canonical identity regardless of optional indexes.
+            bounded_identity("coalesce(m.id, p.message_id)"),
             bounded_identity("p.id"),
             hydrated_payload_bytes(schema, "p"),
             hydrated_payload_bytes(schema, "m"),
@@ -167,9 +151,7 @@ pub(super) fn source_backed_fallback_events_by_rowids_sql(
         .collect::<Vec<_>>()
         .join(", ");
     let mut sql = match schema.family {
-        OpenCodeNativeSchemaFamily::MessagePart => {
-            part_event_source_sql_with_payload(schema, true, true)
-        }
+        OpenCodeNativeSchemaFamily::MessagePart => part_event_source_sql_with_payload(schema, true),
         _ => source_backed_event_source_sql(schema),
     };
     let alias = if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
@@ -184,38 +166,11 @@ pub(super) fn source_backed_fallback_events_by_rowids_sql(
 fn part_event_source_sql_with_payload(
     schema: &OpenCodeNativeSchema,
     include_payload: bool,
-    hydrate_by_rowid: bool,
 ) -> String {
     let type_column = type_expression(schema.event_has_type, "p");
-    let (source, source_locator, include_payload) =
-        if schema.message_part_indexed_streaming && !hydrate_by_rowid {
-            (
-                "from message m
-                 cross join part p on p.message_id = m.id
-                 left join session s on s.id = p.session_id",
-                "p.rowid",
-                true,
-            )
-        } else if include_payload {
-            (
-                "from part p
-                 left join message m on m.id = p.message_id
-                 left join session s on s.id = p.session_id",
-                "p.rowid",
-                true,
-            )
-        } else {
-            // The compatibility path can require a full ORDER BY when provider
-            // indexes are absent. Keep payloads out of that sorter and hydrate
-            // the ordered identities through their required primary keys.
-            (
-                "from part p
-                 left join message m on m.id = p.message_id
-                 left join session s on s.id = p.session_id",
-                "0",
-                false,
-            )
-        };
+    // Compatibility ORDER BY probes omit payloads; production hydration uses
+    // the same parent join and collation regardless of optional native indexes.
+    let source_locator = if include_payload { "p.rowid" } else { "0" };
     let native_identity = bounded_identity("p.id");
     let message_identity = bounded_identity("p.message_id");
     let session_identity = bounded_identity("p.session_id");
@@ -274,7 +229,9 @@ fn part_event_source_sql_with_payload(
                     when cast(m.session_id as text) <> cast(p.session_id as text) then 3
                     else 0
                 end
-         {source}",
+         from part p
+         left join message m on m.id = p.message_id
+         left join session s on s.id = p.session_id",
     )
 }
 

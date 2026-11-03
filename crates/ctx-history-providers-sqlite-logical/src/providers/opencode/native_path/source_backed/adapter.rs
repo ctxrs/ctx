@@ -327,7 +327,7 @@ fn discover_document_tree_with_progress(
     }
 }
 
-fn exact_replay_base(
+pub(super) fn exact_replay_base(
     base_sources: &[CertifiedSource],
     provider: CaptureProvider,
     source_scope: SourceAnchorScope,

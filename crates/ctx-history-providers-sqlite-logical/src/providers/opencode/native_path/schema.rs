@@ -135,7 +135,7 @@ impl OpenCodeNativeSchema {
             conn.query_row(
                 "select exists(
                      select 1 from message m
-                     join part p on p.message_id = m.id
+                     join part p on m.id = p.message_id
                      limit 1
                  )",
                 [],
@@ -670,7 +670,7 @@ fn capability_digest(
         conn.query_row(
             "select exists(
                  select 1 from message m
-                 join part p on p.message_id = m.id
+                 join part p on m.id = p.message_id
                  limit 1
              )",
             [],

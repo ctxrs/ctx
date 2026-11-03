@@ -521,3 +521,83 @@ fn bounded_schema_preserves_rowid_aliases_and_strict_column_types() {
         snapshot.finish().unwrap();
     }
 }
+
+#[test]
+fn bounded_payload_integer_primary_key_desc_keeps_native_rowids() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let path = temp.path().join("provider.sqlite");
+    let source = Connection::open(&path).unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE messages(sibling TEXT, body INTEGER PRIMARY KEY DESC);
+        INSERT INTO messages(rowid,sibling,body)
+        VALUES(-8,'one','large-one'),(5,'two','large-two'),(12,'small','ok');",
+        )
+        .unwrap();
+    let before = directory_file_state(temp.path());
+    let authority = retain_parent_in_data_root(data.path(), temp.path());
+    for bounded in [false, true] {
+        let snapshot = authority
+            .open_bounded_tables_snapshot_with_progress(
+                OsStr::new("provider.sqlite"),
+                &["messages"],
+                bounded.then_some(SqliteSourceColumnBound {
+                    tables: &["messages"],
+                    column: "body",
+                    maximum_bytes: 4,
+                }),
+                |_| Ok::<(), ()>(()),
+            )
+            .unwrap();
+        let rows = snapshot
+            .connection()
+            .unwrap()
+            .prepare("SELECT rowid,sibling,body FROM messages ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    -8,
+                    "one".into(),
+                    if bounded { "" } else { "large-one" }.into()
+                ),
+                (
+                    5,
+                    "two".into(),
+                    if bounded { "" } else { "large-two" }.into()
+                ),
+                (12, "small".into(), "ok".into()),
+            ]
+        );
+        if bounded {
+            let lengths = snapshot
+                .connection()
+                .unwrap()
+                .prepare("SELECT __ctx_original_bytes FROM messages ORDER BY rowid")
+                .unwrap()
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(lengths, [9, 9, 2]);
+        }
+        snapshot.finish().unwrap();
+    }
+    assert_eq!(directory_file_state(temp.path()), before);
+    assert_eq!(staging_entries(data.path()), 0);
+}
