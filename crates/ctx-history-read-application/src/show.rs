@@ -132,6 +132,7 @@ impl ShowEventApplicationResult {
             &self.result.copied_lineage,
             format,
             output_limit_bytes,
+            self.generation.archive_provenance(),
         )
     }
 
@@ -235,6 +236,7 @@ impl ShowSessionApplicationResult {
             self.page.events,
             self.page.has_more,
             output_limit_bytes,
+            self.generation.archive_provenance(),
         )?;
         let value = paginated_session_transcript_read_model(
             &self.page.session,
@@ -244,6 +246,7 @@ impl ShowSessionApplicationResult {
             limit,
             retained.has_more,
             retained.next_cursor.as_ref(),
+            self.generation.archive_provenance(),
         )?;
         let compact_value = self
             .compact_projection
@@ -321,12 +324,17 @@ pub struct ShowSessionStreamRequest {
 
 #[derive(Clone, Copy)]
 pub struct ShowReadModelProjection<'index> {
+    provenance: &'index crate::ArchiveProvenanceMap,
     current: &'index ctx_history_index_query::VerifiedIndex,
     retained_peer: Option<&'index ctx_history_index_query::VerifiedIndex>,
     enabled: bool,
 }
 
 impl ShowReadModelProjection<'_> {
+    pub fn archive_provenance(&self) -> &crate::ArchiveProvenanceMap {
+        self.provenance
+    }
+
     pub fn project(&self, value: &serde_json::Value) -> Result<Option<serde_json::Value>> {
         self.enabled
             .then(|| {
@@ -420,6 +428,7 @@ where
         )
         .map_err(ShowReadApplicationError::Query)?;
     let projection = ShowReadModelProjection {
+        provenance: generation.archive_provenance(),
         current: generation.index(),
         retained_peer: generation.retained_peer(),
         enabled: request.compact_projection,

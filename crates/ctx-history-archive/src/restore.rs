@@ -244,6 +244,9 @@ pub fn restore(
                 .ok()
                 .and_then(|position| manifest.sources.get(position))
         });
+        let has_labels = prior.is_some_and(|certificate| {
+            certificate.observation().revision_kind() == crate::provenance::OBSERVATION_KIND
+        });
         let prior = match prior {
             Some(certificate) => {
                 certificate
@@ -258,11 +261,11 @@ pub fn restore(
         if expected.is_some() {
             used_predecessors += 1;
         }
-        if prior.as_deref() == Some(&member.sha256) {
+        if prior.as_deref() == Some(&member.sha256) && has_labels {
             unchanged_members += 1;
             return Ok(());
         }
-        if prior.as_ref() != expected {
+        if prior.as_ref() != expected && prior.as_deref() != Some(&member.sha256) {
             return Err(ArchiveError::Conflict {
                 member: member.path,
                 current: prior.unwrap_or_else(|| "absent".into()),
@@ -276,11 +279,13 @@ pub fn restore(
         let digest = digest_bytes(&member.sha256)?;
         let observation = SourceObservation::new(
             source,
-            crate::retained::OBSERVATION_KIND,
-            serde_json::to_vec(&crate::retained::OwnedMember {
+            crate::provenance::OBSERVATION_KIND,
+            crate::retained::OwnedMember {
                 snapshot: snapshot_id.clone(),
                 member: member.path.clone(),
-            })?,
+                identity: None,
+            }
+            .encode(&options.binding.identity)?,
         )?;
         writer.certify_source(CertifiedSource::certify(
             observation.clone(),

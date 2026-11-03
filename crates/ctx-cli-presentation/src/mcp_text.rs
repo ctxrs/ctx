@@ -180,6 +180,7 @@ fn render_search_text(value: &Value) -> String {
         ));
         push_indented_key_value(&mut out, "ctx_session_id", result.get("ctx_session_id"));
         push_indented_key_value(&mut out, "ctx_event_id", result.get("ctx_event_id"));
+        push_archive_provenance(&mut out, result);
         push_indented_key_value(&mut out, "provider", result.get("provider"));
         push_indented_key_value(&mut out, "provider_key", result.get("provider_key"));
         push_indented_key_value(&mut out, "source_id", result.get("source_id"));
@@ -496,6 +497,7 @@ fn render_session_text(value: &Value) -> String {
         "provider_session_id",
         value.get("provider_session_id"),
     );
+    push_archive_provenance(&mut out, value);
     push_key_value(&mut out, "mode", value.get("mode"));
     out.push_str(&format!("events: {}\n", events.len()));
     if let Some(pagination) = value.get("pagination") {
@@ -671,6 +673,7 @@ fn push_event_summary(out: &mut String, index: usize, event: &Value) {
         "\n{index}. {sequence}{role} {event_type}{suffix}\n"
     ));
     push_indented_key_value(out, "ctx_event_id", event.get("ctx_event_id"));
+    push_archive_provenance(out, event);
     push_indented_activity(out, event.get("activity"));
     if let Some(text) = value_field(event, "text").filter(|text| !text.is_empty()) {
         out.push_str(&format!(
@@ -678,6 +681,20 @@ fn push_event_summary(out: &mut String, index: usize, event: &Value) {
             clip_inline(&text, MCP_TEXT_MAX_EVENT_CHARS)
         ));
     }
+}
+
+fn push_archive_provenance(out: &mut String, value: &Value) {
+    let provenance = &value["archive_provenance"];
+    if !provenance.is_object() {
+        return;
+    }
+    for (label, key) in [("Archive origin", "origin"), ("Archive view", "view")] {
+        if let Some(value) = provenance[key].as_str() {
+            let safe = ctx_terminal::sanitize_untrusted_history_body_for_terminal(value);
+            out.push_str(&format!("   {label} (creator-supplied): {safe}\n"));
+        }
+    }
+    out.push_str("   Not verified machine identities.\n");
 }
 
 fn push_indented_activity(out: &mut String, activity: Option<&Value>) {

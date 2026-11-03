@@ -83,16 +83,14 @@ impl OpenedCoordinator {
             }
             Err(error) => return Err(error),
         };
-        let needs_initialization = if created {
-            restrict_private_file_handle(&file)?;
-            true
-        } else {
-            match verify_coordinator_file(&file, magic) {
-                Ok(()) => false,
-                Err(_) if create && recoverable_coordinator_prefix(&file, magic)? => true,
-                Err(error) => return Err(error),
-            }
-        };
+        // The versioned filename defines the lock ranges. These bytes are only
+        // an initialization marker, never generation or owner authority. Repair
+        // the same inode/handle so existing process locks remain effective.
+        if create {
+            prepare_control_file(&file)?;
+        }
+        let needs_initialization =
+            created || (create && verify_coordinator_file(&file, magic).is_err());
         if needs_initialization {
             #[cfg(test)]
             if let Some(prefix_len) =
@@ -103,6 +101,7 @@ impl OpenedCoordinator {
                 std::process::exit(super::super::COORDINATOR_CREATION_CRASH_EXIT_CODE);
             }
             write_exact_at(&file, magic)?;
+            file.set_len(magic.len() as u64)?;
             file.sync_all()?;
         }
         verify_coordinator_file(&file, magic)?;
@@ -156,8 +155,8 @@ fn open_initialization_file(root: &File, name: &str, create: bool) -> io::Result
         }
         Err(error) => return Err(error),
     };
-    if created {
-        restrict_private_file_handle(&file)?;
+    if created || create {
+        prepare_control_file(&file)?;
     }
     verify_initialization_file(&file)?;
     Ok(file)
@@ -274,19 +273,17 @@ fn verify_coordinator_file(file: &File, magic: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn recoverable_coordinator_prefix(file: &File, magic: &[u8]) -> io::Result<bool> {
-    verify_private_file_handle(file)?;
+fn prepare_control_file(file: &File) -> io::Result<()> {
     let information = information(file)?;
-    let length = file.metadata()?.len();
     if information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
         || information.nNumberOfLinks != 1
-        || length >= magic.len() as u64
     {
-        return Ok(false);
+        return Err(invalid_state());
     }
-    let mut bytes = vec![0_u8; usize::try_from(length).map_err(|_| invalid_state())?];
-    read_exact_at(file, &mut bytes)?;
-    Ok(magic.starts_with(&bytes))
+    if verify_private_file_handle(file).is_err() {
+        restrict_private_file_handle(file)?;
+    }
+    Ok(())
 }
 
 fn verify_initialization_file(file: &File) -> io::Result<()> {
@@ -294,7 +291,6 @@ fn verify_initialization_file(file: &File) -> io::Result<()> {
     let information = information(file)?;
     if information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0
         && information.nNumberOfLinks == 1
-        && file.metadata()?.len() == 0
     {
         Ok(())
     } else {

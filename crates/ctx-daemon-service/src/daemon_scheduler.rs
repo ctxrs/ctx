@@ -860,16 +860,14 @@ fn record_source_refresh_retry(
 
     backoff.reset();
     let status = RefreshStatus::classify_schema_v1(&job)?;
-    if status
-        .terminal_outcome()
-        .and_then(|outcome| outcome.retry_advice())
-        == Some(RefreshRetryAdvice::RetryAdmission)
-    {
+    if status.request_state() == RefreshRequestState::Failed {
         let request_id = job
             .get("request_id")
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("terminal retry-admission status has no request ID"))?;
-        coordinator.complete_retry_admission_handoff(request_id)?;
+            .ok_or_else(|| anyhow::anyhow!("terminal failed status has no request ID"))?;
+        // Retry advice does not own queue capacity. Even a failure before any
+        // exact routes were admitted must release its durable terminal root.
+        coordinator.complete_failed_request_handoff(request_id)?;
     }
     // The engine already persisted this capture terminal together with its
     // logical-demand queue. Rewriting it here could discard the durable image
@@ -942,7 +940,7 @@ use std::{
 use anyhow::Result;
 use ctx_history_capture::SourceBackedRefreshScope;
 use ctx_history_core::utc_now;
-use ctx_history_refresh::{RefreshRetryAdvice, RefreshStatus};
+use ctx_history_refresh::{RefreshRequestState, RefreshStatus};
 use serde_json::{json, Value};
 
 use crate::{

@@ -1,4 +1,5 @@
 use super::*;
+use crate::filtering::fold_metadata_case;
 
 impl CoreEventRangeSelection {
     pub fn new<I, S>(
@@ -99,6 +100,37 @@ impl CoreEventRangeSelection {
         &self.filters
     }
 
+    /// Stored workspace evidence and whether each value matches this selection's
+    /// indexed workspace predicate. With no workspace filter, every value matches.
+    pub fn workspace_metadata<'a>(
+        &'a self,
+        record: &'a CoreRecord,
+    ) -> impl Iterator<Item = (&'a str, bool)> + 'a {
+        record
+            .content
+            .activity
+            .iter()
+            .flat_map(|activity| &activity.facts)
+            .filter(|fact| {
+                matches!(
+                    fact.kind,
+                    LiteralFactKind::Workspace
+                        | LiteralFactKind::SessionCwd
+                        | LiteralFactKind::ToolWorkdir
+                        | LiteralFactKind::Project
+                )
+            })
+            .map(|fact| {
+                (
+                    fact.value.as_str(),
+                    self.filters
+                        .workspace
+                        .as_deref()
+                        .is_none_or(|expected| fold_metadata_case(&fact.value).contains(expected)),
+                )
+            })
+    }
+
     pub fn cursor_for(
         &self,
         generation_id: &str,
@@ -191,22 +223,14 @@ impl CoreEventRangeSelection {
         {
             return false;
         }
-        if filters.workspace.as_deref().is_some_and(|expected| {
-            !has_literal_fact(record, LiteralFactKind::Workspace, |value| {
-                value.to_lowercase().contains(expected)
-            }) && !has_literal_fact(record, LiteralFactKind::SessionCwd, |value| {
-                value.to_lowercase().contains(expected)
-            }) && !has_literal_fact(record, LiteralFactKind::ToolWorkdir, |value| {
-                value.to_lowercase().contains(expected)
-            }) && !has_literal_fact(record, LiteralFactKind::Project, |value| {
-                value.to_lowercase().contains(expected)
-            })
-        }) {
+        if filters.workspace.is_some()
+            && !self.workspace_metadata(record).any(|(_, matches)| matches)
+        {
             return false;
         }
         if filters.file.as_deref().is_some_and(|expected| {
             !has_literal_fact(record, LiteralFactKind::File, |value| {
-                value.to_lowercase().contains(expected)
+                fold_metadata_case(value).contains(expected)
             })
         }) {
             return false;
@@ -267,7 +291,7 @@ fn canonicalize_optional_filter(
         return Err(CoreEventRangeError::InvalidFilter { field });
     }
     if lowercase {
-        current = current.to_lowercase();
+        current = fold_metadata_case(&current);
     }
     *value = Some(current);
     Ok(())

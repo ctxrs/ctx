@@ -81,6 +81,9 @@ pub use physical::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use physical::{checksum_walks, hashed_artifact_bytes, reset_physical_verification_activity};
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod read_metrics;
 #[cfg(any(test, feature = "test-support"))]
 pub use publication_probe::{
     AtomicPublicationStage, AtomicReplacementFailureProbe, PublicationIoProbe,
@@ -93,7 +96,8 @@ pub use retention::{
     acquire_generation_read_lease, acquire_generation_read_lease_from_root,
     acquire_generation_retention_lease, acquire_retained_generation_read_lease,
     acquire_retained_generation_read_lease_from_root, load_generation_retention_lease,
-    release_generation_retention_lease, GenerationReadLease, GenerationRetentionLease,
+    quarantine_invalid_retention_lease_with_writer_lock_held, release_generation_retention_lease,
+    GenerationReadLease, GenerationRetentionLease,
 };
 
 pub const MANIFEST_DIRECTORY: &str = "ctx-generations";

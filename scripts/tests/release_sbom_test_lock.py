@@ -255,13 +255,13 @@ def synthetic_lock_text() -> str:
                 "ctx-history-index-format",
                 "ctx-history-index-query",
                 "ctx-semantic-model",
-                "tantivy 0.26.1",
+                "tantivy 0.27.0",
             ),
         ),
         package(
             "ctx-history-index-format",
             "0.26.0",
-            ("ctx-history-core", "tantivy 0.26.1"),
+            ("ctx-history-core", "tantivy 0.27.0"),
         ),
         package(
             "ctx-history-index-query",
@@ -269,7 +269,7 @@ def synthetic_lock_text() -> str:
             (
                 "ctx-history-core",
                 "ctx-history-index-format",
-                "tantivy 0.26.1",
+                "tantivy 0.27.0",
             ),
         ),
         package(
@@ -566,7 +566,7 @@ def synthetic_lock_text() -> str:
         package("serde_json", "1.0.0", external=True),
         package(
             "tantivy",
-            "0.26.1",
+            "0.27.0",
             (
                 "fs4 0.1.0",
                 "lz4_flex 0.11.0",

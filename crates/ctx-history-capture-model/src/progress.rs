@@ -220,6 +220,8 @@ pub struct AttemptHistoryProgressSnapshot {
     pub processed_sessions: u64,
     pub processed_messages: u64,
     pub processed_tool_calls: u64,
+    /// Completed logical source coverage, including retained certified bytes.
+    /// This is progress accounting, not bytes read from sources or index files.
     pub processed_bytes: u64,
 }
 

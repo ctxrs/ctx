@@ -119,12 +119,20 @@ persistent daemon and removes its supervision; explicit `ctx import` and
 Machine-readable setup follows the same lifecycle and reports schema version 2
 with top-level `daemon_autostart` and `refresh_request` objects.
 
-Use a different root when testing:
+Use a different root with manual indexing when testing:
 
 ```bash
+ctx --data-root /tmp/ctx-demo index mode manual
 ctx --data-root /tmp/ctx-demo setup
 CTX_DATA_ROOT=/tmp/ctx-demo ctx status
 ```
+
+`--data-root` separates the index and configuration, but still discovers agent
+history from the same home and environment. A fresh root defaults to automatic
+indexing regardless of another root's mode. Select manual mode first to avoid
+leaving a persistent indexer running after a one-off command. Use
+`ctx daemon status --all` to inspect roots registered with this installation;
+stop one with `ctx --data-root /tmp/ctx-demo index mode manual`.
 
 Setup does not write to source repositories, call embedding executors, download
 embedding models, or require executor credentials while semantic search is

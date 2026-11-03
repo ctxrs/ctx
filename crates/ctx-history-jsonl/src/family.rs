@@ -251,6 +251,7 @@ pub struct JsonlReader<E: JsonlFamilyError> {
     direct_append_resume: bool,
     semantic_preflight_binding: Option<JsonlSemanticPreflightBinding>,
     oversized_record_policy: JsonlOversizedRecordPolicy,
+    replayed_identity_probe: Option<Box<JsonlProbe>>,
 }
 
 struct JsonlSemanticAppendResume {

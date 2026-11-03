@@ -34,13 +34,14 @@ pub(super) struct AsciiFoldSubstring {
     failure: Vec<u32>,
 }
 
+/// Metadata paths fold ASCII case only; distinct non-ASCII spellings stay distinct.
+pub(super) fn fold_metadata_case(value: &str) -> String {
+    value.to_ascii_lowercase()
+}
+
 impl AsciiFoldSubstring {
     fn new(needle: &str) -> Result<Self> {
-        let needle = needle
-            .as_bytes()
-            .iter()
-            .map(|byte| byte.to_ascii_lowercase())
-            .collect::<Vec<_>>();
+        let needle = fold_metadata_case(needle).into_bytes();
         let mut failure = Vec::with_capacity(needle.len());
         failure.push(0);
         for index in 1..needle.len() {

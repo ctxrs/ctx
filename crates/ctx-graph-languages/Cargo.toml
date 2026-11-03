@@ -51,7 +51,7 @@ tree-sitter-zig = "1.1.2"
 tree-sitter-groovy = "0.1.2"
 tree-sitter-dm = "0.25.4"
 tree-sitter-sfapex = "3.0.1"
-pulldown-cmark = "0.13"
+pulldown-cmark = "0.13.5"
 png = "0.18.1"
 quick-xml = "0.41"
 ctx_graph_types = { package = "ctx-graph-types", path = "../ctx-graph-types" }

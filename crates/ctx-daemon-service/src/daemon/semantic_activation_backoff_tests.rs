@@ -9,7 +9,8 @@ fn semantic_activation_retry_wakes_the_idle_daemon_at_its_deadline() {
     runtime.semantic_activation_retry.retry_not_before_at_ms =
         Some(utc_now().timestamp_millis() + 5_000);
 
-    let wait_for = daemon_wait_duration(&runtime, None, now + StdDuration::from_secs(30), now);
+    let wait_for =
+        daemon_wait_duration(&runtime, None, now + StdDuration::from_secs(30), now, false);
 
     assert!(wait_for > StdDuration::from_secs(4));
     assert!(wait_for <= StdDuration::from_secs(5));

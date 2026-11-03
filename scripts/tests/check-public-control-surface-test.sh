@@ -33,6 +33,11 @@ cp "${repo_root}/crates/ctx-app-config/src/loading_tests.rs" "${fixture}/crates/
 cp "${repo_root}/crates/ctx-cli/tests/unified_context.rs" "${fixture}/crates/ctx-cli/tests/"
 cp "${repo_root}/crates/ctx-cli/src/process_environment.rs" "${fixture}/crates/ctx-cli/src/"
 mkdir -p "${fixture}/crates/ctx-daemon-cli/tests/contracts"
+mkdir -p "${fixture}/crates/ctx-daemon-cli/src/daemon"
+cp "${repo_root}/crates/ctx-daemon-cli/src/daemon/registered_tests.rs" \
+  "${fixture}/crates/ctx-daemon-cli/src/daemon/"
+cp "${repo_root}/crates/ctx-daemon-cli/tests/contracts/daemon_rendering.rs" \
+  "${fixture}/crates/ctx-daemon-cli/tests/contracts/"
 cp "${repo_root}/crates/ctx-daemon-cli/tests/contracts/daemon_config_reload.rs" \
   "${fixture}/crates/ctx-daemon-cli/tests/contracts/"
 cp "${repo_root}/crates/ctx-upgrade-engine/src/upgrade/metadata.rs" \

@@ -1,5 +1,7 @@
+pub mod archive_export;
 mod attribution;
 pub use attribution::append_attribution;
+pub mod daemon;
 pub mod doctor;
 mod doctor_presentation;
 mod history_health;
@@ -21,7 +23,7 @@ mod status_usage;
 pub use doctor::DoctorArgs;
 pub use doctor_presentation::{
     append_previous_refresh_failure, render_doctor_human, source_epoch_findings,
-    DoctorRefreshFailure, DoctorSearchAvailability,
+    write_doctor_repair, DoctorRefreshFailure, DoctorSearchAvailability,
 };
 pub use import_diagnostics::{render_import_path_not_found, render_import_path_not_found_plain};
 pub use index::IndexArgs;

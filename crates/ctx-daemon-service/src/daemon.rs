@@ -782,6 +782,7 @@ where
                     .and(daemon_scheduler_source_refresh(&source_refresh_coordinator)),
                 next_safety_reconcile,
                 now,
+                iteration.did_work,
             );
             let wake = wakeup.wait(sharing_workers.wait_duration(wait_for));
             if wake.shutdown {

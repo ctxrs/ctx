@@ -4,11 +4,11 @@ use super::super::SERVER_NAME;
 use super::{server_command, ConfigStatus};
 
 pub fn status_continue(body: &str) -> Result<ConfigStatus> {
-    let doc: serde_yaml::Value = serde_yaml::from_str(body).context("parse YAML config")?;
+    let doc: yaml_serde::Value = yaml_serde::from_str(body).context("parse YAML config")?;
     let root = doc
         .as_mapping()
         .ok_or_else(|| anyhow!("YAML config root must be a mapping"))?;
-    let Some(servers) = root.get(serde_yaml::Value::String("mcpServers".to_owned())) else {
+    let Some(servers) = root.get(yaml_serde::Value::String("mcpServers".to_owned())) else {
         return Ok(ConfigStatus::Missing);
     };
     let servers = servers
@@ -35,30 +35,30 @@ pub fn status_continue(body: &str) -> Result<ConfigStatus> {
 
 pub fn upsert_continue(body: &str, force: bool) -> Result<String> {
     let mut doc = if body.trim().is_empty() {
-        let mut mapping = serde_yaml::Mapping::new();
+        let mut mapping = yaml_serde::Mapping::new();
         mapping.insert(
-            serde_yaml::Value::String("name".to_owned()),
-            serde_yaml::Value::String("ctx MCP".to_owned()),
+            yaml_serde::Value::String("name".to_owned()),
+            yaml_serde::Value::String("ctx MCP".to_owned()),
         );
         mapping.insert(
-            serde_yaml::Value::String("version".to_owned()),
-            serde_yaml::Value::String("0.0.1".to_owned()),
+            yaml_serde::Value::String("version".to_owned()),
+            yaml_serde::Value::String("0.0.1".to_owned()),
         );
         mapping.insert(
-            serde_yaml::Value::String("schema".to_owned()),
-            serde_yaml::Value::String("v1".to_owned()),
+            yaml_serde::Value::String("schema".to_owned()),
+            yaml_serde::Value::String("v1".to_owned()),
         );
-        serde_yaml::Value::Mapping(mapping)
+        yaml_serde::Value::Mapping(mapping)
     } else {
-        serde_yaml::from_str(body).context("parse YAML config")?
+        yaml_serde::from_str(body).context("parse YAML config")?
     };
     let root = doc
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("YAML config root must be a mapping"))?;
-    let servers_key = serde_yaml::Value::String("mcpServers".to_owned());
+    let servers_key = yaml_serde::Value::String("mcpServers".to_owned());
     let servers = root
         .entry(servers_key)
-        .or_insert_with(|| serde_yaml::Value::Sequence(Vec::new()));
+        .or_insert_with(|| yaml_serde::Value::Sequence(Vec::new()));
     let servers = servers
         .as_sequence_mut()
         .ok_or_else(|| anyhow!("mcpServers must be a YAML sequence"))?;
@@ -79,11 +79,11 @@ pub fn upsert_continue(body: &str, force: bool) -> Result<String> {
 }
 
 pub fn remove_continue(body: &str, force: bool) -> Result<String> {
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(body).context("parse YAML config")?;
+    let mut doc: yaml_serde::Value = yaml_serde::from_str(body).context("parse YAML config")?;
     let root = doc
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("YAML config root must be a mapping"))?;
-    let Some(servers) = root.get_mut(serde_yaml::Value::String("mcpServers".to_owned())) else {
+    let Some(servers) = root.get_mut(yaml_serde::Value::String("mcpServers".to_owned())) else {
         return Ok(body.to_owned());
     };
     let servers = servers
@@ -110,17 +110,17 @@ pub fn remove_continue(body: &str, force: bool) -> Result<String> {
 }
 
 pub fn status_goose(body: &str) -> Result<ConfigStatus> {
-    let doc: serde_yaml::Value = serde_yaml::from_str(body).context("parse YAML config")?;
+    let doc: yaml_serde::Value = yaml_serde::from_str(body).context("parse YAML config")?;
     let root = doc
         .as_mapping()
         .ok_or_else(|| anyhow!("YAML config root must be a mapping"))?;
-    let Some(extensions) = root.get(serde_yaml::Value::String("extensions".to_owned())) else {
+    let Some(extensions) = root.get(yaml_serde::Value::String("extensions".to_owned())) else {
         return Ok(ConfigStatus::Missing);
     };
     let extensions = extensions
         .as_mapping()
         .ok_or_else(|| anyhow!("extensions must be a YAML mapping"))?;
-    let Some(server) = extensions.get(serde_yaml::Value::String(SERVER_NAME.to_owned())) else {
+    let Some(server) = extensions.get(yaml_serde::Value::String(SERVER_NAME.to_owned())) else {
         return Ok(ConfigStatus::Missing);
     };
     Ok(if goose_server_is_current(server) {
@@ -132,21 +132,21 @@ pub fn status_goose(body: &str) -> Result<ConfigStatus> {
 
 pub fn upsert_goose(body: &str, force: bool) -> Result<String> {
     let mut doc = if body.trim().is_empty() {
-        serde_yaml::Value::Mapping(Default::default())
+        yaml_serde::Value::Mapping(Default::default())
     } else {
-        serde_yaml::from_str(body).context("parse YAML config")?
+        yaml_serde::from_str(body).context("parse YAML config")?
     };
     let root = doc
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("YAML config root must be a mapping"))?;
-    let extensions_key = serde_yaml::Value::String("extensions".to_owned());
+    let extensions_key = yaml_serde::Value::String("extensions".to_owned());
     let extensions = root
         .entry(extensions_key)
-        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+        .or_insert_with(|| yaml_serde::Value::Mapping(Default::default()));
     let extensions = extensions
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("extensions must be a YAML mapping"))?;
-    let ctx_key = serde_yaml::Value::String(SERVER_NAME.to_owned());
+    let ctx_key = yaml_serde::Value::String(SERVER_NAME.to_owned());
     if let Some(existing) = extensions.get(&ctx_key) {
         if goose_server_is_current(existing) {
             return render(&doc);
@@ -162,17 +162,17 @@ pub fn upsert_goose(body: &str, force: bool) -> Result<String> {
 }
 
 pub fn remove_goose(body: &str, force: bool) -> Result<String> {
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(body).context("parse YAML config")?;
+    let mut doc: yaml_serde::Value = yaml_serde::from_str(body).context("parse YAML config")?;
     let root = doc
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("YAML config root must be a mapping"))?;
-    let Some(extensions) = root.get_mut(serde_yaml::Value::String("extensions".to_owned())) else {
+    let Some(extensions) = root.get_mut(yaml_serde::Value::String("extensions".to_owned())) else {
         return Ok(body.to_owned());
     };
     let extensions = extensions
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("extensions must be a YAML mapping"))?;
-    let ctx_key = serde_yaml::Value::String(SERVER_NAME.to_owned());
+    let ctx_key = yaml_serde::Value::String(SERVER_NAME.to_owned());
     let Some(existing) = extensions.get(&ctx_key) else {
         return Ok(body.to_owned());
     };
@@ -186,120 +186,120 @@ pub fn remove_goose(body: &str, force: bool) -> Result<String> {
 }
 
 #[cfg(test)]
-fn continue_server_by_name(servers: &[serde_yaml::Value]) -> Option<&serde_yaml::Value> {
+fn continue_server_by_name(servers: &[yaml_serde::Value]) -> Option<&yaml_serde::Value> {
     continue_server_index(servers).map(|index| &servers[index])
 }
 
-fn continue_server_index(servers: &[serde_yaml::Value]) -> Option<usize> {
+fn continue_server_index(servers: &[yaml_serde::Value]) -> Option<usize> {
     servers.iter().position(continue_server_has_name)
 }
 
-fn continue_server_has_name(server: &serde_yaml::Value) -> bool {
-    mapping_get(server, "name").and_then(serde_yaml::Value::as_str) == Some(SERVER_NAME)
+fn continue_server_has_name(server: &yaml_serde::Value) -> bool {
+    mapping_get(server, "name").and_then(yaml_serde::Value::as_str) == Some(SERVER_NAME)
 }
 
-fn continue_server_value() -> serde_yaml::Value {
+fn continue_server_value() -> yaml_serde::Value {
     let command = server_command();
-    let mut mapping = serde_yaml::Mapping::new();
+    let mut mapping = yaml_serde::Mapping::new();
     mapping.insert(
-        serde_yaml::Value::String("name".to_owned()),
-        serde_yaml::Value::String(SERVER_NAME.to_owned()),
+        yaml_serde::Value::String("name".to_owned()),
+        yaml_serde::Value::String(SERVER_NAME.to_owned()),
     );
     mapping.insert(
-        serde_yaml::Value::String("type".to_owned()),
-        serde_yaml::Value::String("stdio".to_owned()),
+        yaml_serde::Value::String("type".to_owned()),
+        yaml_serde::Value::String("stdio".to_owned()),
     );
     mapping.insert(
-        serde_yaml::Value::String("command".to_owned()),
-        serde_yaml::Value::String(command.executable().to_owned()),
+        yaml_serde::Value::String("command".to_owned()),
+        yaml_serde::Value::String(command.executable().to_owned()),
     );
     mapping.insert(
-        serde_yaml::Value::String("args".to_owned()),
-        serde_yaml::Value::Sequence(
+        yaml_serde::Value::String("args".to_owned()),
+        yaml_serde::Value::Sequence(
             command
                 .args()
                 .iter()
-                .map(|arg| serde_yaml::Value::String((*arg).to_owned()))
+                .map(|arg| yaml_serde::Value::String((*arg).to_owned()))
                 .collect(),
         ),
     );
-    serde_yaml::Value::Mapping(mapping)
+    yaml_serde::Value::Mapping(mapping)
 }
 
-fn continue_server_is_current(value: &serde_yaml::Value) -> bool {
+fn continue_server_is_current(value: &yaml_serde::Value) -> bool {
     let expected = server_command();
     let Some(mapping) = value.as_mapping() else {
         return false;
     };
     let configured_command = mapping
-        .get(serde_yaml::Value::String("command".to_owned()))
-        .and_then(serde_yaml::Value::as_str);
+        .get(yaml_serde::Value::String("command".to_owned()))
+        .and_then(yaml_serde::Value::as_str);
     let args = mapping
-        .get(serde_yaml::Value::String("args".to_owned()))
-        .and_then(serde_yaml::Value::as_sequence);
+        .get(yaml_serde::Value::String("args".to_owned()))
+        .and_then(yaml_serde::Value::as_sequence);
     configured_command == Some(expected.executable()) && args_are_current(args)
 }
 
-fn goose_server_value() -> serde_yaml::Value {
+fn goose_server_value() -> yaml_serde::Value {
     let command = server_command();
-    let mut mapping = serde_yaml::Mapping::new();
+    let mut mapping = yaml_serde::Mapping::new();
     mapping.insert(
-        serde_yaml::Value::String("enabled".to_owned()),
-        serde_yaml::Value::Bool(true),
+        yaml_serde::Value::String("enabled".to_owned()),
+        yaml_serde::Value::Bool(true),
     );
     mapping.insert(
-        serde_yaml::Value::String("name".to_owned()),
-        serde_yaml::Value::String(SERVER_NAME.to_owned()),
+        yaml_serde::Value::String("name".to_owned()),
+        yaml_serde::Value::String(SERVER_NAME.to_owned()),
     );
     mapping.insert(
-        serde_yaml::Value::String("display_name".to_owned()),
-        serde_yaml::Value::String("ctx".to_owned()),
+        yaml_serde::Value::String("display_name".to_owned()),
+        yaml_serde::Value::String("ctx".to_owned()),
     );
     mapping.insert(
-        serde_yaml::Value::String("type".to_owned()),
-        serde_yaml::Value::String("stdio".to_owned()),
+        yaml_serde::Value::String("type".to_owned()),
+        yaml_serde::Value::String("stdio".to_owned()),
     );
     mapping.insert(
-        serde_yaml::Value::String("cmd".to_owned()),
-        serde_yaml::Value::String(command.executable().to_owned()),
+        yaml_serde::Value::String("cmd".to_owned()),
+        yaml_serde::Value::String(command.executable().to_owned()),
     );
     mapping.insert(
-        serde_yaml::Value::String("args".to_owned()),
-        serde_yaml::Value::Sequence(
+        yaml_serde::Value::String("args".to_owned()),
+        yaml_serde::Value::Sequence(
             command
                 .args()
                 .iter()
-                .map(|arg| serde_yaml::Value::String((*arg).to_owned()))
+                .map(|arg| yaml_serde::Value::String((*arg).to_owned()))
                 .collect(),
         ),
     );
     mapping.insert(
-        serde_yaml::Value::String("timeout".to_owned()),
-        serde_yaml::Value::Number(300.into()),
+        yaml_serde::Value::String("timeout".to_owned()),
+        yaml_serde::Value::Number(300.into()),
     );
-    serde_yaml::Value::Mapping(mapping)
+    yaml_serde::Value::Mapping(mapping)
 }
 
-fn goose_server_is_current(value: &serde_yaml::Value) -> bool {
+fn goose_server_is_current(value: &yaml_serde::Value) -> bool {
     let expected = server_command();
     let Some(mapping) = value.as_mapping() else {
         return false;
     };
     let cmd = mapping
-        .get(serde_yaml::Value::String("cmd".to_owned()))
-        .and_then(serde_yaml::Value::as_str)
+        .get(yaml_serde::Value::String("cmd".to_owned()))
+        .and_then(yaml_serde::Value::as_str)
         .or_else(|| {
             mapping
-                .get(serde_yaml::Value::String("command".to_owned()))
-                .and_then(serde_yaml::Value::as_str)
+                .get(yaml_serde::Value::String("command".to_owned()))
+                .and_then(yaml_serde::Value::as_str)
         });
     let args = mapping
-        .get(serde_yaml::Value::String("args".to_owned()))
-        .and_then(serde_yaml::Value::as_sequence);
+        .get(yaml_serde::Value::String("args".to_owned()))
+        .and_then(yaml_serde::Value::as_sequence);
     cmd == Some(expected.executable()) && args_are_current(args)
 }
 
-fn args_are_current(args: Option<&Vec<serde_yaml::Value>>) -> bool {
+fn args_are_current(args: Option<&Vec<yaml_serde::Value>>) -> bool {
     let expected = server_command();
     args.is_some_and(|args| {
         args.len() == expected.args().len()
@@ -310,14 +310,14 @@ fn args_are_current(args: Option<&Vec<serde_yaml::Value>>) -> bool {
     })
 }
 
-fn mapping_get<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a serde_yaml::Value> {
+fn mapping_get<'a>(value: &'a yaml_serde::Value, key: &str) -> Option<&'a yaml_serde::Value> {
     value
         .as_mapping()?
-        .get(serde_yaml::Value::String(key.to_owned()))
+        .get(yaml_serde::Value::String(key.to_owned()))
 }
 
-fn render(value: &serde_yaml::Value) -> Result<String> {
-    let mut body = serde_yaml::to_string(value)?;
+fn render(value: &yaml_serde::Value) -> Result<String> {
+    let mut body = yaml_serde::to_string(value)?;
     if !body.ends_with('\n') {
         body.push('\n');
     }
@@ -329,9 +329,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn yaml_writers_preserve_aliases_merge_keys_tags_and_scalar_types() {
+        let original = "base: &base {enabled: true, retries: 3}\nalias: *base\nmetadata:\n  <<: *base\n  numeric_text: '001'\n  absent: null\n  tagged: !custom payload\n  note: |\n    first\n    second\n";
+        for rendered in [
+            upsert_continue(original, false).unwrap(),
+            upsert_goose(original, false).unwrap(),
+        ] {
+            let value: yaml_serde::Value = yaml_serde::from_str(&rendered).unwrap();
+            assert_eq!(value["alias"]["enabled"].as_bool(), Some(true));
+            assert_eq!(value["alias"]["retries"].as_u64(), Some(3));
+            assert_eq!(value["metadata"]["<<"]["enabled"].as_bool(), Some(true));
+            assert_eq!(value["metadata"]["<<"]["retries"].as_u64(), Some(3));
+            assert_eq!(value["metadata"]["numeric_text"].as_str(), Some("001"));
+            assert!(value["metadata"]["absent"].is_null());
+            assert_eq!(value["metadata"]["note"].as_str(), Some("first\nsecond\n"));
+            let yaml_serde::Value::Tagged(tagged) = &value["metadata"]["tagged"] else {
+                panic!("unrelated custom YAML tag was lost");
+            };
+            assert_eq!(tagged.tag.to_string(), "!custom");
+            assert_eq!(tagged.value.as_str(), Some("payload"));
+        }
+    }
+
+    #[test]
+    fn yaml_writers_reject_duplicate_keys_and_multiple_documents() {
+        for original in [
+            "key: first\nkey: second\n",
+            "key: first\n---\nkey: second\n",
+        ] {
+            assert!(upsert_continue(original, false).is_err());
+            assert!(upsert_goose(original, false).is_err());
+        }
+    }
+
+    #[test]
     fn goose_writer_adds_extension_and_is_idempotent() {
         let first = upsert_goose("GOOSE_MODEL: test\n", false).unwrap();
-        let value: serde_yaml::Value = serde_yaml::from_str(&first).unwrap();
+        let value: yaml_serde::Value = yaml_serde::from_str(&first).unwrap();
         let ctx = mapping_get(mapping_get(&value, "extensions").unwrap(), "ctx").unwrap();
         assert_eq!(mapping_get(ctx, "cmd").unwrap().as_str(), Some("ctx"));
         assert_eq!(status_goose(&first).unwrap(), ConfigStatus::Current);
@@ -342,7 +376,7 @@ mod tests {
     #[test]
     fn continue_writer_adds_named_server_and_is_idempotent() {
         let first = upsert_continue("name: Local\nversion: 1.0.0\nschema: v1\n", false).unwrap();
-        let value: serde_yaml::Value = serde_yaml::from_str(&first).unwrap();
+        let value: yaml_serde::Value = yaml_serde::from_str(&first).unwrap();
         let servers = mapping_get(&value, "mcpServers")
             .unwrap()
             .as_sequence()
@@ -362,7 +396,7 @@ mod tests {
 
         let repaired = upsert_continue(malformed, true).unwrap();
         assert_eq!(status_continue(&repaired).unwrap(), ConfigStatus::Current);
-        let value: serde_yaml::Value = serde_yaml::from_str(&repaired).unwrap();
+        let value: yaml_serde::Value = yaml_serde::from_str(&repaired).unwrap();
         let servers = mapping_get(&value, "mcpServers")
             .unwrap()
             .as_sequence()
@@ -376,7 +410,7 @@ mod tests {
             &server_command()
                 .args()
                 .iter()
-                .map(|arg| serde_yaml::Value::String((*arg).to_owned()))
+                .map(|arg| yaml_serde::Value::String((*arg).to_owned()))
                 .collect::<Vec<_>>()
         );
     }
@@ -389,7 +423,7 @@ mod tests {
 
         let repaired = upsert_goose(malformed, true).unwrap();
         assert_eq!(status_goose(&repaired).unwrap(), ConfigStatus::Current);
-        let value: serde_yaml::Value = serde_yaml::from_str(&repaired).unwrap();
+        let value: yaml_serde::Value = yaml_serde::from_str(&repaired).unwrap();
         let args = mapping_get(
             mapping_get(mapping_get(&value, "extensions").unwrap(), "ctx").unwrap(),
             "args",
@@ -402,7 +436,7 @@ mod tests {
             &server_command()
                 .args()
                 .iter()
-                .map(|arg| serde_yaml::Value::String((*arg).to_owned()))
+                .map(|arg| yaml_serde::Value::String((*arg).to_owned()))
                 .collect::<Vec<_>>()
         );
     }
@@ -412,9 +446,9 @@ mod tests {
         let current_only =
             "name: Local\nmcpServers:\n  - name: ctx\n    command: ctx\n    args: [mcp, serve]\n";
         let removed = remove_continue(current_only, false).unwrap();
-        let value: serde_yaml::Value = serde_yaml::from_str(&removed).unwrap();
+        let value: yaml_serde::Value = yaml_serde::from_str(&removed).unwrap();
         assert_eq!(
-            mapping_get(&value, "name").and_then(serde_yaml::Value::as_str),
+            mapping_get(&value, "name").and_then(yaml_serde::Value::as_str),
             Some("Local")
         );
         assert!(mapping_get(&value, "mcpServers")
@@ -449,9 +483,9 @@ mod tests {
         let current_only =
             "GOOSE_MODEL: test\nextensions:\n  ctx:\n    cmd: ctx\n    args: [mcp, serve]\n";
         let removed = remove_goose(current_only, false).unwrap();
-        let value: serde_yaml::Value = serde_yaml::from_str(&removed).unwrap();
+        let value: yaml_serde::Value = yaml_serde::from_str(&removed).unwrap();
         assert_eq!(
-            mapping_get(&value, "GOOSE_MODEL").and_then(serde_yaml::Value::as_str),
+            mapping_get(&value, "GOOSE_MODEL").and_then(yaml_serde::Value::as_str),
             Some("test")
         );
         assert!(mapping_get(&value, "extensions")
@@ -463,12 +497,12 @@ mod tests {
 
         let with_other = "extensions:\n  other:\n    cmd: other\n    args: []\n  ctx:\n    cmd: ctx\n    args: [mcp, serve]\n";
         let removed = remove_goose(with_other, false).unwrap();
-        let value: serde_yaml::Value = serde_yaml::from_str(&removed).unwrap();
+        let value: yaml_serde::Value = yaml_serde::from_str(&removed).unwrap();
         let extensions = mapping_get(&value, "extensions").unwrap();
         assert!(mapping_get(extensions, "ctx").is_none());
         assert_eq!(
             mapping_get(mapping_get(extensions, "other").unwrap(), "cmd")
-                .and_then(serde_yaml::Value::as_str),
+                .and_then(yaml_serde::Value::as_str),
             Some("other")
         );
     }

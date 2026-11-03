@@ -32,6 +32,28 @@ fn resolver_at(address: SocketAddr) -> TokioResolver {
 }
 
 #[test]
+fn office_format_is_inferred_from_zip_members() {
+    use zip::{ZipWriter, write::SimpleFileOptions};
+
+    let url = reqwest::Url::parse("https://example.com/document").unwrap();
+    for (member, expected) in [
+        ("word/document.xml", "docx"),
+        ("xl/worksheets/sheet1.xml", "xlsx"),
+    ] {
+        let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(member, SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"<document/>").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        assert_eq!(
+            infer_format(&bytes, None, &url, "document").unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn redirect_targets_keep_scheme_credentials_and_private_address_checks() {
     let source = safe_url("https://public.example/start", false).unwrap();
     assert_eq!(

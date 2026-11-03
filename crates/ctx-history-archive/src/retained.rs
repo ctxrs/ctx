@@ -27,6 +27,8 @@ pub(crate) const OBSERVATION_KIND: &str = "archive-owned-member-v1";
 pub(crate) struct OwnedMember {
     pub snapshot: String,
     pub member: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ArchiveIdentity>,
 }
 
 /// A single-origin export, including identities intentionally not exported.
@@ -47,9 +49,25 @@ pub fn export_data_root(
     identity: ArchiveIdentity,
     selection: &Selection,
 ) -> Result<ExportReceipt> {
+    let index = VerifiedIndex::open_pinned(root.join("search/lexical"))?;
+    export_pinned(
+        root,
+        &index,
+        destination,
+        identity,
+        &crate::selection::SessionSelection::explicit(selection),
+    )
+}
+
+pub(crate) fn export_pinned(
+    root: &Path,
+    index: &VerifiedIndex,
+    destination: &Path,
+    identity: ArchiveIdentity,
+    selection: &crate::selection::SessionSelection<'_>,
+) -> Result<ExportReceipt> {
     identity.validate()?;
     let owned = crate::is_archive_root(root)?;
-    let index = VerifiedIndex::open_pinned(root.join("search/lexical"))?;
     if !owned {
         if index
             .manifest()
@@ -62,20 +80,17 @@ pub fn export_data_root(
             ));
         }
         return Ok(ExportReceipt {
-            manifest: crate::export(&index, destination, identity, selection)?,
+            manifest: crate::export::export_selected(
+                index,
+                destination,
+                identity,
+                selection,
+                || Ok(()),
+            )?,
             excluded_identities: Vec::new(),
         });
     }
-    if selection
-        .sources
-        .iter()
-        .chain(&selection.sessions)
-        .any(|id| !crate::is_digest(id))
-    {
-        return Err(invalid(
-            "selection requires full lowercase identity digests",
-        ));
-    }
+    selection.explicit.validate()?;
     if destination.try_exists()? {
         return Err(invalid("archive destination already exists"));
     }
@@ -99,13 +114,16 @@ pub fn export_data_root(
     for certificate in &index.manifest().sources {
         let observation = certificate.observation();
         if observation.source().source_format() != "ctx_archive_v1"
-            || observation.revision_kind() != OBSERVATION_KIND
+            || !matches!(
+                observation.revision_kind(),
+                OBSERVATION_KIND | crate::provenance::OBSERVATION_KIND
+            )
         {
             return Err(invalid(
                 "archive-owned export requires committed original-member references",
             ));
         }
-        let owned: OwnedMember = serde_json::from_slice(observation.revision())?;
+        let owned: OwnedMember = OwnedMember::decode(observation)?;
         if !crate::is_digest(&owned.snapshot)
             || !owned
                 .member
@@ -122,7 +140,7 @@ pub fn export_data_root(
                 owned.member,
                 serde_json::to_string(observation.source())?,
                 hex(certificate.content_digest()),
-                selection.includes_source(observation.source())
+                selection.includes_source(observation.source())?
             ],
         )?;
     }
@@ -164,7 +182,7 @@ pub fn export_data_root(
                 selected |= selection.includes_session(crate::restore::session_for_source(
                     &source,
                     member.session_id,
-                )?);
+                )?)?;
             }
             if selected {
                 retain_member(&db, &archive, stage.path(), &member)?;
@@ -198,11 +216,9 @@ pub fn export_data_root(
     let manifest = finish(
         &db,
         stage.path(),
-        &index,
+        index,
         identity,
-        !selection.sources.is_empty()
-            || !selection.sessions.is_empty()
-            || !excluded_identities.is_empty(),
+        selection.is_subset() || !excluded_identities.is_empty(),
     )?;
     ctx_history_index_generation::sync_directory(&stage.path().join("members"))?;
     ctx_history_index_generation::sync_directory(stage.path())?;
