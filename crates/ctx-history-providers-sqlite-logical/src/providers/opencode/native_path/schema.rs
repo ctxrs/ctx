@@ -9,6 +9,8 @@ use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 use super::model::OpenCodeNativeSchemaFamily;
 use crate::provider::providers::opencode::OpenCodeSqliteDialect;
 
+pub(super) const PAYLOAD_TABLES: &[&str] = &["session_message", "session_entry", "message", "part"];
+
 const MAX_NATIVE_IDENTITY_BYTES: i64 = 4 * 1024;
 const JSON_HINT_BYTES: usize = 256;
 const CONVERSATION_ROLES: &str =
@@ -20,6 +22,7 @@ const CONVERSATION_TYPES: &str =
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct OpenCodeNativeSchema {
+    pub(super) bounded_payloads: bool,
     pub(super) family: OpenCodeNativeSchemaFamily,
     pub(super) capability_digest: String,
     pub(super) user_version: i64,
@@ -48,7 +51,27 @@ enum CurrentTableRows {
 }
 
 impl OpenCodeNativeSchema {
+    #[cfg(test)]
     pub(super) fn probe(conn: &Connection, dialect: &OpenCodeSqliteDialect) -> Result<Self> {
+        Self::probe_with_bound(conn, dialect, false)
+    }
+
+    pub(super) fn payload_bytes_sql(&self, alias: &str) -> String {
+        if self.bounded_payloads {
+            format!(
+                "{alias}.{}",
+                crate::provider_sources::SqliteSourceColumnBound::BYTES_COLUMN
+            )
+        } else {
+            format!("octet_length({alias}.data)")
+        }
+    }
+
+    pub(super) fn probe_with_bound(
+        conn: &Connection,
+        dialect: &OpenCodeSqliteDialect,
+        bounded_payloads: bool,
+    ) -> Result<Self> {
         let tables = sqlite_tables(conn)?;
         if !tables.contains("session") && !tables.contains("session_v2") {
             return Err(CaptureError::InvalidPayload(format!(
@@ -112,7 +135,7 @@ impl OpenCodeNativeSchema {
             conn.query_row(
                 "select exists(
                      select 1 from message m
-                     join part p on p.message_id = m.id
+                     join part p on m.id = p.message_id
                      limit 1
                  )",
                 [],
@@ -163,8 +186,9 @@ impl OpenCodeNativeSchema {
         };
         let user_version = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let schema_version = conn.pragma_query_value(None, "schema_version", |row| row.get(0))?;
-        let capability_digest = capability_digest(conn, user_version, family)?;
+        let capability_digest = capability_digest(conn, user_version, family, bounded_payloads)?;
         Ok(Self {
+            bounded_payloads,
             family,
             capability_digest,
             user_version,
@@ -616,19 +640,26 @@ fn capability_digest(
     conn: &Connection,
     user_version: i64,
     selected_family: OpenCodeNativeSchemaFamily,
+    bounded_payloads: bool,
 ) -> Result<String> {
     let table_names = sqlite_tables(conn)?;
     let mut tables = BTreeMap::new();
     for table in &table_names {
         let sql = format!("pragma table_info(\"{}\")", table.replace('"', "\"\""));
         let mut statement = conn.prepare(&sql)?;
-        let columns = statement
+        let mut columns = statement
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        if bounded_payloads && PAYLOAD_TABLES.contains(&table.as_str()) {
+            columns.retain(|column| {
+                column != crate::provider_sources::SqliteSourceColumnBound::BYTES_COLUMN
+            });
+        }
         tables.insert(table.clone(), columns);
     }
-    let candidate_families = ["session_message", "session_entry", "message", "part"]
-        .into_iter()
+    let candidate_families = PAYLOAD_TABLES
+        .iter()
+        .copied()
         .filter(|table| table_names.contains(*table))
         .collect::<Vec<_>>();
     let mut populated = BTreeMap::new();
@@ -639,7 +670,7 @@ fn capability_digest(
         conn.query_row(
             "select exists(
                  select 1 from message m
-                 join part p on p.message_id = m.id
+                 join part p on m.id = p.message_id
                  limit 1
              )",
             [],

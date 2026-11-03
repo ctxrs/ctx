@@ -38,7 +38,9 @@ const MUX_CORE_ACTIVITY_REVISION: &str = "mux-source-backed-v16-explicit-root-on
 const OPENCLAW_CORE_ACTIVITY_REVISION: &str =
     "openclaw-source-backed-v20-direct-parent-explicit-root";
 const CRUSH_CORE_ACTIVITY_REVISION: &str = "crush-sqlite-source-backed-v5-record-rejections";
-const OPENCODE_CORE_ACTIVITY_REVISION: &str = "opencode-family-source-backed-v14-proven-v2-overlap";
+const OPENCODE_CORE_ACTIVITY_REVISION: &str =
+    "opencode-family-source-backed-v15-canonical-parent-order";
+const OPENCODE_RELEASED_V14_REVISION: &str = "opencode-family-source-backed-v14-proven-v2-overlap";
 const OPENCODE_RELEASED_V13_REVISION: &str =
     "opencode-family-source-backed-v13-bounded-oversized-content";
 const OPENCODE_RELEASED_V12_REVISION: &str =
@@ -155,6 +157,7 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
         ) || (opencode_schema
             && [
                 OPENCODE_CORE_ACTIVITY_REVISION,
+                OPENCODE_RELEASED_V14_REVISION,
                 OPENCODE_RELEASED_V13_REVISION,
                 OPENCODE_RELEASED_V12_REVISION,
             ]

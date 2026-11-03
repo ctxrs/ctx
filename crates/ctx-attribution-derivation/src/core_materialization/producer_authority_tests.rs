@@ -284,6 +284,7 @@ fn opencode_retained_and_migrated_tuples_preserve_native_primary_and_child_admis
         "opencode-family-source-backed-v12-known-file-carriers",
         "opencode-family-source-backed-v13-bounded-oversized-content",
         "opencode-family-source-backed-v14-proven-v2-overlap",
+        "opencode-family-source-backed-v15-canonical-parent-order",
     ] {
         for primary in [false, true] {
             let mut record = provider_record("opencode", false)?;

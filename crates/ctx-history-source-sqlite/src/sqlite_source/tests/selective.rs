@@ -1,5 +1,6 @@
 use super::super::resources::override_next_scratch_available_space_for_test;
 use super::*;
+use crate::SqliteSourceColumnBound;
 
 fn selected(authority: &SqliteSourceDirectoryAuthority) -> SqliteSourceReadSnapshot {
     authority
@@ -206,7 +207,7 @@ fn selected_schema_values_and_native_rowids_are_preserved() {
     let path = temp.path().join("provider.sqlite");
     let source = Connection::open(&path).unwrap();
     source.execute_batch("PRAGMA foreign_keys=OFF; CREATE TABLE messages (
-        id TEXT PRIMARY KEY, body TEXT, integer_value INTEGER, real_value REAL, bytes BLOB,
+        id TEXT PRIMARY KEY, body TEXT UNIQUE, integer_value INTEGER, real_value REAL, bytes BLOB,
         parent TEXT REFERENCES omitted(id), CHECK(json_valid(body)));
         CREATE INDEX by_body ON messages(body COLLATE NOCASE DESC) WHERE body IS NOT NULL;
         CREATE TABLE omitted(id TEXT PRIMARY KEY);
@@ -315,4 +316,376 @@ fn selected_schema_execution_cannot_attach_or_change_unrelated_objects() {
         "CREATE INDEX foreign_table ON messages((SELECT value FROM other))"
     )
     .is_err());
+}
+
+#[test]
+fn bounded_cells_keep_byte_lengths_types_and_native_metadata_cannot_spoof_them() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let path = temp.path().join("provider.sqlite");
+    let source = Connection::open(&path).unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE messages(body UNIQUE CHECK(octet_length(body)>0),
+            sibling TEXT COLLATE NOCASE PRIMARY KEY);
+        CREATE INDEX by_sibling ON messages(sibling);
+        CREATE INDEX by_expression ON messages(length(body));
+        CREATE INDEX by_partial ON messages(sibling) WHERE body != '';
+        INSERT INTO messages(rowid,body,sibling) VALUES
+        (-7,CAST(x'c3a900ff' AS TEXT),'exact'), (9,'ééé','multibyte'),
+        (11,CAST(x'0000000000' AS TEXT),'nul'), (13,x'0001020304','blob'),
+        (15,NULL,'null'), (17,42,'integer'), (19,1.25,'real');",
+        )
+        .unwrap();
+    let before = directory_file_state(temp.path());
+    let authority = retain_parent_in_data_root(data.path(), temp.path());
+    let bound = SqliteSourceColumnBound {
+        tables: &["messages"],
+        column: "body",
+        maximum_bytes: 4,
+    };
+    let snapshot = authority
+        .open_bounded_tables_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            &["messages"],
+            Some(bound),
+            |_| Ok::<(), ()>(()),
+        )
+        .unwrap();
+    assert_eq!(snapshot.column_bound(), Some(bound));
+    let connection = snapshot.connection().unwrap();
+    let values: Vec<(i64, String, String, Option<i64>, String)> = connection.prepare(
+        "SELECT rowid,typeof(body),hex(body),__ctx_original_bytes,sibling FROM messages ORDER BY rowid",
+    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
+        .unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(
+        values,
+        vec![
+            (
+                -7,
+                "text".into(),
+                "C3A900FF".into(),
+                Some(4),
+                "exact".into()
+            ),
+            (9, "text".into(), "".into(), Some(6), "multibyte".into()),
+            (11, "text".into(), "".into(), Some(5), "nul".into()),
+            (13, "blob".into(), "".into(), Some(5), "blob".into()),
+            (15, "null".into(), "".into(), None, "null".into()),
+            (
+                17,
+                "integer".into(),
+                "3432".into(),
+                Some(2),
+                "integer".into()
+            ),
+            (19, "real".into(), "312E3235".into(), Some(4), "real".into()),
+        ]
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='by_sibling'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT sibling FROM messages INDEXED BY by_sibling WHERE sibling='EXACT'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "exact"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM pragma_index_list('messages') WHERE origin='pk'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type='index'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2,
+        "keep only the primary identity and ordinary sibling index"
+    );
+    snapshot.finish().unwrap();
+    assert_eq!(directory_file_state(temp.path()), before);
+    source
+        .execute(
+            "ALTER TABLE messages ADD COLUMN __ctx_original_bytes INTEGER",
+            [],
+        )
+        .unwrap();
+    assert!(authority
+        .open_bounded_tables_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            &["messages"],
+            Some(bound),
+            |_| Ok::<(), ()>(()),
+        )
+        .is_err());
+    let exact = selected(&authority);
+    assert_eq!(exact.column_bound(), None);
+    assert_eq!(
+        exact
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT octet_length(body) FROM messages WHERE rowid=9",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        6
+    );
+    exact.finish().unwrap();
+    assert_eq!(staging_entries(data.path()), 0);
+}
+
+#[test]
+fn bounded_schema_preserves_rowid_aliases_and_strict_column_types() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    for (schema, rowid) in [
+        ("id INTEGER PRIMARY KEY, body TEXT", 7),
+        ("id INTEGER PRIMARY KEY DESC, body TEXT", -3),
+        ("id INTEGER, body TEXT, PRIMARY KEY(id DESC)", 7),
+        ("id INTEGER, body TEXT, PRIMARY KEY(id, body)", -3),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let path = temp.path().join("provider.sqlite");
+        let source = Connection::open(&path).unwrap();
+        source
+            .execute_batch(&format!(
+                "CREATE TABLE messages(sibling ANY UNIQUE, {schema}) STRICT;
+             INSERT INTO messages(rowid,id,body,sibling) VALUES({rowid},7,'oversized','000123');"
+            ))
+            .unwrap();
+        let authority = retain_parent_in_data_root(data.path(), temp.path());
+        let snapshot = authority
+            .open_bounded_tables_snapshot_with_progress(
+                OsStr::new("provider.sqlite"),
+                &["messages"],
+                Some(SqliteSourceColumnBound {
+                    tables: &["messages"],
+                    column: "body",
+                    maximum_bytes: 4,
+                }),
+                |_| Ok::<(), ()>(()),
+            )
+            .unwrap();
+        let copied = snapshot.connection().unwrap();
+        assert_eq!(
+            copied
+                .query_row("SELECT rowid,id,body,sibling FROM messages", [], |row| Ok(
+                    (
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    )
+                ),)
+                .unwrap(),
+            (rowid, 7, "".to_owned(), "000123".to_owned())
+        );
+        assert_eq!(
+            copied
+                .query_row(
+                    "SELECT count(*) FROM pragma_index_list('messages') WHERE origin='u'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        snapshot.finish().unwrap();
+    }
+}
+
+#[test]
+fn bounded_payload_integer_primary_key_desc_keeps_native_rowids() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let path = temp.path().join("provider.sqlite");
+    let source = Connection::open(&path).unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE messages(sibling TEXT, body INTEGER PRIMARY KEY DESC);
+        INSERT INTO messages(rowid,sibling,body)
+        VALUES(-8,'one','large-one'),(5,'two','large-two'),(12,'small','ok');",
+        )
+        .unwrap();
+    let before = directory_file_state(temp.path());
+    let authority = retain_parent_in_data_root(data.path(), temp.path());
+    for bounded in [false, true] {
+        let snapshot = authority
+            .open_bounded_tables_snapshot_with_progress(
+                OsStr::new("provider.sqlite"),
+                &["messages"],
+                bounded.then_some(SqliteSourceColumnBound {
+                    tables: &["messages"],
+                    column: "body",
+                    maximum_bytes: 4,
+                }),
+                |_| Ok::<(), ()>(()),
+            )
+            .unwrap();
+        let rows = snapshot
+            .connection()
+            .unwrap()
+            .prepare("SELECT rowid,sibling,body FROM messages ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    -8,
+                    "one".into(),
+                    if bounded { "" } else { "large-one" }.into()
+                ),
+                (
+                    5,
+                    "two".into(),
+                    if bounded { "" } else { "large-two" }.into()
+                ),
+                (12, "small".into(), "ok".into()),
+            ]
+        );
+        if bounded {
+            let lengths = snapshot
+                .connection()
+                .unwrap()
+                .prepare("SELECT __ctx_original_bytes FROM messages ORDER BY rowid")
+                .unwrap()
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(lengths, [9, 9, 2]);
+        }
+        snapshot.finish().unwrap();
+    }
+    assert_eq!(directory_file_state(temp.path()), before);
+    assert_eq!(staging_entries(data.path()), 0);
+}
+
+#[test]
+fn bounded_covering_indexes_keep_safe_nonunique_lookup_prefixes() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let path = temp.path().join("provider.sqlite");
+    let source = Connection::open(&path).unwrap();
+    source.execute_batch(
+        "CREATE TABLE messages(parent TEXT, id TEXT, body TEXT,
+             UNIQUE(parent COLLATE NOCASE DESC,id COLLATE RTRIM,body));
+         CREATE UNIQUE INDEX covering ON messages(parent COLLATE NOCASE DESC,id COLLATE RTRIM,body);
+         CREATE INDEX expression ON messages(parent COLLATE BINARY,id DESC,json_extract(body,'$.type'));
+         INSERT INTO messages VALUES('same','id','{\"type\":\"one\"}'),('SAME','id ','{\"type\":\"two\"}');"
+    ).unwrap();
+    let before = directory_file_state(temp.path());
+    let authority = retain_parent_in_data_root(data.path(), temp.path());
+    let snapshot = authority
+        .open_bounded_tables_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            &["messages"],
+            Some(SqliteSourceColumnBound {
+                tables: &["messages"],
+                column: "body",
+                maximum_bytes: 4,
+            }),
+            |_| Ok::<(), ()>(()),
+        )
+        .unwrap();
+    let copied = snapshot.connection().unwrap();
+    let automatic: String = copied.query_row(
+        "SELECT name FROM pragma_index_list('messages') WHERE name NOT IN ('covering','expression')",
+        [], |row| row.get(0),
+    ).unwrap();
+    for (index, expected) in [
+        (
+            automatic.as_str(),
+            vec![
+                ("parent".to_owned(), "NOCASE".to_owned(), true),
+                ("id".to_owned(), "RTRIM".to_owned(), false),
+            ],
+        ),
+        (
+            "covering",
+            vec![
+                ("parent".to_owned(), "NOCASE".to_owned(), true),
+                ("id".to_owned(), "RTRIM".to_owned(), false),
+            ],
+        ),
+        (
+            "expression",
+            vec![
+                ("parent".to_owned(), "BINARY".to_owned(), false),
+                ("id".to_owned(), "BINARY".to_owned(), true),
+            ],
+        ),
+    ] {
+        let keys = copied
+            .prepare("SELECT name,coll,desc FROM pragma_index_xinfo(?1) WHERE key=1 ORDER BY seqno")
+            .unwrap()
+            .query_map([index], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(keys, expected);
+        assert!(!copied
+            .query_row(
+                "SELECT \"unique\" FROM pragma_index_list('messages') WHERE name=?1",
+                [index],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap());
+    }
+    assert_eq!(copied.query_row(
+        "SELECT count(*) FROM messages INDEXED BY covering WHERE parent='same' COLLATE NOCASE AND body='' AND __ctx_original_bytes=14",
+        [], |row| row.get::<_,i64>(0),
+    ).unwrap(), 2);
+    snapshot.finish().unwrap();
+    assert_eq!(directory_file_state(temp.path()), before);
 }
