@@ -597,7 +597,7 @@ impl SqliteSourceTerminalFence {
                 family.revalidate(&self.inner.native_evidence)?;
             }
             SqliteSourceSnapshotPolicy::StablePrivateCopy
-            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_, _) => {
                 let family = SqliteSourceFamily::open(&authority, &self.inner.database_name, || {})
                     .map_err(map_revalidation_error)?;
                 family.revalidate_database_identity(&self.inner.native_evidence)?;
@@ -662,6 +662,7 @@ pub struct SqliteSourceReadSnapshot {
     sqlite_evidence: SqliteSnapshotEvidence,
     evidence: SqliteSourceEvidence,
     policy: SqliteSourceSnapshotPolicy,
+    column_bound: Option<SqliteSourceColumnBound>,
     admitted_revision_is_replay_safe: bool,
     strategy: SqliteSourceSnapshotStrategy,
     copied_bytes: u64,
@@ -709,6 +710,12 @@ impl SqliteSourceReadSnapshot {
         self.strategy
     }
 
+    /// The provider-requested bound actually applied to this private copy.
+    /// Native columns never establish this authority; full-family copies return None.
+    pub fn column_bound(&self) -> Option<SqliteSourceColumnBound> {
+        self.column_bound
+    }
+
     pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
     }
@@ -746,7 +753,7 @@ impl SqliteSourceReadSnapshot {
                 family.revalidate_database_identity(&self.native_evidence)
             }
             SqliteSourceSnapshotPolicy::StablePrivateCopy
-            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_, _) => {
                 family.revalidate_database_identity(&self.native_evidence)
             }
         }
@@ -978,6 +985,7 @@ use family::{
     NativeFileState, SqliteConnectionEvidence, SqliteFamilyEvidence, SqliteFamilyMember,
     SqliteSchemaEvidence, SqliteSnapshotEvidence, SqliteSourceFamily,
 };
+pub use snapshot::selective::SqliteSourceColumnBound;
 #[cfg(any(test, feature = "test-support"))]
 pub use snapshot::{
     fail_next_opened_snapshot_cleanup_for_test, fail_next_private_directory_cleanup_for_test,
