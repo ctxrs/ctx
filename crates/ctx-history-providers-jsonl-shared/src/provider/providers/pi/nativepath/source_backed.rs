@@ -15,11 +15,10 @@ use ctx_history_capture_runtime::{
 };
 use ctx_history_core::{
     admit_optional_metadata_text, admit_optional_provider_call_id, admit_provider_declared_fact,
-    derive_event_id, derive_native_session_id, ActivityInvocation, ActivityJsonCapture,
-    ActivityResult, ActivityTextCapture, CaptureProvider, CoreActivity, CoreRecord,
-    EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, ProviderDeclaredFact,
-    ProviderNativeSessionRelationship, SourceAnchorScope, SourceKey, StableEntityId, TypedKey,
-    CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
+    derive_event_id, derive_native_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
+    EventType, LiteralFactKind, NativeItemKey, PositionStability, ProviderDeclaredFact,
+    ProviderNativeSessionRelationship, SourceAnchorScope, SourceKey, StableEntityId,
+    SubrecordSelector, TypedKey, MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_jsonl::JsonlRecordRejections;
 use serde::{Deserialize, Serialize};
@@ -47,7 +46,9 @@ use super::super::{
     PI_SOURCE_FORMAT,
 };
 
+mod activity;
 mod discovery;
+use activity::{pi_activity, split_tool_calls};
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "pi.session";
 const NATIVE_SESSION_NAMESPACE: &str = "pi.session";
@@ -55,7 +56,7 @@ const NATIVE_EVENT_NAMESPACE: &str = "pi.entry";
 const LOGICAL_SESSION_KIND: &str = "pi-session";
 const LOGICAL_EVENT_KIND: &str = "pi-event";
 const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
-const PARSER_REVISION: &str = "pi-shared-jsonl-v11-omp-parent-lineage";
+const PARSER_REVISION: &str = "pi-shared-jsonl-v12-nested-tool-activity";
 const EVENT_IDENTITY_REVISION: &str = "pi-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.pi.fallback-event-fingerprint.v1\0";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
@@ -280,15 +281,6 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
         let Some(occurred_at) = event_timestamp(&value) else {
             return Ok(());
         };
-        let event_type = pi_event_type(
-            value
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown"),
-            value.get("message"),
-        );
-        let body = projected_body(&value, event_type);
-        let mut facts = literal_facts(&value)?;
         let ordinal = evidence.physical_ordinal();
         let native_id = value
             .get("id")
@@ -313,63 +305,87 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
                 )
             }
         };
-        let event_id = derive_event_id(EventIdentityInput {
-            source: &self.source,
-            session_id: self.session_id,
-            logical_item_kind: LOGICAL_EVENT_KIND,
-            native_item_key: &native_item_key,
-            subrecord_selector: None,
-        })
-        .map_err(contract)?;
-        let message = value.get("message").unwrap_or(&value);
-        if let Some(cwd) = &self.binding.cwd {
-            if let Some(fact) =
-                admit_provider_declared_fact(LiteralFactKind::SessionCwd, cwd.clone(), facts.len())
-            {
-                facts.insert(0, fact);
+        for (part, value) in split_tool_calls(value)? {
+            let event_type = pi_event_type(
+                value
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                value.get("message"),
+            );
+            let body = projected_body(&value, event_type);
+            let mut facts = literal_facts(&value)?;
+            let selector = SubrecordSelector::certified_position(
+                "pi.tool-call",
+                TypedKey::U64(u64::from(part)),
+                PositionStability::StableSlot,
+            )
+            .map_err(contract)?;
+            let event_id = derive_event_id(EventIdentityInput {
+                source: &self.source,
+                session_id: self.session_id,
+                logical_item_kind: LOGICAL_EVENT_KIND,
+                native_item_key: &native_item_key,
+                subrecord_selector: (part != 0).then_some(&selector),
+            })
+            .map_err(contract)?;
+            let message = value.get("message").unwrap_or(&value);
+            if let Some(cwd) = &self.binding.cwd {
+                if let Some(fact) = admit_provider_declared_fact(
+                    LiteralFactKind::SessionCwd,
+                    cwd.clone(),
+                    facts.len(),
+                ) {
+                    facts.insert(0, fact);
+                }
             }
-        }
-        let activity = pi_activity(message, event_type, &body, facts)?;
-        let mut core = CoreRecord::new_selected(
-            event_id,
-            self.session_id,
-            self.source.clone(),
-            ordinal,
-            event_type.as_str(),
-            PARSER_REVISION,
-            body.clone(),
-        )
-        .map_err(contract)?;
-        core.provider_session_id = Some(self.binding.native_session_id.clone());
-        if let Some(parent_session_id) = self.binding.parent_session_id {
-            core.parent_session_id = Some(parent_session_id);
-            core.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
-        }
-        core.native_event_id = Some(native_event_id);
-        core.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
-        core.role = value
-            .get("message")
-            .and_then(|message| message.get("role"))
-            .and_then(Value::as_str)
-            .map(pi_event_role)
-            .map(|role| role.as_str().to_owned());
-        core.content.structured_content = Some(value);
-        core.content.activity = activity;
-        ctx_history_jsonl::fit_jsonl_activity(
-            &body,
-            core.content.structured_content.as_ref(),
-            &mut core.content.activity,
-            ctx_history_jsonl::JsonlActivityObservedBytes::infer_from_present(),
-            MAX_CORE_CONTENT_BYTES,
-        );
-        core.content
-            .omit_provider_declared_facts_if_aggregate_exceeds_limit()
+            let activity = pi_activity(message, event_type, facts)?;
+            let sequence = ordinal
+                .checked_mul(u64::from(u32::MAX) + 1)
+                .and_then(|base| base.checked_add(u64::from(part)))
+                .ok_or_else(|| contract("Pi event sequence overflow"))?;
+            let mut core = CoreRecord::new_selected(
+                event_id,
+                self.session_id,
+                self.source.clone(),
+                sequence,
+                event_type.as_str(),
+                PARSER_REVISION,
+                body.clone(),
+            )
             .map_err(contract)?;
-        core.content
-            .omit_structured_content_if_aggregate_exceeds_limit()
-            .map_err(contract)?;
-        core.validate_contract().map_err(contract)?;
-        emit(core)
+            core.provider_session_id = Some(self.binding.native_session_id.clone());
+            if let Some(parent_session_id) = self.binding.parent_session_id {
+                core.parent_session_id = Some(parent_session_id);
+                core.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+            }
+            core.native_event_id = Some(native_event_id.clone());
+            core.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
+            core.role = value
+                .get("message")
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)
+                .map(pi_event_role)
+                .map(|role| role.as_str().to_owned());
+            core.content.structured_content = Some(value);
+            core.content.activity = activity;
+            ctx_history_jsonl::fit_jsonl_activity(
+                &body,
+                core.content.structured_content.as_ref(),
+                &mut core.content.activity,
+                ctx_history_jsonl::JsonlActivityObservedBytes::infer_from_present(),
+                MAX_CORE_CONTENT_BYTES,
+            );
+            core.content
+                .omit_provider_declared_facts_if_aggregate_exceeds_limit()
+                .map_err(contract)?;
+            core.content
+                .omit_structured_content_if_aggregate_exceeds_limit()
+                .map_err(contract)?;
+            core.validate_contract().map_err(contract)?;
+            emit(core)?;
+        }
+        Ok(())
     }
 
     fn rejected_records(&self) -> u64 {
@@ -584,70 +600,6 @@ fn literal_facts(value: &Value) -> Result<Vec<ProviderDeclaredFact>> {
     } else {
         facts
     })
-}
-
-fn pi_activity(
-    message: &Value,
-    event_type: EventType,
-    body: &str,
-    facts: Vec<ProviderDeclaredFact>,
-) -> Result<Option<CoreActivity>> {
-    let call_ids = ["toolCallId", "tool_call_id", "callId"]
-        .into_iter()
-        .filter_map(|field| message.get(field).and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    let provider_call_id = match call_ids.as_slice() {
-        [id] => admit_optional_provider_call_id(Some((*id).to_owned())),
-        _ => None,
-    };
-    let tools = ["toolName", "tool_name", "name"]
-        .into_iter()
-        .filter_map(|field| message.get(field).and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    let invocation = if provider_call_id.is_some() && event_type == EventType::ToolCall {
-        match tools.as_slice() {
-            [tool] => admit_optional_metadata_text(Some((*tool).to_owned())).map(|tool| {
-                ActivityInvocation {
-                    protocol: None,
-                    server: None,
-                    tool,
-                    arguments: message.get("arguments").map_or(
-                        ActivityJsonCapture::Absent,
-                        |value| ActivityJsonCapture::Present {
-                            value: value.clone(),
-                        },
-                    ),
-                    started_at_unix_ms: None,
-                }
-            }),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let result = (provider_call_id.is_some()
-        && matches!(event_type, EventType::ToolOutput | EventType::CommandOutput))
-    .then(|| ActivityResult {
-        status: None,
-        completed_at_unix_ms: None,
-        duration_ns: None,
-        text: ActivityTextCapture::Present {
-            value: body.to_owned(),
-        },
-        structured_content: ActivityJsonCapture::Present {
-            value: message.clone(),
-        },
-    });
-    if invocation.is_none() && result.is_none() && facts.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(CoreActivity {
-        revision: CORE_ACTIVITY_REVISION,
-        provider_call_id,
-        invocation,
-        result,
-        facts,
-    }))
 }
 
 fn event_timestamp(value: &Value) -> Option<DateTime<Utc>> {

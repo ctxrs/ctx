@@ -1571,6 +1571,7 @@ dependencies = [
  "ctx-history-snapshot-reader",
  "ctx-history-source-discovery",
  "ctx-history-source-io",
+ "ctx-repository-evidence",
  "rusqlite",
  "serde_json",
  "sha2 0.10.9",
