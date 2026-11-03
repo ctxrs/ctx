@@ -218,6 +218,16 @@ event eligibility and lexical weighting change.
 lexical ranking. Result rendering reads the corresponding imported Core
 events.
 
+Lexical retrieval keeps a bounded top-k heap ordered by term coverage,
+class-weighted BM25, and stable event identity. Once full, it prunes documents
+that cannot beat the current boundary before charging the candidate-examination
+budget, and seeks past intervals with insufficient term coverage. Posting
+traversal, filter work, and materialization retain separate
+fixed ceilings. A completed pass returns the exact best candidates for its
+retained limit; adversarial or larger queries can still exhaust a work ceiling.
+JSON reports that separately through `truncation.lexical.work_complete` and
+`truncation.lexical.exhaustion`, and text output retains the bounded-work warning.
+
 `--backend semantic` queries the flat-F32 generation under
 `search/semantic`. Semantic projection enumerates eligible imported Core
 records, filters control messages, then chunks and embeds them. The semantic

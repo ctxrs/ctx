@@ -117,6 +117,8 @@ pub const MAX_LEXICAL_QUERY_RESULTS: usize = 4_096;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexicalWorkBudget {
     pub maximum_segments: u64,
+    /// Documents requiring candidate examination after top-k rank pruning.
+    /// List mode has no relevance bound and charges every visited document.
     pub maximum_candidate_docs: u64,
     /// Body cursor movements, including positive-filter seeks and advances.
     pub maximum_body_posting_advances: u64,
@@ -166,6 +168,8 @@ pub const LEXICAL_WORK_BUDGET_V1: LexicalWorkBudget = LexicalWorkBudget {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LexicalWorkCounters {
     pub segments: u64,
+    /// Documents not pruned by the current top-k rank bound (all visited
+    /// documents in List mode). Pruned traversal still charges body movements.
     pub candidate_docs: u64,
     /// Body cursor movements, including positive-filter seeks and advances.
     pub body_posting_advances: u64,
