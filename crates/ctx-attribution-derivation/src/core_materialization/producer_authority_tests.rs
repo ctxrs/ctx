@@ -49,7 +49,13 @@ fn current_provider_contracts_and_released_support_keep_exact_boundaries() -> Te
                 }
                 assert_eq!(
                     producer_authority_disposition(&miss),
-                    ProducerAuthorityDisposition::AbstainUnknown,
+                    if provider == "gemini" && !released && missing == "scope" {
+                        // Removing its only child claim makes this a native
+                        // unparented witness, independent of the child contract.
+                        ProducerAuthorityDisposition::EligibleUnique
+                    } else {
+                        ProducerAuthorityDisposition::AbstainUnknown
+                    },
                     "{provider} {missing}"
                 );
             }
@@ -189,7 +195,7 @@ fn only_current_mux_openclaw_allow_missing_root_and_no_provider_invents_relation
 }
 
 #[test]
-fn reviewed_provider_primary_shapes_do_not_require_child_lineage() -> TestResult {
+fn native_unparented_records_do_not_require_child_contracts() -> TestResult {
     for provider in PROVIDERS {
         for released in [false, true] {
             let mut primary = provider_record(provider, released)?;
@@ -207,32 +213,41 @@ fn reviewed_provider_primary_shapes_do_not_require_child_lineage() -> TestResult
             primary.root_session_id = None;
             primary.session_relationship = None;
             primary.validate_contract()?;
-            // The current reviewed emitters distinguish a native primary from
-            // unknown lineage. Older child-only contracts and Gemini v2 remain
-            // outside this proof; a provider label alone is not admission.
-            let expected = if !released && provider != "gemini" {
-                ProducerAuthorityDisposition::EligibleUnique
-            } else {
-                ProducerAuthorityDisposition::AbstainUnknown
-            };
+            // Native unparented occurrences are independent of child-contract
+            // tuples and optional search scope. Parser updates do not revoke
+            // the same retained identity and ownership evidence.
+            for scope in [None, Some(AgentScope::Primary)] {
+                for relationship in [None, Some(ProviderNativeSessionRelationship::Root)] {
+                    for root in [None, Some(primary.session_id)] {
+                        primary.agent_scope = scope;
+                        primary.session_relationship = relationship;
+                        primary.root_session_id = root;
+                        assert_eq!(
+                            producer_authority_disposition(&primary),
+                            ProducerAuthorityDisposition::EligibleUnique,
+                            "{provider} released={released}"
+                        );
+                    }
+                }
+            }
+            primary.parser_revision.push_str("-future");
             assert_eq!(
                 producer_authority_disposition(&primary),
-                expected,
-                "{provider} released={released}"
+                ProducerAuthorityDisposition::EligibleUnique
             );
             for missing in [
-                "scope",
+                "subagent",
                 "parent",
                 "root",
                 "relationship",
                 "session",
                 "event",
                 "null-event",
-                "revision",
+                "empty-session",
             ] {
                 let mut miss = primary.clone();
                 match missing {
-                    "scope" => miss.agent_scope = None,
+                    "subagent" => miss.agent_scope = Some(AgentScope::Subagent),
                     "parent" => miss.parent_session_id = Some(other_session),
                     "root" => miss.root_session_id = Some(other_session),
                     "relationship" => {
@@ -242,7 +257,7 @@ fn reviewed_provider_primary_shapes_do_not_require_child_lineage() -> TestResult
                     "session" => miss.provider_session_id = None,
                     "event" => miss.native_event_id = None,
                     "null-event" => miss.native_event_id = Some(TypedKey::Null),
-                    "revision" => miss.parser_revision.push_str("-unknown"),
+                    "empty-session" => miss.provider_session_id = Some(String::new()),
                     _ => unreachable!(),
                 }
                 assert_eq!(
@@ -302,7 +317,11 @@ fn opencode_retained_and_migrated_tuples_preserve_native_primary_and_child_admis
             record.parser_revision.push_str("-unknown");
             assert_eq!(
                 producer_authority_disposition(&record),
-                ProducerAuthorityDisposition::AbstainUnknown
+                if primary {
+                    ProducerAuthorityDisposition::EligibleUnique
+                } else {
+                    ProducerAuthorityDisposition::AbstainUnknown
+                }
             );
         }
     }

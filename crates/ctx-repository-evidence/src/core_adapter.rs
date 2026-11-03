@@ -91,6 +91,7 @@ impl CoreRepositoryEvidenceAdapter {
 
         if let Some(invocation) = activity.invocation.as_ref() {
             reconcile_codex_exec_command(record, invocation, &mut facts);
+            reconcile_pi_bash_command(record, invocation, &mut facts);
             match exact_file_invocations(record, invocation) {
                 FileInvocationExtraction::Exact(evidence) => {
                     facts.repository_file_invocation_evidence = evidence;
@@ -149,7 +150,8 @@ impl CoreRepositoryEvidenceAdapter {
                     .completed_at_unix_ms
                     .or(record.occurred_at_unix_ms)
                     .unwrap_or(i64::MIN),
-                result_succeeded: result_succeeded(result.status.as_deref()),
+                result_succeeded: result_succeeded(result.status.as_deref())
+                    && native_result_allows_success(record, result),
                 result_output,
             };
             match self.pending.remove(&call_id) {
@@ -333,6 +335,41 @@ fn exact_codex_exec_command(
     }
 }
 
+// Pi retains its native Bash invocation without a redundant Command literal.
+// Interpret that typed carrier here, alongside the other command schemas.
+fn reconcile_pi_bash_command(
+    record: &CoreRecord,
+    invocation: &ctx_history_core::ActivityInvocation,
+    facts: &mut NeutralRepositoryFacts,
+) {
+    if record.source.provider() != "pi" || invocation.tool != "bash" {
+        return;
+    }
+    let command = match &invocation.arguments {
+        ActivityJsonCapture::Present { value }
+            if invocation.protocol.is_none() && invocation.server.is_none() =>
+        {
+            value
+                .get("command")
+                .and_then(Value::as_str)
+                .filter(|command| !command.is_empty() && !command.contains('\0'))
+        }
+        _ => None,
+    };
+    if facts.provider_native_context_ambiguous
+        || command.is_none()
+        || facts
+            .command
+            .as_deref()
+            .is_some_and(|literal| Some(literal) != command)
+    {
+        facts.command = None;
+        facts.provider_native_context_ambiguous = true;
+    } else {
+        facts.command = command.map(str::to_owned);
+    }
+}
+
 fn neutral_facts(record: &CoreRecord) -> NeutralRepositoryFacts {
     let mut neutral = NeutralRepositoryFacts {
         activity_at_unix_ms: record.occurred_at_unix_ms,
@@ -432,11 +469,30 @@ fn literal_object_id(value: &str) -> Option<GitObjectId> {
         })
 }
 
+fn native_result_allows_success(
+    record: &CoreRecord,
+    result: &ctx_history_core::ActivityResult,
+) -> bool {
+    let error_field = match record.source.provider() {
+        "claude" => "is_error",
+        "pi" => "isError",
+        _ => return true,
+    };
+    match &result.structured_content {
+        ActivityJsonCapture::Present { value } => value
+            .get(error_field)
+            .is_none_or(|error| error.as_bool() == Some(false)),
+        _ => true,
+    }
+}
+
 fn exact_result_output(
     record: &CoreRecord,
     result: &ctx_history_core::ActivityResult,
 ) -> Option<Value> {
-    if let ActivityJsonCapture::Present { value } = &result.structured_content {
+    if record.source.provider() != "pi"
+        && let ActivityJsonCapture::Present { value } = &result.structured_content
+    {
         return Some(value.clone());
     }
     match &result.text {

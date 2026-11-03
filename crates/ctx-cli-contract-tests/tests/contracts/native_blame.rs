@@ -163,3 +163,225 @@ fn authored_commit_has_identical_native_cli_mcp_results_citations_and_one_termin
         assert!(!encoded.contains(&citation.core_generation_id));
     }
 }
+
+// Authored transcripts exercise import, retained Core, materialization, and CLI
+// blame against actual Git output. They are not native provider captures.
+fn imported_commit_case(provider: &str, case: &str) {
+    let temp = daemon_test_root();
+    let repository = temp.path().join("repository");
+    fs::create_dir(&repository).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&repository)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env(
+                "SystemRoot",
+                std::env::var_os("SystemRoot").unwrap_or_default(),
+            )
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", temp.path().join("absent-gitconfig"))
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=absent-hooks",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-q", "--initial-branch=main"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/producer-fixture.git",
+    ]);
+    fs::write(repository.join("witness.txt"), "commit authority witness\n").unwrap();
+    git(&["add", "witness.txt"]);
+    let receipt = git(&["commit", "-m", "authored commit"]);
+    let oid = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    let output = format!("{receipt}{oid}\n");
+    let command = if case == "replayed_output" {
+        "cat earlier-commit.log"
+    } else {
+        "git commit -m 'authored commit' && git rev-parse HEAD"
+    };
+    let result_id = if case == "unlinked" {
+        "other-call"
+    } else {
+        "commit-call"
+    };
+    let timestamp = "2026-01-01T00:00:00Z";
+    let source = temp.path().join("transcripts");
+    let (path, mut rows) = if provider == "claude" {
+        let project = source.join("projects").join("fixture-project");
+        let path = if case == "child" {
+            project.join("primary/subagents/agent-child.jsonl")
+        } else {
+            project.join("primary.jsonl")
+        };
+        (
+            path,
+            vec![
+                json!({"type":"assistant", "uuid":"call-event", "sessionId":"primary",
+                "cwd":repository, "timestamp":timestamp, "gitBranch":"main", "version":"2.0.0",
+                "message":{"role":"assistant", "content":[{"type":"tool_use",
+                    "id":"commit-call", "name":"Bash", "input":{"command":command}}]}}),
+                json!({"type":"user", "uuid":"result-event", "sessionId":"primary",
+                "cwd":repository, "timestamp":timestamp, "gitBranch":"main", "version":"2.0.0",
+                "message":{"role":"user", "content":[{"type":"tool_result",
+                    "tool_use_id":result_id, "is_error":case == "failed", "content":output}]}}),
+            ],
+        )
+    } else {
+        let mut header = json!({"type":"session", "version":3, "id":"primary",
+            "cwd":repository, "timestamp":timestamp});
+        if case == "child" {
+            header["parentSession"] = json!("parent-session");
+        }
+        // The already supported message-level invocation carrier isolates the
+        // authority regression from nested content[] tool-call parsing (#1143).
+        (
+            source.join("primary.jsonl"),
+            vec![
+                header,
+                json!({"type":"message", "id":"call-event", "timestamp":timestamp,
+                "message":{"role":"assistant", "toolCallId":"commit-call", "toolName":"bash",
+                    "arguments":{"command":command}, "content":[{"type":"toolCall",
+                        "id":"commit-call", "name":"bash", "arguments":{"command":command}}]}}),
+                json!({"type":"message", "id":"result-event", "timestamp":timestamp,
+                "message":{"role":"toolResult", "toolCallId":result_id, "toolName":"bash",
+                    "isError":case == "failed", "content":[{"type":"text", "text":output}]}}),
+            ],
+        )
+    };
+    if case == "missing_result" {
+        rows.pop();
+    }
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let root = data_root(&temp);
+    fs::create_dir(&root).unwrap();
+    fs::write(
+        root.join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n[sources]\nautomatic = false\n",
+    )
+    .unwrap();
+    let import_root = if provider == "claude" {
+        source.join("projects")
+    } else {
+        source
+    };
+    ctx(&temp)
+        .args(["import", "--provider", provider, "--path"])
+        .arg(&import_root)
+        .args(["--progress", "none"])
+        .assert()
+        .success();
+    let status = json_output(ctx(&temp).args(["status", "--format", "json"]));
+    assert_eq!(
+        status["attribution"]["currentness"], "current",
+        "{status:#}"
+    );
+    let count = &status["attribution"]["coverage"]["exact_commit_evidence_events"];
+    let mut blame = ctx(&temp);
+    blame
+        .current_dir(&repository)
+        .args(["blame", "commit", &oid, "--format", "json"]);
+    if case == "primary" {
+        assert_eq!(status["attribution"]["materialized_coverage"], "complete");
+        assert_eq!(*count, 1, "{provider}: {status:#}");
+        assert_eq!(status["attribution"]["availability"]["commit_blame"], true);
+        let result = json_output(&mut blame);
+        assert_eq!(result["outcome"]["attribution"], "possible", "{result:#}");
+        assert_eq!(result["matches"].as_array().unwrap().len(), 1, "{result:#}");
+        assert_eq!(
+            result["matches"][0]["value"]["predicate"], "possibly_produced_by",
+            "{result:#}"
+        );
+        let citation = &result["evidence"][0]["citation"];
+        assert_eq!(
+            result["matches"][0]["value"]["direct_actor"]["display"],
+            citation["session_id"]["uuid"]
+        );
+        let event = json_output(ctx(&temp).args([
+            "show",
+            "event",
+            citation["event_id"]["uuid"].as_str().unwrap(),
+            "--format",
+            "json",
+        ]));
+        assert_eq!(
+            event["event"]["provider_session_id"], "primary",
+            "{event:#}"
+        );
+    } else {
+        assert_eq!(*count, 0, "{provider} {case}: {status:#}");
+        assert_eq!(status["attribution"]["availability"]["commit_blame"], false);
+        let failed = blame.assert().failure().get_output().clone();
+        let result: Value = serde_json::from_slice(&failed.stderr)
+            .unwrap_or_else(|error| panic!("{error}: {failed:?}"));
+        assert_eq!(
+            result["reason"], "target_not_indexed",
+            "{provider} {case}: {result:#}"
+        );
+    }
+}
+
+#[test]
+fn claude_primary_commit_survives_producer_authority_gate() {
+    imported_commit_case("claude", "primary");
+}
+
+#[test]
+fn pi_primary_commit_survives_producer_authority_gate() {
+    imported_commit_case("pi", "primary");
+}
+
+#[test]
+fn claude_child_and_nonproducing_results_stay_unattributed() {
+    for case in [
+        "child",
+        "replayed_output",
+        "unlinked",
+        "failed",
+        "missing_result",
+    ] {
+        imported_commit_case("claude", case);
+    }
+}
+
+#[test]
+fn pi_fork_and_nonproducing_results_stay_unattributed() {
+    for case in [
+        "child",
+        "replayed_output",
+        "unlinked",
+        "failed",
+        "missing_result",
+    ] {
+        imported_commit_case("pi", case);
+    }
+}

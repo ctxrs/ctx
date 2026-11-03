@@ -16,7 +16,7 @@ use crate::query::{
 };
 use std::path::Path;
 
-const PREDECESSOR: &str = "2026.09.24.1+bounded-omissions";
+const PREDECESSOR: &str = "2026.10.01.2+audited-primary-producer";
 
 fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Vec<CoreRecord>> {
     let provider = match mode {
@@ -138,7 +138,7 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
                 },
                 structured_content: ActivityJsonCapture::Absent,
             }),
-            // Literal command/workdir keeps the unknown-provider controls from
+            // Literal command/workdir keeps the provider-neutral witnesses from
             // merely failing the Codex argument decoder before the origin gate.
             facts: if is_call {
                 vec![
@@ -403,6 +403,8 @@ fn primary_native_commit_call_and_output_reach_blame_with_exact_controls() -> Te
                     | "opencode-v13-child"
                     | "opencode-v14-child"
                     | "zed"
+                    | "gemini"
+                    | "provider"
             ) {
                 vec![AttributionOutcome::Possible]
             } else {
@@ -428,6 +430,7 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
     let (output, oid) = real_commit(&repository)?;
     for mode in [
         "primary",
+        "provider",
         "v11",
         "v14",
         "v15",
@@ -484,6 +487,8 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
                 | "opencode-v13-child"
                 | "opencode-v14-child"
                 | "zed"
+                | "gemini"
+                | "provider"
         ) {
             vec![AttributionOutcome::Possible]
         } else {
