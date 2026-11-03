@@ -58,6 +58,14 @@ impl BaseEventLookup for IndexBaseEventLookup {
     fn contains(&self, event_id: Uuid) -> Result<bool, Self::Error> {
         self.0.contains(event_id)
     }
+
+    fn may_contain_call_result(
+        &self,
+        session_id: ctx_history_core::StableEntityId,
+        call_id: &ctx_history_core::TypedKey,
+    ) -> Result<bool, Self::Error> {
+        self.0.contains_call_result(session_id, call_id)
+    }
 }
 
 /// Transparent capture adapter for the index-owned preparation authority.

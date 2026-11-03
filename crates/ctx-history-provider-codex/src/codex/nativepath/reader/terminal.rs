@@ -1,10 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 
-use super::super::checkpoint::{
-    CodexTerminalAuthorityCheckpointV0, MAX_CODEX_TERMINAL_AUTHORITIES,
-};
+use super::super::checkpoint::CodexTerminalAuthorityCheckpointV0;
 use super::*;
 
 const TERMINAL_CALL_ID_DOMAIN: &[u8] = b"ctx/codex-nativepath/terminal-call-id/v1\0";
@@ -15,6 +13,7 @@ struct CodexTerminalAuthorityState {
     mcp_terminal: bool,
     mcp_model_output: bool,
     builtin_exec_invocation: bool,
+    indexed: bool,
 }
 
 impl CodexTerminalAuthorityState {
@@ -27,12 +26,11 @@ impl CodexTerminalAuthorityState {
 
 #[derive(Debug, Default)]
 pub(super) struct CodexTerminalAuthority {
-    prior_fingerprints: BTreeSet<u64>,
+    prior: CodexTerminalAuthorityCheckpointV0,
     // Exact per-scan evidence costs O(C) keys for C distinct calls.
     // Compact checkpoint capacity must not limit ordinary session operations.
     call_ids: BTreeMap<[u8; 32], CodexTerminalAuthorityState>,
     linkage_unknown: bool,
-    prior_saturated: bool,
     append_resume: bool,
     replacement_required: bool,
 }
@@ -41,22 +39,27 @@ impl CodexTerminalAuthority {
     pub(super) fn restore(&mut self, checkpoint: &CodexTerminalAuthorityCheckpointV0) -> bool {
         if self.append_resume
             || self.linkage_unknown
-            || self.prior_saturated
-            || !self.prior_fingerprints.is_empty()
             || !self.call_ids.is_empty()
             || self.replacement_required
         {
             return false;
         }
         self.append_resume = true;
-        match checkpoint.fingerprints() {
-            Some(fingerprints) => self.prior_fingerprints.extend(fingerprints.iter().copied()),
-            None => self.prior_saturated = true,
-        }
+        self.prior = checkpoint.clone();
         true
     }
 
+    #[cfg(test)]
     pub(super) fn observe_record(&mut self, record: &[u8]) {
+        self.observe_record_with_base(record, |_| Ok(false))
+            .unwrap();
+    }
+
+    pub(super) fn observe_record_with_base(
+        &mut self,
+        record: &[u8],
+        mut indexed_terminal_exists: impl FnMut(&str) -> Result<bool>,
+    ) -> Result<()> {
         match classify_codex_record(record) {
             Ok(probe) if probe.lineage_malformed() => {
                 if terminal_call_id(&probe).is_some()
@@ -74,7 +77,11 @@ impl CodexTerminalAuthority {
             }
             Ok(probe) if matches!(probe.class, CodexRecordClass::ExcludedResult(kind) if kind.is_call_terminal()) => {
                 if let Some(call_id) = terminal_call_id(&probe) {
-                    self.observe_call_id(call_id, mcp_carrier(record, probe.class));
+                    self.observe_call_id(
+                        call_id,
+                        mcp_carrier(record, probe.class),
+                        &mut indexed_terminal_exists,
+                    )?;
                 }
             }
             Ok(probe) if probe.class == CodexRecordClass::Retained(CodexRetainedKind::ToolCall) => {
@@ -87,11 +94,8 @@ impl CodexTerminalAuthority {
                             .builtin_exec_invocation = true;
                         // An appended invocation can contradict a prefix MCP
                         // result too; the checkpoint does not retain its kind.
-                        self.replacement_required |= self.append_resume
-                            && (self.prior_saturated
-                                || self
-                                    .prior_fingerprints
-                                    .contains(&terminal_call_id_fingerprint(&digest)));
+                        self.replacement_required |=
+                            self.prior_contains(call_id, &mut indexed_terminal_exists)?;
                     }
                 }
             }
@@ -103,15 +107,35 @@ impl CodexTerminalAuthority {
                     .as_ref()
                     .and_then(terminal_call_id)
                 {
-                    self.observe_call_id(call_id, None);
+                    self.observe_call_id(call_id, None, &mut indexed_terminal_exists)?;
                 }
             }
         }
+        Ok(())
+    }
+
+    pub(super) fn mark_indexed(&mut self, call_id: &str) {
+        if let Some(state) = self.call_ids.get_mut(&terminal_call_id_digest(call_id)) {
+            state.indexed = true;
+        }
+    }
+
+    fn prior_contains(
+        &self,
+        call_id: &str,
+        indexed_terminal_exists: &mut impl FnMut(&str) -> Result<bool>,
+    ) -> Result<bool> {
+        Ok(self.append_resume
+            && (self
+                .prior
+                .may_contain_unindexed(terminal_call_id_fingerprint(&terminal_call_id_digest(
+                    call_id,
+                )))
+                || indexed_terminal_exists(call_id)?))
     }
 
     pub(super) fn invalidate_linkage(&mut self) {
         self.replacement_required |= self.append_resume;
-        self.prior_fingerprints.clear();
         self.call_ids.clear();
         self.linkage_unknown = true;
     }
@@ -169,42 +193,37 @@ impl CodexTerminalAuthority {
     }
 
     pub(super) fn checkpoint(&self) -> CodexTerminalAuthorityCheckpointV0 {
-        if self.linkage_unknown || self.prior_saturated {
+        if self.linkage_unknown {
             return CodexTerminalAuthorityCheckpointV0::saturated();
         }
-        let mut fingerprints = self.prior_fingerprints.clone();
+        let mut checkpoint = self.prior.clone();
         for (digest, state) in &self.call_ids {
-            if state.candidates == 0 {
-                continue;
-            }
-            // Truncation collisions and capacity only prevent compact resume;
-            // the full-digest scan above still distinguishes unique calls.
-            if !fingerprints.insert(terminal_call_id_fingerprint(digest))
-                || fingerprints.len() > MAX_CODEX_TERMINAL_AUTHORITIES
-            {
-                return CodexTerminalAuthorityCheckpointV0::saturated();
+            if state.candidates != 0 && !state.indexed {
+                checkpoint.insert_unindexed(terminal_call_id_fingerprint(digest));
             }
         }
-        CodexTerminalAuthorityCheckpointV0::exact(fingerprints.into_iter().collect())
+        checkpoint
     }
 
-    fn observe_call_id(&mut self, call_id: &str, mcp_carrier: Option<CodexResultKind>) {
+    fn observe_call_id(
+        &mut self,
+        call_id: &str,
+        mcp_carrier: Option<CodexResultKind>,
+        indexed_terminal_exists: &mut impl FnMut(&str) -> Result<bool>,
+    ) -> Result<()> {
         if call_id.is_empty() || call_id.len() > super::super::checkpoint::MAX_CODEX_CALL_ID_BYTES {
-            return;
+            return Ok(());
         }
         if self.linkage_unknown {
             self.replacement_required |= self.append_resume;
-            return;
+            return Ok(());
         }
         let digest = terminal_call_id_digest(call_id);
-        let fingerprint = terminal_call_id_fingerprint(&digest);
-        if self.append_resume
-            && (self.prior_saturated || self.prior_fingerprints.contains(&fingerprint))
-        {
-            // Fingerprint matches are deliberately conservative. Equality is
-            // possible, so only a replacement scan may decide linkage.
+        if self.prior_contains(call_id, indexed_terminal_exists)? {
+            // Only an actual indexed witness or retained unindexed evidence
+            // requires replacement. Unique calls never replay due to a filter.
             self.replacement_required = true;
-            return;
+            return Ok(());
         }
         let state = self.call_ids.entry(digest).or_default();
         // Legacy MCP persists one execution twice: its self-contained event and
@@ -218,6 +237,7 @@ impl CodexTerminalAuthority {
         // Reuse full replacement; do not extend the checkpoint wire contract.
         self.replacement_required |=
             self.append_resume && state.mcp_terminal && state.mcp_model_output;
+        Ok(())
     }
 }
 
@@ -322,6 +342,7 @@ fn terminal_call_id_fingerprint(digest: &[u8; 32]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::checkpoint::MAX_CODEX_TERMINAL_AUTHORITIES;
     use super::*;
 
     fn terminal(call_id: &str) -> Vec<u8> {
@@ -639,40 +660,57 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_capacity_does_not_limit_unique_terminal_linkage() {
+    fn indexed_terminals_do_not_consume_checkpoint_capacity() {
         let mut prefix = CodexTerminalAuthority::default();
-        for index in 0..MAX_CODEX_TERMINAL_AUTHORITIES {
-            prefix.observe_record(&terminal(&format!("terminal-{index}")));
+        for index in 0..50_000 {
+            let call_id = format!("terminal-{index}");
+            prefix.observe_record(&terminal(&call_id));
+            prefix.mark_indexed(&call_id);
         }
-        assert!(prefix.checkpoint().fingerprints().is_some());
+        assert_eq!(prefix.checkpoint().fingerprints(), Some(&[][..]));
 
-        let mut appended = CodexTerminalAuthority::default();
-        assert!(appended.restore(&prefix.checkpoint()));
-        appended.observe_record(&terminal("terminal-overflow"));
-        assert!(!appended.append_requires_replacement());
-        assert!(appended.is_unique("terminal-overflow"));
-        assert!(appended.checkpoint().fingerprints().is_none());
-
-        // A saturated prefix cannot rule out overlap. Either terminal forces
-        // the existing replacement scan; a message-only append need not.
-        for call_id in ["terminal-0", "new-unique-terminal"] {
+        for (call_id, replacement) in [("terminal-0", true), ("new-unique-terminal", false)] {
             let mut restarted = CodexTerminalAuthority::default();
-            assert!(restarted.restore(&appended.checkpoint()));
-            restarted.observe_record(br#"{"type":"response_item","payload":{"type":"message"}}"#);
-            assert!(!restarted.append_requires_replacement());
-            restarted.observe_record(&terminal(call_id));
-            assert!(restarted.append_requires_replacement());
-        }
-
-        prefix.observe_record(&terminal("terminal-overflow"));
-        assert!(prefix.checkpoint().fingerprints().is_none());
-        for call_id in ["terminal-0", "terminal-4095", "terminal-overflow"] {
-            assert!(prefix.is_unique(call_id));
+            assert!(restarted.restore(&prefix.checkpoint()));
+            let mut probes = 0;
+            restarted
+                .observe_record_with_base(&terminal(call_id), |candidate| {
+                    probes += 1;
+                    Ok(candidate == "terminal-0")
+                })
+                .unwrap();
+            assert_eq!(probes, 1);
+            assert_eq!(restarted.append_requires_replacement(), replacement);
         }
         prefix.observe_record(&terminal("terminal-0"));
         assert!(!prefix.is_unique("terminal-0"));
         assert!(prefix.is_unique("terminal-4095"));
-        assert!(prefix.is_unique("terminal-overflow"));
+    }
+
+    #[test]
+    fn unindexed_terminals_still_require_replay_even_when_the_index_is_negative() {
+        let mut prefix = CodexTerminalAuthority::default();
+        prefix.observe_record(&terminal("unindexed"));
+        let mut resumed = CodexTerminalAuthority::default();
+        assert!(resumed.restore(&prefix.checkpoint()));
+        resumed.observe_record(&terminal("unindexed"));
+        assert!(resumed.append_requires_replacement());
+
+        for index in 0..MAX_CODEX_TERMINAL_AUTHORITIES {
+            prefix.observe_record(&terminal(&format!("unindexed-{index}")));
+        }
+        assert!(prefix.checkpoint().fingerprints().is_none());
+    }
+
+    #[test]
+    fn indexed_lookup_failures_abort_instead_of_proving_absence() {
+        let mut resumed = CodexTerminalAuthority::default();
+        assert!(resumed.restore(&CodexTerminalAuthorityCheckpointV0::default()));
+        assert!(resumed
+            .observe_record_with_base(&terminal("unique"), |_| {
+                Err(CaptureError::SystemInvariant("lookup unavailable"))
+            })
+            .is_err());
     }
 
     #[test]
@@ -690,7 +728,7 @@ mod tests {
                 },
             );
         }
-        assert!(authority.checkpoint().fingerprints().is_none());
+        assert!(authority.checkpoint().may_contain_unindexed(0));
         assert_eq!(authority.call_ids.len(), 2);
         assert!(!authority.linkage_unknown);
         assert!(!authority.append_requires_replacement());

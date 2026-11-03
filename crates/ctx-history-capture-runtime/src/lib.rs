@@ -512,6 +512,16 @@ pub trait BaseEventLookup: Clone + Send + Sync + 'static {
     type Error: Error + Send + Sync + 'static;
 
     fn contains(&self, event_id: Uuid) -> Result<bool, Self::Error>;
+
+    /// Exact result-call membership when supported. A lookup without this
+    /// projection conservatively requests replay rather than proving absence.
+    fn may_contain_call_result(
+        &self,
+        _session_id: ctx_history_core::StableEntityId,
+        _call_id: &ctx_history_core::TypedKey,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
 }
 
 /// Classifies a concrete preparation failure without importing its authority.

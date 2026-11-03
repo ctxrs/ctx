@@ -557,6 +557,7 @@ fn newer_exhaustive_marker_survives_post_publication_coverage_fence() {
         coordinator.status(&request_id).unwrap()["request_state"],
         "published"
     );
+    wait_for_automatic_coalescing(&coordinator);
     assert!(coordinator
         .enqueue_next_dirty_route(&data_root, ledger_now_ms())
         .unwrap());
@@ -694,6 +695,14 @@ fn request_id(response: &Value) -> String {
 
 fn route_identity(byte: u8) -> SourceRouteIdentity {
     SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap()
+}
+
+fn wait_for_automatic_coalescing(coordinator: &CoreRefreshEngine) {
+    let delay = coordinator
+        .next_dirty_route_due_in_ms(ledger_now_ms())
+        .unwrap_or(0);
+    assert!(delay <= 2_000, "unexpected retry delay: {delay}");
+    std::thread::sleep(StdDuration::from_millis(delay));
 }
 
 fn ledger_now_ms() -> u64 {

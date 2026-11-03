@@ -294,6 +294,12 @@ catch-up. Manual wait is the sole query-process exception: after finite Core
 publication it may reconcile only the semantic projection for that exact pinned
 generation.
 
+Automatic filesystem refresh coalesces repeat captures of each source route
+within a two-second window. Idle routes retain their short quiet debounce;
+continuous writes cannot extend scheduling beyond two seconds from the first
+pending event, excluding capture time and failure backoff. Explicit imports and
+`--refresh wait` bypass this automatic cadence and wait for their own frontier.
+
 On a fresh auto-mode root, background mode asks the daemon to publish the first
 lexical generation. In manual mode, search performs no hidden bootstrap or
 fallback import and can query only an already committed generation. Enabled

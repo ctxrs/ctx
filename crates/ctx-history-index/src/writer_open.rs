@@ -17,6 +17,7 @@ impl GenerationWriter {
                 .map(PinnedPublication::searcher)
                 .cloned(),
             event_id_field: self.fields.event_id,
+            provider_call_result_field: self.fields.provider_call_result,
         }
     }
 

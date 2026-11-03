@@ -54,6 +54,7 @@ pub struct Fields {
     pub semantic_event_order: Field,
     pub event_range_order: Field,
     pub discovery_eligible: Field,
+    pub provider_call_result: Field,
 }
 
 impl Fields {
@@ -160,6 +161,7 @@ pub fn lexical_schema() -> Schema {
     builder.add_bytes_field("semantic_event_order", INDEXED);
     builder.add_bytes_field("event_range_order", FAST | INDEXED);
     builder.add_u64_field("discovery_eligible", INDEXED);
+    builder.add_bytes_field("provider_call_result", INDEXED);
     builder.build()
 }
 
@@ -215,6 +217,7 @@ pub fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         semantic_event_order: required_field(schema, "semantic_event_order")?,
         event_range_order: required_field(schema, "event_range_order")?,
         discovery_eligible: required_field(schema, "discovery_eligible")?,
+        provider_call_result: required_field(schema, "provider_call_result")?,
     })
 }
 

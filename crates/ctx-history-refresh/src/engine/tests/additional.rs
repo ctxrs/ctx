@@ -143,6 +143,7 @@ fn exact_route_event_during_execution_creates_one_successor_and_noop_ack_cleans_
         release.wait();
     });
 
+    wait_for_automatic_coalescing(&coordinator);
     assert!(coordinator
         .enqueue_next_dirty_route(&data_root, ledger_now_ms())
         .unwrap());

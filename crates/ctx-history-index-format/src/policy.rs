@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 13;
 pub const SOURCE_ROUTE_SNAPSHOT_REVISION: u32 = 1;
 pub const AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS: u32 = 3;
-pub const LEXICAL_SCHEMA_REVISION: u32 = 22;
+pub const LEXICAL_SCHEMA_REVISION: u32 = 23;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 9;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
@@ -306,11 +306,11 @@ mod tests {
         assert!(!lexical.keys().any(|key| key.contains("repository")));
         assert_eq!(first.policy_version, 13);
         assert_eq!(first.lexical.event_projector_revision, 9);
-        assert_eq!(first.lexical.schema_revision, 22);
+        assert_eq!(first.lexical.schema_revision, 23);
         assert_eq!(first.lexical.tokenizer_revision, 2);
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "84d58ff1dbcfbf524845eea78162e013e76cc000b275393711b6617764da3ae9"
+            "b098af240ed02a9074a20caea3bdb68b8e4b307b970152a855832d09f60c5660"
         );
     }
 

@@ -43,6 +43,7 @@ fn cached_source_descriptor_preserves_core_record_and_active_source_faults() {
 use ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES;
 use std::{path::Path, sync::Arc};
 
+mod call_result_lookup;
 mod complexity_contract;
 mod merge_policy;
 mod rollback_merge_lifetime;

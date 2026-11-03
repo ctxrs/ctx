@@ -8,6 +8,8 @@ mod analyzer;
 mod contracts;
 mod core_contract;
 mod index_document;
+mod provider_call_result;
+
 mod manifest;
 pub mod policy;
 mod record_digest;
@@ -45,6 +47,9 @@ pub use policy::{
     SEMANTIC_CHUNK_TARGET_CHARS, SEMANTIC_SOURCE_MAX_CHARS,
 };
 pub use search_projection::project_body_search;
+
+#[doc(hidden)]
+pub use provider_call_result::provider_call_result_key;
 
 #[doc(hidden)]
 pub use analyzer::{body_analyzer, register_body_analyzer, BODY_ANALYZER};

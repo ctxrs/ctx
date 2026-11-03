@@ -250,6 +250,14 @@ contract for that source family:
   next refresh imports that suffix exactly once, while truncation, path
   replacement, and mutation inside the authenticated prefix continue to fail
   closed.
+- Large Codex call journals check prior results through exact event-ID and
+  result-call lookups in the published generation. Results with native item IDs
+  and call-derived IDs do not consume checkpoint capacity when their indexed
+  witness is retained. Repeated calls still replay, including results with
+  different item IDs. Terminals without an indexed witness retain bounded
+  conservative evidence; ambiguous linkage or exhausted exception capacity can
+  still require replay. The proof commits with the source frontier and survives
+  restart. Older checkpoints replay once to establish the new coverage proof.
 - Standard-Zstandard Codex rollouts snapshot exactly the frozen compressed
   prefix from the retained source handle, then decode and hash that same private
   snapshot. The compressed snapshot plus decoded spool is bounded to 256 MiB

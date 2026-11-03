@@ -698,7 +698,7 @@ fn assert_current_provider_checkpoint(checkpoint: &serde_json::Value) {
         .get("Utf8")
         .and_then(serde_json::Value::as_str)
         .expect("Codex provider checkpoint must be compact UTF-8");
-    assert!(encoded.starts_with("codex.projector-checkpoint.v8:"));
+    assert!(encoded.starts_with("codex.projector-checkpoint.v9:"));
     assert!(encoded.len() <= MAX_PROVIDER_CHECKPOINT_BYTES);
 }
 

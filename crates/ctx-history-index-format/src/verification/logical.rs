@@ -514,6 +514,16 @@ fn expected_query_projection_delta(
         add(Term::from_field_text(fields.role, role));
     }
     if let Some(activity) = &core.content.activity {
+        if let Some(call_id) = activity
+            .provider_call_id
+            .as_ref()
+            .filter(|_| activity.result.is_some())
+        {
+            add(Term::from_field_bytes(
+                fields.provider_call_result,
+                &crate::provider_call_result_key(core.session_id, call_id)?,
+            ));
+        }
         for fact in &activity.facts {
             add(Term::from_field_text(
                 fields.literal_fact(fact.kind),
@@ -669,9 +679,9 @@ impl IncrementalProjectionVerifier {
     }
 }
 
-fn incremental_query_projection_fields(fields: crate::Fields) -> [Field; 39] {
+fn incremental_query_projection_fields(fields: crate::Fields) -> [Field; 40] {
     let remaining = remaining_query_projection_fields(fields);
-    let mut all = [fields.event_id; 39];
+    let mut all = [fields.event_id; 40];
     all[..4].copy_from_slice(&[
         fields.event_id,
         fields.session_id,
@@ -774,7 +784,7 @@ fn verify_remaining_query_projections(
     Ok(())
 }
 
-fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 35] {
+fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 36] {
     [
         fields.event_identity_digest,
         fields.provider_native_session_relationship,
@@ -811,6 +821,7 @@ fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 35] {
         fields.semantic_event_order,
         fields.event_range_order,
         fields.discovery_eligible,
+        fields.provider_call_result,
     ]
 }
 

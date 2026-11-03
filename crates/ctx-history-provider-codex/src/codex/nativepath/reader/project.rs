@@ -444,6 +444,24 @@ impl CodexNativeScanner {
                 insert_pending_call,
                 remove_pending_call_id,
             } => {
+                // Call-derived IDs remain witnesses even when activity is
+                // omitted. Other native IDs use the materialized result-call
+                // term below; rejected rows still need checkpoint evidence.
+                let indexed_terminal = remove_pending_call_id.as_ref().is_some_and(|call_id| {
+                    row.provider_event_identity
+                        .as_ref()
+                        .is_some_and(|identity| {
+                            identity.kind
+                                == super::super::rows::CodexProviderEventIdentityKindV0::CallId
+                                && identity.value == *call_id
+                        })
+                        && matches!(
+                            row.event_type,
+                            ctx_history_core::EventType::ToolOutput
+                                | ctx_history_core::EventType::CommandOutput
+                        )
+                        && row.role == Some(ctx_history_core::EventRole::Tool)
+                });
                 let record = if emit_record {
                     debug_assert!(self.active_core_page.is_some());
                     let owner = self.owner.as_ref().ok_or(CaptureError::SystemInvariant(
@@ -485,6 +503,17 @@ impl CodexNativeScanner {
                     None
                 };
                 if let Some(call_id) = remove_pending_call_id {
+                    let indexed_result_call = record
+                        .as_ref()
+                        .and_then(|record| record.content.activity.as_ref())
+                        .is_some_and(|activity| {
+                            activity.result.is_some()
+                                && activity.provider_call_id.as_ref()
+                                    == Some(&ctx_history_core::TypedKey::Utf8(call_id.clone()))
+                        });
+                    if (indexed_terminal && record.is_some()) || indexed_result_call {
+                        self.terminal_authority.mark_indexed(&call_id);
+                    }
                     self.pending_calls.remove(&call_id);
                 }
                 if let Some((call_id, pending)) = insert_pending_call {

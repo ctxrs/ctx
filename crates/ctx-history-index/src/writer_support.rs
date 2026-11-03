@@ -116,9 +116,28 @@ pub(super) struct ExactReplayInventoryWitness<'a> {
 pub struct BaseEventIdentityLookup {
     pub(super) searcher: Option<Searcher>,
     pub(super) event_id_field: Field,
+    pub(super) provider_call_result_field: Field,
 }
 
 impl BaseEventIdentityLookup {
+    /// A dictionary seek for a result linked to this exact source-owned call.
+    /// Multiple documents are valid witnesses; no stored Core body is loaded.
+    pub fn contains_call_result(
+        &self,
+        session_id: ctx_history_core::StableEntityId,
+        call_id: &ctx_history_core::TypedKey,
+    ) -> Result<bool> {
+        let Some(searcher) = self.searcher.as_ref() else {
+            return Ok(false);
+        };
+        let key = ctx_history_index_format::provider_call_result_key(session_id, call_id)?;
+        let query = TermQuery::new(
+            Term::from_field_bytes(self.provider_call_result_field, &key),
+            IndexRecordOption::Basic,
+        );
+        Ok(searcher.search(&query, &Count)? != 0)
+    }
+
     /// Returns whether the immutable base generation contains `event_id`.
     pub fn contains(&self, event_id: Uuid) -> Result<bool> {
         let Some(searcher) = self.searcher.as_ref() else {

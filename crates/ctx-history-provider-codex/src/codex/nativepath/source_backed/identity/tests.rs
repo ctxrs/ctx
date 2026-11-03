@@ -3,6 +3,23 @@ use ctx_history_capture_model::{ProviderRootDefinition, ProviderRootSourceIdenti
 
 mod argument_fact_retention;
 
+#[test]
+fn absent_terminal_uses_only_three_immutable_index_probes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let probes = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&probes);
+    let state = CodexEventIdentityStateV0::for_append(CodexEventLookup(Arc::new(move |_| {
+        observed.fetch_add(1, Ordering::Relaxed);
+        Ok(false)
+    })));
+    let source = codex_source_key_in_root(None, "session").unwrap();
+    let session = codex_session_identity(&source, "session").unwrap();
+    assert!(!state
+        .contains_terminal(&source, session, "call-20030")
+        .unwrap());
+    assert_eq!(probes.load(Ordering::Relaxed), 3);
+}
+
 fn canonical_identity_hex(identity: StableEntityId) -> String {
     use std::fmt::Write as _;
 

@@ -43,6 +43,7 @@ pub(super) struct DirtySourceRouteAdmission {
     watermark: EventWatermark,
     dirty_revision: u64,
     admission_id: u64,
+    admitted_at_ms: u64,
 }
 
 impl DirtySourceRouteAdmission {
@@ -88,12 +89,15 @@ impl DirtyRouteState {
         }
     }
 
-    fn due_at_ms(&self) -> u64 {
+    fn due_at_ms(&self, coalesce_until_ms: u64) -> u64 {
         let debounce_due = self
             .last_event_at_ms
             .saturating_add(DEBOUNCE_MS)
             .min(self.first_event_at_ms.saturating_add(MAX_EVENT_LATENCY_MS));
-        self.retry_not_before_ms.unwrap_or(0).max(debounce_due)
+        self.retry_not_before_ms
+            .unwrap_or(0)
+            .max(coalesce_until_ms.min(self.first_event_at_ms.saturating_add(MAX_EVENT_LATENCY_MS)))
+            .max(debounce_due)
     }
 
     fn reset_retry(&mut self) {
@@ -114,6 +118,10 @@ pub(super) struct DirtySourceRoutes {
     // while a completion can advance only the prefix it actually proved.
     seen_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
     covered_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
+    // Bound repeat captures under steady appends without delaying an idle
+    // route's first event. This is scheduling state only: restart reconstructs
+    // dirty routes from committed generations as before.
+    coalesce_until_ms: BTreeMap<SourceRouteIdentity, u64>,
     dirty: BTreeMap<SourceRouteIdentity, DirtyRouteState>,
     next_dirty_revision: u64,
     next_dirty_order: u64,
@@ -140,6 +148,8 @@ impl DirtySourceRoutes {
         self.seen_watermarks
             .retain(|route, _| routes.contains(route));
         self.covered_watermarks
+            .retain(|route, _| routes.contains(route));
+        self.coalesce_until_ms
             .retain(|route, _| routes.contains(route));
         self.dirty.retain(|route, _| routes.contains(route));
     }
@@ -223,6 +233,8 @@ impl DirtySourceRoutes {
             if let Some(state) = self.dirty.get_mut(&route) {
                 state.reset_retry();
             }
+            // Explicit demand still bypasses automatic coalescing.
+            self.coalesce_until_ms.remove(&route);
         }
     }
 
@@ -255,6 +267,10 @@ impl DirtySourceRoutes {
             if self.dirty.contains_key(&route) {
                 continue;
             }
+            // A clean peer included by safety/configuration work has no
+            // pending appends to coalesce. Preserve deadlines only for dirty
+            // routes, whose eligibility the caller already checked.
+            self.coalesce_until_ms.remove(&route);
             self.mark_dirty(route, observed_at_ms);
             scheduled = scheduled.saturating_add(1);
         }
@@ -278,15 +294,19 @@ impl DirtySourceRoutes {
         }
     }
 
+    fn coalesce_deadline(&self, route: &SourceRouteIdentity) -> u64 {
+        self.coalesce_until_ms.get(route).copied().unwrap_or(0)
+    }
+
     /// Earliest time at which any non-blocked, non-admitted route can run.
     pub(super) fn next_due_at_ms(&self) -> Option<u64> {
         if self.dirty.is_empty() {
             return None;
         }
         self.dirty
-            .values()
-            .filter(|state| !state.permanently_blocked && state.in_flight.is_none())
-            .map(DirtyRouteState::due_at_ms)
+            .iter()
+            .filter(|(_, state)| !state.permanently_blocked && state.in_flight.is_none())
+            .map(|(route, state)| state.due_at_ms(self.coalesce_deadline(route)))
             .min()
     }
 
@@ -294,10 +314,10 @@ impl DirtySourceRoutes {
     pub(super) fn next_due_route(&self, now_ms: u64) -> Option<SourceRouteIdentity> {
         self.dirty
             .iter()
-            .filter(|(_, state)| {
+            .filter(|(route, state)| {
                 !state.permanently_blocked
                     && state.in_flight.is_none()
-                    && state.due_at_ms() <= now_ms
+                    && state.due_at_ms(self.coalesce_deadline(route)) <= now_ms
             })
             .min_by(|left, right| compare_dirty_route_priority(*left, *right))
             .map(|(route, _)| route.clone())
@@ -320,10 +340,10 @@ impl DirtySourceRoutes {
         let mut due = self
             .dirty
             .iter()
-            .filter(|(_, state)| {
+            .filter(|(route, state)| {
                 !state.permanently_blocked
                     && state.in_flight.is_none()
-                    && state.due_at_ms() <= now_ms
+                    && state.due_at_ms(self.coalesce_deadline(route)) <= now_ms
             })
             .collect::<Vec<_>>();
         due.sort_unstable_by(|left, right| compare_dirty_route_priority(*left, *right));
@@ -336,8 +356,10 @@ impl DirtySourceRoutes {
     /// Full-catalog maintenance may include clean routes, but must not turn
     /// a peer's event into permission to retry blocked or deferred work.
     pub(super) fn all_routes_ready(&self, now_ms: u64) -> bool {
-        self.dirty.values().all(|state| {
-            !state.permanently_blocked && state.in_flight.is_none() && state.due_at_ms() <= now_ms
+        self.dirty.iter().all(|(route, state)| {
+            !state.permanently_blocked
+                && state.in_flight.is_none()
+                && state.due_at_ms(self.coalesce_deadline(route)) <= now_ms
         })
     }
 
@@ -369,8 +391,12 @@ impl DirtySourceRoutes {
     ) -> Option<DirtySourceRouteAdmission> {
         let watermark = self.seen_watermarks.get(route).copied()?;
         let admission_id = self.allocate_admission_id();
+        let coalesce_deadline = self.coalesce_deadline(route);
         let state = self.dirty.get_mut(route)?;
-        if state.permanently_blocked || state.in_flight.is_some() || state.due_at_ms() > now_ms {
+        if state.permanently_blocked
+            || state.in_flight.is_some()
+            || state.due_at_ms(coalesce_deadline) > now_ms
+        {
             return None;
         }
         let dirty_revision = state.dirty_revision;
@@ -383,6 +409,7 @@ impl DirtySourceRoutes {
             watermark,
             dirty_revision,
             admission_id,
+            admitted_at_ms: now_ms,
         })
     }
 
@@ -398,7 +425,7 @@ impl DirtySourceRoutes {
                     || self.dirty.get(route).is_none_or(|state| {
                         state.permanently_blocked
                             || state.in_flight.is_some()
-                            || state.due_at_ms() > now_ms
+                            || state.due_at_ms(self.coalesce_deadline(route)) > now_ms
                     })
             })
         {
@@ -578,6 +605,14 @@ impl DirtySourceRoutes {
             seen <= *current_covered
                 && (may_cover_newer_revision || state.dirty_revision == admission.dirty_revision)
         };
+        // Successful captures establish the cadence. Failures keep the
+        // existing retry policy, including immediate rearming by new data.
+        self.coalesce_until_ms.insert(
+            admission.route.clone(),
+            admission
+                .admitted_at_ms
+                .saturating_add(MAX_EVENT_LATENCY_MS),
+        );
         if should_remove {
             self.dirty.remove(&admission.route);
         }
@@ -605,6 +640,7 @@ fn admission_matches(state: &DirtyRouteState, admission: &DirtySourceRouteAdmiss
 
 #[cfg(test)]
 mod tests {
+    mod coalescing;
     mod resource_retry;
     use super::*;
 
@@ -650,26 +686,6 @@ mod tests {
 
         assert_eq!(ledger.seed_clean_exact_routes([route], watermark, 400), 0);
         assert_eq!(ledger.next_due_at_ms(), None);
-    }
-
-    #[test]
-    fn debounce_moves_with_events_but_never_exceeds_first_event_max_latency() {
-        let mut ledger = DirtySourceRoutes::default();
-        let route = route(1);
-
-        assert!(ledger.record_event(route.clone(), watermark(1, 1), 1_000));
-        assert_eq!(ledger.next_due_at_ms(), Some(1_250));
-        assert!(ledger.record_event(route.clone(), watermark(1, 2), 1_400));
-        assert_eq!(ledger.next_due_at_ms(), Some(1_650));
-        assert!(ledger.record_event(route.clone(), watermark(1, 3), 2_900));
-        assert_eq!(ledger.next_due_at_ms(), Some(3_000));
-        assert!(ledger.admit_next(2_999).is_none());
-        assert_eq!(
-            ledger
-                .admit_next(3_000)
-                .map(|admission| admission.watermark()),
-            Some(watermark(1, 3))
-        );
     }
 
     #[test]
@@ -775,23 +791,6 @@ mod tests {
     }
 
     #[test]
-    fn event_arriving_during_admission_remains_dirty_with_a_fresh_debounce() {
-        let mut ledger = DirtySourceRoutes::default();
-        let route = route(6);
-
-        ledger.record_event(route.clone(), watermark(1, 1), 0);
-        let first = ledger.admit_next(250).unwrap();
-        ledger.record_event(route.clone(), watermark(1, 2), 300);
-
-        assert!(!ledger.acknowledge(&first));
-        assert_eq!(ledger.next_due_at_ms(), Some(550));
-        assert!(ledger.admit_next(549).is_none());
-        let second = ledger.admit_next(550).unwrap();
-        assert_eq!(second.route(), &route);
-        assert_eq!(second.watermark(), watermark(1, 2));
-    }
-
-    #[test]
     fn matching_generation_certificate_covers_event_delivered_during_capture() {
         let mut ledger = DirtySourceRoutes::default();
         let route = route(41);
@@ -822,8 +821,8 @@ mod tests {
 
         assert!(!ledger.acknowledge_generation_coverage(&admission, &coverage));
         assert_eq!(ledger.covered_watermark(&route), Some(watermark(3, 2)));
-        assert_eq!(ledger.next_due_at_ms(), Some(600));
-        let successor = ledger.admit_next(600).unwrap();
+        assert_eq!(ledger.next_due_at_ms(), Some(2_250));
+        let successor = ledger.admit_next(2_250).unwrap();
         assert_eq!(successor.watermark(), watermark(3, 3));
     }
 
@@ -853,7 +852,7 @@ mod tests {
         ledger.record_event(route.clone(), watermark(1, 2), 300);
         assert!(!ledger.acknowledge(&stale));
 
-        let current = ledger.admit_next(550).unwrap();
+        let current = ledger.admit_next(2_250).unwrap();
         assert!(!ledger.acknowledge(&stale));
         assert_eq!(ledger.len(), 1);
         assert!(ledger.acknowledge(&current));
@@ -869,7 +868,7 @@ mod tests {
         let stale = ledger.admit_next(250).unwrap();
         ledger.record_event(route.clone(), watermark(1, 2), 300);
         assert!(!ledger.acknowledge(&stale));
-        let current = ledger.admit_next(550).unwrap();
+        let current = ledger.admit_next(2_250).unwrap();
         let coverage = VerifiedSourceRefreshRouteBoundary::for_test(&route, watermark(1, 2));
 
         assert!(!ledger.acknowledge_generation_coverage(&stale, &coverage));
@@ -905,7 +904,7 @@ mod tests {
         assert!(!ledger.acknowledge(&admitted));
 
         assert_eq!(ledger.admit_next(550).unwrap().route(), &waiting);
-        assert_eq!(ledger.admit_next(550).unwrap().route(), &first);
+        assert_eq!(ledger.admit_next(2_250).unwrap().route(), &first);
     }
 
     #[test]

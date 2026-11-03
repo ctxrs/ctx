@@ -237,9 +237,9 @@ mod coverage_certificate_tests {
         assert!(ledger.is_empty());
 
         assert!(ledger.record_event(route.clone(), event_after_fence, 350));
-        assert_eq!(ledger.next_due_at_ms(), Some(600));
+        assert_eq!(ledger.next_due_at_ms(), Some(2_250));
         assert_eq!(
-            ledger.admit_next(600).unwrap().watermark(),
+            ledger.admit_next(2_250).unwrap().watermark(),
             event_after_fence
         );
     }
