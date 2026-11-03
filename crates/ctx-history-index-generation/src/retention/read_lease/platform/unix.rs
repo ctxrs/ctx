@@ -59,16 +59,14 @@ impl OpenedCoordinator {
             }
             Err(error) => return Err(error),
         };
-        let needs_initialization = if created {
-            restrict_private_file_handle(&file)?;
-            true
-        } else {
-            match verify_coordinator_file(&file, magic) {
-                Ok(()) => false,
-                Err(_) if create && recoverable_coordinator_prefix(&file, magic)? => true,
-                Err(error) => return Err(error),
-            }
-        };
+        // The versioned filename defines the lock ranges. These bytes are only
+        // an initialization marker, never generation or owner authority. Repair
+        // the same inode/handle so existing process locks remain effective.
+        if create {
+            prepare_control_file(&file)?;
+        }
+        let needs_initialization =
+            created || (create && verify_coordinator_file(&file, magic).is_err());
         if needs_initialization {
             #[cfg(test)]
             if let Some(prefix_len) =
@@ -80,6 +78,7 @@ impl OpenedCoordinator {
                 std::process::exit(super::super::COORDINATOR_CREATION_CRASH_EXIT_CODE);
             }
             write_exact_at(&file, magic)?;
+            file.set_len(magic.len() as u64)?;
             file.sync_all()?;
             root.sync_all()?;
         }
@@ -135,8 +134,8 @@ fn open_initialization_file(root: &File, name: &CString, create: bool) -> io::Re
         }
         Err(error) => return Err(error),
     };
-    if created {
-        restrict_private_file_handle(&file)?;
+    if created || create {
+        prepare_control_file(&file)?;
     }
     verify_initialization_file(&file)?;
     Ok(file)
@@ -207,29 +206,22 @@ fn verify_coordinator_file(file: &File, magic: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn recoverable_coordinator_prefix(file: &File, magic: &[u8]) -> io::Result<bool> {
-    verify_private_file_handle(file)?;
+fn prepare_control_file(file: &File) -> io::Result<()> {
     let metadata = file.metadata()?;
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.nlink() != 1
-        || metadata.len() >= magic.len() as u64
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.nlink() != 1
     {
-        return Ok(false);
+        return Err(invalid_state());
     }
-    let mut bytes = vec![0_u8; usize::try_from(metadata.len()).map_err(|_| invalid_state())?];
-    read_exact_at(file, &mut bytes)?;
-    Ok(magic.starts_with(&bytes))
+    if verify_private_file_handle(file).is_err() {
+        restrict_private_file_handle(file)?;
+    }
+    Ok(())
 }
 
 fn verify_initialization_file(file: &File) -> io::Result<()> {
     verify_private_file_handle(file)?;
     let metadata = file.metadata()?;
-    if metadata.is_file()
-        && metadata.uid() == unsafe { libc::geteuid() }
-        && metadata.nlink() == 1
-        && metadata.len() == 0
-    {
+    if metadata.is_file() && metadata.uid() == unsafe { libc::geteuid() } && metadata.nlink() == 1 {
         Ok(())
     } else {
         Err(invalid_state())
@@ -268,7 +260,10 @@ fn write_exact_at(file: &File, bytes: &[u8]) -> io::Result<()> {
 
 fn identity(file: &File) -> io::Result<ObjectIdentity> {
     let metadata = file.metadata()?;
-    object_identity(metadata.dev(), metadata.ino())
+    Ok(ObjectIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 fn identity_at(root: &File, name: &CString) -> io::Result<ObjectIdentity> {
@@ -289,17 +284,33 @@ fn identity_at(root: &File, name: &CString) -> io::Result<ObjectIdentity> {
     if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Err(invalid_state());
     }
-    object_identity(metadata.st_dev, metadata.st_ino)
+    Ok(stat_identity(&metadata))
 }
 
-fn object_identity(
-    device: impl TryInto<u64>,
-    inode: impl TryInto<u64>,
-) -> io::Result<ObjectIdentity> {
-    Ok(ObjectIdentity {
-        device: device.try_into().map_err(|_| invalid_state())?,
-        inode: inode.try_into().map_err(|_| invalid_state())?,
-    })
+// Match std::os::unix::fs::MetadataExt exactly: Darwin dev_t is signed,
+// and std sign-extends it when returning u64. Negative IDs are valid devices.
+#[allow(clippy::unnecessary_cast)]
+fn stat_identity(metadata: &libc::stat) -> ObjectIdentity {
+    ObjectIdentity {
+        device: metadata.st_dev as u64,
+        inode: metadata.st_ino as u64,
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn negative_darwin_device_id_matches_metadata_representation() {
+    // SAFETY: zero is a valid initial value for every field of stat.
+    let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+    metadata.st_dev = -17;
+    metadata.st_ino = 41;
+    assert_eq!(
+        stat_identity(&metadata),
+        ObjectIdentity {
+            device: u64::MAX - 16,
+            inode: 41
+        }
+    );
 }
 
 fn set_lock(file: &File, offset: u64, kind: LockKind) -> io::Result<bool> {

@@ -115,6 +115,10 @@ fn terminal_status_waits_for_real_journal_replacement_and_scheduler_retry() {
         assert_eq!(notification.calls.load(Ordering::SeqCst), 0);
         assert!(fixture.coordinator.has_pending_request());
         assert_waiting_for_terminal(fixture.status(), &fixture.request_id);
+        assert!(fixture
+            .coordinator
+            .complete_failed_request_handoff(&fixture.request_id)
+            .is_err());
 
         let generation = ctx_history_refresh::pin_published_generation(&data_root)
             .unwrap()
@@ -143,6 +147,10 @@ fn terminal_status_waits_for_real_journal_replacement_and_scheduler_retry() {
             usize::from(!provider_fails)
         );
         assert!(!fixture.coordinator.has_pending_request());
+        assert_eq!(
+            fixture.coordinator.pending_scheduler_retry_root_for_test(),
+            None
+        );
         let status = fixture.status();
         let durable = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
         assert_eq!(

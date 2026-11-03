@@ -183,6 +183,7 @@ fn scan_leaf_serial<R: JsonlFamilyRuntime>(
             leaf.source().clone(),
             route_invalid("JSONL source is unreadable"),
             retained.is_some(),
+            Some(&leaf.source_path().display().to_string()),
         )
         .map_err(route_internal)?;
         sink.record_failed_attempt_rejections(record_rejections);
@@ -716,6 +717,9 @@ fn open_leaf_reader<R: JsonlFamilyRuntime>(
             )
         }
     }?;
+    if let Some(probe) = leaf.replayed_identity_probe.as_deref() {
+        reader.bind_replayed_identity_probe(probe.clone())?;
+    }
     reader.set_oversized_record_policy(adapter.oversized_record_policy());
     Ok(reader)
 }

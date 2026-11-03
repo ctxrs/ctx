@@ -273,7 +273,8 @@ pub trait JsonlFamilyAdapter: Send + Sync {
     >;
 
     /// Validates provider admission before append selection, unless a compatible
-    /// committed checkpoint already certifies the exact strong file observation.
+    /// committed checkpoint certifies the exact strong file observation or the
+    /// adapter explicitly accepts its same-object append trust contract.
     /// Returning a rejected leaf keeps the ordinary inventory quarantine path.
     fn validate_changed_leaf(
         &self,
@@ -623,6 +624,7 @@ pub struct JsonlFamilyLeaf<E: JsonlFamilyError> {
     binding: TypedKey,
     terminal_dependencies: JsonlFamilyLeafTerminalDependencies<E>,
     identity_probe: Option<JsonlProbe>,
+    replayed_identity_probe: Option<Box<JsonlProbe>>,
     identity_probe_rejected_records: u64,
     whole_record: bool,
     freeze_observation_at_scan: bool,

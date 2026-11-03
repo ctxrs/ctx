@@ -145,7 +145,14 @@ pub fn execute_locate<Generation: GenerationReadPort>(
     let result = PinnedHistoryQuery::new(generation.index(), generation.retained_peer())
         .locate(&request)
         .map_err(LocateApplicationError::Query)?;
-    let read_model = locate_read_model(&result);
+    let mut read_model = locate_read_model(&result);
+    let session_id = match &result {
+        LocateResult::Session { session, .. } => session.session_id,
+        LocateResult::Event(event) => event.session_id,
+    };
+    generation
+        .archive_provenance()
+        .decorate(&mut read_model, session_id);
     let compact_read_model = compact_projection
         .then(|| {
             CompactPresentationProjection::new(generation.index(), generation.retained_peer())

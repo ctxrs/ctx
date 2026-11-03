@@ -33,7 +33,7 @@ tree-sitter-rust = "0.24"
 tree-sitter-go = "0.25"
 tree-sitter-swift = "0.7.3"
 tree-sitter-bash = "0.25.1"
-serde_yaml_ng = "0.10"
+yaml_serde = "0.10.7"
 quick-xml = "0.41"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 ctx_graph_types = { package = "ctx-graph-types", path = "../ctx-graph-types" }

@@ -190,6 +190,13 @@ impl OperationLock {
     }
 }
 
+impl Drop for OperationLock {
+    fn drop(&mut self) {
+        // Duplicated or inherited handles can outlive this logical writer lease.
+        let _ = FileExt::unlock(self.file.file());
+    }
+}
+
 /// Owner-private, singly linked regular file pinned to one opened identity.
 pub struct VerifiedFile {
     file: File,

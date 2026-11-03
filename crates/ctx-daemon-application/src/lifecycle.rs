@@ -11,10 +11,11 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use ctx_daemon_runtime::{
-    daemon_lock_is_active, daemon_lock_is_owned_by, daemon_lock_is_stale,
-    daemon_lock_matches_executable, daemon_lock_path, executable_sha256, pid_from_lock_json,
-    read_daemon_status, read_pid_lock_json, spawn_detached, write_daemon_status,
-    DaemonHandoffRestartDeferral, NormalizedLaunch,
+    daemon_lock_executable_metadata, daemon_lock_is_active, daemon_lock_is_owned_by,
+    daemon_lock_is_stale, daemon_lock_matches_executable, daemon_lock_matches_executable_metadata,
+    daemon_lock_path, executable_sha256, pid_from_lock_json, read_daemon_status,
+    read_pid_lock_json, spawn_detached, write_daemon_status, DaemonHandoffRestartDeferral,
+    ExecutableMetadataStamp, NormalizedLaunch,
 };
 use ctx_history_core::utc_now;
 use serde_json::{json, Value};
@@ -26,6 +27,7 @@ mod finite_worker;
 mod finite_worker_bounded_tests;
 mod launch;
 mod owner_observation;
+use owner_observation::read_daemon_owner_identity;
 #[cfg(target_os = "linux")]
 pub(super) use owner_observation::verify_inspection_denied_owner;
 pub use owner_observation::{active_daemon_matches_current_executable, observe_ready_core_daemon};
@@ -105,7 +107,8 @@ struct DaemonOwnerIdentity {
     owner_id: String,
     pid: u32,
     started_at_ms: i64,
-    binary_sha256: String,
+    binary_sha256: Option<String>,
+    binary_metadata: Option<ExecutableMetadataStamp>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DaemonOwnerWaitOutcome {
@@ -188,48 +191,6 @@ fn hosted_uninstall_fences_daemon_autostart(host: &dyn DaemonApplicationHost) ->
 
 pub fn daemon_start_is_fenced(host: &dyn DaemonApplicationHost) -> bool {
     hosted_uninstall_fences_daemon_autostart(host)
-}
-
-fn read_daemon_owner_identity(data_root: &Path) -> Result<Option<DaemonOwnerIdentity>> {
-    if !daemon_lock_is_active(data_root) {
-        return Ok(None);
-    }
-    let Some(value) = read_pid_lock_json(&daemon_lock_path(data_root)) else {
-        return Ok(None);
-    };
-    let Some(pid) = pid_from_lock_json(&value) else {
-        return Ok(None);
-    };
-    let Some(owner_id) = value
-        .get("owner_id")
-        .and_then(Value::as_str)
-        .filter(|owner_id| !owner_id.is_empty())
-    else {
-        return Ok(None);
-    };
-    let Some(started_at_ms) = value
-        .get("started_at_ms")
-        .and_then(Value::as_i64)
-        .filter(|started_at_ms| *started_at_ms > 0)
-    else {
-        return Ok(None);
-    };
-    let Some(binary_sha256) = value
-        .get("binary_sha256")
-        .and_then(Value::as_str)
-        .filter(|digest| !digest.is_empty())
-    else {
-        return Ok(None);
-    };
-    if !daemon_lock_is_owned_by(data_root, pid) {
-        return Ok(None);
-    }
-    Ok(Some(DaemonOwnerIdentity {
-        owner_id: owner_id.to_owned(),
-        pid,
-        started_at_ms,
-        binary_sha256: binary_sha256.to_owned(),
-    }))
 }
 
 fn wait_for_daemon_owner_identity_with_cancellation(
@@ -352,6 +313,11 @@ fn recover_unusable_daemon_owner_with(
     // Revalidate the complete advisory-lock owner identity after the bounded
     // probe immediately before any destructive action.
     if current_owner()?.as_ref() != Some(observed_owner) {
+        return Ok(false);
+    }
+    // A metadata stamp is sufficient for observational reuse, never forced
+    // termination. Only the finite worker's direct parent can reap it.
+    if observed_owner.binary_sha256.is_none() {
         return Ok(false);
     }
     checkpoint()?;
@@ -586,7 +552,7 @@ fn start_daemon_profile_and_wait(
                 child_unreaped.set(false);
                 if exit.success() && daemon_lock_is_active(data_root) {
                     let executable = daemon_autostart_exe()?;
-                    if daemon_lock_matches_executable(data_root, &executable)? {
+                    if daemon_lock_matches_executable_metadata(data_root, &executable)? {
                         // Another same-binary cold-start child won singleton
                         // ownership. Join its authenticated readiness handoff
                         // instead of treating the losing child's clean exit as

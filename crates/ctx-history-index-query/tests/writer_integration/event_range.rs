@@ -271,6 +271,77 @@ fn range_is_half_open_timestamped_provider_neutral_and_tie_ordered() {
 }
 
 #[test]
+fn metadata_filters_fold_ascii_only_in_pages_cursors_and_workspace_evidence() {
+    use ctx_history_core::{
+        CoreActivity, LiteralFactKind, ProviderDeclaredFact, CORE_ACTIVITY_REVISION,
+    };
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "unicode-paths");
+    let records: Vec<_> = ["/work/ÉCOLE", "/work/école"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let mut event = record(&source, i as u64, i as u64, Some(100), "project history");
+            event.content.activity = Some(CoreActivity {
+                revision: CORE_ACTIVITY_REVISION,
+                provider_call_id: None,
+                invocation: None,
+                result: None,
+                facts: [
+                    LiteralFactKind::Workspace,
+                    LiteralFactKind::SessionCwd,
+                    LiteralFactKind::ToolWorkdir,
+                    LiteralFactKind::Project,
+                    LiteralFactKind::File,
+                ]
+                .map(|kind| ProviderDeclaredFact {
+                    kind,
+                    value: path.into(),
+                })
+                .into(),
+            });
+            event
+        })
+        .collect();
+    publish(temp.path(), 1, &[(source, records.clone())]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    for (i, path) in ["/WORK/École", "/WORK/éCOLE"].into_iter().enumerate() {
+        for file in [false, true] {
+            let filters = if file {
+                CoreEventRangeFilters {
+                    file: Some(path.into()),
+                    ..CoreEventRangeFilters::default()
+                }
+            } else {
+                CoreEventRangeFilters {
+                    workspace: Some(path.into()),
+                    ..CoreEventRangeFilters::default()
+                }
+            };
+            let selection = CoreEventRangeSelection::all(filters).unwrap();
+            let page = index.core_event_range_page(&selection, None, 1).unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].event_id, records[i].event_id);
+            let cursor = selection
+                .cursor_for(index.generation_id(), &page.items[0])
+                .unwrap();
+            assert!(index
+                .core_event_range_page(&selection, Some(&cursor), 1)
+                .unwrap()
+                .items
+                .is_empty());
+            if !file {
+                for (j, record) in records.iter().enumerate() {
+                    let metadata: Vec<_> = selection.workspace_metadata(record).collect();
+                    assert_eq!(metadata.len(), 4);
+                    assert!(metadata.iter().all(|(_, matches)| *matches == (i == j)));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn all_domain_includes_untimestamped_tail_and_descending_is_exact_reverse() {
     let temp = tempdir().unwrap();
     let source = test_source("codex", "all-events");
@@ -1232,4 +1303,40 @@ fn indexed_selective_continuation_never_walks_chronology_or_materializes_decoys(
         ctx_history_index_query::stored_core_event_record_materializations(),
         selected_ids.len()
     );
+}
+
+#[test]
+fn workspace_scope_evidence_agrees_with_indexed_matching_and_cursor_validation() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "workspace-evidence");
+    let mut events = Vec::new();
+    for (i, value) in ["/WORK/éCOLE", "/work/ÉCOLE", "/other/project"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut event = record(&source, i as u64, i as u64, Some(150), "workspace evidence");
+        add_literal_fact(&mut event, LiteralFactKind::SessionCwd, value);
+        events.push(event);
+    }
+    publish(temp.path(), 1, &[(source, events.clone())]);
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::all(CoreEventRangeFilters {
+        workspace: Some("école".into()),
+        ..CoreEventRangeFilters::default()
+    })
+    .unwrap();
+    let page = index.core_event_range_page(&selection, None, 10).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].core_record.event_id, events[0].event_id);
+    assert!(selection
+        .cursor_for(index.generation_id(), &page.items[0])
+        .is_ok());
+    for (i, event) in events.iter().enumerate() {
+        assert_eq!(
+            selection
+                .workspace_metadata(event)
+                .any(|(_, matches)| matches),
+            i == 0
+        );
+    }
 }

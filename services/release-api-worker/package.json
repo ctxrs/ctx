@@ -14,16 +14,16 @@
   },
   "pnpm": {
     "overrides": {
-      "sharp": "0.35.4",
-      "undici": "7.29.1",
+      "sharp": "0.35.5",
+      "undici": "7.30.1",
       "nanoid": "3.3.18"
     }
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260426.1",
     "typescript": "^5.9.3",
-    "vite": "8.0.16",
-    "vitest": "^4.1.11",
+    "vite": "8.1.6",
+    "vitest": "^4.1.12",
     "wrangler": "^4.114.0"
   },
   "license": "Apache-2.0"

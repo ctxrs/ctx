@@ -157,7 +157,8 @@ pub(super) fn resolver_group(provider: CaptureProvider) -> Option<ResolverGroup>
         | CaptureProvider::Zed
         | CaptureProvider::CopilotCli
         | CaptureProvider::Antigravity => Some(ResolverGroup::Platform),
-        CaptureProvider::Pi
+        CaptureProvider::PrimeAgent
+        | CaptureProvider::Pi
         | CaptureProvider::Crush
         | CaptureProvider::QwenCode
         | CaptureProvider::MistralVibe
@@ -274,6 +275,17 @@ pub(super) fn source_from_location(
     location: &ProviderDefaultLocation,
     path: PathBuf,
 ) -> ProviderSource {
+    source_from_location_with_probe(probes, data_root, spec, location, path, None)
+}
+
+pub(super) fn source_from_location_with_probe(
+    probes: &StaticProviderProbeCatalog,
+    data_root: Option<&Path>,
+    spec: &ProviderSourceSpec,
+    location: &ProviderDefaultLocation,
+    path: PathBuf,
+    selected_probe: Option<BoundedProbe>,
+) -> ProviderSource {
     let presence = path_presence(&path);
     let exists = !matches!(presence, PathPresence::Missing);
     let (status, unsupported_reason, blocked_auth_or_encryption) =
@@ -301,13 +313,15 @@ pub(super) fn source_from_location(
                     false,
                 ),
                 PathPresence::Present => {
-                    match default_location_import_probe(
-                        probes,
-                        data_root,
-                        spec.provider,
-                        location,
-                        &path,
-                    ) {
+                    match selected_probe.unwrap_or_else(|| {
+                        default_location_import_probe(
+                            probes,
+                            data_root,
+                            spec.provider,
+                            location,
+                            &path,
+                        )
+                    }) {
                         BoundedProbe::Found => (
                             ProviderSourceStatus::Available,
                             spec.unsupported_reason,
@@ -592,14 +606,14 @@ mod tests {
     #[test]
     fn every_registered_provider_has_exactly_one_grouped_dispatch_lane() {
         let specs = provider_source_specs();
-        assert_eq!(specs.len(), 43);
+        assert_eq!(specs.len(), 44);
         assert!(specs
             .iter()
             .all(|spec| resolver_group(spec.provider).is_some()));
         for (group, expected) in [
             (ResolverGroup::Simple, 18),
             (ResolverGroup::Platform, 7),
-            (ResolverGroup::ConfigProject, 6),
+            (ResolverGroup::ConfigProject, 7),
             (ResolverGroup::ProfileProject, 6),
             (ResolverGroup::ManualUnsupported, 6),
         ] {

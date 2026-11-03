@@ -20,6 +20,7 @@ COMMON_RUSTC_ENV = {
 }
 
 HISTORY_CLI_DEPS = [
+    "//crates/ctx-history-archive:lib",
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-platform:lib",
@@ -33,6 +34,7 @@ HISTORY_CLI_DEPS = [
 ]
 
 HISTORY_CLI_TEST_SUPPORT_DEPS = [
+    "//crates/ctx-history-archive:lib",
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-platform:lib",

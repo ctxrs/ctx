@@ -13,19 +13,17 @@ impl std::error::Error for ExactMemberFallbackRequired {}
 
 pub(super) fn exact_member_family_fallback_required(
     route_worksets: &BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
-    complete_inventory_routes: &BTreeSet<SourceRouteIdentity>,
     successful_routes: &[SourceBackedSuccessfulRouteOutcome],
     failed_routes: &[SourceBackedFailedRouteOutcome],
 ) -> bool {
     let exact_routes = route_worksets.keys().collect::<BTreeSet<_>>();
-    complete_inventory_routes
+    // Capture can widen member discovery and certify a complete route inventory
+    // when a new session appears. That successful capture is already publishable;
+    // replaying it exhaustively would discard trusted append admission. Only
+    // failures require the existing family reconciliation retry.
+    successful_routes.iter().any(|outcome| {
+        exact_routes.contains(&outcome.route_identity) && outcome.logical_source_failure_total != 0
+    }) || failed_routes
         .iter()
-        .any(|route| exact_routes.contains(route))
-        || successful_routes.iter().any(|outcome| {
-            exact_routes.contains(&outcome.route_identity)
-                && outcome.logical_source_failure_total != 0
-        })
-        || failed_routes
-            .iter()
-            .any(|outcome| exact_routes.contains(&outcome.route_identity))
+        .any(|outcome| exact_routes.contains(&outcome.route_identity))
 }

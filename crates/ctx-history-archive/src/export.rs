@@ -33,20 +33,27 @@ pub fn export_with_control(
     destination: &Path,
     identity: ArchiveIdentity,
     selection: &Selection,
+    control: impl FnMut() -> Result<()>,
+) -> Result<Manifest> {
+    export_selected(
+        index,
+        destination,
+        identity,
+        &crate::selection::SessionSelection::explicit(selection),
+        control,
+    )
+}
+
+pub(crate) fn export_selected(
+    index: &VerifiedIndex,
+    destination: &Path,
+    identity: ArchiveIdentity,
+    selection: &crate::selection::SessionSelection<'_>,
     mut control: impl FnMut() -> Result<()>,
 ) -> Result<Manifest> {
     control()?;
     identity.validate()?;
-    if selection
-        .sources
-        .iter()
-        .chain(selection.sessions.iter())
-        .any(|s| !crate::is_digest(s))
-    {
-        return Err(invalid(
-            "selection requires full lowercase identity digests",
-        ));
-    }
+    selection.explicit.validate()?;
     if destination.try_exists()? {
         return Err(invalid("archive destination already exists"));
     }
@@ -68,7 +75,7 @@ pub fn export_with_control(
     for certificate in &index.manifest().sources {
         control()?;
         let source = certificate.observation().source();
-        if !selection.includes_source(source) {
+        if !selection.includes_source(source)? {
             continue;
         }
         let mut cursor = None;
@@ -78,7 +85,7 @@ pub fn export_with_control(
             for stored in page.items {
                 control()?;
                 let record = &stored.core_record;
-                if !selection.includes_session(record.session_id) {
+                if !selection.includes_session(record.session_id)? {
                     continue;
                 }
                 let path = member_path(source, record.session_id);
@@ -152,7 +159,7 @@ pub fn export_with_control(
         core_contract: ctx_history_core::core_record_contract_fingerprint(),
         generation: index.generation_id().to_owned(),
         fidelity: "retained_normalized".into(),
-        selected_subset: !selection.sources.is_empty() || !selection.sessions.is_empty(),
+        selected_subset: selection.is_subset(),
         inventory_sha256: io::hash_file_with_control(
             &staging.path().join("inventory.jsonl"),
             &mut control,

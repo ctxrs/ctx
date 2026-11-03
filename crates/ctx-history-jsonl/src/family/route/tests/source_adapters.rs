@@ -500,6 +500,43 @@ fn unobserved_membership_uses_parent_enumeration_without_opening_the_leaf() {
 }
 
 #[test]
+fn selected_membership_fences_additions_and_rejects_escaped_or_duplicate_paths() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let first = root.join("first.jsonl");
+    fs::write(&first, TEST_RECORD).unwrap();
+    let inventory = TestAdapter.discover(&root).unwrap();
+    let opening =
+        JsonlFamilyMembershipObservation::observe_selected_paths(&inventory, vec![first.clone()])
+            .unwrap();
+    let second = root.join("second.jsonl");
+    fs::write(&second, TEST_RECORD).unwrap();
+    let current = JsonlFamilyMembershipObservation::observe_selected_paths(
+        &inventory,
+        vec![first.clone(), second],
+    )
+    .unwrap();
+    assert!(!opening.admits(
+        &current,
+        JsonlFamilyInventoryMode::Exact,
+        &HashMap::new(),
+        &HashMap::new()
+    ));
+    assert!(JsonlFamilyMembershipObservation::observe_selected_paths(
+        &inventory,
+        vec![first.clone(), first]
+    )
+    .is_err());
+    let outside = temp.path().join("outside.jsonl");
+    fs::write(&outside, TEST_RECORD).unwrap();
+    assert!(
+        JsonlFamilyMembershipObservation::observe_selected_paths(&inventory, vec![outside])
+            .is_err()
+    );
+}
+
+#[test]
 fn canonical_inventory_collapses_byte_identical_logical_source_aliases() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");

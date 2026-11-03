@@ -1,6 +1,8 @@
 #[cfg(test)]
 use anyhow::Result;
-use ctx_history_index::{CoreEventRecord, SessionRecord};
+#[cfg(test)]
+use ctx_history_index::CoreEventRecord;
+use ctx_history_index::SessionRecord;
 use serde_json::Value;
 
 use crate::presentation_limit::PresentationOutputLimitError;
@@ -35,6 +37,7 @@ pub(in crate::source_index) fn session_transcript_value(
     rendered: Vec<Value>,
     truncated: bool,
     max_events: Option<usize>,
+    provenance: &ctx_history_read_application::ArchiveProvenanceMap,
 ) -> Value {
     ctx_history_read_application::session_transcript_read_model(
         session,
@@ -43,6 +46,7 @@ pub(in crate::source_index) fn session_transcript_value(
         rendered,
         truncated,
         max_events,
+        provenance,
     )
 }
 
@@ -60,12 +64,17 @@ pub(in crate::source_index) fn render_event_values(
     events: &[&CoreEventRecord],
     output_limit_bytes: usize,
 ) -> Result<Vec<Value>> {
-    ctx_history_read_application::render_event_read_model_values(events, output_limit_bytes)
-        .map_err(map_read_model_error)
+    ctx_history_read_application::render_event_read_model_values(
+        events,
+        output_limit_bytes,
+        &Default::default(),
+    )
+    .map_err(map_read_model_error)
 }
 
+#[cfg(test)]
 pub(in crate::source_index) fn render_event_value(event: &CoreEventRecord) -> Value {
-    ctx_history_read_application::render_show_event_read_model(event)
+    ctx_history_read_application::render_show_event_read_model(event, &Default::default())
 }
 
 pub(super) fn map_read_model_error(error: anyhow::Error) -> anyhow::Error {

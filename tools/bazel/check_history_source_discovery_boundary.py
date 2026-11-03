@@ -27,7 +27,7 @@ EXPECTED_DEPENDENCIES: dict[str, Any] = {
     "rusqlite": {"workspace": True},
     "serde": {"workspace": True},
     "serde_json": {"workspace": True},
-    "serde_yaml": {"workspace": True},
+    "yaml_serde": {"workspace": True},
     "sha2": {"workspace": True},
     "same-file": "1.0.6",
     "thiserror": {"workspace": True},

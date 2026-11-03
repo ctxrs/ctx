@@ -1,0 +1,10 @@
+{"type":"session","version":3,"id":"00000000-0000-7000-8000-000000000001","timestamp":"2026-10-01T12:00:00Z","cwd":"/workspace/example","rlmDepth":0}
+{"type":"model_change","id":"model","parentId":null,"timestamp":"2026-10-01T12:00:00Z","provider":"example","modelId":"example-model"}
+{"type":"thinking_level_change","id":"thinking","parentId":"model","timestamp":"2026-10-01T12:00:00Z","thinkingLevel":"high"}
+{"type":"service_tier_change","id":"tier","parentId":"thinking","timestamp":"2026-10-01T12:00:00Z","serviceTier":null}
+{"type":"session_state","id":"state","parentId":"tier","timestamp":"2026-10-01T12:00:00Z","state":{"status":"active"}}
+{"type":"message","id":"user","parentId":"state","timestamp":"2026-10-01T12:00:01Z","message":{"role":"user","content":"primeagentuseroracle: update the example greeting","timestamp":1790856001000}}
+{"type":"message","id":"assistant","parentId":"user","timestamp":"2026-10-01T12:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"primeagentassistantoracle: checking the greeting"},{"type":"toolCall","id":"cell-1","name":"ipython","arguments":{"code":"print('primeagenttooloracle')"}}],"provider":"example","model":"example-model","timestamp":1790856002000}}
+{"type":"message","id":"result","parentId":"assistant","timestamp":"2026-10-01T12:00:03Z","message":{"role":"toolResult","toolCallId":"cell-1","toolName":"ipython","content":[{"type":"text","text":"primeagenttooloracle"}],"details":{"status":"ok","durationMs":2,"diffs":[{"path":"src/greeting.py","diff":"-1 print('hello')\n+1 print('welcome')"}]},"isError":false,"timestamp":1790856003000}}
+{"type":"custom_message","id":"goal","parentId":"result","timestamp":"2026-10-01T12:00:04Z","customType":"goal_context","content":"primeagentgoaloracle: verify the greeting","display":true}
+{"type":"message","id":"custom","parentId":"goal","timestamp":"2026-10-01T12:00:05Z","message":{"role":"custom","customType":"session_slash_command","content":"/status","display":true,"timestamp":1790856005000}}

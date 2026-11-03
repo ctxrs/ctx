@@ -211,6 +211,13 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         DiscoveredWinner
     ),
     route!(Pi, "pi_session_jsonl", true, true, DiscoveredWinner),
+    route!(
+        PrimeAgent,
+        "prime_agent_session_jsonl",
+        true,
+        true,
+        DiscoveredWinner
+    ),
     sqlite_route!(OpenCode, "opencode_sqlite", true, true, DiscoveredWinner),
     sqlite_route!(Kilo, "kilo_sqlite", true, true, DiscoveredWinner),
     sqlite_route!(KiroCli, "kiro_cli_sqlite", true, true, DiscoveredWinner),
@@ -533,6 +540,7 @@ DeepSeekHarness|deepseek_harness_session_jsonl_tree|deepseek_harness_session_jso
 DeepSeekHarness|deepseek_harness_session_jsonl|deepseek_harness_session_jsonl|false|true|ExplicitPath|none|ProviderSource
 Claude|claude_projects_jsonl_tree|claude_projects_jsonl_tree|true|true|DiscoveredWinner|none|ProviderSource
 Pi|pi_session_jsonl|pi_session_jsonl|true|true|DiscoveredWinner|none|ProviderSource
+PrimeAgent|prime_agent_session_jsonl|prime_agent_session_jsonl|true|true|DiscoveredWinner|none|ProviderSource
 OpenCode|opencode_sqlite|opencode_sqlite|true|true|DiscoveredWinner|none|ProviderSource
 Kilo|kilo_sqlite|kilo_sqlite|true|true|DiscoveredWinner|none|ProviderSource
 KiroCli|kiro_cli_sqlite|kiro_cli_sqlite|true|true|DiscoveredWinner|none|ProviderSource

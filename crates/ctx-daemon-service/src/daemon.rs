@@ -313,7 +313,7 @@ where
     {
         return Ok(());
     }
-    let Some(lock) = DaemonLock::acquire(data_root)? else {
+    let Some(lock) = acquire_daemon_lock(data_root, finite_worker)? else {
         return Ok(());
     };
     // Close the check/acquire race with an installation lifecycle owner that
@@ -782,6 +782,7 @@ where
                     .and(daemon_scheduler_source_refresh(&source_refresh_coordinator)),
                 next_safety_reconcile,
                 now,
+                iteration.did_work,
             );
             let wake = wakeup.wait(sharing_workers.wait_duration(wait_for));
             if wake.shutdown {

@@ -47,13 +47,13 @@ pub(super) fn yaml_error(
     text: &str,
     document: Option<usize>,
     line_offset: usize,
-    error: serde_yaml_ng::Error,
+    error: yaml_serde::Error,
 ) -> anyhow::Error {
     use serde::Deserialize;
     // Value decoding also has recursion/alias budgets. The native syntax-only
     // visitor skips value construction and alias expansion; only its failures
     // are known input syntax errors. Other decoder failures remain fatal.
-    let syntax_error = serde_yaml_ng::Deserializer::from_str(text)
+    let syntax_error = yaml_serde::Deserializer::from_str(text)
         .nth(document.unwrap_or(1) - 1)
         .is_some_and(|deserializer| serde::de::IgnoredAny::deserialize(deserializer).is_err());
     let format = if document.is_some() {

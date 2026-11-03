@@ -1,3 +1,5 @@
+mod archive;
+
 use ctx_history_core::MAX_CORE_CONTENT_BYTES;
 use serde_json::{json, Value};
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -465,6 +467,15 @@ fn strip_ansi(rendered: &str) -> String {
         }
     }
     plain
+}
+
+#[test]
+fn prime_agent_show_uses_human_provider_name() {
+    let mut value = show_value();
+    value["provider"] = json!("prime_agent");
+    let text = render_show_document(&value, &context(80, ColorMode::Never)).render_plain();
+    assert!(text.contains("Provider          Prime Agent"), "{text}");
+    assert_eq!(value["provider"], "prime_agent");
 }
 
 #[test]

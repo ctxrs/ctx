@@ -308,7 +308,7 @@ pub(super) fn office(bytes: &[u8], ext: &str, limit: usize) -> Result<OfficeCont
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         // Never extract an archive member to the filesystem.
-        let name = file.name().to_owned();
+        let name = file.name()?.into_owned();
         ensure!(
             file.enclosed_name().is_some(),
             "unsafe Office archive member path"

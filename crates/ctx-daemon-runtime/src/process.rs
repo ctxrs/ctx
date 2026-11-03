@@ -1,21 +1,91 @@
-use std::{env, fmt::Write as _, fs, io::Read, path::Path};
+use std::{env, fmt::Write as _, fs, io::Read, path::Path, time::SystemTime};
 
 use anyhow::{Context, Result};
 use ring::digest::{Context as DigestContext, SHA256};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{daemon_lock_path, observe_process_cpu, pid_lock_payload, read_pid_lock_json};
 
 #[cfg(all(test, target_os = "linux"))]
 mod linux_inspection_tests;
+#[cfg(test)]
+mod metadata_tests;
+
+#[cfg(test)]
+thread_local! {
+    static EXECUTABLE_HASH_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Cheap executable change detection, never authority to signal a process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutableMetadataStamp {
+    len: u64,
+    modified_at: SystemTime,
+    #[cfg(windows)]
+    created_at: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+}
+
+pub fn executable_metadata_stamp(path: &Path) -> Result<ExecutableMetadataStamp> {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("inspect executable metadata {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "executable identity is not a regular file"
+    );
+    Ok(ExecutableMetadataStamp {
+        len: metadata.len(),
+        modified_at: metadata.modified()?,
+        #[cfg(windows)]
+        created_at: metadata.created().ok(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(unix)]
+        changed_seconds: metadata.ctime(),
+        #[cfg(unix)]
+        changed_nanoseconds: metadata.ctime_nsec(),
+    })
+}
+
+pub fn daemon_lock_executable_metadata(value: &Value) -> Option<ExecutableMetadataStamp> {
+    serde_json::from_value(value.get("binary_metadata")?.clone()).ok()
+}
 
 pub fn current_daemon_lock_identity(data_root: &Path) -> Result<Value> {
-    let binary = env::current_exe().context("resolve ctx daemon executable identity")?;
+    current_daemon_lock_identity_with_hash(data_root, true)
+}
+
+pub(crate) fn current_daemon_lock_identity_with_hash(
+    data_root: &Path,
+    include_binary_hash: bool,
+) -> Result<Value> {
+    let binary =
+        fs::canonicalize(env::current_exe().context("resolve ctx daemon executable identity")?)
+            .context("resolve canonical ctx daemon executable")?;
+    // Linux's /proc image refers to this process even if the install path was
+    // replaced between exec and lock publication.
+    let image = process_executable_path(std::process::id()).unwrap_or_else(|| binary.clone());
     let mut payload = pid_lock_payload(json!({
         "binary": binary,
-        "binary_sha256": executable_sha256(&binary)?,
+        "binary_metadata": executable_metadata_stamp(&image)?,
         "data_root": data_root,
     }));
+    if include_binary_hash {
+        payload["binary_sha256"] = Value::String(executable_sha256(&image)?);
+    }
     // Optional accounting binds this daemon owner to its native process birth.
     // Missing OS/boot inspection must not prevent ordinary daemon startup.
     if let Some(token) = observe_process_cpu(std::process::id())
@@ -25,6 +95,34 @@ pub fn current_daemon_lock_identity(data_root: &Path) -> Result<Value> {
         payload["process_creation_token"] = token;
     }
     Ok(payload)
+}
+
+pub fn daemon_lock_metadata_identity_matches(value: &Value, executable: &Path) -> Result<bool> {
+    let Some(recorded_binary) = value.get("binary").and_then(Value::as_str).map(Path::new) else {
+        return Ok(false);
+    };
+    if !executable_paths_match(recorded_binary, executable) {
+        return Ok(false);
+    }
+    // Retain compatibility with locks published before metadata stamps existed.
+    // A malformed new stamp must not fall back to an unrelated digest.
+    if value.get("binary_metadata").is_none() {
+        return daemon_lock_binary_identity_matches(value, executable);
+    }
+    let Some(recorded) = daemon_lock_executable_metadata(value) else {
+        return Ok(false);
+    };
+    Ok(recorded == executable_metadata_stamp(executable)?)
+}
+
+pub fn daemon_lock_matches_executable_metadata(
+    data_root: &Path,
+    executable: &Path,
+) -> Result<bool> {
+    let Some(value) = read_pid_lock_json(&daemon_lock_path(data_root)) else {
+        return Ok(false);
+    };
+    daemon_lock_metadata_identity_matches(&value, executable)
 }
 
 pub fn daemon_lock_matches_executable(data_root: &Path, executable: &Path) -> Result<bool> {
@@ -38,13 +136,47 @@ pub fn daemon_lock_binary_identity_matches(value: &Value, executable: &Path) -> 
     let Some(recorded_binary) = value.get("binary").and_then(Value::as_str).map(Path::new) else {
         return Ok(false);
     };
-    if fs::canonicalize(recorded_binary).ok() != fs::canonicalize(executable).ok() {
+    if !executable_paths_match(recorded_binary, executable) {
         return Ok(false);
     }
     let Some(recorded_sha256) = value.get("binary_sha256").and_then(Value::as_str) else {
         return Ok(false);
     };
     Ok(recorded_sha256 == executable_sha256(executable)?)
+}
+
+/// Cheap ownership check for reuse. Callers must still complete the local
+/// authenticated lifecycle handshake before treating the daemon as usable.
+pub fn daemon_owner_metadata_identity_matches(value: &Value, executable: &Path) -> Result<bool> {
+    if value.get("binary_metadata").is_none() {
+        return daemon_owner_binary_identity_matches(value, executable);
+    }
+    if !daemon_lock_metadata_identity_matches(value, executable)? {
+        return Ok(false);
+    }
+    let Some(pid) = value
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return Ok(false);
+    };
+    if process_state(pid) != ProcessState::Running {
+        return Ok(false);
+    }
+    let Some(image) = process_executable_path(pid) else {
+        return Ok(false);
+    };
+    let observed = executable_metadata_stamp(&image)
+        .map_err(|error| process_executable_inspection_error(pid, error))?;
+    Ok(daemon_lock_executable_metadata(value).as_ref() == Some(&observed))
+}
+
+fn executable_paths_match(recorded: &Path, expected: &Path) -> bool {
+    match (fs::canonicalize(recorded), fs::canonicalize(expected)) {
+        (Ok(recorded), Ok(expected)) => recorded == expected,
+        _ => false,
+    }
 }
 
 pub fn daemon_owner_binary_identity_matches(value: &Value, executable: &Path) -> Result<bool> {
@@ -298,6 +430,8 @@ pub fn process_executable_path(_pid: u32) -> Option<std::path::PathBuf> {
 }
 
 pub fn executable_sha256(path: &Path) -> Result<String> {
+    #[cfg(test)]
+    EXECUTABLE_HASH_READS.with(|reads| reads.set(reads.get() + 1));
     let mut file = fs::File::open(path)
         .with_context(|| format!("open executable identity {}", path.display()))?;
     let mut hasher = DigestContext::new(&SHA256);
@@ -336,6 +470,24 @@ mod tests {
         assert!(daemon_lock_binary_identity_matches(&lock, &executable).unwrap());
         fs::write(&executable, b"new executable image").unwrap();
         assert!(!daemon_lock_binary_identity_matches(&lock, &executable).unwrap());
+    }
+
+    #[test]
+    fn finite_worker_identity_uses_metadata_without_hashing_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let before = EXECUTABLE_HASH_READS.with(std::cell::Cell::get);
+        let lock = current_daemon_lock_identity_with_hash(temp.path(), false).unwrap();
+        assert!(daemon_lock_executable_metadata(&lock).is_some());
+        assert!(lock.get("binary_sha256").is_none());
+        let executable = lock
+            .get("binary")
+            .and_then(Value::as_str)
+            .map(Path::new)
+            .unwrap();
+        assert!(daemon_lock_metadata_identity_matches(&lock, executable).unwrap());
+        assert!(daemon_owner_metadata_identity_matches(&lock, executable).unwrap());
+        assert_eq!(EXECUTABLE_HASH_READS.with(std::cell::Cell::get), before);
+        assert!(!daemon_owner_binary_identity_matches(&lock, executable).unwrap());
     }
 
     #[cfg(target_os = "linux")]

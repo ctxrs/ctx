@@ -53,8 +53,8 @@ event-local Core capability has its own provider + route + source format +
 format version authority in
 [`mcp-tool-call-attribution-capabilities.json`](mcp-tool-call-attribution-capabilities.json).
 Capability revision 4 exact providers are Codex, Warp, and Copilot CLI. The
-complete evidence matrix contains 48 base routes and 52 capability lanes:
-three exact, 48 not-qualified, and one excluded. The Deep Agents hosted trace
+complete evidence matrix contains 49 base routes and 53 capability lanes:
+three exact, 49 not-qualified, and one excluded. The Deep Agents hosted trace
 is excluded from the local-only boundary, while its local SQLite history import
 remains Supported but not qualified for exact attribution. See
 [`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) for absence,
@@ -73,6 +73,7 @@ support matrix is:
 | Codex | Supported | `codex_session_jsonl_tree`, `codex_history_jsonl` |
 | Grok Build | Supported | `grok_build_session_updates_jsonl_tree` |
 | DeepSeek Harness | Supported | `deepseek_harness_session_jsonl_tree` |
+| Prime Agent | Supported | `prime_agent_session_jsonl` |
 | Pi | Supported | `pi_session_jsonl` |
 | Claude Code | Supported | `claude_projects_jsonl_tree` |
 | OpenCode | Supported | `opencode_sqlite` |

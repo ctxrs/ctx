@@ -78,6 +78,12 @@ pub enum JsonlPhysicalDigest {
         bounded_prefix: Sha256,
         bounded_prefix_remaining: u64,
     },
+    FullCompleteAndResumablePrefix {
+        full: JsonlResumableSha256,
+        complete: JsonlResumableSha256,
+        bounded_prefix: JsonlResumableSha256,
+        bounded_prefix_remaining: u64,
+    },
 }
 
 impl JsonlPhysicalDigest {
@@ -120,14 +126,16 @@ impl JsonlPhysicalDigest {
             Self::Complete { complete }
             | Self::FullAndComplete { complete, .. }
             | Self::CompleteAndBoundedPrefix { complete, .. }
-            | Self::FullCompleteAndBoundedPrefix { complete, .. } => complete,
+            | Self::FullCompleteAndBoundedPrefix { complete, .. }
+            | Self::FullCompleteAndResumablePrefix { complete, .. } => complete,
         }
     }
 
     pub fn full_hasher(&self) -> Option<&JsonlResumableSha256> {
         match self {
             Self::FullAndComplete { full, .. }
-            | Self::FullCompleteAndBoundedPrefix { full, .. } => Some(full),
+            | Self::FullCompleteAndBoundedPrefix { full, .. }
+            | Self::FullCompleteAndResumablePrefix { full, .. } => Some(full),
             _ => None,
         }
     }
@@ -145,6 +153,19 @@ impl JsonlPhysicalDigest {
                 ..
             } => Some((bounded_prefix, *bounded_prefix_remaining)),
             _ => None,
+        }
+    }
+
+    pub(super) fn authenticated_prefix_sha256(&self) -> Option<([u8; 32], u64)> {
+        match self {
+            Self::FullCompleteAndResumablePrefix {
+                bounded_prefix,
+                bounded_prefix_remaining,
+                ..
+            } => Some((bounded_prefix.digest(), *bounded_prefix_remaining)),
+            _ => self
+                .bounded_prefix()
+                .map(|(hasher, remaining)| (hasher.clone().finalize().into(), remaining)),
         }
     }
 
@@ -186,6 +207,21 @@ impl JsonlPhysicalDigest {
                     digest.update(bytes);
                 }
             }
+            Self::FullCompleteAndResumablePrefix {
+                full,
+                complete: digest,
+                bounded_prefix,
+                bounded_prefix_remaining,
+            } => {
+                full.update(bytes);
+                let take = usize::try_from((*bounded_prefix_remaining).min(bytes.len() as u64))
+                    .unwrap_or(bytes.len());
+                bounded_prefix.update(&bytes[..take]);
+                *bounded_prefix_remaining = bounded_prefix_remaining.saturating_sub(take as u64);
+                if complete {
+                    digest.update(bytes);
+                }
+            }
         }
     }
 }
@@ -221,6 +257,7 @@ pub struct JsonlPhysicalStreamPosition {
     next_physical_ordinal: u64,
     complete_prefix_end: u64,
     digest: JsonlPhysicalDigest,
+    incomplete_prefix_eof_hasher: Option<JsonlResumableSha256>,
     incomplete_tail: bool,
     exhausted: bool,
 }
@@ -284,6 +321,7 @@ pub struct JsonlPhysicalStream<E: JsonlFamilyError> {
     framing: JsonlRecordFraming,
     source_changed: fn() -> E,
     digest: JsonlPhysicalDigest,
+    incomplete_prefix_eof_hasher: Option<JsonlResumableSha256>,
     record_buffer: Vec<u8>,
     route_resources: Option<SourceBackedRouteResources>,
     records_since_activity: u8,
@@ -397,6 +435,7 @@ impl<E: JsonlFamilyError> JsonlPhysicalStream<E> {
             framing,
             source_changed,
             digest,
+            incomplete_prefix_eof_hasher: None,
             record_buffer: Vec::new(),
             route_resources: route_resources.cloned(),
             records_since_activity: 0,
@@ -420,6 +459,7 @@ impl<E: JsonlFamilyError> JsonlPhysicalStream<E> {
             self.exhausted = true;
             return Ok(None);
         }
+        let before_record_eof_hasher = self.digest.full_hasher().cloned();
         let record = if self.encoding == JsonlPhysicalEncoding::StandardZstdJsonl {
             self.read_standard_zstd_record()?
         } else if self.encoding == JsonlPhysicalEncoding::ChecksummedZstdFrames {
@@ -490,6 +530,22 @@ impl<E: JsonlFamilyError> JsonlPhysicalStream<E> {
                     self.framing,
                     self.source_changed,
                 )?,
+                JsonlPhysicalDigest::FullCompleteAndResumablePrefix {
+                    full,
+                    complete,
+                    bounded_prefix,
+                    bounded_prefix_remaining,
+                } => super::framing::read_bounded_record_full_complete_and_prefix(
+                    &mut self.reader,
+                    &mut self.record_buffer,
+                    full,
+                    complete,
+                    bounded_prefix,
+                    bounded_prefix_remaining,
+                    remaining,
+                    self.framing,
+                    self.source_changed,
+                )?,
             }
             .ok_or_else(|| (self.source_changed)())?;
             JsonlDecodedPhysicalUnit {
@@ -520,6 +576,7 @@ impl<E: JsonlFamilyError> JsonlPhysicalStream<E> {
                 .checked_add(1)
                 .ok_or_else(|| E::system_invariant("JSONL physical stream ordinal overflowed"))?;
         } else {
+            self.incomplete_prefix_eof_hasher = before_record_eof_hasher;
             self.incomplete_tail = true;
             self.exhausted = true;
         }
@@ -560,6 +617,7 @@ impl<E: JsonlFamilyError> JsonlPhysicalStream<E> {
             next_physical_ordinal: self.next_physical_ordinal,
             complete_prefix_end: self.complete_prefix_end,
             digest: self.digest.clone(),
+            incomplete_prefix_eof_hasher: self.incomplete_prefix_eof_hasher.clone(),
             incomplete_tail: self.incomplete_tail,
             exhausted: self.exhausted,
         }
@@ -577,6 +635,7 @@ impl<E: JsonlFamilyError> JsonlPhysicalStream<E> {
         self.next_physical_ordinal = position.next_physical_ordinal;
         self.complete_prefix_end = position.complete_prefix_end;
         self.digest = position.digest;
+        self.incomplete_prefix_eof_hasher = position.incomplete_prefix_eof_hasher;
         self.incomplete_tail = position.incomplete_tail;
         self.exhausted = position.exhausted;
         Ok(())
@@ -584,6 +643,13 @@ impl<E: JsonlFamilyError> JsonlPhysicalStream<E> {
 
     pub fn complete_prefix_end(&self) -> u64 {
         self.complete_prefix_end
+    }
+
+    pub(super) fn complete_prefix_eof_hasher(&self) -> Option<&JsonlResumableSha256> {
+        self.incomplete_prefix_eof_hasher
+            .as_ref()
+            .or_else(|| self.digest.full_hasher())
+            .filter(|hasher| hasher.bytes_hashed() == self.complete_prefix_end)
     }
 
     pub fn offset(&self) -> u64 {

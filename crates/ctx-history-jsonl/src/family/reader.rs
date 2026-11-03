@@ -148,9 +148,8 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                 && admitted_length >= previous.complete_prefix_end()
             {
                 if direct_append
-                    && previous.terminal()
                     && admitted_length > previous.admitted_length()
-                    && previous.admitted_length() == previous.complete_prefix_end()
+                    && observation.length() >= previous_observation.length()
                     && (!bind_admitted_eof
                         || deferred_append_eof_sha256
                             .flatten()
@@ -159,6 +158,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                                     .restore_admitted_eof_hasher()
                                     .is_some_and(|hasher| hasher.digest() == expected)
                             }))
+                    && previous.restore_complete_prefix_eof_hasher().is_some()
                     && previous
                         .restore_complete_prefix_hasher()
                         .is_some_and(|restored| {
@@ -171,7 +171,13 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                     source_change = JsonlSourceChange::Append;
                     semantic_append_resume = Some(JsonlSemanticAppendResume {
                         previous: previous.clone(),
-                        admitted_eof_sha256: None,
+                        admitted_eof_sha256: if bind_admitted_eof
+                            && previous.complete_prefix_end() < previous.admitted_length()
+                        {
+                            deferred_append_eof_sha256.flatten()
+                        } else {
+                            None
+                        },
                         position: None,
                     });
                     used_direct_append = true;
@@ -237,18 +243,17 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
         let full_hasher = if whole_record || skip_scan {
             None
         } else if used_direct_append {
-            let restored = semantic_append_resume
-                .as_ref()
-                .and_then(|resume| resume.previous.restore_admitted_eof_hasher());
-            Some(match restored {
-                Some(restored) => restored,
-                None => hash_prefix::<E, _>(
-                    identity.source_path(),
-                    &mut file,
-                    complete_prefix_end,
-                    JsonlResumableSha256::new(),
-                )?,
-            })
+            // Both hash streams must start at the complete-record frontier.
+            // The old admitted EOF may be inside the record we are about to
+            // reread, so restoring it here would hash the deferred tail twice.
+            Some(
+                semantic_append_resume
+                    .as_ref()
+                    .and_then(|resume| resume.previous.restore_complete_prefix_eof_hasher())
+                    .ok_or_else(|| {
+                        E::system_invariant("direct JSONL append lost its EOF frontier")
+                    })?,
+            )
         } else if semantic_append_resume
             .as_ref()
             .is_some_and(|resume| resume.admitted_eof_sha256.is_some())
@@ -286,6 +291,20 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                     physical_encoding,
                     record_framing,
                     match (full_hasher, semantic_append_resume.as_ref()) {
+                        (Some(full), Some(resume))
+                            if used_direct_append && resume.admitted_eof_sha256.is_some() =>
+                        {
+                            // Trust the certified complete prefix and authenticate
+                            // only the previously admitted unfinished bytes while
+                            // the same pass frames their completion and new suffix.
+                            JsonlPhysicalDigest::FullCompleteAndResumablePrefix {
+                                bounded_prefix: full.clone(),
+                                bounded_prefix_remaining: resume.previous.admitted_length()
+                                    - complete_prefix_end,
+                                full,
+                                complete: prefix_hasher.clone(),
+                            }
+                        }
                         (Some(full), Some(resume)) if resume.admitted_eof_sha256.is_some() => {
                             JsonlPhysicalDigest::full_complete_and_bounded_prefix(
                                 full,
@@ -328,7 +347,51 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             direct_append_resume: used_direct_append,
             semantic_preflight_binding: None,
             oversized_record_policy: JsonlOversizedRecordPolicy::RejectSource,
+            replayed_identity_probe: None,
         })
+    }
+
+    // Admission authority is independent of whether projection consumes the
+    // probed records. Retain the original observation: the leaf's observation
+    // may already have advanced after an append or a change-time-only update.
+    pub(super) fn bind_replayed_identity_probe(&mut self, probe: JsonlProbe) -> JsonlResult<(), E> {
+        if self.whole_record || probe.complete_prefix_end > self.admitted_length() {
+            return Err(E::source_changed());
+        }
+        self.replayed_identity_probe = Some(Box::new(probe));
+        self.revalidate_replayed_identity_probe()
+    }
+
+    fn revalidate_replayed_identity_probe(&self) -> JsonlResult<(), E> {
+        if let Some(probe) = self.replayed_identity_probe.as_deref() {
+            revalidate_frozen_prefix(
+                self.identity.source_path(),
+                self.source_file.as_ref(),
+                &probe.observation,
+                probe.complete_prefix_end,
+                prefix_digest(&probe.prefix_hasher),
+            )?;
+        }
+        Ok(())
+    }
+
+    // Compare the bytes actually replayed as well as the retained file. A
+    // rewrite after reader opening must not acquire authority merely because
+    // the reader computed a fresh checkpoint over the rewritten bytes.
+    fn validate_replayed_identity_frontier(&self) -> JsonlResult<(), E> {
+        if let (Some(probe), Some(physical)) = (
+            self.replayed_identity_probe.as_deref(),
+            self.physical.as_ref(),
+        ) {
+            if physical.next_physical_ordinal() == probe.next_physical_ordinal
+                && (physical.complete_prefix_end() != probe.complete_prefix_end
+                    || prefix_digest(physical.digest().complete_hasher())
+                        != prefix_digest(&probe.prefix_hasher))
+            {
+                return Err(E::source_changed());
+            }
+        }
+        Ok(())
     }
 
     pub fn set_oversized_record_policy(&mut self, policy: JsonlOversizedRecordPolicy) {
@@ -366,6 +429,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             .as_mut()
             .ok_or_else(|| E::system_invariant("semantic JSONL input lost its physical stream"))?
             .next_record()?;
+        self.validate_replayed_identity_frontier()?;
         match record {
             None => self.finish(true)?,
             Some(record) if !record.complete => self.finish(false)?,
@@ -494,11 +558,8 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                 let prefix_matches = resume.admitted_eof_sha256.is_none_or(|expected| {
                     self.physical
                         .as_ref()
-                        .and_then(|physical| physical.digest().bounded_prefix())
-                        .is_some_and(|(digest, remaining)| {
-                            remaining == 0
-                                && <[u8; 32]>::from(digest.clone().finalize()) == expected
-                        })
+                        .and_then(|physical| physical.digest().authenticated_prefix_sha256())
+                        .is_some_and(|(digest, remaining)| remaining == 0 && digest == expected)
                 });
                 match (resume_append && prefix_matches, resume.position.clone()) {
                     (true, Some(position)) => (position, true),
@@ -568,6 +629,8 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                 let position = physical.position();
                 (position, physical.next_record().map_err(V::from)?)
             };
+            self.validate_replayed_identity_frontier()
+                .map_err(V::from)?;
             let Some(record) = record else {
                 self.finish(true).map_err(V::from)?;
                 break;
@@ -723,9 +786,15 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             next_physical_ordinal,
             terminal,
         )
+        .with_complete_prefix_eof_state(
+            self.physical
+                .as_ref()
+                .and_then(JsonlPhysicalStream::complete_prefix_eof_hasher),
+        )
     }
 
     fn finish(&mut self, terminal: bool) -> JsonlResult<(), E> {
+        self.revalidate_replayed_identity_probe()?;
         if let Some(expected) = self.semantic_preflight_binding.as_ref() {
             let physical = self.physical.as_ref().ok_or_else(|| {
                 E::system_invariant("semantic JSONL input lost its physical stream")

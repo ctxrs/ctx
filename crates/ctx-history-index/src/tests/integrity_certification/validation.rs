@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn warm_metadata_reads_are_visible_without_artifact_rehashing() {
+    use ctx_history_index_generation::read_metrics::{
+        metadata_read_activity, reset_metadata_read_activity,
+    };
+
+    let (temp, source, _) = published_fixture("metadata-read-accounting.jsonl");
+    for appended in [false, true] {
+        if appended {
+            append_one_record(temp.path(), &source).unwrap();
+        }
+        // Retain the materialized manifest cache while measuring another open.
+        let pinned = VerifiedIndex::open_pinned(temp.path()).unwrap();
+        reset_metadata_read_activity();
+        crate::publication::reset_verification_activity();
+        let reopened = VerifiedIndex::open_pinned(temp.path()).unwrap();
+        let reads = metadata_read_activity();
+        assert_eq!(reopened.generation_id(), pinned.generation_id());
+        assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
+        assert_eq!(crate::publication::verification_activity().0, 0);
+        let manifest_size = fs::metadata(
+            temp.path()
+                .join("ctx-generations")
+                .join(format!("{}.json", pinned.generation_id())),
+        )
+        .unwrap()
+        .len();
+        assert!(reads.manifest.operations > 0);
+        assert_eq!(
+            reads.manifest.bytes,
+            manifest_size * reads.manifest.operations
+        );
+        assert!(reads.certification.bytes > 0);
+        assert!(reads.pointer.bytes > 0);
+        assert!(reads.tantivy_control.bytes > 0);
+        eprintln!("appended={appended}: {reads:?}; artifact_hash_bytes=0");
+    }
+}
+
+#[test]
 fn missing_and_corrupt_certification_force_one_rehash_then_reuse() {
     for corrupt in [false, true] {
         let (temp, _, _) = published_fixture(if corrupt {

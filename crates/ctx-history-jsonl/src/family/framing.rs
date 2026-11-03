@@ -5,6 +5,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+use super::revalidation::JsonlPrefixHasher;
 use super::{JsonlFamilyError, JsonlResult, JsonlResumableSha256, MAX_PROVIDER_JSONL_LINE_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,16 +100,16 @@ struct CompleteAndBoundedPrefixSha256<'a> {
     bounded_prefix_remaining: &'a mut u64,
 }
 
-struct FullCompleteAndBoundedPrefixSha256<'a> {
+struct FullCompleteAndBoundedPrefixSha256<'a, H> {
     full_hasher: &'a mut JsonlResumableSha256,
     complete_hasher: &'a mut JsonlResumableSha256,
     complete_before_record: JsonlResumableSha256,
     record_hasher: Sha256,
-    bounded_prefix_hasher: &'a mut Sha256,
+    bounded_prefix_hasher: &'a mut H,
     bounded_prefix_remaining: &'a mut u64,
 }
 
-impl JsonlRecordDigest for FullCompleteAndBoundedPrefixSha256<'_> {
+impl<H: JsonlPrefixHasher> JsonlRecordDigest for FullCompleteAndBoundedPrefixSha256<'_, H> {
     #[inline(always)]
     fn update(&mut self, chunk: &[u8]) {
         self.full_hasher.update(chunk);
@@ -116,7 +117,7 @@ impl JsonlRecordDigest for FullCompleteAndBoundedPrefixSha256<'_> {
         self.record_hasher.update(chunk);
         let take = usize::try_from((*self.bounded_prefix_remaining).min(chunk.len() as u64))
             .unwrap_or(chunk.len());
-        self.bounded_prefix_hasher.update(&chunk[..take]);
+        self.bounded_prefix_hasher.update_bytes(&chunk[..take]);
         *self.bounded_prefix_remaining = self
             .bounded_prefix_remaining
             .saturating_sub(u64::try_from(take).unwrap_or(u64::MAX));
@@ -290,6 +291,34 @@ pub fn read_bounded_record_full_complete_and_prefix_sha256<E: JsonlFamilyError>(
     framing: JsonlRecordFraming,
     source_changed: fn() -> E,
 ) -> JsonlResult<Option<JsonlBoundedRecordRead>, E> {
+    read_bounded_record_full_complete_and_prefix(
+        reader,
+        storage,
+        full_hasher,
+        complete_hasher,
+        bounded_prefix_hasher,
+        bounded_prefix_remaining,
+        maximum_bytes,
+        framing,
+        source_changed,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn read_bounded_record_full_complete_and_prefix<
+    E: JsonlFamilyError,
+    H: JsonlPrefixHasher,
+>(
+    reader: &mut BufReader<File>,
+    storage: &mut Vec<u8>,
+    full_hasher: &mut JsonlResumableSha256,
+    complete_hasher: &mut JsonlResumableSha256,
+    bounded_prefix_hasher: &mut H,
+    bounded_prefix_remaining: &mut u64,
+    maximum_bytes: u64,
+    framing: JsonlRecordFraming,
+    source_changed: fn() -> E,
+) -> JsonlResult<Option<JsonlBoundedRecordRead>, E> {
     if maximum_bytes == 0 {
         return Ok(None);
     }
@@ -346,7 +375,17 @@ fn read_bounded_record_with_digest<E: JsonlFamilyError, D: JsonlRecordDigest>(
 
     loop {
         let (consumed, complete) = {
-            let available = reader.fill_buf()?;
+            #[cfg(all(unix, any(test, feature = "test-support")))]
+            let refill = reader.buffer().is_empty();
+            reader.fill_buf()?;
+            #[cfg(all(unix, any(test, feature = "test-support")))]
+            if refill {
+                ctx_history_source_io::read_metrics::record_source_read(
+                    reader.get_ref(),
+                    reader.buffer().len(),
+                );
+            }
+            let available = reader.buffer();
             if available.is_empty() {
                 if byte_len == 0 {
                     return Err(source_changed());

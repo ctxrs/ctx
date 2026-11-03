@@ -11,7 +11,7 @@ shared incremental, read-only architecture.
 
 The public CLI supports these local-history harnesses:
 
-Codex, Grok Build, DeepSeek Harness, Pi, Claude Code, OpenCode, Kilo Code, Kiro, Crush, Goose, Lingma, Qoder, Warp, CodeBuddy, OpenClaw, Hermes Agent, NanoClaw, AstrBot, Shelley, Continue, OpenHands, Antigravity, Gemini, Tabnine, Cursor, Zed, GitHub Copilot, Factory AI Droid, Qwen Code, Kimi Code, Auggie, Junie, Firebender, ForgeCode, Deep Agents, Mistral Vibe, Mux, Rovo Dev, Cline, Roo Code, MiMo Code, fx, Devin.
+Codex, Grok Build, DeepSeek Harness, Prime Agent, Pi, Claude Code, OpenCode, Kilo Code, Kiro, Crush, Goose, Lingma, Qoder, Warp, CodeBuddy, OpenClaw, Hermes Agent, NanoClaw, AstrBot, Shelley, Continue, OpenHands, Antigravity, Gemini, Tabnine, Cursor, Zed, GitHub Copilot, Factory AI Droid, Qwen Code, Kimi Code, Auggie, Junie, Firebender, ForgeCode, Deep Agents, Mistral Vibe, Mux, Rovo Dev, Cline, Roo Code, MiMo Code, fx, Devin.
 
 Use `ctx sources` for the truth on the current machine:
 
@@ -40,7 +40,7 @@ lineage/origin unknown.
 
 Exact MCP server/tool attribution is a separate, narrower event capability.
 Supported provider import does not automatically qualify it. The complete
-43-provider importable route/format partition is documented in
+44-provider importable route/format partition is documented in
 [`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) and its
 machine-readable
 [`capability contract`](mcp-tool-call-attribution-capabilities.json).
@@ -194,3 +194,50 @@ discover or parse that provider's real local history and the provider support
 matrix marks the shipped path as Supported. Contributor-facing content and
 fixture expectations are defined in
 [`provider-import-policy.md`](provider-import-policy.md).
+
+## Prime Agent
+
+Use `--provider prime-agent` (`prime` and `prime_agent` are aliases). Stored
+provider identity is `prime_agent`, separate from Pi, and the source format is
+`prime_agent_session_jsonl`. Only version 3 session headers are admitted.
+
+CLI discovery selects `PRIME_AGENT_SESSION_DIR`, or the legacy
+`PRIME_AGENT_CODING_AGENT_SESSION_DIR` when the current variable is absent.
+An empty current variable suppresses the legacy variable and allows settings
+selection. Without a nonempty session environment override, `sessionDir` in
+exact-CWD `.prime/agent/settings.json` wins over the global `settings.json`.
+Otherwise sessions live under `<agent-dir>/sessions`; the agent directory is
+`PRIME_AGENT_CODING_AGENT_DIR` or `~/.prime/agent`. Relative selectors resolve
+against the current working directory. Prime's null and wrong-typed settings
+are unset, while an empty string selects that working directory. Project
+settings are read only at that exact CWD; no ancestor or project-tree scan is
+performed. Malformed or unsafe winning selectors suppress stale defaults.
+
+RLM child transcripts coexist under
+`<agent-dir>/session-artifacts/<parent-session-id>/sub-*/<session-id>.jsonl`.
+Changing `sessionDir` does not relocate this RLM store. Grandchildren use the
+same artifacts root, keyed by their immediate parent's session ID. Native
+`parentSession` and supported child path structure establish relationships;
+depth or similar text alone does not. Ledgers such as `semantic-edges.jsonl`, `rlm-ledger.jsonl`, and
+`rlm-subagents.jsonl`, window/info caches, and binary artifacts are excluded.
+
+The current T3 store at `~/.t3/userdata/prime-agent/<instance>/<thread>/`
+is also automatic and coexists with CLI history. Probes inspect flat session
+files and supported instance `session-artifacts` children at fixed depths,
+with at most 10,000 entries, 64 KiB per header, and 16 MiB of header data per
+source probe. Symlinks are not followed. Other one-shot `--session-dir`
+locations and old working directories require an exact `--path`; named roots
+can persist an explicitly selected history directory.
+
+Automatic and named-source imports keep readable sessions when a sibling
+transcript is unreadable, and report that file separately. Explicit directory
+import has a shared preflight that can stop on an unreadable sibling. Register
+the directory with `ctx sources add` or select a readable transcript directly
+when this occurs. Native declared file paths and diffs can appear as blame
+evidence; an arbitrary Python cell does not establish a proven producer.
+
+The location rules follow Prime Agent's
+[CLI selectors](https://github.com/PrimeIntellect-ai/prime-agent/blob/c6d4da9421e6087e3fc1a763e947cf37153cd76f/crates/pa-cli/src/config.rs),
+[settings selection](https://github.com/PrimeIntellect-ai/prime-agent/blob/c6d4da9421e6087e3fc1a763e947cf37153cd76f/crates/pa-cli/src/lib.rs),
+[exact-CWD settings storage](https://github.com/PrimeIntellect-ai/prime-agent/blob/c6d4da9421e6087e3fc1a763e947cf37153cd76f/crates/pa-core/src/settings/storage.rs),
+and [RLM child storage](https://github.com/PrimeIntellect-ai/prime-agent/blob/c6d4da9421e6087e3fc1a763e947cf37153cd76f/crates/pa-core/src/session_engine/rlm_host.rs).

@@ -19,6 +19,7 @@ unicode-width.workspace = true
 ctx-agent-application = { path = "../ctx-agent-application" }
 ctx-agent-integrations = { path = "../ctx-agent-integrations" }
 ctx-client-observability = { path = "../ctx-client-observability" }
+ctx-history-archive = { path = "../ctx-history-archive" }
 ctx-history-cli = { path = "../ctx-history-cli" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-read-application = { path = "../ctx-history-read-application" }

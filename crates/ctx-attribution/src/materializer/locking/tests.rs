@@ -51,19 +51,32 @@ use std::os::unix::fs::symlink;
 #[test]
 fn native_operation_lock_excludes_a_contender_and_releases_on_drop()
 -> Result<(), Box<dyn std::error::Error>> {
-    let directory = tempfile::tempdir()?;
-    let root = directory.path().join("graph");
-    prepare_private_root(&root)?;
-    let owner = OperationLock::acquire(&root)?;
+    for retain_duplicate in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("graph");
+        prepare_private_root(&root)?;
+        let owner = OperationLock::acquire(&root)?;
+        let retained = retain_duplicate
+            .then(|| owner.file.file().try_clone())
+            .transpose()?;
+        let contender = open_private_file(&root.join(MATERIALIZER_LOCK_FILE), true)?;
 
-    assert!(matches!(
-        OperationLock::acquire(&root),
-        Err(SegmentMaterializerError::Busy)
-    ));
-    drop(owner);
+        assert!(matches!(
+            OperationLock::acquire(&root),
+            Err(SegmentMaterializerError::Busy)
+        ));
+        assert!(OperationLock::read_progress(&root)?.is_some());
+        drop(owner);
 
-    let successor = OperationLock::acquire(&root)?;
-    successor.verify_identity()?;
+        // Probe immediately while the duplicate is still open: no retry can mask a held lease.
+        assert!(OperationLock::read_progress(&root)?.is_none());
+        FileExt::try_lock_exclusive(contender.file())?;
+        FileExt::unlock(contender.file())?;
+        let successor = OperationLock::acquire(&root)?;
+        successor.verify_identity()?;
+        drop(retained);
+        assert!(OperationLock::read_progress(&root)?.is_some());
+    }
     Ok(())
 }
 

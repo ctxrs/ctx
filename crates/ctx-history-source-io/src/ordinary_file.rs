@@ -229,6 +229,8 @@ fn hash_opened_file_range(
             .len()
             .min(usize::try_from(remaining).unwrap_or(usize::MAX));
         let read = file.read(&mut buffer[..take])?;
+        #[cfg(all(unix, any(test, feature = "test-support")))]
+        crate::read_metrics::record_source_read(file, read);
         if read == 0 {
             return Err(crate::SourceIoError::SourceChangedDuringCapture);
         }

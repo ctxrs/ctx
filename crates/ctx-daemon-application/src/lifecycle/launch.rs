@@ -30,7 +30,7 @@ fn daemon_autostart_command_with_environment_overrides(
 ) -> io::Result<NormalizedLaunch> {
     let mut args = vec![
         OsString::from("--data-root"),
-        data_root.as_os_str().to_os_string(),
+        std::path::absolute(data_root)?.into_os_string(),
         OsString::from("daemon"),
         OsString::from("run"),
         OsString::from("--start-mode"),

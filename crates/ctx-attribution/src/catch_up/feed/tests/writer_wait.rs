@@ -28,6 +28,78 @@ fn receive_progress(
 }
 
 #[test]
+fn background_wait_selects_current_core_after_writer_release() {
+    let fixture = Fixture::new();
+    let source = source("queued-maintenance");
+    let first = fixture.publish(1, &[(source.clone(), vec![(1, "first".to_owned())])], None);
+    let mut owner = fixture.materializer();
+    sync(&fixture, &first, &mut owner);
+    let checkpoints = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let (waiting, observed) = mpsc::channel();
+        let fixture = &fixture;
+        let checkpoints = &checkpoints;
+        let cancelled = &cancelled;
+        let waiter = scope.spawn(move || {
+            crate::catch_up_current(&fixture.data_root, &|| {
+                // Initial cancellation check, first lock attempt, then the
+                // contended retry prove this worker is already waiting.
+                if checkpoints.fetch_add(1, Ordering::SeqCst) == 2 {
+                    waiting.send(()).unwrap();
+                }
+                cancelled.load(Ordering::SeqCst)
+            })
+        });
+        let waiting = observed.recv_timeout(Duration::from_secs(5));
+        let second = fixture.publish(
+            2,
+            &[(
+                source,
+                vec![(1, "replacement".to_owned()), (2, "new".to_owned())],
+            )],
+            None,
+        );
+        sync(fixture, &second, &mut owner);
+        if waiting.is_err() {
+            cancelled.store(true, Ordering::SeqCst);
+        }
+        // Release the lease even when the observation failed.
+        drop(owner);
+        let result = waiter.join().unwrap();
+        waiting.unwrap();
+        let CoreMaterializationSyncOutcome::Finished { receipt, did_work } =
+            result.unwrap().unwrap();
+        assert_eq!(receipt.core_generation_id, second);
+        assert_eq!(receipt.event_count, 2);
+        assert!(
+            !did_work,
+            "queued maintenance must reuse the newer completed projection"
+        );
+        assert_eq!(
+            crate::readiness(&fixture.data_root).unwrap().currentness,
+            CoreProjectionCurrentness::Current
+        );
+    });
+}
+
+#[test]
+fn current_core_maintenance_without_core_or_when_cancelled_creates_no_projection() {
+    let fixture = Fixture::new();
+    assert!(
+        crate::catch_up_current(&fixture.data_root, &|| false)
+            .unwrap()
+            .is_none()
+    );
+    let error = crate::catch_up_current(&fixture.data_root, &|| true).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<crate::materializer::SegmentMaterializerError>(),
+        Some(crate::materializer::SegmentMaterializerError::Cancelled)
+    ));
+    assert!(!fixture.graph_root.exists());
+}
+
+#[test]
 fn waiting_observer_relays_writer_counters_and_torn_snapshot_without_cancelling_writer() {
     let fixture = Fixture::new();
     let generation = fixture.publish(1, &[], None);

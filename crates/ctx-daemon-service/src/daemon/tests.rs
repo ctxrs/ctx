@@ -1090,6 +1090,7 @@ fn due_dirty_route_wakes_the_scheduler_immediately() {
         Some(&coordinator),
         now + StdDuration::from_secs(30),
         now,
+        true,
     );
 
     assert_eq!(wait_for, StdDuration::ZERO);
@@ -1120,6 +1121,7 @@ fn pending_source_refresh_wait_ignores_unreachable_work_until_retry() {
         Some(&coordinator),
         now + StdDuration::from_secs(30),
         now,
+        false,
     );
 
     assert!(wait_for > StdDuration::from_secs(4));

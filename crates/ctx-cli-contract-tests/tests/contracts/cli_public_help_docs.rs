@@ -804,7 +804,8 @@ fn indexing_mode_and_daemon_run_help_expose_the_public_controls() {
         .and_then(|tail| tail.split("Options:").next())
         .unwrap_or(&daemon_help);
     assert!(daemon_commands.contains("run"), "{daemon_help}");
-    for hidden in ["status", "enable", "disable"] {
+    assert!(daemon_commands.contains("status"), "{daemon_help}");
+    for hidden in ["enable", "disable"] {
         assert!(!daemon_commands.contains(hidden), "{daemon_help}");
     }
 

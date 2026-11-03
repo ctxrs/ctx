@@ -1,5 +1,52 @@
 use super::*;
 
+pub(super) fn read_daemon_owner_identity(data_root: &Path) -> Result<Option<DaemonOwnerIdentity>> {
+    if !daemon_lock_is_active(data_root) {
+        return Ok(None);
+    }
+    let Some(value) = read_pid_lock_json(&daemon_lock_path(data_root)) else {
+        return Ok(None);
+    };
+    let Some(pid) = pid_from_lock_json(&value) else {
+        return Ok(None);
+    };
+    let Some(owner_id) = value
+        .get("owner_id")
+        .and_then(Value::as_str)
+        .filter(|owner_id| !owner_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(started_at_ms) = value
+        .get("started_at_ms")
+        .and_then(Value::as_i64)
+        .filter(|started_at_ms| *started_at_ms > 0)
+    else {
+        return Ok(None);
+    };
+    let binary_sha256 = value
+        .get("binary_sha256")
+        .and_then(Value::as_str)
+        .filter(|digest| !digest.is_empty())
+        .map(str::to_owned);
+    let binary_metadata = daemon_lock_executable_metadata(&value);
+    if (value.get("binary_metadata").is_some() && binary_metadata.is_none())
+        || (binary_sha256.is_none() && binary_metadata.is_none())
+    {
+        return Ok(None);
+    }
+    if !daemon_lock_is_owned_by(data_root, pid) {
+        return Ok(None);
+    }
+    Ok(Some(DaemonOwnerIdentity {
+        owner_id: owner_id.to_owned(),
+        pid,
+        started_at_ms,
+        binary_sha256,
+        binary_metadata,
+    }))
+}
+
 /// Returns whether a live daemon is already owned by this exact executable.
 ///
 /// Ordinary foreground commands use this to reuse a healthy installed daemon
@@ -10,7 +57,7 @@ pub fn active_daemon_matches_current_executable(data_root: &Path) -> Result<bool
     if !daemon_lock_is_active(data_root) {
         return Ok(false);
     }
-    daemon_lock_matches_executable(data_root, &daemon_autostart_exe()?)
+    daemon_lock_matches_executable_metadata(data_root, &daemon_autostart_exe()?)
 }
 
 /// A Core request may reuse a responsive existing owner without reinstalling
@@ -27,7 +74,7 @@ pub fn observe_ready_core_daemon(
         return Ok(None);
     };
     let executable = daemon_autostart_exe()?;
-    match ctx_daemon_runtime::daemon_owner_binary_identity_matches(&lock, &executable) {
+    match ctx_daemon_runtime::daemon_owner_metadata_identity_matches(&lock, &executable) {
         Ok(true) => {}
         Ok(false) => return Err(binary_identity_handoff_error()),
         #[cfg(target_os = "linux")]
@@ -70,7 +117,7 @@ pub(crate) fn verify_inspection_denied_owner(
     denied: &ctx_daemon_runtime::ProcessExecutableInspectionDenied,
 ) -> Result<u32> {
     use ctx_daemon_runtime::{
-        daemon_lock_binary_identity_matches, daemon_query_roundtrip_linux_owner,
+        daemon_lock_metadata_identity_matches, daemon_query_roundtrip_linux_owner,
         observe_pid_advisory_lock, process_state, DaemonQueryEndpoint, ProcessState,
     };
     let lock_path = daemon_lock_path(data_root);
@@ -87,7 +134,7 @@ pub(crate) fn verify_inspection_denied_owner(
         || lock.get("lock_protocol").and_then(Value::as_str)
             != Some(ctx_daemon_runtime::PID_LOCK_PROTOCOL)
         || process_state(owner.pid) != ProcessState::Running
-        || !daemon_lock_binary_identity_matches(&lock, executable)?
+        || !daemon_lock_metadata_identity_matches(&lock, executable)?
         || lock
             .get("data_root")
             .and_then(Value::as_str)

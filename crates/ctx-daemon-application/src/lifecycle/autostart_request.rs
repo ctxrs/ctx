@@ -36,7 +36,7 @@ pub(super) fn request_daemon_autostart_with(
         && daemon_lock_is_active(data_root)
     {
         let executable = daemon_autostart_exe()?;
-        if daemon_lock_matches_executable(data_root, &executable)? {
+        if daemon_lock_matches_executable_metadata(data_root, &executable)? {
             if let Some(existing) = existing_daemon_request(data_root, checkpoint)? {
                 return Ok(existing);
             }
@@ -123,7 +123,12 @@ pub(super) fn request_daemon_autostart_with(
     };
     let launch = launch?;
     match spawn_daemon_profile(host, launch, profile, checkpoint) {
-        Ok(child) => Ok(DaemonAutostartRequest::Spawned(child)),
+        Ok(child) => {
+            if profile == DaemonLaunchProfile::Persistent {
+                host.persistent_daemon_spawned(data_root);
+            }
+            Ok(DaemonAutostartRequest::Spawned(child))
+        }
         Err(error) => {
             let _ = write_daemon_autostart_status(
                 data_root,

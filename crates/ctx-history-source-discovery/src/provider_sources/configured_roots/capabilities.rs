@@ -30,7 +30,7 @@ const INTENTIONAL_AUTOMATIC_EXACT: ConfiguredRootCapabilityState =
     ConfiguredRootCapabilityState::IntentionalAutomaticExact;
 
 // Keep this table in the exact landed provider-spec order. It is the one
-// exhaustive configured-root capability declaration for all 43 providers.
+// exhaustive configured-root capability declaration for all 44 providers.
 pub(super) const CONFIGURED_ROOT_CAPABILITIES: &[ConfiguredRootCapability] = &[
     ConfiguredRootCapability {
         provider: CaptureProvider::Codex,
@@ -50,6 +50,14 @@ pub(super) const CONFIGURED_ROOT_CAPABILITIES: &[ConfiguredRootCapability] = &[
             ConfiguredRootPathKind::Directory,
             "deepseek_harness_session_jsonl_tree",
             "deepseek-harness-sessions",
+        ),
+    },
+    ConfiguredRootCapability {
+        provider: CaptureProvider::PrimeAgent,
+        state: exact_source(
+            ConfiguredRootPathKind::Directory,
+            "prime_agent_session_jsonl",
+            "prime-agent-sessions",
         ),
     },
     ConfiguredRootCapability {

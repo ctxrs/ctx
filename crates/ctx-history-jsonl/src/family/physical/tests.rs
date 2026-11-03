@@ -29,6 +29,10 @@ fn stream_tracks_complete_prefix_tail_and_rollback() {
     let second = stream.next_record().unwrap().unwrap();
     assert_eq!(stream.record_bytes(second), b"two");
     stream.restore(after_first).unwrap();
+    assert_eq!(
+        stream.complete_prefix_eof_hasher().unwrap().digest(),
+        <[u8; 32]>::from(Sha256::digest(b"one\n"))
+    );
     assert_eq!(stream.next_record().unwrap().unwrap(), second);
     let tail = stream.next_record().unwrap().unwrap();
     assert!(!tail.complete);
@@ -40,6 +44,12 @@ fn stream_tracks_complete_prefix_tail_and_rollback() {
     assert_eq!(stream.complete_prefix_end(), 8);
     assert_eq!(stream.next_physical_ordinal(), 2);
     assert!(!stream.terminal());
+    let frontier = stream.complete_prefix_eof_hasher().unwrap();
+    assert_eq!(frontier.bytes_hashed(), 8);
+    assert_eq!(
+        frontier.digest(),
+        <[u8; 32]>::from(Sha256::digest(&contents[..8]))
+    );
     let digest = stream.digest();
     let complete = digest.complete_hasher().digest();
     let expected_complete: [u8; 32] = Sha256::digest(&contents[..8]).into();
@@ -127,6 +137,10 @@ fn zstd_stream_omits_torn_frame_and_rejects_corrupt_or_unchecked_frames() {
     assert!(!stream.next_record().unwrap().unwrap().complete);
     assert!(!stream.terminal());
     assert_eq!(stream.complete_prefix_end(), complete.len() as u64);
+    assert_eq!(
+        stream.complete_prefix_eof_hasher().unwrap().digest(),
+        <[u8; 32]>::from(Sha256::digest(&complete))
+    );
     assert_eq!(
         stream.digest().full_hasher().unwrap().digest(),
         <[u8; 32]>::from(Sha256::digest(&contents))

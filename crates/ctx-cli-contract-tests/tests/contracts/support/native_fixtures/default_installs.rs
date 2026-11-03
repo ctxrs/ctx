@@ -44,6 +44,12 @@ pub(crate) fn install_provider_default_fixture(
             &temp.path().join(".grok/sessions"),
         ),
         "pi" => install_pi(temp, user_text, assistant_text),
+        "prime_agent" => install_fixture_file(
+            "prime-agent-session.jsonl",
+            &temp
+                .path()
+                .join(".prime/agent/sessions/00000000-0000-7000-8000-000000000001.jsonl"),
+        ),
         "claude_code" => install_default_claude_fixture(temp, user_text),
         "open_code" => install_opencode(temp, user_text),
         "kilo" => install_kilo(temp, user_text),
