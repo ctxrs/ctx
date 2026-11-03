@@ -216,6 +216,7 @@ pub(super) fn hardlink_copy_fallback_error(error: &io::Error) -> bool {
             libc::EPERM,
             libc::EACCES,
             libc::EMLINK,
+            libc::ENOTSUP,
             libc::EOPNOTSUPP,
             libc::ENOENT,
         ]
@@ -389,5 +390,30 @@ pub(super) fn source_topology_open_error(error: io::Error) -> IndexError {
         IndexError::CurrentRepublishSourceTopology("symlinked or non-directory republish source")
     } else {
         IndexError::Io(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hardlink_unsupported_errors_allow_fallback() {
+        // Darwin's linkat reports ENOTSUP, which differs from EOPNOTSUPP there.
+        for code in [libc::ENOTSUP, libc::EOPNOTSUPP] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(hardlink_copy_fallback_error(&error), "{error}");
+        }
+    }
+
+    #[test]
+    fn hardlink_unrelated_errors_remain_fatal() {
+        for code in [libc::EIO, libc::ENOSPC, libc::EBADF, libc::EEXIST] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(!hardlink_copy_fallback_error(&error), "{error}");
+        }
+        assert!(!hardlink_copy_fallback_error(&io::Error::other(
+            "not an OS error"
+        )));
     }
 }
