@@ -908,6 +908,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn authenticate_prefix(
         source_path: &std::path::Path,
         opened: &OpenedProviderSourceFile<E>,

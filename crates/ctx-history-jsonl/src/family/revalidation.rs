@@ -369,6 +369,7 @@ pub(crate) fn authenticate_frozen_prefix_sha256<E: JsonlFamilyError>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn revalidate_frozen_prefix_with_hasher<E: JsonlFamilyError>(
     source_path: &Path,
     source_file: &OpenedProviderSourceFile<E>,

@@ -189,7 +189,7 @@ fn cursor_unforked_equal_and_prefix_copies_still_dedupe() {
     let root = temp.path().join("projects");
     let index = temp.path().join("index");
     let first = cursor_message("user", "2026-08-16T00:00:00Z", "ordinary first");
-    write_transcript(&cursor_copy_path(&root, "a"), &[first.clone()]);
+    write_transcript(&cursor_copy_path(&root, "a"), std::slice::from_ref(&first));
     write_transcript(&cursor_copy_path(&root, "b"), &[first]);
     let registry = registry(CaptureProvider::Cursor, CURSOR_SOURCE_FORMAT, &root);
     assert_cursor_refresh(&index, &registry);
