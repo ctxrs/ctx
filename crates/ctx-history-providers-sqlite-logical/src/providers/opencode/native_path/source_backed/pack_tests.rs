@@ -26,6 +26,8 @@ use crate::{
 mod current_schema;
 #[path = "tests/projection_contract.rs"]
 mod projection_contract;
+#[path = "tests/snapshot_memory.rs"]
+mod snapshot_memory;
 #[path = "tests/sqlite_diagnostics.rs"]
 mod sqlite_diagnostics;
 #[path = "tests/temp_authority.rs"]
@@ -323,7 +325,7 @@ fn scan_current_schema_result_with_rejections(
 )> {
     let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
     let observation = observe_logical_source(
-        authorized.sqlite_snapshot.connection()?,
+        &authorized.sqlite_snapshot,
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
     )?;
     let mut records = Vec::new();
@@ -772,7 +774,7 @@ fn admitted_copy_stays_stable_across_later_wal_commit_and_next_open_advances() {
         1
     );
     let observation = observe_logical_source(
-        authorized.sqlite_snapshot.connection().unwrap(),
+        &authorized.sqlite_snapshot,
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
     )
     .unwrap();
@@ -987,7 +989,7 @@ fn rejection_heavy_scan_reports_authoritative_completed_bytes_before_finishing()
         open_root_authorized_snapshot_retained(crate::test_provider_sqlite_data_root(), &database)
             .unwrap();
     let observation = observe_logical_source(
-        authorized.sqlite_snapshot.connection().unwrap(),
+        &authorized.sqlite_snapshot,
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
     )
     .unwrap();
@@ -1041,7 +1043,7 @@ fn detailed_progress_reports_source_copy_and_one_pass_scan() {
     )
     .unwrap();
     let observation = observe_logical_source_with_progress(
-        authorized.sqlite_snapshot.connection().unwrap(),
+        &authorized.sqlite_snapshot,
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
         &mut |update| {
             progress.push(update);

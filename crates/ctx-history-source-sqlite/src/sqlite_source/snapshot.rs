@@ -41,7 +41,7 @@ pub(super) enum SqliteSourceSnapshotPolicy {
     ExactRevision,
     PinnedReadOnlyWal,
     StablePrivateCopy,
-    SelectivePrivateCopy(&'static [&'static str]),
+    SelectivePrivateCopy(&'static [&'static str], Option<SqliteSourceColumnBound>),
 }
 
 /// Snapshot-wide scratch policy. The aggregate includes every retained DB/WAL
@@ -217,7 +217,7 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         })?;
     let native_evidence = match options.policy {
         SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
-        | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+        | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_, _) => {
             family.capture_revision_evidence()?
         }
         SqliteSourceSnapshotPolicy::ExactRevision
@@ -242,7 +242,7 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         // evidence read so a concurrent write cannot escape acquisition.
         match options.policy {
             SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
-            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_, _) => {
                 family.revalidate_database_identity(&native_evidence)?
             }
             SqliteSourceSnapshotPolicy::ExactRevision
@@ -253,7 +253,7 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         let sqlite_evidence = capture_sqlite_evidence(&acquired.connection)?;
         match options.policy {
             SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
-            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+            | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_, _) => {
                 family.revalidate_database_identity(&native_evidence)?
             }
             SqliteSourceSnapshotPolicy::ExactRevision
@@ -286,7 +286,7 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
     // additionally recover exactly that commit, not later unpublished frames.
     let replay_safe = match options.policy {
         SqliteSourceSnapshotPolicy::PinnedReadOnlyWal
-        | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+        | SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_, _) => {
             family.revalidate_revision(&native_evidence).is_ok()
         }
         _ => {
@@ -295,7 +295,7 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         }
     };
     let policy = match options.policy {
-        SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_) => {
+        SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_, _) => {
             SqliteSourceSnapshotPolicy::StablePrivateCopy
         }
         policy => policy,
@@ -318,6 +318,10 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
         sqlite_evidence,
         evidence,
         policy,
+        column_bound: match options.policy {
+            SqliteSourceSnapshotPolicy::SelectivePrivateCopy(_, bound) => bound,
+            _ => None,
+        },
         admitted_revision_is_replay_safe: replay_safe,
         strategy,
         copied_bytes,

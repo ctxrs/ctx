@@ -136,13 +136,14 @@ pub(super) fn acquire_sqlite_connection_with_progress<E>(
     after_database_copy: impl FnOnce(),
     report_progress: &mut impl FnMut(SqliteSourceProgress) -> Result<(), E>,
 ) -> Result<AcquiredSqliteConnection, SqliteSourceProgressError<E>> {
-    if let SqliteSourceSnapshotPolicy::SelectivePrivateCopy(tables) = options.policy {
+    if let SqliteSourceSnapshotPolicy::SelectivePrivateCopy(tables, bound) = options.policy {
         return super::selective::acquire(
             snapshot_context,
             family,
             evidence,
             options.limits,
             tables,
+            bound,
             report_progress,
         );
     }

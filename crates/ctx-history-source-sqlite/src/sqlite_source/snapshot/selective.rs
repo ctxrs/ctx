@@ -2,6 +2,20 @@
 //! this layer owns the consistent no-write read, disk bound, and cleanup.
 use super::*;
 
+/// Explicit opt-in to omit oversized TEXT/BLOB cells from selected tables.
+/// Omitted values retain their storage class as empty cells. Original byte
+/// lengths are stored in `BYTES_COLUMN`; native columns may not use that name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqliteSourceColumnBound {
+    pub tables: &'static [&'static str],
+    pub column: &'static str,
+    pub maximum_bytes: usize,
+}
+
+impl SqliteSourceColumnBound {
+    pub const BYTES_COLUMN: &'static str = "__ctx_original_bytes";
+}
+
 impl SqliteSourceDirectoryAuthority {
     /// Captures the named ordinary tables and their indexes into one private
     /// database, streaming native values from one read transaction. Missing
@@ -11,10 +25,27 @@ impl SqliteSourceDirectoryAuthority {
         &self,
         database_name: &OsStr,
         tables: &'static [&'static str],
+        report_progress: impl FnMut(SqliteSourceProgress) -> Result<(), E>,
+    ) -> Result<SqliteSourceReadSnapshot, SqliteSourceProgressError<E>> {
+        self.open_bounded_tables_snapshot_with_progress(
+            database_name,
+            tables,
+            None,
+            report_progress,
+        )
+    }
+
+    /// Applies an explicit column bound before SQLite materializes selected cells.
+    /// Platforms without the no-write reader retain full-family capture.
+    pub fn open_bounded_tables_snapshot_with_progress<E>(
+        &self,
+        database_name: &OsStr,
+        tables: &'static [&'static str],
+        bound: Option<SqliteSourceColumnBound>,
         mut report_progress: impl FnMut(SqliteSourceProgress) -> Result<(), E>,
     ) -> Result<SqliteSourceReadSnapshot, SqliteSourceProgressError<E>> {
         let policy = if selective_reader_available() {
-            SqliteSourceSnapshotPolicy::SelectivePrivateCopy(tables)
+            SqliteSourceSnapshotPolicy::SelectivePrivateCopy(tables, bound)
         } else {
             SqliteSourceSnapshotPolicy::StablePrivateCopy
         };
@@ -45,11 +76,12 @@ pub(super) fn acquire<E>(
     evidence: &SqliteFamilyEvidence,
     limits: SqliteSourceSnapshotLimits,
     tables: &[&str],
+    bound: Option<SqliteSourceColumnBound>,
     report: &mut impl FnMut(SqliteSourceProgress) -> Result<(), E>,
 ) -> Result<AcquiredSqliteConnection, SqliteSourceProgressError<E>> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (context, family, evidence, limits, tables, report);
+        let _ = (context, family, evidence, limits, tables, bound, report);
         Err(SqliteSourceAccessError::SnapshotUnavailable {
             reason: "selective snapshots require the Linux no-write SQLite reader".into(),
         }
@@ -62,7 +94,7 @@ pub(super) fn acquire<E>(
             verify_connection_read_only(&source)?;
             configure_and_pin_snapshot(&source)?;
             family.revalidate_database_identity(evidence)?;
-            copy_tables(context, &source, limits, tables, report)
+            copy_tables(context, &source, limits, tables, bound, report)
         })();
         // Close the live transaction before any adapter query. A failed close
         // also discards the private candidate; no second allocation is opened.
@@ -89,6 +121,7 @@ fn copy_tables<E>(
     source: &Connection,
     limits: SqliteSourceSnapshotLimits,
     tables: &[&str],
+    bound: Option<SqliteSourceColumnBound>,
     report: &mut impl FnMut(SqliteSourceProgress) -> Result<(), E>,
 ) -> Result<AcquiredSqliteConnection, SqliteSourceProgressError<E>> {
     let scratch = SqliteRouteScratch::new(context, limits.maximum_scratch_limit());
@@ -126,7 +159,7 @@ fn copy_tables<E>(
             let mut bytes = 0_u64;
             report_progress(report, bytes)?;
             for table in tables {
-                copy_table(source, &target, table, &mut bytes, report)?;
+                copy_table(source, &target, table, bound, &mut bytes, report)?;
             }
             target.execute_batch("COMMIT").map_err(private_error)?;
             report_progress(report, bytes)?;
@@ -176,6 +209,7 @@ fn copy_table<E>(
     source: &Connection,
     target: &Connection,
     table: &str,
+    bound: Option<SqliteSourceColumnBound>,
     bytes: &mut u64,
     report: &mut impl FnMut(SqliteSourceProgress) -> Result<(), E>,
 ) -> Result<(), SqliteSourceProgressError<E>> {
@@ -239,8 +273,10 @@ fn copy_table<E>(
         let sql: String = row.get(0).map_err(source_error)?;
         execute_schema(target, table, &sql)?;
     }
+    let selection = bounded_selection(source, target, table, bound)
+        .map_err(SqliteSourceProgressError::Source)?;
     let mut select = source
-        .prepare(&format!("SELECT rowid, * FROM {quoted} NOT INDEXED"))
+        .prepare(&format!("SELECT {selection} FROM {quoted} NOT INDEXED"))
         .map_err(source_error)?;
     let columns = select.column_count();
     let parameters = vec!["?"; columns].join(",");
@@ -355,4 +391,63 @@ pub(in crate::sqlite_source) fn execute_schema(
         .map_err(|error| SqliteSourceAccessError::SnapshotUnavailable {
             reason: format!("selected provider table/index schema cannot be reproduced: {error}"),
         })
+}
+
+#[cfg(target_os = "linux")]
+fn bounded_selection(
+    source: &Connection,
+    target: &Connection,
+    table: &str,
+    bound: Option<SqliteSourceColumnBound>,
+) -> SqliteSourceAccessResult<String> {
+    let Some(bound) = bound.filter(|bound| bound.tables.contains(&table)) else {
+        return Ok("rowid, *".into());
+    };
+    let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+    let table = quote(table);
+    let columns = source
+        .prepare(&format!("SELECT * FROM {table} LIMIT 0"))
+        .map_err(source_error)?;
+    let names = columns.column_names();
+    if names
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(SqliteSourceColumnBound::BYTES_COLUMN))
+    {
+        return Err(SqliteSourceAccessError::SnapshotUnavailable {
+            reason: "selected SQLite column conflicts with private byte-length metadata".into(),
+        });
+    }
+    // Missing payload columns remain an adapter schema error.
+    if !names
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(bound.column))
+    {
+        return Ok("rowid, *".into());
+    }
+    let bytes = quote(SqliteSourceColumnBound::BYTES_COLUMN);
+    target
+        .execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {bytes} INTEGER"),
+            [],
+        )
+        .map_err(private_error)?;
+    let mut selection = vec!["rowid".to_owned()];
+    for name in names {
+        let column = quote(name);
+        selection.push(if name.eq_ignore_ascii_case(bound.column) {
+            // octet_length reads the record header, including for TEXT with NUL
+            // or multibyte characters. CASE never loads an oversized payload.
+            format!(
+                "CASE WHEN octet_length({column}) > {} THEN
+                CASE typeof({column}) WHEN 'text' THEN '' WHEN 'blob' THEN x'' ELSE {column} END
+                ELSE {column} END AS {column}",
+                bound.maximum_bytes
+            )
+        } else {
+            column
+        });
+    }
+    let column = quote(bound.column);
+    selection.push(format!("octet_length({column}) AS {bytes}"));
+    Ok(selection.join(","))
 }

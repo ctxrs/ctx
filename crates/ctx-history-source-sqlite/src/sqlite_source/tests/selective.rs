@@ -1,5 +1,6 @@
 use super::super::resources::override_next_scratch_available_space_for_test;
 use super::*;
+use crate::SqliteSourceColumnBound;
 
 fn selected(authority: &SqliteSourceDirectoryAuthority) -> SqliteSourceReadSnapshot {
     authority
@@ -315,4 +316,112 @@ fn selected_schema_execution_cannot_attach_or_change_unrelated_objects() {
         "CREATE INDEX foreign_table ON messages((SELECT value FROM other))"
     )
     .is_err());
+}
+
+#[test]
+fn bounded_cells_keep_byte_lengths_types_and_native_metadata_cannot_spoof_them() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let path = temp.path().join("provider.sqlite");
+    let source = Connection::open(&path).unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE messages(body, sibling TEXT);
+        CREATE INDEX by_sibling ON messages(sibling);
+        INSERT INTO messages(rowid,body,sibling) VALUES
+        (-7,CAST(x'c3a900ff' AS TEXT),'exact'), (9,'ééé','multibyte'),
+        (11,CAST(x'0000000000' AS TEXT),'nul'), (13,x'0001020304','blob'),
+        (15,NULL,'null'), (17,42,'integer'), (19,1.25,'real');",
+        )
+        .unwrap();
+    let before = directory_file_state(temp.path());
+    let authority = retain_parent_in_data_root(data.path(), temp.path());
+    let bound = SqliteSourceColumnBound {
+        tables: &["messages"],
+        column: "body",
+        maximum_bytes: 4,
+    };
+    let snapshot = authority
+        .open_bounded_tables_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            &["messages"],
+            Some(bound),
+            |_| Ok::<(), ()>(()),
+        )
+        .unwrap();
+    assert_eq!(snapshot.column_bound(), Some(bound));
+    let connection = snapshot.connection().unwrap();
+    let values: Vec<(i64, String, String, Option<i64>, String)> = connection.prepare(
+        "SELECT rowid,typeof(body),hex(body),__ctx_original_bytes,sibling FROM messages ORDER BY rowid",
+    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
+        .unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(
+        values,
+        vec![
+            (
+                -7,
+                "text".into(),
+                "C3A900FF".into(),
+                Some(4),
+                "exact".into()
+            ),
+            (9, "text".into(), "".into(), Some(6), "multibyte".into()),
+            (11, "text".into(), "".into(), Some(5), "nul".into()),
+            (13, "blob".into(), "".into(), Some(5), "blob".into()),
+            (15, "null".into(), "".into(), None, "null".into()),
+            (
+                17,
+                "integer".into(),
+                "3432".into(),
+                Some(2),
+                "integer".into()
+            ),
+            (19, "real".into(), "312E3235".into(), Some(4), "real".into()),
+        ]
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='by_sibling'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    snapshot.finish().unwrap();
+    assert_eq!(directory_file_state(temp.path()), before);
+    source
+        .execute(
+            "ALTER TABLE messages ADD COLUMN __ctx_original_bytes INTEGER",
+            [],
+        )
+        .unwrap();
+    assert!(authority
+        .open_bounded_tables_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            &["messages"],
+            Some(bound),
+            |_| Ok::<(), ()>(()),
+        )
+        .is_err());
+    let exact = selected(&authority);
+    assert_eq!(exact.column_bound(), None);
+    assert_eq!(
+        exact
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT octet_length(body) FROM messages WHERE rowid=9",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        6
+    );
+    exact.finish().unwrap();
+    assert_eq!(staging_entries(data.path()), 0);
 }
