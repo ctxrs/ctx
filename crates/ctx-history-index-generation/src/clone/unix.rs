@@ -488,40 +488,8 @@ fn clone_candidate_files(
             };
         }
         clone_checkpoint(CloneStage::AfterSourceOpen, &planned.path)?;
-        if sealed
-            && !planned.copy_required
-            && !force_reflink_fallback()
-            && try_clone_reflink_at(&source_file, &destination.file, &planned.path)?
-        {
-            metrics.retained_reflinked_files = metrics
-                .retained_reflinked_files
-                .checked_add(1)
-                .ok_or(IndexError::CountOverflow)?;
-            let source_after = recapture_authenticated_artifact(
-                root,
-                source_path,
-                &planned.path,
-                &source_file,
-                Some(predecessor_pointer),
-            )?;
-            if source_after != expected_artifact {
-                return if expected_artifact.same_payload_identity_changed(&source_after) {
-                    Err(IndexError::ConcurrentGenerationChange)
-                } else {
-                    Err(IndexError::ChecksumMismatch)
-                };
-            }
-            let destination_artifact =
-                capture_artifact_identity(root, destination_path, &planned.path, None)?;
-            physical_proof.insert(PhysicalFileDigest {
-                artifact: destination_artifact,
-                sha256: expected_sha256,
-            });
-            validate_child_binding(&generations.file, source_name, source.identity)?;
-            clone_checkpoint(CloneStage::AfterFile, &planned.path)?;
-            continue;
-        }
-
+        // Immutable segments share an inode on supported filesystems. Reflinks
+        // and authenticated copies are fallbacks when linking is unavailable.
         clone_checkpoint(CloneStage::BeforeHardlink, &planned.path)?;
         let source_prelink = recapture_authenticated_artifact(
             root,
@@ -567,6 +535,40 @@ fn clone_candidate_files(
                 .retained_hardlinked_files
                 .checked_add(1)
                 .ok_or(IndexError::CountOverflow)?;
+            validate_child_binding(&generations.file, source_name, source.identity)?;
+            clone_checkpoint(CloneStage::AfterFile, &planned.path)?;
+            continue;
+        }
+
+        if sealed
+            && !planned.copy_required
+            && !force_reflink_fallback()
+            && try_clone_reflink_at(&source_file, &destination.file, &planned.path)?
+        {
+            metrics.retained_reflinked_files = metrics
+                .retained_reflinked_files
+                .checked_add(1)
+                .ok_or(IndexError::CountOverflow)?;
+            let source_after = recapture_authenticated_artifact(
+                root,
+                source_path,
+                &planned.path,
+                &source_file,
+                Some(predecessor_pointer),
+            )?;
+            if source_after != expected_artifact {
+                return if expected_artifact.same_payload_identity_changed(&source_after) {
+                    Err(IndexError::ConcurrentGenerationChange)
+                } else {
+                    Err(IndexError::ChecksumMismatch)
+                };
+            }
+            let destination_artifact =
+                capture_artifact_identity(root, destination_path, &planned.path, None)?;
+            physical_proof.insert(PhysicalFileDigest {
+                artifact: destination_artifact,
+                sha256: expected_sha256,
+            });
             validate_child_binding(&generations.file, source_name, source.identity)?;
             clone_checkpoint(CloneStage::AfterFile, &planned.path)?;
             continue;

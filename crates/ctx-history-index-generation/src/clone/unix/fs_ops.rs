@@ -123,8 +123,11 @@ pub(super) fn create_directory_at(parent: &File, path: &Path) -> Result<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub(super) fn hard_link_at(source: &File, path: &Path, destination: &File) -> io::Result<()> {
+pub(super) fn hard_link_authenticated_source(
+    source: &File,
+    path: &Path,
+    destination: &File,
+) -> io::Result<()> {
     let path = path_cstring(path)?;
     // SAFETY: both descriptors and both NUL-terminated path pointers stay
     // valid for the duration of `linkat`.
@@ -142,24 +145,6 @@ pub(super) fn hard_link_at(source: &File, path: &Path, destination: &File) -> io
     } else {
         Err(io::Error::last_os_error())
     }
-}
-
-#[cfg(target_os = "linux")]
-pub(super) fn hard_link_authenticated_source(
-    source_directory: &File,
-    path: &Path,
-    destination: &File,
-) -> io::Result<()> {
-    hard_link_at(source_directory, path, destination)
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn hard_link_authenticated_source(
-    _source: &File,
-    _path: &Path,
-    _destination: &File,
-) -> io::Result<()> {
-    Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP))
 }
 
 #[cfg(target_os = "linux")]
