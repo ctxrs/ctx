@@ -15,11 +15,15 @@ autotests = false
 [package.metadata.cargo-shear]
 # Shared contract modules live outside this package, which cargo-shear does not
 # follow. Their imports are required by the declared Cargo test targets.
-ignored = ["base64", "chrono", "ctx-history-core", "ctx-history-index", "flate2", "libc", "ring", "sha2", "tar", "uuid", "windows-sys"]
+ignored = ["base64", "chrono", "ctx-history-core", "flate2", "libc", "ring", "sha2", "tar", "uuid", "windows-sys"]
 
 [[test]]
 name = "index"
 path = "tests/index.rs"
+
+[[test]]
+name = "native_blame"
+path = "tests/native_blame.rs"
 
 [[test]]
 name = "native_provider_rejections"
@@ -42,8 +46,11 @@ anstream.workspace = true
 assert_cmd.workspace = true
 base64.workspace = true
 chrono.workspace = true
+ctx-attribution = { path = "../ctx-attribution", features = ["test-support"] }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-index = { path = "../ctx-history-index" }
+ctx-history-platform = { path = "../ctx-history-platform" }
+ctx-history-snapshot-reader = { path = "../ctx-history-snapshot-reader" }
 flate2 = "1"
 libc.workspace = true
 predicates.workspace = true

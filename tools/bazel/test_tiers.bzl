@@ -40,7 +40,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-agent-application:mcp_telemetry_tests",
     "//crates/ctx-agent-application:mcp_tests",
     "//crates/ctx-cli-contract-tests:lib",
-    "//crates/ctx-cli-contract-tests:native_blame_tests",
+    "//crates/ctx-cli-qualification:native_blame_tests",
     "//crates/ctx-cli-contract-tests:native_provider_real_shapes_tests",
     "//crates/ctx-cli-qualification:native_provider_rejections_tests",
     "//crates/ctx-cli-contract-tests:native_providers_tests",

@@ -63,7 +63,8 @@ pub enum BlameDiagnosticCandidate {
 }
 
 impl BlameDiagnosticCandidate {
-    fn validate(&self) -> Result<(), ProtocolError> {
+    /// Validates one candidate before disclosure or inclusion in diagnostic details.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
             Self::Repository { selector } => validate_logical_repository(selector),
             Self::Commit { repository, oid } => {

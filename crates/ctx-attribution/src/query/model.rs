@@ -137,7 +137,6 @@ pub struct ProductionAttribution {
 /// protocol and graph-work bounds. The graph still fails closed when those
 /// larger bounds are exceeded before choosing the deterministic candidates.
 pub const MAX_ATTRIBUTION_CANDIDATES: usize = 5;
-const MAX_PUBLIC_DIAGNOSTIC_CANDIDATE_BYTES: usize = 160;
 
 /// Safe, bounded public identities retained when exact resolution is ambiguous.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,28 +153,37 @@ impl AmbiguityCandidates {
 
     #[must_use]
     pub fn repositories(selectors: impl IntoIterator<Item = String>) -> Self {
-        Self::bounded(selectors.into_iter().filter_map(|selector| {
-            safe_logical_repository(&selector)
-                .then_some(BlameDiagnosticCandidate::Repository { selector })
-        }))
+        Self::bounded(
+            selectors
+                .into_iter()
+                .map(|selector| BlameDiagnosticCandidate::Repository { selector }),
+        )
     }
 
     #[must_use]
     pub fn commits(repository: &str, oids: impl IntoIterator<Item = String>) -> Self {
-        if !safe_logical_repository(repository) {
+        if (BlameDiagnosticCandidate::Repository {
+            selector: repository.to_owned(),
+        })
+        .validate()
+        .is_err()
+        {
             return Self::bounded(std::iter::empty());
         }
-        Self::bounded(oids.into_iter().filter_map(|oid| {
-            let oid = oid.to_ascii_lowercase();
-            safe_commit_oid(&oid).then(|| BlameDiagnosticCandidate::Commit {
-                repository: repository.to_owned(),
-                oid,
-            })
-        }))
+        Self::bounded(
+            oids.into_iter()
+                .map(|oid| BlameDiagnosticCandidate::Commit {
+                    repository: repository.to_owned(),
+                    oid: oid.to_ascii_lowercase(),
+                }),
+        )
     }
 
     fn bounded(candidates: impl IntoIterator<Item = BlameDiagnosticCandidate>) -> Self {
-        let mut candidates = candidates.into_iter().collect::<BTreeSet<_>>();
+        let mut candidates = candidates
+            .into_iter()
+            .filter(|candidate| candidate.validate().is_ok())
+            .collect::<BTreeSet<_>>();
         // Disclosing one surviving public identity would reveal relative
         // uniqueness; candidate-free ambiguity preserves the diagnosis safely.
         if candidates.len() == 1 {
@@ -190,66 +198,6 @@ impl AmbiguityCandidates {
             candidates_truncated,
         }
     }
-}
-
-fn safe_logical_repository(value: &str) -> bool {
-    let Some((host, path)) = value
-        .strip_prefix("forge:")
-        .and_then(|identity| identity.split_once('/'))
-    else {
-        return false;
-    };
-    value.len() <= MAX_PUBLIC_DIAGNOSTIC_CANDIDATE_BYTES
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
-        && safe_public_forge_host(host)
-        && safe_public_forge_path(path)
-}
-
-fn safe_public_forge_host(host: &str) -> bool {
-    let reserved = matches!(
-        host,
-        "localhost" | "local" | "private" | "workspace" | "internal"
-    ) || [
-        ".localhost",
-        ".local",
-        ".private",
-        ".workspace",
-        ".internal",
-    ]
-    .iter()
-    .any(|suffix| host.ends_with(suffix));
-    !host.is_empty()
-        && host.contains('.')
-        && host.bytes().any(|byte| byte.is_ascii_alphabetic())
-        && !host.bytes().any(|byte| byte.is_ascii_uppercase())
-        && !reserved
-        && host.split('.').all(|label| {
-            !label.is_empty()
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
-}
-
-fn safe_public_forge_path(path: &str) -> bool {
-    !path.is_empty()
-        && path.split('/').all(|component| {
-            !component.is_empty()
-                && !matches!(component, "." | "..")
-                && component.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
-                })
-        })
-}
-
-fn safe_commit_oid(value: &str) -> bool {
-    matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
