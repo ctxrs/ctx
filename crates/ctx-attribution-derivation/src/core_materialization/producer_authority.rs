@@ -1,4 +1,6 @@
-use crate::protocol::{AgentScope, CoreRecord, ProviderNativeSessionRelationship};
+use crate::protocol::{
+    AgentScope, CoreRecord, ProviderNativeSessionRelationship, SourceAnchor, TypedKey,
+};
 use sha2::{Digest, Sha256};
 
 use super::ProducerAuthorityDisposition;
@@ -53,9 +55,8 @@ fn protocol_label_matches(value: &str, expected: [u8; 32]) -> bool {
     actual == expected
 }
 
-/// Recovers only provider contracts whose neutral Core fields are sufficient
-/// to prove that the event is native to this session. Every near miss
-/// deliberately abstains; an explicit copy proof always wins.
+/// Requires positive native ownership evidence under its retained capture contract.
+/// Missing lineage alone is not ownership; explicit copies always lose.
 pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityDisposition {
     if record.event_copy.is_some() {
         return ProducerAuthorityDisposition::IneligibleCopied;
@@ -81,6 +82,18 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
             .native_event_id
             .as_ref()
             .is_some_and(|key| *key != crate::protocol::TypedKey::Null);
+    // Consistency checks constrain positive ownership evidence below. They do
+    // not establish it: unresolved parent claims can have this same shape.
+    let unparented = native_identity
+        && record.agent_scope != Some(AgentScope::Subagent)
+        && record.parent_session_id.is_none()
+        && record
+            .root_session_id
+            .is_none_or(|root| root == record.session_id)
+        && matches!(
+            record.session_relationship,
+            None | Some(ProviderNativeSessionRelationship::Root)
+        );
     let primary = record.agent_scope == Some(AgentScope::Primary)
         && record.parent_session_id.is_none()
         && record
@@ -176,11 +189,10 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
                 "zed-nativepath-sqlite-v0",
                 ZED_CORE_ACTIVITY_REVISION,
             ));
-    // Exact current contracts distinguish primary native owners from malformed
-    // or unresolved lineage. Codex retains Root explicitly; the other reviewed
-    // emitters retain Primary with no relationship. Neither needs a fake parent.
-    // Released child-only contracts below do not establish that primary shape.
+    // Retain the reviewed contracts for existing owners. New primary carriers
+    // must prove native ownership, including whether parent evidence was lost.
     let eligible = codex
+        || unparented && native_primary_owner(record)
         || primary && current && record.session_relationship.is_none()
         || child
             && delegated
@@ -234,6 +246,74 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
         ProducerAuthorityDisposition::EligibleUnique
     } else {
         ProducerAuthorityDisposition::AbstainUnknown
+    }
+}
+
+// Decode the positive ownership carriers, rather than treating an unknown
+// provider/parser or an absent edge as a unique native occurrence.
+fn native_primary_owner(record: &CoreRecord) -> bool {
+    let source = &record.source;
+    let SourceAnchor::ProviderNative { namespace, key } = source.anchor() else {
+        return false;
+    };
+    let key = match key {
+        TypedKey::Composite(parts) => match parts.as_slice() {
+            [TypedKey::Bytes(scope), key] if scope.len() == 32 => key,
+            _ => key,
+        },
+        _ => key,
+    };
+    if source.provider_identity_version() != 1 {
+        return false;
+    }
+    match source.provider() {
+        "claude" => {
+            // A primary file can contain sidechain records. Require the captured
+            // row markers as well as the native file identity; older projections
+            // discarded these markers and cannot establish ownership.
+            source.source_format() == "claude_projects_jsonl_tree"
+                && source.schema_variant() == "claude-nativepath-jsonl-v6"
+                && record.parser_revision == "claude-shared-jsonl-core-activity-v3-record-ownership"
+                && record
+                    .content
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.get("record_ownership"))
+                    .is_some_and(|ownership| {
+                        matches!(
+                            ownership
+                                .get("sidechain")
+                                .and_then(serde_json::Value::as_str),
+                            Some("absent" | "false")
+                        ) && ownership
+                            .get("agent_id_present")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(false)
+                    })
+                && namespace == "claude.session-leaf"
+                && record.agent_scope == Some(AgentScope::Primary)
+                && matches!(key, TypedKey::Composite(parts) if matches!(parts.as_slice(),
+                    [TypedKey::Utf8(session), TypedKey::Null, TypedKey::Null]
+                    if Some(session.as_str()) == record.provider_session_id.as_deref()))
+        }
+        "pi" => {
+            // Earlier projections discarded unresolved header parent claims.
+            // Only a complete new capture can prove the field was absent.
+            source.source_format() == "pi_session_jsonl"
+                && source.schema_variant() == "pi-nativepath-jsonl-v1"
+                && record.parser_revision == "pi-shared-jsonl-v13-nested-tool-parent-evidence"
+                && namespace == "pi.session"
+                && matches!(key, TypedKey::Utf8(session)
+                    if Some(session.as_str()) == record.provider_session_id.as_deref())
+                && record
+                    .content
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.get("session_parent_claim_present"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+        }
+        _ => false,
     }
 }
 

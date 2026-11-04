@@ -50,7 +50,7 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-claude-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
 const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
-const PARSER_REVISION: &str = "claude-shared-jsonl-core-activity-v2-record-rejections";
+const PARSER_REVISION: &str = "claude-shared-jsonl-core-activity-v3-record-ownership";
 
 mod binding;
 mod discovery;
@@ -355,7 +355,7 @@ where
                 continue;
             }
             let normalized_body = lexical_body(&row);
-            let annotation =
+            let mut annotation =
                 claude_annotation(&row, parsed.cwd.as_deref(), parsed.git_branch.as_deref())
                     .map_err(|error| match error {
                         ClaudeRowValidationError::Record(_) => CaptureError::SystemInvariant(
@@ -363,6 +363,10 @@ where
                         ),
                         ClaudeRowValidationError::Fatal(error) => error,
                     })?;
+            annotation.structured_content = Some(serde_json::json!({
+                "entry": annotation.structured_content,
+                "record_ownership": parsed.ownership,
+            }));
             let fallback_identity = next_fallback_event_identity::<B>(
                 &row,
                 &self.source,

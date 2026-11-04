@@ -2,6 +2,38 @@ use super::*;
 use ctx_history_core::{ActivityJsonCapture, ActivityTextCapture};
 
 #[test]
+fn header_parent_presence_survives_unresolved_or_malformed_claims() {
+    for field in [
+        "",
+        r#", "parentSession":"parent""#,
+        r#", "parentSession":"/tmp/original.jsonl""#,
+        r#", "parentSession":"primary""#,
+        r#", "parentSession":null"#,
+        r#", "parentSession":false"#,
+        r#", "parentSession":"""#,
+        r#", "parentSession":"parent", "parentSession":null"#,
+    ] {
+        let header = format!(
+            r#"{{"type":"session","id":"primary","timestamp":"2026-01-01T00:00:00Z"{field}}}"#
+        );
+        let binding = parse_header_binding(
+            JsonlRecordRef::for_test(header.as_bytes(), 0),
+            SourceAnchorScope::Unqualified,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            binding.parent_session_claim_present,
+            !field.is_empty(),
+            "{field}"
+        );
+        if field != r#", "parentSession":"parent""# {
+            assert!(binding.parent_session_id.is_none(), "{field}");
+        }
+    }
+}
+
+#[test]
 fn source_and_related_session_identities_are_root_scoped() {
     let released = source_key("same-session").unwrap();
     let compatibility = source_key_scoped("same-session", SourceAnchorScope::Unqualified).unwrap();
