@@ -40,7 +40,7 @@ fn pi_oversized_sidecar_does_not_block_a_healthy_session() {
 fn pi_incomplete_headers_are_pending_and_complete_without_losing_peers() {
     // Authored native headers, including the physical header after an OMP title.
     for warm in [false, true] {
-        for title in [false, true] {
+        for title in ["none", "legacy", "mutable"] {
             for unframed in [false, true] {
                 let temp = crate::test_support_paths::tempdir().unwrap();
                 let root = temp.path().join("sessions");
@@ -50,7 +50,9 @@ fn pi_incomplete_headers_are_pending_and_complete_without_losing_peers() {
                 write_pi_session(&path, "writing", None, "retained history");
                 let session = fs::read(&path).unwrap();
                 let header_end = session.iter().position(|byte| *byte == b'\n').unwrap();
-                let prefix = if title {
+                let prefix = if title == "mutable" {
+                    super::pi_omp_title_slot::title_slot("Working")
+                } else if title == "legacy" {
                     format!("{}\n", json!({"type":"title", "v":1, "title":"Working", "updatedAt":"2026-11-03T00:00:00Z", "pad":""})).into_bytes()
                 } else {
                     Vec::new()
@@ -67,7 +69,14 @@ fn pi_incomplete_headers_are_pending_and_complete_without_losing_peers() {
                 let split = prefix.len() + if unframed { header_end } else { header_end / 2 };
                 fs::write(&path, &complete[..split]).unwrap();
                 write_pi_session(&root.join("peer.jsonl"), "peer", None, "new peer history");
-                for _ in 0..2 {
+                for attempt in 0..2 {
+                    if title == "mutable" {
+                        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+                        file.write_all(&super::pi_omp_title_slot::title_slot(&format!(
+                            "Working {attempt}"
+                        )))
+                        .unwrap();
+                    }
                     let receipt =
                         refresh_source_backed_generation(&index, &registry, writer_options())
                             .unwrap();

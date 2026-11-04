@@ -266,6 +266,9 @@ fn cursor_route_publishes_cold_append_and_recovers_from_carried_checkpoint() {
     );
 }
 
+#[path = "cursor_views.rs"]
+mod cursor_views;
+
 #[test]
 fn cursor_malformed_nested_role_rejects_only_that_record() {
     let temp = crate::test_support_paths::tempdir().unwrap();

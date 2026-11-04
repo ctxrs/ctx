@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use super::super::{
     authenticate_frozen_prefix, authenticate_frozen_prefix_sha256,
     observe_opened_file_allow_append, observe_opened_file_leaf, revalidate_frozen_prefix,
-    revalidate_frozen_prefix_sha256, JsonlFileObservation,
+    revalidate_frozen_prefix_sha256, JsonlFileObservation, JsonlMutableFirstRecord,
 };
 use super::super::{
     JsonlFamilyError, JsonlFamilyRuntime, JsonlResult, JsonlRuntimeError, OpenedProviderSourceFile,
@@ -42,6 +42,7 @@ enum JsonlFamilyTerminalPhysicalBinding {
         prefix_sha256: [u8; 32],
         hash_kind: JsonlFamilyTerminalPrefixHash,
         force_authentication: bool,
+        mutable_first_record: Option<JsonlMutableFirstRecord>,
     },
     ExactFile,
 }
@@ -88,6 +89,30 @@ impl JsonlFamilyTerminalLeafBinding {
             return Err(JsonlRuntimeError::<R>::invalid_payload(
                 "JSONL append-only terminal proof is not authorized for this leaf".to_owned(),
             ));
+        }
+        let mutable_first_record = leaf
+            .identity_probe
+            .as_ref()
+            .and_then(|probe| probe.mutable_first_record);
+        match &physical {
+            JsonlFamilyTerminalPhysicalBinding::FrozenPrefix {
+                prefix_length,
+                mutable_first_record: proof_policy,
+                ..
+            } if *proof_policy == mutable_first_record
+                && (proof_policy.is_none()
+                    || *prefix_length >= JsonlMutableFirstRecord::WIRE_BYTES as u64) => {}
+            JsonlFamilyTerminalPhysicalBinding::FrozenPrefix { .. } => {
+                return Err(JsonlRuntimeError::<R>::invalid_payload(
+                    "JSONL mutable-first-record proof does not match its identity probe".to_owned(),
+                ));
+            }
+            _ if mutable_first_record.is_some() => {
+                return Err(JsonlRuntimeError::<R>::invalid_payload(
+                    "mutable JSONL metadata requires exact suffix authentication".to_owned(),
+                ));
+            }
+            _ => {}
         }
         certificate
             .validate_contract()
@@ -187,6 +212,7 @@ pub enum JsonlFamilyTerminalProof<E: JsonlFamilyError> {
         prefix_sha256: [u8; 32],
         hash_kind: JsonlFamilyTerminalPrefixHash,
         force_authentication: bool,
+        mutable_first_record: Option<JsonlMutableFirstRecord>,
     },
     ExactFile {
         binding: Option<JsonlFamilyTerminalLeafBinding>,
@@ -227,6 +253,7 @@ impl<E: JsonlFamilyError> Clone for JsonlFamilyTerminalProof<E> {
                 prefix_sha256,
                 hash_kind,
                 force_authentication,
+                mutable_first_record,
             } => Self::FrozenPrefix {
                 binding: binding.clone(),
                 source_path: source_path.clone(),
@@ -237,6 +264,7 @@ impl<E: JsonlFamilyError> Clone for JsonlFamilyTerminalProof<E> {
                 prefix_sha256: *prefix_sha256,
                 hash_kind: *hash_kind,
                 force_authentication: *force_authentication,
+                mutable_first_record: *mutable_first_record,
             },
             Self::ExactFile {
                 binding,
@@ -393,6 +421,9 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
                 prefix_sha256,
                 hash_kind,
                 force_authentication,
+                leaf.identity_probe
+                    .as_ref()
+                    .and_then(|probe| probe.mutable_first_record),
             )?;
         }
         Self::bind_admitted_frozen_prefix(
@@ -418,11 +449,16 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
         if prefix_length > leaf.observation.length() {
             return Err(E::source_changed());
         }
+        let mutable_first_record = leaf
+            .identity_probe
+            .as_ref()
+            .and_then(|probe| probe.mutable_first_record);
         let physical = JsonlFamilyTerminalPhysicalBinding::FrozenPrefix {
             prefix_length,
             prefix_sha256,
             hash_kind,
             force_authentication,
+            mutable_first_record,
         };
         let binding = JsonlFamilyTerminalLeafBinding::new(adapter, leaf, certificate, physical)?;
         Ok(Self::FrozenPrefix {
@@ -435,6 +471,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
             prefix_sha256,
             hash_kind,
             force_authentication,
+            mutable_first_record,
         })
     }
 
@@ -636,6 +673,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
             prefix_sha256,
             hash_kind: JsonlFamilyTerminalPrefixHash::Sha256,
             force_authentication: false,
+            mutable_first_record: None,
         };
         proof.revalidate_dependency()?;
         Ok(proof)
@@ -697,12 +735,14 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
                 prefix_sha256,
                 hash_kind,
                 force_authentication,
+                mutable_first_record,
                 ..
             } => JsonlFamilyTerminalPhysicalBinding::FrozenPrefix {
                 prefix_length: *prefix_length,
                 prefix_sha256: *prefix_sha256,
                 hash_kind: *hash_kind,
                 force_authentication: *force_authentication,
+                mutable_first_record: *mutable_first_record,
             },
             Self::ExactFile { .. } => JsonlFamilyTerminalPhysicalBinding::ExactFile,
         }
@@ -836,6 +876,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
                 prefix_sha256,
                 hash_kind,
                 force_authentication,
+                mutable_first_record,
             } => {
                 let opened = authority.open_file(authority_path)?;
                 Self::authenticate_prefix(
@@ -846,6 +887,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
                     *prefix_sha256,
                     *hash_kind,
                     *force_authentication,
+                    *mutable_first_record,
                 )
             }
             Self::ExactFile {
@@ -866,6 +908,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn authenticate_prefix(
         source_path: &std::path::Path,
         opened: &OpenedProviderSourceFile<E>,
@@ -874,6 +917,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
         prefix_sha256: [u8; 32],
         hash_kind: JsonlFamilyTerminalPrefixHash,
         force_authentication: bool,
+        mutable_first_record: Option<JsonlMutableFirstRecord>,
     ) -> JsonlResult<JsonlFileObservation, E> {
         match (hash_kind, force_authentication) {
             (JsonlFamilyTerminalPrefixHash::Sha256, true) => authenticate_frozen_prefix_sha256(
@@ -882,6 +926,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
                 admitted,
                 prefix_length,
                 prefix_sha256,
+                mutable_first_record,
             ),
             (JsonlFamilyTerminalPrefixHash::Sha256, false) => revalidate_frozen_prefix_sha256(
                 source_path,
@@ -889,6 +934,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
                 admitted,
                 prefix_length,
                 prefix_sha256,
+                mutable_first_record,
             ),
             (JsonlFamilyTerminalPrefixHash::SharedJsonlDomain, true) => authenticate_frozen_prefix(
                 source_path,
@@ -896,6 +942,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
                 admitted,
                 prefix_length,
                 prefix_sha256,
+                mutable_first_record,
             ),
             (JsonlFamilyTerminalPrefixHash::SharedJsonlDomain, false) => revalidate_frozen_prefix(
                 source_path,
@@ -903,6 +950,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
                 admitted,
                 prefix_length,
                 prefix_sha256,
+                mutable_first_record,
             ),
         }
     }
@@ -931,6 +979,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
                 admitted,
                 admitted.length(),
                 *admitted_eof_sha256,
+                None,
             );
         }
         let binding = binding.as_ref().ok_or_else(|| {
@@ -945,6 +994,7 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
             admitted,
             *certified_prefix_end,
             binding.certified_prefix_digest,
+            None,
         )
     }
 }

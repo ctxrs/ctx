@@ -3,8 +3,8 @@
 use super::*;
 use ctx_history_capture_runtime::{SourceBackedRouteError, SourceBackedRouteErrorKind};
 use ctx_history_jsonl::{
-    observe_opened_file, probe_records_until, JsonlFamilyError, JsonlFamilyPendingLeaf,
-    JsonlFamilyRejectedLeaf, JsonlProbeOutcome,
+    observe_opened_file_allow_append, probe_records_until_with_mutable_first_record,
+    JsonlFamilyError, JsonlFamilyPendingLeaf, JsonlFamilyRejectedLeaf, JsonlProbeOutcome,
 };
 use ctx_history_source_io::visit_bounded_tree_files_isolating_selected;
 use std::{collections::BTreeSet, fs, io};
@@ -79,7 +79,10 @@ pub(super) fn discover<R: JsonlProviderRuntime>(
     for path in paths {
         let relative_path = relative_to_authority(&authority, &path)?;
         let opened = authority.open_file(&relative_path).and_then(|file| {
-            let observation = observe_opened_file(&path, &file)?;
+            // Cache full metadata, but fence only object identity here: the
+            // probe and terminal proof authenticate the bytes, including the
+            // validated mutable OMP title slot.
+            let observation = observe_opened_file_allow_append(&path, &file)?;
             Ok((Arc::new(file), observation))
         });
         let (opened, observation) = match opened {
@@ -98,8 +101,12 @@ pub(super) fn discover<R: JsonlProviderRuntime>(
             Some(cached) if cached.observation == observation => cached.clone(),
             _ => {
                 let mut leading_rejection_details = Vec::new();
-                let parsed =
-                    probe_records_until(&path, &opened, MAX_HEADER_PROBE_RECORDS, |record| {
+                let parsed = probe_records_until_with_mutable_first_record(
+                    &path,
+                    &opened,
+                    MAX_HEADER_PROBE_RECORDS,
+                    Some(JsonlMutableFirstRecord::OmpTitleSlotV1),
+                    |record| {
                         let Some(mut binding) =
                             parse_header_binding(record, adapter.source_anchor_scope)?
                         else {
@@ -127,7 +134,8 @@ pub(super) fn discover<R: JsonlProviderRuntime>(
                         let binding_key =
                             TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?;
                         Ok(Some((binding, source, binding_key)))
-                    });
+                    },
+                );
                 let parsed = match parsed {
                     Err(CaptureError::InvalidPayload(detail)) => {
                         rejected.push(rejected_file(

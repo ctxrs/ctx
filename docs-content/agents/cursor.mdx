@@ -25,6 +25,26 @@ ctx sources --json
 
 Use `ctx sources --json` to confirm whether Cursor history is `importable` on this machine.
 
+### Conflicting transcript copies
+
+Cursor can store several transcript files with the same native session UUID.
+ctx deduplicates equivalent copies and strict prefixes while their event order agrees.
+If copies diverge in content or order, ctx imports each physical view as a separate session.
+Each view keeps its own event order and source provenance; ctx never synthesizes a combined timeline.
+Common messages can therefore appear in more than one preserved view.
+
+Use the returned `ctx_session_id` or `ctx_event_id` to inspect and cite a specific view.
+A native Cursor UUID can identify several views and cannot select one unambiguously.
+
+An existing canonical view keeps its citations while its source remains present,
+even if another view becomes longer. Alternative identities use the native UUID,
+root-relative transcript path, and configured root identity.
+Appending events or relocating the same named root does not change those identities.
+Deleting a view retires its citations on reconciliation.
+ctx does not transfer a deleted canonical identity to an existing alternative,
+even when their text agrees. Renaming a transcript within a root changes its alternative identity.
+Once ctx has published alternatives, later convergence does not collapse their sessions.
+
 ## Prompt Cursor to search first
 
 Paste this into Cursor before a follow-up task:

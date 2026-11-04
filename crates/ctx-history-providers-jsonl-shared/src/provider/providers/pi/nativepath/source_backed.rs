@@ -33,7 +33,7 @@ use crate::{
         family::jsonl::{
             JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
             JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
-            JsonlFileObservation, JsonlRecordRef,
+            JsonlFileObservation, JsonlMutableFirstRecord, JsonlRecordRef,
         },
         FallbackEventIdentityState,
     },
@@ -555,21 +555,8 @@ fn is_omp_filename_timestamp(timestamp: &str) -> bool {
 }
 
 fn is_omp_title_slot(record: JsonlRecordRef<'_>) -> bool {
-    if record.evidence().physical_ordinal() != 0 {
-        return false;
-    }
-    let Ok(value) = serde_json::from_slice::<Value>(record.bytes()) else {
-        return false;
-    };
-    value.get("type").and_then(Value::as_str) == Some("title")
-        && value.get("v").and_then(Value::as_f64) == Some(1.0)
-        && value.get("title").is_some_and(Value::is_string)
-        && value.get("updatedAt").is_some_and(Value::is_string)
-        && value.get("pad").is_some_and(Value::is_string)
-        && match value.get("source") {
-            None => true,
-            Some(source) => matches!(source.as_str(), Some("auto" | "user")),
-        }
+    record.evidence().physical_ordinal() == 0
+        && JsonlMutableFirstRecord::OmpTitleSlotV1.validates_record(record.bytes())
 }
 
 fn projected_body(value: &Value, event_type: EventType) -> String {
