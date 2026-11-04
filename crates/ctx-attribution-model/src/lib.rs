@@ -56,6 +56,8 @@ mod coverage;
 pub use coverage::{CoreProjectionCurrentness, MaterializedCoverage, RepositoryCoverage};
 mod presentation;
 pub use presentation::{BlameResultFreshness, HostedBlameResult};
+mod progress;
+pub use progress::{MaterializationPhase, MaterializationProgress};
 pub mod diagnostic;
 pub use diagnostic::{
     BlameDiagnostic, BlameDiagnosticFreshness, BlameFreshnessState, BlameNextAction,

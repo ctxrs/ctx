@@ -1,7 +1,9 @@
 use std::{path::Path, time::Instant};
 
 use anyhow::Result;
-use ctx_attribution::presentation::{mcp_text, print_blame_result_with_evidence_preview};
+use ctx_attribution::presentation::{
+    diagnostic_text, mcp_text, print_blame_result_with_evidence_preview,
+};
 use ctx_attribution_model::{
     BlameAttribution, BlameDiagnostic, BlameDiagnosticReason, BlameResultFreshness, BlameTarget,
     EvidencePreviewModel, HostedBlameResult,
@@ -64,6 +66,7 @@ fn query(
             Ok((result, previews))
         }
         Err(error) => {
+            let error = crate::semantic::upgrade_blame_diagnostic(data_root, error);
             facts.failure = Some(BlameFailure {
                 class: failure_class(error.reason),
                 phase: BlameFailurePhase::Query,
@@ -88,20 +91,6 @@ fn failure_class(reason: BlameDiagnosticReason) -> BlameFailureClass {
         }
         _ => BlameFailureClass::Repository,
     }
-}
-
-fn diagnostic_text(error: &BlameDiagnostic) -> String {
-    let mut text = format!("{}\n", error.message);
-    if let Some(action) = &error.next_action {
-        let argv = action
-            .argv
-            .iter()
-            .map(|arg| ctx_attribution::presentation::shell_quote_arg(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        text.push_str(&format!("\nNext\n  {argv}\n"));
-    }
-    text
 }
 
 pub(crate) fn run(

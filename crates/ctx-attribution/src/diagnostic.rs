@@ -22,6 +22,7 @@ fn diagnostic(
         reason,
         message,
         retryable: false,
+        progress: None,
         freshness: None,
         next_action,
         candidates: Vec::new(),
@@ -317,4 +318,22 @@ fn safe_repository_relative_path(path: &str) -> bool {
         && path
             .split('/')
             .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+}
+
+/// Projects a verified revision mismatch while the caller observes automatic maintenance.
+pub fn rebuilding_after_upgrade(
+    mut diagnostic: BlameDiagnostic,
+    progress: Option<MaterializationProgress>,
+) -> BlameDiagnostic {
+    diagnostic.error = "rebuilding";
+    diagnostic.error_code = "rebuilding";
+    diagnostic.message =
+        "Blame data is rebuilding after upgrade. Retry when background indexing finishes.";
+    diagnostic.retryable = true;
+    diagnostic.progress = progress.map(Box::new);
+    diagnostic.next_action = Some(BlameNextAction {
+        kind: BlameNextActionKind::CheckStatus,
+        argv: ["ctx", "status"].map(str::to_owned).to_vec(),
+    });
+    diagnostic
 }

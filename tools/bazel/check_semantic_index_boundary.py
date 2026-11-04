@@ -56,6 +56,8 @@ EXPECTED_INTERNAL_TEST_LABELS = [
 ALLOWED_CLI_SEMANTIC_SOURCES = {
     path.strip()
     for path in """
+attribution_status.rs
+attribution_status_tests.rs
 daemon.rs
 daemon/control.rs
 daemon/seam_tests.rs

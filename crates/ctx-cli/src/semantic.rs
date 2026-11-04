@@ -1,5 +1,8 @@
 //! Final-binary composition for daemon and semantic adapters.
 
+mod attribution_status;
+pub(crate) use attribution_status::upgrade_blame_diagnostic;
+
 use std::env;
 use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
@@ -9,7 +12,9 @@ use std::{io::Write, path::Path, thread, time::Duration};
 
 use anyhow::{Context, Result};
 use ctx_client_observability::analytics::PublicEventV1;
-use ctx_daemon_cli::DaemonRuntimeConfig;
+use ctx_daemon_cli::{
+    record_attribution_maintenance, AttributionMaintenanceStatus, DaemonRuntimeConfig,
+};
 
 pub(crate) use ctx_daemon_cli::{
     begin_daemon_upgrade_handoff, begin_daemon_upgrade_handoff_for_installation,
@@ -433,10 +438,20 @@ pub(crate) fn source_epoch_status_report(
 ) -> Result<ctx_daemon_cli::SourceEpochStatus> {
     let mut source =
         ctx_daemon_cli::source_epoch_status_report(data_root, &daemon_cli_config(config))?;
+    let maintenance = ctx_daemon_cli::attribution_maintenance_status(data_root);
     source.report["attribution"] = match ctx_attribution::readiness(data_root) {
-        Ok(status) => serde_json::to_value(status)?,
+        Ok(mut status) => {
+            status.diagnostic = status.diagnostic.map(|error| {
+                attribution_status::with_maintenance(data_root, error, maintenance.as_ref())
+            });
+            serde_json::to_value(status)?
+        }
         Err(error) => serde_json::json!({"error": error}),
     };
+    if source.report["attribution"]["diagnostic"]["error_code"] == "rebuilding" {
+        source.report["attribution"]["status"] = serde_json::json!("rebuilding");
+    }
+    source.report["attribution"]["maintenance"] = serde_json::to_value(maintenance)?;
     source.report["attribution"]["indexing_enabled"] = serde_json::json!(config.blame.enabled);
     source.report["attribution"]["progress"] = serde_json::to_value(
         ctx_attribution::materialization_progress(data_root)
@@ -666,6 +681,7 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
         if !request_attribution_maintenance_worker(&ATTRIBUTION_MAINTENANCE_WAKE_STATE) {
             return Ok(());
         }
+        record_attribution_maintenance(AttributionMaintenanceStatus::Running);
         let data_root = data_root.to_path_buf();
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
@@ -673,8 +689,15 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
             .name("ctx-attribution-maintenance".to_owned())
             .spawn(move || loop {
                 take_attribution_maintenance_request(&ATTRIBUTION_MAINTENANCE_WAKE_STATE);
-                let _ = reconcile_current_attribution(&data_root, &|| {
+                record_attribution_maintenance(AttributionMaintenanceStatus::Running);
+                let result = reconcile_current_attribution(&data_root, &|| {
                     worker_cancellation.load(Ordering::Acquire)
+                });
+                record_attribution_maintenance(match result {
+                    Ok(()) => AttributionMaintenanceStatus::Completed,
+                    Err(error) => AttributionMaintenanceStatus::Failed {
+                        error: format!("{error:#}"),
+                    },
                 });
                 if worker_cancellation.load(Ordering::Acquire) {
                     ATTRIBUTION_MAINTENANCE_WAKE_STATE.store(0, Ordering::Release);
@@ -698,7 +721,12 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
                     let _ = previous.handle.join();
                 }
             }
-            Err(_) => ATTRIBUTION_MAINTENANCE_WAKE_STATE.store(0, Ordering::Release),
+            Err(error) => {
+                record_attribution_maintenance(AttributionMaintenanceStatus::Failed {
+                    error: error.to_string(),
+                });
+                ATTRIBUTION_MAINTENANCE_WAKE_STATE.store(0, Ordering::Release);
+            }
         }
         Ok(())
     }

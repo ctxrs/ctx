@@ -22,7 +22,7 @@ Released: 2026-11-04
 ### Fixed
 
 - Broad multi-word searches on large histories return their best matches instead of stopping after the first 65,536 candidates.
-- Background indexing no longer rereads whole live Codex sessions after every small append, which kept one or two CPU cores busy while agents were writing. The search index is rebuilt once after upgrading. Search and Blame keep working during the rebuild, and `ctx status` shows its progress.
+- Background indexing no longer rereads whole live Codex sessions after every small append, which kept one or two CPU cores busy while agents were writing. The search index and Blame data are rebuilt once after upgrading. Search keeps working during the rebuild, Blame is available again when it finishes, and `ctx status` shows progress.
 - Blame attributes commits made in primary Claude Code and Pi sessions. Subagent, forked and copied sessions stay unattributed.
 - Blame finds commits made from Codex code mode.
 - A Pi sessions folder that contains other JSONL files, or files that can't be read, no longer blocks every Pi import. Tool calls nested in Pi messages are recorded.

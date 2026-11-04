@@ -1,6 +1,6 @@
 use super::*;
 
-fn copy_fixture(from: &Path, to: &Path) {
+pub(super) fn copy_fixture(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     #[cfg(unix)]
     {

@@ -96,9 +96,19 @@ Status reports active work separately from the last committed index's readiness.
 Source counters count completed sources in this pass; changes count accepted
 additions, replacements and deletions, not every record in retained history.
 
-If work is pending or interrupted, retry `ctx import --all` or
-`ctx setup --wait`. Committed history remains searchable while attribution is
-pending. A completed index can still have no evidence for the requested code.
+After an upgrade, automatic maintenance can rebuild Blame while history remains
+searchable. When that work is admitted and the daemon is responsive, Blame reports
+`error`/`error_code: "rebuilding"`, `retryable: true`, optional progress, and
+`next_action: {"kind":"check_status","argv":["ctx","status"]}`. Check status
+and retry Blame when it finishes; no full import is needed alongside the rebuild.
+Status reports `attribution.status: "rebuilding"` while committed
+`currentness` remains `needs_rebuild`.
+
+In manual mode, with Blame indexing disabled, or when maintenance has failed or
+is unavailable, the existing `needs_rebuild` wording and `ctx import --all`
+advice remain. Status shows a worker failure when the daemon can report it;
+resolve that failure before retrying import or `ctx setup --wait`. A completed
+index can still have no evidence for the requested code.
 
 JSON status exposes the existing generation, coverage, availability, and
 diagnostic fields under `attribution`; see [JSON contracts](contracts/json.md#blame-attribution-readiness).

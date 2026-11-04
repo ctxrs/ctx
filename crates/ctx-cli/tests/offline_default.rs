@@ -1,3 +1,5 @@
+#[path = "offline_default/attribution_upgrade.rs"]
+mod attribution_upgrade;
 #[path = "offline_default/schema_upgrade.rs"]
 mod schema_upgrade;
 mod support;
