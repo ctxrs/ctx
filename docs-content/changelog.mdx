@@ -8,24 +8,29 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
-## Unreleased
-
-### Fixed
-
-- Cursor imports preserve conflicting transcript copies as separately addressable histories, including reordered messages and unique tool events. Existing canonical citations stay stable while their source remains present, even when another copy grows longer.
-
 ## 2.4.0
 
-Released: 2026-11-02
+Released: 2026-11-04
 
 ### Added
 
 - Prime Agent is a supported history provider, separate from Pi. ctx discovers version 3 sessions in the selected Prime directory, RLM child sessions, and T3 Code's local Prime session store.
 - Search and show preserve conversation and custom messages, Python tool calls and results, and session relationships. Explicit imports accept `--provider prime-agent --path PATH`; `prime` and `prime_agent` are aliases.
 - Structured file references and tool diffs remain available to history and Blame. Dynamic Python source does not establish exact file ownership or MCP server identity.
+- `ctx status` shows how the active search index's storage is split between the docstore, terms, postings, positions and fast fields.
 
 ### Fixed
 
+- Broad multi-word searches on large histories return their best matches instead of stopping after the first 65,536 candidates.
+- Background indexing no longer rereads whole live Codex sessions after every small append, which kept one or two CPU cores busy while agents were writing. The search index is rebuilt once after upgrading. Search and Blame keep working during the rebuild, and `ctx status` shows its progress.
+- Blame attributes commits made in primary Claude Code and Pi sessions. Subagent, forked and copied sessions stay unattributed.
+- Blame finds commits made from Codex code mode.
+- A Pi sessions folder that contains other JSONL files, or files that can't be read, no longer blocks every Pi import. Tool calls nested in Pi messages are recorded.
+- OMP sessions keep importing while OMP updates the session title.
+- Cursor imports preserve conflicting transcript copies as separately addressable histories, including reordered messages and unique tool events. Existing canonical citations stay stable while their source remains present, even when another copy grows longer.
+- OpenCode imports check payload sizes before copying them, so one very large record no longer uses hundreds of megabytes of memory.
+- Unchanged search index files are shared between index generations with hard links where the filesystem supports them.
+- A rolled-back index write can no longer leave background merges writing into an index that was already published.
 - Updated Markdown parsing and Zstandard compression dependencies to versions that address the release scan's security advisories.
 
 ## 2.2.3
