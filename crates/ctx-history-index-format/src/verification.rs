@@ -295,6 +295,10 @@ pub fn open_pinned_publication(
         return Err(IndexError::UnboundIndexState);
     }
     let publication = load_publication_for_metas(root, &metas)?;
+    crate::validate_read_schema(
+        &index.schema(),
+        publication.manifest().lexical_schema_version,
+    )?;
     if slot.generation_id() != publication.generation_id() {
         return Err(IndexError::InvalidActiveGenerationPointer);
     }
@@ -420,6 +424,10 @@ pub fn open_publication_candidate<'a>(
     }
     let metas = index.load_metas()?;
     let publication = load_publication_for_metas(root, &metas)?;
+    crate::validate_read_schema(
+        &index.schema(),
+        publication.manifest().lexical_schema_version,
+    )?;
     Ok(OpenedPublicationCandidate {
         index,
         publication,

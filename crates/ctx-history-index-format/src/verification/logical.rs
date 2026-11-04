@@ -519,10 +519,12 @@ fn expected_query_projection_delta(
             .as_ref()
             .filter(|_| activity.result.is_some())
         {
-            add(Term::from_field_bytes(
+            if let (Some(field), Some(key)) = (
                 fields.provider_call_result,
-                &crate::provider_call_result_key(core.session_id, call_id)?,
-            ));
+                crate::provider_call_result_key(core.session_id, call_id)?,
+            ) {
+                add(Term::from_field_bytes(field, &key));
+            }
         }
         for fact in &activity.facts {
             add(Term::from_field_text(
@@ -679,17 +681,15 @@ impl IncrementalProjectionVerifier {
     }
 }
 
-fn incremental_query_projection_fields(fields: crate::Fields) -> [Field; 40] {
-    let remaining = remaining_query_projection_fields(fields);
-    let mut all = [fields.event_id; 40];
-    all[..4].copy_from_slice(&[
+fn incremental_query_projection_fields(fields: crate::Fields) -> impl Iterator<Item = Field> {
+    [
         fields.event_id,
         fields.session_id,
         fields.parent_session_id,
         fields.root_session_id,
-    ]);
-    all[4..].copy_from_slice(&remaining);
-    all
+    ]
+    .into_iter()
+    .chain(remaining_query_projection_fields(fields))
 }
 
 fn query_projection_digest(field: Field, serialized_value: &[u8]) -> [u8; 32] {
@@ -784,7 +784,7 @@ fn verify_remaining_query_projections(
     Ok(())
 }
 
-fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 36] {
+fn remaining_query_projection_fields(fields: crate::Fields) -> impl Iterator<Item = Field> {
     [
         fields.event_identity_digest,
         fields.provider_native_session_relationship,
@@ -821,8 +821,9 @@ fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 36] {
         fields.semantic_event_order,
         fields.event_range_order,
         fields.discovery_eligible,
-        fields.provider_call_result,
     ]
+    .into_iter()
+    .chain(fields.provider_call_result)
 }
 
 fn verify_query_projection_completion(

@@ -84,7 +84,10 @@ pub use manifest::{
 #[doc(hidden)]
 pub use record_digest::{accumulate_core_record, core_record_accumulator_leaf, core_record_leaf};
 #[doc(hidden)]
-pub use schema::{fields_from_schema, lexical_schema, required_field, validate_schema, Fields};
+pub use schema::{
+    fields_from_schema, lexical_schema, required_field, validate_read_schema, validate_schema,
+    Fields,
+};
 #[doc(hidden)]
 pub use source_identity::{source_sort_key, source_token};
 #[doc(hidden)]

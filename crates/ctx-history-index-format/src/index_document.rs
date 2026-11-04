@@ -919,10 +919,12 @@ impl IndexDocument {
                 .as_ref()
                 .filter(|_| activity.result.is_some())
             {
-                target.add_bytes(
+                if let (Some(field), Some(key)) = (
                     fields.provider_call_result,
                     crate::provider_call_result_key(record.session_id, call_id)?,
-                );
+                ) {
+                    target.add_bytes(field, key);
+                }
             }
             for fact in &activity.facts {
                 target.add_text(fields.literal_fact(fact.kind), fact.value.clone());

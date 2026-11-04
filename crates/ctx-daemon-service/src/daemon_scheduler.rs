@@ -363,22 +363,8 @@ where
             DaemonCycleStateV1::unknown(),
         ));
     };
-    let cold_all_refresh = run.scope == SourceBackedRefreshScope::All
-        && matches!(
-            run.job.get("trigger").and_then(Value::as_str),
-            Some("periodic" | "setup")
-        )
-        && run
-            .job
-            .get("previous_generation")
-            .is_none_or(Value::is_null);
-    debug_assert!(
-        matches!(run.scope, SourceBackedRefreshScope::Exact(_))
-            || (run.scope == SourceBackedRefreshScope::All
-                && run.job.get("trigger").and_then(Value::as_str) == Some("import"))
-            || cold_all_refresh,
-        "dirty-route work may become All only for cold startup/setup or when a manual import upgrades the queued exact refresh"
-    );
+    // The refresh coordinator owns scope admission, including complete-catalog
+    // schema and route migrations with a still-searchable predecessor.
     let terminal_persistence_pending = run.terminal_persistence_pending;
     let job = record_source_refresh_retry(
         data_root,
@@ -938,7 +924,6 @@ use std::{
 };
 
 use anyhow::Result;
-use ctx_history_capture::SourceBackedRefreshScope;
 use ctx_history_core::utc_now;
 use ctx_history_refresh::{RefreshRequestState, RefreshStatus};
 use serde_json::{json, Value};

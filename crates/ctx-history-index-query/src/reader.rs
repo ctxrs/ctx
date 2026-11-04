@@ -7,7 +7,7 @@ use std::{
 use crate::{IndexError, Result};
 use ctx_history_index_format::{
     is_generation_id, load_publication_for_metas, meta_generation, payload_generation_id,
-    register_body_analyzer, searcher_generation, validate_schema,
+    register_body_analyzer, searcher_generation, validate_read_schema, validate_schema,
     verify_or_certify_physical_integrity, verify_searcher_structure, DurableMmapDirectory,
     GenerationManifest, VerifiedPublication,
 };
@@ -668,10 +668,10 @@ impl VerifiedIndex {
         VERIFIED_INDEX_REOPEN_COUNT.with(|count| count.set(count.get().saturating_add(1)));
         let index = open_slot_index(root, slot)?;
         register_body_analyzer(&index);
-        validate_schema(&index.schema())?;
         let metas = index.load_metas()?;
         let publication = load_publication_for_metas(root, &metas)?;
         let (generation_id, manifest) = publication.into_parts();
+        validate_read_schema(&index.schema(), manifest.lexical_schema_version)?;
         if slot.generation_id() != generation_id {
             return Err(generation_mismatch(generation_id));
         }

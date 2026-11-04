@@ -76,6 +76,7 @@ rust_doc_test(
 ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_TEST_SRCS,
+    data = glob(["tests/fixtures/schema-22/**"]),
     crate_name = "ctx_history_index",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
@@ -122,4 +123,10 @@ ctx_rust_test(
     rustc_env = COMMON_RUSTC_ENV,
     tags = ["tier-nightly"],
     timeout = "long",
+)
+
+filegroup(
+    name = "schema_22_fixture",
+    testonly = True,
+    srcs = glob(["tests/fixtures/schema-22/**"]),
 )
