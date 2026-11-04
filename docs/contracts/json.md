@@ -227,6 +227,8 @@ and advisory indexing observations:
 | `diagnostic` | Canonical Blame diagnostic for noncurrent state; omitted when absent. |
 | `indexing_enabled` | Effective `blame.enabled` configuration (default true); independent of committed readiness. |
 | `progress` | Active writer observation, or null when no writer is observed. |
+| `status` | `rebuilding` while automatic attribution work is admitted and its daemon is responsive; otherwise omitted. Committed `currentness` remains `needs_rebuild` during an upgrade. |
+| `maintenance` | Responsive daemon's attribution worker state (`idle`, `running`, `completed`, or `failed` with `error`); null when unavailable. |
 
 `progress` contains `phase` (`preparing`, `indexing`, `publishing`, briefly
 `complete`, or `snapshot_unavailable` during an incomplete advisory read),
@@ -249,8 +251,20 @@ facts remain queryable according to `availability`.
 
 `currentness: "current"` with `materialized_coverage: "empty"` or `"abstained"`
 is terminal and has no import/rebuild instruction. Availability may still be
-false because there is no usable evidence. Noncurrent diagnostics carry the
-ordinary completion action under `diagnostic.next_action`:
+false because there is no usable evidence. During an automatic revision upgrade,
+admitted attribution work on a responsive daemon produces `error` and
+`error_code: "rebuilding"`, `retryable: true`, and optional `progress` in both
+Blame CLI/MCP diagnostics and `attribution.diagnostic`. Its `next_action` is:
+
+```json
+{ "kind": "check_status", "argv": ["ctx", "status"] }
+```
+
+Retry Blame after the rebuild completes. A long-running pass or a worker waiting
+for the writer remains rebuilding; elapsed time does not indicate failure.
+Manual mode, disabled Blame indexing, failed work, and unavailable maintenance
+retain `needs_rebuild`, `retryable: false`, and the ordinary completion action
+under `diagnostic.next_action`:
 
 ```json
 { "kind": "import_all", "argv": ["ctx", "import", "--all"] }

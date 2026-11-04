@@ -921,10 +921,10 @@ fn native_attribution_wait_exceeds_two_seconds_and_cancels_without_revoking_core
             // beyond Core completion, rather than just a slow provider scan.
             let publication_deadline = Instant::now() + Duration::from_secs(15);
             loop {
-                assert!(
-                    client.child.as_mut().unwrap().try_wait().unwrap().is_none(),
-                    "{mode}: command exited while attribution writer was held"
-                );
+                if client.child.as_mut().unwrap().try_wait().unwrap().is_some() {
+                    let output = client.child.take().unwrap().wait_with_output().unwrap();
+                    panic!("{mode}: command exited while attribution writer was held: {output:?}");
+                }
                 let status = json_output(ctx(&temp).args(["status", "--format=json"]));
                 if status["refresh"]["status"] == "ready"
                     && status["lexical"]["generation_id"] != original_generation

@@ -398,6 +398,7 @@ impl CtxAuthenticatedRequestHandler {
             "owner": "daemon",
             "service": "lifecycle",
             "pid": std::process::id(),
+            "attribution_maintenance": ctx_daemon_runtime::current_attribution_maintenance_status(),
         });
         response[key] = value.into();
         SourceRefreshResponse::Value(response)

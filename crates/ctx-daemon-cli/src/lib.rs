@@ -9,11 +9,14 @@ fn committed_generation_recovery_error(
     }
 }
 
+mod attribution_maintenance;
 mod composition;
+pub use attribution_maintenance::attribution_maintenance_status;
 pub use composition::{install_host, DaemonCliHost, DaemonConfig, DaemonMode, DaemonRuntimeConfig};
 pub use ctx_daemon_application::DaemonDiagnosticSnapshot;
 pub use ctx_daemon_application::DaemonHostRunRequest;
 pub use ctx_daemon_runtime::apply_supervisor_environment_handoff;
+pub use ctx_daemon_runtime::{record_attribution_maintenance, AttributionMaintenanceStatus};
 pub use ctx_daemon_service::{
     CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts, SemanticFailureClass,
 };

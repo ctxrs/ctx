@@ -29,22 +29,21 @@ pub struct DaemonLock {
 
 impl DaemonLock {
     pub fn acquire(data_root: &Path) -> Result<Option<Self>> {
-        Self::acquire_with_binary_hash(data_root, true)
+        Self::acquire_with_profile(data_root, true)
     }
 
     /// Finite foreground workers have an exact child capability and do not
     /// need to hash the executable to establish ownership of their lock.
     pub fn acquire_for_finite_worker(data_root: &Path) -> Result<Option<Self>> {
-        Self::acquire_with_binary_hash(data_root, false)
+        Self::acquire_with_profile(data_root, false)
     }
 
-    fn acquire_with_binary_hash(
-        data_root: &Path,
-        include_binary_hash: bool,
-    ) -> Result<Option<Self>> {
+    fn acquire_with_profile(data_root: &Path, persistent: bool) -> Result<Option<Self>> {
         ctx_history_platform::platform_security::establish_private_data_root(data_root)?;
         create_private_dir_all(&daemon_root_path(data_root))?;
-        let payload = current_daemon_lock_identity_with_hash(data_root, include_binary_hash)?;
+        let mut payload = current_daemon_lock_identity_with_hash(data_root, persistent)?;
+        // Observers must not keep a finite worker alive by polling its IPC.
+        payload["persistent"] = json!(persistent);
         Ok(PidFileLock::acquire(&daemon_lock_path(data_root), payload)?
             .map(|inner| Self { _inner: inner }))
     }

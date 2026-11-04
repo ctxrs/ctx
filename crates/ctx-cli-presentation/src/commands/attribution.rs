@@ -37,6 +37,9 @@ pub fn append_attribution(context: &RenderContext, document: &mut Document, repo
                 .join(" ")
         });
     let mut rows = vec![Field::new("Index", state)];
+    if let Some(error) = attribution["maintenance"]["error"].as_str() {
+        rows.push(Field::new("Maintenance failed", error));
+    }
     let omitted_note = attribution["coverage"]["bounded_omission_events"]
         .as_u64()
         .filter(|count| *count > 0)

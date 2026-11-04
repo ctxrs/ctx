@@ -7,6 +7,15 @@ pub(crate) fn upgrade_blame_diagnostic(
     data_root: &Path,
     diagnostic: BlameDiagnostic,
 ) -> BlameDiagnostic {
+    let maintenance = ctx_daemon_cli::attribution_maintenance_status(data_root);
+    with_maintenance(data_root, diagnostic, maintenance.as_ref())
+}
+
+pub(super) fn with_maintenance(
+    data_root: &Path,
+    diagnostic: BlameDiagnostic,
+    maintenance: Option<&ctx_daemon_cli::AttributionMaintenanceStatus>,
+) -> BlameDiagnostic {
     if diagnostic.error_code != "needs_rebuild"
         || diagnostic.reason != BlameDiagnosticReason::ProjectionIncompatible
     {
@@ -15,21 +24,17 @@ pub(crate) fn upgrade_blame_diagnostic(
     let Ok(config) = AppConfig::load(data_root) else {
         return diagnostic;
     };
-    if config.automatic_indexing_enabled() && config.blame.enabled {
+    if config.automatic_indexing_enabled()
+        && config.blame.enabled
+        && matches!(
+            maintenance,
+            Some(ctx_daemon_cli::AttributionMaintenanceStatus::Running)
+        )
+    {
         let progress = ctx_attribution::materialization_progress(data_root)
             .ok()
             .flatten();
-        // Startup and publication schedule the existing worker. A stopped daemon
-        // without a live writer cannot promise automatic completion.
-        let running = progress.is_some()
-            || ctx_daemon_cli::source_epoch_status_report(
-                data_root,
-                &super::daemon_cli_config(&config),
-            )
-            .is_ok_and(|source| source.report["daemon"]["running"] == true);
-        if running {
-            return ctx_attribution::rebuilding_after_upgrade(diagnostic, progress);
-        }
+        return ctx_attribution::rebuilding_after_upgrade(diagnostic, progress);
     }
     diagnostic
 }
