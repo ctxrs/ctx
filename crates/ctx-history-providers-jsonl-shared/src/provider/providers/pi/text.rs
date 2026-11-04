@@ -12,15 +12,21 @@ pub(crate) fn pi_event_role(role: &str) -> EventRole {
 }
 
 pub(crate) fn pi_message_has_tool_call(message: &Value) -> bool {
-    message
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .any(|block| block.get("type").and_then(Value::as_str) == Some("toolCall"))
-        })
-        .unwrap_or(false)
+    (["toolCallId", "tool_call_id", "callId"]
+        .iter()
+        .any(|field| message.get(field).is_some())
+        && ["toolName", "tool_name", "name"]
+            .iter()
+            .any(|field| message.get(field).is_some()))
+        || message
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block.get("type").and_then(Value::as_str) == Some("toolCall"))
+            })
+            .unwrap_or(false)
 }
 
 /// Returns the exact result text selected by Pi's result-body profile.
@@ -42,7 +48,7 @@ pub(crate) fn pi_result_content(entry: &Value) -> Option<String> {
     }
 }
 
-fn pi_result_value_text(value: &Value) -> Option<String> {
+pub(crate) fn pi_result_value_text(value: &Value) -> Option<String> {
     if let Some(text) = value.as_str() {
         return Some(text.to_owned());
     }

@@ -53,6 +53,7 @@ ctx-history-providers-sqlite-selected = { path = "../ctx-history-providers-sqlit
 ctx-history-snapshot-reader = { path = "../ctx-history-snapshot-reader" }
 ctx-history-source-discovery = { path = "../ctx-history-source-discovery" }
 ctx-history-source-io = { path = "../ctx-history-source-io", features = ["test-support"] }
+ctx-repository-evidence = { path = "../ctx-repository-evidence" }
 rusqlite.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
