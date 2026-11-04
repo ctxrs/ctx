@@ -454,8 +454,15 @@ cannot reactivate it. After all abortable checks, ctx enables only the terminal
 writer immediately before commit. Publication waits for that writer's merges
 to finish.
 
-Generation candidates hard-link unchanged base segments when the filesystem
-supports it. For threshold planning, let `F` be the physical footprint of the
+On Linux and macOS, generation candidates first hard-link unchanged, read-only
+base segments. If the filesystem or permissions prevent linking, they try a
+copy-on-write filesystem clone (reflink), then a verified copy. Reflinks share
+data blocks but have different inodes and link counts of one; `du` can count
+their shared blocks twice. Windows and FreeBSD currently use verified copies.
+Mutable Tantivy control files (`meta.json` and `.managed.json`) always remain
+independent so candidate updates cannot modify the retained generation.
+
+For threshold planning, let `F` be the physical footprint of the
 same live documents in a deletion-free generation. Assume stored bytes scale
 with physical document slots, the active and retained previous generations are
 distinct and each sits at exactly 25% deletions, and a worst-case compaction

@@ -20,11 +20,7 @@ impl EventCandidateQueryReceipt {
 
 use ctx_history_index_format::BODY_ANALYZER;
 use std::sync::Arc;
-use tantivy::{
-    fieldnorm::FieldNormReader,
-    postings::{Postings as _, TermInfo},
-    query::Bm25Weight,
-};
+use tantivy::{fieldnorm::FieldNormReader, postings::TermInfo, query::Bm25Weight};
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -37,6 +33,10 @@ thread_local! {
 
 const EVENT_RANGE_ORDER_FAST_FIELD: &str = "event_range_order";
 
+mod blocks;
+use blocks::BodyPostings;
+mod classes;
+use classes::SegmentClasses;
 mod executor;
 mod semantic_projection;
 
@@ -49,7 +49,7 @@ struct PreparedBodySegment {
 
 struct PreparedSegment {
     context: LexicalSegmentContext,
-    body_postings: Vec<Option<SegmentPostings>>,
+    body_postings: Vec<Option<BodyPostings>>,
     fieldnorms: Option<FieldNormReader>,
     filters: SegmentFilters,
     classes: SegmentClasses,
@@ -59,7 +59,7 @@ struct PreparedSegment {
 impl PreparedSegment {
     fn new(
         context: LexicalSegmentContext,
-        body_postings: Vec<Option<SegmentPostings>>,
+        body_postings: Vec<Option<BodyPostings>>,
         fieldnorms: Option<FieldNormReader>,
         filters: SegmentFilters,
         classes: SegmentClasses,
@@ -304,57 +304,6 @@ impl SegmentBitmap {
     }
 }
 
-enum SegmentClasses {
-    Unweighted,
-    Weighted(Box<WeightedSegmentClasses>),
-}
-
-struct WeightedSegmentClasses {
-    message: Option<SegmentPostings>,
-    summary: Option<SegmentPostings>,
-    outputs: Vec<SegmentPostings>,
-    scope: SearchContentScope,
-}
-
-impl SegmentClasses {
-    #[cfg(any(test, feature = "test-support"))]
-    fn posting_count(&self) -> usize {
-        match self {
-            Self::Unweighted => 0,
-            Self::Weighted(weighted) => {
-                usize::from(weighted.message.is_some())
-                    + usize::from(weighted.summary.is_some())
-                    + weighted.outputs.len()
-            }
-        }
-    }
-
-    fn weight(
-        &mut self,
-        doc: DocId,
-        meter: &mut LexicalWorkMeter,
-        segment: &LexicalSegmentContext,
-    ) -> Option<Score> {
-        let Self::Weighted(weighted) = self else {
-            return Some(1.0);
-        };
-        if posting_option_contains(&mut weighted.message, doc, meter, segment)? {
-            return Some(1.0);
-        }
-        if posting_option_contains(&mut weighted.summary, doc, meter, segment)? {
-            return Some(0.9);
-        }
-        if posting_group_contains(&mut weighted.outputs, doc, meter, segment)? {
-            return Some(0.6);
-        }
-        Some(match weighted.scope {
-            SearchContentScope::All => 0.8,
-            SearchContentScope::Transcript => 0.9,
-            SearchContentScope::Calls | SearchContentScope::Outputs => unreachable!(),
-        })
-    }
-}
-
 enum PostingOpen {
     Opened { postings: Box<SegmentPostings> },
     Missing,
@@ -429,7 +378,7 @@ fn open_manual_segment(
         return Ok(None);
     };
     let Some(classes) =
-        open_segment_classes(reader, fields.event_type, content_scope, meter, &context)?
+        SegmentClasses::open(reader, fields.event_type, content_scope, meter, &context)?
     else {
         return Ok(None);
     };
@@ -450,7 +399,7 @@ fn open_body_postings(
     term_infos: &[Option<TermInfo>],
     meter: &mut LexicalWorkMeter,
     segment: &LexicalSegmentContext,
-) -> Result<Option<Vec<Option<SegmentPostings>>>> {
+) -> Result<Option<Vec<Option<BodyPostings>>>> {
     let mut inverted = None;
     let mut postings = Vec::with_capacity(term_infos.len());
     for term_info in term_infos {
@@ -467,11 +416,7 @@ fn open_body_postings(
             Some(inverted) => inverted,
             None => inverted.insert(manual_inverted_index(reader, field)?),
         };
-        postings.push(Some(manual_read_postings(
-            inverted,
-            term_info,
-            IndexRecordOption::WithFreqs,
-        )?));
+        postings.push(Some(BodyPostings::open(inverted, term_info)?));
     }
     Ok(Some(postings))
 }
@@ -677,70 +622,6 @@ fn open_posting_groups(
     Ok(Some(opened_groups))
 }
 
-fn open_segment_classes(
-    reader: &SegmentReader,
-    event_type_field: Field,
-    scope: SearchContentScope,
-    meter: &mut LexicalWorkMeter,
-    segment: &LexicalSegmentContext,
-) -> Result<Option<SegmentClasses>> {
-    if matches!(
-        scope,
-        SearchContentScope::Calls | SearchContentScope::Outputs
-    ) {
-        return Ok(Some(SegmentClasses::Unweighted));
-    }
-    let open = |value: &str, meter: &mut LexicalWorkMeter| {
-        open_posting(
-            reader,
-            &Term::from_field_text(event_type_field, value),
-            IndexRecordOption::Basic,
-            meter,
-            segment,
-        )
-    };
-    let message = match open("message", meter)? {
-        PostingOpen::Opened { postings, .. } => Some(*postings),
-        PostingOpen::Missing => None,
-        PostingOpen::Exhausted => return Ok(None),
-    };
-    let summary = match open("summary", meter)? {
-        PostingOpen::Opened { postings, .. } => Some(*postings),
-        PostingOpen::Missing => None,
-        PostingOpen::Exhausted => return Ok(None),
-    };
-    let mut outputs = Vec::new();
-    if scope == SearchContentScope::All {
-        for output_type in OUTPUT_EVENT_TYPES {
-            match open(output_type, meter)? {
-                PostingOpen::Opened { postings, .. } => outputs.push(*postings),
-                PostingOpen::Missing => {}
-                PostingOpen::Exhausted => return Ok(None),
-            }
-        }
-    }
-    Ok(Some(SegmentClasses::Weighted(Box::new(
-        WeightedSegmentClasses {
-            message,
-            summary,
-            outputs,
-            scope,
-        },
-    ))))
-}
-
-fn posting_option_contains(
-    postings: &mut Option<SegmentPostings>,
-    doc: DocId,
-    meter: &mut LexicalWorkMeter,
-    segment: &LexicalSegmentContext,
-) -> Option<bool> {
-    let Some(postings) = postings else {
-        return Some(false);
-    };
-    posting_contains(postings, doc, meter, segment)
-}
-
 fn posting_group_contains(
     postings: &mut [SegmentPostings],
     doc: DocId,
@@ -793,7 +674,7 @@ fn posting_contains(
     Some(false)
 }
 
-fn next_body_doc(postings: &[Option<SegmentPostings>]) -> Option<DocId> {
+fn next_body_doc(postings: &[Option<BodyPostings>]) -> Option<DocId> {
     postings
         .iter()
         .filter_map(|postings| postings.as_ref().map(|postings| postings.doc()))

@@ -2,7 +2,6 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    fs, io,
     marker::PhantomData,
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
@@ -16,11 +15,10 @@ use ctx_history_capture_runtime::{
 };
 use ctx_history_core::{
     admit_optional_metadata_text, admit_optional_provider_call_id, admit_provider_declared_fact,
-    derive_event_id, derive_native_session_id, ActivityInvocation, ActivityJsonCapture,
-    ActivityResult, ActivityTextCapture, CaptureProvider, CoreActivity, CoreRecord,
-    EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, ProviderDeclaredFact,
-    ProviderNativeSessionRelationship, SourceAnchorScope, SourceKey, StableEntityId, TypedKey,
-    CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
+    derive_event_id, derive_native_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
+    EventType, LiteralFactKind, NativeItemKey, PositionStability, ProviderDeclaredFact,
+    ProviderNativeSessionRelationship, SourceAnchorScope, SourceKey, StableEntityId,
+    SubrecordSelector, TypedKey, MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_jsonl::JsonlRecordRejections;
 use serde::{Deserialize, Serialize};
@@ -31,17 +29,13 @@ use ctx_history_capture_model::file_references::visit_provider_file_reference_dr
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
-    provider::{
-        providers::native_jsonl::visit_native_jsonl_files,
-        source_backed::{
-            family::jsonl::{
-                observe_opened_file, probe_records_until, JsonlFamilyAdapter,
-                JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-                JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
-                JsonlFileObservation, JsonlRecordRef,
-            },
-            FallbackEventIdentityState,
+    provider::source_backed::{
+        family::jsonl::{
+            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
+            JsonlFileObservation, JsonlMutableFirstRecord, JsonlRecordRef,
         },
+        FallbackEventIdentityState,
     },
     CaptureError, Result,
 };
@@ -52,13 +46,17 @@ use super::super::{
     PI_SOURCE_FORMAT,
 };
 
+mod activity;
+mod discovery;
+use activity::{pi_activity, split_tool_calls};
+
 const SOURCE_ANCHOR_NAMESPACE: &str = "pi.session";
 const NATIVE_SESSION_NAMESPACE: &str = "pi.session";
 const NATIVE_EVENT_NAMESPACE: &str = "pi.entry";
 const LOGICAL_SESSION_KIND: &str = "pi-session";
 const LOGICAL_EVENT_KIND: &str = "pi-event";
 const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
-const PARSER_REVISION: &str = "pi-shared-jsonl-v11-omp-parent-lineage";
+const PARSER_REVISION: &str = "pi-shared-jsonl-v12-nested-tool-activity";
 const EVENT_IDENTITY_REVISION: &str = "pi-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.pi.fallback-event-fingerprint.v1\0";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
@@ -125,7 +123,9 @@ impl<R> Default for PiJsonlAdapter<R> {
 #[derive(Clone)]
 struct CachedBinding {
     observation: JsonlFileObservation,
+    source: SourceKey,
     binding: Binding,
+    binding_key: TypedKey,
     identity_probe: crate::provider::source_backed::family::jsonl::JsonlProbe,
     leading_rejections: SourceBackedRecordRejectionDrafts,
 }
@@ -144,16 +144,6 @@ struct Binding {
 struct ParentSessionHeader {
     #[serde(rename = "parentSession")]
     parent_session: Option<String>,
-}
-
-struct DiscoveredPiSource {
-    path: PathBuf,
-    relative_path: PathBuf,
-    observation: JsonlFileObservation,
-    source: SourceKey,
-    binding: Binding,
-    identity_probe: crate::provider::source_backed::family::jsonl::JsonlProbe,
-    leading_rejections: SourceBackedRecordRejectionDrafts,
 }
 
 impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
@@ -184,156 +174,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
-        match fs::symlink_metadata(root) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return JsonlFamilyInventory::missing(self.provider(), root);
-            }
-            Err(error) => return Err(error.into()),
-        }
-        let canonical_root = fs::canonicalize(root)?;
-        let authority_path = if fs::symlink_metadata(root)?.is_file() {
-            canonical_root
-                .parent()
-                .ok_or(CaptureError::InvalidProviderTranscriptPath {
-                    path: canonical_root.clone(),
-                    reason: "selected Pi transcript has no authority directory",
-                })?
-                .to_path_buf()
-        } else {
-            canonical_root
-        };
-        let authority = Arc::new(ProviderSourceRoot::open(&authority_path)?);
-        let mut paths = BTreeSet::new();
-        visit_native_jsonl_files(root, self.provider(), &mut |path| {
-            paths.insert(fs::canonicalize(path)?);
-            Ok(())
-        })?;
-
-        let previous = self
-            .bindings
-            .lock()
-            .map_err(|_| contract("Pi binding catalog lock was poisoned"))?
-            .clone();
-        let mut next = HashMap::with_capacity(paths.len());
-        let mut discovered = Vec::with_capacity(paths.len());
-        for path in paths {
-            let relative_path = relative_to_authority(&authority, &path)?;
-            let opened = Arc::new(authority.open_file(&relative_path)?);
-            let observation = observe_opened_file(&path, opened.as_ref())?;
-            let (binding, identity_probe, leading_rejections) = match previous.get(&path) {
-                Some(cached) if cached.observation == observation => (
-                    cached.binding.clone(),
-                    cached.identity_probe.clone(),
-                    cached.leading_rejections.clone(),
-                ),
-                _ => {
-                    let mut leading_rejection_details = Vec::new();
-                    let (binding, probe) = probe_records_until(
-                        &path,
-                        &opened,
-                        MAX_HEADER_PROBE_RECORDS,
-                        |record| -> Result<Option<Binding>> {
-                            let Some(mut binding) =
-                                parse_header_binding(record, self.source_anchor_scope)?
-                            else {
-                                if !is_omp_title_slot(record) {
-                                    leading_rejection_details.push((
-                                        record.evidence().physical_ordinal().saturating_add(1),
-                                        leading_rejection_detail(record),
-                                    ));
-                                }
-                                return Ok(None);
-                            };
-                            binding.leading_rejected_records =
-                                u64::try_from(leading_rejection_details.len()).map_err(|_| {
-                                    CaptureError::SystemInvariant(
-                                        "Pi identity rejection count does not fit u64",
-                                    )
-                                })?;
-                            Ok(Some(binding))
-                        },
-                    )?
-                    .ok_or_else(|| {
-                        CaptureError::InvalidPayload(
-                            "Pi source has no valid session header within the bounded identity probe"
-                                .to_owned(),
-                        )
-                    })?;
-                    let source =
-                        source_key_scoped(&binding.native_session_id, self.source_anchor_scope)?;
-                    let leading_rejections =
-                        pi_leading_rejection_drafts(&source, &path, leading_rejection_details)?;
-                    (binding, probe, leading_rejections)
-                }
-            };
-            let source = source_key_scoped(&binding.native_session_id, self.source_anchor_scope)?;
-            discovered.push(DiscoveredPiSource {
-                path,
-                relative_path,
-                observation,
-                source,
-                binding,
-                identity_probe,
-                leading_rejections,
-            });
-        }
-        let mut sources = HashMap::<[u8; 32], JsonlFileObservation>::new();
-        let mut leaves = Vec::with_capacity(discovered.len());
-        for discovered in discovered {
-            let DiscoveredPiSource {
-                path,
-                relative_path,
-                observation,
-                source,
-                binding,
-                identity_probe,
-                leading_rejections,
-            } = discovered;
-            let source_digest = source.exact_descriptor_digest();
-            if let Some(selected) = sources.get(&source_digest) {
-                if selected == &observation {
-                    next.insert(
-                        path,
-                        CachedBinding {
-                            observation,
-                            binding,
-                            identity_probe,
-                            leading_rejections,
-                        },
-                    );
-                    continue;
-                }
-                return Err(CaptureError::InvalidPayload(
-                    "Pi inventory repeats a native session identity".to_owned(),
-                ));
-            }
-            sources.insert(source_digest, observation.clone());
-            next.insert(
-                path.clone(),
-                CachedBinding {
-                    observation,
-                    binding: binding.clone(),
-                    identity_probe: identity_probe.clone(),
-                    leading_rejections,
-                },
-            );
-            let binding_key = TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?;
-            leaves.push(JsonlFamilyLeaf::observe_after_identity_probe(
-                source,
-                path,
-                Arc::clone(&authority),
-                relative_path,
-                binding_key,
-                identity_probe,
-                binding.leading_rejected_records,
-            )?);
-        }
-        *self
-            .bindings
-            .lock()
-            .map_err(|_| contract("Pi binding catalog lock was poisoned"))? = next;
-        JsonlFamilyInventory::present(self.provider(), root, authority, leaves)
+        discovery::discover(self, root)
     }
 
     fn projector(
@@ -440,15 +281,6 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
         let Some(occurred_at) = event_timestamp(&value) else {
             return Ok(());
         };
-        let event_type = pi_event_type(
-            value
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown"),
-            value.get("message"),
-        );
-        let body = projected_body(&value, event_type);
-        let mut facts = literal_facts(&value)?;
         let ordinal = evidence.physical_ordinal();
         let native_id = value
             .get("id")
@@ -473,63 +305,87 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
                 )
             }
         };
-        let event_id = derive_event_id(EventIdentityInput {
-            source: &self.source,
-            session_id: self.session_id,
-            logical_item_kind: LOGICAL_EVENT_KIND,
-            native_item_key: &native_item_key,
-            subrecord_selector: None,
-        })
-        .map_err(contract)?;
-        let message = value.get("message").unwrap_or(&value);
-        if let Some(cwd) = &self.binding.cwd {
-            if let Some(fact) =
-                admit_provider_declared_fact(LiteralFactKind::SessionCwd, cwd.clone(), facts.len())
-            {
-                facts.insert(0, fact);
+        for (part, value) in split_tool_calls(value)? {
+            let event_type = pi_event_type(
+                value
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                value.get("message"),
+            );
+            let body = projected_body(&value, event_type);
+            let mut facts = literal_facts(&value)?;
+            let selector = SubrecordSelector::certified_position(
+                "pi.tool-call",
+                TypedKey::U64(u64::from(part)),
+                PositionStability::StableSlot,
+            )
+            .map_err(contract)?;
+            let event_id = derive_event_id(EventIdentityInput {
+                source: &self.source,
+                session_id: self.session_id,
+                logical_item_kind: LOGICAL_EVENT_KIND,
+                native_item_key: &native_item_key,
+                subrecord_selector: (part != 0).then_some(&selector),
+            })
+            .map_err(contract)?;
+            let message = value.get("message").unwrap_or(&value);
+            if let Some(cwd) = &self.binding.cwd {
+                if let Some(fact) = admit_provider_declared_fact(
+                    LiteralFactKind::SessionCwd,
+                    cwd.clone(),
+                    facts.len(),
+                ) {
+                    facts.insert(0, fact);
+                }
             }
-        }
-        let activity = pi_activity(message, event_type, &body, facts)?;
-        let mut core = CoreRecord::new_selected(
-            event_id,
-            self.session_id,
-            self.source.clone(),
-            ordinal,
-            event_type.as_str(),
-            PARSER_REVISION,
-            body.clone(),
-        )
-        .map_err(contract)?;
-        core.provider_session_id = Some(self.binding.native_session_id.clone());
-        if let Some(parent_session_id) = self.binding.parent_session_id {
-            core.parent_session_id = Some(parent_session_id);
-            core.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
-        }
-        core.native_event_id = Some(native_event_id);
-        core.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
-        core.role = value
-            .get("message")
-            .and_then(|message| message.get("role"))
-            .and_then(Value::as_str)
-            .map(pi_event_role)
-            .map(|role| role.as_str().to_owned());
-        core.content.structured_content = Some(value);
-        core.content.activity = activity;
-        ctx_history_jsonl::fit_jsonl_activity(
-            &body,
-            core.content.structured_content.as_ref(),
-            &mut core.content.activity,
-            ctx_history_jsonl::JsonlActivityObservedBytes::infer_from_present(),
-            MAX_CORE_CONTENT_BYTES,
-        );
-        core.content
-            .omit_provider_declared_facts_if_aggregate_exceeds_limit()
+            let activity = pi_activity(message, event_type, facts)?;
+            let sequence = ordinal
+                .checked_mul(u64::from(u32::MAX) + 1)
+                .and_then(|base| base.checked_add(u64::from(part)))
+                .ok_or_else(|| contract("Pi event sequence overflow"))?;
+            let mut core = CoreRecord::new_selected(
+                event_id,
+                self.session_id,
+                self.source.clone(),
+                sequence,
+                event_type.as_str(),
+                PARSER_REVISION,
+                body.clone(),
+            )
             .map_err(contract)?;
-        core.content
-            .omit_structured_content_if_aggregate_exceeds_limit()
-            .map_err(contract)?;
-        core.validate_contract().map_err(contract)?;
-        emit(core)
+            core.provider_session_id = Some(self.binding.native_session_id.clone());
+            if let Some(parent_session_id) = self.binding.parent_session_id {
+                core.parent_session_id = Some(parent_session_id);
+                core.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+            }
+            core.native_event_id = Some(native_event_id.clone());
+            core.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
+            core.role = value
+                .get("message")
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)
+                .map(pi_event_role)
+                .map(|role| role.as_str().to_owned());
+            core.content.structured_content = Some(value);
+            core.content.activity = activity;
+            ctx_history_jsonl::fit_jsonl_activity(
+                &body,
+                core.content.structured_content.as_ref(),
+                &mut core.content.activity,
+                ctx_history_jsonl::JsonlActivityObservedBytes::infer_from_present(),
+                MAX_CORE_CONTENT_BYTES,
+            );
+            core.content
+                .omit_provider_declared_facts_if_aggregate_exceeds_limit()
+                .map_err(contract)?;
+            core.content
+                .omit_structured_content_if_aggregate_exceeds_limit()
+                .map_err(contract)?;
+            core.validate_contract().map_err(contract)?;
+            emit(core)?;
+        }
+        Ok(())
     }
 
     fn rejected_records(&self) -> u64 {
@@ -693,21 +549,8 @@ fn is_omp_filename_timestamp(timestamp: &str) -> bool {
 }
 
 fn is_omp_title_slot(record: JsonlRecordRef<'_>) -> bool {
-    if record.evidence().physical_ordinal() != 0 {
-        return false;
-    }
-    let Ok(value) = serde_json::from_slice::<Value>(record.bytes()) else {
-        return false;
-    };
-    value.get("type").and_then(Value::as_str) == Some("title")
-        && value.get("v").and_then(Value::as_f64) == Some(1.0)
-        && value.get("title").is_some_and(Value::is_string)
-        && value.get("updatedAt").is_some_and(Value::is_string)
-        && value.get("pad").is_some_and(Value::is_string)
-        && match value.get("source") {
-            None => true,
-            Some(source) => matches!(source.as_str(), Some("auto" | "user")),
-        }
+    record.evidence().physical_ordinal() == 0
+        && JsonlMutableFirstRecord::OmpTitleSlotV1.validates_record(record.bytes())
 }
 
 fn projected_body(value: &Value, event_type: EventType) -> String {
@@ -744,70 +587,6 @@ fn literal_facts(value: &Value) -> Result<Vec<ProviderDeclaredFact>> {
     } else {
         facts
     })
-}
-
-fn pi_activity(
-    message: &Value,
-    event_type: EventType,
-    body: &str,
-    facts: Vec<ProviderDeclaredFact>,
-) -> Result<Option<CoreActivity>> {
-    let call_ids = ["toolCallId", "tool_call_id", "callId"]
-        .into_iter()
-        .filter_map(|field| message.get(field).and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    let provider_call_id = match call_ids.as_slice() {
-        [id] => admit_optional_provider_call_id(Some((*id).to_owned())),
-        _ => None,
-    };
-    let tools = ["toolName", "tool_name", "name"]
-        .into_iter()
-        .filter_map(|field| message.get(field).and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    let invocation = if provider_call_id.is_some() && event_type == EventType::ToolCall {
-        match tools.as_slice() {
-            [tool] => admit_optional_metadata_text(Some((*tool).to_owned())).map(|tool| {
-                ActivityInvocation {
-                    protocol: None,
-                    server: None,
-                    tool,
-                    arguments: message.get("arguments").map_or(
-                        ActivityJsonCapture::Absent,
-                        |value| ActivityJsonCapture::Present {
-                            value: value.clone(),
-                        },
-                    ),
-                    started_at_unix_ms: None,
-                }
-            }),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let result = (provider_call_id.is_some()
-        && matches!(event_type, EventType::ToolOutput | EventType::CommandOutput))
-    .then(|| ActivityResult {
-        status: None,
-        completed_at_unix_ms: None,
-        duration_ns: None,
-        text: ActivityTextCapture::Present {
-            value: body.to_owned(),
-        },
-        structured_content: ActivityJsonCapture::Present {
-            value: message.clone(),
-        },
-    });
-    if invocation.is_none() && result.is_none() && facts.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(CoreActivity {
-        revision: CORE_ACTIVITY_REVISION,
-        provider_call_id,
-        invocation,
-        result,
-        facts,
-    }))
 }
 
 fn event_timestamp(value: &Value) -> Option<DateTime<Utc>> {

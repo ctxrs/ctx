@@ -487,6 +487,7 @@ fn active_source_family_contract_jsonl_rewrite_truncate_and_replacement_fail_clo
         checkpoint.source_observation(),
         checkpoint.complete_prefix_end(),
         *checkpoint.complete_prefix_sha256(),
+        None,
     );
     assert!(rewrite_ran.load(Ordering::SeqCst), "test hook did not run");
     assert!(
@@ -550,6 +551,7 @@ fn active_source_family_contract_jsonl_terminal_proof_allows_continuous_append()
         checkpoint.source_observation(),
         checkpoint.complete_prefix_end(),
         *checkpoint.complete_prefix_sha256(),
+        None,
     )
     .unwrap();
     worker.join().unwrap();
@@ -609,6 +611,7 @@ fn active_source_family_contract_jsonl_terminal_proof_rejects_rewrite_plus_appen
         checkpoint.source_observation(),
         checkpoint.complete_prefix_end(),
         *checkpoint.complete_prefix_sha256(),
+        None,
     );
     worker.join().unwrap();
     assert!(matches!(
@@ -659,6 +662,7 @@ fn active_source_family_contract_jsonl_terminal_proof_rejects_leaf_route_swap_af
         checkpoint.source_observation(),
         checkpoint.complete_prefix_end(),
         *checkpoint.complete_prefix_sha256(),
+        None,
     );
     worker.join().unwrap();
     assert!(matches!(
