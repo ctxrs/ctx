@@ -6,6 +6,70 @@ use crate::protocol::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn pi_requires_captured_parent_absence_and_native_source_ownership() -> TestResult {
+    let mut record = provider_record("gemini", false)?;
+    record.source = SourceKey::derive_provider_native(
+        "pi",
+        "pi_session_jsonl",
+        "pi-nativepath-jsonl-v1",
+        1,
+        "pi.session",
+        TypedKey::utf8("child")?,
+    )?;
+    record.parser_revision = "pi-shared-jsonl-v13-nested-tool-parent-evidence".to_owned();
+    record.agent_scope = None;
+    record.parent_session_id = None;
+    record.session_relationship = None;
+    for (carrier, expected) in [
+        (None, false),
+        (Some(serde_json::json!({})), false),
+        (
+            Some(serde_json::json!({"session_parent_claim_present":true})),
+            false,
+        ),
+        (
+            Some(serde_json::json!({"session_parent_claim_present":null})),
+            false,
+        ),
+        (
+            Some(serde_json::json!({"session_parent_claim_present":false})),
+            true,
+        ),
+    ] {
+        record.content.structured_content = carrier;
+        assert_eq!(
+            producer_authority_disposition(&record).permits_positive_authority(),
+            expected
+        );
+    }
+    for revision in [
+        "pi-shared-jsonl-v11-omp-parent-lineage",
+        "pi-shared-jsonl-v12-nested-tool-activity",
+        "pi-shared-jsonl-v12-parent-claim-presence",
+        "unknown",
+    ] {
+        record.parser_revision = revision.to_owned();
+        assert_eq!(
+            producer_authority_disposition(&record),
+            ProducerAuthorityDisposition::AbstainUnknown
+        );
+    }
+    record.parser_revision = "pi-shared-jsonl-v13-nested-tool-parent-evidence".to_owned();
+    record.source = SourceKey::derive(
+        "pi",
+        "pi_session_jsonl",
+        "pi-nativepath-jsonl-v1",
+        1,
+        SourceAnchor::CatalogLineage([1; 32]),
+    )?;
+    assert_eq!(
+        producer_authority_disposition(&record),
+        ProducerAuthorityDisposition::AbstainUnknown
+    );
+    Ok(())
+}
+
 macro_rules! current_positive {
     ($name:ident, $provider:literal) => {
         #[test]
@@ -306,6 +370,82 @@ fn opencode_retained_and_migrated_tuples_preserve_native_primary_and_child_admis
                 ProducerAuthorityDisposition::AbstainUnknown
             );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn claude_requires_complete_record_ownership_observations() -> TestResult {
+    let mut record = provider_record("gemini", false)?;
+    record.source = SourceKey::derive_provider_native(
+        "claude",
+        "claude_projects_jsonl_tree",
+        "claude-nativepath-jsonl-v6",
+        1,
+        "claude.session-leaf",
+        TypedKey::Composite(vec![
+            TypedKey::utf8("child")?,
+            TypedKey::Null,
+            TypedKey::Null,
+        ]),
+    )?;
+    record.parser_revision = "claude-shared-jsonl-core-activity-v3-record-ownership".to_owned();
+    record.agent_scope = Some(AgentScope::Primary);
+    record.parent_session_id = None;
+    record.session_relationship = None;
+    for (carrier, expected) in [
+        (None, false),
+        (Some(serde_json::json!({})), false),
+        (Some(serde_json::json!({"sidechain":"absent"})), false),
+        (Some(serde_json::json!({"agent_id_present":false})), false),
+        (
+            Some(serde_json::json!({"sidechain":"absent","agent_id_present":false})),
+            true,
+        ),
+        (
+            Some(serde_json::json!({"sidechain":"false","agent_id_present":false})),
+            true,
+        ),
+        (
+            Some(serde_json::json!({"sidechain":"true","agent_id_present":false})),
+            false,
+        ),
+        (
+            Some(serde_json::json!({"sidechain":"other","agent_id_present":false})),
+            false,
+        ),
+        (
+            Some(serde_json::json!({"sidechain":null,"agent_id_present":false})),
+            false,
+        ),
+        (
+            Some(serde_json::json!({"sidechain":"absent","agent_id_present":true})),
+            false,
+        ),
+        (
+            Some(serde_json::json!({"sidechain":"absent","agent_id_present":null})),
+            false,
+        ),
+    ] {
+        record.content.structured_content =
+            carrier.map(|value| serde_json::json!({"record_ownership":value}));
+        assert_eq!(
+            producer_authority_disposition(&record).permits_positive_authority(),
+            expected
+        );
+    }
+    record.content.structured_content = Some(serde_json::json!({
+        "record_ownership":{"sidechain":"absent", "agent_id_present":false}
+    }));
+    for revision in [
+        "claude-shared-jsonl-core-activity-v2-record-rejections",
+        "unknown",
+    ] {
+        record.parser_revision = revision.to_owned();
+        assert_eq!(
+            producer_authority_disposition(&record),
+            ProducerAuthorityDisposition::AbstainUnknown
+        );
     }
     Ok(())
 }

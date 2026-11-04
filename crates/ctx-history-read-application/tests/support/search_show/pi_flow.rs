@@ -1,5 +1,5 @@
 const PI_V10_PARSER_REVISION: &str = "pi-shared-jsonl-v10-child-local-lineage";
-const PI_CURRENT_PARSER_REVISION: &str = "pi-shared-jsonl-v12-nested-tool-activity";
+const PI_CURRENT_PARSER_REVISION: &str = "pi-shared-jsonl-v13-nested-tool-parent-evidence";
 const PI_V10_PARENT_SESSION_ID: &str = "pi-v10-parent";
 const PI_V10_CHILD_SESSION_ID: &str = "pi-session-docs-1";
 
@@ -44,6 +44,11 @@ fn publish_pi_v10_predecessor(data_root: &Path) -> String {
         record.parser_revision = PI_V10_PARSER_REVISION.to_owned();
         record.parent_session_id = None;
         record.session_relationship = None;
+        record.content.structured_content = record
+            .content
+            .structured_content
+            .take()
+            .map(|mut value| value["entry"].take());
         assert_eq!(record.root_session_id, None);
         assert_eq!(record.agent_scope, None);
         record.validate_contract().unwrap();

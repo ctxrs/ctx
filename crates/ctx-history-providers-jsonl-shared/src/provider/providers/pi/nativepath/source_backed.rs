@@ -56,7 +56,7 @@ const NATIVE_EVENT_NAMESPACE: &str = "pi.entry";
 const LOGICAL_SESSION_KIND: &str = "pi-session";
 const LOGICAL_EVENT_KIND: &str = "pi-event";
 const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
-const PARSER_REVISION: &str = "pi-shared-jsonl-v12-nested-tool-activity";
+const PARSER_REVISION: &str = "pi-shared-jsonl-v13-nested-tool-parent-evidence";
 const EVENT_IDENTITY_REVISION: &str = "pi-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.pi.fallback-event-fingerprint.v1\0";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
@@ -136,6 +136,7 @@ struct Binding {
     native_session_id: String,
     cwd: Option<String>,
     parent_session_id: Option<StableEntityId>,
+    parent_session_claim_present: bool,
     header_digest: [u8; 32],
     leading_rejected_records: u64,
 }
@@ -367,7 +368,11 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
                 .and_then(Value::as_str)
                 .map(pi_event_role)
                 .map(|role| role.as_str().to_owned());
-            core.content.structured_content = Some(value);
+            // Preserve the header claim even if its parent ID could not resolve.
+            core.content.structured_content = Some(serde_json::json!({
+                "entry": value,
+                "session_parent_claim_present": self.binding.parent_session_claim_present,
+            }));
             core.content.activity = activity;
             ctx_history_jsonl::fit_jsonl_activity(
                 &body,
@@ -508,6 +513,7 @@ fn parse_header_binding(
         native_session_id,
         cwd: value.get("cwd").and_then(Value::as_str).map(str::to_owned),
         parent_session_id,
+        parent_session_claim_present: value.get("parentSession").is_some(),
         header_digest: Sha256::digest(record.bytes()).into(),
         leading_rejected_records: 0,
     }))

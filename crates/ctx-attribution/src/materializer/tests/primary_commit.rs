@@ -16,7 +16,7 @@ use crate::query::{
 };
 use std::path::Path;
 
-const PREDECESSOR: &str = "2026.09.24.1+bounded-omissions";
+const PREDECESSOR: &str = "2026.11.03.3+pi-native-envelope";
 
 fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Vec<CoreRecord>> {
     let provider = match mode {
@@ -35,7 +35,29 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
         provider_contract.as_mut().unwrap().parser_revision =
             "opencode-family-source-backed-v13-bounded-oversized-content".to_owned();
     }
-    let source = if let Some(contract) = &provider_contract {
+    let source = if mode == "claude-lossy-v2" {
+        SourceKey::derive_provider_native(
+            "claude",
+            "claude_projects_jsonl_tree",
+            "claude-nativepath-jsonl-v6",
+            1,
+            "claude.session-leaf",
+            TypedKey::Composite(vec![
+                TypedKey::utf8("primary-commit")?,
+                TypedKey::Null,
+                TypedKey::Null,
+            ]),
+        )?
+    } else if mode.starts_with("pi-lossy") {
+        SourceKey::derive_provider_native(
+            "pi",
+            "pi_session_jsonl",
+            "pi-nativepath-jsonl-v1",
+            1,
+            "pi.session",
+            TypedKey::utf8("primary-commit")?,
+        )?
+    } else if let Some(contract) = &provider_contract {
         contract.source.clone()
     } else {
         SourceKey::derive(
@@ -64,7 +86,13 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
             source.clone(),
             sequence,
             if is_call { "tool_call" } else { "tool_output" },
-            if let Some(contract) = &provider_contract {
+            if mode == "claude-lossy-v2" {
+                "claude-shared-jsonl-core-activity-v2-record-rejections"
+            } else if mode == "pi-lossy-v12" {
+                "pi-shared-jsonl-v12-nested-tool-activity"
+            } else if mode.starts_with("pi-lossy") {
+                "pi-shared-jsonl-v11-omp-parent-lineage"
+            } else if let Some(contract) = &provider_contract {
                 &contract.parser_revision
             } else {
                 match mode {
@@ -159,6 +187,33 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
                 Vec::new()
             },
         });
+        if mode == "claude-lossy-v2" {
+            record.session_relationship = None;
+            record.root_session_id = None;
+            let activity = record.content.activity.as_mut().unwrap();
+            if let Some(invocation) = &mut activity.invocation {
+                invocation.tool = "Bash".to_owned();
+            }
+            if let Some(result) = &mut activity.result {
+                result.structured_content = ActivityJsonCapture::Present {
+                    value: serde_json::json!({"type":"tool_result", "is_error":false, "content":output}),
+                };
+            }
+        }
+        if mode.starts_with("pi-lossy") {
+            record.agent_scope = None;
+            record.session_relationship = None;
+            record.root_session_id = None;
+            let activity = record.content.activity.as_mut().unwrap();
+            if let Some(invocation) = &mut activity.invocation {
+                invocation.tool = "bash".to_owned();
+            }
+            if let Some(result) = &mut activity.result {
+                result.structured_content = ActivityJsonCapture::Present {
+                    value: serde_json::json!({"isError":false}),
+                };
+            }
+        }
         match mode {
             "copied" => {
                 record.event_copy = Some(ProviderNativeEventCopy {
@@ -349,6 +404,9 @@ fn primary_native_commit_call_and_output_reach_blame_with_exact_controls() -> Te
     let (output, oid) = real_commit(&repository)?;
     for mode in [
         "primary",
+        "pi-lossy",
+        "pi-lossy-v12",
+        "claude-lossy-v2",
         "optional-root",
         "v11",
         "v14",
@@ -428,6 +486,9 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
     let (output, oid) = real_commit(&repository)?;
     for mode in [
         "primary",
+        "pi-lossy",
+        "pi-lossy-v12",
+        "claude-lossy-v2",
         "v11",
         "v14",
         "v15",
@@ -446,6 +507,7 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
         "mismatched-call",
         "mismatched-output",
         "duplicate-call",
+        "provider",
     ] {
         let records = primary_records(&repository, &output, mode)?;
         let original = records
@@ -463,6 +525,11 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
             PREDECESSOR,
             if mode == "copied" {
                 IndexedCoreEventOriginKind::CopiedFromAncestor
+            } else if matches!(
+                mode,
+                "pi-lossy" | "pi-lossy-v12" | "claude-lossy-v2" | "provider" | "gemini"
+            ) {
+                IndexedCoreEventOriginKind::UniqueToSession
             } else {
                 IndexedCoreEventOriginKind::Unknown
             },

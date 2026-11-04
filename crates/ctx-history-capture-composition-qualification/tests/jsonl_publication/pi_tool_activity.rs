@@ -141,7 +141,7 @@ fn pi_nested_and_flat_calls_join_native_result_blocks_to_a_real_commit() {
         );
         assert!(call_record.event_sequence < result_record.event_sequence);
         assert_eq!(
-            result_record.content.structured_content.as_ref().unwrap()["message"],
+            result_record.content.structured_content.as_ref().unwrap()["entry"]["message"],
             rows[2]["message"]
         );
         // Repository outcome derivation can now reach the OID through exact
@@ -161,15 +161,22 @@ fn pi_nested_and_flat_calls_join_native_result_blocks_to_a_real_commit() {
         assert_eq!(fs::read(&path).unwrap(), original);
 
         if shape == "nested" {
-            seed_v11_projection(&index, &records);
-            let migrated =
-                refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
-            assert!(migrated.failed_routes.is_empty());
-            assert_eq!(all_indexed_records(&index), records);
-            assert_eq!(
-                committed_oids(&all_indexed_records(&index)),
-                std::slice::from_ref(&oid)
-            );
+            for revision in [
+                "pi-shared-jsonl-v11-omp-parent-lineage",
+                "pi-shared-jsonl-v12-nested-tool-activity",
+            ] {
+                seed_predecessor_projection(&index, &records, revision);
+                let migrated =
+                    refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+                assert!(migrated.failed_routes.is_empty());
+                assert_eq!(all_indexed_records(&index), records);
+                assert!(records.iter().all(|record| record.parser_revision
+                    == "pi-shared-jsonl-v13-nested-tool-parent-evidence"));
+                assert_eq!(
+                    committed_oids(&all_indexed_records(&index)),
+                    std::slice::from_ref(&oid)
+                );
+            }
         }
         append_openclaw_lifecycle_transcript(
             &path,
@@ -204,10 +211,10 @@ fn pi_nested_and_flat_calls_join_native_result_blocks_to_a_real_commit() {
     }
 }
 
-// Model the retained predecessor projection, with no nested invocation and
-// an envelope in place of the result payload. Provider bytes stay unchanged.
-fn seed_v11_projection(index: &Path, records: &[CoreRecord]) {
-    let revision = "pi-shared-jsonl-v11-omp-parent-lineage";
+// Both predecessors lack the retained header observation. v11 also lacks the
+// nested invocation and puts an envelope in the result payload.
+fn seed_predecessor_projection(index: &Path, records: &[CoreRecord], revision: &str) {
+    let v11 = revision == "pi-shared-jsonl-v11-omp-parent-lineage";
     let verified = VerifiedIndex::open_pinned(index).unwrap();
     let current = &verified.manifest().sources[0];
     let source = current.observation().source().clone();
@@ -223,8 +230,15 @@ fn seed_v11_projection(index: &Path, records: &[CoreRecord]) {
     writer.begin_source(source).unwrap();
     for mut record in records.iter().cloned() {
         record.parser_revision = revision.to_owned();
-        record.event_sequence /= u64::from(u32::MAX) + 1;
-        if let Some(activity) = record.content.activity.as_mut() {
+        record.content.structured_content = record
+            .content
+            .structured_content
+            .take()
+            .map(|mut value| value["entry"].take());
+        if v11 {
+            record.event_sequence /= u64::from(u32::MAX) + 1;
+        }
+        if let Some(activity) = record.content.activity.as_mut().filter(|_| v11) {
             if activity.invocation.take().is_some() {
                 activity.provider_call_id = None;
             }
@@ -241,5 +255,7 @@ fn seed_v11_projection(index: &Path, records: &[CoreRecord]) {
         .certify_source(serde_json::from_value(certificate).unwrap())
         .unwrap();
     writer.commit(|_| true).unwrap();
-    assert!(committed_oids(&all_indexed_records(index)).is_empty());
+    if v11 {
+        assert!(committed_oids(&all_indexed_records(index)).is_empty());
+    }
 }

@@ -46,6 +46,7 @@ enum CodexExecCommandExtraction {
 
 #[derive(Debug, Clone)]
 struct PendingInvocation {
+    outcome_admitted: bool,
     call_id: String,
     event_sequence: u64,
     command: Option<String>,
@@ -82,6 +83,19 @@ impl CoreRepositoryEvidenceAdapter {
         record: &CoreRecord,
         record_sha256: &str,
     ) -> RepositoryEvaluation {
+        self.evaluate_record_with_outcome_admission(record, record_sha256, true)
+    }
+
+    /// Carries the caller's authority verdict through both halves of a linked
+    /// outcome, including when the result precedes the invocation. The caller
+    /// owns that policy; neutral repository interpretation admits both by default.
+    #[must_use]
+    pub fn evaluate_record_with_outcome_admission(
+        &mut self,
+        record: &CoreRecord,
+        record_sha256: &str,
+        outcome_admitted: bool,
+    ) -> RepositoryEvaluation {
         let mut facts = neutral_facts(record);
         let Some(activity) = record.content.activity.as_ref() else {
             return self.resolver.evaluate(facts);
@@ -106,6 +120,7 @@ impl CoreRepositoryEvidenceAdapter {
                 FileInvocationExtraction::NotApplicable => {}
             }
             let pending = PendingInvocation {
+                outcome_admitted,
                 call_id: call_id.clone(),
                 event_sequence: record.event_sequence,
                 command: facts.command.clone(),
@@ -149,13 +164,15 @@ impl CoreRepositoryEvidenceAdapter {
             && let Some(result_record_sha256) = decode_sha256(record_sha256)
         {
             let result = PendingResult {
+                outcome_admitted,
                 result_call_id: call_id.clone(),
                 result_record_sha256,
                 observed_at_unix_ms: result
                     .completed_at_unix_ms
                     .or(record.occurred_at_unix_ms)
                     .unwrap_or(i64::MIN),
-                result_succeeded: result_succeeded(result.status.as_deref()),
+                result_succeeded: result_succeeded(result.status.as_deref())
+                    && native_result_allows_success(record, result),
                 result_output,
             };
             match self.pending.remove(&call_id) {
@@ -193,6 +210,7 @@ impl CoreRepositoryEvidenceAdapter {
 
 #[derive(Debug, Clone)]
 struct PendingResult {
+    outcome_admitted: bool,
     result_call_id: String,
     result_record_sha256: [u8; 32],
     observed_at_unix_ms: i64,
@@ -215,6 +233,9 @@ fn apply_linked_result(
         facts
             .declared_tool_workdir
             .clone_from(&origin.declared_workdir);
+    }
+    if !origin.outcome_admitted || !result.outcome_admitted {
+        return;
     }
     let Some(command) = origin.command.as_deref() else {
         return;
@@ -465,11 +486,45 @@ fn literal_object_id(value: &str) -> Option<GitObjectId> {
         })
 }
 
+fn native_result_allows_success(
+    record: &CoreRecord,
+    result: &ctx_history_core::ActivityResult,
+) -> bool {
+    let error_field = match record.source.provider() {
+        "claude" => "is_error",
+        "pi" => "isError",
+        _ => return true,
+    };
+    let envelope = match &result.structured_content {
+        ActivityJsonCapture::Present { value } => Some(value),
+        // Pi retains the native envelope once, in Core content. An absent
+        // activity field is not an omission of that complete carrier.
+        ActivityJsonCapture::Absent if record.source.provider() == "pi" => record
+            .content
+            .structured_content
+            .as_ref()
+            .map(|value| value.get("entry").unwrap_or(value))
+            .and_then(|entry| entry.get("message")),
+        ActivityJsonCapture::Absent
+        | ActivityJsonCapture::Unavailable
+        | ActivityJsonCapture::Omitted { .. } => None,
+    };
+    // An absent error field in a complete envelope is allowed. Missing native
+    // content or an omitted/unavailable capture cannot establish success.
+    envelope.and_then(Value::as_object).is_some_and(|envelope| {
+        envelope
+            .get(error_field)
+            .is_none_or(|error| error.as_bool() == Some(false))
+    })
+}
+
 fn exact_result_output(
     record: &CoreRecord,
     result: &ctx_history_core::ActivityResult,
 ) -> Option<Value> {
-    if let ActivityJsonCapture::Present { value } = &result.structured_content {
+    if record.source.provider() != "pi"
+        && let ActivityJsonCapture::Present { value } = &result.structured_content
+    {
         return Some(value.clone());
     }
     match &result.text {
