@@ -327,7 +327,7 @@ fn discover_document_tree_with_progress(
     }
 }
 
-fn exact_replay_base(
+pub(super) fn exact_replay_base(
     base_sources: &[CertifiedSource],
     provider: CaptureProvider,
     source_scope: SourceAnchorScope,
@@ -405,14 +405,12 @@ fn observe_present_document_tree_with_progress(
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
     let authorized =
         open_root_authorized_snapshot_retained_with_progress(data_root, path, report_progress)?;
-    let observation = (|| {
-        observe_logical_source_with_progress_scoped(
-            authorized.sqlite_snapshot.connection()?,
-            dialect,
-            source_scope,
-            report_progress,
-        )
-    })();
+    let observation = observe_logical_source_with_progress_scoped(
+        &authorized.sqlite_snapshot,
+        dialect,
+        source_scope,
+        report_progress,
+    );
     let observation = match observation {
         Ok(observation) => observation,
         Err(error) => return Err(abort_authorized_snapshot(authorized, error)),

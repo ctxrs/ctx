@@ -539,7 +539,7 @@ fn unwritable_fallback_scratch_root_is_typed_and_preserves_the_provider() {
     let before = directory_file_bytes(&provider);
     let authorized = open_root_authorized_snapshot_retained(&data_root, &database).unwrap();
     let observation = observe_logical_source(
-        authorized.sqlite_snapshot.connection().unwrap(),
+        &authorized.sqlite_snapshot,
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
     )
     .unwrap();
