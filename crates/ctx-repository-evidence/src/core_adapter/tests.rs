@@ -481,6 +481,7 @@ fn codex_exec_command_near_misses_abstain_without_overriding_literal_facts() {
             CodexExecCommandExtraction::Exact {
                 command: "git status".to_owned(),
                 workdir: Some("/repo".to_owned()),
+                output: None,
             }
         );
         // v14 retains the argument string and adds neutral literal facts. Exact
@@ -613,3 +614,5 @@ fn codex_exec_command_near_misses_abstain_without_overriding_literal_facts() {
         assert!(facts.provider_native_context_ambiguous);
     }
 }
+
+mod code_mode;

@@ -10,7 +10,7 @@ use std::{
 
 const TITLE_SLOT_BYTES: usize = 256;
 
-fn title_slot(title: &str) -> Vec<u8> {
+pub(super) fn title_slot(title: &str) -> Vec<u8> {
     let mut value = json!({
         "type": "title",
         "v": 1,

@@ -83,6 +83,34 @@ change which root owns the managed installation's supervisor. Graph databases,
 output state, the executable, and explicitly overridden runtime/model caches
 have separate locations.
 
+## Active Index Size
+
+`ctx status` shows an `Active index storage` section. Use
+`ctx status --format json` for exact integer bytes under `lexical.storage`:
+`docstore_bytes`, `terms_bytes`, `postings_bytes`, `positions_bytes`,
+`fast_fields_bytes`, `other_bytes`, and their sum, `total_bytes`.
+
+The docstore contains the compressed Core records and block index. Terms,
+postings, and positions support lexical search; fast fields support filtering
+and ordering. Other bytes cover field norms, deletion bitsets, and Tantivy
+commit metadata. Component sizes include file headers and footers and retain
+deleted-document bytes until compaction. Core is stored in this same generation,
+so the docstore is already included in the total.
+
+The breakdown reads the active generation's certified file-size inventory,
+without scanning history or segment contents. It reports logical file lengths,
+not allocated disk blocks. Retained older generations, unreferenced files,
+ctx manifests/certifications, lock/control files, semantic and attribution
+indexes, and other data-root files are outside this total. Hard links and
+filesystem clones can share allocated blocks despite having separate logical
+lengths. Consequently, this total need not match `du` for the data root.
+
+The existing processed-history byte count measures source coverage and is
+independent of storage size. No verified generation means no storage section.
+If size metadata is unavailable or publication changes the generation during
+observation, human output says `Size unavailable`; JSON omits `storage` and
+sets `lexical.storage_error` to `"size_unavailable"`.
+
 ## Moving The Managed Root
 
 Upgrade ctx before migrating. Make sure the destination filesystem is mounted
@@ -420,8 +448,21 @@ refresh waits for any triggered merge before publication completes. Thus every
 published active segment has at most 25% deletions, while exact no-op refreshes
 perform no writer or merge work.
 
-Generation candidates hard-link unchanged base segments when the filesystem
-supports it. For threshold planning, let `F` be the physical footprint of the
+ctx suppresses merges while route or cohort staging can still roll back.
+Each replacement writer gets a fresh disabled merge control; abandoned updaters
+cannot reactivate it. After all abortable checks, ctx enables only the terminal
+writer immediately before commit. Publication waits for that writer's merges
+to finish.
+
+On Linux and macOS, generation candidates first hard-link unchanged, read-only
+base segments. If the filesystem or permissions prevent linking, they try a
+copy-on-write filesystem clone (reflink), then a verified copy. Reflinks share
+data blocks but have different inodes and link counts of one; `du` can count
+their shared blocks twice. Windows and FreeBSD currently use verified copies.
+Mutable Tantivy control files (`meta.json` and `.managed.json`) always remain
+independent so candidate updates cannot modify the retained generation.
+
+For threshold planning, let `F` be the physical footprint of the
 same live documents in a deletion-free generation. Assume stored bytes scale
 with physical document slots, the active and retained previous generations are
 distinct and each sits at exactly 25% deletions, and a worst-case compaction

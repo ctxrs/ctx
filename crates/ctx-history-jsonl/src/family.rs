@@ -220,6 +220,19 @@ pub struct JsonlProbe {
     mutable_first_record: Option<JsonlMutableFirstRecord>,
 }
 
+/// The bounded identity scan distinguishes an unfinished physical record from
+/// complete input that did not establish a provider identity.
+// This transient per-source result keeps the probe by value, avoiding an
+// allocation for every successful identity scan.
+#[allow(clippy::large_enum_variant)]
+pub enum JsonlProbeOutcome<T> {
+    Matched(T, JsonlProbe),
+    /// EOF or the record bound was reached without a match.
+    Missing,
+    /// An unterminated record was encountered before the record bound.
+    Incomplete,
+}
+
 impl JsonlProbe {
     pub fn next_physical_ordinal(&self) -> u64 {
         self.next_physical_ordinal
@@ -303,19 +316,19 @@ where
     V: From<E>,
 {
     let mut visit = Some(visit);
-    probe_records_until(source_path, source_file, 1, |record| {
+    match probe_records_until(source_path, source_file, 1, |record| {
         visit.take().ok_or_else(|| {
             V::from(E::system_invariant(
                 "provider identity probe visited more than one record",
             ))
         })?(record)
         .map(Some)
-    })?
-    .ok_or_else(|| {
-        V::from(E::invalid_payload(
-            "provider identity record is missing or incomplete".to_owned(),
-        ))
-    })
+    })? {
+        JsonlProbeOutcome::Matched(value, probe) => Ok((value, probe)),
+        JsonlProbeOutcome::Missing | JsonlProbeOutcome::Incomplete => Err(V::from(
+            E::invalid_payload("provider identity record is missing or incomplete".to_owned()),
+        )),
+    }
 }
 
 pub fn probe_records_until<T, E, V>(
@@ -323,7 +336,7 @@ pub fn probe_records_until<T, E, V>(
     source_file: &Arc<OpenedProviderSourceFile<E>>,
     max_records: usize,
     visit: impl FnMut(JsonlRecordRef<'_>) -> JsonlResult<Option<T>, V>,
-) -> JsonlResult<Option<(T, JsonlProbe)>, V>
+) -> JsonlResult<JsonlProbeOutcome<T>, V>
 where
     E: JsonlFamilyError,
     V: From<E>,
@@ -345,7 +358,7 @@ pub fn probe_records_until_with_mutable_first_record<T, E, V>(
     max_records: usize,
     first_record_policy: Option<JsonlMutableFirstRecord>,
     mut visit: impl FnMut(JsonlRecordRef<'_>) -> JsonlResult<Option<T>, V>,
-) -> JsonlResult<Option<(T, JsonlProbe)>, V>
+) -> JsonlResult<JsonlProbeOutcome<T>, V>
 where
     E: JsonlFamilyError,
     V: From<E>,
@@ -371,6 +384,7 @@ where
     let mut buffer = Vec::new();
     let mut start = 0_u64;
     let mut mutable_first_record = None;
+    let mut incomplete = false;
     for ordinal in 0..max_records {
         let before_first_record =
             (ordinal == 0 && first_record_policy.is_some()).then(|| hasher.clone());
@@ -388,7 +402,11 @@ where
                 record_digest,
                 wire_bytes,
             } => (end, record_digest, wire_bytes),
-            RawLine::EndOfFile | RawLine::IncompleteTail => break,
+            RawLine::EndOfFile => break,
+            RawLine::IncompleteTail => {
+                incomplete = true;
+                break;
+            }
             RawLine::Oversized => {
                 return Err(V::from(E::invalid_payload(format!(
                     "provider identity record exceeds the {} byte JSONL record limit",
@@ -425,7 +443,7 @@ where
                 mutable_first_record,
             )
             .map_err(V::from)?;
-            return Ok(Some((
+            return Ok(JsonlProbeOutcome::Matched(
                 value,
                 JsonlProbe {
                     observation: closing,
@@ -434,7 +452,7 @@ where
                     next_physical_ordinal: physical_ordinal.saturating_add(1),
                     mutable_first_record,
                 },
-            )));
+            ));
         }
         start = end;
     }
@@ -447,7 +465,11 @@ where
         mutable_first_record,
     )
     .map_err(V::from)?;
-    Ok(None)
+    Ok(if incomplete {
+        JsonlProbeOutcome::Incomplete
+    } else {
+        JsonlProbeOutcome::Missing
+    })
 }
 
 enum RawLine {

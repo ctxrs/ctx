@@ -92,6 +92,14 @@ Important reusable records:
 - `Status.lexical` and `Status.refresh`: the verified generation and daemon-owned
   refresh readiness reported by `ctx status`; `Status.semantic` and
   `Status.daemon` remain extensible local diagnostic objects.
+- `Status.lexical.storage`, when available, contains seven required byte counters:
+  `docstoreBytes`, `termsBytes`, `postingsBytes`, `positionsBytes`, `fastFieldsBytes`,
+  `otherBytes`, and `totalBytes`. Each is an integer in `0..9007199254740991`.
+  These are logical bytes for the active generation; Core records are included
+  in the docstore. An unavailable measurement omits `storage` and reports
+  `storageError: "size_unavailable"`. Without a verified generation, both fields
+  are omitted. The lexical object remains extensible. CLI adapters normalize
+  `*_bytes` and `storage_error` to these camelCase names.
 - `Status.indexedItems`, `indexedSessions`, `indexedEvents`, and
   `indexedSources` are operational counters in the exact integer range
   `0..9007199254740991` (`2^53-1`). SDKs retain their native integer/number

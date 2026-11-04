@@ -516,3 +516,6 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
     }
     Ok(())
 }
+
+#[path = "primary_commit/code_mode.rs"]
+mod code_mode;

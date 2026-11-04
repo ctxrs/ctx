@@ -24,17 +24,20 @@ fn a_stale_identity_probe_accepts_only_the_title_update() {
         );
         fs::write(&path, &bytes).unwrap();
         let source_file = Arc::new(open_provider_source_file(&path).unwrap());
-        let (_, probe) = probe_records_until_with_mutable_first_record(
-            &path,
-            &source_file,
-            2,
-            Some(JsonlMutableFirstRecord::OmpTitleSlotV1),
-            |record| -> Result<Option<()>> {
-                Ok((record.evidence().physical_ordinal() == 1).then_some(()))
-            },
-        )
-        .unwrap()
-        .unwrap();
+        let crate::family::JsonlProbeOutcome::Matched((), probe) =
+            probe_records_until_with_mutable_first_record(
+                &path,
+                &source_file,
+                2,
+                Some(JsonlMutableFirstRecord::OmpTitleSlotV1),
+                |record| -> Result<Option<()>> {
+                    Ok((record.evidence().physical_ordinal() == 1).then_some(()))
+                },
+            )
+            .unwrap()
+        else {
+            panic!("expected a complete session header");
+        };
         let mut file = OpenOptions::new().write(true).open(&path).unwrap();
         file.write_all(&title_record("updated title")).unwrap();
         if change_header {
