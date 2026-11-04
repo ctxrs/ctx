@@ -25,6 +25,20 @@ ctx_cli_contract_test(
 )
 
 ctx_cli_contract_test(
+    name = "native_blame_tests",
+    src = "tests/native_blame.rs",
+    # Each case owns a daemon; run cases independently through teardown.
+    extra_env = {"RUST_TEST_THREADS": "1"},
+    deps = [
+        "//crates/ctx-attribution:test_support_lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-platform:lib",
+        "//crates/ctx-history-snapshot-reader:lib",
+    ],
+    test_support = ["base", "fixtures"],
+)
+
+ctx_cli_contract_test(
     name = "native_provider_rejections_tests",
     src = "tests/native_provider_rejections.rs",
     deps = ["//crates/ctx-history-index:lib"],
