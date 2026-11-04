@@ -1359,3 +1359,9 @@ fn pi_declared_missing_parent_keeps_normalized_direct_lineage() {
 
 #[path = "prime_agent.rs"]
 mod prime_agent;
+
+#[path = "pi_rejections.rs"]
+mod pi_rejections;
+
+#[path = "pi_tool_activity.rs"]
+mod pi_tool_activity;

@@ -53,6 +53,7 @@ ctx_rust_test(
         "//crates/ctx-history-provider-runtime:test_support_lib",
         "//crates/ctx-history-source-discovery:lib",
         "//crates/ctx-history-source-io:test_support_lib",
+        "//crates/ctx-repository-evidence:lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-capture-composition-qualification"},

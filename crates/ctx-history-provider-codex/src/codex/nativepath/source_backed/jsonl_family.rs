@@ -21,7 +21,9 @@ use crate::{
     },
     Result,
 };
-use ctx_history_jsonl::{JsonlPhysicalEncoding, MAX_STANDARD_ZSTD_PARALLEL_STREAMS};
+use ctx_history_jsonl::{
+    JsonlPhysicalEncoding, JsonlProbeOutcome, MAX_STANDARD_ZSTD_PARALLEL_STREAMS,
+};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
@@ -73,11 +75,12 @@ fn generation_source_owner_is_admissible_v0(
         return Ok(true);
     }
     let opened = reopen_codex_source_capability(source)?;
-    if probe_records_until(&source.source_path, &opened, 1, |_| {
-        Ok::<Option<()>, CaptureError>(Some(()))
-    })?
-    .is_none()
-    {
+    if !matches!(
+        probe_records_until(&source.source_path, &opened, 1, |_| {
+            Ok::<Option<()>, CaptureError>(Some(()))
+        })?,
+        JsonlProbeOutcome::Matched(..)
+    ) {
         // A nonempty file without one complete first physical record is an
         // in-progress JSONL write. Shared JSONL will classify it as pending;
         // it has no complete provider record on which to make an ownership
