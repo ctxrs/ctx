@@ -78,6 +78,8 @@ pub struct SnapshotContract {
 }
 
 impl SnapshotContract {
+    /// The current contract also admits predecessors verified by the index reader.
+    /// A snapshot always reports its actual manifest contract, never this expectation.
     pub fn current() -> Result<Self> {
         Ok(Self {
             schema: SnapshotSchema {
@@ -222,7 +224,11 @@ impl CoreSnapshot {
             ));
         }
         let actual_schema = SnapshotSchema::from_manifest(index.manifest());
-        if actual_schema != expected.schema {
+        // VerifiedIndex has authenticated the complete supported read contract,
+        // including the predecessor policy hash and unchanged Core fingerprint.
+        // Custom expectations remain exact; current consumers may read any such
+        // verified predecessor without relabeling its schema or generation.
+        if actual_schema != expected.schema && expected != &SnapshotContract::current()? {
             return Err(SnapshotError::SchemaMismatch {
                 expected: expected.schema.clone(),
                 actual: actual_schema,
@@ -235,9 +241,13 @@ impl CoreSnapshot {
                 actual: actual_fingerprint.clone(),
             });
         }
+        let contract = SnapshotContract {
+            schema: actual_schema,
+            core_record_fingerprint: actual_fingerprint.clone(),
+        };
         Ok(Self {
             index,
-            contract: expected.clone(),
+            contract,
             _lease: lease,
         })
     }

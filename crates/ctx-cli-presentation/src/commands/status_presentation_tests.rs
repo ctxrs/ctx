@@ -1,0 +1,681 @@
+use ctx_history_read_application::{HistoryDataCoverage, HistoryHealthReport, HistoryRootCoverage};
+
+use super::*;
+use crate::{
+    test_support::{assert_fits, strip_ansi},
+    ui::{ColorMode, StreamKind, TestContext},
+};
+
+fn context(width: usize, color: ColorMode) -> RenderContext {
+    RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
+}
+
+fn status_report(initialized: bool, lexical: &str, refresh: &str) -> Value {
+    json!({
+        "initialized": initialized,
+        "indexing": {"mode": "auto"},
+        "history_epoch": {"status": lexical},
+        "lexical": {"status": lexical},
+        "refresh": {"status": refresh},
+        "semantic": {"status": "disabled"},
+        "daemon": {"status": "running", "running": true},
+        "indexed_sources": 1,
+        "indexed_sessions": 2,
+        "indexed_events": 1000,
+    })
+}
+
+#[test]
+fn pending_status_displays_previous_failure_without_changing_current_health() {
+    let mut report = status_report(true, "ready", "pending");
+    report["refresh"]["progress"] = json!({"completed_records": 42});
+    let context = context(120, ColorMode::Never);
+    let ordinary = render_report(&context, &report).render_plain();
+    report["refresh"]["last_failure"] = json!({"error_code": "resource_unavailable",
+        "last_error": "free space on the index volume and retry"});
+    let rendered = render_report(&context, &report).render_plain();
+    assert_eq!(rendered.lines().next(), ordinary.lines().next());
+    assert!(rendered.contains("42 records"));
+    assert!(rendered.contains("Previous refresh failure"));
+    assert!(rendered.contains("free space on the index volume and retry"));
+    assert!(!rendered.contains("History status: failed"));
+}
+
+fn usage_report() -> local_usage::UsageReport {
+    local_usage::UsageReport {
+        schema_version: 3,
+        local_only: true,
+        read_only: true,
+        enabled: true,
+        state: "ready",
+        retention_days: 400,
+        definition_version: 3,
+        definitions: None,
+        estimates: None,
+        error: None,
+    }
+}
+
+fn healthy_upgrade() -> Value {
+    json!({
+        "auto": "apply",
+        "install": {
+            "managed": false,
+            "marker": "absent",
+        },
+    })
+}
+
+fn healthy_coverage() -> HistoryHealthReport {
+    HistoryHealthReport {
+        contributing_agent_histories: vec!["claude".to_owned(), "codex".to_owned()],
+        provider_roots: Some(HistoryRootCoverage {
+            included: 3,
+            partial: 0,
+            excluded: 0,
+            unknown: 0,
+        }),
+        sessions: 2,
+        messages: 1_000,
+        tool_calls: 300,
+        data: HistoryDataCoverage {
+            processed: 4 * 1024 * 1024,
+            excluded: Some(0),
+        },
+        source_failures: 0,
+        rejected_records: 0,
+    }
+}
+
+fn render_report(context: &RenderContext, report: &Value) -> Document {
+    let coverage = healthy_coverage();
+    render_report_with_coverage(context, report, &coverage)
+}
+
+fn render_report_with_coverage(
+    context: &RenderContext,
+    report: &Value,
+    coverage: &HistoryHealthReport,
+) -> Document {
+    render_status_human(
+        context,
+        report,
+        Some(coverage),
+        std::path::Path::new("/tmp/ctx"),
+        std::path::Path::new("/tmp/ctx/config.toml"),
+        &healthy_upgrade(),
+        &usage_report(),
+    )
+}
+
+#[test]
+fn compatible_upgrade_reports_search_and_generation_with_progress() {
+    for (state, title, command) in [
+        (
+            "rebuilding",
+            "History status: rebuilding",
+            "ctx index watch",
+        ),
+        (
+            "awaiting_upgrade",
+            "History status: awaiting upgrade",
+            "ctx import --all",
+        ),
+    ] {
+        let mut report = status_report(true, state, "pending");
+        let generation = "a1".repeat(32);
+        report["lexical"]["search_available"] = json!(true);
+        report["lexical"]["generation_id"] = json!(generation);
+        report["refresh"]["progress"] =
+            json!({"completed_records": 1234, "processed_bytes": 4 * 1024 * 1024});
+        let rendered = render_report(&context(120, ColorMode::Never), &report).render_plain();
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains(title), "{rendered}");
+        assert!(normalized.contains("Search remains available"));
+        assert!(normalized.contains(&format!("Serving generation {generation}")));
+        assert!(normalized.contains("Processed 1,234 records"));
+        assert!(normalized.contains("Progress data 4.0 MiB processed"));
+        assert!(normalized.contains(command));
+        assert!(!normalized.contains("failed"));
+        assert!(!normalized.contains("index is not available"));
+    }
+}
+
+#[test]
+fn healthy_status_is_concise_and_hides_routine_internal_paths() {
+    let report = status_report(true, "ready", "ready");
+    for width in [32, 48, 80, 120] {
+        let context = context(width, ColorMode::Never);
+        let document = render_report(&context, &report);
+        let rendered = document.render_plain();
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(rendered.starts_with("✓ ctx is healthy\n\nHistory\n"));
+        assert!(normalized.contains("Agent histories Claude Code, Codex"));
+        assert!(normalized.contains("Roots 3 included roots"));
+        assert!(!rendered.contains("747"));
+        assert!(normalized.contains("Sessions 2"));
+        assert!(normalized.contains("Messages 1,000"));
+        assert!(normalized.contains("Tool calls 300"));
+        assert!(normalized.contains("Data 4.0 MiB processed"));
+        assert!(!rendered.contains("indexed source"));
+        assert!(rendered.contains("\nServices\n"));
+        assert!(normalized.contains("Daemon running"));
+        assert!(normalized.contains("Indexing mode auto"));
+        assert!(normalized.contains("Semantic disabled"));
+        assert!(!rendered.contains("Automatic upgrades"));
+        assert!(rendered.contains("Local usage"));
+        assert!(normalized.contains("enabled; store readable"));
+        assert!(!rendered.contains("\nData\n"));
+        assert!(!rendered.contains("/tmp/ctx"));
+        assert!(!rendered.contains("local-only"));
+        assert!(!rendered.contains("read-only"));
+        assert!(!rendered.contains("Generation"));
+        assert!(!rendered.contains("PID"));
+        assert!(!rendered.contains("\nNext\n"));
+        assert_fits(&document, &context);
+    }
+}
+
+#[test]
+fn published_rejections_are_partial_and_name_the_record_cause() {
+    let mut report = status_report(true, "ready", "ready");
+    report["refresh"]["current"] = json!({
+        "current_rejected_records": 3,
+        "current_sources_with_rejections": 1,
+    });
+    let coverage = HistoryHealthReport {
+        rejected_records: 3,
+        data: HistoryDataCoverage {
+            processed: 4 * 1024 * 1024,
+            excluded: None,
+        },
+        ..healthy_coverage()
+    };
+    let rendered = render_report_with_coverage(&context(80, ColorMode::Never), &report, &coverage)
+        .render_plain();
+    let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        rendered.starts_with("! ctx needs attention\n"),
+        "{rendered}"
+    );
+    assert!(normalized.contains("Refresh ready"), "{rendered}");
+    assert!(
+        normalized.contains("3 history records were skipped"),
+        "{rendered}"
+    );
+    assert!(normalized.contains("excluded size unknown"), "{rendered}");
+    assert!(rendered.contains("ctx doctor"), "{rendered}");
+    assert!(rendered.contains("ctx status --format json"), "{rendered}");
+}
+
+#[test]
+fn status_ignores_legacy_path_precedence_diagnostics() {
+    let report = status_report(true, "ready", "ready");
+    let upgrade = json!({
+        "auto": "apply",
+        "install": {
+            "managed": true,
+            "marker": "valid",
+            "path": {
+                "background_apply": {
+                    "allowed": false,
+                    "reason": "path_shadowed",
+                },
+            },
+        },
+    });
+    let usage = local_usage::UsageReport::config_error();
+    let context = context(80, ColorMode::Never);
+    let document = render_status_human(
+        &context,
+        &report,
+        Some(&healthy_coverage()),
+        std::path::Path::new("/tmp/ctx"),
+        std::path::Path::new("/tmp/ctx/config.toml"),
+        &upgrade,
+        &usage,
+    );
+    let rendered = document.render_plain();
+    let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(rendered.starts_with("! ctx needs attention\n"));
+    assert!(!normalized.contains("Automatic upgrades"), "{rendered}");
+    assert!(!normalized.contains("PATH"), "{rendered}");
+    assert!(rendered.contains("Local usage"));
+    assert!(rendered.contains("local_usage_config_unavailable"));
+    assert!(normalized.contains("local usage configuration could not be read"));
+    assert_fits(&document, &context);
+}
+
+#[test]
+fn scheduler_heartbeat_age_does_not_downgrade_a_live_daemon() {
+    let mut stale_heartbeat = status_report(true, "ready", "ready");
+    stale_heartbeat["daemon"]["heartbeat_stale"] = json!(true);
+    let rendered = render_report(&context(80, ColorMode::Never), &stale_heartbeat).render_plain();
+    let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(rendered.starts_with("✓ ctx is healthy\n"), "{rendered}");
+    assert!(normalized.contains("Daemon running"), "{rendered}");
+    assert!(!rendered.contains("heartbeat"), "{rendered}");
+}
+
+#[test]
+fn actionable_daemon_or_semantic_state_prevents_a_healthy_headline() {
+    let mut daemon_failed = status_report(true, "ready", "ready");
+    daemon_failed["daemon"] = json!({
+        "status": "failed",
+        "enabled": true,
+        "running": false,
+        "reason": "daemon_process_failed",
+    });
+    let context = context(80, ColorMode::Never);
+    let rendered = render_report(&context, &daemon_failed).render_plain();
+    assert!(
+        rendered.starts_with("! ctx needs attention\n"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Daemon"), "{rendered}");
+    assert!(rendered.contains("failed"), "{rendered}");
+    assert!(rendered.contains("Next\n  ctx doctor\n"), "{rendered}");
+
+    let mut semantic_pending = status_report(true, "ready", "ready");
+    semantic_pending["semantic"] = json!({
+        "status": "pending",
+        "enabled": true,
+        "reason": "projection_missing",
+    });
+    let rendered = render_report(&context, &semantic_pending).render_plain();
+    assert!(
+        rendered.starts_with("! ctx needs attention\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("pending (still being prepared)"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("projection missing"), "{rendered}");
+}
+
+#[test]
+fn resource_failure_explains_required_and_available_headroom() {
+    let mut report = status_report(true, "ready", "failed");
+    report["refresh"]["structured_outcome"] = json!({
+        "code": "resource_unavailable",
+        "detail": "current publication needs 1024 bytes of headroom, but only 512 are available",
+    });
+
+    let rendered = render_report(&context(120, ColorMode::Never), &report).render_plain();
+    assert!(rendered.contains("Issue"), "{rendered}");
+    assert!(rendered.contains("1024 bytes"), "{rendered}");
+    assert!(rendered.contains("512 are available"), "{rendered}");
+}
+
+#[test]
+fn normal_status_always_reports_local_usage_enablement_and_store_health() {
+    let report = status_report(true, "ready", "ready");
+    let context = context(80, ColorMode::Never);
+    for (usage, expected) in [
+        (
+            local_usage::UsageReport {
+                enabled: false,
+                state: "disabled",
+                ..usage_report()
+            },
+            "Local usage disabled",
+        ),
+        (
+            local_usage::UsageReport {
+                state: "empty",
+                ..usage_report()
+            },
+            "Local usage enabled; store missing or empty",
+        ),
+    ] {
+        let rendered = render_status_human(
+            &context,
+            &report,
+            Some(&healthy_coverage()),
+            std::path::Path::new("/tmp/ctx"),
+            std::path::Path::new("/tmp/ctx/config.toml"),
+            &healthy_upgrade(),
+            &usage,
+        )
+        .render_plain();
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains(expected), "{rendered}");
+    }
+}
+
+#[test]
+fn partial_status_keeps_searchable_counts_and_points_to_index_watch() {
+    let report = status_report(true, "ready", "pending");
+    for width in [32, 48, 80, 120] {
+        let context = context(width, ColorMode::Never);
+        let document = render_report(&context, &report);
+        let rendered = document.render_plain();
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(rendered.starts_with("! ctx is partially ready\n"));
+        assert!(rendered.contains("Refresh"));
+        assert!(rendered.contains("pending"));
+        assert!(normalized.contains("Messages 1,000"));
+        assert!(rendered.contains("Next\n  ctx index watch\n"));
+        assert!(!rendered.contains("\nData\n"));
+        assert_fits(&document, &context);
+    }
+
+    let context = context(80, ColorMode::Never);
+    let rendered = render_report(&context, &report).render_plain();
+    assert!(rendered.contains("1 history service is catching up; search remains available."));
+}
+
+#[test]
+fn active_work_explanation_uses_only_live_jobs_and_closed_provider_names() {
+    let mut report = status_report(true, "ready", "pending");
+    report["daemon"]["started_at_ms"] = json!(100);
+    report["daemon"]["jobs"] = json!({"core_refresh": {
+        "request_state": "running", "trigger": "periodic",
+        "last_run_at_ms": 101,
+        "trigger_provenance": "daemon_scheduler",
+        "progress": {"whole_run_stage": "reading", "providers": ["opencode", "codex"]}
+    }});
+    for width in [32, 48, 80, 120] {
+        let context = context(width, ColorMode::Never);
+        let document = render_report(&context, &report);
+        let plain = document.render_plain();
+        let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains("History work reading; scheduled refresh"));
+        assert!(normalized.contains("Providers Codex, OpenCode"));
+        assert_fits(&document, &context);
+    }
+    for timestamp in [json!(99), Value::Null] {
+        report["daemon"]["jobs"]["core_refresh"]["last_run_at_ms"] = timestamp;
+        let plain = render_report(&context(80, ColorMode::Never), &report).render_plain();
+        let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(!plain.contains("History work"));
+        assert!(!plain.contains("Providers"));
+        assert!(normalized.contains("Last recorded work reading; scheduled refresh"));
+    }
+    report["daemon"]["jobs"]["core_refresh"]["last_run_at_ms"] = json!(101);
+    for (state, expected) in [
+        ("admission_pending", "waiting for admission"),
+        ("queued", "queued"),
+    ] {
+        report["daemon"]["jobs"]["core_refresh"]["request_state"] = json!(state);
+        let plain = render_report(&context(80, ColorMode::Never), &report).render_plain();
+        let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains(&format!("History work {expected}; scheduled refresh")));
+        assert!(!plain.contains("reading"));
+    }
+    report["daemon"]["jobs"]["core_refresh"]["request_state"] = json!("running");
+    report["daemon"]["running"] = json!(false);
+    assert!(!render_report(&context(80, ColorMode::Never), &report)
+        .render_plain()
+        .contains("History work"));
+    report["daemon"]["running"] = json!(true);
+    report["daemon"]["jobs"]["core_refresh"]["request_state"] = json!("published");
+    assert!(!render_report(&context(80, ColorMode::Never), &report)
+        .render_plain()
+        .contains("History work"));
+}
+
+#[test]
+fn active_refresh_status_shows_record_and_byte_progress_without_inventing_a_total() {
+    let mut report = status_report(true, "ready", "pending");
+    report["refresh"]["progress"] = json!({
+        "phase": "refreshing",
+        "completed_sources": 2,
+        "total_sources": 6,
+        "current_source": "~/.local/share/opencode/opencode.db",
+        "completed_records": 1234,
+        "completed_bytes": 4 * 1024 * 1024,
+    });
+
+    let rendered = render_report(&context(80, ColorMode::Never), &report).render_plain();
+    let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(!rendered.contains("~/.local/share/opencode/opencode.db"));
+    assert!(normalized.contains("Processed 1,234 records"));
+    assert!(normalized.contains("Progress data 4.0 MiB processed"));
+    assert!(!rendered.contains("records /"));
+}
+
+#[test]
+fn paused_and_mixed_automatic_retry_keep_last_good_searchable_and_offer_one_explicit_retry() {
+    for (retry_state, refresh_status, expected_detail) in [
+        (
+            "paused",
+            "paused",
+            "Automatic history refresh is paused. The last verified history remains searchable.",
+        ),
+        (
+            "mixed",
+            "partial",
+            "Automatic history refresh is paused for some sources. The last verified history remains searchable.",
+        ),
+        (
+            "paused",
+            "partial",
+            "Automatic history refresh is paused for some sources. The last verified history remains searchable.",
+        ),
+    ] {
+        let mut report = status_report(true, "ready", refresh_status);
+        let paused_route = "aa".repeat(32);
+        let mut automatic_retry = json!({
+            "state": retry_state,
+            "reason": "repeated_internal_failure",
+            "confirmation_limit": 2,
+            "routes": {
+                (paused_route): {
+                    "state": "paused",
+                    "matching_failures": 2,
+                    "source_observation": "cc".repeat(32),
+                    "failure_fingerprint": "dd".repeat(32),
+                    "build_version": "0.0.0-test",
+                }
+            },
+            "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+        });
+        if retry_state == "mixed" {
+            let confirming_route = "bb".repeat(32);
+            automatic_retry["routes"][confirming_route.as_str()] = json!({
+                "state": "confirming",
+                "matching_failures": 1,
+                "source_observation": "ee".repeat(32),
+                "failure_fingerprint": "ff".repeat(32),
+                "build_version": "0.0.0-test",
+            });
+        }
+        report["refresh"] = json!({
+            "status": refresh_status,
+            "reason": if refresh_status == "paused" {
+                "automatic_retry_paused"
+            } else {
+                "automatic_retry_partially_paused"
+            },
+            "last_error": "internal refresh error at /tmp/private/source",
+            "automatic_retry": automatic_retry,
+        });
+
+        for width in [32, 48, 80, 120] {
+            let plain_context = context(width, ColorMode::Never);
+            let document = render_report(&plain_context, &report);
+            let rendered = document.render_plain();
+            let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+            assert!(
+                rendered.starts_with("! ctx needs attention\n"),
+                "{rendered}"
+            );
+            assert!(normalized.contains(expected_detail), "{rendered}");
+            assert!(normalized.contains("Refresh"), "{rendered}");
+            assert!(normalized.contains(refresh_status), "{rendered}");
+            assert!(
+                normalized.contains("Issue The same internal refresh failure happened twice."),
+                "{rendered}"
+            );
+            assert!(
+                normalized.contains("Hint: Retry after fixing the source or updating ctx."),
+                "{rendered}"
+            );
+            assert_eq!(
+                rendered.matches("ctx import --all").count(),
+                1,
+                "{rendered}"
+            );
+            assert!(!rendered.contains("--no-daemon"), "{rendered}");
+            assert!(!rendered.contains("/tmp/private/source"), "{rendered}");
+            assert!(!rendered.contains(&"dd".repeat(32)), "{rendered}");
+            assert_eq!(
+                strip_ansi(&document.render(&context(width, ColorMode::Always))),
+                rendered
+            );
+            assert_fits(&document, &plain_context);
+        }
+    }
+}
+
+#[test]
+fn confirming_automatic_retry_is_pending_without_claiming_refresh_is_paused() {
+    let mut report = status_report(true, "ready", "pending");
+    report["refresh"]["reason"] = json!("automatic_retry_confirming");
+    let route = "aa".repeat(32);
+    report["refresh"]["automatic_retry"] = json!({
+        "state": "confirming",
+        "reason": "internal_failure_confirmation",
+        "confirmation_limit": 2,
+        "routes": {
+            (route): {
+                "state": "confirming",
+                "matching_failures": 1,
+                "source_observation": "bb".repeat(32),
+                "failure_fingerprint": "cc".repeat(32),
+                "build_version": "0.0.0-test",
+            }
+        },
+        "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+    });
+
+    let rendered = render_report(&context(80, ColorMode::Never), &report).render_plain();
+    let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        rendered.starts_with("! ctx is partially ready\n"),
+        "{rendered}"
+    );
+    assert!(
+        normalized.contains("Automatic history refresh will retry to confirm an internal failure."),
+        "{rendered}"
+    );
+    assert!(normalized.contains("Refresh pending"), "{rendered}");
+    assert!(
+        normalized.contains("An automatic retry will check whether the internal failure repeats."),
+        "{rendered}"
+    );
+    assert!(rendered.contains("ctx index watch"), "{rendered}");
+    assert!(!rendered.contains("ctx import --all"), "{rendered}");
+    assert!(
+        !rendered.contains("history refresh is paused"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn retained_retry_checkpoint_does_not_promise_unscheduled_work() {
+    for (reason, status, expected_detail, expected_action) in [
+        (
+            "refresh_requires_explicit_request",
+            "partial",
+            "History refresh needs an explicit request.",
+            "ctx import --all",
+        ),
+        (
+            "automatic_retry_daemon_unavailable",
+            "partial",
+            "Automatic history refresh is waiting for a running daemon.",
+            "ctx import --all",
+        ),
+        (
+            "core_refresh_pending",
+            "pending",
+            "1 history service is catching up",
+            "ctx index watch",
+        ),
+    ] {
+        for checkpoint in ["confirming", "paused", "mixed"] {
+            let mut report = status_report(true, "ready", status);
+            report["daemon"] = json!({
+                "enabled": reason == "automatic_retry_daemon_unavailable",
+                "running": status == "pending",
+                "status": if status == "pending" { "running" } else { "stopped" },
+            });
+            report["refresh"]["reason"] = json!(reason);
+            // The projection can retain a terminal root while an admitted
+            // successor runs. Historical fields must not override its advice.
+            report["refresh"]["request_state"] = json!("published");
+            report["refresh"]["last_error"] = json!("retained failure");
+            report["refresh"]["automatic_retry"] = json!({"state": checkpoint});
+            for width in [32, 48, 80, 120] {
+                let render_context = context(width, ColorMode::Never);
+                let document = render_report(&render_context, &report);
+                let rendered = document.render_plain();
+                let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(normalized.contains(expected_detail), "{rendered}");
+                assert!(rendered.contains(expected_action), "{rendered}");
+                assert!(!rendered.contains("will retry"), "{rendered}");
+                assert!(!rendered.contains("An automatic retry will"), "{rendered}");
+                assert!(
+                    !rendered.contains("history refresh is paused"),
+                    "{rendered}"
+                );
+                if status == "partial" {
+                    assert!(!rendered.contains("ctx index watch"), "{rendered}");
+                } else {
+                    assert!(!rendered.contains("ctx import --all"), "{rendered}");
+                }
+                assert_fits(&document, &render_context);
+            }
+        }
+    }
+}
+
+#[test]
+fn failed_status_exposes_actionable_paths_and_doctor_recovery() {
+    let mut report = status_report(false, "unavailable", "unavailable");
+    report["lexical"]["reason"] = json!("generation_verification_failed");
+    report["daemon"] = json!({
+        "status": "failed",
+        "reason": "daemon_process_failed",
+        "running": false,
+    });
+
+    for width in [32, 48, 80, 120] {
+        let context = context(width, ColorMode::Never);
+        let document = render_report(&context, &report);
+        let rendered = document.render_plain();
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(rendered.starts_with("✗ History status: failed\n"));
+        assert!(normalized.contains("generation verification failed"));
+        assert!(rendered.contains("\nData\n"));
+        assert!(rendered.contains("/tmp/ctx"));
+        assert!(rendered.contains("Next\n  ctx doctor\n"));
+        assert_fits(&document, &context);
+    }
+}
+
+#[test]
+fn status_without_a_published_generation_points_to_setup() {
+    let mut report = status_report(false, "unavailable", "unavailable");
+    report["lexical"]["reason"] = json!("generation_not_published");
+    let context = context(80, ColorMode::Never);
+    let rendered = render_report(&context, &report).render_plain();
+    assert!(rendered.contains("Next\n  ctx setup\n"));
+}
+
+#[test]
+fn status_plain_output_equals_ansi_stripped_styled_output() {
+    let report = status_report(true, "ready", "ready");
+    let context = context(80, ColorMode::Always);
+    let document = render_report(&context, &report);
+    assert_eq!(
+        strip_ansi(&document.render(&context)),
+        document.render_plain()
+    );
+}

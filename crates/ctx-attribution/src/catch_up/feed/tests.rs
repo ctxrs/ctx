@@ -22,6 +22,8 @@ mod manifest_recovery;
 mod replacement_regressions;
 #[path = "tests/runtime_contracts.rs"]
 mod runtime_contracts;
+#[path = "tests/schema_upgrade.rs"]
+mod schema_upgrade;
 #[path = "tests/writer_wait.rs"]
 mod writer_wait;
 

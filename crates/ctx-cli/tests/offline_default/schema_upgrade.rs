@@ -57,10 +57,35 @@ fn schema_22_upgrade_starts_without_search_and_keeps_search_available() {
         concat!(
             "[indexing]\nmode = \"automatic\"\n",
             "[analytics]\nenabled = false\n[upgrade]\nauto = \"off\"\n",
-            "[search]\nsemantic = false\n[blame]\nenabled = false\n",
+            "[search]\nsemantic = false\n[blame]\nenabled = true\n",
         ),
     )
     .unwrap();
+    // Status is observational in both modes and identifies the actual readable
+    // predecessor without initiating the upgrade.
+    for (mode, state) in [("manual", "awaiting_upgrade"), ("automatic", "rebuilding")] {
+        let config = data_root.join("config.toml");
+        let text = fs::read_to_string(&config)
+            .unwrap()
+            .replace("mode = \"automatic\"", &format!("mode = \"{mode}\""))
+            .replace("mode = \"manual\"", &format!("mode = \"{mode}\""));
+        fs::write(config, text).unwrap();
+        let output = isolated_local_command(&temp, &data_root, &environment)
+            .args(["status", "--format=json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(status["lexical"]["status"], state, "{status:#}");
+        assert_eq!(status["lexical"]["search_available"], true);
+        assert_eq!(status["lexical"]["lexical_schema_version"], 22);
+        assert_eq!(status["initialized"], true);
+        assert!(!data_root.join("daemon/jobs/core-refresh.json").exists());
+    }
     let pointer = index.join("active-generation.json");
     let before = fs::read(&pointer).unwrap();
     let mut daemon = spawn_isolated_source_refresh_daemon(&temp, &data_root, &environment);
@@ -102,6 +127,29 @@ fn schema_22_upgrade_starts_without_search_and_keeps_search_available() {
             1,
             "{results:#}; startup job: {job:#}"
         );
+    }
+    // Publication must wake attribution automatically, without import or blame.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        daemon.assert_running();
+        let output = isolated_local_command(&temp, &data_root, &environment)
+            .args(["status", "--format=json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if status["attribution"]["currentness"] == "current" {
+            assert_eq!(
+                status["attribution"]["receipt"]["core_generation_id"],
+                job["published_generation"]
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "attribution did not catch up: {status:#}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
     }
     drop(daemon);
 }
