@@ -109,11 +109,14 @@ fn identity_probe_rejects_header_rewrites_and_object_replacement() {
             .unwrap();
         let authority = Arc::new(ProviderSourceRoot::open(temp.path()).unwrap());
         let opened = Arc::new(authority.open_file(Path::new("session.jsonl")).unwrap());
-        let (binding, probe) = probe_records_until(&path, &opened, 1, |record| {
-            parse_header(record, &path, SourceAnchorScope::Unqualified)
-        })
-        .unwrap()
-        .unwrap();
+        let JsonlProbeOutcome::Matched(binding, probe) =
+            probe_records_until(&path, &opened, 1, |record| {
+                parse_header(record, &path, SourceAnchorScope::Unqualified)
+            })
+            .unwrap()
+        else {
+            panic!("expected a complete session header")
+        };
         value[field] = json!(replacement);
         let output = if replace_object {
             temp.path().join("replacement.jsonl")
@@ -149,11 +152,14 @@ fn replayed_header_remains_inside_the_logical_boundary() {
     fs::write(&path, &bytes).unwrap();
     let authority = Arc::new(ProviderSourceRoot::open(temp.path()).unwrap());
     let opened = Arc::new(authority.open_file(Path::new("session.jsonl")).unwrap());
-    let (binding, probe) = probe_records_until(&path, &opened, 1, |record| {
-        parse_header(record, &path, SourceAnchorScope::Unqualified)
-    })
-    .unwrap()
-    .unwrap();
+    let JsonlProbeOutcome::Matched(binding, probe) =
+        probe_records_until(&path, &opened, 1, |record| {
+            parse_header(record, &path, SourceAnchorScope::Unqualified)
+        })
+        .unwrap()
+    else {
+        panic!("expected a complete session header")
+    };
     let leaf = bind_leaf(
         path,
         "session.jsonl".into(),
