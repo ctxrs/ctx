@@ -11,6 +11,8 @@ pub struct BlameDiagnostic {
     pub message: &'static str,
     pub retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Box<crate::MaterializationProgress>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub freshness: Option<BlameDiagnosticFreshness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<BlameNextAction>,

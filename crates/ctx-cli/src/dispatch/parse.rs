@@ -73,6 +73,7 @@ fn write_adapted_clap_output(
             reason: ctx_attribution_model::BlameDiagnosticReason::RequestInvalid,
             message: "The blame request is invalid.",
             retryable: false,
+            progress: None,
             freshness: None,
             next_action: None,
             candidates: Vec::new(),

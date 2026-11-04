@@ -210,6 +210,7 @@ fn diagnostics_are_pure_data_with_a_concrete_import_action() {
         reason,
         message: "Attribution is behind the retained history.",
         retryable: true,
+        progress: None,
         freshness: Some(BlameDiagnosticFreshness {
             state: BlameFreshnessState::StaleCommitted,
         }),

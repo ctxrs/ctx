@@ -6,7 +6,11 @@ pub fn append_attribution(context: &RenderContext, document: &mut Document, repo
     let Some(attribution) = report.get("attribution") else {
         return;
     };
-    let state = match attribution["currentness"].as_str() {
+    let state = match attribution["status"]
+        .as_str()
+        .or_else(|| attribution["currentness"].as_str())
+    {
+        Some("rebuilding") => "rebuilding after upgrade",
         Some("current") => match attribution["materialized_coverage"].as_str() {
             Some("empty") => "ready; no indexed evidence",
             Some("abstained") => "ready; evidence did not support attribution",
@@ -148,4 +152,27 @@ mod tests {
         assert!(text.contains("2/7 sources; 89 changes applied"));
         assert!(!text.contains("ctx import --all"));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn upgrade_rebuild_keeps_committed_currentness_separate_from_activity() {
+    use crate::ui::{StreamKind, TestContext};
+    let context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+    let mut document = Document::new();
+    append_attribution(
+        &context,
+        &mut document,
+        &serde_json::json!({"attribution": {
+            "status": "rebuilding", "currentness": "needs_rebuild",
+            "progress": {"phase": "indexing", "completed_sources": 3, "total_sources": 10, "applied_changes": 1500},
+            "diagnostic": {"message": "Blame data is rebuilding after upgrade.",
+                "next_action": {"argv": ["ctx", "status"]}}
+        }}),
+    );
+    let text = document.render_plain();
+    assert!(text.contains("rebuilding after upgrade"));
+    assert!(text.contains("3/10 sources; 1500 changes applied"));
+    assert!(text.contains("ctx status"));
+    assert!(!text.contains("ready") && !text.contains("ctx import"));
 }

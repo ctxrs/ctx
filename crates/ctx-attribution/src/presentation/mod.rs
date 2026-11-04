@@ -25,3 +25,25 @@ pub fn shell_quote_arg(value: &str) -> String {
     }
     format!("'{}'", value.replace('\'', "'\\''"))
 }
+
+/// Shared CLI and MCP text for canonical execution diagnostics.
+pub fn diagnostic_text(error: &ctx_attribution_model::BlameDiagnostic) -> String {
+    let mut text = format!("{}\n", error.message);
+    if let Some(changes) = error
+        .progress
+        .as_ref()
+        .and_then(|progress| progress.applied_changes)
+    {
+        text.push_str(&format!("{changes} changes applied.\n"));
+    }
+    if let Some(action) = &error.next_action {
+        let argv = action
+            .argv
+            .iter()
+            .map(|arg| shell_quote_arg(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        text.push_str(&format!("\nNext\n  {argv}\n"));
+    }
+    text
+}

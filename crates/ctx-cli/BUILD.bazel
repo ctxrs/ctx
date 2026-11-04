@@ -457,7 +457,8 @@ test_suite(
 ctx_cli_integration_test(
     name = "offline_default_tests",
     src = "tests/offline_default.rs",
-    extra_srcs = ["tests/offline_default/schema_upgrade.rs"],
+    extra_srcs = ["tests/offline_default/schema_upgrade.rs", "tests/offline_default/attribution_upgrade.rs"],
+    extra_crates = ["fs2"],
     extra_data = ["//crates/ctx-history-index:schema_22_fixture"],
     tags = ["privacy", "security"],
 )

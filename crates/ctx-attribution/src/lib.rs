@@ -41,6 +41,7 @@ pub use runtime::{
 };
 mod diagnostic;
 pub use catch_up::CoreMaterializationSyncOutcome;
+pub use diagnostic::rebuilding_after_upgrade;
 pub use evidence::hydrate_evidence_previews;
 pub use evidence_preview::{VerifiedEvidenceRecord, project_evidence_previews};
 

@@ -1,5 +1,8 @@
 //! Final-binary composition for daemon and semantic adapters.
 
+mod attribution_status;
+pub(crate) use attribution_status::upgrade_blame_diagnostic;
+
 use std::env;
 use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
@@ -434,9 +437,17 @@ pub(crate) fn source_epoch_status_report(
     let mut source =
         ctx_daemon_cli::source_epoch_status_report(data_root, &daemon_cli_config(config))?;
     source.report["attribution"] = match ctx_attribution::readiness(data_root) {
-        Ok(status) => serde_json::to_value(status)?,
+        Ok(mut status) => {
+            status.diagnostic = status
+                .diagnostic
+                .map(|error| upgrade_blame_diagnostic(data_root, error));
+            serde_json::to_value(status)?
+        }
         Err(error) => serde_json::json!({"error": error}),
     };
+    if source.report["attribution"]["diagnostic"]["error_code"] == "rebuilding" {
+        source.report["attribution"]["status"] = serde_json::json!("rebuilding");
+    }
     source.report["attribution"]["indexing_enabled"] = serde_json::json!(config.blame.enabled);
     source.report["attribution"]["progress"] = serde_json::to_value(
         ctx_attribution::materialization_progress(data_root)

@@ -85,7 +85,7 @@ pub(super) fn tool_definition() -> Value {
     json!({
         "name": "blame",
         "title": "Agent Blame",
-        "description": "Return complete cited provenance for committed file lines, a commit, or a pull request. PR activity and commit production remain separate. Blame reads the local attribution index and never writes provider history or repositories. Run ctx import --all when attribution indexing is pending.",
+        "description": "Return complete cited provenance for committed file lines, a commit, or a pull request. PR activity and commit production remain separate. Blame reads the local attribution index and never writes provider history or repositories. Follow the diagnostic next_action when indexing is pending; automatic upgrade rebuilds can be retried after ctx status reports completion.",
         "inputSchema": object_schema(
             json!({
                 "target": target,
