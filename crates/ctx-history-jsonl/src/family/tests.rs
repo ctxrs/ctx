@@ -6,6 +6,31 @@ use std::{
 use super::*;
 use ctx_history_source_io::open_provider_source_file_mapped as open_provider_source_file;
 
+#[test]
+fn identity_probe_distinguishes_incomplete_input_within_its_record_bound() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("session.jsonl");
+    for (bytes, bound, expected) in [
+        (b"".as_slice(), 2, "missing"),
+        (b"{}\n".as_slice(), 2, "missing"),
+        (b"{".as_slice(), 2, "incomplete"),
+        (b"{}\n{".as_slice(), 2, "incomplete"),
+        (b"{}\n{".as_slice(), 1, "missing"),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        let opened = Arc::new(open_provider_source_file::<CaptureError>(&path).unwrap());
+        let outcome =
+            probe_records_until(&path, &opened, bound, |_| Ok::<_, CaptureError>(None::<()>))
+                .unwrap();
+        let kind = match outcome {
+            JsonlProbeOutcome::Missing => "missing",
+            JsonlProbeOutcome::Incomplete => "incomplete",
+            JsonlProbeOutcome::Matched(..) => panic!("unexpected identity"),
+        };
+        assert_eq!(kind, expected, "{bytes:?}, bound={bound}");
+    }
+}
+
 fn drain(reader: &mut JsonlReader<CaptureError>) -> Result<Vec<Vec<u8>>> {
     let mut records = Vec::new();
     while reader

@@ -10,8 +10,8 @@ use ctx_history_core::{
 use ctx_history_jsonl::{
     observe_opened_file, probe_records_until, JsonlFamilyAdapter, JsonlFamilyAppendMode,
     JsonlFamilyError, JsonlFamilyMembershipObservation, JsonlFamilyProjector,
-    JsonlFamilyRejectedLeaf, JsonlOversizedRecordPolicy, JsonlProbe, JsonlRecordRef,
-    JsonlRuntimeLookup,
+    JsonlFamilyRejectedLeaf, JsonlOversizedRecordPolicy, JsonlProbe, JsonlProbeOutcome,
+    JsonlRecordRef, JsonlRuntimeLookup,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -139,7 +139,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
                 parse_header(record, &path, self.scope)
             });
             match parsed {
-                Ok(Some((binding, probe))) => {
+                Ok(JsonlProbeOutcome::Matched(binding, probe)) => {
                     // Retain the proof that authorized identity and context.
                     // Replay the header as metadata under that retained authority,
                     // including otherwise empty header-only sessions.
@@ -152,7 +152,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PrimeAdapter<R> {
                         self.scope,
                     )?);
                 }
-                Ok(None) => {
+                Ok(JsonlProbeOutcome::Missing | JsonlProbeOutcome::Incomplete) => {
                     // The shared engine classifies a torn first record as pending.
                     rejected.push(JsonlFamilyRejectedLeaf::bind_observed(
                         path,

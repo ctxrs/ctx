@@ -1,0 +1,28 @@
+{
+  "storage": [
+    "not a byte object",
+    null,
+    [],
+    true,
+    {},
+    {
+      "totalBytes": 0
+    }
+  ],
+  "byteCounters": [
+    -1,
+    1.5,
+    true,
+    false,
+    "1",
+    null,
+    9007199254740992
+  ],
+  "storageError": [
+    123,
+    null,
+    true,
+    {},
+    "unknown"
+  ]
+}

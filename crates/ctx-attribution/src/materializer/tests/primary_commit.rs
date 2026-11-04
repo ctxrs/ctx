@@ -16,7 +16,7 @@ use crate::query::{
 };
 use std::path::Path;
 
-const PREDECESSOR: &str = "2026.11.03.1+native-unparented-producer";
+const PREDECESSOR: &str = "2026.11.03.2+native-owner-evidence";
 
 fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Vec<CoreRecord>> {
     let provider = match mode {
@@ -35,7 +35,7 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
         provider_contract.as_mut().unwrap().parser_revision =
             "opencode-family-source-backed-v13-bounded-oversized-content".to_owned();
     }
-    let source = if mode == "pi-lossy" {
+    let source = if mode.starts_with("pi-lossy") {
         SourceKey::derive_provider_native(
             "pi",
             "pi_session_jsonl",
@@ -73,7 +73,9 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
             source.clone(),
             sequence,
             if is_call { "tool_call" } else { "tool_output" },
-            if mode == "pi-lossy" {
+            if mode == "pi-lossy-v12" {
+                "pi-shared-jsonl-v12-nested-tool-activity"
+            } else if mode.starts_with("pi-lossy") {
                 "pi-shared-jsonl-v11-omp-parent-lineage"
             } else if let Some(contract) = &provider_contract {
                 &contract.parser_revision
@@ -170,7 +172,7 @@ fn primary_records(repository: &Path, output: &str, mode: &str) -> TestResult<Ve
                 Vec::new()
             },
         });
-        if mode == "pi-lossy" {
+        if mode.starts_with("pi-lossy") {
             record.agent_scope = None;
             record.session_relationship = None;
             record.root_session_id = None;
@@ -375,6 +377,7 @@ fn primary_native_commit_call_and_output_reach_blame_with_exact_controls() -> Te
     for mode in [
         "primary",
         "pi-lossy",
+        "pi-lossy-v12",
         "optional-root",
         "v11",
         "v14",
@@ -455,6 +458,7 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
     for mode in [
         "primary",
         "pi-lossy",
+        "pi-lossy-v12",
         "v11",
         "v14",
         "v15",
@@ -491,7 +495,7 @@ fn primary_commit_same_core_upgrade_repairs_abstention_then_is_current() -> Test
             PREDECESSOR,
             if mode == "copied" {
                 IndexedCoreEventOriginKind::CopiedFromAncestor
-            } else if matches!(mode, "pi-lossy" | "provider" | "gemini") {
+            } else if matches!(mode, "pi-lossy" | "pi-lossy-v12" | "provider" | "gemini") {
                 IndexedCoreEventOriginKind::UniqueToSession
             } else {
                 IndexedCoreEventOriginKind::Unknown

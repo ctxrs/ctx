@@ -17,7 +17,7 @@ fn pi_requires_captured_parent_absence_and_native_source_ownership() -> TestResu
         "pi.session",
         TypedKey::utf8("child")?,
     )?;
-    record.parser_revision = "pi-shared-jsonl-v12-parent-claim-presence".to_owned();
+    record.parser_revision = "pi-shared-jsonl-v13-nested-tool-parent-evidence".to_owned();
     record.agent_scope = None;
     record.parent_session_id = None;
     record.session_relationship = None;
@@ -43,14 +43,19 @@ fn pi_requires_captured_parent_absence_and_native_source_ownership() -> TestResu
             expected
         );
     }
-    for revision in ["pi-shared-jsonl-v11-omp-parent-lineage", "unknown"] {
+    for revision in [
+        "pi-shared-jsonl-v11-omp-parent-lineage",
+        "pi-shared-jsonl-v12-nested-tool-activity",
+        "pi-shared-jsonl-v12-parent-claim-presence",
+        "unknown",
+    ] {
         record.parser_revision = revision.to_owned();
         assert_eq!(
             producer_authority_disposition(&record),
             ProducerAuthorityDisposition::AbstainUnknown
         );
     }
-    record.parser_revision = "pi-shared-jsonl-v12-parent-claim-presence".to_owned();
+    record.parser_revision = "pi-shared-jsonl-v13-nested-tool-parent-evidence".to_owned();
     record.source = SourceKey::derive(
         "pi",
         "pi_session_jsonl",
@@ -343,6 +348,7 @@ fn opencode_retained_and_migrated_tuples_preserve_native_primary_and_child_admis
         "opencode-family-source-backed-v12-known-file-carriers",
         "opencode-family-source-backed-v13-bounded-oversized-content",
         "opencode-family-source-backed-v14-proven-v2-overlap",
+        "opencode-family-source-backed-v15-canonical-parent-order",
     ] {
         for primary in [false, true] {
             let mut record = provider_record("opencode", false)?;

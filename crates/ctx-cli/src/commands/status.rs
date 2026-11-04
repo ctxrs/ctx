@@ -205,6 +205,17 @@ mod tests {
         assert_eq!(status.report["indexing"]["mode"], "auto");
         assert_eq!(status.report["lexical"]["generation_id"], generation_id);
         assert!(status.report.get("catalog").is_none());
+        let size = &status.report["lexical"]["storage"];
+        assert_eq!(status.report["schema_version"], 3);
+        assert_eq!(status.report["read_only"], true);
+        assert_eq!(size["docstore_bytes"], 0);
+        assert_eq!(size["terms_bytes"], 0);
+        assert_eq!(size["postings_bytes"], 0);
+        assert_eq!(size["positions_bytes"], 0);
+        assert_eq!(size["fast_fields_bytes"], 0);
+        assert!(size["other_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(size["total_bytes"], size["other_bytes"]);
+        assert!(status.report["lexical"].get("storage_error").is_none());
 
         let components = UnifiedHealth::inspect(None);
         let storage = crate::observability_composition::local_usage_storage_authority(&data_root);

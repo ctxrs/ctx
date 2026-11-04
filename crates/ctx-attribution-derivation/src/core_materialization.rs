@@ -32,7 +32,7 @@ mod repositories;
 pub use producer_authority::producer_authority_disposition;
 use repositories::{ProjectedRepositories, has_repository_candidate, project_repositories};
 
-pub const CORE_MATERIALIZER_REVISION: &str = "2026.11.03.2+native-owner-evidence";
+pub const CORE_MATERIALIZER_REVISION: &str = "2026.11.03.3+pi-native-envelope";
 
 #[allow(dead_code)]
 pub const CORE_PREPARATION_WORKERS_ENV: &str = crate::worker_budget::CORE_PREPARATION_WORKERS_ENV;

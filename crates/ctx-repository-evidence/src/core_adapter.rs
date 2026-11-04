@@ -96,7 +96,6 @@ impl CoreRepositoryEvidenceAdapter {
 
         if let Some(invocation) = activity.invocation.as_ref() {
             let code_mode_output = reconcile_codex_exec_command(record, invocation, &mut facts);
-            reconcile_pi_bash_command(record, invocation, &mut facts);
             match exact_file_invocations(record, invocation) {
                 FileInvocationExtraction::Exact(evidence) => {
                     facts.repository_file_invocation_evidence = evidence;
@@ -368,41 +367,6 @@ fn exact_codex_exec_command(
     }
 }
 
-// Pi retains its native Bash invocation without a redundant Command literal.
-// Interpret that typed carrier here, alongside the other command schemas.
-fn reconcile_pi_bash_command(
-    record: &CoreRecord,
-    invocation: &ctx_history_core::ActivityInvocation,
-    facts: &mut NeutralRepositoryFacts,
-) {
-    if record.source.provider() != "pi" || invocation.tool != "bash" {
-        return;
-    }
-    let command = match &invocation.arguments {
-        ActivityJsonCapture::Present { value }
-            if invocation.protocol.is_none() && invocation.server.is_none() =>
-        {
-            value
-                .get("command")
-                .and_then(Value::as_str)
-                .filter(|command| !command.is_empty() && !command.contains('\0'))
-        }
-        _ => None,
-    };
-    if facts.provider_native_context_ambiguous
-        || command.is_none()
-        || facts
-            .command
-            .as_deref()
-            .is_some_and(|literal| Some(literal) != command)
-    {
-        facts.command = None;
-        facts.provider_native_context_ambiguous = true;
-    } else {
-        facts.command = command.map(str::to_owned);
-    }
-}
-
 fn neutral_facts(record: &CoreRecord) -> NeutralRepositoryFacts {
     let mut neutral = NeutralRepositoryFacts {
         activity_at_unix_ms: record.occurred_at_unix_ms,
@@ -511,18 +475,27 @@ fn native_result_allows_success(
         "pi" => "isError",
         _ => return true,
     };
-    match &result.structured_content {
-        ActivityJsonCapture::Present { value } => value.as_object().is_some_and(|envelope| {
-            envelope
-                .get(error_field)
-                .is_none_or(|error| error.as_bool() == Some(false))
-        }),
-        // A missing field in a complete object is different from a missing
-        // envelope: omission may have hidden an explicit failure flag.
+    let envelope = match &result.structured_content {
+        ActivityJsonCapture::Present { value } => Some(value),
+        // Pi retains the native envelope once, in Core content. An absent
+        // activity field is not an omission of that complete carrier.
+        ActivityJsonCapture::Absent if record.source.provider() == "pi" => record
+            .content
+            .structured_content
+            .as_ref()
+            .map(|value| value.get("entry").unwrap_or(value))
+            .and_then(|entry| entry.get("message")),
         ActivityJsonCapture::Absent
         | ActivityJsonCapture::Unavailable
-        | ActivityJsonCapture::Omitted { .. } => false,
-    }
+        | ActivityJsonCapture::Omitted { .. } => None,
+    };
+    // An absent error field in a complete envelope is allowed. Missing native
+    // content or an omitted/unavailable capture cannot establish success.
+    envelope.and_then(Value::as_object).is_some_and(|envelope| {
+        envelope
+            .get(error_field)
+            .is_none_or(|error| error.as_bool() == Some(false))
+    })
 }
 
 fn exact_result_output(

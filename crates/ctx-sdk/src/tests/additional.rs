@@ -475,6 +475,34 @@ fn status_normalization_rejects_counters_outside_the_exact_json_domain() {
 }
 
 #[test]
+fn status_storage_normalizes_shared_cli_fixtures() {
+    let fixtures =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/agent-history-v2/fixtures");
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../../contracts/agent-history-v2/fixtures/cli/status-storage.json"
+    ))
+    .unwrap();
+    for (name, raw) in cases.as_object().unwrap() {
+        let expected: Value =
+            serde_json::from_str(&fs::read_to_string(fixtures.join(name)).unwrap()).unwrap();
+        for operation in [AgentHistoryOperation::Status, AgentHistoryOperation::Init] {
+            let output = serde_json::to_value(
+                normalize(operation, BackendInfo::local(None), raw.clone()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                output["status"]["lexical"], expected["status"]["lexical"],
+                "{name}"
+            );
+            assert_eq!(
+                output["status"]["initialized"], expected["status"]["initialized"],
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
 #[allow(deprecated)]
 fn hosted_backend_returns_structured_error() {
     let client = AgentHistoryClient::hosted(HostedBackendConfig {

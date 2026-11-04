@@ -40,7 +40,9 @@ const MUX_CORE_ACTIVITY_REVISION: &str = "mux-source-backed-v16-explicit-root-on
 const OPENCLAW_CORE_ACTIVITY_REVISION: &str =
     "openclaw-source-backed-v20-direct-parent-explicit-root";
 const CRUSH_CORE_ACTIVITY_REVISION: &str = "crush-sqlite-source-backed-v5-record-rejections";
-const OPENCODE_CORE_ACTIVITY_REVISION: &str = "opencode-family-source-backed-v14-proven-v2-overlap";
+const OPENCODE_CORE_ACTIVITY_REVISION: &str =
+    "opencode-family-source-backed-v15-canonical-parent-order";
+const OPENCODE_RELEASED_V14_REVISION: &str = "opencode-family-source-backed-v14-proven-v2-overlap";
 const OPENCODE_RELEASED_V13_REVISION: &str =
     "opencode-family-source-backed-v13-bounded-oversized-content";
 const OPENCODE_RELEASED_V12_REVISION: &str =
@@ -168,6 +170,7 @@ pub fn producer_authority_disposition(record: &CoreRecord) -> ProducerAuthorityD
         ) || (opencode_schema
             && [
                 OPENCODE_CORE_ACTIVITY_REVISION,
+                OPENCODE_RELEASED_V14_REVISION,
                 OPENCODE_RELEASED_V13_REVISION,
                 OPENCODE_RELEASED_V12_REVISION,
             ]
@@ -283,7 +286,7 @@ fn native_primary_owner(record: &CoreRecord) -> bool {
             // Only a complete new capture can prove the field was absent.
             source.source_format() == "pi_session_jsonl"
                 && source.schema_variant() == "pi-nativepath-jsonl-v1"
-                && record.parser_revision == "pi-shared-jsonl-v12-parent-claim-presence"
+                && record.parser_revision == "pi-shared-jsonl-v13-nested-tool-parent-evidence"
                 && namespace == "pi.session"
                 && matches!(key, TypedKey::Utf8(session)
                     if Some(session.as_str()) == record.provider_session_id.as_deref())

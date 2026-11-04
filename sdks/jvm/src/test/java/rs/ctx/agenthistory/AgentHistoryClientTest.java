@@ -931,7 +931,8 @@ public final class AgentHistoryClientTest {
                             String operation = String.valueOf(canonical.get("operation"));
                             switch (operation) {
                                 case "status":
-                                    assertEquals(Boolean.TRUE, new StatusResponse(canonical).getStatus().getInitialized());
+                                    assertEquals(AgentHistoryValue.objectAt(canonical, "status").get("initialized"),
+                                            new StatusResponse(canonical).getStatus().getInitialized());
                                     break;
                                 case "init":
                                     assertEquals(Boolean.TRUE, new InitResponse(canonical).getStatus().getInitialized());

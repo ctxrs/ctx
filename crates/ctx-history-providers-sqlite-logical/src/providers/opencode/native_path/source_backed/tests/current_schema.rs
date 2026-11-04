@@ -1006,9 +1006,21 @@ fn native_selected_snapshot_matches_full_family_capture() {
         .sqlite_authority
         .open_stable_snapshot(&retained.database_leaf)
         .unwrap();
-    let selected = open_root_authorized_snapshot_retained(temp.path(), &database)
-        .unwrap()
-        .sqlite_snapshot;
+    let selected = retained
+        .sqlite_authority
+        .open_selected_tables_snapshot_with_progress(
+            &retained.database_leaf,
+            &[
+                "session",
+                "session_v2",
+                "message",
+                "part",
+                "session_message",
+                "session_entry",
+            ],
+            |_| Ok::<(), ()>(()),
+        )
+        .unwrap();
     let tables = [
         "session",
         "message",
@@ -1060,7 +1072,7 @@ fn native_selected_snapshot_matches_full_family_capture() {
     }
     let scan = |snapshot: SqliteSourceReadSnapshot| {
         let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
-        let observation = observe_logical_source(snapshot.connection().unwrap(), dialect).unwrap();
+        let observation = observe_logical_source(&snapshot, dialect).unwrap();
         let mut records = Vec::new();
         let scan = scan_pinned_source(&database, dialect, &observation, snapshot, &mut |output| {
             if let OpenCodeScanOutput::Document(record) = output {

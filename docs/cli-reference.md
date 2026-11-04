@@ -100,6 +100,13 @@ ctx daemon status --all --format json
   searchable. JSON retains the existing `indexed_sources` meaning and is the
   exact diagnostic drilldown. Status does not initialize or repair Core or
   semantic state or open old history.
+  The human `Active index storage` section and JSON `lexical.storage` report
+  the active generation's logical bytes: docstore (stored Core records), terms,
+  postings, positions, fast fields, other metadata, and total. Processed history
+  bytes describe source coverage, not index size. The size breakdown uses
+  publication metadata without scanning records; it excludes retained older
+  generations and other data-root storage. See [storage accounting](storage.md#active-index-size)
+  and the [JSON fields](contracts/json.md#status).
 - `status --sample SECONDS` observes the existing daemon for 1–60 seconds and
   prints a shareable plain-text report; `--format json` prints the same facts
   as JSON. It reads existing daemon/Blame progress records and process accounting
