@@ -231,6 +231,129 @@ fn measure_refresh(root: &Path, scenario: &str, append: bool, create: bool) {
     }
 }
 
+#[test]
+fn large_live_call_journal_reads_only_new_suffixes_across_cycles() {
+    large_live_journal(false);
+}
+
+#[test]
+fn large_live_item_id_journal_reads_only_new_suffixes_across_cycles() {
+    large_live_journal(true);
+}
+
+fn large_live_journal(item_ids: bool) {
+    let initial_calls = if item_ids { 5_001 } else { 20_000 };
+    const LARGE_RESTART_ROOT: &str = "CTX_TEST_LARGE_JOURNAL_RESTART_ROOT";
+    if let Some(root) = std::env::var_os(LARGE_RESTART_ROOT) {
+        append_large_journal(Path::new(&root), initial_calls, item_ids, 1..31);
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let sessions = root.join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    let path = session_path(&sessions, OWNER);
+    let mut records = vec![session_meta(OWNER), message("oldmarker")];
+    records.extend(
+        (0..initial_calls).map(|index| call_terminal(index, &"padding ".repeat(256), item_ids)),
+    );
+    fs::write(&path, jsonl(records)).unwrap();
+    assert!(fs::metadata(&path).unwrap().len() > 8 * 1024 * 1024);
+    let (_, _, discovery) = discovery_fixture(root);
+    ctx_history_platform::platform_security::establish_private_data_root(&root.join("data"))
+        .unwrap();
+    refresh(root, &discovery, admission(root, &discovery));
+    append_large_journal(root, initial_calls, item_ids, 0..1);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            if item_ids {
+                "tests::execution_path::maintenance_io::large_live_item_id_journal_reads_only_new_suffixes_across_cycles"
+            } else {
+                "tests::execution_path::maintenance_io::large_live_call_journal_reads_only_new_suffixes_across_cycles"
+            },
+            "--nocapture",
+        ])
+        .env(LARGE_RESTART_ROOT, root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    let index = VerifiedIndex::open_pinned(source_backed_index_root(&root.join("data"))).unwrap();
+    assert_eq!(
+        index
+            .complete_lexical_search("liveappendmarker", 64)
+            .unwrap()
+            .len(),
+        31
+    );
+}
+
+fn call_terminal(index: u64, body: &str, item_ids: bool) -> Value {
+    let mut result = json!({"timestamp":"2026-08-17T00:00:01Z", "type":"response_item",
+        "payload":{"type":"function_call_output", "call_id":format!("call-{index}"), "output":body}});
+    if item_ids {
+        result["payload"]["id"] = json!(format!("item-{index}"));
+    }
+    result
+}
+
+fn append_large_journal(
+    root: &Path,
+    initial_calls: u64,
+    item_ids: bool,
+    cycles: std::ops::Range<u64>,
+) {
+    let (_, _, discovery) = discovery_fixture(root);
+    let path = session_path(&root.join("sessions"), OWNER);
+    for cycle in cycles {
+        let suffix = jsonl([call_terminal(
+            initial_calls + cycle,
+            "liveappendmarker",
+            item_ids,
+        )]);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&suffix)
+            .unwrap();
+        // Each execution reconstructs the adapter from the published checkpoint.
+        let reads = track_source_reads(&path);
+        let catalog = admission(root, &discovery)
+            .discovery()
+            .watch_catalog()
+            .clone();
+        let routes = catalog.route_ids().cloned().collect::<BTreeSet<_>>();
+        let route = routes.first().unwrap().clone();
+        let admitted =
+            AdmittedRefresh::from_exact_catalog_authority(routes, StdDuration::ZERO, catalog)
+                .unwrap()
+                .with_execution_facts(BTreeMap::from([(
+                    route,
+                    SourceBackedRefreshWorkset::members([path.clone()]),
+                )]))
+                .unwrap();
+        refresh(root, &discovery, admitted);
+        eprintln!(
+            "live cycle {cycle}: source_reads={} appended={}",
+            reads.bytes(),
+            suffix.len()
+        );
+        assert!(
+            reads.bytes() < 32 * 1024,
+            "cycle {cycle} read {} bytes for {} appended bytes",
+            reads.bytes(),
+            suffix.len()
+        );
+    }
+}
+
 fn admission(root: &Path, discovery: &DiscoveryContext) -> AdmittedRefresh {
     source_backed_admitted_discovery_from_report(
         discovery,

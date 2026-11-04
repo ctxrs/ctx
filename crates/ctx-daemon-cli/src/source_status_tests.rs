@@ -703,10 +703,10 @@ fn source_daemon_report_preserves_semantic_terminal_job_facts() {
 
 #[test]
 fn lexical_state_depends_only_on_verified_generation_policy_identity() {
-    assert_eq!(lexical_state(true), ("ready", None));
+    assert_eq!(lexical_state(true, false, None), ("ready", None));
     assert_eq!(
-        lexical_state(false),
-        ("stale", Some("generation_policy_mismatch"))
+        lexical_state(false, false, None),
+        ("awaiting_upgrade", Some("generation_upgrade_required"))
     );
 }
 

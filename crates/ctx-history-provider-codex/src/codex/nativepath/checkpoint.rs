@@ -7,17 +7,19 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use super::rows::{CodexSessionRow, MAX_CODEX_DURABLE_SESSION_ID_BYTES};
 
 pub(super) const MAX_CODEX_SEMANTIC_CHECKPOINT_BYTES: usize = 64 * 1024 - 5;
-const CODEX_SEMANTIC_CHECKPOINT_VERSION: u8 = 8;
-const CODEX_SEMANTIC_CHECKPOINT_PREFIX: &str = "codex.projector-checkpoint.v8:";
+const CODEX_SEMANTIC_CHECKPOINT_VERSION: u8 = 9;
+const CODEX_SEMANTIC_CHECKPOINT_PREFIX: &str = "codex.projector-checkpoint.v9:";
 pub(super) const MAX_CODEX_PENDING_CALLS: usize = 24;
 pub(super) const MAX_CODEX_CALL_ID_BYTES: usize = 1024;
-// Serialization/resume capacity only; cold scans count every distinct terminal.
+// Only terminals without a published event or result-call witness need space here.
 pub(super) const MAX_CODEX_TERMINAL_AUTHORITIES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum CodexTerminalAuthorityCheckpointV0 {
-    Exact {
+    Indexed {
+        // Every other observed terminal has an exact event or result-call
+        // witness in the same immutable generation. Rejected rows stay here.
         #[serde(with = "terminal_fingerprints_base64")]
         fingerprints: Vec<u64>,
     },
@@ -25,32 +27,38 @@ pub(super) enum CodexTerminalAuthorityCheckpointV0 {
 }
 
 impl CodexTerminalAuthorityCheckpointV0 {
-    pub(super) fn exact(fingerprints: Vec<u64>) -> Self {
-        Self::Exact { fingerprints }
+    pub(super) fn indexed(fingerprints: Vec<u64>) -> Self {
+        Self::Indexed { fingerprints }
     }
 
     pub(super) const fn saturated() -> Self {
         Self::Saturated
     }
 
+    #[cfg(test)]
     pub(super) fn fingerprints(&self) -> Option<&[u64]> {
         match self {
-            Self::Exact { fingerprints } => Some(fingerprints),
+            Self::Indexed { fingerprints } => Some(fingerprints),
             Self::Saturated => None,
         }
     }
 
     fn validate_wire_state(&self) -> Result<(), serde_json::Error> {
-        if let Self::Exact { fingerprints } = self {
-            if fingerprints.len() > MAX_CODEX_TERMINAL_AUTHORITIES
-                || fingerprints.windows(2).any(|pair| pair[0] >= pair[1])
-            {
-                return Err(invalid_checkpoint_state());
+        let valid = match self {
+            Self::Indexed { fingerprints } => {
+                fingerprints.len() <= MAX_CODEX_TERMINAL_AUTHORITIES
+                    && fingerprints.windows(2).all(|pair| pair[0] < pair[1])
             }
+            Self::Saturated => true,
+        };
+        if !valid {
+            return Err(invalid_checkpoint_state());
         }
         Ok(())
     }
 }
+
+mod terminal_membership;
 
 mod terminal_fingerprints_base64 {
     use super::*;
@@ -279,7 +287,7 @@ mod tests {
             owner: None,
             local_turn_started: false,
             pending_calls: &pending_calls,
-            terminal_authority: CodexTerminalAuthorityCheckpointV0::exact(Vec::new()),
+            terminal_authority: CodexTerminalAuthorityCheckpointV0::indexed(Vec::new()),
         })
         .unwrap()
         .unwrap();
@@ -318,7 +326,7 @@ mod tests {
             owner: Some(&owner),
             local_turn_started: false,
             pending_calls: &pending_calls,
-            terminal_authority: CodexTerminalAuthorityCheckpointV0::exact(vec![1, 2, 3]),
+            terminal_authority: CodexTerminalAuthorityCheckpointV0::indexed(vec![1, 2, 3]),
         })
         .unwrap()
         .unwrap();
@@ -342,7 +350,7 @@ mod tests {
             owner: Some(&owner),
             local_turn_started: false,
             pending_calls: &pending_calls,
-            terminal_authority: CodexTerminalAuthorityCheckpointV0::exact(fingerprints.clone()),
+            terminal_authority: CodexTerminalAuthorityCheckpointV0::indexed(fingerprints.clone()),
         })
         .unwrap()
         .expect("the 4,096-entry authority must fit");
@@ -372,5 +380,13 @@ mod tests {
             CodexSemanticCheckpoint::decode_key(&checkpoint.encode_key().unwrap()).unwrap();
 
         assert!(decoded.terminal_authority().fingerprints().is_none());
+    }
+
+    #[test]
+    fn v8_checkpoint_cannot_claim_indexed_terminal_coverage() {
+        let old = TypedKey::utf8(
+            r#"codex.projector-checkpoint.v8:{"version":8,"owner":null,"local_turn_started":false,"pending_calls":{},"terminal_authority":{"state":"exact","fingerprints":""}}"#,
+        ).unwrap();
+        assert!(CodexSemanticCheckpoint::decode_key(&old).is_err());
     }
 }

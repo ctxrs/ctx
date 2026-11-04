@@ -28,9 +28,9 @@ impl CoreRefreshEngine {
         provider_root_refresh: bool,
     ) -> Result<Option<SourceBackedRefreshScope>> {
         let observed_generation = self.observed_published_generation(data_root)?;
-        let automatic_split_pending = self.automatic_split_pending_for_watch(data_root)?;
+        let full_rebuild_pending = self.full_rebuild_pending_for_watch(data_root)?;
         let all_scope_widening_possible = provider_root_refresh
-            || automatic_split_pending
+            || full_rebuild_pending
             || (cold_all && observed_generation.is_none());
         let (sampled_routes, observation_routes, catalog, catalog_revision) = {
             let state = self.lock_state();
@@ -120,11 +120,10 @@ impl CoreRefreshEngine {
                     return Ok(None);
                 }
                 SourceBackedRefreshScope::Exact(routes)
-            } else if automatic_split_pending && !paused_routes_present {
-                // A released collapsed identity is still active. Exact watch
-                // work cannot establish the complete role cohort required to
-                // bridge or retire it, so retain the event as the trigger but
-                // admit a single all-route exhaustive migration attempt.
+            } else if full_rebuild_pending && !paused_routes_present {
+                // Schema upgrades and collapsed-route migrations need the
+                // complete catalog. A fresh writer cannot carry unselected
+                // predecessor routes into its replacement generation.
                 SourceBackedRefreshScope::All
             } else if retry_intent.is_none()
                 && cold_all
@@ -153,7 +152,7 @@ impl CoreRefreshEngine {
             attempt.state = SourceBackedRefreshState::AdmissionPending;
             attempt.progress.phase = "admission_pending".to_owned();
             attempt.preserve_route_retry_state = provider_root_all;
-            if requires_exhaustive_recovery || automatic_split_pending || provider_root_all {
+            if requires_exhaustive_recovery || full_rebuild_pending || provider_root_all {
                 attempt.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
             }
             attempt.automatic_retry_checkpoints = state.automatic_retry_checkpoints.clone();
@@ -167,7 +166,7 @@ impl CoreRefreshEngine {
         Ok(Some(refresh_scope))
     }
 
-    fn automatic_split_pending_for_watch(&self, data_root: &Path) -> Result<bool> {
+    fn full_rebuild_pending_for_watch(&self, data_root: &Path) -> Result<bool> {
         let catalog = self.lock_state().watch_catalog.clone();
         let Some(catalog) = catalog else {
             return Ok(false);
@@ -175,11 +174,14 @@ impl CoreRefreshEngine {
         let Some(index) = open_published_generation(data_root, self.journal.as_ref())? else {
             return Ok(false);
         };
-        Ok(index
-            .manifest()
-            .source_routes()
-            .iter()
-            .any(|route| catalog.has_automatic_split_legacy_route(route.route_identity())))
+        Ok(
+            index.manifest().lexical_schema_version != ctx_history_index::LEXICAL_SCHEMA_VERSION
+                || index
+                    .manifest()
+                    .source_routes()
+                    .iter()
+                    .any(|route| catalog.has_automatic_split_legacy_route(route.route_identity())),
+        )
     }
 
     pub(super) fn background_maintenance_wake_response(

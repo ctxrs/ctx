@@ -54,6 +54,7 @@ pub struct Fields {
     pub semantic_event_order: Field,
     pub event_range_order: Field,
     pub discovery_eligible: Field,
+    pub provider_call_result: Option<Field>,
 }
 
 impl Fields {
@@ -101,7 +102,25 @@ pub fn validate_schema(schema: &Schema) -> Result<()> {
     Ok(())
 }
 
+/// Schema 23 adds only an import-acceleration projection. Schema 22 retains
+/// the same searchable Core contract and remains readable during rebuilding.
+pub fn validate_read_schema(schema: &Schema, version: u32) -> Result<()> {
+    let expected = match version {
+        22 => lexical_schema_with_call_results(false),
+        LEXICAL_SCHEMA_VERSION => lexical_schema(),
+        _ => return Err(IndexError::SchemaMismatch(LEXICAL_SCHEMA_VERSION)),
+    };
+    if serde_json::to_vec(schema)? != serde_json::to_vec(&expected)? {
+        return Err(IndexError::SchemaMismatch(LEXICAL_SCHEMA_VERSION));
+    }
+    Ok(())
+}
+
 pub fn lexical_schema() -> Schema {
+    lexical_schema_with_call_results(true)
+}
+
+fn lexical_schema_with_call_results(call_results: bool) -> Schema {
     let mut builder = Schema::builder();
     builder.add_text_field("event_id", STRING);
     builder.add_text_field("event_identity_digest", STRING | FAST);
@@ -160,6 +179,9 @@ pub fn lexical_schema() -> Schema {
     builder.add_bytes_field("semantic_event_order", INDEXED);
     builder.add_bytes_field("event_range_order", FAST | INDEXED);
     builder.add_u64_field("discovery_eligible", INDEXED);
+    if call_results {
+        builder.add_bytes_field("provider_call_result", INDEXED);
+    }
     builder.build()
 }
 
@@ -215,6 +237,7 @@ pub fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         semantic_event_order: required_field(schema, "semantic_event_order")?,
         event_range_order: required_field(schema, "event_range_order")?,
         discovery_eligible: required_field(schema, "discovery_eligible")?,
+        provider_call_result: schema.get_field("provider_call_result").ok(),
     })
 }
 
@@ -227,6 +250,27 @@ pub fn required_field(schema: &Schema, name: &'static str) -> Result<Field> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_22_remains_readable_but_is_not_a_writable_base() {
+        let predecessor = lexical_schema_with_call_results(false);
+        validate_read_schema(&predecessor, 22).unwrap();
+        assert!(fields_from_schema(&predecessor)
+            .unwrap()
+            .provider_call_result
+            .is_none());
+        assert!(validate_schema(&predecessor).is_err());
+        assert!(validate_read_schema(&predecessor, LEXICAL_SCHEMA_VERSION).is_err());
+        assert!(validate_read_schema(&lexical_schema(), 22).is_err());
+        validate_read_schema(&lexical_schema(), LEXICAL_SCHEMA_VERSION).unwrap();
+        for version in [21, 24] {
+            assert!(validate_read_schema(&predecessor, version).is_err());
+        }
+        let mut changed = serde_json::to_value(&predecessor).unwrap();
+        changed.as_array_mut().unwrap().pop();
+        let changed: Schema = serde_json::from_value(changed).unwrap();
+        assert!(validate_read_schema(&changed, 22).is_err());
+    }
 
     #[test]
     fn lexical_schema_has_only_neutral_core_and_literal_fact_fields() {

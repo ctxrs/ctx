@@ -78,10 +78,11 @@ pub fn source_epoch_status_report(
         refresh_job.as_ref(),
         &current_policy_hash,
         serde_json::to_value(&current_policy)?,
+        config.daemon.enabled,
     );
     let admitted_index = matches!(
         lexical.get("status").and_then(Value::as_str),
-        Some("ready" | "stale")
+        Some("ready" | "rebuilding" | "awaiting_upgrade")
     )
     .then_some(index.as_ref())
     .flatten();
@@ -455,6 +456,7 @@ fn lexical_report(
     refresh_job: Option<&Value>,
     current_policy_hash: &str,
     current_policy: Value,
+    automatic: bool,
 ) -> (Value, Option<VerifiedIndex>) {
     let path = data_root.join(SEARCH_DIRECTORY).join(LEXICAL_DIRECTORY);
     let request_state = refresh_job
@@ -469,10 +471,11 @@ fn lexical_report(
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;
             let generation_matches =
                 published_generation.map(|generation| generation == index.generation_id());
-            let (status, reason) = lexical_state(policy_matches);
+            let (status, reason) = lexical_state(policy_matches, automatic, request_state);
             let mut value = compact_json(json!({
                 "status": status,
                 "reason": reason,
+                "search_available": true,
                 "path": path,
                 "generation_id": index.generation_id(),
                 "request_state": request_state,
@@ -517,6 +520,7 @@ fn lexical_report(
                     "status": status,
                     "reason": reason,
                     "path": path,
+                    "search_available": false,
                     "generation_id": Value::Null,
                     "request_state": request_state,
                     "published_generation": published_generation,
@@ -534,6 +538,7 @@ fn lexical_report(
         Err(error) => (
             compact_json(json!({
                 "status": "unavailable",
+                "search_available": false,
                 "reason": "generation_verification_failed",
                 "path": path,
                 "generation_id": Value::Null,
@@ -553,11 +558,28 @@ fn lexical_report(
     }
 }
 
-fn lexical_state(policy_matches: bool) -> (&'static str, Option<&'static str>) {
-    if !policy_matches {
-        return ("stale", Some("generation_policy_mismatch"));
+fn lexical_state(
+    policy_matches: bool,
+    automatic: bool,
+    request_state: Option<&str>,
+) -> (&'static str, Option<&'static str>) {
+    if policy_matches {
+        return ("ready", None);
     }
-    ("ready", None)
+    // This is only called after VerifiedIndex has accepted the complete read
+    // contract. An incompatible or corrupt index takes the error path above.
+    let running = matches!(
+        request_state,
+        Some("admission_pending" | "queued" | "running")
+    );
+    (
+        if automatic || running {
+            "rebuilding"
+        } else {
+            "awaiting_upgrade"
+        },
+        Some("generation_upgrade_required"),
+    )
 }
 
 fn catalog_report(generation_id: Option<&str>, index: Option<&VerifiedIndex>) -> Value {

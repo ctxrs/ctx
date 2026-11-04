@@ -19,7 +19,10 @@ pub(super) fn history_health(report: &Value) -> StatusHealth {
             .all(|(_, component)| component_is_healthy(component))
     {
         StatusHealth::Healthy
-    } else if matches!(lexical_status, "ready" | "pending") {
+    } else if matches!(
+        lexical_status,
+        "ready" | "pending" | "rebuilding" | "awaiting_upgrade"
+    ) {
         StatusHealth::Partial
     } else {
         StatusHealth::Failed
@@ -71,6 +74,12 @@ pub(super) fn status_next_command(
     pending: usize,
     unhealthy: usize,
 ) -> Option<&'static str> {
+    if component_status(&report["lexical"]) == "awaiting_upgrade" {
+        return Some("ctx import --all");
+    }
+    if component_status(&report["lexical"]) == "rebuilding" {
+        return Some("ctx index watch");
+    }
     if automatic_retry_pause(report).is_some()
         || matches!(
             report["refresh"]["reason"].as_str(),

@@ -14,10 +14,9 @@ use serde::{Deserialize, Serialize};
 use tantivy::{IndexMeta, Searcher};
 
 use crate::{
-    expected_source_generation_policy_hash, is_generation_id, validate_core_contract_fingerprint,
-    CommitPayload, GenerationManifest, IndexError, Result, SourceCoreRecordAggregate,
-    COMMIT_PAYLOAD_VERSION, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
-    LEXICAL_SCHEMA_VERSION,
+    is_generation_id, validate_core_contract_fingerprint, CommitPayload, GenerationManifest,
+    IndexError, Result, SourceCoreRecordAggregate, COMMIT_PAYLOAD_VERSION,
+    GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
 };
 
 use ctx_history_core::CertifiedSource;
@@ -374,7 +373,7 @@ fn validate_manifest_contract(manifest: &GenerationManifest) -> Result<()> {
         return Err(IndexError::UnsupportedManifest(manifest.manifest_version));
     }
     if manifest.identity_version != IDENTITY_VERSION
-        || manifest.lexical_schema_version != LEXICAL_SCHEMA_VERSION
+        || !matches!(manifest.lexical_schema_version, 22 | LEXICAL_SCHEMA_VERSION)
         || manifest.lexical_analyzer_version != LEXICAL_ANALYZER_VERSION
         || manifest.core_record_version != CORE_RECORD_VERSION
     {
@@ -386,7 +385,11 @@ fn validate_manifest_contract(manifest: &GenerationManifest) -> Result<()> {
         });
     }
     validate_core_contract_fingerprint(&manifest.core_record_contract_fingerprint)?;
-    let expected_policy_hash = expected_source_generation_policy_hash()?;
+    // Only the additive import projection differs in the readable predecessor.
+    // All other Core, analyzer and source-policy contracts must still match.
+    let mut policy = crate::policy::current_source_generation_policy();
+    policy.lexical.schema_revision = manifest.lexical_schema_version;
+    let expected_policy_hash = policy.canonical_sha256()?;
     if manifest.policy_schema_hash != expected_policy_hash {
         return Err(IndexError::GenerationPolicyMismatch {
             expected: expected_policy_hash,

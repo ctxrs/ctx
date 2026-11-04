@@ -85,7 +85,24 @@ fn query_pinned(
         &graph.completed_receipt().core_generation_id,
         &contract,
     )
-    .map_err(|error| from_snapshot_error(&error))?;
+    .map_err(|error| {
+        if matches!(
+            error,
+            ctx_history_snapshot_reader::SnapshotError::NotFound(_)
+        ) && load_active_generation_id(data_root)
+            .ok()
+            .flatten()
+            .as_deref()
+            .is_some_and(|active| active != graph.completed_receipt().core_generation_id)
+        {
+            crate::diagnostic::projection_diagnostic(
+                ctx_attribution_model::CoreProjectionCurrentness::Stale,
+            )
+            .expect("stale projection has a diagnostic")
+        } else {
+            from_snapshot_error(&error)
+        }
+    })?;
     // This reader stays alive through resolution, query, and result validation.
     // Exact generation reads never fall forward to a newer active Core snapshot.
     if snapshot.contract().core_record_fingerprint
@@ -121,15 +138,31 @@ pub fn readiness(data_root: &Path) -> Result<CoreProjectionStatus, BlameDiagnost
     let active =
         load_active_generation_id(data_root).map_err(|error| from_snapshot_error(&error))?;
     let mut observed = status(data_root, active.as_deref())?;
-    if active.is_none()
-        && observed.receipt.is_some()
-        && observed.currentness == ctx_attribution_model::CoreProjectionCurrentness::Current
+    if observed.currentness == ctx_attribution_model::CoreProjectionCurrentness::Current
+        && let Some(receipt) = &observed.receipt
     {
-        observed.currentness = ctx_attribution_model::CoreProjectionCurrentness::Stale;
-        observed.materialized_coverage = ctx_attribution_model::MaterializedCoverage::Partial;
-        observed.diagnostic = crate::diagnostic::projection_diagnostic(observed.currentness);
-        observed.availability = Default::default();
-        observed.local_repository_access = false;
+        let contract = SnapshotContract::current().map_err(|error| from_snapshot_error(&error))?;
+        let readable = CoreSnapshot::open(data_root, &receipt.core_generation_id, &contract);
+        let diagnostic = match readable {
+            Ok(snapshot)
+                if snapshot.contract().core_record_fingerprint
+                    == receipt.core_record_contract_fingerprint
+                    && active.is_some() =>
+            {
+                None
+            }
+            Ok(_) => crate::diagnostic::projection_diagnostic(
+                ctx_attribution_model::CoreProjectionCurrentness::Stale,
+            ),
+            Err(error) => Some(from_snapshot_error(&error)),
+        };
+        if let Some(diagnostic) = diagnostic {
+            observed.currentness = ctx_attribution_model::CoreProjectionCurrentness::Stale;
+            observed.materialized_coverage = ctx_attribution_model::MaterializedCoverage::Partial;
+            observed.diagnostic = Some(diagnostic);
+            observed.availability = Default::default();
+            observed.local_repository_access = false;
+        }
     }
     Ok(observed)
 }

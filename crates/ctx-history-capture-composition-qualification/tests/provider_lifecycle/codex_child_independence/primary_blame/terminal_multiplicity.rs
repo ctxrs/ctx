@@ -724,27 +724,27 @@ fn appended_duplicate_withdraws_prior_blame_and_matches_cold_reopen_and_noop() {
     }
 }
 
-fn assert_saturated_checkpoint(index: &VerifiedIndex) {
+fn assert_indexed_checkpoint(index: &VerifiedIndex) {
     let (_, _, _, checkpoint) = provider_checkpoint_envelope(index, OWNER);
     assert_current_provider_checkpoint(&checkpoint);
     let encoded = checkpoint["Utf8"].as_str().unwrap();
     let value: Value = serde_json::from_str(
         encoded
-            .strip_prefix("codex.projector-checkpoint.v8:")
+            .strip_prefix("codex.projector-checkpoint.v9:")
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(value["terminal_authority"]["state"], "saturated");
+    assert_eq!(value["terminal_authority"]["state"], "indexed");
 }
 
 #[test]
-fn more_than_4096_unique_terminals_keep_blame_across_saturated_unique_and_duplicate_appends() {
+fn more_than_4096_unique_terminals_keep_blame_across_unique_and_duplicate_appends() {
     for direct_append in [false, true] {
         let temp = tempdir().unwrap();
         let repository = temp.path().join("repository");
         let (output, oid) = real_commit(&repository);
         let (after_output, after_oid) = next_commit(&repository, "after checkpoint boundary");
-        let (appended_output, appended_oid) = next_commit(&repository, "after saturated prefix");
+        let (appended_output, appended_oid) = next_commit(&repository, "after large prefix");
         let sessions = temp.path().join("sessions");
         fs::create_dir(&sessions).unwrap();
         let path = session_path(&sessions, OWNER);
@@ -781,7 +781,7 @@ fn more_than_4096_unique_terminals_keep_blame_across_saturated_unique_and_duplic
             .unwrap()
             .provider_call_id
             .is_some()));
-        assert_saturated_checkpoint(&index);
+        assert_indexed_checkpoint(&index);
         assert_blame(&data, &prefix.commit.generation_id, &oid, &before, true);
         assert_call_blame(
             &data,
@@ -810,13 +810,12 @@ fn more_than_4096_unique_terminals_keep_blame_across_saturated_unique_and_duplic
         let unique_records = records_for(&index, OWNER);
         if let Some(completed) = completed {
             assert_eq!(
-                completed,
-                unique_records.len() as u64,
-                "saturated prefix settles the complete source"
+                completed, 2,
+                "a unique call resumes only the invocation and result suffix"
             );
         }
         assert_eq!(&unique_records[..before.len()], &before);
-        assert_saturated_checkpoint(&index);
+        assert_indexed_checkpoint(&index);
         assert_blame(
             &data,
             &unique_append.commit.generation_id,

@@ -517,7 +517,7 @@ fn inferred_codex_member_refresh_keeps_released_identity_and_stays_bounded() {
 }
 
 #[test]
-fn codex_incremental_4097th_terminal_saturates_only_the_checkpoint() {
+fn codex_incremental_4097th_terminal_preserves_linkage_beyond_exact_checkpoint_capacity() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions-incremental-terminal-saturation");
     let index_root = temp.path().join("index-incremental-terminal-saturation");
@@ -590,4 +590,83 @@ fn codex_incremental_4097th_terminal_saturates_only_the_checkpoint() {
     let (_, _, _, saturated_checkpoint) =
         provider_checkpoint_envelope(&saturated_index, native_session_id);
     assert_current_provider_checkpoint(&saturated_checkpoint);
+}
+
+#[test]
+fn terminal_evidence_survives_identity_selector_changes_and_rejected_rows() {
+    const OWNER: &str = "019fb000-0000-7000-8000-000000000091";
+    for mode in [
+        "item_to_call",
+        "item_to_item",
+        "call_to_item",
+        "invalid_timestamp",
+    ] {
+        let temp = tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index_root = temp.path().join("index");
+        fs::create_dir_all(&sessions).unwrap();
+        let call = "unindexed-call";
+        let mut result = exact_exec_result(call, "originalresultmarker");
+        if mode.starts_with("item_to_") {
+            result["payload"]["id"] = serde_json::json!("different-native-item-id");
+        } else if mode == "invalid_timestamp" {
+            result["timestamp"] = serde_json::json!("invalid");
+        }
+        write_session(
+            &sessions,
+            OWNER,
+            ProviderNativeSessionRelationship::Root,
+            None,
+            vec![
+                turn_context(),
+                exec_call_with_command(call, "echo original"),
+                result,
+            ],
+        );
+        let path = session_path(&sessions, OWNER);
+        let registry = register_tree(&[&sessions]);
+        let cold =
+            refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+        assert!(cold.failed_routes.is_empty());
+        append_event(
+            &path,
+            exact_exec_result("new-unique-call", "newresultmarker"),
+        );
+        let (unique, completed) = incremental_refresh(&index_root, &registry, &cold);
+        assert!(unique.failed_routes.is_empty());
+        assert_eq!(
+            completed, 1,
+            "terminal witnesses do not block unrelated appends"
+        );
+
+        let mut duplicate_result = exact_exec_result(call, "duplicateresultmarker");
+        if mode.ends_with("_to_item") {
+            duplicate_result["payload"]["id"] = serde_json::json!("another-native-item-id");
+        }
+        append_event(&path, duplicate_result);
+        let (duplicate, completed) = incremental_refresh(&index_root, &registry, &unique);
+        assert!(duplicate.failed_routes.is_empty());
+        assert!(
+            completed > 1,
+            "duplicate call must revisit the prefix regardless of item ID"
+        );
+        let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+        let records = records_for(&index, OWNER);
+        let result = records
+            .iter()
+            .find(|record| {
+                record
+                    .content
+                    .normalized_body
+                    .as_deref()
+                    .is_some_and(|body| body.contains("duplicateresultmarker"))
+            })
+            .unwrap();
+        assert!(result
+            .content
+            .activity
+            .as_ref()
+            .and_then(|activity| activity.provider_call_id.as_ref())
+            .is_none());
+    }
 }

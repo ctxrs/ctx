@@ -2,6 +2,7 @@ use super::*;
 use crate::provider::source_backed::{
     family::jsonl::JsonlAppendOccurrenceState, BaseEventLookup as _,
 };
+use ctx_history_core::{EventRole, EventType};
 use std::sync::Arc;
 
 const CODEX_NATIVE_EVENT_NAMESPACE: &str = "codex.event.v1";
@@ -11,22 +12,37 @@ const CODEX_PROVIDER_EVENT_OCCURRENCE_DOMAIN: &[u8] =
     b"ctx/codex-nativepath/provider-event-occurrence/v1\0";
 const CODEX_FALLBACK_EVENT_DIGEST_DOMAIN: &[u8] = b"ctx/codex-nativepath/fallback-event/v1\0";
 
+enum CodexLookupKey<'a> {
+    Event(uuid::Uuid),
+    CallResult(StableEntityId, &'a TypedKey),
+}
+
+type CodexLookupFn =
+    dyn Fn(CodexLookupKey<'_>) -> std::result::Result<bool, CaptureError> + Send + Sync;
+
 #[derive(Clone)]
-struct CodexEventLookup(
-    Arc<dyn Fn(uuid::Uuid) -> std::result::Result<bool, CaptureError> + Send + Sync>,
-);
+struct CodexEventLookup(Arc<CodexLookupFn>);
 
 impl crate::provider::source_backed::BaseEventLookup for CodexEventLookup {
     type Error = CaptureError;
 
     fn contains(&self, event_id: uuid::Uuid) -> std::result::Result<bool, CaptureError> {
-        (self.0)(event_id)
+        (self.0)(CodexLookupKey::Event(event_id))
+    }
+
+    fn may_contain_call_result(
+        &self,
+        session_id: StableEntityId,
+        call_id: &TypedKey,
+    ) -> std::result::Result<bool, CaptureError> {
+        (self.0)(CodexLookupKey::CallResult(session_id, call_id))
     }
 }
 
 #[derive(Default)]
 pub(in crate::codex::nativepath) struct CodexEventIdentityStateV0 {
     occurrences: JsonlAppendOccurrenceState<[u8; 32], CodexEventLookup>,
+    base_lookup: Option<CodexEventLookup>,
 }
 
 impl CodexEventIdentityStateV0 {
@@ -34,14 +50,57 @@ impl CodexEventIdentityStateV0 {
         base_lookup: impl crate::provider::source_backed::BaseEventLookup<Error = impl std::error::Error>
             + 'static,
     ) -> Self {
-        let lookup = CodexEventLookup(Arc::new(move |event_id| {
-            base_lookup
-                .contains(event_id)
-                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
+        let lookup = CodexEventLookup(Arc::new(move |key| {
+            match key {
+                CodexLookupKey::Event(event_id) => base_lookup.contains(event_id),
+                CodexLookupKey::CallResult(session_id, call_id) => {
+                    base_lookup.may_contain_call_result(session_id, call_id)
+                }
+            }
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
         }));
         Self {
-            occurrences: JsonlAppendOccurrenceState::for_append(lookup),
+            occurrences: JsonlAppendOccurrenceState::for_append(lookup.clone()),
+            base_lookup: Some(lookup),
         }
+    }
+
+    /// At most three indexed seeks, independent of the number of prefix calls.
+    /// Call-result terms cover native item IDs; event-ID probes also cover
+    /// call-derived records whose optional activity was omitted.
+    pub(in crate::codex::nativepath) fn contains_terminal(
+        &self,
+        source: &SourceKey,
+        session_id: StableEntityId,
+        call_id: &str,
+    ) -> crate::Result<bool> {
+        let lookup = self
+            .base_lookup
+            .as_ref()
+            .ok_or(CaptureError::SystemInvariant(
+                "Codex terminal append has no immutable base lookup",
+            ))?;
+        if (lookup.0)(CodexLookupKey::CallResult(
+            session_id,
+            &TypedKey::utf8(call_id).map_err(CodexSourceBackedErrorV0::from)?,
+        ))? {
+            return Ok(true);
+        }
+        let identity = CodexProviderEventIdentityV0 {
+            kind: CodexProviderEventIdentityKindV0::CallId,
+            value: call_id.to_owned(),
+        };
+        for event_type in [EventType::ToolOutput, EventType::CommandOutput] {
+            let (_, parts) = provider_event_key_parts(
+                event_type.as_str(),
+                Some(EventRole::Tool.as_str()),
+                &identity,
+            )?;
+            if base_occurrence_exists(lookup, source, session_id, &parts, 0)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn next_identity(

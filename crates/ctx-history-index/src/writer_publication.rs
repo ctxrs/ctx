@@ -523,10 +523,15 @@ impl GenerationWriter {
         drop(manifest);
         let next_pointer = ActiveGenerationPointer::new(
             verified.slot.clone(),
-            self.base_publication.as_ref().and_then(|_| {
-                self.active_pointer
-                    .as_ref()
-                    .map(|pointer| pointer.active().clone())
+            self.active_pointer.as_ref().and_then(|pointer| {
+                // A readable schema predecessor is still useful to pinned derived
+                // consumers even though it cannot be cloned by this writer.
+                let readable_predecessor = self.base_publication.is_some()
+                    || VerifiedIndex::open_pinned(&root).is_ok_and(|index| {
+                        index.generation_id() == pointer.active().generation_id()
+                            && index.manifest().lexical_schema_version != LEXICAL_SCHEMA_VERSION
+                    });
+                readable_predecessor.then(|| pointer.active().clone())
             }),
         )?;
         #[cfg(test)]

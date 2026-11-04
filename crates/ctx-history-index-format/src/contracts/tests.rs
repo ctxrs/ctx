@@ -57,11 +57,11 @@ fn source_route_snapshot_and_generation_wire_contract_remain_stable() {
     let manifest = GenerationManifest::from_parts(Vec::new(), vec![snapshot]).unwrap();
     assert_eq!(
         serde_json::to_string(&manifest).unwrap(),
-        "{\"manifest_version\":11,\"identity_version\":1,\"core_record_version\":3,\"core_record_contract_fingerprint\":\"ebb5c9b638de184824a6ce141ebf9b70941fb293fc113d29e2851565bad4371e\",\"lexical_schema_version\":22,\"lexical_analyzer_version\":2,\"policy_schema_hash\":\"84d58ff1dbcfbf524845eea78162e013e76cc000b275393711b6617764da3ae9\",\"indexed_documents\":0,\"certified_source_bytes\":0,\"sources\":[],\"core_record_aggregates\":[],\"source_routes\":[{\"route_identity\":\"abababababababababababababababababababababababababababababababab\",\"sources\":[],\"missing\":null}],\"generation_state\":{\"format\":\"ctx.generation-state.empty.v1\",\"bytes\":\"\"},\"automatic_provider_discovery\":true,\"provider_root_config_digest\":\"4bfe780cf41a834d4bd7c58d54498cc96b6a5a1d6b20c37f212af31aaa674064\",\"provider_roots\":[]}",
+        "{\"manifest_version\":11,\"identity_version\":1,\"core_record_version\":3,\"core_record_contract_fingerprint\":\"ebb5c9b638de184824a6ce141ebf9b70941fb293fc113d29e2851565bad4371e\",\"lexical_schema_version\":23,\"lexical_analyzer_version\":2,\"policy_schema_hash\":\"b098af240ed02a9074a20caea3bdb68b8e4b307b970152a855832d09f60c5660\",\"indexed_documents\":0,\"certified_source_bytes\":0,\"sources\":[],\"core_record_aggregates\":[],\"source_routes\":[{\"route_identity\":\"abababababababababababababababababababababababababababababababab\",\"sources\":[],\"missing\":null}],\"generation_state\":{\"format\":\"ctx.generation-state.empty.v1\",\"bytes\":\"\"},\"automatic_provider_discovery\":true,\"provider_root_config_digest\":\"4bfe780cf41a834d4bd7c58d54498cc96b6a5a1d6b20c37f212af31aaa674064\",\"provider_roots\":[]}",
     );
     assert_eq!(
         manifest.generation_id().unwrap(),
-        "1c30f4b8de96a2294a8ef6a2d77c1168e9e5b125f202b7c1c95a6bee0e2d5c59"
+        "fb19cc062e6c1ac333d0aeaa25cda2172f3c316fb31c1cfa1988d39b1f4a77e7"
     );
 }
 

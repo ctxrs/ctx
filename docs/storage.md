@@ -933,6 +933,27 @@ meaningful-body lexical selection, event projector/class revision, tokenizer
 and lexical schema revision, and semantic settings. A mismatch makes derived
 storage stale and requires a Core rebuild rather than an in-place migration.
 
+Lexical schema 23 adds a call-result membership index used during incremental
+imports. Its schema-22 predecessor has the same searchable Core contract and
+remains readable while the replacement is built. With automatic indexing,
+daemon startup schedules the rebuild without a search or import request.
+Search continues using the published schema-22 generation until the verified
+schema-23 generation is published atomically. An interrupted rebuild leaves
+the predecessor searchable, and the next daemon startup resumes maintenance.
+In manual mode, the predecessor remains searchable until an explicit import
+or wait-refresh builds the replacement. Native sources must be available for
+the rebuild; missing membership evidence is never treated as proof of absence.
+
+Status reports `rebuilding` in automatic mode or `awaiting_upgrade` in manual
+mode, with search availability, the served generation and refresh progress.
+Pinned Core consumers also accept the verified schema-22 contract and retain
+its actual schema and generation identity. Upgrade publication keeps the
+readable predecessor in the normal previous-generation slot. The daemon wakes
+attribution on publication and catches it up independently. While it catches
+up, blame can serve positive evidence from the retained predecessor with stale
+freshness. If further publications reclaim that pin first, blame and attribution
+status report the pending projection instead of claiming complete availability.
+
 Activity participates in the current Core record contract fingerprint. An
 incompatible predecessor requires the ordinary Core rebuild path; query code
 does not reopen provider history or synthesize activity. A later provider

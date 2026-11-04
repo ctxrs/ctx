@@ -914,6 +914,18 @@ impl IndexDocument {
             target.add_text(fields.role, role);
         }
         if let Some(activity) = record.content.activity.as_ref() {
+            if let Some(call_id) = activity
+                .provider_call_id
+                .as_ref()
+                .filter(|_| activity.result.is_some())
+            {
+                if let (Some(field), Some(key)) = (
+                    fields.provider_call_result,
+                    crate::provider_call_result_key(record.session_id, call_id)?,
+                ) {
+                    target.add_bytes(field, key);
+                }
+            }
             for fact in &activity.facts {
                 target.add_text(fields.literal_fact(fact.kind), fact.value.clone());
             }

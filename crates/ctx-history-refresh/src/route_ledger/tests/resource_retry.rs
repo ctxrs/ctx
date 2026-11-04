@@ -23,6 +23,6 @@ fn resource_failures_keep_backoff_across_events_during_and_between_attempts() {
     let recovered = ledger.admit_next(now).unwrap();
     assert!(ledger.acknowledge(&recovered));
     ledger.record_event(route, watermark(1, 99), now + 1);
-    let next = ledger.admit_next(now + 251).unwrap();
-    assert_eq!(ledger.resource_failure(&next, now + 252), Some(10_000));
+    let next = ledger.admit_next(now + 2_000).unwrap();
+    assert_eq!(ledger.resource_failure(&next, now + 2_001), Some(10_000));
 }

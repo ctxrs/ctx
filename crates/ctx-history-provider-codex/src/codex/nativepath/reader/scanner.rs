@@ -75,8 +75,8 @@ impl CodexNativeScanner {
             // Ordinary append preflight may reread the certified prefix. Its
             // terminals are already represented by the restored checkpoint;
             // only suffix records can add candidates or overlap that prefix.
-            let audit_terminal =
-                certified_prefix_end.is_none_or(|end| record.byte_end_exclusive() > end);
+            let audit_terminal = !self.ownership_quarantined
+                && certified_prefix_end.is_none_or(|end| record.byte_end_exclusive() > end);
             if record.oversized() {
                 if audit_terminal {
                     self.terminal_authority.invalidate_linkage();
@@ -84,7 +84,14 @@ impl CodexNativeScanner {
             } else if !record.terminal_nul_padding() {
                 let bytes = input.record_bytes(record)?;
                 if audit_terminal {
-                    self.terminal_authority.observe_record(bytes);
+                    self.terminal_authority
+                        .observe_record_with_base(bytes, |call_id| {
+                            self.event_identity_state.contains_terminal(
+                                &self.core_source,
+                                self.core_session_id,
+                                call_id,
+                            )
+                        })?;
                 }
                 if !self.ownership_quarantined
                     && classify_codex_record(bytes)

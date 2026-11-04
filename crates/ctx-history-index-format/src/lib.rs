@@ -8,6 +8,8 @@ mod analyzer;
 mod contracts;
 mod core_contract;
 mod index_document;
+mod provider_call_result;
+
 mod manifest;
 pub mod policy;
 mod record_digest;
@@ -47,6 +49,9 @@ pub use policy::{
 pub use search_projection::project_body_search;
 
 #[doc(hidden)]
+pub use provider_call_result::provider_call_result_key;
+
+#[doc(hidden)]
 pub use analyzer::{body_analyzer, register_body_analyzer, BODY_ANALYZER};
 #[doc(hidden)]
 pub use contracts::{
@@ -79,7 +84,10 @@ pub use manifest::{
 #[doc(hidden)]
 pub use record_digest::{accumulate_core_record, core_record_accumulator_leaf, core_record_leaf};
 #[doc(hidden)]
-pub use schema::{fields_from_schema, lexical_schema, required_field, validate_schema, Fields};
+pub use schema::{
+    fields_from_schema, lexical_schema, required_field, validate_read_schema, validate_schema,
+    Fields,
+};
 #[doc(hidden)]
 pub use source_identity::{source_sort_key, source_token};
 #[doc(hidden)]

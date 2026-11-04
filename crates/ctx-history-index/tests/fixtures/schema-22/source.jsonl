@@ -1,0 +1,2 @@
+{"type":"session_meta","payload":{"id":"019fb000-0000-7000-8000-000000000100","timestamp":"2026-08-17T00:00:00Z","cwd":"/example","originator":"codex_cli_rs","cli_version":"1.0.0","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-08-17T00:00:01Z","type":"response_item","payload":{"type":"function_call_output","id":"item-1","call_id":"call-1","output":"schema22upgrademarker"}}

@@ -441,6 +441,11 @@ fn codex_rollout_ownership_quarantine_retries_after_file_repair() {
     // The member workset first exercises append checkpoint restoration in the
     // bounded partial path. Quarantine then falls through to exhaustive
     // discovery, which retains the exact prior source until this file repairs.
+    // Later results must not consult the quarantined owner's cleared lookup.
+    append_event(
+        &repairable_path,
+        exact_exec_result("quarantined-call", "quarantined-result"),
+    );
     let quarantined = incremental_refresh_member(
         &index_root,
         &registry,
