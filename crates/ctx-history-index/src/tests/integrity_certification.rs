@@ -115,7 +115,7 @@ fn mismatched_same_size_managed_bytes(path: &Path) -> Vec<u8> {
     bytes
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn mismatched_same_size_bytes(path: &Path) -> Vec<u8> {
     let mut bytes = fs::read(path).unwrap();
     bytes[0] ^= 0x5a;
@@ -336,14 +336,14 @@ fn each_new_generation_hashes_once_and_is_immediately_restart_reusable() {
     assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn append_reports_nonreflink_fallback_without_faking_hardlink_availability() {
-    let (temp, source, _) = published_fixture("append-nonreflink-fallback.jsonl");
+fn append_reports_reflink_or_copy_fallback_when_hardlinks_are_unavailable() {
+    let (temp, source, _) = published_fixture("append-hardlink-fallback.jsonl");
     crate::publication::reset_candidate_clone_metrics();
     let guard = CloneTestHookGuard::set(
         CloneTestOptions {
-            force_reflink_fallback: true,
+            force_hardlink_fallback: true,
             ..CloneTestOptions::default()
         },
         |_, _| Ok(()),
@@ -352,18 +352,18 @@ fn append_reports_nonreflink_fallback_without_faking_hardlink_availability() {
     append_one_record(temp.path(), &source).unwrap();
     let metrics = crate::publication::candidate_clone_metrics();
     drop(guard);
-    assert_eq!(metrics.retained_reflinked_files, 0);
-    if metrics.retained_hardlinked_files > 0 {
+    assert_eq!(metrics.retained_hardlinked_files, 0);
+    if metrics.retained_reflinked_files > 0 {
         assert_eq!(metrics.retained_copied_files, 0);
         assert_eq!(metrics.retained_copied_bytes, 0);
     } else {
-        assert_eq!(metrics.retained_hardlinked_files, 0);
+        assert_eq!(metrics.retained_reflinked_files, 0);
         assert!(metrics.retained_copied_files > 0);
         assert!(metrics.retained_copied_bytes > 0);
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn managed_three_generation_reclamation_preserves_retained_certifications() {
     let (temp, source, _) = published_fixture("managed-reclamation-certification.jsonl");
@@ -398,7 +398,7 @@ fn managed_three_generation_reclamation_preserves_retained_certifications() {
     assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn reclamation_does_not_rebind_a_restored_metadata_mutation() {
     let (temp, source, _) = published_fixture("managed-reclamation-mutation.jsonl");
@@ -490,7 +490,7 @@ fn append_reports_copy_fallback_when_reflink_and_hardlink_are_forced_off() {
     assert!(metrics.retained_copied_bytes > 0);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn hardlink_fallback_rejects_same_size_restored_mtime_mutation_before_link() {
     let (temp, source, _) = published_fixture("hardlink-prelink-mutation.jsonl");
@@ -857,6 +857,9 @@ fn assert_certification_is_bounded(path: &Path) {
 }
 
 mod headroom;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod generation_sharing;
 
 #[cfg(target_os = "linux")]
 mod lifecycle;
