@@ -658,7 +658,11 @@ impl CoreProjectionPreparer {
             repository.core_generation_id = Some(core_generation_id.to_owned());
             repository.source = Some(source.source.clone());
         }
-        Ok(repository.adapter.evaluate_record(record, record_sha256))
+        Ok(repository.adapter.evaluate_record_with_outcome_admission(
+            record,
+            record_sha256,
+            producer_authority_disposition(record).permits_positive_authority(),
+        ))
     }
 }
 

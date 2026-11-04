@@ -268,13 +268,28 @@ fn native_primary_owner(record: &CoreRecord) -> bool {
     }
     match source.provider() {
         "claude" => {
-            // The native source key identifies one primary file, with neither a
-            // workflow nor an agent leaf. An imported ID or search scope alone
-            // cannot supply this ownership evidence.
+            // A primary file can contain sidechain records. Require the captured
+            // row markers as well as the native file identity; older projections
+            // discarded these markers and cannot establish ownership.
             source.source_format() == "claude_projects_jsonl_tree"
                 && source.schema_variant() == "claude-nativepath-jsonl-v6"
-                && record.parser_revision
-                    == "claude-shared-jsonl-core-activity-v2-record-rejections"
+                && record.parser_revision == "claude-shared-jsonl-core-activity-v3-record-ownership"
+                && record
+                    .content
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.get("record_ownership"))
+                    .is_some_and(|ownership| {
+                        matches!(
+                            ownership
+                                .get("sidechain")
+                                .and_then(serde_json::Value::as_str),
+                            Some("absent" | "false")
+                        ) && ownership
+                            .get("agent_id_present")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(false)
+                    })
                 && namespace == "claude.session-leaf"
                 && record.agent_scope == Some(AgentScope::Primary)
                 && matches!(key, TypedKey::Composite(parts) if matches!(parts.as_slice(),

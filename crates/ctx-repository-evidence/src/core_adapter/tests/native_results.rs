@@ -113,31 +113,50 @@ fn native_error_evidence_controls_real_commit_outcomes() {
             call.source = source.clone();
             result.source = source;
             result.content.structured_content = retained;
-            for reversed in [false, true] {
-                let mut adapter = CoreRepositoryEvidenceAdapter::default();
-                adapter.begin_source();
-                let records = if reversed {
-                    [&result, &call]
-                } else {
-                    [&call, &result]
-                };
-                let outcomes = records
-                    .into_iter()
-                    .enumerate()
-                    .flat_map(|(index, record)| {
-                        adapter
-                            .evaluate_record(record, &format!("{:064x}", index + 1))
-                            .repository_vcs_observations
-                    })
-                    .filter(|observation| {
-                        matches!(observation.kind, RepositoryVcsObservationKind::Outcome(_))
-                    })
-                    .count();
-                assert_eq!(
-                    outcomes,
-                    usize::from(expected),
-                    "{provider} {name} reversed={reversed}"
-                );
+            for (call_admitted, result_admitted) in
+                [(true, true), (false, true), (true, false), (false, false)]
+            {
+                for reversed in [false, true] {
+                    let mut adapter = CoreRepositoryEvidenceAdapter::default();
+                    adapter.begin_source();
+                    let records = if reversed {
+                        [&result, &call]
+                    } else {
+                        [&call, &result]
+                    };
+                    let outcomes = records
+                        .into_iter()
+                        .enumerate()
+                        .flat_map(|(index, record)| {
+                            adapter
+                                .evaluate_record_with_outcome_admission(
+                                    record,
+                                    &format!("{:064x}", index + 1),
+                                    if record
+                                        .content
+                                        .activity
+                                        .as_ref()
+                                        .unwrap()
+                                        .invocation
+                                        .is_some()
+                                    {
+                                        call_admitted
+                                    } else {
+                                        result_admitted
+                                    },
+                                )
+                                .repository_vcs_observations
+                        })
+                        .filter(|observation| {
+                            matches!(observation.kind, RepositoryVcsObservationKind::Outcome(_))
+                        })
+                        .count();
+                    assert_eq!(
+                        outcomes,
+                        usize::from(expected && call_admitted && result_admitted),
+                        "{provider} {name} reversed={reversed} call={call_admitted} result={result_admitted}"
+                    );
+                }
             }
         }
     }

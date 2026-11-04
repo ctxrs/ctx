@@ -337,6 +337,47 @@ fn imported_commit_case(provider: &str, case: &str) {
             ],
         )
     };
+    if provider == "claude" {
+        for (index, row) in rows.iter_mut().enumerate() {
+            if matches!(case, "sidechain" | "sidechain_call" | "sidechain_result")
+                && (case == "sidechain" || (case == "sidechain_call") == (index == 0))
+            {
+                row["isSidechain"] = json!(true);
+                row["agentId"] = json!("child");
+            }
+            if case == "agent_id" {
+                row["agentId"] = json!("child");
+            }
+            if case == "sidechain_only" {
+                row["isSidechain"] = json!(true);
+            }
+            if case == "primary_explicit_false" {
+                row["isSidechain"] = json!(false);
+            }
+        }
+    }
+    let sidechain_oid = if case == "primary_mixed_sidechain" {
+        let child_receipt = git(&["commit", "--allow-empty", "-m", "child commit"]);
+        let child_oid = git(&["rev-parse", "HEAD"]).trim().to_owned();
+        let mut child_rows = rows.clone();
+        child_rows[0]["uuid"] = json!("child-call-event");
+        child_rows[0]["message"]["content"][0]["id"] = json!("child-call");
+        child_rows[0]["message"]["content"][0]["input"]["command"] =
+            json!("git commit --allow-empty -m 'child commit' && git rev-parse HEAD");
+        child_rows[1]["uuid"] = json!("child-result-event");
+        child_rows[1]["message"]["content"][0]["tool_use_id"] = json!("child-call");
+        child_rows[1]["message"]["content"][0]["content"] =
+            json!(format!("{child_receipt}{child_oid}\n"));
+        for row in &mut child_rows {
+            row["isSidechain"] = json!(true);
+            row["agentId"] = json!("child");
+        }
+        child_rows.extend(rows);
+        rows = child_rows;
+        Some(child_oid)
+    } else {
+        None
+    };
     if case == "fork_custom_path" {
         let mut original = rows.clone();
         original[0]["id"] = json!("original");
@@ -495,6 +536,17 @@ fn imported_commit_case(provider: &str, case: &str) {
             );
         }
     }
+    if let Some(child_oid) = sidechain_oid {
+        let failed = ctx(&temp)
+            .current_dir(&repository)
+            .args(["blame", "commit", &child_oid, "--format", "json"])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let result: Value = serde_json::from_slice(&failed.stderr).unwrap();
+        assert_eq!(result["reason"], "target_not_indexed", "{result:#}");
+    }
     let status = json_output(ctx(&temp).args(["status", "--format", "json"]));
     assert_eq!(
         status["attribution"]["currentness"], "current",
@@ -615,4 +667,23 @@ fn complete_native_results_with_no_error_field_still_attribute() {
     for provider in ["claude", "pi"] {
         imported_commit_case(provider, "primary_no_error_flag");
     }
+}
+
+#[test]
+fn claude_inline_sidechain_records_stay_unattributed() {
+    for case in [
+        "sidechain",
+        "sidechain_call",
+        "sidechain_result",
+        "sidechain_only",
+        "agent_id",
+    ] {
+        imported_commit_case("claude", case);
+    }
+}
+
+#[test]
+fn claude_primary_records_in_a_file_with_sidechain_records_still_attribute() {
+    imported_commit_case("claude", "primary_mixed_sidechain");
+    imported_commit_case("claude", "primary_explicit_false");
 }
