@@ -6,6 +6,9 @@ mod segment_boundaries;
 #[path = "lexical_selective.rs"]
 mod selective;
 
+#[path = "lexical_top_k.rs"]
+mod top_k;
+
 fn publish_records(temp: &TempDir, source: &SourceKey, records: Vec<CoreRecord>) -> VerifiedIndex {
     let document_count = u64::try_from(records.len()).unwrap();
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
@@ -487,7 +490,7 @@ fn exact_boundary_matches_exhaustive_order_and_decodes_only_possible_winners() {
 
     assert!(batch.complete);
     assert!(!batch.candidate_set_exhaustive);
-    assert_eq!(batch.counters.candidate_docs, 4);
+    assert_eq!(batch.counters.candidate_docs, 3);
     assert_eq!(batch.candidates.len(), 1);
     assert_eq!(batch.candidates[0].event.event_id, expected);
     assert_eq!(
@@ -615,7 +618,7 @@ fn better_primary_rank_replacement_decodes_once_and_worse_rank_does_not() {
     )
     .unwrap();
 
-    assert_eq!(batch.counters.candidate_docs, 3);
+    assert_eq!(batch.counters.candidate_docs, 2);
     assert_eq!(batch.candidates[0].event.event_id, expected);
     assert_eq!(
         index.manual_event_range_order_decodes_for_test(),
@@ -1334,7 +1337,7 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
         lexical_search_batch(&index, &[query.as_str()], &EventSearchFilters::default(), 3).unwrap();
     assert!(top_three.complete);
     assert!(!top_three.candidate_set_exhaustive);
-    assert_eq!(top_three.counters.candidate_docs, SEGMENTS as u64);
+    assert!((3..=SEGMENTS as u64).contains(&top_three.counters.candidate_docs));
     let order_decodes = index.manual_event_range_order_decodes_for_test();
     assert!((3..=SEGMENTS).contains(&order_decodes));
     assert_eq!(
@@ -1480,3 +1483,11 @@ fn manual_body_and_list_execution_ignore_deleted_source_revisions() {
         deleted.event_id.as_uuid()
     );
 }
+
+#[path = "lexical_top_k_oracle.rs"]
+mod top_k_oracle;
+#[path = "lexical_top_k_scaling.rs"]
+mod top_k_scaling;
+
+#[path = "lexical_top_k_regressions.rs"]
+mod top_k_regressions;

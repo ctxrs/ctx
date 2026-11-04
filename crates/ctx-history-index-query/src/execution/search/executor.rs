@@ -115,8 +115,9 @@ impl VerifiedIndex {
     ///
     /// Segments are visited by ascending immutable Tantivy segment ID. Within
     /// each segment, body postings intersect required positive groups in
-    /// ascending document ID. Skipped intervals provably cannot match; an
-    /// incomplete result describes one deterministic fully examined prefix.
+    /// ascending document ID. A full heap prunes documents whose best possible
+    /// rank cannot enter it. Posting traversal remains independently bounded;
+    /// an incomplete result describes a deterministic, work-limited pass.
     pub fn execute_lexical(
         &self,
         execution: LexicalExecution<'_>,
@@ -182,7 +183,7 @@ impl VerifiedIndex {
             return Ok(finish_lexical_batch(Vec::new(), meter, false));
         };
 
-        let mut retained = BinaryHeap::new();
+        let mut retained: BinaryHeap<Reverse<RankedCandidateRef>> = BinaryHeap::new();
         let mut retained_truncated = false;
         let query_term_count =
             u8::try_from(body_terms.len()).map_err(|_| IndexError::CountOverflow)?;
@@ -211,6 +212,51 @@ impl VerifiedIndex {
             match mode {
                 LexicalMode::Search(_) => {
                     while let Some(doc) = next_body_doc(&prepared.body_postings) {
+                        // Once an omitted match is known, skip whole posting
+                        // intervals whose rank bounds cannot beat the heap.
+                        // Before then, inspect pruning witnesses individually
+                        // so filtered-out rows cannot imply truncation.
+                        if retained_truncated {
+                            if let Some(Reverse(worst)) = retained.peek() {
+                                let next = coverage_pivot(&prepared.body_postings, worst.coverage);
+                                if next == TERMINATED {
+                                    break;
+                                }
+                                if next != doc {
+                                    if !seek_body_postings(&mut prepared, next, &mut meter) {
+                                        break 'segments;
+                                    }
+                                    continue;
+                                }
+                                let Some((end, coverage, score, prefix)) =
+                                    super::blocks::block_rank_bound(
+                                        &mut prepared,
+                                        &body_weights,
+                                        reader,
+                                        &mut meter,
+                                    )?
+                                else {
+                                    break 'segments;
+                                };
+                                let rank = compare_primary_rank(coverage, score, worst);
+                                if rank == Ordering::Less
+                                    || (rank == Ordering::Equal
+                                        && compare_identity_prefix_ascending(
+                                            prefix,
+                                            worst.order.event_identity_digest(),
+                                        ) == Ordering::Less)
+                                {
+                                    if !seek_body_postings(
+                                        &mut prepared,
+                                        end.saturating_add(1),
+                                        &mut meter,
+                                    ) {
+                                        break 'segments;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
                         let deleted = reader.is_deleted(doc);
                         if !deleted {
                             let Some(next) = prepared.filters.next_required_doc(
@@ -224,32 +270,11 @@ impl VerifiedIndex {
                                 break;
                             }
                             if next != doc {
-                                // Only a required positive group proves this
-                                // interval cannot match. Charge every body seek
-                                // just like an advance, before moving its cursor.
-                                for postings in prepared.body_postings.iter_mut().flatten() {
-                                    if postings.doc() < next {
-                                        if !meter.charge(
-                                            LexicalWorkCounter::BodyPostingAdvances,
-                                            1,
-                                            Some(&prepared.context),
-                                            Some(next),
-                                        ) {
-                                            break 'segments;
-                                        }
-                                        postings.seek(next);
-                                    }
+                                if !seek_body_postings(&mut prepared, next, &mut meter) {
+                                    break 'segments;
                                 }
                                 continue;
                             }
-                        }
-                        if !meter.charge(
-                            LexicalWorkCounter::CandidateDocs,
-                            1,
-                            Some(&prepared.context),
-                            Some(doc),
-                        ) {
-                            break 'segments;
                         }
                         let mut term_frequencies = [0_u32; 32];
                         for (index, postings) in prepared.body_postings.iter().enumerate() {
@@ -263,7 +288,36 @@ impl VerifiedIndex {
                                     .term_freq();
                             }
                         }
-                        if !deleted {
+                        let pruned = if !deleted && retained.len() >= limit {
+                            let Some(pruned) = prune_by_rank_bound(
+                                &mut prepared,
+                                doc,
+                                &term_frequencies[..body_terms.len()],
+                                &body_weights,
+                                &retained,
+                                &filter_plan,
+                                &mut retained_truncated,
+                                &mut meter,
+                            )?
+                            else {
+                                break 'segments;
+                            };
+                            pruned
+                        } else {
+                            false
+                        };
+                        if !deleted
+                            && !pruned
+                            && !meter.charge(
+                                LexicalWorkCounter::CandidateDocs,
+                                1,
+                                Some(&prepared.context),
+                                Some(doc),
+                            )
+                        {
+                            break 'segments;
+                        }
+                        if !deleted && !pruned {
                             let outcome = self.examine_manual_candidate(
                                 &mut prepared,
                                 doc,
@@ -539,9 +593,7 @@ impl VerifiedIndex {
         meter: &mut LexicalWorkMeter,
     ) -> Result<CandidateExamination> {
         let Some(matches_exact_filters) =
-            prepared
-                .filters
-                .accepts_remaining(doc, meter, &prepared.context)?
+            candidate_matches_filters(prepared, doc, filter_plan, meter)?
         else {
             return Ok(CandidateExamination::Exhausted);
         };
@@ -549,33 +601,8 @@ impl VerifiedIndex {
             return Ok(CandidateExamination::Rejected);
         }
 
-        let occurred_at_unix_ms = prepared.candidate_fields.occurred_at_unix_ms(doc)?;
-        if filter_plan
-            .since_unix_ms
-            .is_some_and(|since| occurred_at_unix_ms.is_none_or(|occurred_at| occurred_at < since))
-        {
-            return Ok(CandidateExamination::Rejected);
-        }
-
-        let coverage = term_frequencies
-            .iter()
-            .filter(|frequency| **frequency > 0)
-            .count();
-        let coverage = u8::try_from(coverage).map_err(|_| IndexError::CountOverflow)?;
-        let mut score = if term_frequencies.is_empty() {
-            0.0
-        } else {
-            let fieldnorm_id = prepared
-                .fieldnorms
-                .as_ref()
-                .ok_or(IndexError::InvalidStoredDocumentField("body_search"))?
-                .fieldnorm_id(doc);
-            body_weights
-                .iter()
-                .zip(term_frequencies)
-                .map(|(weight, frequency)| weight.score(fieldnorm_id, *frequency))
-                .sum()
-        };
+        let coverage = term_coverage(term_frequencies);
+        let mut score = body_score(prepared, doc, term_frequencies, body_weights)?;
         let Some(class_weight) = prepared.classes.weight(doc, meter, &prepared.context) else {
             return Ok(CandidateExamination::Exhausted);
         };
@@ -618,7 +645,7 @@ impl VerifiedIndex {
         };
 
         let order = prepared.candidate_fields.event_range_order(doc)?;
-        if occurred_at_unix_ms != order.occurred_at_unix_ms()
+        if prepared.candidate_fields.occurred_at_unix_ms(doc)? != order.occurred_at_unix_ms()
             || !prepared
                 .candidate_fields
                 .exact_identity_matches_compact_fields(
@@ -652,6 +679,157 @@ impl VerifiedIndex {
         }
         Ok(CandidateExamination::Accepted)
     }
+}
+
+fn seek_body_postings(
+    prepared: &mut PreparedSegment,
+    next: DocId,
+    meter: &mut LexicalWorkMeter,
+) -> bool {
+    for postings in prepared.body_postings.iter_mut().flatten() {
+        if postings.doc() < next {
+            if !meter.charge(
+                LexicalWorkCounter::BodyPostingAdvances,
+                1,
+                Some(&prepared.context),
+                Some(next),
+            ) {
+                return false;
+            }
+            postings.seek(next);
+        }
+    }
+    true
+}
+
+/// Before the kth cursor, fewer than k terms can match any document. This
+/// is a coverage bound, independent of BM25 and of segment-local statistics.
+fn coverage_pivot(postings: &[Option<BodyPostings>], minimum: u8) -> DocId {
+    if minimum <= 1 {
+        return next_body_doc(postings).unwrap_or(TERMINATED);
+    }
+    if usize::from(minimum) == postings.len() {
+        return postings
+            .iter()
+            .map(|posting| posting.as_ref().map_or(TERMINATED, |posting| posting.doc()))
+            .max()
+            .unwrap_or(TERMINATED);
+    }
+    let mut docs = [TERMINATED; 32];
+    for (slot, posting) in docs.iter_mut().zip(postings) {
+        if let Some(posting) = posting {
+            *slot = posting.doc();
+        }
+    }
+    let index = usize::from(minimum.max(1)) - 1;
+    *docs[..postings.len()].select_nth_unstable(index).1
+}
+
+fn candidate_matches_filters(
+    prepared: &mut PreparedSegment,
+    doc: DocId,
+    filter_plan: &LexicalFilterAdapter,
+    meter: &mut LexicalWorkMeter,
+) -> Result<Option<bool>> {
+    let Some(matches) = prepared
+        .filters
+        .accepts_remaining(doc, meter, &prepared.context)?
+    else {
+        return Ok(None);
+    };
+    if !matches {
+        return Ok(Some(false));
+    }
+    let occurred_at = prepared.candidate_fields.occurred_at_unix_ms(doc)?;
+    Ok(Some(filter_plan.since_unix_ms.is_none_or(|since| {
+        occurred_at.is_some_and(|occurred_at| occurred_at >= since)
+    })))
+}
+
+fn term_coverage(term_frequencies: &[u32]) -> u8 {
+    // Query admission bounds this slice to 32 terms.
+    term_frequencies
+        .iter()
+        .filter(|frequency| **frequency > 0)
+        .count() as u8
+}
+
+fn body_score(
+    prepared: &PreparedSegment,
+    doc: DocId,
+    term_frequencies: &[u32],
+    body_weights: &[Bm25Weight],
+) -> Result<Score> {
+    if term_frequencies.is_empty() {
+        return Ok(0.0);
+    }
+    let fieldnorm_id = prepared
+        .fieldnorms
+        .as_ref()
+        .ok_or(IndexError::InvalidStoredDocumentField("body_search"))?
+        .fieldnorm_id(doc);
+    Ok(body_weights
+        .iter()
+        .zip(term_frequencies)
+        .map(|(weight, frequency)| weight.score(fieldnorm_id, *frequency))
+        .sum())
+}
+
+/// The maximum class weight is 1.0 in every scope, so the unweighted body
+/// score bounds the final BM25 score. Preserve coverage-first ordering and
+/// never prune equal scores without a strictly worse exact identity prefix.
+/// Each probe follows a body cursor movement (or a segment's initial doc),
+/// bounding probes by body_posting_advances + segments, with at most 32 terms.
+#[allow(clippy::too_many_arguments)]
+fn prune_by_rank_bound(
+    prepared: &mut PreparedSegment,
+    doc: DocId,
+    term_frequencies: &[u32],
+    body_weights: &[Bm25Weight],
+    retained: &BinaryHeap<Reverse<RankedCandidateRef>>,
+    filter_plan: &LexicalFilterAdapter,
+    retained_truncated: &mut bool,
+    meter: &mut LexicalWorkMeter,
+) -> Result<Option<bool>> {
+    let Some(Reverse(worst)) = retained.peek() else {
+        return Ok(Some(false));
+    };
+    let coverage = term_coverage(term_frequencies);
+    let rank = coverage.cmp(&worst.coverage);
+    let rank = if rank == Ordering::Equal {
+        let mut score_bound = body_score(prepared, doc, term_frequencies, body_weights)?;
+        if score_bound >= worst.score {
+            // Tighten only when needed. Class posting work is independently
+            // precharged, including for a document ultimately pruned here.
+            let Some(weight) = prepared.classes.weight(doc, meter, &prepared.context) else {
+                return Ok(None);
+            };
+            score_bound *= weight;
+        }
+        score_bound.total_cmp(&worst.score)
+    } else {
+        rank
+    };
+    let pruned = match rank {
+        Ordering::Less => true,
+        Ordering::Greater => false,
+        Ordering::Equal => {
+            let prefix = prepared.candidate_fields.event_id_high(doc)? >> 16;
+            compare_identity_prefix_ascending(prefix, worst.order.event_identity_digest())
+                == Ordering::Less
+        }
+    };
+    if pruned && !*retained_truncated {
+        // A rank-pruned document might fail a negative, substring or time
+        // filter. Prove that at least one admissible match was discarded before
+        // reporting result-limit truncation; never confuse pruning with work
+        // exhaustion or report a filtered-out document as an omitted match.
+        let Some(matches) = candidate_matches_filters(prepared, doc, filter_plan, meter)? else {
+            return Ok(None);
+        };
+        *retained_truncated = matches;
+    }
+    Ok(Some(pruned))
 }
 
 #[cfg(test)]
