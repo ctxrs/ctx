@@ -496,3 +496,43 @@ fn claude_duplicate_result_content_retains_row_and_marks_capture_unavailable() {
     assert_eq!(result.text, ActivityTextCapture::Unavailable);
     assert_eq!(result.structured_content, ActivityJsonCapture::Unavailable);
 }
+
+#[test]
+fn claude_record_ownership_observes_markers_on_calls_and_results() {
+    for content in [
+        serde_json::json!({"type":"tool_use", "id":"call", "name":"Bash", "input":{"command":"pwd"}}),
+        serde_json::json!({"type":"tool_result", "tool_use_id":"call", "content":"result"}),
+    ] {
+        for (markers, sidechain, agent_id_present) in [
+            (serde_json::json!({}), "absent", false),
+            (serde_json::json!({"isSidechain":false}), "false", false),
+            (serde_json::json!({"isSidechain":true}), "true", false),
+            (serde_json::json!({"isSidechain":null}), "other", false),
+            (serde_json::json!({"isSidechain":"false"}), "other", false),
+            (serde_json::json!({"agentId":"child"}), "absent", true),
+            (serde_json::json!({"agentId":null}), "absent", true),
+            (serde_json::json!({"agentId":""}), "absent", true),
+            (
+                serde_json::json!({"isSidechain":true,"agentId":"child"}),
+                "true",
+                true,
+            ),
+        ] {
+            let mut value = markers;
+            value["message"] = serde_json::json!({"content":[content]});
+            let bytes = serde_json::to_vec(&value).unwrap();
+            let parsed = parse_native_record(&bytes, 0, &locator(&bytes)).unwrap();
+            assert_eq!(parsed.rows.len(), 1);
+            assert_eq!(
+                serde_json::to_value(parsed.ownership).unwrap(),
+                serde_json::json!({"sidechain":sidechain, "agent_id_present":agent_id_present})
+            );
+        }
+    }
+    for bytes in [
+        br#"{"isSidechain":true,"isSidechain":false,"message":{"content":"text"}}"#.as_slice(),
+        br#"{"agentId":"child","agentId":null,"message":{"content":[{"type":"tool_result","tool_use_id":"call","content":"result"}]}}"#.as_slice(),
+    ] {
+        assert!(parse_native_record(bytes, 0, &locator(bytes)).is_err());
+    }
+}

@@ -18,7 +18,10 @@ use super::{
 };
 use crate::raw_json::{audit_json, SelectorGroup};
 
+mod ownership;
 mod value_decoding;
+
+use ownership::ClaudeRecordOwnership;
 
 use value_decoding::complete_output_rows;
 
@@ -509,6 +512,7 @@ fn order(identity: ClaudeEventIdentity) -> ClaudeNativeOrder {
 
 #[derive(Debug)]
 pub(super) struct ParsedClaudeRecord {
+    pub(super) ownership: ClaudeRecordOwnership,
     pub(super) session_id: Option<String>,
     pub(super) timestamp: Option<String>,
     pub(super) cwd: Option<String>,
@@ -562,6 +566,7 @@ fn parse_native_record_inner(
     locator: &ClaudePhysicalLocator,
 ) -> Result<ParsedClaudeRecord, serde_json::Error> {
     let preflight = preflight_record(bytes)?;
+    let ownership = serde_json::from_slice(bytes)?;
     if preflight.explicit_result {
         let value: Value = serde_json::from_slice(bytes)?;
         let metadata = metadata_from_value(&value);
@@ -576,6 +581,7 @@ fn parse_native_record_inner(
         );
         validate_row_count(&rows)?;
         return Ok(ParsedClaudeRecord {
+            ownership,
             session_id: metadata.session_id,
             timestamp: metadata.timestamp,
             cwd: metadata.cwd,
@@ -596,6 +602,7 @@ fn parse_native_record_inner(
     let rows = projection.rows;
     validate_row_count(&rows)?;
     Ok(ParsedClaudeRecord {
+        ownership,
         session_id,
         timestamp,
         cwd,
