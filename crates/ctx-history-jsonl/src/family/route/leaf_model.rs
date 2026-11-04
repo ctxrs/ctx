@@ -137,7 +137,11 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
         identity_probe_rejected_records: u64,
     ) -> JsonlResult<Self, E> {
         let opened = authority.open_file(&authority_path)?;
-        let observation = observe_opened_file(&source_path, &opened)?;
+        let observation = if identity_probe.mutable_first_record.is_some() {
+            observe_opened_file_allow_append(&source_path, &opened)?
+        } else {
+            observe_opened_file(&source_path, &opened)?
+        };
         if observation != identity_probe.observation {
             revalidate_frozen_prefix(
                 &source_path,
@@ -145,6 +149,7 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
                 &identity_probe.observation,
                 identity_probe.complete_prefix_end,
                 super::super::prefix_digest(&identity_probe.prefix_hasher),
+                identity_probe.mutable_first_record,
             )?;
             identity_probe.observation = observation.clone();
         }
@@ -395,7 +400,11 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
 
     pub(super) fn open_for_scan(&self) -> JsonlResult<(Self, Arc<OpenedProviderSourceFile<E>>), E> {
         let opened = self.authority.open_file(&self.authority_path)?;
-        let current = if self.freeze_observation_at_scan {
+        let mutable_first_record = self
+            .identity_probe
+            .as_ref()
+            .and_then(|probe| probe.mutable_first_record);
+        let current = if self.freeze_observation_at_scan || mutable_first_record.is_some() {
             observe_opened_file_allow_append(&self.source_path, &opened)?
         } else {
             observe_opened_file(&self.source_path, &opened)?
@@ -412,7 +421,9 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
         let change_time_only = self.observation.differs_only_by_change_identity(&current);
         if !change_time_only
             && (self.whole_record
-                || current.length() <= self.observation.length()
+                || current.length() < self.observation.length()
+                || (current.length() == self.observation.length()
+                    && mutable_first_record.is_none())
                 || !self.observation.admits_frozen_prefix_in(&current))
         {
             return Err(E::source_changed());
@@ -433,6 +444,7 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
                 &probe.observation,
                 probe.complete_prefix_end,
                 super::super::prefix_digest(&probe.prefix_hasher),
+                probe.mutable_first_record,
             )?;
             probe.observation = current;
         }
