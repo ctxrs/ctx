@@ -8,16 +8,18 @@ Entries below describe the behavior of their dated historical releases. A
 feature recorded here may no longer be part of the current product surface.
 See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
-## Unreleased
+## 2.4.1
+
+Released: 2026-11-05
 
 ### Fixed
 
-- `ctx status` no longer briefly reports a stale daemon lock while the daemon is starting or updating it.
-- Broad multi-word searches run faster on large histories while returning the same best matches.
+- Broad multi-word searches run about 40 to 50 percent faster on large histories and return the same best matches.
+- While background indexing catches Blame up with newer history, Blame tells you to check `ctx status` and retry instead of starting another full import.
 - Retrying an interrupted search index rebuild removes abandoned build files before starting again, while keeping searchable history and files still in use.
-- While background indexing catches Blame up with newer history, Blame tells you to check status and retry instead of starting another full import.
-- Importing a Pi folder with `--path` keeps healthy sessions when a neighboring file is unreadable, is not a session, or is a symlink, and reports the problem file.
-- Cline SDK imports keep previously imported sessions and report a failure when a session catalog cannot be read.
+- `ctx status` no longer briefly reports a stale daemon lock while the daemon is starting or updating it.
+- Importing a folder with `--path` keeps healthy sessions when a neighboring file can't be read, and reports the problem file. This covers Pi, Claude Code, Codex and Prime Agent. Pi also skips files that aren't sessions and symlinks.
+- Cline SDK imports keep previously imported sessions and report a failure when a session catalog can't be read.
 
 ## 2.4.0
 
