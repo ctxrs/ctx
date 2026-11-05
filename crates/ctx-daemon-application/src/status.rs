@@ -99,9 +99,15 @@ pub(super) fn prepare_daemon_status<'a>(
     let lock_state = lock_pid.map(process_state);
     let lock_reports_running =
         pid_lock_file_reports_running(&lock_path, lock_state, status.as_str());
+    // With no live metadata PID, only a held advisory guard can report running.
+    // A replacement may hold it while the previous owner's JSON is still visible.
+    let owner_identity_pending = lock_reports_running
+        && !terminal_lifecycle
+        && (lock_value.is_none()
+            || lock_state == Some(ctx_daemon_runtime::ProcessState::NotRunning));
     let owner_identity = lock_value
         .as_ref()
-        .filter(|_| lock_reports_running)
+        .filter(|_| lock_reports_running && !owner_identity_pending)
         .map(|identity| {
             identity
                 .get("binary")
@@ -113,9 +119,7 @@ pub(super) fn prepare_daemon_status<'a>(
     let owner_identity_matches = match &owner_identity {
         Some(Ok(matches)) => Some(*matches),
         Some(Err(_)) => None,
-        // An older writer can still be publishing after the bounded read retry.
-        // A held guard with no complete identity is unverified, not a mismatch.
-        None if lock_reports_running && lock_value.is_none() && !terminal_lifecycle => None,
+        None if owner_identity_pending => None,
         None => Some(false),
     };
     let owner_inspection_denied = owner_identity.as_ref().is_some_and(|identity| {
@@ -123,9 +127,10 @@ pub(super) fn prepare_daemon_status<'a>(
             .as_ref()
             .is_err_and(|error| error.is::<ctx_daemon_runtime::ProcessExecutableInspectionDenied>())
     });
-    let owner_identity_unavailable = lock_reports_running
-        && owner_identity_matches.is_none()
-        && lock_state != Some(ctx_daemon_runtime::ProcessState::NotRunning);
+    let owner_identity_unavailable = owner_identity_pending
+        || (lock_reports_running
+            && owner_identity_matches.is_none()
+            && lock_state != Some(ctx_daemon_runtime::ProcessState::NotRunning));
     #[cfg(target_os = "linux")]
     let endpoint_verified = owner_identity
         .as_ref()
