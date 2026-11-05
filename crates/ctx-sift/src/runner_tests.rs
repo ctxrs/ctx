@@ -123,13 +123,30 @@ mod unix {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    fn is_start_marker(line: &[u8]) -> bool {
+        // Serial libtest prefixes the marker with the test name. Its
+        // parallel scheduler prints the test result separately.
+        line.strip_prefix(b"test runner_tests::unix::runner_entry ... ")
+            .unwrap_or(line)
+            == MARKER
+    }
+
+    #[test]
+    fn start_marker_accepts_only_expected_prefix() {
+        assert!(is_start_marker(b"RUNNER-START\n"));
+        assert!(is_start_marker(
+            b"test runner_tests::unix::runner_entry ... RUNNER-START\n"
+        ));
+        assert!(!is_start_marker(b"UNRELATED-DIAGNOSTIC RUNNER-START\n"));
+    }
+
     fn start_lines(child: &mut Child) -> BufReader<std::process::ChildStdout> {
         let mut reader = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         loop {
             line.clear();
             assert_ne!(reader.read_line(&mut line).unwrap(), 0);
-            if line.as_bytes() == MARKER {
+            if is_start_marker(line.as_bytes()) {
                 return reader;
             }
         }
@@ -508,14 +525,18 @@ mod unix {
 
     #[test]
     fn cancellation_escalates_when_child_ignores_signal() {
-        let mut child = command(&["python3", "-c", "import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print(os.getpid(),flush=True); time.sleep(60)"], false).spawn().unwrap();
-        let mut reader = start_lines(&mut child);
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        let pid: i32 = line.trim().parse().unwrap();
-        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
-        assert_eq!(finish(&mut child).code(), Some(143));
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        for threads in [1, 2] {
+            let mut child = command(&["python3", "-c", "import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print(os.getpid(),flush=True); time.sleep(60)"], false)
+                .arg(format!("--test-threads={threads}"))
+                .spawn().unwrap();
+            let mut reader = start_lines(&mut child);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let pid: i32 = line.trim().parse().unwrap();
+            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+            assert_eq!(finish(&mut child).code(), Some(143));
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        }
     }
 
     #[test]
