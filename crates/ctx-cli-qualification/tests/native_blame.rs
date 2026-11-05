@@ -688,3 +688,136 @@ fn claude_primary_records_in_a_file_with_sidechain_records_still_attribute() {
     imported_commit_case("claude", "primary_mixed_sidechain");
     imported_commit_case("claude", "primary_explicit_false");
 }
+
+#[cfg(unix)]
+mod daemon_teardown {
+    use super::*;
+    use std::io::Read;
+    use std::process::{Child, Command as StdCommand, Stdio};
+
+    struct ReleasedChild(Child);
+
+    impl Drop for ReleasedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for released daemon teardown"]
+    fn released_child() {
+        std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
+    }
+
+    fn fixture() -> (TempDir, PathBuf, PathBuf, ReleasedChild) {
+        let temp = tempdir();
+        let root = data_root(&temp);
+        let binary = std::env::current_exe().unwrap();
+        let child = ReleasedChild(
+            StdCommand::new(&binary)
+                .args(["--exact", "daemon_teardown::released_child", "--ignored"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        fs::create_dir_all(root.join("daemon")).unwrap();
+        fs::write(
+            root.join("daemon/daemon.lock"),
+            json!({"released": true, "pid": child.0.id(), "owner_id": "test-owner",
+                "data_root": root, "binary": binary})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(root.join("daemon/query-endpoint.json"), "{}").unwrap();
+        (temp, root, binary, child)
+    }
+
+    #[test]
+    fn waits_for_released_process_before_removing_artifacts() {
+        for replace_lock in [false, true] {
+            let (temp, root, binary, mut child) = fixture();
+            std::thread::scope(|scope| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (temp, root, binary) = (&temp, &root, &binary);
+                scope.spawn(move || {
+                    tx.send(stop_test_owned_daemon_for_binary(temp, root, binary, None))
+                        .unwrap();
+                });
+                // Hold the released process alive until cleanup has had a
+                // chance to wait. No sleep in the child controls this race.
+                let early = rx.recv_timeout(Duration::from_millis(150));
+                assert!(child.0.try_wait().unwrap().is_none());
+                let lock = root.join("daemon/daemon.lock");
+                assert!(lock.exists());
+                assert!(root.join("daemon/query-endpoint.json").exists());
+                let replacement = b"{\"owner_id\":\"replacement\",\"released\":false}";
+                if replace_lock {
+                    fs::write(&lock, replacement).unwrap();
+                }
+                drop(child.0.stdin.take());
+                // Reap before waiting for cleanup, including on systems where
+                // kill(pid, 0) succeeds for zombies.
+                assert!(child.0.wait().unwrap().success());
+                assert!(
+                    matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+                    "cleanup returned while the released process was alive: {early:?}"
+                );
+                let result = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                if replace_lock {
+                    assert!(result.unwrap_err().contains("lock changed during teardown"));
+                    assert_eq!(fs::read(&lock).unwrap(), replacement);
+                    assert!(root.join("daemon/query-endpoint.json").exists());
+                } else {
+                    result.unwrap();
+                    assert!(!lock.exists());
+                    assert!(!root.join("daemon/query-endpoint.json").exists());
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn live_released_process_times_out_without_removing_artifacts() {
+        let (temp, root, binary, mut child) = fixture();
+        let lock = root.join("daemon/daemon.lock");
+        let before = fs::read(&lock).unwrap();
+        let started = Instant::now();
+        let error = stop_test_owned_daemon_for_binary(&temp, &root, &binary, None).unwrap_err();
+        assert!(error.contains("still identifies a live process"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "cleanup signaled the child"
+        );
+        assert_eq!(fs::read(&lock).unwrap(), before);
+        assert!(root.join("daemon/query-endpoint.json").exists());
+    }
+
+    #[test]
+    fn released_lock_identity_mismatches_preserve_artifacts() {
+        let (temp, root, binary, mut child) = fixture();
+        let lock = root.join("daemon/daemon.lock");
+        let original: Value = serde_json::from_slice(&fs::read(&lock).unwrap()).unwrap();
+        for (field, wrong, message) in [
+            (
+                "data_root",
+                temp.path().to_path_buf(),
+                "does not match test root",
+            ),
+            ("binary", lock.clone(), "is not the test copy"),
+        ] {
+            let mut value = original.clone();
+            value[field] = json!(wrong);
+            let bytes = serde_json::to_vec(&value).unwrap();
+            fs::write(&lock, &bytes).unwrap();
+            let error = stop_test_owned_daemon_for_binary(&temp, &root, &binary, None).unwrap_err();
+            assert!(error.contains(message), "{error}");
+            assert_eq!(fs::read(&lock).unwrap(), bytes);
+            assert!(root.join("daemon/query-endpoint.json").exists());
+            assert!(child.0.try_wait().unwrap().is_none());
+        }
+    }
+}

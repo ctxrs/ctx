@@ -786,11 +786,16 @@ fn remove_released_test_daemon_artifacts(
         if value["pid"]
             .as_u64()
             .and_then(|pid| u32::try_from(pid).ok())
-            .is_some_and(process_is_running)
+            // PidFileLock::drop publishes release before the process exits.
+            // Only wait after verifying the test's root and executable.
+            .is_some_and(|pid| !wait_for_process_exit(pid, DAEMON_STOP_TIMEOUT))
         {
             return Err(format!(
                 "released daemon lock still identifies a live process: {value:#}"
             ));
+        }
+        if fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
+            return Err("daemon lock changed during teardown; refusing cleanup".into());
         }
     }
     remove_test_daemon_artifacts(daemon_data_root)
