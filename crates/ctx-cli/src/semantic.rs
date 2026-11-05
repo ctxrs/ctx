@@ -1,7 +1,7 @@
 //! Final-binary composition for daemon and semantic adapters.
 
 mod attribution_status;
-pub(crate) use attribution_status::upgrade_blame_diagnostic;
+pub(crate) use attribution_status::maintenance_blame_diagnostic;
 
 use std::env;
 use std::sync::{

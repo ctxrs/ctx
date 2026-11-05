@@ -1,3 +1,5 @@
+#[path = "offline_default/attribution_catchup.rs"]
+mod attribution_catchup;
 #[path = "offline_default/attribution_upgrade.rs"]
 mod attribution_upgrade;
 #[path = "offline_default/schema_upgrade.rs"]
@@ -292,6 +294,15 @@ fn spawn_isolated_source_refresh_daemon(
     data_root: &Path,
     environment: &IsolatedProcessEnvironment,
 ) -> OfflineSourceRefreshDaemon {
+    spawn_isolated_daemon(temp, data_root, environment, false)
+}
+
+fn spawn_isolated_daemon(
+    temp: &TempDir,
+    data_root: &Path,
+    environment: &IsolatedProcessEnvironment,
+    finite: bool,
+) -> OfflineSourceRefreshDaemon {
     bind_test_ctx_binary(temp);
     let prepared = isolated_local_command(temp, data_root, environment);
     let mut command = StdCommand::new(prepared.get_program());
@@ -311,6 +322,11 @@ fn spawn_isolated_source_refresh_daemon(
         .env("CTX_DAEMON_MODE", "source-refresh-only")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    if finite {
+        command
+            .arg("--finite-core-worker")
+            .env("CTX_DAEMON_BACKGROUND_CHILD", "1");
+    }
     let child = command
         .spawn()
         .unwrap_or_else(|error| panic!("start isolated analytics daemon: {error}"));

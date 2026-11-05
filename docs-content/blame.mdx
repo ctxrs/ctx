@@ -75,8 +75,11 @@ valid result. Missing local Git objects or ambiguous repository identity can
 limit attribution even when history search works.
 
 The daemon catches up the derived `search/attribution/` index after startup and
-Core publication. If Blame reports indexing is pending, run `ctx import --all`
-or `ctx setup --wait`. In manual indexing mode, these commands complete
+Core publication. While admitted rebuild or catch-up work runs on a responsive
+daemon, Blame reports a retryable diagnostic and directs you to `ctx status`.
+Retry when it finishes. When automatic maintenance is unavailable or has failed,
+run `ctx import --all` or `ctx setup --wait` after resolving any reported failure.
+In manual indexing mode, these commands complete
 attribution in the caller, including when Core history has not changed.
 `ctx setup --no-daemon` suppresses this refresh. Status, doctor, and index
 wait/watch only observe it.

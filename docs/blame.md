@@ -96,17 +96,21 @@ Status reports active work separately from the last committed index's readiness.
 Source counters count completed sources in this pass; changes count accepted
 additions, replacements and deletions, not every record in retained history.
 
-After an upgrade, automatic maintenance can rebuild Blame while history remains
-searchable. When that work is admitted and the daemon is responsive, Blame reports
+Automatic maintenance can rebuild Blame after an upgrade or catch up with newly
+imported history while search remains available. When that work is admitted and
+the daemon is responsive, Blame diagnostics report
 `error`/`error_code: "rebuilding"`, `retryable: true`, optional progress, and
 `next_action: {"kind":"check_status","argv":["ctx","status"]}`. Check status
 and retry Blame when it finishes; no full import is needed alongside the rebuild.
 Status reports `attribution.status: "rebuilding"` while committed
-`currentness` remains `needs_rebuild`.
+`currentness` remains `needs_rebuild` after an upgrade or `stale` during catch-up.
+Successful commit-Blame results with `freshness.state: "stale_committed"` remain
+available unchanged. Negative results stay retryable until catch-up can determine
+whether the newer history contains evidence.
 
 In manual mode, with Blame indexing disabled, or when maintenance has failed or
-is unavailable, the existing `needs_rebuild` wording and `ctx import --all`
-advice remain. Status shows a worker failure when the daemon can report it;
+is unavailable or stopped, the existing `needs_rebuild` or `stale_source` wording
+and `ctx import --all` advice remain. Status shows a worker failure when the daemon can report it;
 resolve that failure before retrying import or `ctx setup --wait`. A completed
 index can still have no evidence for the requested code.
 
