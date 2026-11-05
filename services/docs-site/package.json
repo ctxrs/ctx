@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "pnpm@10.34.9",
   "scripts": {
     "generate:content": "node node_modules/tsx/dist/cli.mjs scripts/build-content.ts",
     "dev": "pnpm generate:content && vite",
