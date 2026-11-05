@@ -14,6 +14,7 @@ fn dense_top_k_measurement() {
     dense_measurement(800_000, true, "message");
     dense_measurement(800_000, true, "tool_output");
     dense_measurement(3_000_000, true, "message");
+    dense_measurement(3_000_000, true, "tool_output");
 }
 
 fn dense_measurement(count: u64, measure: bool, event_type: &str) {

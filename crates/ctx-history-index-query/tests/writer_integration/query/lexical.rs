@@ -1323,8 +1323,8 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
     let simultaneous = index.maximum_simultaneous_manual_postings_for_test();
     assert_eq!(
         simultaneous,
-        LEXICAL_QUERY_LIMITS.maximum_unique_tokens + 2,
-        "one segment retains 32 body, one discovery, and one class posting"
+        LEXICAL_QUERY_LIMITS.maximum_unique_tokens + 1,
+        "one segment retains 32 body and one discovery posting; its class is constant"
     );
     assert_eq!(
         batch.counters.posting_opens,
