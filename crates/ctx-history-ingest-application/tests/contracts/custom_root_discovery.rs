@@ -936,3 +936,6 @@ fn wait_for_projection(temp: &TempDir, report: &Value) {
 #[cfg(unix)]
 #[path = "custom_root_discovery/import_failures.rs"]
 mod import_failures;
+
+#[path = "custom_root_discovery/pi_file_isolation.rs"]
+mod pi_file_isolation;

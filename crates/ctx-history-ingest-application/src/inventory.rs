@@ -7,10 +7,14 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use ctx_history_refresh::explicit_source_path_symlink_metadata;
 use ctx_history_source_io::{
-    inventory_provider_regular_paths, observe_ordinary_file, provider_regular_file_len,
-    OrdinaryFileObservation, ProviderJsonlInventoryLimits,
+    inventory_provider_regular_paths_with_file_errors, is_provider_source_unavailable_io,
+    observe_ordinary_file, provider_regular_file_len, OrdinaryFileObservation,
+    ProviderJsonlInventoryLimits, SourceIoError,
 };
 use sha2::{Digest, Sha256};
+
+#[cfg(test)]
+mod tests;
 
 /// Bounded, provider-neutral source observation facts. The token is an
 /// observation aid only; refresh remains the sole authority for publication.
@@ -89,23 +93,59 @@ fn source_stats_with_inventory_limits(
     if !metadata.file_type().is_dir() {
         return Ok(stats);
     }
-    let inventory = inventory_provider_regular_paths(path, limits)
+    let mut unobserved_files = false;
+    let inventory =
+        inventory_provider_regular_paths_with_file_errors(path, limits, &mut |entry, error| {
+            account_unreadable_file(&mut stats, entry, error)?;
+            unobserved_files = true;
+            Ok(())
+        })
         .with_context(|| format!("inventory import source directory {}", path.display()))?;
     for entry in inventory.into_paths() {
-        if contributes_to_revision(&entry) {
-            let observation = observe_ordinary_file(&entry)
-                .with_context(|| format!("observe import source file {}", entry.display()))?;
-            add_observation(&mut stats, &mut entries, path, &entry, &observation);
+        let result = if contributes_to_revision(&entry) {
+            observe_ordinary_file(&entry).map(|observation| {
+                add_observation(&mut stats, &mut entries, path, &entry, &observation);
+            })
         } else {
-            stats.files += 1;
-            stats.bytes = stats.bytes.saturating_add(
-                provider_regular_file_len(&entry)
-                    .with_context(|| format!("stat import source file {}", entry.display()))?,
-            );
+            provider_regular_file_len(&entry).map(|bytes| {
+                stats.files += 1;
+                stats.bytes = stats.bytes.saturating_add(bytes);
+            })
+        };
+        if let Err(error) = result {
+            account_unreadable_file(&mut stats, &entry, error)
+                .with_context(|| format!("observe import source file {}", entry.display()))?;
+            unobserved_files = true;
         }
     }
-    stats.change_token = Some(source_change_token(entries));
+    stats.change_token = (!unobserved_files).then(|| source_change_token(entries));
     Ok(stats)
+}
+
+fn account_unreadable_file(
+    stats: &mut SourceStats,
+    path: &Path,
+    error: SourceIoError,
+) -> ctx_history_source_io::Result<()> {
+    let permission_denied = match &error {
+        SourceIoError::Io(source) => source.kind() == std::io::ErrorKind::PermissionDenied,
+        SourceIoError::SystemIo { operation, source } => {
+            is_provider_source_unavailable_io(operation, source)
+        }
+        _ => false,
+    };
+    if !permission_denied {
+        return Err(error);
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() {
+        return Err(error);
+    }
+    // Accounting must not preempt the provider's file-local diagnostics,
+    // last-good retention, or retry policy. Never mint a partial change token.
+    stats.files += 1;
+    stats.bytes = stats.bytes.saturating_add(metadata.len());
+    Ok(())
 }
 
 fn contributes_to_revision(path: &Path) -> bool {
