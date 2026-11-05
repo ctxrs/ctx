@@ -34,6 +34,45 @@ pub fn write_private_json_file(path: &Path, value: &Value) -> Result<()> {
     write_private_json_file_with_permissions(path, value, secure_private_file_permissions)
 }
 
+/// Only call while holding the exclusive guard for this publication path.
+pub(crate) fn remove_abandoned_private_json_temps(path: &Path) -> Result<()> {
+    let prefix = path.with_extension("json.");
+    let Some(prefix) = prefix.file_name() else {
+        return Ok(());
+    };
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    for entry in fs::read_dir(parent.unwrap_or_else(|| Path::new(".")))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .as_encoded_bytes()
+            .strip_prefix(prefix.as_encoded_bytes())
+        else {
+            continue;
+        };
+        let Some((pid, sequence)) = std::str::from_utf8(suffix)
+            .ok()
+            .and_then(|suffix| suffix.strip_suffix(".tmp"))
+            .and_then(|suffix| suffix.split_once('.'))
+        else {
+            continue;
+        };
+        // Match the decimal PID and sequence emitted by the writer.
+        let decimal =
+            |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+        if decimal(pid) && decimal(sequence) && entry.file_type()?.is_file() {
+            match fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("remove abandoned process lock metadata"),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_private_json_file_with_permissions(
     path: &Path,
     value: &Value,
@@ -68,6 +107,8 @@ fn write_private_json_file_with_permissions(
         let _ = fs::remove_file(&tmp_path);
         return Err(error);
     }
+    #[cfg(test)]
+    tests::before_replace(path);
     if let Err(error) = replace_private_file(&tmp_path, path)
         .with_context(|| format!("replace private status file {}", path.display()))
     {
@@ -227,4 +268,4 @@ pub fn read_daemon_job_status_strict(path: &Path) -> Result<Option<Value>> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

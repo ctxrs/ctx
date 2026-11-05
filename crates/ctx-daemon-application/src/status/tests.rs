@@ -9,6 +9,8 @@ use ctx_daemon_service::daemon_core_refresh_job_path;
 use super::*;
 use crate::{DaemonApplication, TestHost};
 
+mod publication;
+
 #[test]
 fn stale_heartbeat_is_reported_without_revoking_live_ownership() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;

@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use ctx_daemon_runtime::{
     daemon_lock_path, daemon_owner_metadata_identity_matches, daemon_root_path, daemon_status_path,
-    pid_lock_file_is_orphaned, pid_lock_file_reports_running, process_state, read_daemon_status,
-    read_pid_lock_file, read_pid_lock_json,
+    pid_from_lock_json, pid_lock_file_is_orphaned, pid_lock_file_reports_running, process_state,
+    read_daemon_status, read_pid_lock_json,
 };
 use ctx_daemon_service::daemon_wakeup_report;
 use serde_json::{json, Value};
@@ -90,17 +90,24 @@ pub(super) fn prepare_daemon_status<'a>(
     let lock_path = daemon_lock_path(data_root);
     let status_path = daemon_status_path(data_root);
     let lock_value = read_pid_lock_json(&lock_path);
-    let lock_pid = read_pid_lock_file(&lock_path);
+    let lock_pid = lock_value.as_ref().and_then(pid_from_lock_json);
     let mut status = status_value
         .as_ref()
         .and_then(|value| json_string(value, "status"))
         .unwrap_or_else(|| "unknown".to_owned());
+    let terminal_lifecycle = ["completed", "stopped", "failed"].contains(&status.as_str());
     let lock_state = lock_pid.map(process_state);
     let lock_reports_running =
         pid_lock_file_reports_running(&lock_path, lock_state, status.as_str());
+    // With no live metadata PID, only a held advisory guard can report running.
+    // A replacement may hold it while the previous owner's JSON is still visible.
+    let owner_identity_pending = lock_reports_running
+        && !terminal_lifecycle
+        && (lock_value.is_none()
+            || lock_state == Some(ctx_daemon_runtime::ProcessState::NotRunning));
     let owner_identity = lock_value
         .as_ref()
-        .filter(|_| lock_reports_running)
+        .filter(|_| lock_reports_running && !owner_identity_pending)
         .map(|identity| {
             identity
                 .get("binary")
@@ -112,6 +119,7 @@ pub(super) fn prepare_daemon_status<'a>(
     let owner_identity_matches = match &owner_identity {
         Some(Ok(matches)) => Some(*matches),
         Some(Err(_)) => None,
+        None if owner_identity_pending => None,
         None => Some(false),
     };
     let owner_inspection_denied = owner_identity.as_ref().is_some_and(|identity| {
@@ -119,9 +127,10 @@ pub(super) fn prepare_daemon_status<'a>(
             .as_ref()
             .is_err_and(|error| error.is::<ctx_daemon_runtime::ProcessExecutableInspectionDenied>())
     });
-    let owner_identity_unavailable = lock_reports_running
-        && owner_identity_matches.is_none()
-        && lock_state != Some(ctx_daemon_runtime::ProcessState::NotRunning);
+    let owner_identity_unavailable = owner_identity_pending
+        || (lock_reports_running
+            && owner_identity_matches.is_none()
+            && lock_state != Some(ctx_daemon_runtime::ProcessState::NotRunning));
     #[cfg(target_os = "linux")]
     let endpoint_verified = owner_identity
         .as_ref()
@@ -149,8 +158,8 @@ pub(super) fn prepare_daemon_status<'a>(
     let running =
         lock_reports_running && (owner_identity_matches == Some(true) || endpoint_verified);
     let stale_lock = lock_path.exists() && pid_lock_file_is_orphaned(&lock_path);
-    let stale_lock_overrides_lifecycle = (stale_lock || owner_identity_mismatch)
-        && !["completed", "stopped", "failed"].contains(&status.as_str());
+    let stale_lock_overrides_lifecycle =
+        (stale_lock || owner_identity_mismatch) && !terminal_lifecycle;
     let stale_running_status = !running && !owner_identity_unavailable && status == "running";
     if running {
         status = "running".to_owned();

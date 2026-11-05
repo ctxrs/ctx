@@ -1,6 +1,5 @@
 use std::{
     fs,
-    io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process,
     time::{Duration, SystemTime},
@@ -14,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     create_private_dir_all, current_daemon_lock_identity_with_hash, daemon_lock_path,
     daemon_root_path, private_create_new_lock_file, private_open_existing_lock_file, process_state,
-    secure_private_file_permissions, ProcessState,
+    secure_private_file_permissions, write_private_json_file, ProcessState,
 };
 
 pub const DAEMON_LOCK_STALE_AFTER_MS: i64 = 25 * 60 * 60 * 1_000;
@@ -22,6 +21,8 @@ pub const PID_LOCK_INCOMPLETE_GRACE: Duration = Duration::from_secs(30);
 pub const PID_LOCK_PROTOCOL: &str = "advisory-v1";
 pub const PID_LOCK_ACQUIRE_ATTEMPTS: usize = 20;
 pub const PID_LOCK_ACQUIRE_RETRY: Duration = Duration::from_millis(2);
+const PID_LOCK_READ_ATTEMPTS: usize = 20;
+const PID_LOCK_READ_RETRY: Duration = Duration::from_millis(2);
 
 pub struct DaemonLock {
     _inner: PidFileLock,
@@ -118,6 +119,8 @@ impl PidFileLock {
             let _ = fs2::FileExt::unlock(&guard);
             return Ok(None);
         }
+        // The exclusive guard proves no other publisher for this path is active.
+        crate::private_json::remove_abandoned_private_json_temps(path)?;
         if !publish_pid_lock_metadata(path, &payload)? {
             let _ = fs2::FileExt::unlock(&guard);
             return Ok(None);
@@ -158,11 +161,16 @@ pub fn open_or_create_pid_lock_file(path: &Path) -> std::io::Result<(fs::File, b
 
 pub fn publish_pid_lock_metadata(path: &Path, payload: &Value) -> Result<bool> {
     for attempt in 0..3 {
-        let (mut file, created) = open_or_create_pid_lock_file(path)
-            .with_context(|| format!("open ctx process lock metadata {}", path.display()))?;
-        secure_private_file_permissions(path)?;
-        let previous = (!created).then(|| read_pid_lock_json(path)).flatten();
-        if !created
+        // Ownership is held on the separate, stable .guard inode. Never create
+        // or truncate the published metadata: even older readers must see a
+        // complete JSON record, including the released handshake.
+        let exists = match private_open_existing_lock_file(path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error).context("open ctx process lock metadata"),
+        };
+        let previous = exists.then(|| read_pid_lock_json(path)).flatten();
+        if exists
             && !previous
                 .as_ref()
                 .is_some_and(pid_lock_uses_advisory_protocol)
@@ -170,7 +178,7 @@ pub fn publish_pid_lock_metadata(path: &Path, payload: &Value) -> Result<bool> {
         {
             return Ok(false);
         }
-        write_pid_lock_json(&mut file, payload)
+        write_private_json_file(path, payload)
             .with_context(|| format!("publish ctx process lock metadata {}", path.display()))?;
         if pid_lock_path_has_owner(path, payload) {
             return Ok(true);
@@ -412,17 +420,28 @@ pub fn read_pid_lock_file(path: &Path) -> Option<u32> {
 }
 
 pub fn read_pid_lock_json(path: &Path) -> Option<Value> {
-    let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    read_pid_lock_json_with_retry(path, || std::thread::sleep(PID_LOCK_READ_RETRY))
 }
 
-pub fn write_pid_lock_json(file: &mut fs::File, value: &Value) -> Result<()> {
-    file.set_len(0)?;
-    file.seek(SeekFrom::Start(0))?;
-    serde_json::to_writer(&mut *file, value)?;
-    file.write_all(b"\n")?;
-    file.flush()?;
-    Ok(())
+fn read_pid_lock_json_with_retry(path: &Path, mut wait: impl FnMut()) -> Option<Value> {
+    for attempt in 0..PID_LOCK_READ_ATTEMPTS {
+        let text = fs::read_to_string(path).ok()?;
+        match serde_json::from_str(&text) {
+            Ok(value) => return Some(value),
+            // Released writers before atomic publication truncate and stream
+            // this file. Retry their incomplete records only while a guard is
+            // held; a dead writer must still be observable as stale.
+            Err(error)
+                if error.is_eof()
+                    && attempt + 1 < PID_LOCK_READ_ATTEMPTS
+                    && observe_pid_advisory_guard(path) == Some(true) =>
+            {
+                wait();
+            }
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 pub fn pid_from_lock_json(value: &Value) -> Option<u32> {
@@ -455,8 +474,44 @@ fn json_i64(value: &Value, key: &str) -> Option<i64> {
 }
 
 #[cfg(test)]
+mod publication_tests;
+
+#[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
+
+    #[test]
+    fn reads_retry_an_incomplete_older_writer_but_remain_bounded() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("daemon.lock");
+        // Model the unchanged advisory-v1 guard used by released writers.
+        let guard = private_create_new_lock_file(&pid_lock_guard_path(&path))?;
+        fs2::FileExt::try_lock_exclusive(&guard)?;
+        let payload = pid_lock_payload(json!({}));
+        for incomplete in [b"".as_slice(), b"{\"pid\":"] {
+            fs::write(&path, incomplete)?;
+            let mut waits = 0;
+            let value = read_pid_lock_json_with_retry(&path, || {
+                waits += 1;
+                // Complete an old-style in-place publication between reads.
+                fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+            });
+            assert_eq!(value, Some(payload.clone()));
+            assert_eq!(waits, 1);
+        }
+        fs::write(&path, b"{")?;
+        let mut waits = 0;
+        assert_eq!(read_pid_lock_json_with_retry(&path, || waits += 1), None);
+        assert_eq!(waits, PID_LOCK_READ_ATTEMPTS - 1);
+        fs2::FileExt::unlock(&guard)?;
+        assert_eq!(
+            read_pid_lock_json_with_retry(&path, || panic!("unheld guard must not retry")),
+            None,
+        );
+        Ok(())
+    }
 
     #[test]
     fn windows_lock_violation_is_lock_contention_for_acquisition_and_observation() {

@@ -2,6 +2,18 @@ use super::*;
 use ctx_history_platform::platform_security::{verify_private_directory, verify_private_file};
 use serde_json::json;
 
+thread_local! {
+    pub(crate) static BEFORE_REPLACE: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+}
+
+pub(super) fn before_replace(path: &Path) {
+    BEFORE_REPLACE.with(|hook| {
+        if let Some(hook) = hook.get() {
+            hook(path);
+        }
+    });
+}
+
 fn isolated_root() -> Result<tempfile::TempDir> {
     #[cfg(target_os = "linux")]
     let parent = std::path::PathBuf::from("/tmp");
