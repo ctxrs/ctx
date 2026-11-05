@@ -129,7 +129,9 @@ mod unix {
         loop {
             line.clear();
             assert_ne!(reader.read_line(&mut line).unwrap(), 0);
-            if line.as_bytes() == MARKER {
+            // Serial libtest prefixes this line with "test ... ". Its
+            // parallel scheduler prints the test result separately.
+            if line.as_bytes().ends_with(MARKER) {
                 return reader;
             }
         }
@@ -508,14 +510,18 @@ mod unix {
 
     #[test]
     fn cancellation_escalates_when_child_ignores_signal() {
-        let mut child = command(&["python3", "-c", "import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print(os.getpid(),flush=True); time.sleep(60)"], false).spawn().unwrap();
-        let mut reader = start_lines(&mut child);
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        let pid: i32 = line.trim().parse().unwrap();
-        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
-        assert_eq!(finish(&mut child).code(), Some(143));
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        for threads in [1, 2] {
+            let mut child = command(&["python3", "-c", "import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print(os.getpid(),flush=True); time.sleep(60)"], false)
+                .arg(format!("--test-threads={threads}"))
+                .spawn().unwrap();
+            let mut reader = start_lines(&mut child);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let pid: i32 = line.trim().parse().unwrap();
+            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+            assert_eq!(finish(&mut child).code(), Some(143));
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        }
     }
 
     #[test]
