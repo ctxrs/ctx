@@ -168,7 +168,10 @@ fn released_230_blame_upgrade_reports_retryable_maintenance_and_recovers() {
     drop(daemon);
 }
 
-fn prepare_projection(data_root: &Path, environment: &IsolatedProcessEnvironment) -> String {
+pub(super) fn prepare_projection(
+    data_root: &Path,
+    environment: &IsolatedProcessEnvironment,
+) -> String {
     fs::create_dir(data_root).unwrap();
     #[cfg(unix)]
     {
