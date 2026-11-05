@@ -50,6 +50,7 @@ function graphqlResponse(dataset, rows) {
 }
 
 function liveFetch({
+  environment = "staging",
   backlog = 0,
   dlqBacklog = 0,
   operations = [{
@@ -58,19 +59,23 @@ function liveFetch({
     dimensions: {actionType: "DeleteMessage", outcome: "success"},
   }],
   concurrency = 1,
+  backlogRows = [{avg: {messages: backlog, bytes: backlog * 20}}],
+  concurrencyRows = [{avg: {concurrency}}],
   primaryOldestAgeSeconds = backlog > 0 ? 600 : 0,
 } = {}) {
+  const workerName = environment === "prod" ? "ctx-telemetry" : "ctx-telemetry-staging";
+  const queueName = `ctx-telemetry-ingest-${environment}`;
   const calls = [];
   const queues = [
     {
       queue_id: "primary-id",
-      queue_name: "ctx-telemetry-ingest-staging",
+      queue_name: queueName,
       settings: {message_retention_period: 345600, delivery_paused: false},
-      producers: [{script_name: "ctx-telemetry-staging"}],
+      producers: [{script_name: workerName}],
     },
     {
       queue_id: "dlq-id",
-      queue_name: "ctx-telemetry-ingest-staging-dlq",
+      queue_name: `${queueName}-dlq`,
       settings: {message_retention_period: 345600, delivery_paused: false},
       producers: [],
     },
@@ -81,28 +86,28 @@ function liveFetch({
     if (parsed.pathname.endsWith("/graphql")) {
       const body = JSON.parse(init.body);
       if (body.query.includes("queueBacklogAdaptiveGroups")) {
-        return graphqlResponse("queueBacklogAdaptiveGroups", [{avg: {messages: backlog, bytes: 20}}]);
+        return graphqlResponse("queueBacklogAdaptiveGroups", backlogRows);
       }
       if (body.query.includes("queueConsumerMetricsAdaptiveGroups")) {
-        return graphqlResponse("queueConsumerMetricsAdaptiveGroups", [{avg: {concurrency}}]);
+        return graphqlResponse("queueConsumerMetricsAdaptiveGroups", concurrencyRows);
       }
       return graphqlResponse("queueMessageOperationsAdaptiveGroups", operations);
     }
     if (parsed.pathname.endsWith("/queues")) return response(queues, {total_pages: 1});
     if (parsed.pathname.endsWith("/workers/scripts")) {
-      return response([{id: "ctx-telemetry-staging", handlers: ["fetch", "scheduled", "queue"]}], {total_pages: 1});
+      return response([{id: workerName, handlers: ["fetch", "scheduled", "queue"]}], {total_pages: 1});
     }
-    if (parsed.pathname.endsWith("/workers/scripts/ctx-telemetry-staging/settings")) {
+    if (parsed.pathname.endsWith(`/workers/scripts/${workerName}/settings`)) {
       return response({bindings: [{
         type: "queue",
         name: "TELEMETRY_INGEST_QUEUE",
-        queue_name: "ctx-telemetry-ingest-staging",
+        queue_name: queueName,
       }]});
     }
     if (parsed.pathname.endsWith("/queues/primary-id/consumers")) {
       return response([{
-        script_name: "ctx-telemetry-staging",
-        dead_letter_queue: "ctx-telemetry-ingest-staging-dlq",
+        script_name: workerName,
+        dead_letter_queue: `${queueName}-dlq`,
         settings: {batch_size: 10, max_wait_time_ms: 5000, max_retries: 10, max_concurrency: 4},
       }]);
     }
@@ -306,6 +311,8 @@ test("summarizes the exact GraphQL Queue fields used for alerting", () => {
       },
     ],
   }), {
+    sample_status: "sampled",
+    sample_counts: {backlog: 1, concurrency: 1, operations: 2},
     backlog_average_messages: 2,
     backlog_average_bytes: 30,
     consumer_concurrency_max: 4,
@@ -387,4 +394,106 @@ test("fails closed for missing metric samples", () => {
     }),
     /no samples/u,
   );
+});
+
+async function runFixture(live, {environment = "staging", phase = "publication"} = {}) {
+  return runQueueGate({
+    argv: ["--environment", environment, "--phase", phase, "--sample-interval-seconds", "0"],
+    env: {CLOUDFLARE_ACCOUNT_ID: "account", CLOUDFLARE_API_TOKEN: "token"},
+    fetchImpl: live.fetchImpl,
+    readConfig: async ({env}) => config(env),
+    now: () => NOW,
+    sleep: async () => {},
+  });
+}
+
+test("accepts idle staging with empty operations and independently empty queue metrics", async () => {
+  for (const backlogRows of [[], [{avg: {messages: 0, bytes: 0}}]]) {
+    for (const phase of ["publication", "ongoing"]) {
+      const live = liveFetch({operations: [], concurrency: 0, backlogRows});
+      const result = await runFixture(live, {phase});
+      assert.equal(result.exitCode, 0);
+      assert.deepEqual(result.receipt.alerts, []);
+      const metrics = result.receipt.samples[0].environments[0].metrics.graphql;
+      assert.equal(metrics.sample_status, "idle_staging");
+      assert.deepEqual(metrics.sample_counts, {backlog: backlogRows.length, concurrency: 1, operations: 0});
+      assert.equal(metrics.backlog_average_messages, backlogRows.length ? 0 : null);
+      assert.equal(metrics.consumer_concurrency_max, 0);
+      for (const field of ["lag_milliseconds_max", "retry_count_max", "failed_operations", "dlq_outcomes"]) {
+        assert.equal(metrics[field], null, field);
+      }
+      assert(live.calls.every(({url, init}) => init.method === "GET"
+        || (url.endsWith("/graphql") && JSON.parse(init.body).query.startsWith("query "))));
+    }
+  }
+});
+
+test("empty staging operations fail closed without complete idle evidence", async () => {
+  for (const change of [
+    {backlog: 1},
+    {dlqBacklog: 1},
+    {primaryOldestAgeSeconds: 1},
+    {concurrency: 1},
+    {concurrencyRows: []},
+    {concurrencyRows: [{avg: {concurrency: null}}]},
+    {concurrencyRows: [{avg: {concurrency: 0}}, {avg: {concurrency: 1}}]},
+    {backlogRows: [{avg: {messages: 1, bytes: 0}}]},
+    {backlogRows: [{avg: {messages: 0, bytes: 1}}]},
+    {backlogRows: [{avg: {messages: null, bytes: 0}}]},
+  ]) {
+    await assert.rejects(runFixture(liveFetch({operations: [], concurrency: 0, backlogRows: [], ...change})),
+      /no samples|metric is invalid/u, JSON.stringify(change));
+  }
+});
+
+test("idle staging never substitutes missing, malformed, or failed metric responses", async () => {
+  const datasets = ["queueBacklogAdaptiveGroups", "queueConsumerMetricsAdaptiveGroups", "queueMessageOperationsAdaptiveGroups"];
+  for (const dataset of datasets) {
+    for (const rows of [undefined, null, {}, [null], [{avg: {}}]]) {
+      const live = liveFetch({operations: [], concurrency: 0, backlogRows: []});
+      const fetchImpl = async (url, init) => url.endsWith("/graphql") && JSON.parse(init.body).query.includes(dataset)
+        ? graphqlResponse(dataset, rows) : live.fetchImpl(url, init);
+      await assert.rejects(runFixture({fetchImpl}), /complete rows|invalid|no samples/u);
+    }
+    const live = liveFetch({operations: [], concurrency: 0, backlogRows: []});
+    const fetchImpl = async (url, init) => url.endsWith("/graphql") && JSON.parse(init.body).query.includes(dataset)
+      ? {ok: true, json: async () => ({errors: [{message: "analytics unavailable"}]})}
+      : live.fetchImpl(url, init);
+    await assert.rejects(runFixture({fetchImpl}), /GraphQL .* failed/u);
+  }
+  for (const queue of ["primary-id", "dlq-id"]) {
+    for (const field of ["backlog_count", "backlog_bytes", "oldest_message_timestamp_ms"]) {
+      for (const value of [undefined, null, "", -1]) {
+        const live = liveFetch({operations: [], concurrency: 0, backlogRows: []});
+        const fetchImpl = async (url, init) => url.endsWith(`/queues/${queue}/metrics`)
+          ? response({backlog_count: 0, backlog_bytes: 0, oldest_message_timestamp_ms: 0, [field]: value})
+          : live.fetchImpl(url, init);
+        await assert.rejects(runFixture({fetchImpl}), /Queue metrics are incomplete/u);
+      }
+    }
+  }
+});
+
+test("production still requires nonempty samples from every metric dataset", async () => {
+  for (const change of [{operations: []}, {backlogRows: []}, {concurrencyRows: []}]) {
+    const live = liveFetch({environment: "prod", concurrency: 0, ...change});
+    await assert.rejects(runFixture(live, {environment: "prod"}), /no samples/u);
+  }
+});
+
+test("healthy production passes ongoing health but publication still requires an empty queue", async () => {
+  const active = liveFetch({environment: "prod", backlog: 100, concurrency: 2, primaryOldestAgeSeconds: 20});
+  const ongoing = await runFixture(active, {environment: "prod", phase: "ongoing"});
+  assert.equal(ongoing.exitCode, 0);
+  assert.equal(ongoing.receipt.samples[0].environments[0].metrics.graphql.sample_status, "sampled");
+  const publication = await runFixture(active, {environment: "prod"});
+  assert.equal(publication.exitCode, 1);
+  assert.deepEqual(publication.receipt.failures, ["prod:publication-requires-empty-primary-and-dlq"]);
+  const empty = await runFixture(liveFetch({environment: "prod"}), {environment: "prod"});
+  assert.equal(empty.exitCode, 0);
+});
+
+test("rollback continues to require nonempty samples even for idle staging", async () => {
+  await assert.rejects(runFixture(liveFetch({operations: [], concurrency: 0, backlogRows: []}),
+    {phase: "rollback"}), /no samples/u);
 });
