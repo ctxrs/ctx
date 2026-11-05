@@ -119,6 +119,8 @@ impl PidFileLock {
             let _ = fs2::FileExt::unlock(&guard);
             return Ok(None);
         }
+        // The exclusive guard proves no other publisher for this path is active.
+        crate::private_json::remove_abandoned_private_json_temps(path)?;
         if !publish_pid_lock_metadata(path, &payload)? {
             let _ = fs2::FileExt::unlock(&guard);
             return Ok(None);
@@ -470,6 +472,9 @@ pub fn unknown_process_lock_reports_running(
 fn json_i64(value: &Value, key: &str) -> Option<i64> {
     value.get(key).and_then(Value::as_i64)
 }
+
+#[cfg(test)]
+mod publication_tests;
 
 #[cfg(test)]
 mod tests {

@@ -85,6 +85,9 @@ fn concurrent_lock_publication_keeps_legacy_reads_and_status_consistent() -> any
     // record. These one-shot reads deliberately do not use the new retry path.
     while !root.join("ready").exists() {
         assert_child_running(&mut child.0, deadline)?;
+        let status = report(&root, false, None);
+        assert_ne!(status["status"], "stale_lock", "{status}");
+        assert_eq!(status["recoverable"], false, "{status}");
         match fs::read(&path) {
             Ok(bytes) => {
                 let _: Value = serde_json::from_slice(&bytes)?;
@@ -125,6 +128,36 @@ fn concurrent_lock_publication_keeps_legacy_reads_and_status_consistent() -> any
     assert_eq!(released["released"], true);
     assert_eq!(observe_pid_advisory_guard(&path), Some(false));
     assert!(DaemonLock::acquire_for_finite_worker(&root)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn current_reader_spans_guard_acquisition_through_first_publication() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    create_private_dir_all(&ctx_daemon_runtime::daemon_root_path(root))?;
+    let path = daemon_lock_path(root);
+    let mut payload = ctx_daemon_runtime::current_daemon_lock_identity(root)?;
+    payload["persistent"] = json!(false);
+    assert_ne!(report(root, false, None)["status"], "stale_lock");
+    let guard = private_create_new_lock_file(&pid_lock_guard_path(&path))?;
+    assert_ne!(report(root, false, None)["status"], "stale_lock");
+    assert!(ctx_daemon_runtime::try_lock_pid_file(&guard)?);
+    // Hold the exact first-publication state deterministically: the guard is
+    // owned, but the new metadata has not been renamed into place yet.
+    assert!(!path.exists());
+    for _ in 0..32 {
+        let status = report(root, false, None);
+        assert_eq!(status["status"], "unverified", "{status}");
+        assert_eq!(status["recoverable"], false);
+        assert!(status.get("live_pid").is_none());
+    }
+    assert!(DaemonLock::acquire_for_finite_worker(root)?.is_none());
+    assert!(publish_pid_lock_metadata(&path, &payload)?);
+    let published = report(root, false, None);
+    assert_eq!(published["status"], "running", "{published}");
+    assert_eq!(published["recoverable"], false);
+    assert_eq!(published["live_pid"], process::id());
     Ok(())
 }
 
