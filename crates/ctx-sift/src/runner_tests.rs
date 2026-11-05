@@ -123,15 +123,30 @@ mod unix {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    fn is_start_marker(line: &[u8]) -> bool {
+        // Serial libtest prefixes the marker with the test name. Its
+        // parallel scheduler prints the test result separately.
+        line.strip_prefix(b"test runner_tests::unix::runner_entry ... ")
+            .unwrap_or(line)
+            == MARKER
+    }
+
+    #[test]
+    fn start_marker_accepts_only_expected_prefix() {
+        assert!(is_start_marker(b"RUNNER-START\n"));
+        assert!(is_start_marker(
+            b"test runner_tests::unix::runner_entry ... RUNNER-START\n"
+        ));
+        assert!(!is_start_marker(b"UNRELATED-DIAGNOSTIC RUNNER-START\n"));
+    }
+
     fn start_lines(child: &mut Child) -> BufReader<std::process::ChildStdout> {
         let mut reader = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         loop {
             line.clear();
             assert_ne!(reader.read_line(&mut line).unwrap(), 0);
-            // Serial libtest prefixes this line with "test ... ". Its
-            // parallel scheduler prints the test result separately.
-            if line.as_bytes().ends_with(MARKER) {
+            if is_start_marker(line.as_bytes()) {
                 return reader;
             }
         }
