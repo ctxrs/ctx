@@ -939,3 +939,6 @@ mod import_failures;
 
 #[path = "custom_root_discovery/pi_file_isolation.rs"]
 mod pi_file_isolation;
+
+#[path = "custom_root_discovery/cline_sdk_catalogs.rs"]
+mod cline_sdk_catalogs;
