@@ -565,6 +565,47 @@ fn one_malformed_catalog_recovers_from_the_other_valid_catalog() {
     assert_eq!(from_index.leaves[0].provider_session_id, "from-index");
 }
 
+#[cfg(unix)]
+#[test]
+fn unavailable_catalog_is_a_typed_error_even_with_a_readable_peer() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for blocked_name in [INDEX_PATH, DATABASE_PATH] {
+        let fixture = Fixture::new();
+        fixture.write_index(single_index("from-index", "model"));
+        fixture
+            .open_database()
+            .execute(
+                "INSERT INTO sessions (session_id) VALUES ('from-database')",
+                [],
+            )
+            .unwrap();
+        let before = discover_cline_sdk_tree(&fixture.provider_root, &fixture.ctx_root).unwrap();
+        assert_eq!(before.leaves.len(), 2);
+        let blocked = fixture.provider_root.join(blocked_name);
+        let permissions = fs::metadata(&blocked).unwrap().permissions();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let access = fs::read(&blocked);
+        let result = discover_cline_sdk_tree(&fixture.provider_root, &fixture.ctx_root);
+        fs::set_permissions(&blocked, permissions).unwrap();
+        // Privileged runners cannot exercise permission denial.
+        if access.is_ok() {
+            return;
+        }
+        assert_eq!(
+            access.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(matches!(
+            result,
+            Err(ClineSdkError::SourceIo(ctx_history_source_io::SourceIoError::Io(error)))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        let repaired = discover_cline_sdk_tree(&fixture.provider_root, &fixture.ctx_root).unwrap();
+        assert_eq!(repaired.leaves, before.leaves);
+    }
+}
+
 #[test]
 fn sqlite_catalog_materialization_is_aggregate_bounded_and_skips_unused_columns() {
     let unused_fixture = Fixture::new();
