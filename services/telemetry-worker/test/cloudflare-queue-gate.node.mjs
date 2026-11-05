@@ -9,6 +9,7 @@ import {
 } from "../scripts/cloudflare-queue-gate.mjs";
 
 const NOW = Date.parse("2026-09-01T16:00:00.000Z");
+const CONCURRENCY_DIMENSIONS = {queueId: "primary-id", datetimeMinute: "2026-09-01T15:59:00Z"};
 
 function config(environment, overrides = {}) {
   const suffix = environment === "prod" ? "prod" : "staging";
@@ -60,7 +61,7 @@ function liveFetch({
   }],
   concurrency = 1,
   backlogRows = [{avg: {messages: backlog, bytes: backlog * 20}}],
-  concurrencyRows = [{avg: {concurrency}}],
+  concurrencyRows = [{avg: {concurrency}, dimensions: {...CONCURRENCY_DIMENSIONS}}],
   primaryOldestAgeSeconds = backlog > 0 ? 600 : 0,
 } = {}) {
   const workerName = environment === "prod" ? "ctx-telemetry" : "ctx-telemetry-staging";
@@ -396,13 +397,13 @@ test("fails closed for missing metric samples", () => {
   );
 });
 
-async function runFixture(live, {environment = "staging", phase = "publication"} = {}) {
+async function runFixture(live, {environment = "staging", phase = "publication", now = NOW} = {}) {
   return runQueueGate({
     argv: ["--environment", environment, "--phase", phase, "--sample-interval-seconds", "0"],
     env: {CLOUDFLARE_ACCOUNT_ID: "account", CLOUDFLARE_API_TOKEN: "token"},
     fetchImpl: live.fetchImpl,
     readConfig: async ({env}) => config(env),
-    now: () => NOW,
+    now: () => now,
     sleep: async () => {},
   });
 }
@@ -435,8 +436,8 @@ test("empty staging operations fail closed without complete idle evidence", asyn
     {primaryOldestAgeSeconds: 1},
     {concurrency: 1},
     {concurrencyRows: []},
-    {concurrencyRows: [{avg: {concurrency: null}}]},
-    {concurrencyRows: [{avg: {concurrency: 0}}, {avg: {concurrency: 1}}]},
+    {concurrencyRows: [{avg: {concurrency: null}, dimensions: CONCURRENCY_DIMENSIONS}]},
+    {concurrencyRows: [0, 1].map((concurrency) => ({avg: {concurrency}, dimensions: CONCURRENCY_DIMENSIONS}))},
     {backlogRows: [{avg: {messages: 1, bytes: 0}}]},
     {backlogRows: [{avg: {messages: 0, bytes: 1}}]},
     {backlogRows: [{avg: {messages: null, bytes: 0}}]},
@@ -496,4 +497,76 @@ test("healthy production passes ongoing health but publication still requires an
 test("rollback continues to require nonempty samples even for idle staging", async () => {
   await assert.rejects(runFixture(liveFetch({operations: [], concurrency: 0, backlogRows: []}),
     {phase: "rollback"}), /no samples/u);
+});
+
+function changePayload(live, matches, mutate) {
+  return {fetchImpl: async (url, init) => {
+    const response = await live.fetchImpl(url, init);
+    if (!matches(url, init)) return response;
+    const payload = structuredClone(await response.json());
+    return {...response, json: async () => mutate(payload)};
+  }};
+}
+
+test("idle staging rejects error-bearing or malformed GraphQL and REST error envelopes", async () => {
+  const datasets = ["queueBacklogAdaptiveGroups", "queueConsumerMetricsAdaptiveGroups", "queueMessageOperationsAdaptiveGroups"];
+  const malformedErrors = [{message: "unavailable"}, {length: 0}, "", false, 0, [null], [{message: "unavailable"}]];
+  for (const dataset of datasets) {
+    for (const errors of malformedErrors) {
+      const live = liveFetch({operations: [], backlogRows: [], concurrency: 0});
+      await assert.rejects(runFixture(changePayload(live,
+        (url, init) => url.endsWith("/graphql") && JSON.parse(init.body).query.includes(dataset),
+        (payload) => ({...payload, errors}))), /GraphQL .* failed/u);
+    }
+  }
+  for (const queue of ["primary-id", "dlq-id"]) {
+    for (const errors of [null, ...malformedErrors]) {
+      const live = liveFetch({operations: [], backlogRows: [], concurrency: 0});
+      await assert.rejects(runFixture(changePayload(live,
+        (url) => url.endsWith(`/queues/${queue}/metrics`),
+        (payload) => ({...payload, errors}))), /Cloudflare rejected/u);
+    }
+  }
+});
+
+test("idle staging accepts absent or empty errors and GraphQL null errors", async () => {
+  for (const errors of [undefined, null, []]) {
+    const live = liveFetch({operations: [], backlogRows: [], concurrency: 0});
+    const result = await runFixture(changePayload(live, () => true, (payload) => ({
+      ...payload,
+      errors: payload.success === true && errors === null ? [] : errors,
+    })));
+    assert.equal(result.exitCode, 0);
+  }
+});
+
+test("idle staging requires every concurrency sample to identify the requested queue and lookback", async () => {
+  const invalidDimensions = [
+    undefined, null, {},
+    {...CONCURRENCY_DIMENSIONS, queueId: "another-queue"},
+    ...[undefined, null, 0, "", "not-a-time", "2020-01-01T00:00:00Z",
+      "2026-09-01T15:44:00Z", "2026-09-01T16:01:00Z", "2026-09-01T15:59:30Z"]
+      .map((datetimeMinute) => ({...CONCURRENCY_DIMENSIONS, datetimeMinute})),
+  ];
+  for (const dimensions of invalidDimensions) {
+    for (const rows of [
+      [{avg: {concurrency: 0}, dimensions}],
+      [{avg: {concurrency: 0}, dimensions: CONCURRENCY_DIMENSIONS}, {avg: {concurrency: 0}, dimensions}],
+    ]) {
+      const live = liveFetch({operations: [], backlogRows: [], concurrencyRows: rows});
+      await assert.rejects(runFixture(live), /invalid sample dimensions/u);
+    }
+  }
+});
+
+test("concurrency samples may use the minute buckets overlapping either end of the lookback", async () => {
+  for (const now of [NOW, NOW + 30_000]) {
+    const live = liveFetch({operations: [], backlogRows: [], concurrencyRows: [
+      {avg: {concurrency: 0}, dimensions: {queueId: "primary-id", datetimeMinute: "2026-09-01T15:45:00Z"}},
+      {avg: {concurrency: 0}, dimensions: {queueId: "primary-id", datetimeMinute: "2026-09-01T16:00:00.000Z"}},
+    ]});
+    const result = await runFixture(live, {now});
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.receipt.samples[0].environments[0].metrics.graphql.sample_counts.concurrency, 2);
+  }
 });

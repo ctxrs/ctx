@@ -194,8 +194,12 @@ export async function readDesiredQueueInventory({
 }
 
 function cloudflareEnvelope(payload, endpoint) {
-  if (!payload || payload.success !== true || payload.result === undefined) {
-    const detail = payload?.errors?.map((error) => error.message).filter(Boolean).join("; ");
+  const errors = payload?.errors;
+  if (!payload || payload.success !== true || payload.result === undefined
+    || (errors !== undefined && (!Array.isArray(errors) || errors.length > 0))) {
+    const detail = Array.isArray(errors)
+      ? errors.map((error) => error?.message).filter((message) => typeof message === "string").join("; ")
+      : "";
     throw new Error(`Cloudflare rejected ${endpoint}${detail ? `: ${detail}` : ""}`);
   }
   return payload;
@@ -217,7 +221,9 @@ async function cloudflareRequest({fetchImpl, token, endpoint, method = "GET", bo
     throw new Error(`Cloudflare ${endpoint} returned non-JSON HTTP ${response.status}`);
   }
   if (!response.ok) {
-    const detail = payload?.errors?.map((error) => error.message).filter(Boolean).join("; ");
+    const detail = Array.isArray(payload?.errors)
+      ? payload.errors.map((error) => error?.message).filter((message) => typeof message === "string").join("; ")
+      : "";
     throw new Error(`Cloudflare ${endpoint} returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
   }
   return cloudflareEnvelope(payload, endpoint);
@@ -252,11 +258,15 @@ async function graphqlRows({fetchImpl, token, accountId, query, dataset, queueId
     }),
   });
   const payload = await response.json();
-  if (!response.ok || payload.errors?.length) {
-    const detail = payload.errors?.map((error) => error.message).join("; ");
+  const errors = payload?.errors;
+  // Cloudflare GraphQL uses null as well as an absent errors field on success.
+  if (!response.ok || (errors != null && (!Array.isArray(errors) || errors.length > 0))) {
+    const detail = Array.isArray(errors)
+      ? errors.map((error) => error?.message).filter((message) => typeof message === "string").join("; ")
+      : "";
     throw new Error(`Cloudflare GraphQL ${dataset} failed${detail ? `: ${detail}` : ""}`);
   }
-  const accounts = payload.data?.viewer?.accounts;
+  const accounts = payload?.data?.viewer?.accounts;
   if (!Array.isArray(accounts) || accounts.length !== 1) {
     throw new Error(`Cloudflare GraphQL ${dataset} returned an unexpected account result`);
   }
@@ -265,6 +275,19 @@ async function graphqlRows({fetchImpl, token, accountId, query, dataset, queueId
     !Array.isArray(rows)
     || rows.some((row) => !row || typeof row !== "object" || Array.isArray(row))
   ) throw new Error(`Cloudflare GraphQL ${dataset} did not return complete rows`);
+  if (dataset === "queueConsumerMetricsAdaptiveGroups") {
+    // A datetimeMinute bucket can start before the requested interval while
+    // still overlapping it. Require every sample to belong to this queue/window.
+    const firstMinute = Math.floor(Date.parse(start) / 60_000) * 60_000;
+    const lastMinute = Math.floor(Date.parse(end) / 60_000) * 60_000;
+    if (rows.some((row) => {
+      const dimensions = row.dimensions;
+      const minute = typeof dimensions?.datetimeMinute === "string"
+        ? Date.parse(dimensions.datetimeMinute) : NaN;
+      return dimensions?.queueId !== queueId || !Number.isFinite(minute)
+        || minute % 60_000 !== 0 || minute < firstMinute || minute > lastMinute;
+    })) throw new Error(`Cloudflare GraphQL ${dataset} returned invalid sample dimensions`);
+  }
   return rows;
 }
 
