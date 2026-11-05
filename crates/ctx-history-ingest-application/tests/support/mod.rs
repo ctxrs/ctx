@@ -33,7 +33,7 @@ mod runner;
 pub(crate) use analytics::*;
 pub(crate) use assertions::*;
 pub(crate) use daemon::{daemon_test_root, wait_for_test_lexical_projection};
-pub(crate) use fixtures::provider_core_counts;
+pub(crate) use fixtures::{provider_core_counts, provider_core_records};
 pub(crate) use history_plugins::*;
 pub(crate) use mcp::*;
 pub(crate) use native_directory_fixtures::{

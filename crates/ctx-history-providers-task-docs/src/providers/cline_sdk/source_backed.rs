@@ -294,13 +294,19 @@ fn route_error(error: ClineSdkError) -> SourceBackedRouteError {
         | ClineSdkError::SourceIo(SourceIoError::SourceChangedDuringCapture) => {
             SourceBackedRouteErrorKind::SourceChanged
         }
-        ClineSdkError::Io(error) | ClineSdkError::SourceIo(SourceIoError::Io(error))
+        ClineSdkError::Io(error)
+        | ClineSdkError::SourceIo(SourceIoError::Io(error))
+        | ClineSdkError::SqliteIo(ctx_history_source_sqlite::SqliteIoError::Io(error))
             if matches!(
                 error.kind(),
                 io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
             ) =>
         {
-            SourceBackedRouteErrorKind::SourceChanged
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                SourceBackedRouteErrorKind::Unavailable
+            } else {
+                SourceBackedRouteErrorKind::SourceChanged
+            }
         }
         _ => SourceBackedRouteErrorKind::InvalidSource,
     };

@@ -205,7 +205,7 @@ pub fn inventory_provider_jsonl_paths(
     root: &Path,
     limits: ProviderJsonlInventoryLimits,
 ) -> Result<ProviderJsonlInventory> {
-    inventory_provider_paths(root, limits, path_is_jsonl)
+    inventory_provider_paths(root, limits, path_is_jsonl, &mut |_, error| Err(error))
 }
 
 /// Inventories every regular file under one provider source without recursive
@@ -215,13 +215,27 @@ pub fn inventory_provider_regular_paths(
     root: &Path,
     limits: ProviderJsonlInventoryLimits,
 ) -> Result<ProviderJsonlInventory> {
-    inventory_provider_paths(root, limits, |_| true)
+    inventory_provider_regular_paths_with_file_errors(root, limits, &mut |_, error| Err(error))
+}
+
+/// Inventories regular files with caller-owned handling of file-open errors.
+///
+/// Only errors for known regular children reach the callback. Root, directory,
+/// enumeration, and inventory-limit failures remain fatal. Links are skipped
+/// without traversal, just as in [`inventory_provider_regular_paths`].
+pub fn inventory_provider_regular_paths_with_file_errors(
+    root: &Path,
+    limits: ProviderJsonlInventoryLimits,
+    file_error: &mut dyn FnMut(&Path, SourceIoError) -> Result<()>,
+) -> Result<ProviderJsonlInventory> {
+    inventory_provider_paths(root, limits, |_| true, file_error)
 }
 
 fn inventory_provider_paths(
     root: &Path,
     limits: ProviderJsonlInventoryLimits,
     is_eligible: impl Fn(&Path) -> bool,
+    file_error: &mut dyn FnMut(&Path, SourceIoError) -> Result<()>,
 ) -> Result<ProviderJsonlInventory> {
     let mut state = ProviderJsonlInventoryState::new(limits);
     state.admit_metadata_entry()?;
@@ -267,6 +281,10 @@ fn inventory_provider_paths(
                     if is_symlink_source_rejection(&error)
                         || is_non_regular_source_rejection(&error) =>
                 {
+                    continue;
+                }
+                Err(error) if fs::symlink_metadata(&path)?.is_file() => {
+                    file_error(&path, error)?;
                     continue;
                 }
                 Err(error) => return Err(error),

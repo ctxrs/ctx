@@ -190,6 +190,45 @@ fn regular_provider_inventory_is_format_neutral_while_jsonl_inventory_is_narrow(
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn inventory_file_error_callback_cannot_contain_directory_or_root_failures() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let blocked = temp.path().join("blocked.jsonl");
+    fs::write(&blocked, b"{}\n").unwrap();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&blocked).is_ok() {
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o600)).unwrap();
+        return;
+    }
+    let mut rejected = Vec::new();
+    let mut contain = |path: &std::path::Path, _error| {
+        rejected.push(path.to_path_buf());
+        Ok(())
+    };
+    let limits = ProviderJsonlInventoryLimits::default();
+    let files =
+        super::inventory_provider_regular_paths_with_file_errors(temp.path(), limits, &mut contain)
+            .unwrap();
+    assert!(files.paths().is_empty());
+    assert!(inventory_provider_regular_paths(temp.path(), limits).is_err());
+    assert!(super::inventory_provider_regular_paths_with_file_errors(
+        &blocked,
+        limits,
+        &mut contain,
+    )
+    .is_err());
+    fs::remove_file(&blocked).unwrap();
+    fs::create_dir(&blocked).unwrap();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+    let result =
+        super::inventory_provider_regular_paths_with_file_errors(temp.path(), limits, &mut contain);
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.is_err());
+    assert_eq!(rejected, vec![blocked]);
+}
+
 #[test]
 fn regular_provider_inventory_applies_file_and_metadata_limits_to_non_jsonl_sources() {
     let temp = crate::test_support_paths::tempdir().unwrap();

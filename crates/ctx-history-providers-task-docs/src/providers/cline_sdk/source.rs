@@ -171,10 +171,10 @@ impl CatalogAttempt {
         }
     }
 
-    fn invalid(domain: &[u8], evidence: Option<[u8; 32]>, error: ClineSdkError) -> Self {
+    fn invalid(domain: &[u8], evidence: [u8; 32], error: ClineSdkError) -> Self {
         Self {
             rows: None,
-            fence: catalog_fence(domain, 2, evidence),
+            fence: catalog_fence(domain, 2, Some(evidence)),
             error: Some(error),
             present: true,
         }
@@ -186,8 +186,10 @@ pub(super) fn discover_cline_sdk_tree(
     data_root: &Path,
 ) -> Result<ClineSdkTreeSnapshot> {
     let authority = ProviderSourceRoot::open(root)?;
-    let mut index = read_index_catalog(&authority);
-    let mut database = read_database_catalog(&authority, data_root);
+    // Membership is the union of both catalogs. An unavailable catalog cannot
+    // certify the absence of sessions that only it names.
+    let mut index = read_index_catalog(&authority)?;
+    let mut database = read_database_catalog(&authority, data_root)?;
     if index.rows.is_none() && database.rows.is_none() {
         if !index.present && !database.present {
             return Err(ClineSdkError::MissingCatalog);
@@ -239,17 +241,16 @@ pub(super) fn discover_cline_sdk_tree(
     })
 }
 
-fn read_index_catalog(authority: &ProviderSourceRoot) -> CatalogAttempt {
-    let bytes = match read_optional_bytes(authority, Path::new(INDEX_PATH), MAX_INDEX_BYTES) {
-        Ok(Some((bytes, _))) => bytes,
-        Ok(None) => return CatalogAttempt::missing(INDEX_FENCE_DOMAIN),
-        Err(error) => return CatalogAttempt::invalid(INDEX_FENCE_DOMAIN, None, error),
+fn read_index_catalog(authority: &ProviderSourceRoot) -> Result<CatalogAttempt> {
+    let Some((bytes, _)) = read_optional_bytes(authority, Path::new(INDEX_PATH), MAX_INDEX_BYTES)?
+    else {
+        return Ok(CatalogAttempt::missing(INDEX_FENCE_DOMAIN));
     };
     let evidence = Sha256::digest(&bytes).into();
-    match parse_index_catalog(&bytes) {
+    Ok(match parse_index_catalog(&bytes) {
         Ok(rows) => CatalogAttempt::valid(INDEX_FENCE_DOMAIN, evidence, rows),
-        Err(error) => CatalogAttempt::invalid(INDEX_FENCE_DOMAIN, Some(evidence), error),
-    }
+        Err(error) => CatalogAttempt::invalid(INDEX_FENCE_DOMAIN, evidence, error),
+    })
 }
 
 fn parse_index_catalog(bytes: &[u8]) -> Result<BTreeMap<String, Value>> {
@@ -287,32 +288,26 @@ fn parse_index_catalog(bytes: &[u8]) -> Result<BTreeMap<String, Value>> {
     Ok(rows)
 }
 
-fn read_database_catalog(authority: &ProviderSourceRoot, data_root: &Path) -> CatalogAttempt {
-    let main_evidence = match open_optional_evidence(authority, Path::new(DATABASE_PATH)) {
-        Ok(Some(evidence)) => evidence,
-        Ok(None) => return CatalogAttempt::missing(DATABASE_FENCE_DOMAIN),
-        Err(error) => return CatalogAttempt::invalid(DATABASE_FENCE_DOMAIN, None, error),
+fn read_database_catalog(
+    authority: &ProviderSourceRoot,
+    data_root: &Path,
+) -> Result<CatalogAttempt> {
+    let Some(main_evidence) = open_optional_evidence(authority, Path::new(DATABASE_PATH))? else {
+        return Ok(CatalogAttempt::missing(DATABASE_FENCE_DOMAIN));
     };
     let main_digest = file_evidence_digest(&main_evidence);
     let path = authority.named_path().join(DATABASE_PATH);
-    let connection = match open_provider_sqlite_readonly(data_root, &path) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return CatalogAttempt::invalid(DATABASE_FENCE_DOMAIN, Some(main_digest), error.into())
-        }
-    };
+    let connection = open_provider_sqlite_readonly(data_root, &path)?;
     let query_result = query_database_rows(&connection);
-    let finish_result = connection.finish();
-    let revision = match finish_result {
-        Ok(evidence) => database_evidence_digest(main_digest, *evidence.revision()),
-        Err(error) => {
-            return CatalogAttempt::invalid(DATABASE_FENCE_DOMAIN, Some(main_digest), error.into())
-        }
-    };
-    match query_result {
+    let evidence = connection.finish()?;
+    let revision = database_evidence_digest(main_digest, *evidence.revision());
+    Ok(match query_result {
         Ok(rows) => CatalogAttempt::valid(DATABASE_FENCE_DOMAIN, revision, rows),
-        Err(error) => CatalogAttempt::invalid(DATABASE_FENCE_DOMAIN, Some(revision), error),
-    }
+        Err(error @ ClineSdkError::Invalid(_)) => {
+            CatalogAttempt::invalid(DATABASE_FENCE_DOMAIN, revision, error)
+        }
+        Err(error) => return Err(error),
+    })
 }
 
 fn query_database_rows(connection: &Connection) -> Result<BTreeMap<String, Value>> {
