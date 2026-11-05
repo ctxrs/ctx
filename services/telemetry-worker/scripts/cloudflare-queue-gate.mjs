@@ -195,8 +195,9 @@ export async function readDesiredQueueInventory({
 
 function cloudflareEnvelope(payload, endpoint) {
   const errors = payload?.errors;
+  // Queue and consumer lists also return null errors on success.
   if (!payload || payload.success !== true || payload.result === undefined
-    || (errors !== undefined && (!Array.isArray(errors) || errors.length > 0))) {
+    || (errors != null && (!Array.isArray(errors) || errors.length > 0))) {
     const detail = Array.isArray(errors)
       ? errors.map((error) => error?.message).filter((message) => typeof message === "string").join("; ")
       : "";
@@ -322,12 +323,14 @@ export function summarizeGraphqlMetrics({
     row?.avg?.concurrency,
     "consumer.concurrency",
   ));
-  // Idle staging may have no backlog or operation samples. Require independent
-  // live evidence of emptiness; a missing dataset or failed query is never idle.
+  // Idle staging may have no samples at all, or sampled zero concurrency with
+  // no backlog or operations. Both require empty REST metrics. graphqlRows
+  // rejects missing datasets and failed queries before this idle check.
   const idleStaging = environment === "staging"
     && ["publication", "ongoing"].includes(phase)
     && operationRows.length === 0
-    && concurrency.length > 0 && concurrency.every((value) => value === 0)
+    && (concurrency.length > 0 || backlogRows.length === 0)
+    && concurrency.every((value) => value === 0)
     && backlogMessages.every((value) => value === 0)
     && backlogBytes.every((value) => value === 0)
     && [primaryMetrics, dlqMetrics].every((metrics) => metrics?.backlog_count === 0
@@ -372,7 +375,7 @@ export function summarizeGraphqlMetrics({
     sample_counts: {backlog: backlogRows.length, concurrency: concurrencyRows.length, operations: operationRows.length},
     backlog_average_messages: backlogMessages.length ? Math.max(...backlogMessages) : null,
     backlog_average_bytes: backlogBytes.length ? Math.max(...backlogBytes) : null,
-    consumer_concurrency_max: Math.max(...concurrency),
+    consumer_concurrency_max: concurrency.length ? Math.max(...concurrency) : null,
     lag_milliseconds_max: idleStaging ? null : Math.max(...lag),
     retry_count_max: idleStaging ? null : Math.max(...retries),
     failed_operations: idleStaging ? null : failedOperations,
@@ -683,7 +686,7 @@ export async function runQueueGate({
     samples,
     limitations: [
       "Queue REST metrics are best-effort and expose combined unacknowledged backlog, not ready and delayed sub-counts.",
-      "Idle staging requires empty primary/DLQ REST metrics, sampled zero concurrency, and no sampled backlog or operations. Unsampled metrics remain null; this is not an ingestion smoke or rollback drain proof.",
+      "Idle staging requires empty primary/DLQ REST metrics and either three explicit empty GraphQL datasets or sampled zero concurrency with zero sampled backlog and no operations. Topology checks still apply. Unsampled metrics remain null; this is not an ingestion smoke or rollback drain proof.",
       "Cloudflare Notifications exposes no native Queue alert type; a scheduler must alert on this command's non-zero exit.",
       "Rollback samples are drain observations only. They never authorize a Queue-less Worker while ingress can still enqueue; that transition requires a separately reviewed live producer fence retaining the compatible consumer.",
     ],
