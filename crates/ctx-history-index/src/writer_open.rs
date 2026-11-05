@@ -132,7 +132,9 @@ impl GenerationWriter {
                     .map(ActivePublicationAuthority::pointer),
             )?;
         let mut retained_generation_directories = Default::default();
-        if !pointer_requires_rebuild {
+        // Directory reclamation needs known pointer slots, not a reusable index
+        // schema. An opaque pointer cannot safely identify what must survive.
+        if !incompatible_active_present {
             loop {
                 let active_pointer_ref = active_authority
                     .as_ref()
@@ -143,6 +145,11 @@ impl GenerationWriter {
                     active_pointer_ref,
                     retention_lease.as_ref(),
                 )?;
+                if pointer_requires_rebuild {
+                    // Keep the old manifest closure intact without interpreting
+                    // an incompatible generation during source-backed rebuilding.
+                    break;
+                }
                 let mut retained_generation_ids = active_pointer_ref
                     .into_iter()
                     .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
@@ -185,10 +192,9 @@ impl GenerationWriter {
 
         let writer = (|| -> Result<Self> {
             let rebuild_marked = if pointer_requires_rebuild {
-                // The unsupported pointer remains the sole durable publication
+                // The old pointer remains the sole durable publication
                 // authority until a complete current candidate atomically replaces
-                // it. Its slots and manifests are intentionally not decoded or
-                // reclaimed during staging.
+                // it. Its referenced slots and manifests survive staging.
                 true
             } else if let Some(marker) = load_active_generation_rebuild_marker(&root)? {
                 if active_authority.as_ref().is_some_and(|authority| {
