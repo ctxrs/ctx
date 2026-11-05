@@ -13,6 +13,7 @@ See [Blame](/blame) and [Install](/getting-started/install) for current use.
 ### Fixed
 
 - Retrying an interrupted search index rebuild removes abandoned build files before starting again, while keeping searchable history and files still in use.
+- While background indexing catches Blame up with newer history, Blame tells you to check status and retry instead of starting another full import.
 - Importing a Pi folder with `--path` keeps healthy sessions when a neighboring file is unreadable, is not a session, or is a symlink, and reports the problem file.
 - Cline SDK imports keep previously imported sessions and report a failure when a session catalog cannot be read.
 

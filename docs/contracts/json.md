@@ -227,7 +227,7 @@ and advisory indexing observations:
 | `diagnostic` | Canonical Blame diagnostic for noncurrent state; omitted when absent. |
 | `indexing_enabled` | Effective `blame.enabled` configuration (default true); independent of committed readiness. |
 | `progress` | Active writer observation, or null when no writer is observed. |
-| `status` | `rebuilding` while automatic attribution work is admitted and its daemon is responsive; otherwise omitted. Committed `currentness` remains `needs_rebuild` during an upgrade. |
+| `status` | `rebuilding` while automatic attribution rebuild or catch-up work is admitted and its daemon is responsive; otherwise omitted. Committed `currentness` remains `needs_rebuild` during an upgrade or `stale` during catch-up. |
 | `maintenance` | Responsive daemon's attribution worker state (`idle`, `running`, `completed`, or `failed` with `error`); null when unavailable. |
 
 `progress` contains `phase` (`preparing`, `indexing`, `publishing`, briefly
@@ -251,8 +251,9 @@ facts remain queryable according to `availability`.
 
 `currentness: "current"` with `materialized_coverage: "empty"` or `"abstained"`
 is terminal and has no import/rebuild instruction. Availability may still be
-false because there is no usable evidence. During an automatic revision upgrade,
-admitted attribution work on a responsive daemon produces `error` and
+false because there is no usable evidence. During an automatic revision upgrade
+or catch-up to a newer Core publication, admitted attribution work on a responsive
+daemon produces `error` and
 `error_code: "rebuilding"`, `retryable: true`, and optional `progress` in both
 Blame CLI/MCP diagnostics and `attribution.diagnostic`. Its `next_action` is:
 
@@ -260,11 +261,13 @@ Blame CLI/MCP diagnostics and `attribution.diagnostic`. Its `next_action` is:
 { "kind": "check_status", "argv": ["ctx", "status"] }
 ```
 
-Retry Blame after the rebuild completes. A long-running pass or a worker waiting
-for the writer remains rebuilding; elapsed time does not indicate failure.
-Manual mode, disabled Blame indexing, failed work, and unavailable maintenance
-retain `needs_rebuild`, `retryable: false`, and the ordinary completion action
-under `diagnostic.next_action`:
+The diagnostic retains `reason: "projection_incompatible"` for an upgrade or
+`reason: "projection_stale"` for catch-up. Retry Blame after maintenance completes.
+A long-running pass or a worker waiting for the writer remains rebuilding;
+elapsed time does not indicate failure.
+Manual mode, disabled Blame indexing, failed work, and unavailable or stopped
+maintenance retain `needs_rebuild` or `stale_source`, `retryable: false`, and the
+ordinary completion action under `diagnostic.next_action`:
 
 ```json
 { "kind": "import_all", "argv": ["ctx", "import", "--all"] }
@@ -272,7 +275,8 @@ under `diagnostic.next_action`:
 
 An actual observation failure returns a canonical diagnostic at
 `attribution.error` while preserving the Core status report. A stale committed
-index may still answer a query with explicit freshness; readiness does not
+index may still answer a query with explicit freshness; successful `stale_committed`
+results remain unchanged during catch-up. Readiness does not
 silently deny that result. Reading status, doctor, or index progress does not
 import, schedule work, create an attribution root, or open legacy product data.
 
