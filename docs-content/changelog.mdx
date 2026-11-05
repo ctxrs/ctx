@@ -12,6 +12,7 @@ See [Blame](/blame) and [Install](/getting-started/install) for current use.
 
 ### Fixed
 
+- `ctx status` no longer occasionally reports a stale daemon lock while the daemon is updating it.
 - Retrying an interrupted search index rebuild removes abandoned build files before starting again, while keeping searchable history and files still in use.
 
 ## 2.4.0
