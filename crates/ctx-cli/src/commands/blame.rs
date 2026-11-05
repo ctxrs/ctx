@@ -66,7 +66,7 @@ fn query(
             Ok((result, previews))
         }
         Err(error) => {
-            let error = crate::semantic::upgrade_blame_diagnostic(data_root, error);
+            let error = crate::semantic::maintenance_blame_diagnostic(data_root, error);
             facts.failure = Some(BlameFailure {
                 class: failure_class(error.reason),
                 phase: BlameFailurePhase::Query,

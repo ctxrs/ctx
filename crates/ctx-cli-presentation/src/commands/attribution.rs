@@ -10,6 +10,7 @@ pub fn append_attribution(context: &RenderContext, document: &mut Document, repo
         .as_str()
         .or_else(|| attribution["currentness"].as_str())
     {
+        Some("rebuilding") if attribution["currentness"] == "stale" => "catching up with history",
         Some("rebuilding") => "rebuilding after upgrade",
         Some("current") => match attribution["materialized_coverage"].as_str() {
             Some("empty") => "ready; no indexed evidence",

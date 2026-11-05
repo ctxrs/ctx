@@ -715,13 +715,15 @@ agent sessions with citations, confidence, and explicit evidence limits.
 `--cursor` continues the same query. See [Blame](blame.md) for indexing,
 continuation, and the distinction between PR activity and code production.
 
-During an automatic upgrade rebuild, admitted work on a responsive daemon returns
+During an automatic upgrade rebuild or catch-up to newer history, admitted work
+on a responsive daemon returns
 `error`/`error_code: "rebuilding"`, `retryable: true`, optional `progress`, and
 `next_action: {"kind":"check_status","argv":["ctx","status"]}`. Retry Blame
 when it finishes. Status shows `attribution.status: "rebuilding"` alongside
-`currentness: "needs_rebuild"`. Manual mode, disabled Blame indexing, and failed
-or unavailable maintenance keep the existing `needs_rebuild` diagnostic and
-`ctx import --all` advice; status exposes the worker failure when available.
+`currentness: "needs_rebuild"` or `"stale"`. Successful `stale_committed` results
+remain unchanged. Manual mode, disabled Blame indexing, and failed, stopped,
+or unavailable maintenance keep the existing `needs_rebuild` or `stale_source`
+diagnostic and `ctx import --all` advice; status exposes the worker failure when available.
 
 ## Show
 
