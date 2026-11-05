@@ -194,8 +194,13 @@ export async function readDesiredQueueInventory({
 }
 
 function cloudflareEnvelope(payload, endpoint) {
-  if (!payload || payload.success !== true || payload.result === undefined) {
-    const detail = payload?.errors?.map((error) => error.message).filter(Boolean).join("; ");
+  const errors = payload?.errors;
+  // Queue and consumer lists also return null errors on success.
+  if (!payload || payload.success !== true || payload.result === undefined
+    || (errors != null && (!Array.isArray(errors) || errors.length > 0))) {
+    const detail = Array.isArray(errors)
+      ? errors.map((error) => error?.message).filter((message) => typeof message === "string").join("; ")
+      : "";
     throw new Error(`Cloudflare rejected ${endpoint}${detail ? `: ${detail}` : ""}`);
   }
   return payload;
@@ -217,7 +222,9 @@ async function cloudflareRequest({fetchImpl, token, endpoint, method = "GET", bo
     throw new Error(`Cloudflare ${endpoint} returned non-JSON HTTP ${response.status}`);
   }
   if (!response.ok) {
-    const detail = payload?.errors?.map((error) => error.message).filter(Boolean).join("; ");
+    const detail = Array.isArray(payload?.errors)
+      ? payload.errors.map((error) => error?.message).filter((message) => typeof message === "string").join("; ")
+      : "";
     throw new Error(`Cloudflare ${endpoint} returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
   }
   return cloudflareEnvelope(payload, endpoint);
@@ -252,20 +259,36 @@ async function graphqlRows({fetchImpl, token, accountId, query, dataset, queueId
     }),
   });
   const payload = await response.json();
-  if (!response.ok || payload.errors?.length) {
-    const detail = payload.errors?.map((error) => error.message).join("; ");
+  const errors = payload?.errors;
+  // Cloudflare GraphQL uses null as well as an absent errors field on success.
+  if (!response.ok || (errors != null && (!Array.isArray(errors) || errors.length > 0))) {
+    const detail = Array.isArray(errors)
+      ? errors.map((error) => error?.message).filter((message) => typeof message === "string").join("; ")
+      : "";
     throw new Error(`Cloudflare GraphQL ${dataset} failed${detail ? `: ${detail}` : ""}`);
   }
-  const accounts = payload.data?.viewer?.accounts;
+  const accounts = payload?.data?.viewer?.accounts;
   if (!Array.isArray(accounts) || accounts.length !== 1) {
     throw new Error(`Cloudflare GraphQL ${dataset} returned an unexpected account result`);
   }
   const rows = accounts[0]?.[dataset];
   if (
     !Array.isArray(rows)
-    || rows.length === 0
     || rows.some((row) => !row || typeof row !== "object" || Array.isArray(row))
   ) throw new Error(`Cloudflare GraphQL ${dataset} did not return complete rows`);
+  if (dataset === "queueConsumerMetricsAdaptiveGroups") {
+    // A datetimeMinute bucket can start before the requested interval while
+    // still overlapping it. Require every sample to belong to this queue/window.
+    const firstMinute = Math.floor(Date.parse(start) / 60_000) * 60_000;
+    const lastMinute = Math.floor(Date.parse(end) / 60_000) * 60_000;
+    if (rows.some((row) => {
+      const dimensions = row.dimensions;
+      const minute = typeof dimensions?.datetimeMinute === "string"
+        ? Date.parse(dimensions.datetimeMinute) : NaN;
+      return dimensions?.queueId !== queueId || !Number.isFinite(minute)
+        || minute % 60_000 !== 0 || minute < firstMinute || minute > lastMinute;
+    })) throw new Error(`Cloudflare GraphQL ${dataset} returned invalid sample dimensions`);
+  }
   return rows;
 }
 
@@ -285,10 +308,9 @@ function finiteNonnegative(value, label) {
   return value;
 }
 
-export function summarizeGraphqlMetrics({backlogRows, concurrencyRows, operationRows}) {
-  if (backlogRows.length === 0 || concurrencyRows.length === 0 || operationRows.length === 0) {
-    throw new Error("Cloudflare GraphQL metric authority returned no samples");
-  }
+export function summarizeGraphqlMetrics({
+  backlogRows, concurrencyRows, operationRows, environment, phase, primaryMetrics, dlqMetrics,
+}) {
   const backlogMessages = backlogRows.map((row) => finiteNonnegative(
     row?.avg?.messages,
     "backlog.messages",
@@ -301,6 +323,21 @@ export function summarizeGraphqlMetrics({backlogRows, concurrencyRows, operation
     row?.avg?.concurrency,
     "consumer.concurrency",
   ));
+  // Idle staging may have no samples at all, or sampled zero concurrency with
+  // no backlog or operations. Both require empty REST metrics. graphqlRows
+  // rejects missing datasets and failed queries before this idle check.
+  const idleStaging = environment === "staging"
+    && ["publication", "ongoing"].includes(phase)
+    && operationRows.length === 0
+    && (concurrency.length > 0 || backlogRows.length === 0)
+    && concurrency.every((value) => value === 0)
+    && backlogMessages.every((value) => value === 0)
+    && backlogBytes.every((value) => value === 0)
+    && [primaryMetrics, dlqMetrics].every((metrics) => metrics?.backlog_count === 0
+      && metrics.backlog_bytes === 0 && metrics.oldest_message_timestamp_ms === 0);
+  if (!idleStaging && (backlogRows.length === 0 || concurrencyRows.length === 0 || operationRows.length === 0)) {
+    throw new Error("Cloudflare GraphQL metric authority returned no samples");
+  }
   const lag = [];
   const retries = [];
   let failedOperations = 0;
@@ -330,17 +367,19 @@ export function summarizeGraphqlMetrics({backlogRows, concurrencyRows, operation
     if (actionType === "DeleteMessage" && outcome === "fail") failedOperations += row.count;
     if (actionType === "DeleteMessage" && outcome === "dlq") dlqOutcomes += row.count;
   }
-  if (lag.length === 0 || retries.length === 0) {
+  if (!idleStaging && (lag.length === 0 || retries.length === 0)) {
     throw new Error("Cloudflare GraphQL operation averages are missing");
   }
   return {
-    backlog_average_messages: Math.max(...backlogMessages),
-    backlog_average_bytes: Math.max(...backlogBytes),
-    consumer_concurrency_max: Math.max(...concurrency),
-    lag_milliseconds_max: Math.max(...lag),
-    retry_count_max: Math.max(...retries),
-    failed_operations: failedOperations,
-    dlq_outcomes: dlqOutcomes,
+    sample_status: idleStaging ? "idle_staging" : "sampled",
+    sample_counts: {backlog: backlogRows.length, concurrency: concurrencyRows.length, operations: operationRows.length},
+    backlog_average_messages: backlogMessages.length ? Math.max(...backlogMessages) : null,
+    backlog_average_bytes: backlogBytes.length ? Math.max(...backlogBytes) : null,
+    consumer_concurrency_max: concurrency.length ? Math.max(...concurrency) : null,
+    lag_milliseconds_max: idleStaging ? null : Math.max(...lag),
+    retry_count_max: idleStaging ? null : Math.max(...retries),
+    failed_operations: idleStaging ? null : failedOperations,
+    dlq_outcomes: idleStaging ? null : dlqOutcomes,
   };
 }
 
@@ -424,19 +463,19 @@ async function getQueueMetrics(context, queue, nowMs) {
     endpoint: `/accounts/${context.accountId}/queues/${queue.queue_id}/metrics`,
   });
   const metrics = {
-    backlog_count: Number(payload.result.backlog_count),
-    backlog_bytes: Number(payload.result.backlog_bytes),
-    oldest_message_timestamp_ms: Number(payload.result.oldest_message_timestamp_ms),
+    backlog_count: payload.result?.backlog_count,
+    backlog_bytes: payload.result?.backlog_bytes,
+    oldest_message_timestamp_ms: payload.result?.oldest_message_timestamp_ms,
     oldest_age_seconds: oldestAgeSeconds(payload.result, nowMs),
   };
   if (![metrics.backlog_count, metrics.backlog_bytes, metrics.oldest_message_timestamp_ms]
-    .every(Number.isFinite)) {
+    .every((value) => Number.isFinite(value) && value >= 0)) {
     throw new Error(`Cloudflare Queue metrics are incomplete for ${queue.queue_name}`);
   }
   return metrics;
 }
 
-async function inspectEnvironment({context, desired, queues, scripts, nowMs, windowMinutes}) {
+async function inspectEnvironment({context, desired, queues, scripts, nowMs, windowMinutes, phase}) {
   const failures = [...desired.config_errors];
   const alerts = [];
   const primaryMatches = queueByName(queues, desired.primary_queue);
@@ -554,7 +593,10 @@ async function inspectEnvironment({context, desired, queues, scripts, nowMs, win
       ...timeVariables,
     }),
   ]);
-  const graphql = summarizeGraphqlMetrics({backlogRows, concurrencyRows, operationRows});
+  const graphql = summarizeGraphqlMetrics({
+    backlogRows, concurrencyRows, operationRows,
+    environment: desired.environment, phase, primaryMetrics, dlqMetrics,
+  });
   result.metrics = {
     primary_realtime: primaryMetrics,
     dlq_realtime: dlqMetrics,
@@ -608,6 +650,7 @@ export async function runQueueGate({
         scripts,
         nowMs: checkedAtMs,
         windowMinutes: options.windowMinutes,
+        phase: options.phase,
       }));
     }
     samples.push({checked_at: new Date(checkedAtMs).toISOString(), environments});
@@ -643,6 +686,7 @@ export async function runQueueGate({
     samples,
     limitations: [
       "Queue REST metrics are best-effort and expose combined unacknowledged backlog, not ready and delayed sub-counts.",
+      "Idle staging requires empty primary/DLQ REST metrics and either three explicit empty GraphQL datasets or sampled zero concurrency with zero sampled backlog and no operations. Topology checks still apply. Unsampled metrics remain null; this is not an ingestion smoke or rollback drain proof.",
       "Cloudflare Notifications exposes no native Queue alert type; a scheduler must alert on this command's non-zero exit.",
       "Rollback samples are drain observations only. They never authorize a Queue-less Worker while ingress can still enqueue; that transition requires a separately reviewed live producer fence retaining the compatible consumer.",
     ],

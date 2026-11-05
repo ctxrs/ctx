@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "pnpm@10.34.9",
   "scripts": {
     "dev": "wrangler dev --local --port 8793",
     "readiness:check": "node scripts/cloudflare-neon-readiness.mjs --profile telemetry --wrangler-config wrangler.toml",
