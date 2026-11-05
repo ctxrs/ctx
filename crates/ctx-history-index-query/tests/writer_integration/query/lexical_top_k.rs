@@ -223,8 +223,8 @@ fn coverage_bound_seeks_over_partial_matches_with_charged_work() {
     );
     assert_eq!(batch.candidates[0].event.event_id, expected);
     assert_eq!(batch.counters.candidate_docs, 2);
-    // Eight movements, three score inspections and three class inspections.
-    assert_eq!(batch.counters.body_posting_advances, 14);
+    // Eight movements and three score inspections; the segment is all messages.
+    assert_eq!(batch.counters.body_posting_advances, 11);
     let partial = lexical_search_batch_with_budget(
         &index,
         &[QUERY],

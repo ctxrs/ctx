@@ -48,6 +48,12 @@ impl SegmentClasses {
             let Some(info) = inverted.get_term_info(&Term::from_field_text(field, name))? else {
                 continue;
             };
+            if info.doc_freq == reader.max_doc() {
+                // This exact term covers even deleted rows. Retain earlier
+                // classes for precedence; no later class can override it.
+                classes.default = class;
+                break;
+            }
             if !meter.charge(LexicalWorkCounter::PostingOpens, 1, Some(context), None) {
                 return Ok(None);
             }
@@ -103,8 +109,8 @@ impl SegmentClasses {
         Some(())
     }
 
-    /// At most 128 document memberships per class inspection, precharged as
-    /// block-bound work. Native class-block seeks are separately charged. A
+    /// Merge at most 128 body postings with each sorted class block, precharged
+    /// as block-bound work. Native class-block seeks are separately charged. A
     /// temporary cursor shares the posting bytes without moving the candidate
     /// cursor beyond an unexamined document. No per-segment class bitmap is built.
     pub(super) fn block_classes(
@@ -125,6 +131,7 @@ impl SegmentClasses {
                 return None;
             }
             let mut cursor = posting.clone();
+            let mut offset = 0;
             #[cfg(any(test, feature = "test-support"))]
             MANUAL_MAXIMUM_LIVE_POSTINGS.set(
                 MANUAL_MAXIMUM_LIVE_POSTINGS
@@ -132,7 +139,18 @@ impl SegmentClasses {
                     .max(MANUAL_LIVE_POSTINGS.get() + 1),
             );
             for (&doc, slot) in docs.iter().zip(&mut classes) {
-                if !reader.is_deleted(doc) && contains(&mut cursor, doc, meter, context)? {
+                if reader.is_deleted(doc) {
+                    continue;
+                }
+                if cursor.docs().last().is_some_and(|&last| doc > last) {
+                    seek_block(&mut cursor, doc, meter, context)?;
+                    offset = 0;
+                }
+                let members = cursor.docs();
+                while members.get(offset).is_some_and(|&member| member < doc) {
+                    offset += 1;
+                }
+                if members.get(offset) == Some(&doc) {
                     *slot = *class;
                 }
             }
@@ -165,3 +183,7 @@ fn seek_block(
     }
     Some(())
 }
+
+#[cfg(test)]
+#[path = "classes_tests.rs"]
+mod tests;
