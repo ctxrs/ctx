@@ -44,8 +44,12 @@ pub(in crate::provider) fn hermes_native_event(
     source_record_ordinal: u64,
 ) -> Result<HermesNativeEvent> {
     let content = hermes_decode_content(row.content.as_deref());
+    // Hermes stores `''` for assistant rows that only carry tool calls. Core
+    // rejects an empty normalized body, so empty text takes the same fallback
+    // as absent content; the raw empty value stays in the structured body.
     let text = hermes_normalized_result_content(&row.role, &content)
         .or_else(|| provider_value_text(&content))
+        .filter(|text| !text.is_empty())
         .unwrap_or_else(|| {
             row.tool_name
                 .as_ref()

@@ -66,7 +66,7 @@ const HERMES_PROFILE_SOURCE_SCHEMA_VARIANT: &str = "hermes-state-db-v1";
 const HERMES_SESSION_SOURCE_SCHEMA_VARIANT: &str = "hermes-state-session-v1";
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "Hermes SQLite source must have an authorized parent and database leaf";
-const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v5-optional-admission";
+const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v6-empty-content-fallback";
 const HERMES_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-session-content-v1\0";
 const HERMES_TREE_FINGERPRINT_DOMAIN: &[u8] = b"ctx-hermes-source-inventory-v1\0";
 const HERMES_LEAF_FINGERPRINT_DOMAIN: &[u8] = b"ctx-hermes-session-leaf-v1\0";

@@ -425,7 +425,7 @@ mod tests {
         let control = serde_json::to_vec(&serde_json::json!({
             "kind": "hermes-route-control-v1",
             "version": 3,
-            "parser_revision": "hermes-source-backed-v5-optional-admission",
+            "parser_revision": "hermes-source-backed-v6-empty-content-fallback",
             "profile_source_descriptor": profile_source_descriptor,
             "database_identity": database_identity,
             "physical_revision": physical_revision,

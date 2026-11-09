@@ -126,7 +126,7 @@ fn direct_core_projection_is_complete_and_has_no_recursive_ancestry_sql() {
     assert!(!production.contains("body.chars().take"));
     assert_eq!(
         HERMES_SOURCE_PARSER_REVISION,
-        "hermes-source-backed-v5-optional-admission"
+        "hermes-source-backed-v6-empty-content-fallback"
     );
 }
 
@@ -318,6 +318,39 @@ fn optional_activity_values_are_omitted_without_losing_raw_content_or_emitting_e
         let activity = record.content.activity.unwrap();
         assert!(activity.provider_call_id.is_some());
         assert_eq!(activity.result.unwrap().status, None);
+    }
+}
+
+#[test]
+fn empty_provider_content_uses_the_fallback_body_and_keeps_raw_content() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/state.db");
+    create_fixture(&database);
+    let candidate = candidate(&temp.path().join("data-root"), &database);
+    let source = session_source(&candidate, PARENT);
+    let context = projection_context(&source);
+
+    let mut tool_call = projection_message_row(130, "assistant");
+    tool_call.content = Some(String::new());
+    tool_call.tool_calls = Some(r#"[{"id":"call-130","type":"function"}]"#.to_owned());
+    let mut named_tool_output = projection_message_row(131, "tool");
+    named_tool_output.content = Some(String::new());
+    named_tool_output.tool_call_id = Some("call-130".to_owned());
+    named_tool_output.tool_name = Some("terminal".to_owned());
+
+    for (ordinal, row, expected_body) in [
+        (30, tool_call, "Hermes assistant"),
+        (31, named_tool_output, "tool: terminal"),
+    ] {
+        let record = project_message(&source, ordinal, row, &context).unwrap();
+        assert_eq!(
+            record.content.normalized_body.as_deref(),
+            Some(expected_body)
+        );
+        assert_eq!(
+            record.content.structured_content.as_ref().unwrap()["content"].as_str(),
+            Some("")
+        );
     }
 }
 
