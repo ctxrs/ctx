@@ -151,6 +151,12 @@ impl Collector {
         let now = unix_now()?;
         for path in self.store.pending_paths()? {
             let mut pending: Pending = private_file::read(&path.join("pending.json"))?;
+            if self
+                .store
+                .session_excluded(pending.member.session_id.as_uuid())?
+            {
+                continue;
+            }
             let settle = pending.settlement_started || !pending.allowed(policy);
             if settle && !pending.may_have_submitted() {
                 continue;
@@ -288,7 +294,12 @@ impl Collector {
             return Err(Error::PolicyDenied);
         }
         let settings = self.store.settings()?.ok_or(Error::NotConnected)?;
-        if settings.paused || settings.policy.as_ref().is_none_or(|p| !pending.allowed(p)) {
+        if settings.paused
+            || self
+                .store
+                .session_excluded(pending.member.session_id.as_uuid())?
+            || settings.policy.as_ref().is_none_or(|p| !pending.allowed(p))
+        {
             return Err(Error::PolicyDenied);
         }
         // This final current-policy read is admission. A request already
@@ -593,6 +604,43 @@ mod tests {
         let b: Pending = private_file::read(&path.join("pending.json")).unwrap();
         assert_ne!(b.operation.idempotency_key, original.idempotency_key);
         assert_eq!(b.operation.expected_sequence, None);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn interrupted_erasure_blocks_upload_admission_and_retries_retired_cleanup() {
+        use std::fs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let server = publishing_mock(|_| panic!("excluded session must not upload"));
+        let (store, collector, _) = make_ready(temp.path(), server.endpoint());
+        let path = store.pending_paths().unwrap().pop().unwrap();
+        let pending: Pending = private_file::read(&path.join("pending.json")).unwrap();
+        let session = pending.member.session_id.as_uuid();
+        private_file::write(
+            &store.root().join("erased-sessions.json"),
+            &BTreeMap::from([(session, false)]),
+        )
+        .unwrap();
+        assert_eq!(store.status().unwrap().held, 1);
+        assert_eq!(collector.tick(), TickOutcome::Idle);
+        let mut pending = pending;
+        assert_eq!(
+            collector.step(
+                &path,
+                &mut pending,
+                &std::sync::atomic::AtomicBool::new(false),
+                false
+            ),
+            Err(Error::PolicyDenied)
+        );
+        let retired = path
+            .parent()
+            .unwrap()
+            .join(format!(".discarded-{}", uuid::Uuid::new_v4()));
+        fs::rename(&path, &retired).unwrap();
+        store.erase_session(session).unwrap();
+        assert!(!retired.exists());
         assert_eq!(server.requests().len(), 1);
     }
 }

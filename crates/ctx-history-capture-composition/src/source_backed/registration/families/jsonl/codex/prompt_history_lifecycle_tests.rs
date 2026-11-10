@@ -196,7 +196,7 @@ fn active_source_family_contract_prompt_history_rejects_scanner_leaf_open_same_l
 }
 
 #[test]
-fn active_source_family_contract_prompt_history_rejects_inflight_disappearance_then_deletes() {
+fn active_source_family_contract_prompt_history_rejects_inflight_disappearance_then_retains() {
     let temp = tempdir().unwrap();
     let history = temp.path().join("history.jsonl");
     write_lines(
@@ -267,7 +267,7 @@ fn active_source_family_contract_prompt_history_rejects_inflight_disappearance_t
         VerifiedIndex::open_pinned(&index_root)
             .unwrap()
             .document_count(),
-        0
+        1
     );
 }
 

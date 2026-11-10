@@ -456,7 +456,13 @@ impl GenerationWriter {
             }
             for source in self.deletions.keys() {
                 if !checkpoint.deletions.contains_key(source) {
-                    delta.deletions.insert(source.identity().digest());
+                    if self.deletions[source].retain_history {
+                        delta
+                            .upserts
+                            .insert(source.identity().digest(), source.clone());
+                    } else {
+                        delta.deletions.insert(source.identity().digest());
+                    }
                 }
             }
             self.partial_source_route_deltas
@@ -882,6 +888,13 @@ impl GenerationWriter {
     }
 
     pub(crate) fn source_is_carried_from_base(&self, source: &SourceKey) -> bool {
+        if self
+            .observed_missing_routes
+            .values()
+            .any(|route| route_contains_exact_source(route, source))
+        {
+            return true;
+        }
         let Some(plan) = &self.source_route_plan else {
             return false;
         };

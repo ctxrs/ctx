@@ -221,11 +221,11 @@ fn mux_compound_route_cold_noop_companion_replacement_and_deletion() {
     fs::remove_file(chat).unwrap();
     let deleted = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
     assert!(deleted.failed_routes.is_empty());
-    assert!(deleted.sources.is_empty());
-    assert_eq!(deleted.removals.len(), 1);
+    assert_eq!(deleted.sources.len(), 1);
+    assert!(deleted.removals.is_empty());
     assert_eq!(
         VerifiedIndex::open_pinned(&index).unwrap().document_count(),
-        0
+        2
     );
 }
 

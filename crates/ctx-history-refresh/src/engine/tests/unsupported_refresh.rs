@@ -164,7 +164,7 @@ fn genuinely_empty_catalog_publishes_a_verified_noop_generation() {
 }
 
 #[test]
-fn confirmed_deletion_can_publish_empty_but_mixed_unavailable_cannot() {
+fn confirmed_deletion_retains_history_with_an_unavailable_peer() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let index_root = source_backed_index_root(&data_root);
@@ -191,13 +191,21 @@ fn confirmed_deletion_can_publish_empty_but_mixed_unavailable_cannot() {
         &index_root,
     )
     .unwrap();
-    assert_eq!(deletion.certified_source_count, 0);
-    assert!(deletion.zero_source_authority.iter().all(|authority| {
-        authority.kind == SourceBackedZeroSourceAuthorityKind::ConfirmedDeletion
-    }));
-    let deletion_generation = deletion.generation_id.clone();
+    assert_eq!(deletion.certified_source_count, 1);
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .document_count(),
+        1
+    );
+    assert!(deletion.zero_source_authority.is_empty());
+    let retained = VerifiedIndex::open_pinned(&index_root)
+        .unwrap()
+        .manifest()
+        .core_record_aggregates
+        .clone();
 
-    let mixed_error = run_report(
+    let mixed = run_report(
         &discovery,
         DiscoveryReport {
             sources: vec![
@@ -209,13 +217,17 @@ fn confirmed_deletion_can_publish_empty_but_mixed_unavailable_cannot() {
         &data_root,
         &index_root,
     )
-    .unwrap_err();
-    assert!(format!("{mixed_error:#}")
-        .contains(RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable.as_str()));
+    .unwrap();
+    assert_eq!(mixed.certified_source_count, 1);
     assert_eq!(
-        VerifiedIndex::open_pinned(&index_root)
-            .unwrap()
-            .generation_id(),
-        deletion_generation
+        mixed
+            .route_results
+            .iter()
+            .map(|route| route.source_failure_total)
+            .sum::<usize>(),
+        1
     );
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(index.generation_id(), mixed.generation_id);
+    assert_eq!(index.manifest().core_record_aggregates, retained);
 }

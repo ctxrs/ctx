@@ -625,23 +625,38 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             // requiring pathname absence would incorrectly reject the atomic
             // replacement. Truly unrepresented base paths still need an
             // explicit absence witness.
-            if let Some(absent) = retirement_absence_dependency(
+            let absence = retirement_absence_dependency(
                 adapter,
                 &opening,
                 &inventory,
                 &terminal_sources,
                 base.observation().source(),
                 &base_path,
-            ) {
-                absent_sources.push(absent);
-            }
+            );
             let deletion = CertifiedSourceDeletion::from_inventory(
                 base.observation().source().clone(),
                 &inventory,
             )
             .map_err(route_invalid)?;
-            sink.delete_source(deletion, inventory.clone())
-                .map_err(route_internal)?;
+            if absence.is_none()
+                && certified_source_replacement(
+                    adapter,
+                    &opening,
+                    &inventory,
+                    &terminal_sources,
+                    base.observation().source(),
+                    &base_path,
+                )
+            {
+                sink.delete_source(deletion, inventory.clone())
+                    .map_err(route_internal)?;
+            } else {
+                if let Some(absent) = absence {
+                    absent_sources.push(absent);
+                }
+                sink.retain_missing_source(deletion, inventory.clone())
+                    .map_err(route_internal)?;
+            }
         }
     }
     let mut resident = resident

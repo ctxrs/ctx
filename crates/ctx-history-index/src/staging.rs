@@ -11,6 +11,7 @@ pub(super) struct PendingSource {
     pub(super) source: SourceKey,
     pub(super) mode: PendingSourceMode,
     pub(super) staged_documents: u64,
+    pub(super) erased_documents: u64,
     pub(super) certificate: Option<CertifiedSource>,
     pub(super) core_record_accumulator: [u8; 32],
 }
@@ -80,6 +81,7 @@ impl GenerationWriter {
                     source: source.clone(),
                     mode: PendingSourceMode::Retain { base },
                     staged_documents: 0,
+                    erased_documents: 0,
                     certificate: Some(certificate),
                     core_record_accumulator: [0; 32],
                 },
@@ -99,13 +101,17 @@ fn retained_core_records_match(base: &CertifiedSource, current: &CertifiedSource
 fn source_record_aggregate(
     source: &SourceKey,
     indexed_documents: u64,
+    erased_documents: u64,
     core_record_accumulator: [u8; 32],
 ) -> Result<SourceCoreRecordAggregate> {
     SourceCoreRecordAggregate::new(
         source_token(source),
-        indexed_documents,
+        indexed_documents
+            .checked_sub(erased_documents)
+            .ok_or(IndexError::CountOverflow)?,
         hex(&core_record_accumulator),
-    )
+    )?
+    .with_erased_documents(erased_documents)
 }
 
 pub(super) fn manifest_record_aggregates(
@@ -125,7 +131,11 @@ pub(super) fn manifest_record_aggregates(
                 .collect::<HashMap<_, _>>()
         })
         .unwrap_or_default();
-    for removal in generation.deletions.values() {
+    for removal in generation
+        .deletions
+        .values()
+        .filter(|removal| !removal.retain_history)
+    {
         base_aggregates.remove(&source_token(removal.source()));
     }
     for source in &generation.route_deletions {
@@ -141,6 +151,7 @@ pub(super) fn manifest_record_aggregates(
             PendingSourceMode::Replace => source_record_aggregate(
                 &pending.source,
                 pending.staged_documents,
+                pending.erased_documents,
                 pending.core_record_accumulator,
             )?,
             PendingSourceMode::Retain { .. } => base_aggregates
@@ -156,7 +167,7 @@ pub(super) fn manifest_record_aggregates(
                     .ok_or(IndexError::WriterInvariant(
                         "append source is missing its base Core-record aggregate",
                     ))?;
-                if base_aggregate.indexed_documents() != base.counts().indexed_documents {
+                if base_aggregate.certified_documents()? != base.counts().indexed_documents {
                     return Err(IndexError::CoreRecordAggregateCountMismatch {
                         source_id: source_token(&pending.source),
                         manifest: base.counts().indexed_documents,
@@ -164,15 +175,23 @@ pub(super) fn manifest_record_aggregates(
                     });
                 }
                 let indexed_documents = base_aggregate
-                    .indexed_documents()
+                    .certified_documents()?
                     .checked_add(pending.staged_documents)
                     .ok_or(IndexError::CountOverflow)?;
                 let mut accumulator = base_aggregate.accumulator_bytes()?;
                 accumulate_core_record(&mut accumulator, &pending.core_record_accumulator);
-                source_record_aggregate(&pending.source, indexed_documents, accumulator)?
+                source_record_aggregate(
+                    &pending.source,
+                    indexed_documents,
+                    base_aggregate
+                        .erased_documents()
+                        .checked_add(pending.erased_documents)
+                        .ok_or(IndexError::CountOverflow)?,
+                    accumulator,
+                )?
             }
         };
-        if aggregate.indexed_documents() != certificate.counts().indexed_documents {
+        if aggregate.certified_documents()? != certificate.counts().indexed_documents {
             return Err(IndexError::CoreRecordAggregateCountMismatch {
                 source_id: source_token(&pending.source),
                 manifest: certificate.counts().indexed_documents,
@@ -229,11 +248,12 @@ pub(super) fn manifest_source_replacements(
             PendingSourceMode::Replace => source_record_aggregate(
                 &pending.source,
                 pending.staged_documents,
+                pending.erased_documents,
                 pending.core_record_accumulator,
             )?,
             PendingSourceMode::Retain { .. } => base_aggregate.clone(),
             PendingSourceMode::Append { base } => {
-                if base_aggregate.indexed_documents() != base.counts().indexed_documents {
+                if base_aggregate.certified_documents()? != base.counts().indexed_documents {
                     return Err(IndexError::CoreRecordAggregateCountMismatch {
                         source_id,
                         manifest: base.counts().indexed_documents,
@@ -241,15 +261,23 @@ pub(super) fn manifest_source_replacements(
                     });
                 }
                 let indexed_documents = base_aggregate
-                    .indexed_documents()
+                    .certified_documents()?
                     .checked_add(pending.staged_documents)
                     .ok_or(IndexError::CountOverflow)?;
                 let mut accumulator = base_aggregate.accumulator_bytes()?;
                 accumulate_core_record(&mut accumulator, &pending.core_record_accumulator);
-                source_record_aggregate(&pending.source, indexed_documents, accumulator)?
+                source_record_aggregate(
+                    &pending.source,
+                    indexed_documents,
+                    base_aggregate
+                        .erased_documents()
+                        .checked_add(pending.erased_documents)
+                        .ok_or(IndexError::CountOverflow)?,
+                    accumulator,
+                )?
             }
         };
-        if aggregate.indexed_documents() != certificate.counts().indexed_documents {
+        if aggregate.certified_documents()? != certificate.counts().indexed_documents {
             return Err(IndexError::CoreRecordAggregateCountMismatch {
                 source_id: source_token(&pending.source),
                 manifest: certificate.counts().indexed_documents,
@@ -334,6 +362,10 @@ fn staged_manifest_matches_base(
     if generation.writer.is_none()
         && generation.complete_inventories.is_empty()
         && generation.source_route_plan.is_none()
+        && !generation
+            .deletions
+            .values()
+            .any(|absence| absence.retain_history)
         && !generation.pending.values().any(|pending| {
             pending
                 .replacement
@@ -356,6 +388,10 @@ fn staged_manifest_matches_base(
             .pending
             .contains_key(&source_token(source.observation().source()))
             && !generation.source_is_carried_from_base(source.observation().source())
+            && !generation
+                .deletions
+                .get(source.observation().source())
+                .is_some_and(|absence| absence.retain_history)
     }) {
         return Ok(false);
     }

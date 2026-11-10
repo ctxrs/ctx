@@ -48,15 +48,19 @@ impl GenerationWriter {
         let Some(base) = self.base_publication.as_ref() else {
             return Ok(None);
         };
-        let Some(certificate) = base
+        let Some(source_index) = base
             .manifest()
             .sources
             .binary_search_by_key(&source.identity().digest(), |candidate| {
                 candidate.observation().source().identity().digest()
             })
             .ok()
-            .and_then(|index| base.manifest().sources.get(index))
-            .filter(|candidate| candidate.observation().source().exact_descriptor_eq(source))
+            .filter(|index| {
+                base.manifest().sources[*index]
+                    .observation()
+                    .source()
+                    .exact_descriptor_eq(source)
+            })
         else {
             return Ok(None);
         };
@@ -65,7 +69,13 @@ impl GenerationWriter {
             base.searcher(),
             self.fields,
             source,
-            certificate.counts().indexed_documents,
+            base.manifest()
+                .core_record_aggregates
+                .get(source_index)
+                .ok_or(IndexError::WriterInvariant(
+                    "replacement source aggregate missing",
+                ))?
+                .indexed_documents(),
             available,
         )
         .map_err(|error| self.replacement_base_failure(error))?;

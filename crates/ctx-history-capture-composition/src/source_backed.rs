@@ -81,9 +81,6 @@ pub(crate) use family::jsonl::FallbackEventIdentityMode;
 pub(crate) use family::jsonl::FallbackEventIdentityState;
 #[doc(hidden)]
 pub use family::{CaptureDocumentSpool, CaptureProviderRuntime};
-#[doc(hidden)]
-#[cfg(any(test, feature = "test-support"))]
-pub use runtime_adapter::automatic_route_deletion_missing_observations_for_test;
 pub(crate) use runtime_adapter::*;
 pub use runtime_adapter::{
     BorrowedIndexManifestView, CommittedIndexManifestView, IndexCaptureCommitReceipt,

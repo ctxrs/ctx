@@ -147,18 +147,6 @@ fn index_preparation_failure_kind(failure: &IndexError) -> CorePreparationFailur
 pub(crate) type SourceBackedRouteResourceKind = CoreRouteResourceKind;
 pub(crate) type SourceBackedRouteByteReservation = CoreRouteByteLease;
 
-/// The index owns automatic missing-route grace. Capture supplies the route
-/// observation and terminal callback, while this adapter binds the established
-/// policy without exposing an index-specific knob.
-pub(crate) const AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS: u32 =
-    ctx_history_index::policy::AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS;
-
-#[doc(hidden)]
-#[cfg(any(test, feature = "test-support"))]
-pub const fn automatic_route_deletion_missing_observations_for_test() -> u32 {
-    AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS
-}
-
 /// Sole concrete lifecycle exchange between source-backed capture and index.
 #[repr(transparent)]
 pub struct IndexCaptureLifecycle(GenerationWriter);
@@ -420,6 +408,14 @@ impl CaptureLifecycleSink for IndexCaptureLifecycle {
         self.0.certify_complete_inventory(inventory)
     }
 
+    fn retain_missing_source(
+        &mut self,
+        deletion: CertifiedSourceDeletion,
+        inventory: CertifiedSourceInventory,
+    ) -> Result<(), Self::Error> {
+        self.0.retain_missing_source(deletion, inventory)
+    }
+
     fn delete_source(
         &mut self,
         deletion: CertifiedSourceDeletion,
@@ -442,12 +438,7 @@ impl CaptureLifecycleSink for IndexCaptureLifecycle {
         revalidate_missing: impl Fn() -> bool + Send + 'static,
     ) -> Result<(), Self::Error> {
         self.0
-            .observe_certified_missing_route(
-                route_identity,
-                observed_at_unix_ms,
-                AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS,
-                revalidate_missing,
-            )
+            .retain_missing_route(route_identity, observed_at_unix_ms, revalidate_missing)
             .map(|_| ())
     }
 

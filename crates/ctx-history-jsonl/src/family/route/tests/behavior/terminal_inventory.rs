@@ -244,7 +244,7 @@ fn sibling_route_source_is_not_reused_or_claimed() {
 }
 
 #[test]
-fn sibling_owned_pending_member_does_not_block_current_route_deletion() {
+fn sibling_owned_pending_member_does_not_block_missing_source_retention() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     let index_root = temp.path().join("index");
@@ -275,12 +275,9 @@ fn sibling_owned_pending_member_does_not_block_current_route_deletion() {
         sibling_source,
     );
 
-    assert_eq!(captured.writer.activity().deleted_sources, 1);
-    assert_eq!(captured.applied_removals.len(), 1);
-    assert!(captured.applied_removals[0]
-        .deletion
-        .source()
-        .exact_descriptor_eq(current.observation().source()));
+    assert_eq!(captured.writer.activity().deleted_sources, 0);
+    assert!(captured.applied_removals.is_empty());
+    assert!(!captured.owners[&current.observation().source().identity().digest()].present);
     assert!(captured.logical_source_failures.is_empty());
 }
 

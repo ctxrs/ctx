@@ -147,6 +147,23 @@ Custom history plugins use a local manifest to identify a durable provider-owned
 refresh; ctx does not execute a plugin command or manage an exporter cursor. See
 [Custom history plugins](/providers/custom-history-plugins).
 
+## Erase a session
+
+```bash
+ctx index erase-session <ctx-session-id>
+ctx index erase-session <ctx-session-id> --format json
+```
+
+Erases a session from native local Core history, clears derived projections, and
+excludes the same ctx session identity from future capture. Other sessions keep
+their IDs. Background indexing is paused and its prior mode is restored. Retry if
+readers or retention leases prevent old-file cleanup. Queued uploads are discarded
+and excluded from recapture. JSON reports whether discarded uploads may have
+reached the server; this command makes no network requests. Provider files,
+independent archives, backups, and server copies are unaffected. Archive-owned
+roots are not supported. See [storage](/reference/storage) for retention and
+rebuild behavior.
+
 ## Show, locate, search, and MCP
 
 ```bash

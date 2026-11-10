@@ -126,7 +126,10 @@ fn frozen_jsonl_append_publishes_new_peers_and_recovers_all_deferred_rows() {
                         &indexed_records(&index, provider, "peer"),
                         &["first", "peer new"],
                     );
-                    assert!(indexed_records(&index, provider, "missing").is_empty());
+                    assert_eq!(
+                        indexed_records(&index, provider, "missing").is_empty(),
+                        !warm
+                    );
                     let recovered =
                         refresh_source_backed_generation(&index, &registry, writer_options())
                             .unwrap();

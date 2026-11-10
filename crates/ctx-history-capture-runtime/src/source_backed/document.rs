@@ -614,6 +614,10 @@ where
     }
     sink.certify_complete_inventory(inventory.clone())
         .map_err(route_coordinator_error)?;
+    let current_fingerprints = certificates
+        .iter()
+        .filter_map(document_frontier_fingerprint)
+        .collect::<HashSet<_>>();
     for base in &base_sources {
         if current_sources.contains_exact(base.observation().source()) {
             continue;
@@ -641,8 +645,15 @@ where
             &inventory,
         )
         .map_err(document_contract_error)?;
-        sink.delete_source(deletion, inventory.clone())
-            .map_err(route_coordinator_error)?;
+        if document_frontier_fingerprint(base)
+            .is_some_and(|fingerprint| current_fingerprints.contains(&fingerprint))
+        {
+            sink.delete_source(deletion, inventory.clone())
+                .map_err(route_coordinator_error)?;
+        } else {
+            sink.retain_missing_source(deletion, inventory.clone())
+                .map_err(route_coordinator_error)?;
+        }
     }
 
     Ok(ExpectedDocumentRoute::new(tree, certificates, inventory))

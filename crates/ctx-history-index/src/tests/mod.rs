@@ -28,6 +28,7 @@ mod previous_recovery;
 #[cfg(unix)]
 mod reader_resources;
 mod replacement;
+mod retained;
 
 type SessionRelationshipKind = ProviderNativeSessionRelationship;
 type EventCopyProofKind = ProviderNativeCopyProof;

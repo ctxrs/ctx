@@ -584,7 +584,7 @@ fn repeated_replacement_tombstones_hit_the_witness_cap_and_fail_closed() {
                     .unwrap()
                     .into_writer()
                     .unwrap();
-                assert!(rebuild.base_manifest().is_none());
+                assert!(rebuild.base_manifest().is_some());
                 break;
             }
         }
@@ -608,7 +608,7 @@ fn repeated_replacement_tombstones_hit_the_witness_cap_and_fail_closed() {
         work.core_decodes <= 1,
         "only the live witness may be decoded"
     );
-    assert!(root
+    assert!(!root
         .path()
         .join("active-generation-rebuild-required.json")
         .is_file());

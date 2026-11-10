@@ -269,12 +269,12 @@ fn incremental_selected_membership_ignores_stale_watcher_members_without_widenin
         );
         let index = crate::open_verified_index(&source_backed_index_root(&data_root)).unwrap();
         assert!(contains(&index, "addedmemberoracle"));
-        assert!(!contains(&index, "deletedmemberoracle"));
+        assert!(contains(&index, "deletedmemberoracle"));
         assert!(
             contains(&index, "retainedpeeroracle"),
             "exact={exact}: incremental import must retain the peer"
         );
         assert!(!contains(&index, "unselectedlateroracle"));
-        assert_eq!(index.document_count(), 3);
+        assert_eq!(index.document_count(), 4);
     }
 }

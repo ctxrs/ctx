@@ -47,6 +47,7 @@ assert_labels 'direct dependency set' \
   '//crates/ctx-history-index:lib' \
   '//crates/ctx-history-read-application:lib' \
   '//crates/ctx-history-refresh:lib' \
+  '//crates/ctx-history-sharing:lib' \
   '//crates/ctx-semantic-index:lib' \
   '//crates/ctx-semantic-model:lib' \
   '//crates/ctx-terminal:lib' \
@@ -66,6 +67,7 @@ assert_labels 'qualification dependency set' \
   '//crates/ctx-history-index:lib' \
   '//crates/ctx-history-read-application:lib' \
   '//crates/ctx-history-refresh:lib' \
+  '//crates/ctx-history-sharing:lib' \
   '//crates/ctx-semantic-index:lib' \
   '//crates/ctx-semantic-model:lib' \
   '//crates/ctx-terminal:lib' \
@@ -131,6 +133,7 @@ expected_dependencies = {
     "ctx-history-index",
     "ctx-history-read-application",
     "ctx-history-refresh",
+    "ctx-history-sharing",
     "ctx-semantic-index",
     "ctx-semantic-model",
     "ctx-terminal",

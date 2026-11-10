@@ -562,6 +562,8 @@ pub(super) fn assert_active_meta_incompatibility_is_rebuilt(
         .unwrap();
     initial.certify_source(certificate(&source, 1, 1)).unwrap();
     let baseline = initial.commit(|_| true).unwrap();
+    // Simulate a generation published before portable checkpoints existed.
+    fs::remove_dir_all(temp.path().join("retained")).unwrap();
     let pointer_path = temp.path().join("active-generation.json");
     let pointer_before = fs::read(&pointer_path).unwrap();
     let old_generation_path = active_generation_path(temp.path());
@@ -797,6 +799,8 @@ fn verified_open_rejects_mismatched_active_policy() {
         .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     let baseline = writer.commit(|_| true).unwrap();
+    // Exercise the legacy generation without a portable checkpoint.
+    fs::remove_dir_all(temp.path().join("retained")).unwrap();
 
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
     let mut mismatched_policy = current_source_generation_policy();

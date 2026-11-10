@@ -527,10 +527,11 @@ impl GenerationWriter {
                 // A readable schema predecessor is still useful to pinned derived
                 // consumers even though it cannot be cloned by this writer.
                 let readable_predecessor = self.base_publication.is_some()
-                    || VerifiedIndex::open_pinned(&root).is_ok_and(|index| {
-                        index.generation_id() == pointer.active().generation_id()
-                            && index.manifest().lexical_schema_version != LEXICAL_SCHEMA_VERSION
-                    });
+                    || (self.erased_sessions.is_empty()
+                        && VerifiedIndex::open_pinned(&root).is_ok_and(|index| {
+                            index.generation_id() == pointer.active().generation_id()
+                                && index.manifest().lexical_schema_version != LEXICAL_SCHEMA_VERSION
+                        }));
                 readable_predecessor.then(|| pointer.active().clone())
             }),
         )?;
@@ -565,6 +566,8 @@ impl GenerationWriter {
             &self.active_pointer_fence,
             &verified.slot,
         )?;
+        super::retained::checkpoint(&root, &reopened_candidate, &self.erased_sessions)?;
+
         report_progress(PublicationStage::Activation)?;
         let validate_before_replace =
             |predecessor_fence: &ctx_history_index_generation::ActiveGenerationPointerFence| {
@@ -665,6 +668,7 @@ impl GenerationWriter {
                 retention_lease.as_ref(),
             );
         }
+        let _ = super::retained::reclaim(&root, Some(&next_pointer));
         let receipt = CommitReceipt::from_verified_manifest(
             opstamp,
             generation_id.clone(),

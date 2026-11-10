@@ -298,10 +298,10 @@ mod tests {
         fs::remove_dir_all(root.join("leaf")).unwrap();
         let deleted =
             refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
-        assert_eq!(deleted.commit.indexed_documents, 0);
+        assert_eq!(deleted.commit.indexed_documents, 2);
         assert_eq!(
             VerifiedIndex::open_pinned(&index).unwrap().document_count(),
-            0
+            2
         );
         let deleted_replay =
             refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
@@ -359,9 +359,11 @@ mod tests {
             refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
         assert_ne!(deleted.commit.generation_id, published.commit.generation_id);
         let deleted_events = rovodev_events(&index, &deleted);
-        let [deleted_leaf] = deleted_events.as_slice() else {
-            panic!("unchanged child must remain after parent deletion");
-        };
+        assert_eq!(deleted_events.len(), published_events.len());
+        let deleted_leaf = deleted_events
+            .iter()
+            .find(|event| event.event_id == child_event_id)
+            .unwrap();
         assert_eq!(deleted_leaf.event_id, child_event_id);
         assert_eq!(deleted_leaf.session_id, child_session_id);
         assert_eq!(deleted_leaf.parent_session_id, Some(direct_parent_id));
@@ -491,10 +493,10 @@ mod tests {
         write_cline_sdk_index(&provider_root, false);
         let deleted =
             refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
-        assert_eq!(deleted.commit.indexed_documents, 0);
+        assert_eq!(deleted.commit.indexed_documents, 2);
         assert_eq!(
             VerifiedIndex::open_pinned(&index).unwrap().document_count(),
-            0
+            2
         );
     }
 

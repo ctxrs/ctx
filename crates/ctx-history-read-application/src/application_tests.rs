@@ -1222,9 +1222,19 @@ fn search_rejects_root_and_group_selectors_absent_from_the_pinned_generation() {
 }
 
 #[test]
-fn locate_application_pins_once_and_assembles_the_neutral_read_model() {
+fn locate_application_reports_retained_missing_history_from_one_pin() {
     let temp = tempdir().unwrap();
     let (index, records) = publish(temp.path());
+    let route_id = index.manifest().source_routes()[0].route_identity().clone();
+    drop(index);
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.set_present_source_routes(Vec::new()).unwrap();
+    writer.retain_missing_route(route_id, 100, || true).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open(temp.path()).unwrap();
     let mut generation = RecordingGenerationPort::new(index);
     let located = execute_locate(
         LocateApplicationRequest {
@@ -1238,6 +1248,8 @@ fn locate_application_pins_once_and_assembles_the_neutral_read_model() {
     )
     .unwrap();
 
+    assert_eq!(located.read_model["source"]["availability"], "missing");
+    assert_eq!(located.read_model["source"]["history_retained"], true);
     assert_eq!(generation.calls.get(), 1);
     assert_eq!(generation.retained_peer.get(), Some(RetainedPeerRead::Omit));
     assert_eq!(located.read_model["payload_type"], "event_location");

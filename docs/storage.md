@@ -516,10 +516,99 @@ files needed to choose the provider's winning root. It does not create provider
 directories, migrate provider data, execute provider commands, or combine a
 selected replacement with old defaults. Exact one-shot paths are read only
 after the user supplies `--path` and are not remembered as discovery policy.
-If a source moves, changes, or is deleted, the active Core/Tantivy generation
-remains available for search and typed presentation. Refresh or explicit import
-discovers the new source state and atomically publishes the corresponding
-generation; a failed refresh leaves the prior verified generation active.
+If a source disappears, refresh retains its last captured records and stable
+identities in the active Core/Tantivy generation. Changes to a source that is
+still present replace its captured content. Refresh publishes records and source
+availability atomically; a failed refresh leaves the prior verified generation
+active.
+
+## Retaining History From Missing Sources
+
+Missing provider sources are retained by default, without an age limit. This
+applies to a source omitted from a complete provider inventory and to a whole
+history root whose absence is verified. It covers provider retention cleanup,
+manual file deletion, and temporarily unavailable roots. ctx cannot infer the
+reason for a deletion from an absent file, so it does not guess based on file age
+or a provider’s cleanup setting.
+
+Refresh carries the last captured normalized records forward with their existing
+source, session, and event IDs. Search, show, locate, semantic indexing, archives,
+and Blame continue to use those records. This does not preserve excluded payloads
+or make an agent’s native session resumable. A source that reappears resumes normal
+capture: corrections and removed records within a present source still replace
+its previous contents. Explicit configured-root replacement and certified route
+retirement retain their existing replacement semantics.
+
+`ctx status --format json` reports `retained_missing_sources`; human status shows
+the count when nonzero. `ctx locate event` and `ctx locate session` report
+`source.availability: "missing"` and `source.history_retained: true` for retained
+absences. Otherwise availability is `"not_known_missing"`. These are observations
+from the pinned generation, not a live filesystem probe; removed configuration,
+an unselected route, or an unreadable input does not establish current presence.
+Reappearance clears the missing observation after a successful refresh.
+
+Provider deletion is not a privacy erasure request to ctx. Retained history can
+contain sensitive transcript text, consumes local disk space, and is included in
+later archive exports or explicitly enabled sharing.
+
+Erase one session from a native local history root:
+
+```bash
+ctx index erase-session <ctx-session-id> --format json
+```
+
+The command records a durable session exclusion, rebuilds Core without that
+session, removes obsolete Core generations and portable records, and clears
+semantic and attribution projections. Future capture excludes the same ctx
+session identity, including new events appended to it. Other sessions retain
+their IDs. Queued session uploads and abandoned sharing scratch files are removed
+under the uploader lock. A durable sharing exclusion blocks recapture and new
+upload requests even if Core erasure is interrupted. The JSON receipt reports
+whether discarded uploads may already have reached the server; erasure itself
+sends no network requests. Provider files, separately exported archives, backups,
+and server copies require separate removal. Archive-owned roots are rejected
+because they retain original archive members.
+
+Background indexing is paused during erasure and its prior mode is restored on
+normal completion or failure. If the process is killed while indexing is paused,
+rerun erasure before using `ctx index mode auto` to reenable it. Once the Core
+exclusion is durable, the next writer open applies it; rerun erasure to finish
+sharing, derived, and physical cleanup.
+Readers or retention leases holding old generations make cleanup report an error;
+close those readers or release the lease, then retry. Success means local files
+were removed, not that filesystem snapshots, freed disk blocks, or copies already
+read into another process were securely wiped. The exclusion is retained as a
+session UUID in `search/lexical/retained/erased-sessions.json` and each local
+sharing connection’s `erased-sessions.json`; source
+certificates and capture frontiers also retain provider IDs, paths, and capture
+metadata. Deleting ctx’s data root removes these exclusions.
+
+Before each publication, ctx automatically writes a private portable checkpoint
+under `search/lexical/retained`. It reuses the stored Core JSON encoding used by
+archive export, preserving original source, session, and event identities plus
+capture frontiers and source availability. A small checkpoint descriptor references
+the generation’s authenticated manifest, including its existing delta anchors;
+it does not duplicate the full manifest or write a corpus-sized blob map.
+Source aggregates address immutable record files and authenticate their exact
+stored bytes during recovery. Unchanged sources reuse those files. A changed
+source rewrites its record file. This adds a local copy of normalized records and
+requires enough disk space to publish it; a checkpoint write failure prevents
+publication. Obsolete checkpoints and record files are reclaimed with publication.
+Public archive restore remains separate because it remaps identities into an
+import namespace.
+
+When the lexical schema or segment format becomes incompatible, the next writer
+automatically rebuilds from the active checkpoint without needing provider files
+or a manual export/import. Session exclusions survive this rebuild. An unreadable
+checkpoint or unsupported Core record contract stops rebuilding and preserves the
+files; a future Core contract change needs an explicit compatible migration.
+Existing compatible generations gain a checkpoint when first opened for writing.
+An already incompatible generation created before this feature has no portable
+copy and still requires its provider inputs.
+
+Retention cannot recover records removed by an earlier refresh, the pre-v0.26
+Store, or deletion of ctx’s own storage. Keep independent backups, and do not
+reset local storage to repair a format mismatch when retained sources are gone.
 
 ## Command Read/Write Behavior
 
@@ -905,7 +994,7 @@ and an opaque source identity derived from the released provider namespace or
 the stable logical name of an independently configured provider root.
 
 Refresh builds a private immutable Core/Tantivy candidate containing complete
-normalized stored records from current provider sources, verifies its manifest
+normalized stored records from current and retained missing sources, verifies its manifest
 and policy identity, then atomically publishes it under `search/lexical`.
 Published generations are never opened writable. Semantic data advances only
 against a verified pinned Core generation and fails closed on generation
@@ -973,9 +1062,8 @@ still discovered alongside any remaining named roots, and explicit `--path`,
 custom JSONL, and plugin imports are not remembered as future defaults. The next
 full refresh atomically withdraws the removed root's name, group, and active
 ownership while preserving its already indexed history under the stable source
-identity. To purge that retained history, remove the root, reset local search
-storage as described below, and rebuild; the records can still return if the
-same provider history is selected through another available route. A failed or
+identity. Use `ctx index erase-session` to erase selected sessions and prevent
+their recapture. A full storage reset also discards those session exclusions. A failed or
 malformed refresh leaves the previous verified generation active.
 
 ## Reset And Inspect Local Search Storage

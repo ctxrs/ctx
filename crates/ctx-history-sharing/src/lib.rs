@@ -21,7 +21,7 @@ pub use collector::{Collector, TickOutcome};
 pub use config::{Connection, Credentials, Endpoint, SharingStore};
 pub use error::{Error, Result};
 pub use observation::*;
-pub use queue::SharingStatus;
+pub use queue::{SessionErasure, SharingStatus};
 pub use selection::{
     Backfill, PublicationMode, SelectionDecision, SelectionObservation, SessionScope,
     SharingPolicy, SourceSelection,

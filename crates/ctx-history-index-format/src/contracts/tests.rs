@@ -66,6 +66,42 @@ fn source_route_snapshot_and_generation_wire_contract_remain_stable() {
 }
 
 #[test]
+fn missing_source_metadata_round_trips_and_rejects_foreign_or_duplicate_members() {
+    let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
+    let member = source("retained", "fixture");
+    let snapshot = SourceRouteSnapshot::present(route, vec![member.clone()])
+        .unwrap()
+        .with_missing_sources(vec![member.clone()])
+        .unwrap();
+    let manifest =
+        GenerationManifest::from_parts(vec![certified(member.clone())], vec![snapshot]).unwrap();
+    let wire = serde_json::to_value(&manifest).unwrap();
+    let loaded: GenerationManifest = serde_json::from_value(wire.clone()).unwrap();
+    loaded.validate_contract().unwrap();
+    assert_eq!(
+        loaded.source_routes()[0].missing_sources(),
+        std::slice::from_ref(&member)
+    );
+    assert_eq!(
+        loaded.generation_id().unwrap(),
+        manifest.generation_id().unwrap()
+    );
+
+    for invalid in [
+        vec![source("foreign", "fixture")],
+        vec![member.clone(), member],
+    ] {
+        let mut malformed = wire.clone();
+        malformed["source_routes"][0]["missing_sources"] = serde_json::json!(invalid);
+        let loaded: GenerationManifest = serde_json::from_value(malformed).unwrap();
+        assert!(matches!(
+            loaded.validate_contract(),
+            Err(IndexError::NonCanonicalSourceRouteMembers(_))
+        ));
+    }
+}
+
+#[test]
 fn generation_state_envelope_rejects_malformed_oversize_and_noncanonical_values() {
     use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 

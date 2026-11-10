@@ -54,8 +54,8 @@ pub type SourceBackedRouteResult<T> = Result<T, SourceBackedRouteError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceBackedDeletionDisposition {
-    Deferred,
     Deleted,
+    Retained,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -882,26 +882,36 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
         Ok(())
     }
 
-    pub fn delete_source(
+    fn handle_missing_source(
         &mut self,
         deletion: CertifiedSourceDeletion,
         inventory: CertifiedSourceInventory,
+        retain: bool,
     ) -> SourceBackedCoordinatorResult<SourceBackedDeletionDisposition, L::Error> {
         if !deletion.verifies(&inventory) {
             return Err(SourceBackedCoordinatorError::InvalidDeletionWitness);
         }
         self.claim_absent(deletion.source())?;
-        self.lifecycle
-            .delete_source(deletion.clone(), inventory.clone())?;
+        if retain {
+            self.lifecycle
+                .retain_missing_source(deletion.clone(), inventory.clone())?;
+        } else {
+            self.lifecycle
+                .delete_source(deletion.clone(), inventory.clone())?;
+        }
         self.record_revalidation(
             deletion.source(),
             SourceBackedRouteRevalidation::Deletion(Box::new(deletion.clone())),
         )?;
-        self.applied_removals.push(SourceBackedCertifiedRemoval {
-            deletion,
-            inventory,
-        });
-        Ok(SourceBackedDeletionDisposition::Deleted)
+        if retain {
+            Ok(SourceBackedDeletionDisposition::Retained)
+        } else {
+            self.applied_removals.push(SourceBackedCertifiedRemoval {
+                deletion,
+                inventory,
+            });
+            Ok(SourceBackedDeletionDisposition::Deleted)
+        }
     }
 
     pub fn replace_source(

@@ -193,6 +193,8 @@ fn rebuild_reclaims_candidates_but_keeps_previous_and_live_reader_generations() 
         .unwrap()
         .unwrap();
     let previous_path = active_generation_path(temp.path());
+    // Model legacy publications without portable checkpoints.
+    fs::remove_dir_all(temp.path().join("retained")).unwrap();
     // Combine genuine published slots with a schema-22 active slot. The first
     // publication is now outside the pointer pair and survives only by lease.
     copy_fixture(
@@ -259,4 +261,57 @@ fn rebuild_reclaims_candidates_but_keeps_previous_and_live_reader_generations() 
     assert_eq!(generation_directories(temp.path()).len(), 3);
     assert!(previous_path.is_dir());
     drop(writer);
+}
+
+#[test]
+fn schema_22_checkpoint_rebuild_preserves_records_and_honors_pending_erasure() {
+    for erase in [false, true] {
+        let temp = tempdir().unwrap();
+        copy_fixture(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schema-22/index"),
+            temp.path(),
+        );
+        let old = VerifiedIndex::open_pinned(temp.path()).unwrap();
+        let source = old.manifest().sources[0].observation().source();
+        let records = old.core_source_event_page(source, None, 64).unwrap().items;
+        assert!(!records.is_empty());
+        let session = records[0].core_record.session_id.as_uuid();
+        crate::retained::checkpoint(temp.path(), &old, &BTreeSet::new()).unwrap();
+        if erase {
+            fs::write(
+                temp.path().join("retained/erased-sessions.json"),
+                serde_json::to_vec(&BTreeSet::from([session])).unwrap(),
+            )
+            .unwrap();
+        }
+        drop(old);
+        drop(GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap());
+        let current = VerifiedIndex::open_pinned(temp.path()).unwrap();
+        assert_eq!(
+            current.manifest().lexical_schema_version,
+            LEXICAL_SCHEMA_VERSION
+        );
+        for stored in records {
+            let expected = if erase && stored.core_record.session_id.as_uuid() == session {
+                None
+            } else {
+                Some(stored.core_record.clone())
+            };
+            assert_eq!(
+                current
+                    .core_record_by_id(stored.core_record.event_id.as_uuid())
+                    .unwrap(),
+                expected
+            );
+        }
+        let pointer = load_active_generation_pointer(temp.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(pointer.previous().is_none(), erase);
+        drop(current);
+        if erase {
+            finish_session_erasure(temp.path()).unwrap();
+            assert_eq!(generation_directories(temp.path()).len(), 1);
+        }
+    }
 }

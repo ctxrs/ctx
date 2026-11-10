@@ -154,19 +154,21 @@ fn cursor_warm_fork_keeps_canonical_citations_across_growth_convergence_and_remo
     let converged = cursor_histories(&index);
     assert_eq!(converged.len(), 2);
     assert!(converged.contains(&initial));
-    assert!(converged
+    let corrected = converged
         .iter()
-        .any(|history| history[0].session_id == alternative_before[0].session_id));
+        .find(|history| history[0].session_id == alternative_before[0].session_id)
+        .unwrap();
+    assert_literal_bodies(corrected, &["canonical marker"]);
     fs::remove_file(&alternative).unwrap();
     assert_cursor_refresh(&index, &registry);
-    assert_eq!(cursor_histories(&index), vec![initial.clone()]);
+    assert_eq!(cursor_histories(&index), converged);
     fs::write(&alternative, alternative_bytes).unwrap();
     assert_cursor_refresh(&index, &registry);
     assert_eq!(cursor_histories(&index), grown);
     fs::remove_file(&canonical).unwrap();
     assert_cursor_refresh(&index, &registry);
-    assert_eq!(cursor_histories(&index), vec![alternative_after.clone()]);
-    // The surviving alternative must not inherit the deleted canonical ID,
+    assert_eq!(cursor_histories(&index), grown);
+    // The surviving alternative must not inherit the missing canonical ID,
     // even after its bytes become equivalent to the old canonical history.
     write_transcript(
         &alternative,
@@ -178,9 +180,13 @@ fn cursor_warm_fork_keeps_canonical_citations_across_growth_convergence_and_remo
     );
     assert_cursor_refresh(&index, &registry);
     let remaining = cursor_histories(&index);
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0][0].session_id, alternative_before[0].session_id);
-    assert_ne!(remaining[0][0].event_id, initial[0].event_id);
+    assert_eq!(remaining, converged);
+    let alternative = remaining
+        .iter()
+        .find(|history| **history != initial)
+        .unwrap();
+    assert_eq!(alternative[0].session_id, alternative_before[0].session_id);
+    assert_ne!(alternative[0].event_id, initial[0].event_id);
 }
 
 #[test]

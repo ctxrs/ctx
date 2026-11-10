@@ -316,6 +316,19 @@ pub trait CaptureLifecycleSink: Sized {
         inventory: CertifiedSourceInventory,
     ) -> Result<(), Self::Error>;
 
+    /// Keep captured records when the source is confirmed missing.
+    fn retain_missing_source(
+        &mut self,
+        deletion: CertifiedSourceDeletion,
+        _inventory: CertifiedSourceInventory,
+    ) -> Result<(), Self::Error> {
+        let certificate = self
+            .base_source(deletion.source())
+            .cloned()
+            .ok_or_else(|| Self::invariant_error("missing source has no captured base"))?;
+        self.retain_source(certificate)
+    }
+
     fn delete_source(
         &mut self,
         deletion: CertifiedSourceDeletion,

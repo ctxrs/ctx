@@ -435,3 +435,91 @@ mod archive_selection;
 #[cfg(target_os = "linux")]
 #[path = "hosted_history/archive_selection_signal.rs"]
 mod archive_selection_signal;
+
+#[test]
+fn native_session_erasure_removes_core_and_derived_copies() {
+    let sandbox = Sandbox::new();
+    let record = seed_history(&sandbox);
+    for directory in ["semantic", "attribution"] {
+        let root = sandbox.path(&format!("history/search/{directory}"));
+        ctx_history_platform::platform_security::ensure_private_directory(&root).unwrap();
+        fs::write(root.join("old-payload"), b"private derived content").unwrap();
+    }
+    for name in ["team", "backup"] {
+        let scratch = sandbox.path(&format!("history/sharing/{name}/queue/.pending-crashed"));
+        ctx_history_platform::platform_security::ensure_private_directory(&scratch).unwrap();
+        fs::write(scratch.join("payload"), b"private queued content").unwrap();
+    }
+    let session = record.session_id.as_uuid().to_string();
+    for _ in 0..2 {
+        let erased =
+            success(
+                sandbox
+                    .command()
+                    .args(["index", "erase-session", &session, "--format=json"]),
+            );
+        assert_eq!(erased["erased"], true);
+        assert_eq!(erased["indexed_items"], 0);
+        assert_eq!(erased["sharing"].as_array().unwrap().len(), 2);
+    }
+    for name in ["team", "backup"] {
+        let root = sandbox.path(&format!("history/sharing/{name}"));
+        let journal: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("erased-sessions.json")).unwrap()).unwrap();
+        assert_eq!(journal[&session], false);
+        assert!(!root.join("queue/.pending-crashed").exists());
+    }
+    let journal = sandbox.path("history/sharing/team/erased-sessions.json");
+    fs::write(
+        journal,
+        serde_json::to_vec(&serde_json::json!({session.clone(): true})).unwrap(),
+    )
+    .unwrap();
+    let output = sandbox
+        .command()
+        .args(["index", "erase-session", &session])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("may already have reached the server"));
+    let index = VerifiedIndex::open_pinned(sandbox.path("history/search/lexical")).unwrap();
+    assert!(index
+        .core_record_by_id(record.event_id.as_uuid())
+        .unwrap()
+        .is_none());
+    for directory in ["semantic", "attribution"] {
+        assert!(!sandbox
+            .path(&format!("history/search/{directory}/old-payload"))
+            .exists());
+    }
+    assert!(sandbox
+        .path("history/search/lexical/retained/erased-sessions.json")
+        .is_file());
+}
+
+#[test]
+fn session_erasure_restores_persisted_mode_under_environment_opt_out() {
+    let sandbox = Sandbox::new();
+    let record = seed_history(&sandbox);
+    let config = sandbox.path("history/config.toml");
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("\"manual\"", "\"auto\""),
+    )
+    .unwrap();
+    success(sandbox.command().env("CTX_DAEMON_ENABLED", "false").args([
+        "index",
+        "erase-session",
+        &record.session_id.as_uuid().to_string(),
+        "--format=json",
+    ]));
+    assert!(fs::read_to_string(&config)
+        .unwrap()
+        .contains("mode = \"auto\""));
+}

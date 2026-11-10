@@ -412,6 +412,14 @@ impl CaptureLifecycleSink for TestLifecycle {
         Ok(())
     }
 
+    fn retain_missing_source(
+        &mut self,
+        _deletion: CertifiedSourceDeletion,
+        _inventory: CertifiedSourceInventory,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn delete_source(
         &mut self,
         deletion: CertifiedSourceDeletion,

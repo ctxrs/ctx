@@ -77,9 +77,9 @@ pub use index_document::{
 #[doc(hidden)]
 pub use manifest::{
     canonical_commit_payload, clear_manifest_cache_for_root, load_publication_for_metas,
-    meta_generation, payload_generation_id, prepare_successor_manifest, reconcile_commit_error,
-    searcher_generation, write_manifest, write_prepared_manifest, LoadedPublication,
-    PreparedManifest,
+    load_retained_manifest, meta_generation, payload_generation_id, prepare_successor_manifest,
+    reconcile_commit_error, searcher_generation, write_manifest, write_prepared_manifest,
+    LoadedPublication, PreparedManifest,
 };
 #[doc(hidden)]
 pub use record_digest::{accumulate_core_record, core_record_accumulator_leaf, core_record_leaf};

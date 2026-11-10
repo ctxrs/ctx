@@ -191,6 +191,12 @@ pub fn load_publication_for_metas(root: &Path, metas: &IndexMeta) -> Result<Load
     })
 }
 
+/// Load retained publication metadata without opening its physical lexical index.
+/// The manifest and any delta anchor remain authenticated by their generation IDs.
+pub fn load_retained_manifest(root: &Path, generation_id: &str) -> Result<Arc<GenerationManifest>> {
+    load_materialized_manifest(root, generation_id, 0)
+}
+
 fn load_materialized_manifest(
     root: &Path,
     generation_id: &str,

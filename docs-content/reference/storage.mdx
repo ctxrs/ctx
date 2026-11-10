@@ -55,6 +55,30 @@ may trail Core independently. Attribution is rebuilt from retained Core records;
 operations that need a current checkout also require available local Git objects.
 The original provider files are not needed to read retained Core history.
 
+Refresh retains previously captured sources when their transcript files or
+history roots disappear, including provider retention cleanup. Existing session
+and event IDs continue to resolve. `ctx status` counts retained missing sources;
+`ctx locate` reports source availability from the last committed refresh, without
+opening the original file. A reappearing source resumes capture, and corrections
+within a present source still replace its old content.
+
+Retention is on by default and has no age limit. Deleting provider files does not
+erase ctx’s copy. Use `ctx index erase-session <ctx-session-id>` to erase one
+session from a native history root and exclude it from future capture. The
+command removes local Core copies, clears semantic and attribution projections,
+discards queued uploads, and excludes the session from local sharing. Already
+admitted uploads may have reached the server; erasure does not contact it.
+Exported archives, backups, and server copies must be removed separately. Readers
+holding older generations can delay cleanup; the command reports an error until
+they release those files.
+
+ctx automatically checkpoints normalized records before publishing them and
+restores their original IDs across lexical-format rebuilds, even when provider
+files are gone. A checkpoint with an unsupported Core contract stops the rebuild
+and preserves the files for a compatible migration. Older installations gain
+this protection on their first compatible write. Deleting ctx’s storage removes
+both retained history and session exclusions; keep independent backups.
+
 Core/Tantivy is the sole public local architecture for normalized lexical
 records and history queries. Typed provider-aware search, show, and locate
 provide direct lookup. There is no `ctx sql`, MCP SQL tool, ctx-owned relational
