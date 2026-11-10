@@ -1,6 +1,40 @@
 use super::*;
 
 impl GenerationWriter {
+    /// Records certified absence without withdrawing captured Core history.
+    pub fn retain_missing_source(
+        &mut self,
+        proof: CertifiedSourceDeletion,
+        inventory: CertifiedSourceInventory,
+    ) -> Result<()> {
+        let mut absence = PendingDeletion::new(proof, inventory)?;
+        let source = absence.source();
+        self.reject_carried_source_mutation(source)?;
+        if !self.base_manifest().is_some_and(|base| {
+            base.sources
+                .binary_search_by_key(&source.identity().digest(), |certificate| {
+                    certificate.observation().source().identity().digest()
+                })
+                .ok()
+                .is_some_and(|index| {
+                    base.sources[index]
+                        .observation()
+                        .source()
+                        .exact_descriptor_eq(source)
+                })
+        }) {
+            return Err(IndexError::SourceNotAppendable(
+                source.identity().to_string(),
+            ));
+        }
+        if self.pending.contains_key(&source_token(source)) || self.deletions.contains_key(source) {
+            return Err(IndexError::DuplicateSource(source.identity().to_string()));
+        }
+        absence.retain_history = true;
+        self.deletions.insert(absence.source().clone(), absence);
+        Ok(())
+    }
+
     pub fn delete_source(
         &mut self,
         proof: CertifiedSourceDeletion,
@@ -39,10 +73,46 @@ impl GenerationWriter {
     where
         F: Fn() -> bool + Send + 'static,
     {
+        self.observe_missing_route(
+            route_identity,
+            observed_at_unix_ms,
+            Some(delete_after_consecutive_observations),
+            revalidate_missing,
+        )
+    }
+
+    /// Retains a missing route indefinitely, recording its first observed absence.
+    pub fn retain_missing_route<F>(
+        &mut self,
+        route_identity: SourceRouteIdentity,
+        observed_at_unix_ms: u64,
+        revalidate_missing: F,
+    ) -> Result<CertifiedMissingRouteOutcome>
+    where
+        F: Fn() -> bool + Send + 'static,
+    {
+        self.observe_missing_route(
+            route_identity,
+            observed_at_unix_ms,
+            None,
+            revalidate_missing,
+        )
+    }
+
+    fn observe_missing_route<F>(
+        &mut self,
+        route_identity: SourceRouteIdentity,
+        observed_at_unix_ms: u64,
+        delete_after_consecutive_observations: Option<u32>,
+        revalidate_missing: F,
+    ) -> Result<CertifiedMissingRouteOutcome>
+    where
+        F: Fn() -> bool + Send + 'static,
+    {
         if self.source_route_plan.is_some() {
             self.require_active_source_route(&route_identity)?;
         }
-        if delete_after_consecutive_observations < 2 {
+        if delete_after_consecutive_observations.is_some_and(|threshold| threshold < 2) {
             return Err(IndexError::InvalidSourceRouteDeletionGraceThreshold);
         }
         if self.observed_missing_routes.contains_key(&route_identity)
@@ -112,11 +182,16 @@ impl GenerationWriter {
             .to_owned();
         let observation = SourceMissingObservationPoint::new(base_generation, observed_at_unix_ms)?;
         let state = match base_route.missing_state() {
-            Some(previous) => previous.advance(observation)?,
+            Some(previous) if delete_after_consecutive_observations.is_some() => {
+                previous.advance(observation)?
+            }
+            Some(previous) => previous.clone(),
             None => SourceRouteMissingState::first(observation),
         };
         let retained_sources = base_route.sources().to_vec();
-        if state.consecutive_missing().get() >= delete_after_consecutive_observations {
+        if delete_after_consecutive_observations
+            .is_some_and(|threshold| state.consecutive_missing().get() >= threshold)
+        {
             let source_key_field = self.fields.source_key;
             for source in &retained_sources {
                 let token = source_token(source);

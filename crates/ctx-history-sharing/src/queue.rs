@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -63,7 +64,67 @@ pub struct SharingStatus {
     pub last_error: Option<Error>,
 }
 
+#[derive(Debug, Default, Serialize)]
+pub struct SessionErasure {
+    pub discarded_uploads: u64,
+    pub discarded_uploads_may_have_reached_server: bool,
+}
+
 impl SharingStore {
+    pub(crate) fn session_excluded(&self, session: uuid::Uuid) -> Result<bool> {
+        Ok(self.session_exclusions()?.contains_key(&session))
+    }
+
+    fn session_exclusions(&self) -> Result<BTreeMap<uuid::Uuid, bool>> {
+        Ok(
+            private_file::read_optional(&self.root().join("erased-sessions.json"))?
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Permanently exclude local recapture and discard this session's queued
+    /// bytes. Already admitted requests may finish; no remote deletion is sent.
+    pub fn erase_session(&self, session: uuid::Uuid) -> Result<SessionErasure> {
+        if !self.root().try_exists().map_err(|_| Error::State)? {
+            return Ok(SessionErasure::default());
+        }
+        let _settings = self.lock("settings.lock", false)?;
+        let mut exclusions = self.session_exclusions()?;
+        exclusions.entry(session).or_insert(false);
+        let journal = self.root().join("erased-sessions.json");
+        // Stop new admission before waiting for an already admitted request.
+        private_file::write(&journal, &exclusions)?;
+        let _uploader = self.lock("uploader.lock", false)?;
+        self.cleanup_scratch()?;
+        let mut paths = Vec::new();
+        for path in self.pending_paths()? {
+            let pending: Pending = private_file::read(&path.join("pending.json"))?;
+            if pending.member.session_id.as_uuid() == session {
+                *exclusions.get_mut(&session).ok_or(Error::State)? |=
+                    pending.upload.is_some() || pending.may_have_submitted();
+                paths.push(path);
+            }
+        }
+        private_file::write(&journal, &exclusions)?;
+        let result = SessionErasure {
+            discarded_uploads: paths.len() as u64,
+            discarded_uploads_may_have_reached_server: exclusions[&session],
+        };
+        for path in paths {
+            let retired = self.retire(&path, ".discarded-")?;
+            fs::remove_dir_all(retired).map_err(|_| Error::State)?;
+        }
+        // Retry payload cleanup after an interrupted retirement as well.
+        self.cleanup_retired()?;
+        let queue = self.root().join("queue");
+        if queue.try_exists().map_err(|_| Error::State)? {
+            private_file::sync_directory(&queue)?;
+        }
+        private_file::sync_directory(self.root())?;
+        CaptureStamp::invalidate(self.root())?;
+        Ok(result)
+    }
+
     pub fn status(&self) -> Result<SharingStatus> {
         let Some(settings) = self.settings()? else {
             return Ok(SharingStatus::default());
@@ -83,7 +144,10 @@ impl SharingStore {
         for path in self.pending_paths()? {
             let pending: Pending = private_file::read(&path.join("pending.json"))?;
             status.pending += 1;
-            if settings.paused || settings.policy.as_ref().is_none_or(|p| !pending.allowed(p)) {
+            if settings.paused
+                || self.session_excluded(pending.member.session_id.as_uuid())?
+                || settings.policy.as_ref().is_none_or(|p| !pending.allowed(p))
+            {
                 status.held += 1;
             }
             if status.last_error.is_none() {
@@ -134,6 +198,9 @@ impl SharingStore {
         stop: &AtomicBool,
     ) -> Result<Enqueued> {
         member.validate().map_err(|_| Error::Archive)?;
+        if self.session_excluded(member.session_id.as_uuid())? {
+            return Ok(Enqueued::Captured);
+        }
         let publication = publication_id(&policy.archive_identity, member)?;
         let queue_root = self.root().join("queue");
         create_private_directory_all(&queue_root).map_err(|_| Error::State)?;
@@ -392,8 +459,9 @@ impl SharingStore {
             // fsync: make retirement durable before removing any contents.
             private_file::sync_directory(&queue)?;
             for path in retired {
-                let _ = fs::remove_dir_all(path);
+                fs::remove_dir_all(path).map_err(|_| Error::State)?;
             }
+            private_file::sync_directory(&queue)?;
         }
         Ok(())
     }

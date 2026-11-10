@@ -1202,3 +1202,85 @@ mod active_file_race;
 
 #[path = "claude_ownership.rs"]
 mod ownership;
+
+#[test]
+fn claude_refresh_preserves_erasure_and_missing_citations_through_format_rebuild() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let erased_path = projects.join("project/erase.jsonl");
+    let kept_path = projects.join("project/keep.jsonl");
+    write_transcript(
+        &erased_path,
+        &[claude_message("user", "erase-event", "erase", "erase me")],
+    );
+    write_transcript(
+        &kept_path,
+        &[claude_message(
+            "user",
+            "keep-event",
+            "keep",
+            "keep citation",
+        )],
+    );
+    let registry = registry(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        &projects,
+    );
+    let index = temp.path().join("index");
+    refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    let erased = indexed_records(&index, CaptureProvider::Claude, "erase");
+    let kept = indexed_records(&index, CaptureProvider::Claude, "keep");
+    assert_eq!(erased.len(), 1);
+    assert_eq!(kept.len(), 1);
+    GenerationWriter::open(&index, writer_options())
+        .unwrap()
+        .into_writer()
+        .unwrap()
+        .erase_session(erased[0].session_id.as_uuid())
+        .unwrap();
+    append_transcript(
+        &erased_path,
+        &claude_message("assistant", "later-erased", "erase", "still excluded"),
+    );
+    refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert!(indexed_records(&index, CaptureProvider::Claude, "erase").is_empty());
+    fs::remove_file(kept_path).unwrap();
+    refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_eq!(
+        indexed_records(&index, CaptureProvider::Claude, "keep"),
+        kept
+    );
+    let pointer: Value =
+        serde_json::from_slice(&fs::read(index.join("active-generation.json")).unwrap()).unwrap();
+    let meta = index
+        .join("index-generations")
+        .join(pointer["active"]["directory"].as_str().unwrap())
+        .join("meta.json");
+    let mut value: Value = serde_json::from_slice(&fs::read(&meta).unwrap()).unwrap();
+    value["schema"] = json!([]);
+    let original = fs::metadata(&meta).unwrap().permissions();
+    let mut writable = original.clone();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        writable.set_mode(writable.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    writable.set_readonly(false);
+    fs::set_permissions(&meta, writable).unwrap();
+    fs::write(&meta, serde_json::to_vec(&value).unwrap()).unwrap();
+    fs::set_permissions(&meta, original).unwrap();
+    refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert!(indexed_records(&index, CaptureProvider::Claude, "erase").is_empty());
+    assert_eq!(
+        indexed_records(&index, CaptureProvider::Claude, "keep"),
+        kept
+    );
+    let verified = VerifiedIndex::open_pinned(&index).unwrap();
+    assert!(verified
+        .manifest()
+        .source_routes()
+        .iter()
+        .any(|route| !route.missing_sources().is_empty()));
+}

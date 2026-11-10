@@ -24,6 +24,16 @@ impl ctx_cli_presentation::commands::index::IndexReadinessPort for CliIndexReadi
 }
 
 impl ctx_cli_presentation::commands::index::IndexModePort for CliIndexMode {
+    fn erase_session(&mut self, data_root: &Path, session_id: &str) -> Result<Value> {
+        let session = uuid::Uuid::parse_str(session_id)?;
+        let config = config::AppConfig::load(data_root)?;
+        ctx_daemon_cli::erase_session(
+            data_root,
+            &ctx_daemon_cli::DaemonRuntimeConfig::from_app_config(&config, false),
+            session,
+        )
+    }
+
     fn current(&mut self, data_root: &Path) -> Result<Value> {
         let config = config::AppConfig::load(data_root)?;
         Ok(index_mode_report(

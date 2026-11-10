@@ -6,7 +6,7 @@ use ctx_history_provider_docproj::OPENHANDS_FILE_EVENTS_SOURCE_FORMAT;
 use std::{fs, path::Path};
 
 #[test]
-fn disjoint_current_root_disappearance_deletes_and_restores_only_its_route() {
+fn disjoint_current_root_disappearance_retains_and_restores_only_its_route() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let home = temp.path().join("home");
     let cwd = temp.path().join("cwd");
@@ -66,8 +66,8 @@ fn disjoint_current_root_disappearance_deletes_and_restores_only_its_route() {
         .unwrap();
 
     fs::remove_dir_all(&conversations).unwrap();
-    let mut deleted = None;
-    for observation in 1..=AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS {
+    let mut retained = None;
+    for _ in 0..5 {
         let missing_registry = discovered_openhands_registry(&context, &data_root);
         assert_eq!(openhands_route_facts(&missing_registry), cold_routes);
         let current = missing_registry
@@ -78,29 +78,31 @@ fn disjoint_current_root_disappearance_deletes_and_restores_only_its_route() {
         let receipt =
             refresh_source_backed_generation(&index, &missing_registry, WriterOptions::default())
                 .unwrap();
-        if observation < AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS {
-            assert_eq!(
-                indexed_bodies(&index, &receipt),
-                vec!["current body", "legacy body"]
-            );
-        } else {
-            deleted = Some(receipt);
+        assert_eq!(
+            indexed_bodies(&index, &receipt),
+            vec!["current body", "legacy body"]
+        );
+        assert_eq!(receipt.sources.len(), 2);
+        assert_eq!(receipt.commit.indexed_documents, 2);
+        assert!(receipt
+            .commit
+            .manifest()
+            .source_route(&current_route_id)
+            .unwrap()
+            .missing_state()
+            .is_some());
+        assert!(receipt
+            .commit
+            .manifest()
+            .source_route(&legacy_route_id)
+            .unwrap()
+            .missing_state()
+            .is_none());
+        if let Some(previous) = retained {
+            assert_eq!(receipt.commit.generation_id, previous);
         }
+        retained = Some(receipt.commit.generation_id);
     }
-    let deleted = deleted.unwrap();
-    assert_eq!(indexed_bodies(&index, &deleted), vec!["legacy body"]);
-    assert_eq!(deleted.sources.len(), 1);
-    assert_eq!(deleted.commit.indexed_documents, 1);
-    assert!(deleted
-        .commit
-        .manifest()
-        .source_route(&current_route_id)
-        .is_none());
-    assert!(deleted
-        .commit
-        .manifest()
-        .source_route(&legacy_route_id)
-        .is_some());
 
     write_current_message(
         &current_profile,
@@ -127,7 +129,7 @@ fn disjoint_current_root_disappearance_deletes_and_restores_only_its_route() {
 }
 
 #[test]
-fn default_current_only_root_disappearance_ages_out_and_restores_exactly() {
+fn default_current_only_root_disappearance_retains_and_restores_exactly() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let home = temp.path().join("home");
     let cwd = temp.path().join("cwd");
@@ -193,8 +195,8 @@ fn default_current_only_root_disappearance_ages_out_and_restores_exactly() {
         .source_route(&current_route_id)
         .is_some());
 
-    let mut deleted = None;
-    for observation in 1..=AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS {
+    let mut retained = None;
+    for _ in 0..5 {
         let missing_registry = discovered_openhands_registry(&context, &data_root);
         let current = missing_registry
             .routes()
@@ -205,20 +207,21 @@ fn default_current_only_root_disappearance_ages_out_and_restores_exactly() {
         let receipt =
             refresh_source_backed_generation(&index, &missing_registry, WriterOptions::default())
                 .unwrap();
-        if observation < AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS {
-            assert_eq!(indexed_bodies(&index, &receipt), vec!["current body"]);
-        } else {
-            deleted = Some(receipt);
+        assert_eq!(indexed_bodies(&index, &receipt), vec!["current body"]);
+        assert_eq!(receipt.sources.len(), 1);
+        assert_eq!(receipt.commit.indexed_documents, 1);
+        assert!(receipt
+            .commit
+            .manifest()
+            .source_route(&current_route_id)
+            .unwrap()
+            .missing_state()
+            .is_some());
+        if let Some(previous) = retained {
+            assert_eq!(receipt.commit.generation_id, previous);
         }
+        retained = Some(receipt.commit.generation_id);
     }
-    let deleted = deleted.unwrap();
-    assert!(deleted.sources.is_empty());
-    assert_eq!(deleted.commit.indexed_documents, 0);
-    assert!(deleted
-        .commit
-        .manifest()
-        .source_route(&current_route_id)
-        .is_none());
 
     write_current_message(
         &profile,

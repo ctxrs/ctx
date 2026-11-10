@@ -145,6 +145,7 @@ pub fn source_epoch_status_report(
         "indexed_sessions": indexed_sessions,
         "indexed_events": indexed_events,
         "indexed_sources": indexed_sources,
+        "retained_missing_sources": admitted_index.map(|index| index.manifest().source_routes().iter().map(|route| route.missing_sources().len()).sum::<usize>()),
         "read_only": true,
     }));
     if config.semantic_builtin_throttling_effective().is_none() {

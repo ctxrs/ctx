@@ -8,7 +8,9 @@ mod identity;
 mod merge_policy;
 mod preparation;
 mod repair;
+mod retained;
 pub use repair::{repair_generation_leases, GenerationLeaseRepair};
+pub use retained::finish_session_erasure;
 mod publication;
 mod staging;
 mod writer_deletion;
@@ -241,6 +243,7 @@ impl CertifiedMissingRouteOutcome {
 #[derive(Debug, Clone)]
 struct PendingDeletion {
     proof: CertifiedSourceDeletion,
+    retain_history: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -281,7 +284,10 @@ impl PendingDeletion {
                 proof.source().identity().to_string(),
             ));
         }
-        Ok(Self { proof })
+        Ok(Self {
+            proof,
+            retain_history: false,
+        })
     }
 
     fn source(&self) -> &SourceKey {
@@ -429,6 +435,8 @@ pub struct GenerationWriter {
     active_source_route_stage: Option<SourceRouteStageCheckpoint>,
     active_source_route_cohort_stage: Option<SourceRouteStageCheckpoint>,
     reusable_base_rebuild_detail: Option<String>,
+    erased_sessions: BTreeSet<Uuid>,
+    retained_manifest: Option<GenerationManifest>,
     #[cfg(test)]
     index_writer_constructions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -521,6 +529,7 @@ impl GenerationWriter {
                     source,
                     mode: PendingSourceMode::Replace,
                     staged_documents: 0,
+                    erased_documents: 0,
                     certificate: None,
                     core_record_accumulator: [0; 32],
                 },
@@ -633,6 +642,7 @@ impl GenerationWriter {
                     source,
                     mode: PendingSourceMode::Append { base },
                     staged_documents: 0,
+                    erased_documents: 0,
                     certificate: None,
                     core_record_accumulator: [0; 32],
                 },
@@ -648,15 +658,6 @@ impl GenerationWriter {
                 Err(IndexError::DocumentSourceNotActive)
             }
         }
-    }
-
-    /// Adds one complete generation-owned Core record.
-    ///
-    /// This is the canonical write API. No provider read locator is accepted,
-    /// synthesized, or persisted by this path.
-    pub fn add_core_record(&mut self, record: CoreRecord) -> Result<()> {
-        let prepared = self.core_record_preparer().prepare(record)?;
-        self.add_prepared_core_record(prepared)
     }
 
     /// Returns a cloneable immutable preparation context pinned to this
@@ -699,6 +700,8 @@ impl GenerationWriter {
             identity_facts,
             document,
         } = prepared.into_parts();
+        let is_replacement = matches!(&pending_source.mode, PendingSourceMode::Replace);
+        let differential = pending_source.replacement.is_some();
         let candidate = identity_facts.session;
         let source_owner = pending_source.source.identity().digest();
         if candidate.source_owner != source_owner
@@ -710,6 +713,9 @@ impl GenerationWriter {
             ));
         }
         let session_uuid = candidate.session_id.as_uuid();
+        if self.exclude_erased_record(&token, session_uuid)? {
+            return Ok(());
+        }
         let (merged, first_for_candidate, prior) =
             match self.changed_sessions.get(&session_uuid).copied() {
                 Some(existing) => (
@@ -761,8 +767,6 @@ impl GenerationWriter {
             };
         let advances = self.changed_sessions.get(&session_uuid).copied() != Some(merged);
         let mut document = document;
-        let is_replacement = matches!(&pending_source.mode, PendingSourceMode::Replace);
-        let differential = pending_source.replacement.is_some();
         if (first_for_candidate && (is_replacement || prior.is_none() || prior != Some(merged)))
             || (!first_for_candidate && advances)
         {

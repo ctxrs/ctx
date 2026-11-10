@@ -48,6 +48,8 @@ ctx does not require hooks or any code running inside the agent process. Automat
 
 Every session and event receives a stable ctx ID and retains its complete transcript content and source information. `ctx search` finds the relevant history, `ctx show` retrieves the exact event or full transcript, and `ctx locate` identifies where it came from. Semantic search and Blame use those same records.
 
+Captured history and its IDs survive provider cleanup and index format rebuilds. Deleting a provider transcript does not erase ctx’s copy; use `ctx index erase-session <ctx-session-id>` to erase a session and exclude it from future capture. See [storage and privacy](docs/storage.md#retaining-history-from-missing-sources) for retention and removal details.
+
 ```bash
 # Index all of your existing local agent sessions
 ctx setup

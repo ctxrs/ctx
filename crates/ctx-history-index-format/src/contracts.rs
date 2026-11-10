@@ -61,6 +61,8 @@ pub type Result<T> = std::result::Result<T, IndexError>;
 
 #[derive(Debug, Error)]
 pub enum IndexError {
+    #[error("retained history: {0}")]
+    RetainedHistory(String),
     #[error("{0}{}", ctx_history_index_generation::open_file_limit_hint(.0))]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -704,7 +706,7 @@ impl SourceMissingObservationPoint {
     }
 }
 
-/// Durable cross-refresh grace for one whole automatic route that is
+/// Durable absence observation for one whole automatic route that is
 /// conclusively absent. It exists only while that route still owns retained
 /// current sources.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -763,15 +765,16 @@ impl SourceRouteMissingState {
     }
 }
 
-/// Generation-authoritative membership of one route. `missing` is present
-/// only during active whole-route absence grace; lifetime removed routes are
-/// deliberately absent from the manifest.
+/// Generation-authoritative membership of one route. `missing` records whole-route
+/// absence; `missing_sources` records absent members of a present route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceRouteSnapshot {
     route_identity: SourceRouteIdentity,
     sources: std::sync::Arc<[SourceKey]>,
     missing: Option<SourceRouteMissingState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    missing_sources: Vec<SourceKey>,
 }
 
 impl SourceRouteSnapshot {
@@ -797,6 +800,7 @@ impl SourceRouteSnapshot {
             route_identity,
             sources: sources.into(),
             missing,
+            missing_sources: Vec::new(),
         };
         snapshot.validate_contract()?;
         Ok(snapshot)
@@ -813,12 +817,28 @@ impl SourceRouteSnapshot {
     pub fn exact_snapshot_eq(&self, other: &Self) -> bool {
         self.route_identity == other.route_identity
             && self.missing == other.missing
+            && self.missing_sources == other.missing_sources
             && (std::sync::Arc::ptr_eq(&self.sources, &other.sources)
                 || self.sources == other.sources)
     }
 
     pub fn missing_state(&self) -> Option<&SourceRouteMissingState> {
         self.missing.as_ref()
+    }
+
+    pub fn missing_sources(&self) -> &[SourceKey] {
+        if self.missing.is_some() {
+            &self.sources
+        } else {
+            &self.missing_sources
+        }
+    }
+
+    pub fn with_missing_sources(mut self, mut sources: Vec<SourceKey>) -> Result<Self> {
+        sources.sort_by_key(source_sort_key);
+        self.missing_sources = sources;
+        self.validate_contract()?;
+        Ok(self)
     }
 
     fn validate_contract(&self) -> Result<()> {
@@ -834,6 +854,21 @@ impl SourceRouteSnapshot {
         }
         for source in self.sources.iter() {
             source.validate_contract()?;
+        }
+        if self
+            .missing_sources
+            .windows(2)
+            .any(|pair| source_sort_key(&pair[0]) >= source_sort_key(&pair[1]))
+            || self.missing_sources.iter().any(|source| {
+                self.sources
+                    .binary_search_by_key(&source_sort_key(source), source_sort_key)
+                    .ok()
+                    .is_none_or(|index| !self.sources[index].exact_descriptor_eq(source))
+            })
+        {
+            return Err(IndexError::NonCanonicalSourceRouteMembers(
+                self.route_identity.as_str().to_owned(),
+            ));
         }
         if let Some(missing) = &self.missing {
             if self.sources.is_empty() {
@@ -878,47 +913,12 @@ pub struct SourceCoreRecordAggregate {
     source_identity_digest: String,
     indexed_documents: u64,
     core_record_accumulator: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    erased_documents: u64,
 }
 
-impl SourceCoreRecordAggregate {
-    pub fn new(
-        source_identity_digest: String,
-        indexed_documents: u64,
-        core_record_accumulator: String,
-    ) -> Result<Self> {
-        let aggregate = Self {
-            source_identity_digest,
-            indexed_documents,
-            core_record_accumulator,
-        };
-        aggregate.validate_contract()?;
-        Ok(aggregate)
-    }
-
-    pub fn source_identity_digest(&self) -> &str {
-        &self.source_identity_digest
-    }
-
-    pub fn indexed_documents(&self) -> u64 {
-        self.indexed_documents
-    }
-
-    pub fn core_record_accumulator(&self) -> &str {
-        &self.core_record_accumulator
-    }
-
-    pub fn accumulator_bytes(&self) -> Result<[u8; 32]> {
-        decode_sha256_hex(&self.core_record_accumulator)
-    }
-
-    fn validate_contract(&self) -> Result<()> {
-        if !is_sha256_hex(&self.source_identity_digest)
-            || !is_sha256_hex(&self.core_record_accumulator)
-        {
-            return Err(IndexError::InvalidGenerationId);
-        }
-        Ok(())
-    }
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 mod generation_manifest;

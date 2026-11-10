@@ -731,71 +731,113 @@ fn import_rejects_unreadable_directory_with_path_context() {
 }
 
 #[test]
-fn codex_cli_search_and_show_survive_deleted_raw_source() {
-    let temp = tempdir();
-    let source = PathBuf::from(provider_history_fixture("codex-sessions"));
-    let copied = temp.path().join("copied-codex-sessions");
-    copy_dir_all(&source, &copied);
-    let copied_text = copied.to_str().unwrap().to_owned();
+fn codex_cli_citations_survive_source_deletion_refresh_and_reappearance() {
+    for whole_root in [false, true] {
+        let temp = tempdir();
+        let source = PathBuf::from(provider_history_fixture("codex-sessions"));
+        let copied = temp.path().join(".codex/sessions");
+        copy_dir_all(&source, &copied);
+        json_output(ctx(&temp).args(["import", "--all", "--format=json"]));
+        let before = json_output(ctx(&temp).args([
+            "search",
+            "onboarding",
+            "--provider",
+            "codex",
+            "--refresh",
+            "off",
+            "--format=json",
+        ]));
+        let cited_event = before["results"][0]["ctx_event_id"].clone();
+        let cited_session = before["results"][0]["ctx_session_id"].clone();
+        if whole_root {
+            fs::remove_dir_all(&copied).unwrap();
+        } else {
+            fs::remove_file(copied.join("2026/06/23/codex-session-root.jsonl")).unwrap();
+        }
+        for _ in 0..5 {
+            json_output(ctx(&temp).args(["import", "--all", "--format=json"]));
+        }
+        let status = json_output(ctx(&temp).args(["status", "--format=json"]));
+        assert!(
+            status["retained_missing_sources"].as_u64().unwrap() > 0,
+            "{status:#}"
+        );
+        let located = json_output(ctx(&temp).args([
+            "locate",
+            "event",
+            cited_event.as_str().unwrap(),
+            "--format=json",
+        ]));
+        assert_eq!(located["source"]["availability"], "missing");
+        assert_eq!(located["source"]["history_retained"], true);
 
-    let imported = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &copied_text,
-        "--format=json",
-    ]));
-    assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl_tree");
+        let search = json_output(ctx(&temp).args([
+            "search",
+            "onboarding",
+            "--provider",
+            "codex",
+            "--refresh",
+            "off",
+            "--format=json",
+        ]));
+        assert_search_provider_oracle(&search, "codex", "onboarding", 1, "message");
 
-    fs::remove_dir_all(&copied).unwrap();
-
-    let search = json_output(ctx(&temp).args([
-        "search",
-        "onboarding",
-        "--provider",
-        "codex",
-        "--refresh",
-        "off",
-        "--format=json",
-    ]));
-    assert_search_provider_oracle(&search, "codex", "onboarding", 1, "message");
-
-    let result = &search["results"][0];
-    let event_id = result["ctx_event_id"].as_str().unwrap();
-    let session_id = result["ctx_session_id"].as_str().unwrap();
-    let shown_event =
-        json_output(ctx(&temp).args(["show", "event", event_id, "--window", "1", "--format=json"]));
-    assert_eq!(
-        shown_event["payload_type"], "event_window",
-        "{shown_event:#}"
-    );
-    assert_eq!(shown_event["ctx_event_id"], event_id, "{shown_event:#}");
-    assert_eq!(shown_event["ctx_session_id"], session_id, "{shown_event:#}");
-    assert_eq!(shown_event["event"]["provider"], "codex", "{shown_event:#}");
-    assert!(
-        shown_event["event"]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("onboarding")),
-        "{shown_event:#}"
-    );
-
-    let shown_session =
-        json_output(ctx(&temp).args(["show", "session", session_id, "--format=json"]));
-    assert_eq!(
-        shown_session["payload_type"], "session_transcript",
-        "{shown_session:#}"
-    );
-    assert_eq!(
-        shown_session["ctx_session_id"], session_id,
-        "{shown_session:#}"
-    );
-    assert!(
-        shown_session["events"]
-            .as_array()
-            .is_some_and(|events| events.iter().any(|event| event["text"]
+        let result = &search["results"][0];
+        let event_id = result["ctx_event_id"].as_str().unwrap();
+        let session_id = result["ctx_session_id"].as_str().unwrap();
+        assert_eq!(result["ctx_event_id"], cited_event);
+        assert_eq!(result["ctx_session_id"], cited_session);
+        let shown_event = json_output(ctx(&temp).args([
+            "show",
+            "event",
+            event_id,
+            "--window",
+            "1",
+            "--format=json",
+        ]));
+        assert_eq!(
+            shown_event["payload_type"], "event_window",
+            "{shown_event:#}"
+        );
+        assert_eq!(shown_event["ctx_event_id"], event_id, "{shown_event:#}");
+        assert_eq!(shown_event["ctx_session_id"], session_id, "{shown_event:#}");
+        assert_eq!(shown_event["event"]["provider"], "codex", "{shown_event:#}");
+        assert!(
+            shown_event["event"]["text"]
                 .as_str()
-                .is_some_and(|text| text.contains("onboarding")))),
-        "{shown_session:#}"
-    );
+                .is_some_and(|text| text.contains("onboarding")),
+            "{shown_event:#}"
+        );
+
+        let shown_session =
+            json_output(ctx(&temp).args(["show", "session", session_id, "--format=json"]));
+        assert_eq!(
+            shown_session["payload_type"], "session_transcript",
+            "{shown_session:#}"
+        );
+        assert_eq!(
+            shown_session["ctx_session_id"], session_id,
+            "{shown_session:#}"
+        );
+        assert!(
+            shown_session["events"]
+                .as_array()
+                .is_some_and(|events| events.iter().any(|event| event["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("onboarding")))),
+            "{shown_session:#}"
+        );
+        copy_dir_all(&source, &copied);
+        json_output(ctx(&temp).args(["import", "--all", "--format=json"]));
+        let located = json_output(ctx(&temp).args([
+            "locate",
+            "event",
+            cited_event.as_str().unwrap(),
+            "--format=json",
+        ]));
+        assert_eq!(located["source"]["availability"], "not_known_missing");
+        assert_eq!(located["ctx_event_id"], cited_event);
+        let status = json_output(ctx(&temp).args(["status", "--format=json"]));
+        assert_eq!(status["retained_missing_sources"], 0);
+    }
 }

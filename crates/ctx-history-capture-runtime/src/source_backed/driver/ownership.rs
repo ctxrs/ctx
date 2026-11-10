@@ -68,3 +68,21 @@ impl CompleteInventoryOwner {
         &self.inventory
     }
 }
+
+impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
+    pub fn retain_missing_source(
+        &mut self,
+        deletion: CertifiedSourceDeletion,
+        inventory: CertifiedSourceInventory,
+    ) -> SourceBackedCoordinatorResult<SourceBackedDeletionDisposition, L::Error> {
+        self.handle_missing_source(deletion, inventory, true)
+    }
+
+    pub fn delete_source(
+        &mut self,
+        deletion: CertifiedSourceDeletion,
+        inventory: CertifiedSourceInventory,
+    ) -> SourceBackedCoordinatorResult<SourceBackedDeletionDisposition, L::Error> {
+        self.handle_missing_source(deletion, inventory, false)
+    }
+}

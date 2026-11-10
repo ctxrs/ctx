@@ -848,7 +848,7 @@ use capture::capture;
 use capture::default_base_source_path;
 pub use capture::jsonl_family_driver;
 mod retirement;
-use retirement::retirement_absence_dependency;
+use retirement::{certified_source_replacement, retirement_absence_dependency};
 
 #[cfg(test)]
 #[path = "route/tests.rs"]

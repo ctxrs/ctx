@@ -357,6 +357,10 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                 lifecycle.finalize_applied_provider_roots(*automatic, digest, roots)?;
             }
         }
+        let deleted_source_ids = applied_removals
+            .iter()
+            .map(|removal| removal.deletion.source().identity().digest())
+            .collect::<BTreeSet<_>>();
         lifecycle.set_present_routes(registry.routes.iter().enumerate().filter_map(
             |(route_index, route)| {
                 let route_identity = route.metadata.route_identity.as_ref()?;
@@ -368,7 +372,11 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                 }
                 let members = owners
                     .values()
-                    .filter(|owner| owner.route_index == route_index && owner.present)
+                    .filter(|owner| {
+                        owner.route_index == route_index
+                            && (owner.present || owner.revalidation.is_some())
+                            && !deleted_source_ids.contains(&owner.source.identity().digest())
+                    })
                     .map(|owner| owner.source.clone())
                     .collect::<Vec<_>>();
                 if members.is_empty()

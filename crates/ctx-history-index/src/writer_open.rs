@@ -190,6 +190,13 @@ impl GenerationWriter {
             }
         }
 
+        let erased_sessions = super::retained::load_erasures(&root)?;
+        let reopen_root = root.clone();
+        let reopen_options = options.clone();
+        let was_fenced = matches!(
+            base_generation_expectation,
+            BaseGenerationExpectation::Exact(_)
+        );
         let writer = (|| -> Result<Self> {
             let rebuild_marked = if pointer_requires_rebuild {
                 // The old pointer remains the sole durable publication
@@ -332,6 +339,8 @@ impl GenerationWriter {
                 active_source_route_stage: None,
                 active_source_route_cohort_stage: None,
                 reusable_base_rebuild_detail: None,
+                erased_sessions,
+                retained_manifest: None,
                 #[cfg(test)]
                 index_writer_constructions: std::sync::Arc::new(
                     std::sync::atomic::AtomicUsize::new(0),
@@ -352,7 +361,16 @@ impl GenerationWriter {
                 after_pointer_switch: None,
             })
         })();
-        writer.map(GenerationWriterOpenOutcome::Ready)
+        let writer = writer?;
+        writer.preserve_base_checkpoint()?;
+        if writer.needs_retained_rebuild()? {
+            writer.rebuild_retained()?;
+            if was_fenced {
+                return Err(IndexError::ConcurrentGenerationChange);
+            }
+            return Self::open(reopen_root, reopen_options);
+        }
+        Ok(GenerationWriterOpenOutcome::Ready(writer))
     }
 
     /// Returns the base generation captured after this writer acquired

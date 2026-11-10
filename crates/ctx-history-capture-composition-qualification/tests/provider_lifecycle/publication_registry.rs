@@ -1014,7 +1014,7 @@ fn selected_failed_route_reports_exact_identity_and_carries_the_whole_base() {
 }
 
 #[test]
-fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
+fn automatic_whole_route_absence_is_retained_and_unknown_aborts_atomically() {
     let temp = tempdir().unwrap();
     let provider = CaptureProvider::Gemini;
     let format = GEMINI_CLI_SOURCE_FORMAT;
@@ -1042,7 +1042,7 @@ fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
         registry
     };
 
-    for expected in 1..automatic_route_deletion_missing_observations_for_test() {
+    for _ in 0..5 {
         let missing = refresh_source_backed_generation(
             temp.path(),
             &missing_registry(),
@@ -1060,7 +1060,7 @@ fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
                 .unwrap()
                 .consecutive_missing()
                 .get(),
-            expected
+            1
         );
     }
 
@@ -1097,7 +1097,7 @@ fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
         .missing_state()
         .is_none());
 
-    for expected in 1..automatic_route_deletion_missing_observations_for_test() {
+    for _ in 0..5 {
         let missing = refresh_source_backed_generation(
             temp.path(),
             &missing_registry(),
@@ -1114,7 +1114,7 @@ fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
                 .unwrap()
                 .consecutive_missing()
                 .get(),
-            expected
+            1
         );
     }
     let deleted = refresh_source_backed_generation(
@@ -1123,13 +1123,13 @@ fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
         WriterOptions::default(),
     )
     .unwrap();
-    assert!(deleted.sources.is_empty());
-    assert!(deleted.commit.manifest().source_routes().is_empty());
+    assert_eq!(deleted.sources.len(), 1);
+    assert_eq!(deleted.commit.manifest().source_routes().len(), 1);
     assert_eq!(
         VerifiedIndex::open_pinned(temp.path())
             .unwrap()
             .document_count(),
-        0
+        1
     );
 }
 
@@ -1253,7 +1253,7 @@ fn certified_missing_route_reappearance_at_precommit_cannot_delete_the_route() {
         registry
     };
 
-    for _ in 1..automatic_route_deletion_missing_observations_for_test() {
+    for _ in 0..5 {
         refresh_source_backed_generation(
             temp.path(),
             &missing_registry(),

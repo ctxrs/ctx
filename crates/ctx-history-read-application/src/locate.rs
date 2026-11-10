@@ -146,6 +146,29 @@ pub fn execute_locate<Generation: GenerationReadPort>(
         .locate(&request)
         .map_err(LocateApplicationError::Query)?;
     let mut read_model = locate_read_model(&result);
+    let source = match &result {
+        LocateResult::Session { first_event, .. } => &first_event.source,
+        LocateResult::Event(event) => &event.source,
+    };
+    let missing = generation
+        .index()
+        .manifest()
+        .source_routes()
+        .iter()
+        .any(|route| {
+            route
+                .missing_sources()
+                .binary_search_by_key(&source.identity().digest(), |candidate| {
+                    candidate.identity().digest()
+                })
+                .is_ok()
+        });
+    read_model["source"]["availability"] = json!(if missing {
+        "missing"
+    } else {
+        "not_known_missing"
+    });
+    read_model["source"]["history_retained"] = json!(true);
     let session_id = match &result {
         LocateResult::Session { session, .. } => session.session_id,
         LocateResult::Event(event) => event.session_id,

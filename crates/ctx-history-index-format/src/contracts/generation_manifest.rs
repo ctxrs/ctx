@@ -128,9 +128,9 @@ impl GenerationManifest {
         });
         let mut indexed_documents = 0_u64;
         let mut certified_source_bytes = 0_u64;
-        for (source, _aggregate) in sources.iter().zip(&core_record_aggregates) {
+        for (source, aggregate) in sources.iter().zip(&core_record_aggregates) {
             indexed_documents = indexed_documents
-                .checked_add(source.counts().indexed_documents)
+                .checked_add(aggregate.indexed_documents)
                 .ok_or(IndexError::CountOverflow)?;
             certified_source_bytes = certified_source_bytes
                 .checked_add(source.counts().certified_bytes)
@@ -239,13 +239,13 @@ impl GenerationManifest {
             }
             let source_id = source_token(source.observation().source());
             if aggregate.source_identity_digest != source_id
-                || aggregate.indexed_documents != source.counts().indexed_documents
+                || aggregate.certified_documents()? != source.counts().indexed_documents
             {
                 return Err(IndexError::CoreRecordAggregateMismatch(source_id));
             }
             indexed_documents = indexed_documents
-                .checked_sub(sources[source_index].counts().indexed_documents)
-                .and_then(|count| count.checked_add(source.counts().indexed_documents))
+                .checked_sub(aggregates[source_index].indexed_documents)
+                .and_then(|count| count.checked_add(aggregate.indexed_documents))
                 .ok_or(IndexError::CountOverflow)?;
             certified_source_bytes = certified_source_bytes
                 .checked_sub(sources[source_index].counts().certified_bytes)
@@ -536,7 +536,7 @@ impl GenerationManifest {
             if aggregate.source_identity_digest != source_id {
                 return Err(IndexError::CoreRecordAggregateMismatch(source_id));
             }
-            if aggregate.indexed_documents != source.counts().indexed_documents {
+            if aggregate.certified_documents()? != source.counts().indexed_documents {
                 return Err(IndexError::CoreRecordAggregateCountMismatch {
                     source_id: aggregate.source_identity_digest.clone(),
                     manifest: source.counts().indexed_documents,
@@ -544,7 +544,7 @@ impl GenerationManifest {
                 });
             }
             expected_documents = expected_documents
-                .checked_add(source.counts().indexed_documents)
+                .checked_add(aggregate.indexed_documents)
                 .ok_or(IndexError::CountOverflow)?;
             expected_bytes = expected_bytes
                 .checked_add(source.counts().certified_bytes)
@@ -564,6 +564,65 @@ impl GenerationManifest {
                 bytes: self.certified_source_bytes,
                 expected_bytes,
             });
+        }
+        Ok(())
+    }
+}
+
+impl SourceCoreRecordAggregate {
+    pub fn new(
+        source_identity_digest: String,
+        indexed_documents: u64,
+        core_record_accumulator: String,
+    ) -> Result<Self> {
+        let aggregate = Self {
+            source_identity_digest,
+            indexed_documents,
+            core_record_accumulator,
+            erased_documents: 0,
+        };
+        aggregate.validate_contract()?;
+        Ok(aggregate)
+    }
+
+    pub fn source_identity_digest(&self) -> &str {
+        &self.source_identity_digest
+    }
+
+    pub fn indexed_documents(&self) -> u64 {
+        self.indexed_documents
+    }
+
+    pub fn erased_documents(&self) -> u64 {
+        self.erased_documents
+    }
+
+    pub fn certified_documents(&self) -> Result<u64> {
+        self.indexed_documents
+            .checked_add(self.erased_documents)
+            .ok_or(IndexError::CountOverflow)
+    }
+
+    pub fn with_erased_documents(mut self, count: u64) -> Result<Self> {
+        self.erased_documents = count;
+        self.certified_documents()?;
+        Ok(self)
+    }
+
+    pub fn core_record_accumulator(&self) -> &str {
+        &self.core_record_accumulator
+    }
+
+    pub fn accumulator_bytes(&self) -> Result<[u8; 32]> {
+        decode_sha256_hex(&self.core_record_accumulator)
+    }
+
+    pub(super) fn validate_contract(&self) -> Result<()> {
+        self.certified_documents()?;
+        if !is_sha256_hex(&self.source_identity_digest)
+            || !is_sha256_hex(&self.core_record_accumulator)
+        {
+            return Err(IndexError::InvalidGenerationId);
         }
         Ok(())
     }

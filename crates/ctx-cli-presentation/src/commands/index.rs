@@ -30,6 +30,7 @@ impl IndexArgs {
         self.format.is_json()
             || match &self.command {
                 None => false,
+                Some(IndexCommand::EraseSession(args)) => args.format.is_json(),
                 Some(IndexCommand::Mode(args)) => args.format.is_json(),
                 Some(IndexCommand::Watch(args)) => args.format == IndexWatchFormat::Jsonl,
                 Some(IndexCommand::Wait(args)) => args.format.is_json(),
@@ -54,12 +55,22 @@ impl IndexArgs {
 
 #[derive(Debug, Subcommand)]
 enum IndexCommand {
+    #[command(about = "Erase a session from local history and exclude it from future capture")]
+    EraseSession(IndexEraseSessionArgs),
     #[command(about = "Show or change automatic indexing mode")]
     Mode(IndexModeArgs),
     #[command(about = "Watch local indexing progress until ready")]
     Watch(IndexWatchArgs),
     #[command(about = "Wait until local indexing reaches a ready state")]
     Wait(IndexWaitArgs),
+}
+
+#[derive(Debug, Args)]
+struct IndexEraseSessionArgs {
+    /// ctx session ID from search or show.
+    session_id: String,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -124,6 +135,7 @@ pub trait IndexReadinessPort {
 }
 
 pub trait IndexModePort {
+    fn erase_session(&mut self, data_root: &Path, session_id: &str) -> Result<Value>;
     fn current(&mut self, data_root: &Path) -> Result<Value>;
     fn update(&mut self, data_root: &Path, mode: IndexModeArg) -> Result<Value>;
 }
@@ -149,6 +161,33 @@ pub fn run_index(
             } else if !quiet {
                 let mut document = IndexDashboard.render(&status, ui.stdout_context());
                 append_indexing_mode(&mut document, &status, ui);
+                ui.write_stdout(&document)?;
+            }
+            Ok(())
+        }
+        Some(IndexCommand::EraseSession(args)) => {
+            let report = mode.erase_session(&data_root, &args.session_id)?;
+            if parent_json || args.format.is_json() {
+                print_json(report)?;
+            } else if !quiet {
+                let document = outcome(
+                    ui.stdout_context(),
+                    Outcome {
+                        state: OutcomeState::Success,
+                        title: "Session erased from local history",
+                        detail: Some(
+                            if report["sharing"].as_array().is_some_and(|connections| {
+                                connections.iter().any(|connection| {
+                                    connection["discarded_uploads_may_have_reached_server"] == true
+                                })
+                            }) {
+                                "Future capture and sharing exclude this session. Discarded uploads may already have reached the server; server copies require separate removal."
+                            } else {
+                                "Future capture and sharing exclude this session. Provider files, archives, and server copies are unchanged."
+                            },
+                        ),
+                    },
+                );
                 ui.write_stdout(&document)?;
             }
             Ok(())

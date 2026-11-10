@@ -444,13 +444,13 @@ fn custom_history_registered_route_preserves_lifecycle_and_core_publication() {
     fs::remove_file(&path).unwrap();
     let deleted =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert!(deleted.sources.is_empty());
-    assert_eq!(deleted.removals.len(), 1);
+    assert_eq!(deleted.sources.len(), 1);
+    assert!(deleted.removals.is_empty());
     assert_eq!(
         VerifiedIndex::open_pinned(&index_root)
             .unwrap()
             .document_count(),
-        0
+        2
     );
 }
 

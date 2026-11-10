@@ -77,3 +77,63 @@ fn uploader_reclaims_only_abandoned_scratch_and_removal_preserves_explicit_previ
     );
     assert!(!store.status().unwrap().connected);
 }
+
+#[test]
+fn erasure_discards_queued_bytes_and_blocks_recapture_without_touching_peers() {
+    for (uploaded, submitted) in [(false, false), (true, false), (false, true)] {
+        let temp = tempdir().unwrap();
+        let server = publishing_mock(|_| panic!("erasure must not contact the server"));
+        let (store, collector, _) = make_ready(temp.path(), server.endpoint());
+        let path = store.pending_paths().unwrap().pop().unwrap();
+        let mut pending: Pending = private_file::read(&path.join("pending.json")).unwrap();
+        pending.upload = uploaded.then(|| UploadStatus {
+            publisher: "synthetic-publisher".into(),
+            id: "synthetic-upload".into(),
+            received_bytes: pending.member.bytes,
+            expected_bytes: pending.member.bytes,
+            expires_at: u64::MAX,
+        });
+        pending.publish_attempted = submitted;
+        pending.retry_at = u64::MAX;
+        pending.save(&path).unwrap();
+        let session = pending.member.session_id.as_uuid();
+        let original = synthetic_record("session-one", ORIGINAL_TEXT);
+        let peer = synthetic_record("session-two", "keep this peer");
+        commit_records(&temp.path().join("data"), &[original, peer.clone()], 2);
+        assert_eq!(collector.tick(), TickOutcome::Progress);
+        let peer_path = store
+            .pending_paths()
+            .unwrap()
+            .into_iter()
+            .find(|p| *p != path)
+            .unwrap();
+        let peer_payload = fs::read(peer_path.join("payload")).unwrap();
+        let mut queued_peer: Pending = private_file::read(&peer_path.join("pending.json")).unwrap();
+        assert_eq!(queued_peer.member.session_id, peer.session_id);
+        queued_peer.retry_at = u64::MAX;
+        queued_peer.save(&peer_path).unwrap();
+        let scratch = abandoned_scratch(&store);
+        let receipt = store.erase_session(session).unwrap();
+        assert_eq!(receipt.discarded_uploads, 1);
+        assert_eq!(
+            receipt.discarded_uploads_may_have_reached_server,
+            uploaded || submitted
+        );
+        assert!(!path.exists());
+        assert!(scratch.iter().all(|p| !p.exists()));
+        assert_eq!(store.pending_paths().unwrap(), vec![peer_path.clone()]);
+        assert_eq!(fs::read(peer_path.join("payload")).unwrap(), peer_payload);
+        // A crash before Core erasure leaves the original record available to
+        // capture. The durable sharing exclusion must still prevent upload.
+        assert_eq!(collector.tick(), TickOutcome::Idle);
+        assert_eq!(store.pending_paths().unwrap(), vec![peer_path.clone()]);
+        assert_eq!(fs::read(peer_path.join("payload")).unwrap(), peer_payload);
+        let retry = store.erase_session(session).unwrap();
+        assert_eq!(retry.discarded_uploads, 0);
+        assert_eq!(
+            retry.discarded_uploads_may_have_reached_server,
+            uploaded || submitted
+        );
+        assert_eq!(server.requests().len(), 1); // Policy authentication only.
+    }
+}

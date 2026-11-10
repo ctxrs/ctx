@@ -209,6 +209,11 @@ pub fn render_status_human(
             }
         }
     }
+    let missing = report["retained_missing_sources"].as_u64().unwrap_or(0);
+    if missing > 0 {
+        let retained = format!("{missing}; captured history remains searchable");
+        history_values.push(("Missing sources", retained));
+    }
     if component_health == StatusHealth::Healthy {
         history_values.push(("Refresh", component_display(&report["refresh"]).to_owned()));
     } else {

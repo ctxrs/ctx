@@ -196,11 +196,17 @@ fn checked_writer_open_requires_the_exact_captured_base_generation() {
         Err(IndexError::ConcurrentGenerationChange)
     ));
 
-    let rebuild = GenerationWriter::open(temp.path(), WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    assert_eq!(rebuild.base_generation_id(), None);
+    assert!(matches!(
+        GenerationWriter::open(temp.path(), WriterOptions::default()),
+        Err(IndexError::RetainedHistory(_))
+    ));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(temp.path().join("active-generation.json")).unwrap()
+        )
+        .unwrap(),
+        unsupported_pointer
+    );
 }
 
 #[test]

@@ -60,6 +60,11 @@ is a no-op. A corrected session requires `--expected-predecessors FILE`, a JSON
 object mapping that member's inventory path to its currently imported SHA-256.
 Missing sessions in a later archive do not delete earlier imports.
 
+Ordinary local refresh also retains previously captured sources that disappear
+from provider storage. Those records remain eligible for export. Provider-side
+deletion therefore does not erase either a local retained copy or an archive;
+see [storage and privacy](storage.md#retaining-history-from-missing-sources).
+
 Local search, conversation details, event enumeration, and locate output expose
 `archive_provenance` with `origin`, `view`, and `label_authority: "archive_creator"`.
 CLI text and MCP text identify these as creator-supplied labels, not verified

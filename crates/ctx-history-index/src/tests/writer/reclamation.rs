@@ -442,8 +442,8 @@ fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
         .into_writer()
         .unwrap();
     assert!(
-        rebuild.base_manifest().is_none(),
-        "a marked physical generation must not be exposed as reusable base state"
+        rebuild.base_manifest().is_some(),
+        "the portable checkpoint must restore a fresh reusable base"
     );
     rebuild
         .certify_complete_inventory(inventory.clone())

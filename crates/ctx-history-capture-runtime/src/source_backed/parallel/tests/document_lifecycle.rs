@@ -691,10 +691,8 @@ fn active_source_family_contract_document_add_change_delete_failure_carry_forwar
         .retain(|leaf| leaf.logical_id != 1);
     adapter.reset_work();
     let deleted = run(&adapter, &sources(&added), 4);
-    assert!(deleted.applied_removals.iter().any(|removal| removal
-        .deletion
-        .source()
-        .exact_descriptor_eq(&deleted_source)));
+    assert!(deleted.applied_removals.is_empty());
+    assert!(!deleted.owners[&deleted_source.identity().digest()].present);
 
     adapter.state.lock().unwrap().leaves.push(leaf(1));
     let reappeared = run(&adapter, &sources(&deleted), 4);

@@ -29,6 +29,7 @@ ctx-history-platform = { path = "../ctx-history-platform" }
 ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-read-application = { path = "../ctx-history-read-application" }
 ctx-history-refresh = { path = "../ctx-history-refresh" }
+ctx-history-sharing = { path = "../ctx-history-sharing" }
 ctx-semantic-index = { path = "../ctx-semantic-index" }
 ctx-semantic-model = { path = "../ctx-semantic-model" }
 ctx-terminal = { path = "../ctx-terminal" }

@@ -34,6 +34,28 @@ pub(super) fn retirement_absence_dependency<R: JsonlFamilyRuntime>(
     base_source: &SourceKey,
     base_path: &Path,
 ) -> Option<JsonlFamilyAbsentMember<JsonlRuntimeError<R>>> {
+    if certified_source_replacement(
+        adapter,
+        opening,
+        inventory,
+        terminal_sources,
+        base_source,
+        base_path,
+    ) {
+        None
+    } else {
+        JsonlFamilyAbsentMember::from_path(opening, base_path.to_path_buf())
+    }
+}
+
+pub(super) fn certified_source_replacement<R: JsonlFamilyRuntime>(
+    adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
+    opening: &JsonlFamilyInventory<JsonlRuntimeError<R>>,
+    inventory: &CertifiedSourceInventory,
+    terminal_sources: &HashMap<[u8; 32], TerminalSourceEvidence<JsonlRuntimeError<R>>>,
+    base_source: &SourceKey,
+    base_path: &Path,
+) -> bool {
     let same_path_replacement = certified_owned_same_path_replacement(
         adapter,
         opening,
@@ -45,13 +67,10 @@ pub(super) fn retirement_absence_dependency<R: JsonlFamilyRuntime>(
     // A complete current inventory is terminal authority for an exact route
     // whose named root changed; reopening the former root would reject an
     // intentional replacement merely because the old home still exists.
-    let external_exact_route_replacement = opening
-        .authorities
-        .iter()
-        .all(|authority| !base_path.starts_with(authority.named_path()));
-    if same_path_replacement || external_exact_route_replacement {
-        None
-    } else {
-        JsonlFamilyAbsentMember::from_path(opening, base_path.to_path_buf())
-    }
+    let external_exact_route_replacement = !opening.authorities.is_empty()
+        && opening
+            .authorities
+            .iter()
+            .all(|authority| !base_path.starts_with(authority.named_path()));
+    same_path_replacement || external_exact_route_replacement
 }

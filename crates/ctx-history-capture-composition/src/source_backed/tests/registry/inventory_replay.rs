@@ -180,7 +180,7 @@ pub(super) fn inventory_replay_registry(
                             error.to_string(),
                         )
                     })?;
-                sink.delete_source(deletion, inventory.clone())
+                sink.retain_missing_source(deletion, inventory.clone())
                     .map_err(route_coordinator_error)?;
             }
             Ok(())
@@ -215,7 +215,7 @@ pub(super) fn inventory_replay_registry(
 }
 
 #[test]
-fn delete_b_then_discover_c_keeps_receipts_and_manifests_current() {
+fn missing_b_then_discover_c_retains_history_across_refresh_and_restart() {
     let source_a = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 101);
     let source_b = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 102);
     let source_c = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 103);
@@ -231,19 +231,21 @@ fn delete_b_then_discover_c_keeps_receipts_and_manifests_current() {
     *current.lock().unwrap() = vec![source_a.clone()];
     let deleted =
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert_eq!(deleted.sources.len(), 1);
-    assert_eq!(deleted.removals.len(), 1);
-    assert!(deleted.removals[0]
-        .deletion
-        .source()
-        .exact_descriptor_eq(&source_b));
+    assert_eq!(deleted.sources.len(), 2);
+    assert!(deleted.removals.is_empty());
+    assert!(deleted
+        .commit
+        .manifest()
+        .source_routes()
+        .iter()
+        .any(|route| route.missing_sources() == [source_b.clone()]));
 
     *current.lock().unwrap() = vec![source_a, source_c];
     let discovered =
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert_eq!(discovered.sources.len(), 2);
+    assert_eq!(discovered.sources.len(), 3);
     assert!(discovered.removals.is_empty());
-    assert_eq!(discovered.commit.manifest().sources.len(), 2);
+    assert_eq!(discovered.commit.manifest().sources.len(), 3);
 
     let replay =
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();

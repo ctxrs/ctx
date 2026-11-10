@@ -93,6 +93,15 @@ pub(in crate::source_index) fn render_locate_document(
 
     document.push_blank();
     push_heading(&mut document, "Core source", Token::Heading);
+    if value["source"]["availability"] == "missing" {
+        push_optional_field(
+            &mut document,
+            context,
+            "Availability",
+            Some("Source missing; captured history retained"),
+            Token::Text,
+        );
+    }
     for (label, field) in [
         ("ID", "ctx_source_id"),
         ("Format", "source_format"),

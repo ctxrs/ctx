@@ -3,6 +3,21 @@ use super::*;
 impl GenerationWriter {
     pub(super) fn next_manifest(&self) -> Result<GenerationManifest> {
         self.validate_source_route_plan_complete()?;
+        if let Some(snapshot) = &self.retained_manifest {
+            let manifest = GenerationManifest::from_parts_with_record_aggregates_and_provider_roots_and_detached_authorities(
+                snapshot.sources.clone(),
+                staging::manifest_record_aggregates(self, &snapshot.sources)?,
+                snapshot.source_routes().to_vec(),
+                snapshot.automatic_provider_discovery(),
+                snapshot.provider_root_config_digest().to_owned(),
+                snapshot.provider_roots().to_vec(),
+                snapshot.detached_released_provider_roots().to_vec(),
+            )?;
+            return match snapshot.generation_state() {
+                Some(state) => manifest.with_generation_state(state.clone()),
+                None => Ok(manifest),
+            };
+        }
         if let Some(base) = self.base_publication.as_ref() {
             if self.source_replacement_manifest_is_route_stable(base.manifest()) {
                 #[cfg(any(test, feature = "test-support"))]
@@ -15,7 +30,9 @@ impl GenerationWriter {
         }
         let deleted_sources = self
             .deletions
-            .keys()
+            .values()
+            .filter(|deletion| !deletion.retain_history)
+            .map(PendingDeletion::source)
             .chain(&self.route_deletions)
             .map(|source| source.identity().digest())
             .collect::<BTreeSet<_>>();
@@ -53,6 +70,31 @@ impl GenerationWriter {
             )?;
         }
         source_routes.extend(self.observed_missing_routes.values().cloned());
+        for route in &mut source_routes {
+            if route.missing_state().is_some() {
+                continue;
+            }
+            let base_missing = self
+                .base_manifest()
+                .and_then(|base| base.source_route(route.route_identity()))
+                .map(|base| base.missing_sources())
+                .unwrap_or_default();
+            let missing = route
+                .sources()
+                .iter()
+                .filter(|source| {
+                    self.deletions
+                        .get(*source)
+                        .is_some_and(|absence| absence.retain_history)
+                        || (!self.pending.contains_key(&source_token(source))
+                            && base_missing
+                                .binary_search_by_key(&source_sort_key(source), source_sort_key)
+                                .is_ok())
+                })
+                .cloned()
+                .collect();
+            *route = route.clone().with_missing_sources(missing)?;
+        }
         let (automatic_provider_discovery, provider_root_config_digest, provider_roots) = self
             .applied_provider_roots
             .clone()
@@ -87,6 +129,14 @@ impl GenerationWriter {
     }
 
     fn source_replacement_manifest_is_route_stable(&self, base: &GenerationManifest) -> bool {
+        if base
+            .source_routes()
+            .iter()
+            .flat_map(|route| route.missing_sources())
+            .any(|source| self.pending.contains_key(&source_token(source)))
+        {
+            return false;
+        }
         if self
             .applied_provider_roots
             .as_ref()

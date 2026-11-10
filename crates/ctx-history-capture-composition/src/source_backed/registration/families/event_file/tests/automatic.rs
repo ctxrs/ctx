@@ -150,12 +150,12 @@ fn current_cli_automatic_discovery_covers_append_rewrite_and_conversation_deleti
     refresh_source_backed_generation(&index, &deleted_registry, WriterOptions::default()).unwrap();
     assert_eq!(
         VerifiedIndex::open_pinned(&index).unwrap().document_count(),
-        0
+        2
     );
 }
 
 #[test]
-fn disjoint_legacy_and_current_routes_coexist_and_delete_independently() {
+fn disjoint_legacy_and_current_routes_retain_history_independently() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let home = temp.path().join("home");
     let cwd = temp.path().join("cwd");
@@ -234,7 +234,7 @@ fn disjoint_legacy_and_current_routes_coexist_and_delete_independently() {
     .unwrap();
     assert_eq!(
         indexed_bodies(&index, &legacy_deleted),
-        vec!["current body"]
+        vec!["current body", "legacy body"]
     );
 
     write_message(
@@ -266,7 +266,7 @@ fn disjoint_legacy_and_current_routes_coexist_and_delete_independently() {
     .unwrap();
     assert_eq!(
         indexed_bodies(&index, &current_deleted),
-        vec!["legacy body"]
+        vec!["current body", "legacy body"]
     );
 }
 
