@@ -126,19 +126,18 @@ mod tests {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let mut lower = filesystem_stat(&File::open(temp.path()).unwrap()).unwrap();
         let upper = filesystem_stat(&File::open(temp.path()).unwrap()).unwrap();
-        for filesystem in [0xEF53, 0x5846_5342, 0x9123_683E, 0xF2F5_2010, 0x0102_1994] {
+        for filesystem in [
+            0xEF53,
+            0x5846_5342,
+            0x9123_683E,
+            0xF2F5_2010,
+            0x0102_1994,
+            0x2FC1_2FC1,
+        ] {
             lower.f_type = filesystem;
             assert!(backing_is_qualified(&upper, &lower));
         }
-        for filesystem in [
-            0xF15F,
-            0x4d44,
-            0x6969,
-            0xFF53_4D42,
-            0x6573_5546,
-            0x2FC1_2FC1,
-            0,
-        ] {
+        for filesystem in [0xF15F, 0x4d44, 0x6969, 0xFF53_4D42, 0x6573_5546, 0] {
             lower.f_type = filesystem;
             assert!(!backing_is_qualified(&upper, &lower));
         }
