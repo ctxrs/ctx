@@ -596,10 +596,19 @@ fn linux_filesystem_is_qualified(filesystem_type: i64) -> bool {
     // tmpfs is kernel-local and provides nanosecond change timestamps, as
     // required by the metadata-only ordinary-file change token.
     const TMPFS_MAGIC: i64 = 0x0102_1994;
+    // OpenZFS is a kernel-local filesystem with nanosecond change timestamps
+    // and per-dataset mount IDs, so it meets the same change-token and
+    // mount-boundary requirements. Native encryption is not visible here.
+    const ZFS_SUPER_MAGIC: i64 = 0x2FC1_2FC1;
 
     matches!(
         filesystem_type,
-        EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | BTRFS_SUPER_MAGIC | F2FS_SUPER_MAGIC | TMPFS_MAGIC
+        EXT_SUPER_MAGIC
+            | XFS_SUPER_MAGIC
+            | BTRFS_SUPER_MAGIC
+            | F2FS_SUPER_MAGIC
+            | TMPFS_MAGIC
+            | ZFS_SUPER_MAGIC
     )
 }
 
@@ -698,6 +707,12 @@ mod tests {
     #[test]
     fn filesystem_policy_accepts_tmpfs_source_roots() {
         assert!(super::linux_filesystem_is_qualified(0x0102_1994));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_policy_accepts_zfs_source_roots() {
+        assert!(super::linux_filesystem_is_qualified(0x2FC1_2FC1));
     }
 
     #[cfg(target_os = "linux")]
