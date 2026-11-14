@@ -310,6 +310,11 @@ fn item_completed_selector_bit(level: ItemCompletedSelectorLevel, key: &str) -> 
             "id" => Some(1 << 0),
             "type" => Some(1 << 1),
             "text" => Some(1 << 2),
+            "kind" => Some(1 << 3),
+            "agent_thread_id" => Some(1 << 4),
+            "agent_path" => Some(1 << 5),
+            "model" => Some(1 << 6),
+            "reasoning_effort" => Some(1 << 7),
             _ => None,
         },
     }
