@@ -18,6 +18,9 @@ use crate::provider::codex::events::codex_content_text;
 use crate::Result as CaptureResult;
 
 mod retrieval;
+mod subagent;
+
+use subagent::subagent_activity_semantic;
 
 use retrieval::{codex_invocation_discovery_exclusion, codex_result_discovery_exclusion};
 
@@ -771,12 +774,22 @@ fn source_backed_completed_item(
         | "FileChange"
         | "McpToolCall"
         | "ContextCompaction" => CompletedItemProjection::KnownNonMaterialized,
-        // These current variants are lifecycle-only in paginated rollouts.
-        // Until they gain a semantic projection, reject them observably rather
-        // than treating them as duplicated raw response items.
-        "SubAgentActivity" | "EnteredReviewMode" | "ExitedReviewMode" => {
-            CompletedItemProjection::Unsupported
-        }
+        // Sub-agent lifecycle records have no response_item equivalent. Keep
+        // their source-authored metadata as notices, never fabricated messages
+        // or inferred session relationships.
+        "SubAgentActivity" => match subagent_activity_semantic(item) {
+            Ok(semantic) => CompletedItemProjection::Materialized(CompletedItemMaterialized {
+                semantic,
+                provider_event_identity: CodexProviderEventIdentityV0 {
+                    kind: CodexProviderEventIdentityKindV0::CompletedItem,
+                    value: qualified_id,
+                },
+                occurred_at: item_occurred_at,
+            }),
+            Err(projection) => projection,
+        },
+        // These current variants still require dedicated bounded projections.
+        "EnteredReviewMode" | "ExitedReviewMode" => CompletedItemProjection::Unsupported,
         "Extension" => CompletedItemProjection::Unsupported,
         _ => CompletedItemProjection::Unsupported,
     }

@@ -203,7 +203,7 @@ fn item_completed_distinguishes_raw_overlaps_from_lifecycle_only_variants() {
         );
     }
 
-    for item_type in ["SubAgentActivity", "EnteredReviewMode", "ExitedReviewMode"] {
+    for item_type in ["EnteredReviewMode", "ExitedReviewMode"] {
         let (record, raw) = completed_item_record(
             "turn-one",
             serde_json::json!({"id": "known-lifecycle-only", "type": item_type}),
@@ -1012,3 +1012,121 @@ mod item_call_identity;
 mod patch_file_facts;
 
 mod code_mode;
+
+#[test]
+fn item_completed_subagent_activity_retains_notice_without_fake_message() {
+    for kind in ["started", "interacted", "interrupted", "completed"] {
+        let item = serde_json::json!({
+            "id": "activity-one", "type": "SubAgentActivity", "kind": kind,
+            "agent_thread_id": "019fb000-0000-7000-8000-0000000000b2",
+            "agent_path": "/root/reviewer", "model": null, "reasoning_effort": null
+        });
+        let (record, raw) = completed_item_record("turn-one", item.clone());
+        let built = build_source_backed_event_row(
+            7,
+            CodexRetainedKind::ItemCompleted,
+            ITEM_COMPLETED_SESSION_ID,
+            &record,
+            &raw,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(built.row.event_type, EventType::Notice);
+        assert_eq!(built.row.role, None);
+        assert_eq!(built.row.structured_content, Some(record.payload));
+        assert_eq!(
+            serde_json::from_str::<Value>(&built.row.lexical_body).unwrap(),
+            item
+        );
+        assert_eq!(
+            built.row.provider_event_identity.unwrap().kind,
+            CodexProviderEventIdentityKindV0::CompletedItem
+        );
+    }
+}
+
+#[test]
+fn item_completed_subagent_activity_rejects_malformed_or_future_kinds() {
+    for (field, value, expected) in [
+        (
+            "kind",
+            serde_json::json!("future"),
+            CodexRetainedNonMaterialized::Unsupported,
+        ),
+        ("kind", Value::Null, CodexRetainedNonMaterialized::Malformed),
+        (
+            "agent_thread_id",
+            serde_json::json!(""),
+            CodexRetainedNonMaterialized::Malformed,
+        ),
+        (
+            "agent_path",
+            serde_json::json!(17),
+            CodexRetainedNonMaterialized::Malformed,
+        ),
+        (
+            "model",
+            serde_json::json!([]),
+            CodexRetainedNonMaterialized::Malformed,
+        ),
+    ] {
+        let mut item = serde_json::json!({
+            "id": "activity-one", "type": "SubAgentActivity", "kind": "started",
+            "agent_thread_id": "019fb000-0000-7000-8000-0000000000b2", "agent_path": "/root/reviewer"
+        });
+        item[field] = value;
+        let (record, raw) = completed_item_record("turn-one", item);
+        assert_eq!(
+            build_source_backed_event_row(
+                7,
+                CodexRetainedKind::ItemCompleted,
+                ITEM_COMPLETED_SESSION_ID,
+                &record,
+                &raw,
+            )
+            .unwrap()
+            .unwrap_err(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn item_completed_subagent_activity_rejects_ambiguous_fields_and_unknown_payloads() {
+    let item = serde_json::json!({
+        "id": "activity-one", "type": "SubAgentActivity", "kind": "started",
+        "agent_thread_id": "019fb000-0000-7000-8000-0000000000b2", "agent_path": "/root/reviewer"
+    });
+    let (record, raw) = completed_item_record("turn-one", item.clone());
+    let raw = String::from_utf8(raw).unwrap().replace(
+        "\"kind\":\"started\"",
+        "\"kind\":\"completed\",\"kind\":\"started\"",
+    );
+    assert_eq!(
+        build_source_backed_event_row(
+            7,
+            CodexRetainedKind::ItemCompleted,
+            ITEM_COMPLETED_SESSION_ID,
+            &record,
+            raw.as_bytes(),
+        )
+        .unwrap()
+        .unwrap_err(),
+        CodexRetainedNonMaterialized::Malformed
+    );
+    let mut item = item;
+    item["future_private_blob"] = serde_json::json!("not retained");
+    let (record, raw) = completed_item_record("turn-one", item);
+    assert_eq!(
+        build_source_backed_event_row(
+            7,
+            CodexRetainedKind::ItemCompleted,
+            ITEM_COMPLETED_SESSION_ID,
+            &record,
+            &raw,
+        )
+        .unwrap()
+        .unwrap_err(),
+        CodexRetainedNonMaterialized::Unsupported
+    );
+}
