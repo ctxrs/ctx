@@ -122,6 +122,12 @@ Codex session UUID. If both representations of one native session coexist,
 ctx selects raw JSONL first (then lexical path order) and publishes one logical
 source; removing either representation does not change logical IDs.
 
+Completed Codex `SubAgentActivity` items retain their lifecycle metadata as
+`notice` events, not conversation messages or inferred parent relationships.
+The known `started`, `interacted`, `interrupted`, and `completed` variants are
+supported; unknown shapes remain observable skipped records. Review-mode and
+extension items still require dedicated projections and remain unsupported.
+
 Hermes Agent uses the native `hermes_state_sqlite` route. On Linux, a non-root
 ctx process with the certified read-only live-WAL path makes new sessions and
 appended records converge on native-watch and search refreshes. Where that fast

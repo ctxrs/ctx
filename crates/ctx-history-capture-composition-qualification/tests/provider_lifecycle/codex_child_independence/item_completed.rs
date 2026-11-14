@@ -92,7 +92,24 @@ fn paginated_item_completed_fixture_keeps_raw_messages_once_and_projects_turn_qu
 
     let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = records_for(&index, NATIVE_SESSION_ID);
-    assert_eq!(records.len(), 6, "four raw messages and two Plans");
+    assert_eq!(
+        records.len(),
+        8,
+        "four raw messages, two Plans, and two lifecycle notices"
+    );
+    let notices = records
+        .iter()
+        .filter(|record| record.event_type == "notice")
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2);
+    assert_ne!(notices[0].event_id, notices[1].event_id);
+    assert!(notices.iter().all(|record| record.role.is_none()));
+    assert!(notices
+        .iter()
+        .all(
+            |record| record.content.structured_content.as_ref().unwrap()["item"]["agent_path"]
+                == "/root/reviewer"
+        ));
     for marker in [
         "synthetic user one",
         "synthetic assistant one",
