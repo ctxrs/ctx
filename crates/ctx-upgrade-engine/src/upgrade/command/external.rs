@@ -58,7 +58,7 @@ impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
         let attempt = begin_manual_attempt_locked(data_root, &lock, EXTERNAL_REPLACEMENT_SOURCE)?;
         write_state_phase_locked(&lock, &attempt, "quiescing")?;
 
-        let result = (|| {
+        let publication = (|| {
             let handoff =
                 self.daemon
                     .begin_for_installation(data_root, attempt.id(), &installed)?;
@@ -72,37 +72,33 @@ impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
                     "the command path resolves to neither the original nor the staged executable"
                 );
             }
-            handoff
-                .resume_with(&selected)
-                .context("resume ctx after external replacement")?;
-            if request? && !replaced {
-                bail!("commit requested before the staged executable was published");
-            }
-            Ok(replaced)
+            Ok((handoff, request, selected, replaced))
         })();
 
-        match &result {
-            Ok(replaced) => {
-                write_state_phase_locked(
-                    &lock,
-                    &attempt,
-                    if *replaced { "applied" } else { "up_to_date" },
-                )?;
+        let (handoff, request, selected, replaced) = publication.map_err(|error| {
+            if let Err(write_error) =
+                write_state_error_locked(data_root, &lock, &attempt, "error", &format!("{error:#}"))
+            {
+                return anyhow!(
+                    "{error:#}; also could not finish the upgrade state: {write_error:#}"
+                );
             }
-            Err(error) => {
-                write_state_error_locked(
-                    data_root,
-                    &lock,
-                    &attempt,
-                    "error",
-                    &format!("{error:#}"),
-                )
-                .map_err(|write_error| {
-                    anyhow!("{error:#}; also could not finish the upgrade state: {write_error:#}")
-                })?;
-            }
+            error
+        })?;
+        // The installation fence must be terminal before secondary roots can
+        // start. The native handoff still owns the origin root until it is ready.
+        write_state_phase_locked(
+            &lock,
+            &attempt,
+            if replaced { "applied" } else { "up_to_date" },
+        )?;
+        handoff
+            .resume_with(&selected)
+            .context("resume ctx after external replacement")?;
+        if request? && !replaced {
+            bail!("commit requested before the staged executable was published");
         }
-        result
+        Ok(replaced)
     }
 }
 
