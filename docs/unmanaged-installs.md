@@ -24,11 +24,14 @@ Use the same tool or manual process that installed ctx to upgrade it.
 ## External Installer Replacement
 
 On Unix, an installer can replace an owner-writable unmanaged executable while
-preserving existing daemon and indexing choices. Run the installed ctx with its
-usual environment and with stdin and stdout connected to the installer:
+preserving existing daemon and indexing choices. Run the verified staged ctx
+with the installation's usual environment and with stdin and stdout connected
+to the installer. It can coordinate replacement even when the installed
+version does not yet implement this command:
 
-```text
-ctx upgrade external-replace --executable /absolute/path/to/ctx --candidate /absolute/path/to/staged-ctx
+```bash
+/absolute/path/to/staged-ctx upgrade external-replace \
+  --executable /absolute/path/to/ctx --candidate /absolute/path/to/staged-ctx
 ```
 
 The installer verifies the candidate before starting the command and serializes
