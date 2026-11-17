@@ -70,8 +70,11 @@ pub(in crate::upgrade) use transaction::{
 };
 pub(super) use transaction::{PendingRecovery, TerminalRecovery};
 
+#[cfg(not(unix))]
 use self::lock::canonical_executable;
 pub(in crate::upgrade) use self::lock::InstallationLock;
+#[cfg(unix)]
+pub(in crate::upgrade) use self::lock::{canonical_executable, validate_mutable_executable};
 use super::{ReleaseProcessPort, SemanticLayoutPort, UpgradePlan};
 
 /// Holds the lock shared by all mutations of one managed installation.

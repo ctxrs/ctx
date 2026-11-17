@@ -21,12 +21,34 @@ mode is `off` without writing an opt-out to `config.toml`. `ctx upgrade check`
 can still report available releases without upgrade locks or scheduler state.
 Use the same tool or manual process that installed ctx to upgrade it.
 
+## External Installer Replacement
+
+On Unix, an installer can replace an owner-writable unmanaged executable while
+preserving existing daemon and indexing choices. Run the installed ctx with its
+usual environment and with stdin and stdout connected to the installer:
+
+```text
+ctx upgrade external-replace --executable /absolute/path/to/ctx --candidate /absolute/path/to/staged-ctx
+```
+
+The installer verifies the candidate before starting the command and serializes
+publication. Wait for a JSON line with `schema_version: 1` and `status: "ready"`
+before atomically replacing the executable or switching its symlink. Keep the
+previous target available when switching a symlink until the handoff completes.
+Send `commit\n` after publication or `abort\n` to finish without publishing.
+Closing stdin also finishes the handoff. ctx resumes the executable now selected
+by the command path and writes a final JSON receipt with the same schema version
+and status `committed` or `aborted`. Require exit status zero and the expected
+receipt. A commit without publication or a path selecting an unexpected
+executable fails.
+
 ## Binary Lifecycle Handoff
 
 Automatic indexing is the default, so `ctx setup` may enable a persistent
 background daemon. Before any package manager, manual installer, or
-source-install command replaces or removes the executable, run the currently
-installed executable immediately before that operation:
+source-install command removes the executable, or replaces it without the
+[external installer protocol](#external-installer-replacement), run the
+currently installed executable immediately before the operation:
 
 ```bash
 ctx daemon disable --prepare-uninstall --format=json

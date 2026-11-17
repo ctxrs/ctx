@@ -53,6 +53,20 @@ pub enum UpgradeCommand {
     Enable,
     #[command(about = "Disable automatic upgrades")]
     Disable,
+    #[cfg(unix)]
+    #[command(about = "Coordinate replacement by an external installer over pipes")]
+    ExternalReplace(ExternalReplaceArgs),
+}
+
+#[cfg(unix)]
+#[derive(Debug, Args)]
+pub struct ExternalReplaceArgs {
+    /// Absolute path currently used to invoke the installed executable.
+    #[arg(long)]
+    pub executable: PathBuf,
+    /// Absolute path of the verified, staged replacement.
+    #[arg(long)]
+    pub candidate: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -93,6 +107,10 @@ impl From<HostedTransactionActionArg> for HostedTransactionAction {
 
 impl UpgradeArgs {
     pub fn json_output(&self) -> bool {
+        #[cfg(unix)]
+        if matches!(self.command, Some(UpgradeCommand::ExternalReplace(_))) {
+            return true;
+        }
         self.format.is_json()
             || matches!(
                 &self.command,
@@ -112,6 +130,8 @@ impl UpgradeArgs {
             Some(UpgradeCommand::Status(_)) => "status",
             Some(UpgradeCommand::Enable) => "enable",
             Some(UpgradeCommand::Disable) => "disable",
+            #[cfg(unix)]
+            Some(UpgradeCommand::ExternalReplace(_)) => "external_replace",
             None => "apply",
         }
     }

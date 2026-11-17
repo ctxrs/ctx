@@ -59,6 +59,8 @@ pub(super) use replacement::reconcile_replacement_terminal_locked;
 
 pub const STATE_FILE: &str = "upgrade-state.json";
 pub const STATE_SCHEMA_VERSION: u64 = 1;
+#[cfg(unix)]
+pub(super) const EXTERNAL_REPLACEMENT_SOURCE: &str = "external_replacement";
 const DAEMON_QUIESCENCE_LOCK_FILE: &str = "daemon-quiescence.lock";
 const DAEMON_QUIESCENCE_ACK_DIR: &str = "daemon-quiescence-acks";
 const DAEMON_INSTALLATION_STATE_DIR: &str = "daemon-installations";
@@ -352,11 +354,24 @@ fn observe_installation_upgrade(install_path: &Path) -> InstallationUpgradeObser
     if state.schema_version != STATE_SCHEMA_VERSION {
         return InstallationUpgradeObservation::Untrusted;
     }
-    if is_active_upgrade_status(&state.status) {
+    if is_active_upgrade_status(&state.status)
+        && !external_replacement_abandoned(install_path, &state)
+    {
         InstallationUpgradeObservation::Active
     } else {
         InstallationUpgradeObservation::Inactive
     }
+}
+
+#[cfg(unix)]
+fn external_replacement_abandoned(install_path: &Path, state: &UpgradeState) -> bool {
+    state.attempt_source.as_deref() == Some(EXTERNAL_REPLACEMENT_SOURCE)
+        && InstallationLock::try_acquire(install_path).is_ok_and(|lock| lock.is_some())
+}
+
+#[cfg(not(unix))]
+fn external_replacement_abandoned(_: &Path, _: &UpgradeState) -> bool {
+    false
 }
 
 pub fn active_installation_upgrade_attempt_id() -> Result<Option<String>> {
@@ -366,9 +381,10 @@ pub fn active_installation_upgrade_attempt_id() -> Result<Option<String>> {
         .and_then(|bytes| serde_json::from_slice::<UpgradeState>(&bytes).ok())
         .filter(|state| state.schema_version == STATE_SCHEMA_VERSION);
     let active_attempt = state.as_ref().and_then(|state| {
-        is_active_upgrade_status(&state.status)
-            .then(|| state.attempt_id.clone())
-            .flatten()
+        (is_active_upgrade_status(&state.status)
+            && !external_replacement_abandoned(&install_path, state))
+        .then(|| state.attempt_id.clone())
+        .flatten()
     });
     if active_attempt.is_some() {
         return Ok(active_attempt);
@@ -397,10 +413,11 @@ pub fn terminal_installation_upgrade_attempt_id() -> Result<Option<String>> {
     let install_path = super::install::current_install_path()?;
     let state = read_state_object(&install_path);
     Ok((state.schema_version == STATE_SCHEMA_VERSION
-        && matches!(
+        && (matches!(
             state.status.as_str(),
             "applied" | "disabled" | "dry_run" | "error" | "up_to_date"
-        ))
+        ) || (is_active_upgrade_status(&state.status)
+            && external_replacement_abandoned(&install_path, &state))))
     .then_some(state.attempt_id)
     .flatten())
 }

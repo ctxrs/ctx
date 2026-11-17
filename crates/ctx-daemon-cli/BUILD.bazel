@@ -230,7 +230,7 @@ daemon_cli_binary_contract(
 daemon_cli_binary_contract(
     name = "unmanaged_daemon_tests",
     src = "tests/contracts/unmanaged_daemon.rs",
-    extra_deps = ["@crates//libc"],
+    fixtures = True,
     tags = [
         "exclusive",
         "release-gate",

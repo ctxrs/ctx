@@ -7,6 +7,7 @@ pub(super) fn restart_acknowledged_installation_daemons(
 ) -> Result<()> {
     restart_acknowledged_installation_daemons_with(
         executable,
+        executable,
         attempt_id,
         skip_root,
         spawn_daemon_child,
@@ -14,12 +15,13 @@ pub(super) fn restart_acknowledged_installation_daemons(
 }
 
 pub(super) fn restart_acknowledged_installation_daemons_with(
+    previous_executable: &Path,
     executable: &Path,
     attempt_id: &str,
     skip_root: Option<&Path>,
     mut spawn: impl FnMut(NormalizedLaunch) -> io::Result<Child>,
 ) -> Result<()> {
-    for restart in read_installation_daemon_restarts(executable, attempt_id)? {
+    for restart in read_installation_daemon_restarts(previous_executable, attempt_id)? {
         if skip_root.is_some_and(|root| root == restart.data_root) {
             let _ = fs::remove_file(restart.registration_path);
             continue;

@@ -22,6 +22,8 @@ use ctx_app_config::{set_auto_upgrade_mode, AppConfig, AutoUpgradeMode};
 
 use super::ports;
 
+#[cfg(unix)]
+mod external;
 mod status;
 use status::render_status;
 
@@ -125,6 +127,11 @@ pub fn run(
                 set_auto_upgrade_mode(&data_root, AutoUpgradeMode::Off)?;
                 render_auto_mode(false, authority, args.format.is_json(), ui)
             }
+            #[cfg(unix)]
+            Some(UpgradeCommand::ExternalReplace(args)) => {
+                telemetry.suppress_event = true;
+                external::run(&engine, &data_root, args)
+            }
             None => {
                 let outcome =
                     engine.apply(&data_root, policy, args.channel.as_deref(), args.dry_run)?;
@@ -151,6 +158,14 @@ fn require_managed_install_for_auto_upgrade() -> Result<()> {
 }
 
 fn validate_hidden_upgrade_protocol(args: &UpgradeArgs) -> Result<()> {
+    #[cfg(unix)]
+    if matches!(args.command, Some(UpgradeCommand::ExternalReplace(_)))
+        && (args.channel.is_some() || args.dry_run)
+    {
+        return Err(anyhow!(
+            "external replacement does not accept --channel or --dry-run"
+        ));
+    }
     let normal_options = args.command.is_some()
         || args.channel.is_some()
         || args.dry_run

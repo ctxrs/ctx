@@ -208,7 +208,7 @@ impl Drop for OwnerFileLock {
     }
 }
 
-pub(super) fn canonical_executable(path: &Path) -> Result<PathBuf> {
+pub(in crate::upgrade) fn canonical_executable(path: &Path) -> Result<PathBuf> {
     validate_absolute_path(path, "ctx executable")?;
     let canonical = fs::canonicalize(path)
         .with_context(|| format!("canonicalize ctx executable {}", path.display()))?;
@@ -382,7 +382,10 @@ fn revalidate_locked_executable(expected: &Path, allow_recovery_hardlink: bool) 
 }
 
 #[cfg(unix)]
-fn validate_mutable_executable(path: &Path, allow_recovery_hardlink: bool) -> Result<()> {
+pub(in crate::upgrade) fn validate_mutable_executable(
+    path: &Path,
+    allow_recovery_hardlink: bool,
+) -> Result<()> {
     use std::os::unix::fs::MetadataExt as _;
 
     let metadata = fs::symlink_metadata(path)

@@ -281,6 +281,7 @@ impl DaemonUpgradeHandoff {
             }
         }
         restart_acknowledged_installation_daemons_with(
+            &self.installation_executable,
             executable,
             self.fence.handoff_id(),
             Some(&self.data_root),

@@ -18,8 +18,8 @@ mod support;
 mod unix {
     use std::{
         fs,
-        io::Read,
-        os::unix::fs::PermissionsExt as _,
+        io::{BufRead as _, BufReader, Read},
+        os::unix::fs::{symlink, PermissionsExt as _},
         path::{Path, PathBuf},
         process::{Child, Command, Stdio},
         time::{Duration, Instant},
@@ -56,7 +56,7 @@ mod unix {
         .unwrap();
     }
 
-    fn start_daemon(temp: &tempfile::TempDir, binary: &Path, root: &Path) -> DaemonGuard {
+    fn child_command(temp: &tempfile::TempDir, binary: &Path) -> Command {
         let prepared = ctx_from_binary(temp, binary);
         let mut command = Command::new(prepared.get_program());
         for (name, value) in prepared.get_envs() {
@@ -69,6 +69,11 @@ mod unix {
                 }
             }
         }
+        command
+    }
+
+    fn start_daemon(temp: &tempfile::TempDir, binary: &Path, root: &Path) -> DaemonGuard {
+        let mut command = child_command(temp, binary);
         command
             .arg("--data-root")
             .arg(root)
@@ -274,5 +279,116 @@ mod unix {
             !registrations.exists(),
             "prepare-uninstall retained installation daemon registrations"
         );
+    }
+
+    #[test]
+    fn external_replacement_resumes_registered_roots_after_commit_or_disconnect() {
+        for (publish, commit, in_place) in [
+            (false, false, false),
+            (true, true, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            let temp = daemon_test_root();
+            let original = copied_ctx_binary(&temp);
+            let replacement_dir = temp.path().join("replacement");
+            fs::create_dir(&replacement_dir).unwrap();
+            let candidate = replacement_dir.join("ctx");
+            fs::copy(&original, &candidate).unwrap();
+            let entry = temp.path().join("ctx-entry");
+            symlink(&original, &entry).unwrap();
+            let first_root = data_root(&temp).join("first");
+            let second_root = data_root(&temp).join("second");
+            let roots = [&first_root, &second_root];
+            for root in roots {
+                write_daemon_config(root);
+            }
+            fs::create_dir_all(temp.path().join(".codex/sessions")).unwrap();
+            let mut first = start_daemon(&temp, &original, &first_root);
+            let mut second = start_daemon(&temp, &original, &second_root);
+            wait_for_running(&mut first);
+            wait_for_running(&mut second);
+            let original_pids = [
+                first.child.as_ref().unwrap().id(),
+                second.child.as_ref().unwrap().id(),
+            ];
+
+            let external_command = || {
+                let mut command = child_command(&temp, &original);
+                command
+                    .arg("--data-root")
+                    .arg(&first_root)
+                    .args(["upgrade", "external-replace", "--executable"])
+                    .arg(&entry)
+                    .arg("--candidate")
+                    .arg(&candidate);
+                command
+            };
+            let mut handoff = external_command()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut receipts = BufReader::new(handoff.stdout.take().unwrap());
+            let mut ready = String::new();
+            receipts.read_line(&mut ready).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&ready).unwrap(),
+                json!({"schema_version": 1, "status": "ready"})
+            );
+            wait_for_stopped(&mut first);
+            wait_for_stopped(&mut second);
+            let concurrent = external_command().output().unwrap();
+            assert!(!concurrent.status.success());
+            assert!(concurrent.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&concurrent.stderr).contains("upgrade lock is held"));
+
+            if in_place {
+                fs::rename(&candidate, &original).unwrap();
+            } else if publish {
+                let next = temp.path().join("ctx-entry.next");
+                symlink(&candidate, &next).unwrap();
+                fs::rename(next, &entry).unwrap();
+            }
+            let mut input = handoff.stdin.take().unwrap();
+            if commit {
+                input.write_all(b"commit\n").unwrap();
+            }
+            drop(input);
+            let mut receipt = String::new();
+            receipts.read_line(&mut receipt).unwrap();
+            let output = handoff.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let status = if publish { "committed" } else { "aborted" };
+            assert_eq!(
+                serde_json::from_str::<Value>(&receipt).unwrap(),
+                json!({"schema_version": 1, "status": status})
+            );
+
+            let selected = if publish && !in_place {
+                &candidate
+            } else {
+                &original
+            };
+            let mut observed = Vec::new();
+            for (root, old_pid) in roots.into_iter().zip(original_pids) {
+                let lifecycle: Value =
+                    serde_json::from_slice(&fs::read(root.join("daemon/status.json")).unwrap())
+                        .unwrap();
+                let pid = u32::try_from(lifecycle["pid"].as_u64().unwrap()).unwrap();
+                observed.push((root, old_pid, pid));
+            }
+            for (root, _, pid) in &observed {
+                stop_test_owned_daemon_for_binary(&temp, root, selected, Some(*pid)).unwrap();
+            }
+            for (_, old_pid, pid) in observed {
+                assert_ne!(pid, old_pid, "the quiesced daemon must be replaced");
+            }
+        }
     }
 }
