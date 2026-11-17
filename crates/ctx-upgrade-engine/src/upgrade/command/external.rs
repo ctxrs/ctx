@@ -30,17 +30,21 @@ impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
         candidate_path: &Path,
         publish: impl FnOnce() -> Result<bool>,
     ) -> Result<bool> {
-        let installed = current_install_path()?;
+        let installed = canonical_executable(command_path)?;
+        let candidate = canonical_executable(candidate_path)?;
+        let running = current_install_path()?;
+        if running != installed && running != candidate {
+            bail!("run the installed or staged ctx executable to coordinate replacement");
+        }
         let lock = UpgradeLock::acquire_for_installation(&installed)?;
         if canonical_executable(command_path)? != installed {
-            bail!("the command path must resolve to the running ctx executable");
+            bail!("the command path changed before the installation was locked");
         }
         ensure_hosted_transaction_inactive_under_installation_lock(&installed)?;
         if !installation_is_unmanaged_at(&installed) || installation_transaction_exists(&installed)?
         {
             bail!("external replacement requires an unmanaged ctx installation without a pending transaction");
         }
-        let candidate = canonical_executable(candidate_path)?;
         validate_mutable_executable(&candidate, false)?;
         if !installation_is_unmanaged_at(&candidate) {
             bail!("external replacement candidate belongs to a managed ctx installation");

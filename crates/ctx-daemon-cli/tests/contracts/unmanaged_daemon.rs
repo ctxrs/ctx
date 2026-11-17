@@ -299,10 +299,22 @@ mod unix {
             symlink(&original, &entry).unwrap();
             let first_root = data_root(&temp).join("first");
             let second_root = data_root(&temp).join("second");
+            let manual_root = data_root(&temp).join("manual");
             let roots = [&first_root, &second_root];
-            for root in roots {
+            for root in [&first_root, &second_root, &manual_root] {
                 write_daemon_config(root);
             }
+            let manual = child_command(&temp, &original)
+                .arg("--data-root")
+                .arg(&manual_root)
+                .args(["index", "mode", "manual", "--format=json"])
+                .output()
+                .unwrap();
+            assert!(
+                manual.status.success(),
+                "{}",
+                String::from_utf8_lossy(&manual.stderr)
+            );
             fs::create_dir_all(temp.path().join(".codex/sessions")).unwrap();
             let mut first = start_daemon(&temp, &original, &first_root);
             let mut second = start_daemon(&temp, &original, &second_root);
@@ -314,7 +326,8 @@ mod unix {
             ];
 
             let external_command = || {
-                let mut command = child_command(&temp, &original);
+                let worker = if publish { &candidate } else { &original };
+                let mut command = child_command(&temp, worker);
                 command
                     .arg("--data-root")
                     .arg(&first_root)
@@ -389,6 +402,15 @@ mod unix {
             for (_, old_pid, pid) in observed {
                 assert_ne!(pid, old_pid, "the quiesced daemon must be replaced");
             }
+            let output = child_command(&temp, selected)
+                .arg("--data-root")
+                .arg(&manual_root)
+                .args(["index", "mode", "--format=json"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["indexing"]["mode"], "manual");
         }
     }
 }
