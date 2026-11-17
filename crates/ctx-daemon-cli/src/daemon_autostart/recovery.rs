@@ -1,4 +1,4 @@
-use super::*;
+use super::{installation::read_installation_daemon_restarts_from, *};
 
 pub(super) fn restart_acknowledged_installation_daemons(
     executable: &Path,
