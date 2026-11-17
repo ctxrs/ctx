@@ -283,20 +283,34 @@ mod unix {
 
     #[test]
     fn external_replacement_resumes_registered_roots_after_commit_or_disconnect() {
-        for (publish, commit, in_place) in [
-            (false, false, false),
-            (true, true, false),
-            (true, false, false),
-            (true, true, true),
+        #[derive(Clone, Copy)]
+        enum Publication {
+            None,
+            SwitchLink,
+            ReplaceFile,
+            ReplaceFileWithLink,
+        }
+        for (publication, commit) in [
+            (Publication::None, false),
+            (Publication::SwitchLink, true),
+            (Publication::SwitchLink, false),
+            (Publication::ReplaceFile, true),
+            (Publication::ReplaceFileWithLink, true),
         ] {
+            let publish = !matches!(publication, Publication::None);
             let temp = daemon_test_root();
             let original = copied_ctx_binary(&temp);
             let replacement_dir = temp.path().join("replacement");
             fs::create_dir(&replacement_dir).unwrap();
             let candidate = replacement_dir.join("ctx");
             fs::copy(&original, &candidate).unwrap();
-            let entry = temp.path().join("ctx-entry");
-            symlink(&original, &entry).unwrap();
+            let entry = if matches!(publication, Publication::ReplaceFileWithLink) {
+                original.clone()
+            } else {
+                let entry = temp.path().join("ctx-entry");
+                symlink(&original, &entry).unwrap();
+                entry
+            };
             let first_root = data_root(&temp).join("first");
             let second_root = data_root(&temp).join("second");
             let manual_root = data_root(&temp).join("manual");
@@ -357,12 +371,14 @@ mod unix {
             assert!(concurrent.stdout.is_empty());
             assert!(String::from_utf8_lossy(&concurrent.stderr).contains("upgrade lock is held"));
 
-            if in_place {
-                fs::rename(&candidate, &original).unwrap();
-            } else if publish {
-                let next = temp.path().join("ctx-entry.next");
-                symlink(&candidate, &next).unwrap();
-                fs::rename(next, &entry).unwrap();
+            match publication {
+                Publication::None => {}
+                Publication::ReplaceFile => fs::rename(&candidate, &original).unwrap(),
+                Publication::SwitchLink | Publication::ReplaceFileWithLink => {
+                    let next = temp.path().join("ctx-entry.next");
+                    symlink(&candidate, &next).unwrap();
+                    fs::rename(next, &entry).unwrap();
+                }
             }
             let mut input = handoff.stdin.take().unwrap();
             if commit {
@@ -383,10 +399,9 @@ mod unix {
                 json!({"schema_version": 1, "status": status})
             );
 
-            let selected = if publish && !in_place {
-                &candidate
-            } else {
-                &original
+            let selected = match publication {
+                Publication::None | Publication::ReplaceFile => &original,
+                Publication::SwitchLink | Publication::ReplaceFileWithLink => &candidate,
             };
             let mut observed = Vec::new();
             for (root, old_pid) in roots.into_iter().zip(original_pids) {

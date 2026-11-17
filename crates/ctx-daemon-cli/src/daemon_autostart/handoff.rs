@@ -186,6 +186,7 @@ pub struct DaemonUpgradeHandoff {
     data_root: PathBuf,
     fence: ctx_daemon_runtime::DurableHandoffFence,
     installation_executable: PathBuf,
+    installation_registrations: PathBuf,
     persisted_restart_label: Option<String>,
     persisted_loop_interval_seconds: Option<u64>,
 }
@@ -281,7 +282,7 @@ impl DaemonUpgradeHandoff {
             }
         }
         restart_acknowledged_installation_daemons_with(
-            &self.installation_executable,
+            &self.installation_registrations,
             executable,
             self.fence.handoff_id(),
             Some(&self.data_root),
@@ -401,6 +402,10 @@ fn begin_daemon_upgrade_handoff_with(
         restart_request_root,
         mut cooperative_stop,
     } = input;
+    let (_, installation_registrations) =
+        ctx_upgrade_engine::installation_daemon_coordination_paths_for(
+            &expected_process.executable,
+        )?;
     let lifecycle_transition = DaemonLifecycleTransitionLock::acquire(&data_root)?;
     match daemon_upgrade_handoff_state_at(&handoff_path) {
         DaemonUpgradeHandoffState::Active => {
@@ -427,6 +432,7 @@ fn begin_daemon_upgrade_handoff_with(
         data_root: data_root.to_path_buf(),
         fence: ctx_daemon_runtime::DurableHandoffFence::armed(handoff_path.clone(), handoff_id),
         installation_executable: expected_process.executable.clone(),
+        installation_registrations,
         persisted_restart_label,
         persisted_loop_interval_seconds: None,
     };
@@ -531,6 +537,8 @@ fn begin_current_daemon_upgrade_handoff_with(
         handoff_path,
         restart_request_root,
     } = input;
+    let (_, installation_registrations) =
+        ctx_upgrade_engine::installation_daemon_coordination_paths_for(&installation_executable)?;
     let _lifecycle_transition = DaemonLifecycleTransitionLock::acquire(&data_root)?;
     if !daemon_lock_is_active(&data_root) {
         return Err(anyhow!(
@@ -560,6 +568,7 @@ fn begin_current_daemon_upgrade_handoff_with(
                 data_root,
                 fence: ctx_daemon_runtime::DurableHandoffFence::armed(handoff_path, handoff_id),
                 installation_executable,
+                installation_registrations,
                 persisted_restart_label: Some(persisted_restart_label),
                 persisted_loop_interval_seconds: loop_interval_seconds,
             });
@@ -572,6 +581,7 @@ fn begin_current_daemon_upgrade_handoff_with(
         data_root,
         fence: ctx_daemon_runtime::DurableHandoffFence::armed(handoff_path, handoff_id),
         installation_executable,
+        installation_registrations,
         persisted_restart_label: Some(persisted_restart_label),
         persisted_loop_interval_seconds: loop_interval_seconds,
     })
