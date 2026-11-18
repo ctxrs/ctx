@@ -5,17 +5,18 @@ use std::{
 
 use ctx_history_capture_runtime::{
     SourceBackedRouteByteReservation, SourceBackedRouteResourceKind, SourceBackedRouteResources,
+    CORE_ROUTE_MAX_PHYSICAL_SCRATCH_BYTES,
 };
 
 use super::{JsonlFamilyError, JsonlPhysicalDigest, JsonlRecordFraming, JsonlResult};
 
 /// Hard physical bound for one provider-owned standard Zstandard JSONL stream.
-pub const MAX_STANDARD_ZSTD_COMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_STANDARD_ZSTD_COMPRESSED_BYTES: u64 = CORE_ROUTE_MAX_PHYSICAL_SCRATCH_BYTES;
 /// Hard logical bound for one decoded standard Zstandard JSONL stream.
-pub const MAX_STANDARD_ZSTD_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_STANDARD_ZSTD_DECOMPRESSED_BYTES: u64 = CORE_ROUTE_MAX_PHYSICAL_SCRATCH_BYTES;
 /// Compressed snapshot plus decoded spool retained by one standard stream.
-pub const MAX_STANDARD_ZSTD_TEMP_BYTES_PER_LEAF: u64 = 256 * 1024 * 1024;
-/// The production route scratch budget admits this many maximum-size leaves.
+pub const MAX_STANDARD_ZSTD_TEMP_BYTES_PER_LEAF: u64 = CORE_ROUTE_MAX_PHYSICAL_SCRATCH_BYTES;
+/// Cap on simultaneous decoders, even when the scratch budget allows more.
 pub const MAX_STANDARD_ZSTD_PARALLEL_STREAMS: usize = 4;
 const MAX_STANDARD_ZSTD_EXPANSION_RATIO: u64 = 256;
 const STANDARD_ZSTD_EXPANSION_SLACK_BYTES: u64 = 16 * 1024 * 1024;
@@ -45,6 +46,28 @@ impl StandardZstdLimits {
         expansion_ratio: MAX_STANDARD_ZSTD_EXPANSION_RATIO,
         expansion_slack_bytes: STANDARD_ZSTD_EXPANSION_SLACK_BYTES,
     };
+
+    fn decoded_bound(self, compressed_length: u64) -> u64 {
+        let expansion_bound = compressed_length
+            .saturating_mul(self.expansion_ratio)
+            .saturating_add(self.expansion_slack_bytes);
+        self.decompressed_bytes.min(expansion_bound)
+    }
+}
+
+/// Limits a batch of compressed leaves using its largest possible snapshot and decoded spool.
+pub fn standard_zstd_parallel_limit(
+    compressed_lengths: impl Iterator<Item = u64>,
+) -> Option<usize> {
+    let largest = compressed_lengths
+        .map(|length| {
+            length
+                .saturating_add(StandardZstdLimits::PRODUCTION.decoded_bound(length))
+                .min(MAX_STANDARD_ZSTD_TEMP_BYTES_PER_LEAF)
+        })
+        .max()?;
+    let workers = MAX_STANDARD_ZSTD_TEMP_BYTES_PER_LEAF / largest;
+    Some(workers.min(MAX_STANDARD_ZSTD_PARALLEL_STREAMS as u64) as usize)
 }
 
 pub(super) struct DecodedStandardZstd {
@@ -75,10 +98,7 @@ pub(super) fn decode_standard_zstd_jsonl<E: JsonlFamilyError>(
             &format!("compressed snapshot exceeds the per-leaf temporary-volume limit (compressed_bytes={compressed_length}, limit_bytes={MAX_STANDARD_ZSTD_TEMP_BYTES_PER_LEAF})"),
         ));
     }
-    let ratio_bound = compressed_length
-        .saturating_mul(limits.expansion_ratio)
-        .saturating_add(limits.expansion_slack_bytes);
-    let decoded_bound = limits.decompressed_bytes.min(ratio_bound);
+    let decoded_bound = limits.decoded_bound(compressed_length);
     let compressed_reservation =
         reserve_standard_zstd_scratch::<E>(route_resources, compressed_length)?;
     let snapshot = snapshot_standard_zstd_prefix::<E>(file, compressed_length)?;

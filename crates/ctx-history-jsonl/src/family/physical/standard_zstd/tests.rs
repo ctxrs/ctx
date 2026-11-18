@@ -130,6 +130,52 @@ fn standard_zstd_jsonl_enforces_physical_logical_and_expansion_limits() {
 }
 
 #[test]
+fn standard_zstd_accepts_a_large_spool_within_the_route_budget() {
+    let plaintext = b"{}\n".repeat(1024);
+    let frame = standard_stream(&plaintext);
+    let frames = (256 * 1024 * 1024) / plaintext.len() + 1;
+    let mut file = tempfile::tempfile().unwrap();
+    let mut writer = std::io::BufWriter::new(&mut file);
+    for _ in 0..frames {
+        writer.write_all(&frame).unwrap();
+    }
+    writer.flush().unwrap();
+    drop(writer);
+
+    let compressed = (frames * frame.len()) as u64;
+    let decoded = (frames * plaintext.len()) as u64;
+    let resources = SourceBackedRouteResources::production(MAX_STANDARD_ZSTD_PARALLEL_STREAMS);
+    let stream = decode_standard_zstd_jsonl::<SourceIoError>(
+        file,
+        compressed,
+        JsonlRecordFraming::ordinary(),
+        StandardZstdLimits::PRODUCTION,
+        Some(&resources),
+    )
+    .unwrap();
+    assert_eq!(stream.logical_length, decoded);
+    assert_eq!(stream.total_records, (frames * 1024) as u64);
+    assert_eq!(
+        resources.live_bytes(SourceBackedRouteResourceKind::LogicalSourceScratch),
+        compressed + decoded
+    );
+}
+
+#[test]
+fn standard_zstd_worker_admission_uses_the_largest_scratch_bound() {
+    let small = 64 * 1024;
+    assert_eq!(standard_zstd_parallel_limit(std::iter::empty()), None);
+    assert_eq!(
+        standard_zstd_parallel_limit([small, small].into_iter()),
+        Some(MAX_STANDARD_ZSTD_PARALLEL_STREAMS)
+    );
+    assert_eq!(
+        standard_zstd_parallel_limit([small, 256 * 1024 * 1024].into_iter()),
+        Some(1)
+    );
+}
+
+#[test]
 fn standard_zstd_snapshot_hash_and_decode_use_only_the_certified_prefix() {
     for overwrite in [false, true] {
         let temp = tempfile::tempdir().unwrap();
