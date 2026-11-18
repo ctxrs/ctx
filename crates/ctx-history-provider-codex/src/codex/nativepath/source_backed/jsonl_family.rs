@@ -21,9 +21,7 @@ use crate::{
     },
     Result,
 };
-use ctx_history_jsonl::{
-    JsonlPhysicalEncoding, JsonlProbeOutcome, MAX_STANDARD_ZSTD_PARALLEL_STREAMS,
-};
+use ctx_history_jsonl::{standard_zstd_parallel_limit, JsonlPhysicalEncoding, JsonlProbeOutcome};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
@@ -345,14 +343,19 @@ fn prepare_codex_session_jsonl_scans_v0<B: ProviderRuntimeBinding>(
             ));
         }
     }
-    Ok(leaves
-        .iter()
-        .any(|leaf| {
-            crate::provider::codex::catalog::is_codex_compressed_session_rollout_path(
-                leaf.source_path(),
-            )
-        })
-        .then_some(MAX_STANDARD_ZSTD_PARALLEL_STREAMS))
+    Ok(standard_zstd_parallel_limit(
+        leaves
+            .iter()
+            .filter(|leaf| {
+                crate::provider::codex::catalog::is_codex_compressed_session_rollout_path(
+                    leaf.source_path(),
+                )
+            })
+            .map(|leaf| {
+                leaf.logical_eof()
+                    .unwrap_or_else(|| leaf.observation().length())
+            }),
+    ))
 }
 
 fn install_prepared_state_v0(

@@ -84,7 +84,7 @@
         "parent_child_session_edges": true
       },
       "limitations": [
-        "Exact supported .jsonl and .jsonl.zst rollouts are manual-importable. Compressed leaves have a 256 MiB combined snapshot/decode-spool bound, a 256x plus 16 MiB expansion bound, a 128 MiB window bound, and share a 1 GiB route scratch budget; SQLite, past roots, and the default beside an override are excluded."
+        "Exact supported .jsonl and .jsonl.zst rollouts are manual-importable. Compressed leaves share a 1 GiB snapshot/decode-spool budget. Worker admission uses the largest bounded spool in the batch. The 256x plus 16 MiB expansion bound and 128 MiB window bound still apply. SQLite, past roots, and the default beside an override are excluded."
       ],
       "public_docs": "docs/providers.md"
     },

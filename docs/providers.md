@@ -118,8 +118,9 @@ imports accept either representation, including a renamed compressed file when
 its bounded decoded catalog prefix contains the Codex session UUID. Raw and
 compressed copies of the same UUID are one logical source: raw wins while both
 exist, with lexical path order as the deterministic tie-breaker. Compressed
-reads snapshot exactly the admitted compressed prefix and bound the combined
-snapshot plus decoded spool to 256 MiB per leaf and 1 GiB across the route.
+reads snapshot exactly the admitted compressed prefix. The compressed snapshots
+and decoded spools share the existing 1 GiB route scratch budget. The scanner
+chooses the worker count from the largest bounded spool in the batch.
 
 Grok Build selects absolute `$GROK_HOME/sessions` when `GROK_HOME` is set and
 `~/.grok/sessions` otherwise. The override replaces the default. A native

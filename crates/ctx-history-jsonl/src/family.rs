@@ -170,8 +170,8 @@ use identity::observe_metadata;
 #[cfg(any(test, feature = "test-support"))]
 pub use physical::set_after_standard_zstd_snapshot_hook;
 pub use physical::{
-    JsonlPhysicalDigest, JsonlPhysicalEncoding, JsonlPhysicalRecord, JsonlPhysicalStream,
-    JsonlPhysicalStreamPosition, MAX_STANDARD_ZSTD_COMPRESSED_BYTES,
+    standard_zstd_parallel_limit, JsonlPhysicalDigest, JsonlPhysicalEncoding, JsonlPhysicalRecord,
+    JsonlPhysicalStream, JsonlPhysicalStreamPosition, MAX_STANDARD_ZSTD_COMPRESSED_BYTES,
     MAX_STANDARD_ZSTD_DECOMPRESSED_BYTES, MAX_STANDARD_ZSTD_PARALLEL_STREAMS,
     MAX_STANDARD_ZSTD_TEMP_BYTES_PER_LEAF,
 };
