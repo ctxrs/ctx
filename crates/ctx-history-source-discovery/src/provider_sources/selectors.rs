@@ -752,7 +752,9 @@ fn source_path_error(error: SourceIoError) -> SourcePathError {
         {
             SourcePathError::Missing
         }
-        SourceIoError::Io(error) => SourcePathError::Unavailable(error.kind()),
+        SourceIoError::Io(error) | SourceIoError::SystemIo { source: error, .. } => {
+            SourcePathError::Unavailable(error.kind())
+        }
         SourceIoError::InvalidProviderTranscriptPath { reason, .. } => {
             SourcePathError::Unsupported(reason)
         }

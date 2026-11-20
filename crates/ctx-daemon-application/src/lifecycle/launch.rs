@@ -79,10 +79,6 @@ pub(super) fn normalized_daemon_launch_for_test(
 
 const DAEMON_CHILD_ENV_ALLOWLIST: &[&str] = &[
     "APPDATA",
-    "ASTRBOT_ROOT",
-    "CLAUDE_CONFIG_DIR",
-    "CODEX_HOME",
-    "COPILOT_HOME",
     "CTX_ANALYTICS_DEBUG",
     "CTX_ANALYTICS_DRY_RUN",
     "CTX_ANALYTICS_ENABLED",
@@ -102,27 +98,18 @@ const DAEMON_CHILD_ENV_ALLOWLIST: &[&str] = &[
     "CTX_UPGRADE_CHANNEL",
     "CTX_UPGRADE_INTERVAL_SECONDS",
     "DBUS_SESSION_BUS_ADDRESS",
-    "DSH_HOME",
-    "FORGE_CONFIG",
-    "GROK_HOME",
-    "HERMES_HOME",
     "HOME",
     "HOMEDRIVE",
     "HOMEPATH",
     "HTTPS_PROXY",
     "HTTP_PROXY",
-    "KILO_DB",
     "LANG",
     "LC_ALL",
     "LOCALAPPDATA",
     "MIMOCODE_CONFIG_DIR",
-    "MIMOCODE_DB",
     "MIMOCODE_DISABLE_CHANNEL_DB",
-    "MIMOCODE_HOME",
     "NO_PROXY",
-    "OPENCLAW_STATE_DIR",
     "PATH",
-    "PI_CODING_AGENT_SESSION_DIR",
     "SHELLEY_DB",
     "SSL_CERT_DIR",
     "SSL_CERT_FILE",
@@ -133,7 +120,6 @@ const DAEMON_CHILD_ENV_ALLOWLIST: &[&str] = &[
     "TZ",
     "USER",
     "USERPROFILE",
-    "VIBE_HOME",
     "WINDIR",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
@@ -143,9 +129,19 @@ const DAEMON_CHILD_ENV_ALLOWLIST: &[&str] = &[
     "http_proxy",
     "no_proxy",
 ];
+
+pub(crate) fn daemon_child_environment_allowlist_names() -> Vec<&'static str> {
+    let mut names = crate::supervisor::DISCOVERY_ENV_ALLOWLIST.to_vec();
+    names.extend_from_slice(DAEMON_CHILD_ENV_ALLOWLIST);
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 fn daemon_child_environment() -> BTreeMap<OsString, OsString> {
-    let mut environment = DAEMON_CHILD_ENV_ALLOWLIST
+    let mut environment = crate::supervisor::DISCOVERY_ENV_ALLOWLIST
         .iter()
+        .chain(DAEMON_CHILD_ENV_ALLOWLIST)
         .filter_map(|name| env::var_os(name).map(|value| (OsString::from(name), value)))
         .collect::<BTreeMap<_, _>>();
     let token = OsString::from(SEMANTIC_EMBEDDING_TOKEN_ENV);

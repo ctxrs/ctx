@@ -766,6 +766,13 @@ pub(super) fn map_provider_source_error(
             path: path.to_path_buf(),
             source,
         },
+        SourceIoError::SystemIo { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            SqliteSourceAccessError::Io {
+                operation,
+                path: path.to_path_buf(),
+                source,
+            }
+        }
         SourceIoError::InvalidProviderTranscriptPath { reason, .. } => {
             SqliteSourceAccessError::UnsafeFile {
                 path: path.to_path_buf(),

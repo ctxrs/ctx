@@ -40,7 +40,7 @@ mod unsupported;
 #[cfg(test)]
 mod windows;
 
-pub(crate) use environment::supervisor_environment_allowlist_names;
+pub(crate) use environment::{supervisor_environment_allowlist_names, DISCOVERY_ENV_ALLOWLIST};
 use environment::{
     supervisor_environment_contract_report, supervisor_environment_snapshot,
     SupervisorEnvironmentSnapshot,

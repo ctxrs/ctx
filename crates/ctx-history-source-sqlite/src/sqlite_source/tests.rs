@@ -997,3 +997,47 @@ fn snapshot_capacity_messages_distinguish_shortages_from_size_limits() {
     };
     assert_eq!(limit.to_string(), "SQLite source snapshot exceeds the bounded limit for \"provider.sqlite\": 2.0 MiB > 1.0 MiB");
 }
+
+#[test]
+fn windows_system_io_not_found_maps_to_sqlite_io_not_found() {
+    let path = Path::new("sessions.db-journal");
+    let mapped = super::map_provider_source_error(
+        ctx_history_source_io::SourceIoError::SystemIo {
+            operation: "provider source target open",
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"),
+        },
+        "opening a SQLite source family member relative to retained authority",
+        path,
+    );
+    assert!(matches!(
+        mapped,
+        SqliteSourceAccessError::Io { ref source, .. }
+            if source.kind() == std::io::ErrorKind::NotFound
+    ));
+
+    let revalidation = super::map_provider_source_revalidation_error(
+        ctx_history_source_io::SourceIoError::SystemIo {
+            operation: "provider source target open",
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"),
+        },
+        "revalidating a SQLite source family member",
+        path,
+    );
+    assert!(matches!(
+        revalidation,
+        SqliteSourceAccessError::SourceChanged
+    ));
+
+    let denied = super::map_provider_source_error(
+        ctx_history_source_io::SourceIoError::SystemIo {
+            operation: "provider source target open",
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied"),
+        },
+        "opening a SQLite source family member relative to retained authority",
+        path,
+    );
+    assert!(matches!(
+        denied,
+        SqliteSourceAccessError::SnapshotUnavailable { .. }
+    ));
+}

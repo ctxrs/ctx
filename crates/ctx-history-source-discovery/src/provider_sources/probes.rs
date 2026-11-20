@@ -72,7 +72,14 @@ pub(super) fn default_location_import_probe(
             candidate.file_name().and_then(|name| name.to_str()) == Some("updates.jsonl")
         }),
         CaptureProvider::DeepSeekHarness => has_deepseek_harness_session_file(path, 10_000),
-        CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |_| true),
+        CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |candidate| {
+            !(candidate != path
+                && candidate.file_name().and_then(|name| name.to_str()) == Some("changes.jsonl")
+                && candidate
+                    .parent()
+                    .and_then(|parent| parent.strip_prefix(path).ok())
+                    .is_some_and(|relative_parent| relative_parent.components().count() >= 1))
+        }),
         CaptureProvider::PrimeAgent => super::prime_agent::probe(path),
         CaptureProvider::OpenCode => path_is_file_probe(path),
         CaptureProvider::Kilo => path_is_file_probe(path),
@@ -179,11 +186,11 @@ fn has_auggie_session_json(root: &Path) -> BoundedProbe {
             has_direct_auggie_session_json(&sessions)
         }
         Ok(OpenedProviderSourcePath::File(_)) => BoundedProbe::IoError,
-        Err(SourceIoError::Io(error)) if error.kind() == ErrorKind::NotFound => {
+        Err(error) if error.is_not_found() => {
             let outcome = has_direct_auggie_session_json(&directory);
             if matches!(outcome, BoundedProbe::Found | BoundedProbe::NotFound) {
                 match directory.open_child(std::ffi::OsStr::new("sessions")) {
-                    Err(SourceIoError::Io(error)) if error.kind() == ErrorKind::NotFound => outcome,
+                    Err(error) if error.is_not_found() => outcome,
                     _ => BoundedProbe::IoError,
                 }
             } else {
