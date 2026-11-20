@@ -275,6 +275,248 @@ impl GenerationManifest {
         })
     }
 
+    pub(crate) fn apply_validated_source_delta(
+        &self,
+        replacements: Vec<(CertifiedSource, SourceCoreRecordAggregate)>,
+        additions: Vec<(CertifiedSource, SourceCoreRecordAggregate)>,
+        route_additions: Vec<(SourceRouteIdentity, Vec<SourceKey>)>,
+        generation_state: Option<GenerationStateEnvelope>,
+    ) -> Result<Self> {
+        if replacements.is_empty() && additions.is_empty() && generation_state.is_none() {
+            return Err(IndexError::NonCanonicalManifest);
+        }
+        if additions.is_empty() != route_additions.is_empty() {
+            return Err(IndexError::NonCanonicalManifest);
+        }
+        if replacements.windows(2).any(|pair| {
+            source_sort_key(pair[0].0.observation().source())
+                >= source_sort_key(pair[1].0.observation().source())
+        }) {
+            return Err(IndexError::NonCanonicalManifestSources);
+        }
+        if additions.windows(2).any(|pair| {
+            source_sort_key(pair[0].0.observation().source())
+                >= source_sort_key(pair[1].0.observation().source())
+        }) {
+            return Err(IndexError::NonCanonicalManifestSources);
+        }
+        if route_additions
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(IndexError::NonCanonicalSourceRoutes);
+        }
+        if let Some(state) = &generation_state {
+            state.validate_contract()?;
+        }
+
+        let mut indexed_replacements = Vec::with_capacity(replacements.len());
+        for (source, aggregate) in replacements {
+            source.validate_contract()?;
+            aggregate.validate_contract()?;
+            let source_identity = source_sort_key(source.observation().source());
+            let source_index = self
+                .sources
+                .binary_search_by_key(&source_identity, |candidate| {
+                    source_sort_key(candidate.observation().source())
+                })
+                .map_err(|_| IndexError::NonCanonicalManifestSources)?;
+            if !self.sources[source_index]
+                .observation()
+                .source()
+                .exact_descriptor_eq(source.observation().source())
+            {
+                return Err(IndexError::NonCanonicalManifestSources);
+            }
+            let source_id = source_token(source.observation().source());
+            if aggregate.source_identity_digest != source_id
+                || aggregate.indexed_documents != source.counts().indexed_documents
+            {
+                return Err(IndexError::CoreRecordAggregateMismatch(source_id));
+            }
+            indexed_replacements.push((source_index, source, aggregate));
+        }
+
+        for (source, aggregate) in &additions {
+            source.validate_contract()?;
+            aggregate.validate_contract()?;
+            let source_identity = source_sort_key(source.observation().source());
+            if self
+                .sources
+                .binary_search_by_key(&source_identity, |candidate| {
+                    source_sort_key(candidate.observation().source())
+                })
+                .is_ok()
+            {
+                return Err(IndexError::NonCanonicalManifestSources);
+            }
+            let source_id = source_token(source.observation().source());
+            if aggregate.source_identity_digest != source_id
+                || aggregate.indexed_documents != source.counts().indexed_documents
+            {
+                return Err(IndexError::CoreRecordAggregateMismatch(source_id));
+            }
+        }
+
+        let mut claimed_additions = vec![false; additions.len()];
+        let mut indexed_route_additions = Vec::with_capacity(route_additions.len());
+        for (route_identity, added_keys) in route_additions {
+            if added_keys.is_empty()
+                || added_keys
+                    .windows(2)
+                    .any(|pair| source_sort_key(&pair[0]) >= source_sort_key(&pair[1]))
+            {
+                return Err(IndexError::NonCanonicalSourceRouteMembers(
+                    route_identity.as_str().to_owned(),
+                ));
+            }
+            let route_index = self
+                .source_routes
+                .binary_search_by(|candidate| candidate.route_identity().cmp(&route_identity))
+                .map_err(|_| IndexError::NonCanonicalSourceRoutes)?;
+            let base_route = &self.source_routes[route_index];
+            for key in &added_keys {
+                key.validate_contract()?;
+                let key_digest = source_sort_key(key);
+                if base_route
+                    .sources()
+                    .binary_search_by_key(&key_digest, source_sort_key)
+                    .is_ok()
+                {
+                    return Err(IndexError::NonCanonicalSourceRouteMembers(
+                        route_identity.as_str().to_owned(),
+                    ));
+                }
+                let addition_index = additions
+                    .binary_search_by_key(&key_digest, |(source, _)| {
+                        source_sort_key(source.observation().source())
+                    })
+                    .map_err(|_| IndexError::SourceRouteMemberNotRetained {
+                        route_id: route_identity.as_str().to_owned(),
+                        source_id: key.identity().to_string(),
+                    })?;
+                if !additions[addition_index]
+                    .0
+                    .observation()
+                    .source()
+                    .exact_descriptor_eq(key)
+                {
+                    return Err(IndexError::SourceRouteMemberNotRetained {
+                        route_id: route_identity.as_str().to_owned(),
+                        source_id: key.identity().to_string(),
+                    });
+                }
+                if claimed_additions[addition_index] {
+                    return Err(IndexError::SourceOwnedByMultipleRoutes(source_token(key)));
+                }
+                claimed_additions[addition_index] = true;
+            }
+            indexed_route_additions.push((route_index, added_keys));
+        }
+        if let Some((index, _)) = claimed_additions
+            .iter()
+            .enumerate()
+            .find(|(_, claimed)| !**claimed)
+        {
+            return Err(IndexError::SourceNotOwnedByRoute(
+                additions[index]
+                    .0
+                    .observation()
+                    .source()
+                    .identity()
+                    .to_string(),
+            ));
+        }
+
+        let mut indexed_documents = self.indexed_documents;
+        let mut certified_source_bytes = self.certified_source_bytes;
+        let total_sources = self
+            .sources
+            .len()
+            .checked_add(additions.len())
+            .ok_or(IndexError::CountOverflow)?;
+        let mut sources = Vec::with_capacity(total_sources);
+        let mut aggregates = Vec::with_capacity(total_sources);
+
+        let mut base_index = 0;
+        let mut replacement_iter = indexed_replacements.into_iter().peekable();
+        let mut addition_iter = additions.into_iter().peekable();
+        while base_index < self.sources.len() || addition_iter.peek().is_some() {
+            let take_base = match (
+                self.sources.get(base_index),
+                addition_iter.peek().map(|(source, _)| source),
+            ) {
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some(base_source), Some(added_source)) => {
+                    source_sort_key(base_source.observation().source())
+                        < source_sort_key(added_source.observation().source())
+                }
+                (None, None) => break,
+            };
+            if take_base {
+                if replacement_iter
+                    .peek()
+                    .is_some_and(|(index, _, _)| *index == base_index)
+                {
+                    let (_, source, aggregate) = replacement_iter.next().unwrap();
+                    indexed_documents = indexed_documents
+                        .checked_sub(self.sources[base_index].counts().indexed_documents)
+                        .and_then(|count| count.checked_add(source.counts().indexed_documents))
+                        .ok_or(IndexError::CountOverflow)?;
+                    certified_source_bytes = certified_source_bytes
+                        .checked_sub(self.sources[base_index].counts().certified_bytes)
+                        .and_then(|count| count.checked_add(source.counts().certified_bytes))
+                        .ok_or(IndexError::CountOverflow)?;
+                    sources.push(source);
+                    aggregates.push(aggregate);
+                } else {
+                    sources.push(self.sources[base_index].clone());
+                    aggregates.push(self.core_record_aggregates[base_index].clone());
+                }
+                base_index += 1;
+            } else {
+                let (source, aggregate) = addition_iter.next().unwrap();
+                indexed_documents = indexed_documents
+                    .checked_add(source.counts().indexed_documents)
+                    .ok_or(IndexError::CountOverflow)?;
+                certified_source_bytes = certified_source_bytes
+                    .checked_add(source.counts().certified_bytes)
+                    .ok_or(IndexError::CountOverflow)?;
+                sources.push(source);
+                aggregates.push(aggregate);
+            }
+        }
+
+        let mut source_routes = self.source_routes.clone();
+        for (route_index, added_keys) in indexed_route_additions {
+            source_routes[route_index] =
+                source_routes[route_index].with_added_sources(added_keys)?;
+        }
+
+        let materialized = Self {
+            manifest_version: self.manifest_version,
+            identity_version: self.identity_version,
+            core_record_version: self.core_record_version,
+            core_record_contract_fingerprint: self.core_record_contract_fingerprint.clone(),
+            lexical_schema_version: self.lexical_schema_version,
+            lexical_analyzer_version: self.lexical_analyzer_version,
+            policy_schema_hash: self.policy_schema_hash.clone(),
+            indexed_documents,
+            certified_source_bytes,
+            sources,
+            core_record_aggregates: aggregates,
+            source_routes,
+            generation_state: generation_state.or_else(|| self.generation_state.clone()),
+            automatic_provider_discovery: self.automatic_provider_discovery,
+            provider_root_config_digest: self.provider_root_config_digest.clone(),
+            provider_roots: self.provider_roots.clone(),
+            detached_released_provider_roots: self.detached_released_provider_roots.clone(),
+        };
+        debug_assert!(materialized.validate_contract().is_ok());
+        Ok(materialized)
+    }
+
     pub fn source_routes(&self) -> &[SourceRouteSnapshot] {
         &self.source_routes
     }

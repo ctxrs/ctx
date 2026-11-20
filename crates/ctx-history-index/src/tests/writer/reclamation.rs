@@ -671,3 +671,107 @@ fn writer_rejects_a_nonempty_payloadless_index() {
     };
     assert!(matches!(error, IndexError::UnboundIndexState));
 }
+
+#[test]
+fn adding_new_source_to_existing_route_publishes_a_flat_delta_and_cold_reopens() {
+    let temp = tempdir().unwrap();
+    let route = SourceRouteIdentity::from_sha256("3".repeat(64)).unwrap();
+    let s1 = source("route-delta-s1.jsonl");
+    let s2 = source("route-delta-s2.jsonl");
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial.begin_source(s1.clone()).unwrap();
+    initial
+        .add_core_record(document(&s1, 1, "first session body"))
+        .unwrap();
+    initial
+        .certify_source(appendable_certificate(&s1, 1, 1, 10))
+        .unwrap();
+    initial
+        .set_present_source_routes(vec![
+            SourceRouteSnapshot::present(route.clone(), vec![s1.clone()]).unwrap(),
+        ])
+        .unwrap();
+    let base = initial.commit(|_| true).unwrap();
+
+    // Publish a new source in the existing route with updated generation_state.
+    let mut add = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    add.set_source_route_plan(BTreeSet::from([route.clone()]), BTreeSet::new())
+        .unwrap();
+    add.begin_source_route_stage(route.clone()).unwrap();
+    add.retain_unstaged_source_route_members(&route).unwrap();
+    add.begin_source(s2.clone()).unwrap();
+    add.add_core_record(document(&s2, 1, "second session initial"))
+        .unwrap();
+    add.certify_source(appendable_certificate(&s2, 1, 1, 12))
+        .unwrap();
+    add.finish_source_route_stage(&route).unwrap();
+    add.set_present_source_routes(Vec::new()).unwrap();
+    let state_1 =
+        crate::GenerationStateEnvelope::new("ctx.test-route-delta.v1", b"after-add".to_vec())
+            .unwrap();
+    let added = add
+        .commit_with_generation_state(|_| true, |_| true, |_| Ok(state_1.clone()), |_| Ok(()))
+        .unwrap();
+    let added_id = added.receipt().generation_id.clone();
+    drop(added);
+    let added_bytes = fs::read(manifest_path(temp.path(), &added_id)).unwrap();
+    let added_json: serde_json::Value = serde_json::from_slice(&added_bytes).unwrap();
+    assert_eq!(added_json["storage_format"], "ctx-manifest-flat-delta-v1");
+    assert_eq!(added_json["base_generation_id"], base.generation_id);
+    assert_eq!(added_json["added"].as_array().unwrap().len(), 1);
+    assert_eq!(added_json["route_additions"].as_array().unwrap().len(), 1);
+
+    // Append to the newly added source: stays a flat delta against the original full anchor.
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    append
+        .set_source_route_plan(BTreeSet::from([route.clone()]), BTreeSet::new())
+        .unwrap();
+    append.begin_source_route_stage(route.clone()).unwrap();
+    append.retain_unstaged_source_route_members(&route).unwrap();
+    let s2_base = append.begin_source_append(s2.clone()).unwrap().clone();
+    append
+        .add_core_record(document(&s2, 2, "second session appended"))
+        .unwrap();
+    append
+        .certify_source_append(
+            CertifiedSourceAppend::certify(
+                &s2_base,
+                appendable_certificate(&s2, 2, 2, 24),
+                12,
+                [1; 32],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    append.finish_source_route_stage(&route).unwrap();
+    append.set_present_source_routes(Vec::new()).unwrap();
+    let appended = append
+        .commit_with_generation_state(|_| true, |_| true, |_| Ok(state_1.clone()), |_| Ok(()))
+        .unwrap();
+    let appended_id = appended.receipt().generation_id.clone();
+    drop(appended);
+    let appended_bytes = fs::read(manifest_path(temp.path(), &appended_id)).unwrap();
+    let appended_json: serde_json::Value = serde_json::from_slice(&appended_bytes).unwrap();
+    assert_eq!(appended_json["storage_format"], "ctx-manifest-flat-delta-v1");
+    assert_eq!(appended_json["base_generation_id"], base.generation_id);
+    assert_eq!(appended_json["changes"].as_array().unwrap().len(), 0);
+    assert_eq!(appended_json["added"].as_array().unwrap().len(), 1);
+
+    ctx_history_index_format::clear_manifest_cache_for_root(temp.path()).unwrap();
+    let reopened = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(reopened.generation_id(), appended_id);
+    assert_eq!(reopened.document_count(), 3);
+    assert_eq!(reopened.manifest().sources.len(), 2);
+    assert_eq!(reopened.manifest().generation_state(), Some(&state_1));
+    assert_eq!(reopened.count_term("appended").unwrap(), 1);
+}
