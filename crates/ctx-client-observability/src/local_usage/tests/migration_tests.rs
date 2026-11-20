@@ -134,3 +134,26 @@ fn every_released_predecessor_migration_recovers_after_precommit_failure() {
         assert_eq!(source_user_version(root.path()), store::SCHEMA_VERSION);
     }
 }
+
+#[test]
+fn predecessor_migration_recovers_with_stale_shm_and_empty_wal() {
+    let root = private_tempdir();
+    store::create_released_fixture_for_test(root.path(), store::PRIOR_SCHEMA_VERSION).unwrap();
+    let wal_path = root.path().join("usage.sqlite-wal");
+    let shm_path = root.path().join("usage.sqlite-shm");
+    fs::write(&wal_path, []).unwrap();
+    fs::write(&shm_path, [0_u8, 0, 0]).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&wal_path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&shm_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    store::record(root.path(), operation("doctor")).unwrap();
+    assert_eq!(source_user_version(root.path()), store::SCHEMA_VERSION);
+    assert!(!wal_path.exists());
+    assert!(!shm_path.exists());
+    let report = read_report(root.path(), true, true);
+    assert_eq!(report.state, "ready");
+}

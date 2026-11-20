@@ -27,6 +27,7 @@ mod file_family;
 #[cfg(all(test, unix))]
 mod lock_tests;
 mod migration;
+mod recovery;
 mod write;
 
 use access::RootAccess;
@@ -736,18 +737,7 @@ fn open_writable_with_migration_hook(
         PreparedFile::NewInitialized(guard) | PreparedFile::Existing(guard) => guard,
     };
     if !newly_created {
-        // A nonempty WAL may contain changes absent from the main image, while
-        // a nonempty SHM cannot be proven source-stable portably. Reject either
-        // from retained native handles before SQLite can open the source
-        // pathname and checkpoint or remove any family member.
-        if guard.has_nonempty_auxiliary()? {
-            return Err(UsageStoreError::UnsafeReadState);
-        }
-        let image = capture_checkpointed_image(path, &guard, || {})?;
-        let detached = deserialize_read_only(image)?;
-        let schema_version = verify_supported_schema(&detached)?;
-        super::report::validate_rows_for_schema(&detached, schema_version)?;
-        drop(detached);
+        recovery::validate_existing_family_detached(path, &guard)?;
         guard.recheck_unchanged(path)?;
         cleanup_stale_initializer_slots(path, SystemTime::now())?;
         guard.recheck_unchanged(path)?;
@@ -762,28 +752,31 @@ fn open_writable_with_migration_hook(
         _access: access,
     };
     let conn = &mut store.conn;
-    let guard = &store.family_guard;
+    let guard = &mut store.family_guard;
     verify_same_file(path, guard.main_file())?;
     verify_single_link(guard.main_file())?;
+    configure_transient(conn, busy_timeout)?;
     let schema_version = verify_supported_schema(conn)?;
     super::report::validate_rows_for_schema(conn, schema_version)?;
-    configure_transient(conn, busy_timeout)?;
     if schema_version != SCHEMA_VERSION {
         // A quiescent predecessor store can have a WAL-mode main header without
-        // auxiliaries. Opening it natively creates fresh WAL/SHM files, which
-        // cannot be part of the pre-open family guard. Return to rollback
-        // journal mode before migration so the guarded family is main-only
-        // again; current persistent configuration restores WAL after commit.
+        // auxiliaries (or stale crash-recovered auxiliaries). Opening it
+        // natively creates or replays WAL/SHM files. Return to rollback journal
+        // mode before migration so the guarded family is main-only again;
+        // current persistent configuration restores WAL after commit.
         let journal_mode: String =
             conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
         match journal_mode.as_str() {
             "wal" => {
+                #[cfg(not(unix))]
+                guard.release_auxiliaries_before_journal_delete(path)?;
                 conn.pragma_update(None, "journal_mode", "DELETE")?;
                 let journal_mode: String =
                     conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
                 if journal_mode != "delete" {
                     return Err(UsageStoreError::UnsafeReadState);
                 }
+                guard.clear_removed_auxiliaries(path)?;
             }
             // The WAL-to-rollback transition is durable independently of the
             // schema transaction. A prior attempt can therefore fail after
