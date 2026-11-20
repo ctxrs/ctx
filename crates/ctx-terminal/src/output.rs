@@ -17,6 +17,88 @@ use serde_json::Value;
 
 use crate::ui::StreamKind;
 
+#[derive(Debug)]
+pub enum FinalOutputFlushError {
+    StructuredUi(io::Error),
+    Stdout(io::Error),
+    Stderr(io::Error),
+    Both {
+        stdout: io::Error,
+        stderr: io::Error,
+    },
+}
+
+impl fmt::Display for FinalOutputFlushError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StructuredUi(error) => write!(f, "flush structured terminal output: {error}"),
+            Self::Stdout(error) => write!(f, "flush CLI stdout: {error}"),
+            Self::Stderr(error) => write!(f, "flush CLI stderr: {error}"),
+            Self::Both { stdout, stderr } => {
+                write!(f, "flush CLI stdout: {stdout}; flush CLI stderr: {stderr}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FinalOutputFlushError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::StructuredUi(error) | Self::Stdout(error) | Self::Stderr(error) => Some(error),
+            Self::Both { stdout, .. } => Some(stdout),
+        }
+    }
+}
+
+impl FinalOutputFlushError {
+    pub fn broken_pipe_ui() -> Self {
+        Self::StructuredUi(io::Error::from(io::ErrorKind::BrokenPipe))
+    }
+
+    pub fn is_broken_pipe(&self) -> bool {
+        match self {
+            Self::StructuredUi(error) | Self::Stdout(error) | Self::Stderr(error) => {
+                error.kind() == io::ErrorKind::BrokenPipe
+            }
+            Self::Both { stdout, stderr } => {
+                stdout.kind() == io::ErrorKind::BrokenPipe
+                    && stderr.kind() == io::ErrorKind::BrokenPipe
+            }
+        }
+    }
+}
+
+pub fn error_has_broken_pipe_cause(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+            || cause
+                .downcast_ref::<serde_json::Error>()
+                .is_some_and(|error| error.io_error_kind() == Some(io::ErrorKind::BrokenPipe))
+    })
+}
+
+pub fn broken_pipe_stdout_error(error: anyhow::Error) -> anyhow::Error {
+    if error_has_broken_pipe_cause(&error) {
+        FinalOutputFlushError::Stdout(io::Error::from(io::ErrorKind::BrokenPipe)).into()
+    } else {
+        error
+    }
+}
+
+pub fn flush_cli_output(
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> std::result::Result<(), FinalOutputFlushError> {
+    match (stdout.flush(), stderr.flush()) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(stdout), Ok(())) => Err(FinalOutputFlushError::Stdout(stdout)),
+        (Ok(()), Err(stderr)) => Err(FinalOutputFlushError::Stderr(stderr)),
+        (Err(stdout), Err(stderr)) => Err(FinalOutputFlushError::Both { stdout, stderr }),
+    }
+}
+
 thread_local! {
     static THREAD_MEASUREMENT: RefCell<Option<Arc<OutputByteCounter>>> =
         const { RefCell::new(None) };
@@ -199,24 +281,38 @@ impl<W: Write> Write for MeasuredWriter<W> {
     }
 }
 
+fn write_formatted(
+    writer: &mut dyn Write,
+    arguments: fmt::Arguments<'_>,
+    newline: bool,
+) -> io::Result<()> {
+    writer.write_fmt(arguments)?;
+    if newline {
+        writer.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+fn handle_stream_write_result(stream: StreamKind, result: io::Result<()>) {
+    match result {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("failed printing to {stream:?}: {error}"),
+    }
+}
+
 fn write_stream(stream: StreamKind, arguments: fmt::Arguments<'_>, newline: bool) {
     let result = match stream {
-        StreamKind::Stdout => with_stdout_writer(|writer| {
-            writer
-                .write_fmt(arguments)
-                .and_then(|()| newline.then(|| writer.write_all(b"\n")).transpose())
-                .map(|_| ())
-        }),
+        StreamKind::Stdout => {
+            with_stdout_writer(|writer| write_formatted(writer, arguments, newline))
+        }
         StreamKind::Stderr => {
             let stderr = io::stderr();
             let mut writer = MeasuredWriter::current(stderr.lock(), stream);
-            writer
-                .write_fmt(arguments)
-                .and_then(|()| newline.then(|| writer.write_all(b"\n")).transpose())
-                .map(|_| ())
+            write_formatted(&mut writer, arguments, newline)
         }
     };
-    result.unwrap_or_else(|error| panic!("failed printing to {stream:?}: {error}"));
+    handle_stream_write_result(stream, result);
 }
 
 pub fn write_stdout(arguments: fmt::Arguments<'_>) {
@@ -302,10 +398,45 @@ pub fn print_json(value: Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
+
     use serde_json::json;
 
-    use super::{print_json, OutputMeasurement};
+    use super::{handle_stream_write_result, print_json, write_formatted, OutputMeasurement};
     use crate::ui::StreamKind;
+
+    struct ErrorWriter(io::ErrorKind);
+
+    impl Write for ErrorWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(self.0, "simulated stream write failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn broken_pipe_stream_write_returns_without_panicking() {
+        for stream in [StreamKind::Stdout, StreamKind::Stderr] {
+            let mut writer = ErrorWriter(io::ErrorKind::BrokenPipe);
+            let result = write_formatted(&mut writer, format_args!("payload"), true);
+            assert_eq!(
+                result.as_ref().unwrap_err().kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            handle_stream_write_result(stream, result);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "failed printing to Stdout")]
+    fn non_broken_pipe_stream_write_still_panics() {
+        let mut writer = ErrorWriter(io::ErrorKind::PermissionDenied);
+        let result = write_formatted(&mut writer, format_args!("payload"), true);
+        handle_stream_write_result(StreamKind::Stdout, result);
+    }
 
     #[test]
     fn print_json_measures_the_exact_pretty_document_and_trailing_newline() {

@@ -1,6 +1,9 @@
 use std::{
     io::{self, IsTerminal as _, Write},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use crate::output::MeasuredWriter;
@@ -12,27 +15,53 @@ use super::{
 type BoxedWriter = Box<dyn Write + Send>;
 
 #[derive(Clone)]
-struct SharedDestinationWriter(Arc<Mutex<BoxedWriter>>);
+struct SharedDestinationWriter {
+    writer: Arc<Mutex<BoxedWriter>>,
+    broken_pipe_observed: Arc<AtomicBool>,
+}
 
 impl SharedDestinationWriter {
     fn new(writer: BoxedWriter) -> Self {
-        Self(Arc::new(Mutex::new(writer)))
+        Self {
+            writer: Arc::new(Mutex::new(writer)),
+            broken_pipe_observed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn broken_pipe_observed(&self) -> bool {
+        self.broken_pipe_observed.load(Ordering::Relaxed)
+    }
+
+    fn observe_error(&self, error: &io::Error) {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            self.broken_pipe_observed.store(true, Ordering::Relaxed);
+        }
     }
 }
 
 impl Write for SharedDestinationWriter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
+        let result = self
+            .writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .write(buffer)
+            .write(buffer);
+        if let Err(ref error) = result {
+            self.observe_error(error);
+        }
+        result
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.0
+        let result = self
+            .writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .flush()
+            .flush();
+        if let Err(ref error) = result {
+            self.observe_error(error);
+        }
+        result
     }
 }
 
@@ -187,6 +216,12 @@ impl Ui {
     pub fn flush(&mut self) -> io::Result<()> {
         self.stdout.flush()?;
         self.stderr.flush()
+    }
+
+    /// Reports whether any write or flush on this UI's stdout or stderr stream
+    /// observed `io::ErrorKind::BrokenPipe`.
+    pub fn broken_pipe_observed(&self) -> bool {
+        self.stdout.writer.broken_pipe_observed() || self.stderr.writer.broken_pipe_observed()
     }
 }
 

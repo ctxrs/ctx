@@ -94,6 +94,13 @@ pub(crate) fn run() -> ExitCode {
             std::process::exit(error.downcast_ref::<EngineExit>().map_or(1, |exit| exit.0));
         }
         Err(error) if ctx_daemon_cli::finite_worker_interrupted(&error) => ExitCode::from(130),
+        Err(error)
+            if error
+                .downcast_ref::<finalization::FinalOutputFlushError>()
+                .is_some_and(finalization::FinalOutputFlushError::is_broken_pipe) =>
+        {
+            ExitCode::SUCCESS
+        }
         Err(error) if error.is::<RenderedClapError>() => {
             let exit_code = error
                 .downcast_ref::<RenderedClapError>()
@@ -611,6 +618,11 @@ pub(crate) fn run_cli() -> Result<()> {
         execute_command()
     };
     let foreground_interrupted = ctx_daemon_cli::foreground_result_interrupted(&result);
+    let ui_broken_pipe = ui.broken_pipe_observed()
+        && result
+            .as_ref()
+            .err()
+            .is_some_and(ctx_terminal::error_has_broken_pipe_cause);
     let output_started = Instant::now();
     let (rendered_error, search_error_render_failure) = match render_command_result_error(
         &result,
@@ -627,17 +639,21 @@ pub(crate) fn run_cli() -> Result<()> {
     let mut stderr = io::stderr();
     let delivery_result = if search_operation || blame_operation {
         ui.flush()
-            .context("flush structured terminal output")
-            .and_then(|()| flush_cli_output(&mut stdout, &mut stderr).map_err(Into::into))
+            .map_err(finalization::FinalOutputFlushError::StructuredUi)
+            .and_then(|()| flush_cli_output(&mut stdout, &mut stderr))
+            .map_err(Into::into)
     } else {
         // Preserve the released non-Search ordering: buffered UI failure
         // returns here; final process-stream failure is returned after the
         // analytics and the daemon post-command hook below. Interruption is
         // the sole exception: delivery failures stay secondary to exit 130.
-        match ui.flush().context("flush structured terminal output") {
+        match ui
+            .flush()
+            .map_err(finalization::FinalOutputFlushError::StructuredUi)
+        {
             Ok(()) => flush_cli_output(&mut stdout, &mut stderr).map_err(Into::into),
-            Err(error) if foreground_interrupted => Err(error),
-            Err(error) => return Err(error),
+            Err(error) if foreground_interrupted => Err(error.into()),
+            Err(error) => return Err(error.into()),
         }
     };
     let output_duration = output_started.elapsed();
@@ -708,6 +724,9 @@ pub(crate) fn run_cli() -> Result<()> {
             semantic::maybe_autostart_daemon(&data_root, &config, trigger);
         }
     }
+    if ui_broken_pipe {
+        return Err(finalization::FinalOutputFlushError::broken_pipe_ui().into());
+    }
     ctx_daemon_cli::finish_foreground_result(result, || {
         output_result?;
         rendered_error.map_or(Ok(()), Err)
@@ -734,10 +753,13 @@ fn render_command_result_error(
     search_operation: bool,
     ui: &mut Ui,
 ) -> Result<Option<anyhow::Error>> {
-    if ctx_daemon_cli::foreground_result_interrupted(result) {
-        // Interruption remains typed through UI flush, analytics, and command
-        // finalization. The outer exit boundary maps it to exactly 130 and no
-        // public format receives an ordinary error document.
+    if ctx_daemon_cli::foreground_result_interrupted(result)
+        || (ui.broken_pipe_observed()
+            && result
+                .as_ref()
+                .err()
+                .is_some_and(ctx_terminal::error_has_broken_pipe_cause))
+    {
         return Ok(None);
     }
     let rendered_error = if let Err(error) = result {

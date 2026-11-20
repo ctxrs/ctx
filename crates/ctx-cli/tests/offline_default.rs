@@ -573,3 +573,84 @@ fn daemon_forced_shutdown_leaves_an_in_flight_event_safely_queued() {
         "an event without a complete 2xx response must survive daemon shutdown"
     );
 }
+
+#[test]
+fn broken_pipe_on_json_and_human_stdout_exits_cleanly_without_panic() {
+    use std::io::Read as _;
+    use std::process::Stdio;
+
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&data_root).unwrap();
+
+    // Register 60 named roots with long paths so both JSON and human output
+    // exceed the OS pipe buffer (~64 KiB) and trigger BrokenPipe on early close.
+    let mut config =
+        String::from("[indexing]\nmode = \"manual\"\n\n[sources]\nautomatic = false\n");
+    let nested = (0..12)
+        .map(|segment| format!("dir_{segment:02}_{}", "x".repeat(48)))
+        .collect::<Vec<_>>()
+        .join("/");
+    for index in 0..60 {
+        let root_path = temp.path().join(&nested).join(format!("root-{index:02}"));
+        config.push_str(&format!(
+            "\n[sources.roots.r{index:02}]\nprovider = \"antigravity\"\npath = {:?}\n",
+            root_path.to_string_lossy()
+        ));
+    }
+    fs::write(data_root.join("config.toml"), config).unwrap();
+
+    let ctx_bin = assert_cmd::Command::cargo_bin("ctx")
+        .expect("resolve compiled ctx executable")
+        .get_program()
+        .to_os_string();
+
+    for (label, args) in [
+        ("json", vec!["sources", "--format", "json"]),
+        ("human", vec!["sources"]),
+    ] {
+        for read_prefix in [false, true] {
+            let mut child = std::process::Command::new(&ctx_bin)
+                .args(["--data-root"])
+                .arg(&data_root)
+                .args(&args)
+                .env("HOME", &home)
+                .env("USERPROFILE", &home)
+                .env("CTX_ANALYTICS_ENABLED", "false")
+                .env("CTX_UPGRADE_AUTO", "off")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+
+            let mut stdout = child.stdout.take().unwrap();
+            if read_prefix {
+                let mut first = [0u8; 16];
+                let _ = stdout.read(&mut first);
+            }
+            drop(stdout);
+
+            let output = child.wait_with_output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !stderr.contains("panicked"),
+                "CLI panicked on broken pipe ({label}, read_prefix={read_prefix}): {stderr}"
+            );
+            assert!(
+                !stderr.contains("failed printing to"),
+                "CLI emitted write panic on broken pipe ({label}, read_prefix={read_prefix}): {stderr}"
+            );
+            assert!(
+                !stderr.contains("Broken pipe"),
+                "CLI emitted broken pipe error on stderr ({label}, read_prefix={read_prefix}): {stderr}"
+            );
+            assert!(
+                output.status.success(),
+                "expected clean exit on broken pipe ({label}, read_prefix={read_prefix}), got {:?}; stderr: {stderr}",
+                output.status
+            );
+        }
+    }
+}

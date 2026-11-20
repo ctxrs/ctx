@@ -183,7 +183,7 @@ pub(crate) fn run(
     {
         telemetry.record(&[event]);
     }
-    output?;
+    output.map_err(ctx_terminal::broken_pipe_stdout_error)?;
     if !available {
         bail!("no requested search scope is available");
     }
