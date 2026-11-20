@@ -35,8 +35,10 @@ use super::{
     SqliteSourceSnapshotLimits, StaticProviderProbeCatalog,
 };
 
+mod antigravity;
 mod fx;
 
+use antigravity::has_antigravity_transcript;
 use fx::has_fx_session_under_immediate_child;
 #[cfg(test)]
 use fx::{is_fx_session_candidate, FX_LEGACY_SUMMARY_PREFIX_MAX_BYTES};
@@ -95,12 +97,7 @@ pub(super) fn default_location_import_probe(
             candidate.file_name().and_then(|name| name.to_str()) != Some("sessions.json")
         }),
         CaptureProvider::OpenHands => has_openhands_event_json(path, 10_000),
-        CaptureProvider::Antigravity => has_jsonl_file_under_matching(path, 10_000, |candidate| {
-            matches!(
-                candidate.file_name().and_then(|name| name.to_str()),
-                Some("transcript_full.jsonl" | "transcript.jsonl")
-            )
-        }),
+        CaptureProvider::Antigravity => has_antigravity_transcript(path, 10_000),
         CaptureProvider::Gemini | CaptureProvider::Tabnine => has_gemini_chat_jsonl(path, 10_000),
         CaptureProvider::Cursor => has_cursor_agent_transcript(probes, path),
         CaptureProvider::Qoder => has_file_under_matching(path, 10_000, |candidate| {

@@ -1,6 +1,5 @@
 use std::{
     collections::HashSet,
-    ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -30,10 +29,11 @@ use ctx_history_capture_runtime::{
 use ctx_history_jsonl::{
     fit_jsonl_activity, observe_opened_file, probe_first_record, FallbackEventIdentityState,
     JsonlActivityObservedBytes, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyError,
-    JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector,
-    JsonlFamilyRejectedLeaf, JsonlFamilyWorkerContext, JsonlOversizedRecordPolicy, JsonlRecordRef,
-    JsonlRuntimeLookup, OpenedProviderSourceFile, OpenedProviderSourcePath,
-    ProviderSourceDirectory, ProviderSourceRoot,
+    JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyMembershipObservation,
+    JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyRejectedLeaf,
+    JsonlFamilyWorkerContext, JsonlOversizedRecordPolicy, JsonlRecordRef, JsonlRuntimeLookup,
+    OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory,
+    ProviderSourceRoot,
 };
 use ctx_history_source_io::{
     open_provider_source_path_mapped as open_provider_source_path,
@@ -165,9 +165,9 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyAdapter<R> {
     }
 
     fn discover_family(self, root: &Path) -> Result<JsonlFamilyInventory<CaptureError>> {
-        let opened = match open_provider_source_path(root) {
+        let opened = match open_provider_source_path::<CaptureError>(root) {
             Ok(opened) => opened,
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if error.is_not_found() => {
                 return JsonlFamilyInventory::missing(self.provider, root);
             }
             Err(error) => return Err(error),
@@ -178,15 +178,27 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyAdapter<R> {
         let authority = match opened {
             OpenedProviderSourcePath::Directory(directory) => {
                 let authority = Arc::new(directory.authority_root());
-                DirectJsonlDirectoryTraversal::<R> {
-                    adapter: self,
-                    source_root: root,
-                    authority: &authority,
-                    leaves: &mut leaves,
-                    rejected_leaves: &mut rejected_leaves,
-                    budget: &mut budget,
+                if self.provider == CaptureProvider::Antigravity {
+                    super::antigravity::discover_directory(
+                        self,
+                        root,
+                        &directory,
+                        &authority,
+                        &mut leaves,
+                        &mut rejected_leaves,
+                        &mut budget,
+                    )?;
+                } else {
+                    DirectJsonlDirectoryTraversal::<R> {
+                        adapter: self,
+                        source_root: root,
+                        authority: &authority,
+                        leaves: &mut leaves,
+                        rejected_leaves: &mut rejected_leaves,
+                        budget: &mut budget,
+                    }
+                    .visit(root, Path::new(""), &directory, 0)?;
                 }
-                .visit(root, Path::new(""), &directory, 0)?;
                 authority.revalidate()?;
                 authority
             }
@@ -284,6 +296,18 @@ impl<R: NativeJsonlRuntime> JsonlFamilyAdapter for DirectJsonlFamilyAdapter<R> {
         self.discover_family(root)
     }
 
+    fn observe_terminal_membership(
+        &self,
+        root: &Path,
+        opening: &JsonlFamilyInventory<CaptureError>,
+    ) -> Result<JsonlFamilyMembershipObservation<CaptureError>> {
+        if self.provider != CaptureProvider::Antigravity || opening.root_missing() {
+            return JsonlFamilyMembershipObservation::observe(root, opening);
+        }
+        let paths = super::antigravity::enumerate_selected_paths(root)?;
+        JsonlFamilyMembershipObservation::observe_selected_paths(opening, paths)
+    }
+
     fn discovery_error_kind(
         &self,
         error: &CaptureError,
@@ -347,9 +371,9 @@ impl<R: NativeJsonlRuntime> JsonlFamilyAdapter for DirectJsonlFamilyAdapter<R> {
 }
 
 #[derive(Default)]
-struct DirectJsonlInventoryBudget {
-    directories: usize,
-    metadata_entries: usize,
+pub(super) struct DirectJsonlInventoryBudget {
+    pub(super) directories: usize,
+    pub(super) metadata_entries: usize,
 }
 
 struct DirectJsonlDirectoryTraversal<'capture, R: NativeJsonlRuntime> {
@@ -394,13 +418,12 @@ impl<R: NativeJsonlRuntime> DirectJsonlDirectoryTraversal<'_, R> {
             }
             let child_path = absolute_path.join(&name);
             let child_relative_path = relative_path.join(&name);
-            let selected = selected_file(
+            let selected = super::super::dialect::native_jsonl_file_is_selected(
                 self.adapter.provider,
                 self.source_root,
-                directory,
                 &child_path,
-                &name,
-            )?;
+                false,
+            );
             let opened = match directory.open_child(&name) {
                 Ok(opened) => opened,
                 Err(error) if selected && self.adapter.provider == CaptureProvider::Tabnine => {
@@ -454,35 +477,8 @@ fn membership_open_error_is_ignorable(selected: bool, error: &CaptureError) -> b
     !selected && error.is_ignorable_membership_entry()
 }
 
-fn selected_file(
-    provider: CaptureProvider,
-    source_root: &Path,
-    directory: &ProviderSourceDirectory<CaptureError>,
-    path: &Path,
-    name: &OsStr,
-) -> Result<bool> {
-    let full_transcript_is_regular =
-        if provider == CaptureProvider::Antigravity && name == OsStr::new("transcript.jsonl") {
-            match directory.open_child(OsStr::new("transcript_full.jsonl")) {
-                Ok(OpenedProviderSourcePath::File(file)) => {
-                    file.revalidate()?;
-                    true
-                }
-                Ok(OpenedProviderSourcePath::Directory(_)) | Err(_) => false,
-            }
-        } else {
-            false
-        };
-    Ok(super::super::dialect::native_jsonl_file_is_selected(
-        provider,
-        source_root,
-        path,
-        full_transcript_is_regular,
-    ))
-}
-
 #[allow(clippy::too_many_arguments)]
-fn bind_opened_leaf<R: NativeJsonlRuntime>(
+pub(super) fn bind_opened_leaf<R: NativeJsonlRuntime>(
     adapter: DirectJsonlFamilyAdapter<R>,
     source_root: &Path,
     path: PathBuf,
