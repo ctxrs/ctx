@@ -739,6 +739,7 @@ fn status_invalidates_healthy_receipt_when_current_launch_environment_is_unreada
             executable_path: Some(temp.path().join("ctx")),
             limitation: None,
             last_error: None,
+            recovery_reason: None,
         },
     )?;
     let report = daemon_supervisor_report_with_normalized_environment(
@@ -895,6 +896,7 @@ fn fallback_disable_status_is_retry_safe_without_claiming_registration() {
             executable_path: None,
             limitation: Some("test limitation".to_owned()),
             last_error: None,
+            recovery_reason: None,
         },
     )
     .unwrap();
@@ -987,6 +989,7 @@ fn selected_managed_supervisor_root_excludes_command_overrides() {
             executable_path: None,
             limitation: None,
             last_error: None,
+            recovery_reason: None,
         },
     )
     .unwrap();
@@ -1029,6 +1032,7 @@ fn supervisor_status_neither_creates_nor_waits_for_installation_lock() -> Result
             executable_path: Some(temp.path().join("ctx")),
             limitation: None,
             last_error: None,
+            recovery_reason: None,
         },
     )?;
     let lock_path =

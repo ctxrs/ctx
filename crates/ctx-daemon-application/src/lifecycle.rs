@@ -27,10 +27,17 @@ mod finite_worker;
 mod finite_worker_bounded_tests;
 mod launch;
 mod owner_observation;
-use owner_observation::read_daemon_owner_identity;
 #[cfg(target_os = "linux")]
 pub(super) use owner_observation::verify_inspection_denied_owner;
 pub use owner_observation::{active_daemon_matches_current_executable, observe_ready_core_daemon};
+use owner_observation::{
+    handoff_health_probe_timeout, read_daemon_owner_identity, recover_unusable_daemon_owner,
+};
+#[cfg(test)]
+use owner_observation::{
+    owner_has_fresh_heartbeat_or_is_starting, probe_daemon_lifecycle_endpoint_with_retries,
+    recover_unusable_daemon_owner_guarded, recover_unusable_daemon_owner_with,
+};
 #[cfg(all(test, target_os = "linux"))]
 mod owner_inspection_tests;
 mod readiness_receipt;
@@ -59,6 +66,8 @@ const DAEMON_SETUP_HANDOFF_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS: i64 = 30_000;
 const DAEMON_SETUP_HANDOFF_MAX_FUTURE_HEARTBEAT_MS: i64 = 5_000;
 const DAEMON_HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
+const DAEMON_RECOVERY_HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+const DAEMON_RECOVERY_HEALTH_ATTEMPTS: usize = 3;
 const DAEMON_HEALTH_RESPONSE_MAX_BYTES: u64 = 16 * 1024;
 const DAEMON_UPGRADE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_UPGRADE_RESTART_TIMEOUT: Duration = Duration::from_secs(5);
@@ -251,80 +260,6 @@ fn existing_daemon_request(
     checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Option<DaemonAutostartRequest>> {
     existing_daemon_request_after_owner_wait(classify_daemon_owner_wait(data_root, checkpoint)?)
-}
-
-fn recover_unusable_daemon_owner(
-    host: &dyn DaemonApplicationHost,
-    data_root: &Path,
-    observed_owner: &DaemonOwnerIdentity,
-    checkpoint: &mut dyn FnMut() -> Result<()>,
-) -> Result<()> {
-    checkpoint()?;
-    let executable = daemon_autostart_exe()?;
-    let terminated = recover_unusable_daemon_owner_with(
-        observed_owner,
-        || {
-            Ok(daemon_lifecycle_endpoint_observation(
-                host,
-                data_root,
-                observed_owner.pid,
-                DAEMON_HEALTH_TIMEOUT,
-            ) != DaemonLifecycleEndpointObservation::Unavailable)
-        },
-        || read_daemon_owner_identity(data_root),
-        |owner_id| {
-            ctx_daemon_runtime::terminate_identity_verified_residual_daemon_owner(
-                data_root,
-                &executable,
-                Some(owner_id),
-            )
-        },
-        &mut *checkpoint,
-    )?;
-    if terminated {
-        let deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
-        loop {
-            checkpoint()?;
-            if read_daemon_owner_identity(data_root)?.as_ref() != Some(observed_owner)
-                || Instant::now() >= deadline
-            {
-                break;
-            }
-            checkpoint()?;
-            std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
-            checkpoint()?;
-        }
-    }
-    Ok(())
-}
-
-fn recover_unusable_daemon_owner_with(
-    observed_owner: &DaemonOwnerIdentity,
-    mut endpoint_usable: impl FnMut() -> Result<bool>,
-    mut current_owner: impl FnMut() -> Result<Option<DaemonOwnerIdentity>>,
-    mut terminate: impl FnMut(&str) -> Result<()>,
-    mut checkpoint: impl FnMut() -> Result<()>,
-) -> Result<bool> {
-    checkpoint()?;
-    if endpoint_usable()? {
-        return Ok(false);
-    }
-    checkpoint()?;
-    // The health probe can race a supervisor or another foreground recovery.
-    // Revalidate the complete advisory-lock owner identity after the bounded
-    // probe immediately before any destructive action.
-    if current_owner()?.as_ref() != Some(observed_owner) {
-        return Ok(false);
-    }
-    // A metadata stamp is sufficient for observational reuse, never forced
-    // termination. Only the finite worker's direct parent can reap it.
-    if observed_owner.binary_sha256.is_none() {
-        return Ok(false);
-    }
-    checkpoint()?;
-    terminate(&observed_owner.owner_id)?;
-    checkpoint()?;
-    Ok(true)
 }
 
 pub fn request_daemon_start(
@@ -520,6 +455,8 @@ fn start_daemon_profile_and_wait(
         let expected_failure_pid = child.as_ref().map(Child::id);
         let child_unreaped = Cell::new(child.is_some());
         let deadline = Cell::new(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT);
+        let stalled_probes = Cell::new(0usize);
+        let mut startup_tracker = startup_activity::StartupActivityTracker::default();
         let handoff = wait_for_daemon_handoff_with_cancellation(
             DAEMON_SETUP_HANDOFF_STALL_POLL_ATTEMPTS,
             || {
@@ -535,12 +472,24 @@ fn start_daemon_profile_and_wait(
                         expected_failure_pid,
                         config,
                         readiness,
-                        deadline
-                            .get()
-                            .saturating_duration_since(Instant::now())
-                            .min(DAEMON_HEALTH_TIMEOUT),
+                        handoff_health_probe_timeout(
+                            deadline.get().saturating_duration_since(Instant::now()),
+                            stalled_probes.get(),
+                        ),
                     );
-                    startup_activity::observe(observation, data_root, child_unreaped.get(), config)
+                    let observed = startup_tracker.observe(
+                        observation,
+                        data_root,
+                        child_unreaped.get(),
+                        config,
+                        readiness,
+                    );
+                    if observed == DaemonHandoffObservation::Pending {
+                        stalled_probes.set(stalled_probes.get().saturating_add(1));
+                    } else {
+                        stalled_probes.set(0);
+                    }
+                    observed
                 }
             },
             || {
@@ -621,20 +570,27 @@ pub fn observe_daemon_and_wait(
     config: &DaemonConfigSnapshot,
 ) -> Result<DaemonHandoff> {
     let deadline = Cell::new(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT);
+    let stalled_probes = Cell::new(0usize);
     wait_for_observed_daemon_handoff_with(
         DAEMON_SETUP_HANDOFF_STALL_POLL_ATTEMPTS,
         || {
-            daemon_handoff_observation(
+            let observed = daemon_handoff_observation(
                 host,
                 data_root,
                 None,
                 config,
                 DaemonReadinessRequirement::Full,
-                deadline
-                    .get()
-                    .saturating_duration_since(Instant::now())
-                    .min(DAEMON_HEALTH_TIMEOUT),
-            )
+                handoff_health_probe_timeout(
+                    deadline.get().saturating_duration_since(Instant::now()),
+                    stalled_probes.get(),
+                ),
+            );
+            stalled_probes.set(if observed == DaemonHandoffObservation::Pending {
+                stalled_probes.get().saturating_add(1)
+            } else {
+                0
+            });
+            observed
         },
         || deadline.set(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT),
         || {

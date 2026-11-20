@@ -23,6 +23,7 @@ pub(super) struct SupervisorReceipt {
     pub(super) executable_path: Option<PathBuf>,
     pub(super) limitation: Option<String>,
     pub(super) last_error: Option<String>,
+    pub(super) recovery_reason: Option<String>,
 }
 
 pub(super) fn write_supervisor_receipt(
@@ -57,6 +58,7 @@ pub(super) fn write_supervisor_receipt_with_environment_snapshot(
             "environment_snapshot": environment_snapshot.unwrap_or(Value::Null),
             "limitation": receipt.limitation,
             "last_error": receipt.last_error,
+            "recovery_reason": receipt.recovery_reason,
         })),
     )
 }
@@ -68,6 +70,25 @@ pub(super) fn write_installed_receipt(
     owner_pid: u32,
     environment_snapshot: Option<Value>,
 ) -> Result<()> {
+    write_installed_receipt_with_recovery_reason(
+        data_root,
+        executable,
+        artifact_path,
+        owner_pid,
+        environment_snapshot,
+        None,
+    )
+}
+
+pub(super) fn write_installed_receipt_with_recovery_reason(
+    data_root: &Path,
+    executable: &Path,
+    artifact_path: Option<PathBuf>,
+    owner_pid: u32,
+    environment_snapshot: Option<Value>,
+    recovery_reason: Option<String>,
+) -> Result<()> {
+    let recovery_reason = recovery_reason.or_else(|| persisted_recovery_reason(data_root));
     let receipt = SupervisorReceipt {
         kind: native_supervisor_kind().to_owned(),
         status: "installed",
@@ -80,6 +101,7 @@ pub(super) fn write_installed_receipt(
         executable_path: Some(executable.to_path_buf()),
         limitation: None,
         last_error: None,
+        recovery_reason,
     };
     match environment_snapshot {
         Some(environment_snapshot) => write_supervisor_receipt_with_environment_snapshot(
@@ -89,6 +111,17 @@ pub(super) fn write_installed_receipt(
         ),
         None => write_supervisor_receipt(data_root, &receipt),
     }
+}
+
+fn persisted_recovery_reason(data_root: &Path) -> Option<String> {
+    read_supervisor_receipt(data_root)
+        .and_then(|report| {
+            report
+                .get("recovery_reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|reason| !reason.is_empty())
 }
 
 pub(super) fn stored_supervisor_report(data_root: &Path) -> Value {

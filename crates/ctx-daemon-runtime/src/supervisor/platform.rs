@@ -16,12 +16,17 @@ use crate::{
     pid_from_lock_json, read_pid_lock_json, SupervisorManagerOperability,
 };
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 use crate::write_atomic_supervisor_file;
 #[cfg(target_os = "linux")]
 use crate::write_atomic_supervisor_file_if_changed;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 use crate::{SupervisorIdentity, SupervisorSpec};
+
+#[cfg(target_os = "macos")]
+const LAUNCHD_BOOTSTRAP_SPAWN_GRACE: Duration = Duration::from_millis(250);
+#[cfg(target_os = "macos")]
+const LAUNCHD_BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SupervisorManagerEnvironment {
@@ -393,6 +398,27 @@ pub fn install_launch_agent(
     manager_environment: &SupervisorManagerEnvironment,
     migrate_owner: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<PathBuf> {
+    install_launch_agent_in_domain(
+        data_root,
+        spec,
+        &launchctl_domain(),
+        manager_environment,
+        migrate_owner,
+        LAUNCHD_BOOTSTRAP_SPAWN_GRACE,
+        LAUNCHD_BOOTSTRAP_POLL_INTERVAL,
+    )
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn install_launch_agent_in_domain(
+    data_root: &Path,
+    spec: &SupervisorSpec,
+    domain: &str,
+    manager_environment: &SupervisorManagerEnvironment,
+    migrate_owner: &dyn Fn(&Path) -> Result<()>,
+    bootstrap_grace: Duration,
+    bootstrap_poll_interval: Duration,
+) -> Result<PathBuf> {
     let identity = spec.identity();
     let path = identity.artifact_path();
     let parent = path
@@ -402,11 +428,10 @@ pub fn install_launch_agent(
         .with_context(|| format!("create LaunchAgent directory {}", parent.display()))?;
     crate::write_supervisor_environment(spec)?;
     write_atomic_supervisor_file(path, super::launch_agent_plist(spec)?.as_bytes())?;
-    let domain = launchctl_domain();
     let mut bootout = supervisor_command("launchctl", manager_environment);
-    bootout.args(["bootout", &domain]).arg(path);
+    bootout.args(["bootout", domain]).arg(path);
     let bootout = supervisor_output(&mut bootout).context("run launchctl bootout")?;
-    if launchctl_print(&domain, identity.name(), manager_environment)?
+    if launchctl_print_in_domain(domain, identity.name(), manager_environment)?
         .status
         .success()
     {
@@ -417,9 +442,15 @@ pub fn install_launch_agent(
     }
     migrate_owner(data_root)?;
     let mut bootstrap = supervisor_command("launchctl", manager_environment);
-    bootstrap.args(["bootstrap", &domain]).arg(path);
+    bootstrap.args(["bootstrap", domain]).arg(path);
     command_success(&mut bootstrap, "launchctl bootstrap")?;
-    start_launch_agent(identity, manager_environment)?;
+    ensure_bootstrapped_launch_agent_started_with(
+        domain,
+        identity.name(),
+        manager_environment,
+        bootstrap_grace,
+        bootstrap_poll_interval,
+    )?;
     Ok(path.to_path_buf())
 }
 
@@ -434,7 +465,7 @@ pub fn disable_launch_agent(
     let mut bootout = supervisor_command("launchctl", manager_environment);
     bootout.args(["bootout", &domain]).arg(path);
     let bootout = supervisor_output(&mut bootout).context("run launchctl bootout")?;
-    if launchctl_print(&domain, label, manager_environment)?
+    if launchctl_print_in_domain(&domain, label, manager_environment)?
         .status
         .success()
     {
@@ -466,7 +497,8 @@ pub fn verify_launch_agent_registration(
             "LaunchAgent registration does not match the maintained definition"
         ));
     }
-    let output = launchctl_print(&launchctl_domain(), identity.name(), manager_environment)?;
+    let output =
+        launchctl_print_in_domain(&launchctl_domain(), identity.name(), manager_environment)?;
     if !output.status.success() {
         return Err(anyhow!(
             "LaunchAgent is not registered in the current GUI login domain: {}",
@@ -482,7 +514,7 @@ pub fn launch_agent_live_owner_pid(
     manager_environment: &SupervisorManagerEnvironment,
 ) -> Result<u32> {
     verify_launch_agent_registration(spec, manager_environment)?;
-    let output = launchctl_print(
+    let output = launchctl_print_in_domain(
         &launchctl_domain(),
         spec.identity().name(),
         manager_environment,
@@ -491,8 +523,8 @@ pub fn launch_agent_live_owner_pid(
         .ok_or_else(|| anyhow!("LaunchAgent GUI registration has no live process identity"))
 }
 
-#[cfg(target_os = "macos")]
-fn launchctl_print(
+#[cfg(any(test, target_os = "macos"))]
+fn launchctl_print_in_domain(
     domain: &str,
     label: &str,
     manager_environment: &SupervisorManagerEnvironment,
@@ -500,6 +532,61 @@ fn launchctl_print(
     let mut print = supervisor_command("launchctl", manager_environment);
     print.args(["print", &format!("{domain}/{label}")]);
     supervisor_output(&mut print).context("run launchctl print in GUI domain")
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn launch_agent_live_pid_in_domain(
+    domain: &str,
+    label: &str,
+    manager_environment: &SupervisorManagerEnvironment,
+) -> Result<Option<u32>> {
+    let output = launchctl_print_in_domain(domain, label, manager_environment)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(launchctl_print_pid(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn launchctl_kickstart_command(
+    domain: &str,
+    label: &str,
+    manager_environment: &SupervisorManagerEnvironment,
+) -> Command {
+    let mut kickstart = supervisor_command("launchctl", manager_environment);
+    // Start a non-running job without `-k`, so a concurrent RunAtLoad or
+    // KeepAlive spawn is never SIGKILLed into launchd's 10s respawn throttle.
+    kickstart.args(["kickstart", &format!("{domain}/{label}")]);
+    kickstart
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn ensure_bootstrapped_launch_agent_started_with(
+    domain: &str,
+    label: &str,
+    manager_environment: &SupervisorManagerEnvironment,
+    grace: Duration,
+    poll_interval: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + grace;
+    loop {
+        if launch_agent_live_pid_in_domain(domain, label, manager_environment)?.is_some() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        thread::sleep(
+            poll_interval
+                .max(Duration::from_millis(1))
+                .min(deadline.saturating_duration_since(now)),
+        );
+    }
+    let mut kickstart = launchctl_kickstart_command(domain, label, manager_environment);
+    command_success(&mut kickstart, "launchctl kickstart")
 }
 
 pub fn launchctl_print_pid(output: &str) -> Option<u32> {
@@ -516,9 +603,22 @@ pub fn start_launch_agent(
     identity: &SupervisorIdentity,
     manager_environment: &SupervisorManagerEnvironment,
 ) -> Result<()> {
-    let domain = launchctl_domain();
-    let mut kickstart = supervisor_command("launchctl", manager_environment);
-    kickstart.args(["kickstart", "-k", &format!("{domain}/{}", identity.name())]);
+    start_launch_agent_in_domain(identity, &launchctl_domain(), manager_environment)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn start_launch_agent_in_domain(
+    identity: &SupervisorIdentity,
+    domain: &str,
+    manager_environment: &SupervisorManagerEnvironment,
+) -> Result<()> {
+    if matches!(
+        launch_agent_live_pid_in_domain(domain, identity.name(), manager_environment),
+        Ok(Some(_))
+    ) {
+        return Ok(());
+    }
+    let mut kickstart = launchctl_kickstart_command(domain, identity.name(), manager_environment);
     command_success(&mut kickstart, "launchctl kickstart")
 }
 
@@ -629,6 +729,8 @@ fn supervisor_process_executable(_pid: u32) -> Option<PathBuf> {
     None
 }
 
+#[cfg(all(test, unix))]
+mod launchd_start_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod systemd_start_tests;
 

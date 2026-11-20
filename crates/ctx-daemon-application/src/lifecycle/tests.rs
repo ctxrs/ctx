@@ -6,6 +6,7 @@ mod environment_allowlist_tests;
 mod executable_metadata_tests;
 mod managed_root;
 mod owner_wait_tests;
+mod recovery_tests;
 
 const DAEMON_ENV_PROBE_STAGE: &str = "CTX_DAEMON_ENV_PROBE_STAGE";
 const DAEMON_ENV_PRO_CHANNEL: &str = "CTX_PRO_CHANNEL";

@@ -47,6 +47,179 @@ pub(super) fn read_daemon_owner_identity(data_root: &Path) -> Result<Option<Daem
     }))
 }
 
+pub(super) fn handoff_health_probe_timeout(remaining: Duration, stalled_probes: usize) -> Duration {
+    let target = match stalled_probes {
+        0 => DAEMON_HEALTH_TIMEOUT,
+        1 => DAEMON_HEALTH_TIMEOUT.saturating_mul(3),
+        _ => DAEMON_RECOVERY_HEALTH_TIMEOUT,
+    };
+    remaining.min(target)
+}
+
+pub(super) fn owner_has_fresh_heartbeat_or_is_starting(
+    status: Option<&Value>,
+    owner: &DaemonOwnerIdentity,
+    now_ms: i64,
+) -> bool {
+    let within_fresh_window = |timestamp_ms: i64| {
+        timestamp_ms > 0
+            && now_ms.saturating_sub(timestamp_ms) <= DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS
+            && timestamp_ms.saturating_sub(now_ms) <= DAEMON_SETUP_HANDOFF_MAX_FUTURE_HEARTBEAT_MS
+    };
+    if let Some(status) = status {
+        let status_pid = status
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok());
+        let status_started_at_ms = status
+            .get("started_at_ms")
+            .and_then(Value::as_i64)
+            .filter(|started_at_ms| *started_at_ms > 0);
+        if status_pid == Some(owner.pid) && status_started_at_ms == Some(owner.started_at_ms) {
+            if status.get("status").and_then(Value::as_str) != Some("running") {
+                return false;
+            }
+            if status
+                .pointer("/config_reload/status")
+                .and_then(Value::as_str)
+                == Some("pending")
+            {
+                return true;
+            }
+            return status
+                .get("heartbeat_at_ms")
+                .and_then(Value::as_i64)
+                .is_some_and(within_fresh_window);
+        }
+    }
+    within_fresh_window(owner.started_at_ms)
+}
+
+pub(super) fn probe_daemon_lifecycle_endpoint_with_retries(
+    attempts: usize,
+    mut probe: impl FnMut() -> DaemonLifecycleEndpointObservation,
+    mut pause: impl FnMut(),
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<bool> {
+    for attempt in 0..attempts {
+        checkpoint()?;
+        if probe() != DaemonLifecycleEndpointObservation::Unavailable {
+            return Ok(true);
+        }
+        if attempt + 1 < attempts {
+            checkpoint()?;
+            pause();
+            checkpoint()?;
+        }
+    }
+    Ok(false)
+}
+
+pub(super) fn recover_unusable_daemon_owner(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    observed_owner: &DaemonOwnerIdentity,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    checkpoint()?;
+    let executable = daemon_autostart_exe()?;
+    let terminated = recover_unusable_daemon_owner_guarded(
+        observed_owner,
+        |checkpoint| {
+            probe_daemon_lifecycle_endpoint_with_retries(
+                DAEMON_RECOVERY_HEALTH_ATTEMPTS,
+                || {
+                    daemon_lifecycle_endpoint_observation(
+                        host,
+                        data_root,
+                        observed_owner.pid,
+                        DAEMON_RECOVERY_HEALTH_TIMEOUT,
+                    )
+                },
+                || std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL),
+                checkpoint,
+            )
+        },
+        || read_daemon_owner_identity(data_root),
+        || {
+            owner_has_fresh_heartbeat_or_is_starting(
+                read_daemon_status(data_root).as_ref(),
+                observed_owner,
+                utc_now().timestamp_millis(),
+            )
+        },
+        |owner_id| {
+            ctx_daemon_runtime::terminate_identity_verified_residual_daemon_owner(
+                data_root,
+                &executable,
+                Some(owner_id),
+            )
+        },
+        &mut *checkpoint,
+    )?;
+    if terminated {
+        let deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
+        loop {
+            checkpoint()?;
+            if read_daemon_owner_identity(data_root)?.as_ref() != Some(observed_owner)
+                || Instant::now() >= deadline
+            {
+                break;
+            }
+            checkpoint()?;
+            std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+            checkpoint()?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn recover_unusable_daemon_owner_with(
+    observed_owner: &DaemonOwnerIdentity,
+    mut endpoint_usable: impl FnMut() -> Result<bool>,
+    current_owner: impl FnMut() -> Result<Option<DaemonOwnerIdentity>>,
+    terminate: impl FnMut(&str) -> Result<()>,
+    checkpoint: impl FnMut() -> Result<()>,
+) -> Result<bool> {
+    recover_unusable_daemon_owner_guarded(
+        observed_owner,
+        |_| endpoint_usable(),
+        current_owner,
+        || false,
+        terminate,
+        checkpoint,
+    )
+}
+
+pub(super) fn recover_unusable_daemon_owner_guarded(
+    observed_owner: &DaemonOwnerIdentity,
+    mut endpoint_usable: impl FnMut(&mut dyn FnMut() -> Result<()>) -> Result<bool>,
+    mut current_owner: impl FnMut() -> Result<Option<DaemonOwnerIdentity>>,
+    mut owner_is_alive_or_starting: impl FnMut() -> bool,
+    mut terminate: impl FnMut(&str) -> Result<()>,
+    mut checkpoint: impl FnMut() -> Result<()>,
+) -> Result<bool> {
+    checkpoint()?;
+    if endpoint_usable(&mut checkpoint)? {
+        return Ok(false);
+    }
+    checkpoint()?;
+    // Revalidate full owner identity and liveness immediately before any
+    // destructive action; never terminate a live owner with a fresh heartbeat
+    // or active startup.
+    if current_owner()?.as_ref() != Some(observed_owner)
+        || observed_owner.binary_sha256.is_none()
+        || owner_is_alive_or_starting()
+    {
+        return Ok(false);
+    }
+    checkpoint()?;
+    terminate(&observed_owner.owner_id)?;
+    checkpoint()?;
+    Ok(true)
+}
+
 /// Returns whether a live daemon is already owned by this exact executable.
 ///
 /// Ordinary foreground commands use this to reuse a healthy installed daemon

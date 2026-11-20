@@ -197,3 +197,81 @@ fn joined_startup_requires_the_live_owner_and_pending_requested_config() -> Resu
     );
     Ok(())
 }
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn advancing_owner_heartbeat_extends_observation_while_unchanged_heartbeat_stays_pending(
+) -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let _lock = ctx_daemon_runtime::DaemonLock::acquire(root.path())?.unwrap();
+    let owner = read_daemon_owner_identity(root.path())?.unwrap();
+    let config = crate::TestHost.daemon_config(root.path())?;
+    let now_ms = utc_now().timestamp_millis();
+    let mut status = json!({
+        "status": "running",
+        "pid": owner.pid,
+        "started_at_ms": owner.started_at_ms,
+        "heartbeat_at_ms": now_ms - 1_000,
+        "config_reload": {
+            "status": "applied",
+            "applied": {
+                "daemon_enabled": true,
+                "daemon_mode": "full",
+                "semantic_enabled": true,
+                "semantic_executor": "builtin",
+                "semantic_contract_fingerprint": "sha256:test-builtin-contract",
+                "semantic_builtin_throttling_configured": true,
+                "semantic_builtin_throttling_effective": true,
+            },
+        },
+    });
+    write_daemon_status(root.path(), &status)?;
+    let mut tracker = StartupActivityTracker::default();
+    // Initial sample records the baseline without fabricating progress.
+    assert_eq!(
+        tracker.observe(
+            DaemonHandoffObservation::Pending,
+            root.path(),
+            false,
+            &config,
+            DaemonReadinessRequirement::Core,
+        ),
+        DaemonHandoffObservation::Pending
+    );
+    // Unchanged heartbeat remains Pending so a hung daemon still times out.
+    assert_eq!(
+        tracker.observe(
+            DaemonHandoffObservation::Pending,
+            root.path(),
+            false,
+            &config,
+            DaemonReadinessRequirement::Core,
+        ),
+        DaemonHandoffObservation::Pending
+    );
+    // Advancing heartbeat from the same process-birth-verified owner signals progress.
+    status["heartbeat_at_ms"] = json!(now_ms);
+    write_daemon_status(root.path(), &status)?;
+    assert_eq!(
+        tracker.observe(
+            DaemonHandoffObservation::Pending,
+            root.path(),
+            false,
+            &config,
+            DaemonReadinessRequirement::Core,
+        ),
+        DaemonHandoffObservation::Starting
+    );
+    // Subsequent poll without another advance returns to Pending.
+    assert_eq!(
+        tracker.observe(
+            DaemonHandoffObservation::Pending,
+            root.path(),
+            false,
+            &config,
+            DaemonReadinessRequirement::Core,
+        ),
+        DaemonHandoffObservation::Pending
+    );
+    Ok(())
+}
