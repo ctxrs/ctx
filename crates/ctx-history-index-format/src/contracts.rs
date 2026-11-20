@@ -817,6 +817,40 @@ impl SourceRouteSnapshot {
                 || self.sources == other.sources)
     }
 
+    pub(crate) fn with_added_sources(&self, added: Vec<SourceKey>) -> Result<Self> {
+        let mut merged = Vec::with_capacity(self.sources.len() + added.len());
+        let mut base_index = 0;
+        let mut added_index = 0;
+        while base_index < self.sources.len() && added_index < added.len() {
+            let base_key = source_sort_key(&self.sources[base_index]);
+            let added_key = source_sort_key(&added[added_index]);
+            match base_key.cmp(&added_key) {
+                std::cmp::Ordering::Less => {
+                    merged.push(self.sources[base_index].clone());
+                    base_index += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    merged.push(added[added_index].clone());
+                    added_index += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    return Err(IndexError::NonCanonicalSourceRouteMembers(
+                        self.route_identity.as_str().to_owned(),
+                    ));
+                }
+            }
+        }
+        merged.extend(self.sources[base_index..].iter().cloned());
+        merged.extend(added.into_iter().skip(added_index));
+        let snapshot = Self {
+            route_identity: self.route_identity.clone(),
+            sources: merged.into(),
+            missing: self.missing.clone(),
+        };
+        snapshot.validate_contract()?;
+        Ok(snapshot)
+    }
+
     pub fn missing_state(&self) -> Option<&SourceRouteMissingState> {
         self.missing.as_ref()
     }

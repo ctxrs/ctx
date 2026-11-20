@@ -2,7 +2,8 @@ use super::*;
 use crate::{
     provider_source_config_digest, source_token, AppliedProviderRoot,
     AppliedProviderRootSourceMembership, DetachedReleasedProviderRootAuthority,
-    ProviderRootDefinition, ProviderRootSourceIdentity, SourceRouteIdentity, SourceRouteSnapshot,
+    ProviderRootDefinition, ProviderRootSourceIdentity, SourceCoreRecordAggregate,
+    SourceRouteIdentity, SourceRouteSnapshot,
 };
 use ctx_history_core::{
     CaptureProvider, CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey,
@@ -512,4 +513,474 @@ fn detached_authority_change_survives_a_cold_reopen() {
         reopened.detached_released_provider_roots(),
         successor.detached_released_provider_roots()
     );
+}
+
+fn certified_at(source: SourceKey, revision: u8, docs: u64, bytes: u64) -> CertifiedSource {
+    let observation = SourceObservation::new(source, "fixture-revision", vec![revision]).unwrap();
+    CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "fixture-parser",
+        [revision; 32],
+        ScannedSourceCounts {
+            complete_records: docs,
+            retained_records: docs,
+            indexed_documents: docs,
+            certified_bytes: bytes,
+            ..ScannedSourceCounts::default()
+        },
+    )
+    .unwrap()
+}
+
+fn manifest_with_routes(
+    route_entries: Vec<(SourceRouteIdentity, Vec<CertifiedSource>)>,
+    state: Option<crate::GenerationStateEnvelope>,
+) -> GenerationManifest {
+    let mut sources = Vec::new();
+    let mut aggregates = Vec::new();
+    let mut routes = Vec::new();
+    for (route_id, route_sources) in route_entries {
+        let mut keys = Vec::with_capacity(route_sources.len());
+        for src in route_sources {
+            let key = src.observation().source().clone();
+            aggregates.push(
+                SourceCoreRecordAggregate::new(
+                    source_token(&key),
+                    src.counts().indexed_documents,
+                    "00".repeat(32),
+                )
+                .unwrap(),
+            );
+            keys.push(key);
+            sources.push(src);
+        }
+        routes.push(SourceRouteSnapshot::present(route_id, keys).unwrap());
+    }
+    let manifest =
+        GenerationManifest::from_parts_with_record_aggregates(sources, aggregates, routes).unwrap();
+    match state {
+        Some(state) => manifest.with_generation_state(state).unwrap(),
+        None => manifest,
+    }
+}
+
+#[test]
+fn flat_delta_carries_added_sources_updates_and_generation_state_across_cold_reopens() {
+    let temp = tempfile::tempdir().unwrap();
+    let route_a = route("1");
+    let route_b = route("2");
+    let s1 = fixture_source("session-1");
+    let s2 = fixture_source("session-2");
+    let s3 = fixture_source("session-3");
+    let s4 = fixture_source("session-4");
+
+    let state_0 = crate::GenerationStateEnvelope::new("ctx.test-state.v1", b"s0".to_vec()).unwrap();
+    let state_1 = crate::GenerationStateEnvelope::new("ctx.test-state.v1", b"s1".to_vec()).unwrap();
+    let state_2 = crate::GenerationStateEnvelope::new("ctx.test-state.v1", b"s2".to_vec()).unwrap();
+
+    // Anchor with s1 in route_a, s2 in route_b.
+    let anchor = manifest_with_routes(
+        vec![
+            (route_a.clone(), vec![certified_at(s1.clone(), 1, 2, 100)]),
+            (route_b.clone(), vec![certified_at(s2.clone(), 1, 3, 200)]),
+        ],
+        Some(state_0),
+    );
+    let anchor_id = anchor.generation_id().unwrap();
+    write_manifest(temp.path(), &anchor_id, &anchor).unwrap();
+
+    // Publication 1: add new source s3 to route_a and update generation_state -> flat delta.
+    let gen1 = manifest_with_routes(
+        vec![
+            (
+                route_a.clone(),
+                vec![
+                    certified_at(s1.clone(), 1, 2, 100),
+                    certified_at(s3.clone(), 1, 4, 300),
+                ],
+            ),
+            (route_b.clone(), vec![certified_at(s2.clone(), 1, 3, 200)]),
+        ],
+        Some(state_1.clone()),
+    );
+    let expected_gen1 = serde_json::to_vec(&gen1).unwrap();
+    let prep1 =
+        prepare_successor_manifest(temp.path(), Arc::new(gen1), Some((&anchor_id, &anchor)))
+            .unwrap();
+    assert!(prep1.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
+    let delta1: StoredManifestFlatDeltaV1 = serde_json::from_slice(&prep1.bytes).unwrap();
+    assert_eq!(delta1.base_generation_id, anchor_id);
+    assert!(delta1.changes.is_empty());
+    assert_eq!(delta1.added.len(), 1);
+    assert_eq!(delta1.route_additions.len(), 1);
+    assert_eq!(delta1.generation_state.as_ref(), Some(&state_1));
+    let (gen1_id, reopened1) = persist_and_cold_reopen(temp.path(), prep1);
+    assert_eq!(
+        serde_json::to_vec(reopened1.as_ref()).unwrap(),
+        expected_gen1
+    );
+
+    // Publication 2: modify s3 (previously added!) + modify base s1 + add s4 to route_b.
+    // s3 MUST remain in `added` (never moved to `changes`), flattened directly against anchor_id!
+    let gen2 = manifest_with_routes(
+        vec![
+            (
+                route_a.clone(),
+                vec![
+                    certified_at(s1.clone(), 2, 5, 250),
+                    certified_at(s3.clone(), 2, 6, 450),
+                ],
+            ),
+            (
+                route_b.clone(),
+                vec![
+                    certified_at(s2.clone(), 1, 3, 200),
+                    certified_at(s4.clone(), 1, 1, 80),
+                ],
+            ),
+        ],
+        Some(state_1.clone()),
+    );
+    let expected_gen2 = serde_json::to_vec(&gen2).unwrap();
+    let prep2 =
+        prepare_successor_manifest(temp.path(), Arc::new(gen2), Some((&gen1_id, &reopened1)))
+            .unwrap();
+    assert!(prep2.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
+    let delta2: StoredManifestFlatDeltaV1 = serde_json::from_slice(&prep2.bytes).unwrap();
+    assert_eq!(delta2.base_generation_id, anchor_id);
+    assert_eq!(delta2.changes.len(), 1);
+    assert_eq!(delta2.changes[0].source_identity, s1.identity().digest());
+    assert_eq!(delta2.added.len(), 2);
+    assert_eq!(delta2.route_additions.len(), 2);
+    assert_eq!(delta2.generation_state.as_ref(), Some(&state_1));
+    let (gen2_id, reopened2) = persist_and_cold_reopen(temp.path(), prep2);
+    assert_eq!(
+        serde_json::to_vec(reopened2.as_ref()).unwrap(),
+        expected_gen2
+    );
+
+    // Publication 3: generation_state-only update on non-empty delta base stays a flat delta.
+    let gen3 = manifest_with_routes(
+        vec![
+            (
+                route_a.clone(),
+                vec![
+                    certified_at(s1.clone(), 2, 5, 250),
+                    certified_at(s3.clone(), 2, 6, 450),
+                ],
+            ),
+            (
+                route_b.clone(),
+                vec![
+                    certified_at(s2.clone(), 1, 3, 200),
+                    certified_at(s4.clone(), 1, 1, 80),
+                ],
+            ),
+        ],
+        Some(state_2.clone()),
+    );
+    let expected_gen3 = serde_json::to_vec(&gen3).unwrap();
+    let prep3 =
+        prepare_successor_manifest(temp.path(), Arc::new(gen3), Some((&gen2_id, &reopened2)))
+            .unwrap();
+    assert!(prep3.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
+    let delta3: StoredManifestFlatDeltaV1 = serde_json::from_slice(&prep3.bytes).unwrap();
+    assert_eq!(delta3.base_generation_id, anchor_id);
+    assert_eq!(delta3.generation_state.as_ref(), Some(&state_2));
+    let (gen3_id, reopened3) = persist_and_cold_reopen(temp.path(), prep3);
+    assert_eq!(
+        serde_json::to_vec(reopened3.as_ref()).unwrap(),
+        expected_gen3
+    );
+
+    // Publication 4: removing a previously added source falls back to a full manifest.
+    let gen4 = manifest_with_routes(
+        vec![
+            (route_a.clone(), vec![certified_at(s1.clone(), 2, 5, 250)]),
+            (
+                route_b.clone(),
+                vec![
+                    certified_at(s2.clone(), 1, 3, 200),
+                    certified_at(s4.clone(), 1, 1, 80),
+                ],
+            ),
+        ],
+        Some(state_2),
+    );
+    let expected_gen4 = serde_json::to_vec(&gen4).unwrap();
+    let prep4 =
+        prepare_successor_manifest(temp.path(), Arc::new(gen4), Some((&gen3_id, &reopened3)))
+            .unwrap();
+    assert!(!prep4.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
+    let (_, reopened4) = persist_and_cold_reopen(temp.path(), prep4);
+    assert_eq!(
+        serde_json::to_vec(reopened4.as_ref()).unwrap(),
+        expected_gen4
+    );
+}
+
+#[test]
+fn old_delta_encoding_omits_empty_additive_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let s1 = fixture_source("legacy-compat");
+    let base = manifest_at_revision(s1.clone(), 1);
+    let base_id = base.generation_id().unwrap();
+    write_manifest(temp.path(), &base_id, &base).unwrap();
+    let successor = manifest_at_revision(s1, 2);
+    let prepared =
+        prepare_successor_manifest(temp.path(), Arc::new(successor), Some((&base_id, &base)))
+            .unwrap();
+    let encoded = std::str::from_utf8(&prepared.bytes).unwrap();
+    assert!(encoded.starts_with(r#"{"storage_format":"ctx-manifest-flat-delta-v1","#));
+    assert!(!encoded.contains("\"added\""));
+    assert!(!encoded.contains("\"route_additions\""));
+    assert!(!encoded.contains("\"generation_state\""));
+}
+
+#[test]
+fn flat_delta_falls_back_to_full_when_added_plus_changed_exceeds_bound() {
+    let temp = tempfile::tempdir().unwrap();
+    let route_a = route("9");
+    let base_source = fixture_source("base-0");
+    let anchor = manifest_with_routes(
+        vec![(
+            route_a.clone(),
+            vec![certified_at(base_source.clone(), 1, 1, 10)],
+        )],
+        None,
+    );
+    let anchor_id = anchor.generation_id().unwrap();
+    write_manifest(temp.path(), &anchor_id, &anchor).unwrap();
+
+    // Adding exactly MAX_MANIFEST_DELTA_CHANGES stays a delta.
+    let mut at_limit_sources = vec![certified_at(base_source.clone(), 1, 1, 10)];
+    for i in 0..MAX_MANIFEST_DELTA_CHANGES {
+        at_limit_sources.push(certified_at(fixture_source(&format!("add-{i}")), 1, 1, 10));
+    }
+    let at_limit = manifest_with_routes(vec![(route_a.clone(), at_limit_sources.clone())], None);
+    let prep_at_limit =
+        prepare_successor_manifest(temp.path(), Arc::new(at_limit), Some((&anchor_id, &anchor)))
+            .unwrap();
+    assert!(prep_at_limit.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
+
+    // Adding one more (MAX_MANIFEST_DELTA_CHANGES + 1) falls back to a full manifest.
+    at_limit_sources.push(certified_at(
+        fixture_source(&format!("add-{MAX_MANIFEST_DELTA_CHANGES}")),
+        1,
+        1,
+        10,
+    ));
+    let over_limit = manifest_with_routes(vec![(route_a, at_limit_sources)], None);
+    let prep_over = prepare_successor_manifest(
+        temp.path(),
+        Arc::new(over_limit),
+        Some((&anchor_id, &anchor)),
+    )
+    .unwrap();
+    assert!(!prep_over.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
+}
+
+#[test]
+fn malformed_additive_deltas_are_rejected_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let route_a = route("a");
+    let route_b = route("b");
+    let s1 = fixture_source("s1");
+    let s2 = fixture_source("s2");
+    let s3 = fixture_source("s3");
+    let base = manifest_with_routes(
+        vec![
+            (route_a.clone(), vec![certified_at(s1.clone(), 1, 2, 100)]),
+            (route_b.clone(), vec![certified_at(s2.clone(), 1, 1, 50)]),
+        ],
+        None,
+    );
+    let base_id = base.generation_id().unwrap();
+    write_manifest(temp.path(), &base_id, &base).unwrap();
+
+    let s3_cert = certified_at(s3.clone(), 1, 3, 75);
+    let s3_agg = SourceCoreRecordAggregate::new(source_token(&s3), 3, "00".repeat(32)).unwrap();
+    let s3_entry = StoredManifestSourceChangeV1 {
+        source_identity: s3.identity().digest(),
+        source: s3_cert.clone(),
+        aggregate: s3_agg.clone(),
+    };
+    let s1_cert = certified_at(s1.clone(), 2, 2, 100);
+    let s1_agg = SourceCoreRecordAggregate::new(source_token(&s1), 2, "00".repeat(32)).unwrap();
+
+    let try_load = |delta: StoredManifestFlatDeltaV1| {
+        let bytes = serde_json::to_vec(&delta).unwrap();
+        let id = sha256_hex(&bytes);
+        write_manifest_bytes(temp.path(), &id, &bytes).unwrap();
+        clear_manifest_cache_for_root(temp.path()).unwrap();
+        load_materialized_manifest(temp.path(), &id, 0)
+    };
+
+    // 1. Empty delta (no changes, no additions, no generation_state).
+    assert!(matches!(
+        try_load(StoredManifestFlatDeltaV1 {
+            storage_format: MANIFEST_FLAT_DELTA_STORAGE.to_owned(),
+            base_generation_id: base_id.clone(),
+            indexed_documents: 3,
+            certified_source_bytes: 150,
+            source_count: 2,
+            changes: Vec::new(),
+            added: Vec::new(),
+            route_additions: Vec::new(),
+            generation_state: None,
+        }),
+        Err(IndexError::NonCanonicalManifest)
+    ));
+
+    // 2. Added source without route_additions.
+    assert!(matches!(
+        try_load(StoredManifestFlatDeltaV1 {
+            storage_format: MANIFEST_FLAT_DELTA_STORAGE.to_owned(),
+            base_generation_id: base_id.clone(),
+            indexed_documents: 6,
+            certified_source_bytes: 225,
+            source_count: 3,
+            changes: Vec::new(),
+            added: vec![StoredManifestSourceChangeV1 {
+                source_identity: s3.identity().digest(),
+                source: s3_cert.clone(),
+                aggregate: s3_agg.clone(),
+            }],
+            route_additions: Vec::new(),
+            generation_state: None,
+        }),
+        Err(IndexError::NonCanonicalManifest)
+    ));
+
+    // 3. Added source claimed by two routes.
+    assert!(matches!(
+        try_load(StoredManifestFlatDeltaV1 {
+            storage_format: MANIFEST_FLAT_DELTA_STORAGE.to_owned(),
+            base_generation_id: base_id.clone(),
+            indexed_documents: 6,
+            certified_source_bytes: 225,
+            source_count: 3,
+            changes: Vec::new(),
+            added: vec![StoredManifestSourceChangeV1 {
+                source_identity: s3.identity().digest(),
+                source: s3_cert.clone(),
+                aggregate: s3_agg.clone(),
+            }],
+            route_additions: vec![
+                StoredManifestRouteAdditionV1 {
+                    route_identity: route_a.clone(),
+                    sources: vec![s3.clone()],
+                },
+                StoredManifestRouteAdditionV1 {
+                    route_identity: route_b.clone(),
+                    sources: vec![s3.clone()],
+                },
+            ],
+            generation_state: None,
+        }),
+        Err(IndexError::SourceOwnedByMultipleRoutes(_))
+    ));
+
+    // 4. Added source already present in base (s1).
+    assert!(matches!(
+        try_load(StoredManifestFlatDeltaV1 {
+            storage_format: MANIFEST_FLAT_DELTA_STORAGE.to_owned(),
+            base_generation_id: base_id.clone(),
+            indexed_documents: 5,
+            certified_source_bytes: 250,
+            source_count: 3,
+            changes: Vec::new(),
+            added: vec![StoredManifestSourceChangeV1 {
+                source_identity: s1.identity().digest(),
+                source: s1_cert.clone(),
+                aggregate: s1_agg.clone(),
+            }],
+            route_additions: vec![StoredManifestRouteAdditionV1 {
+                route_identity: route_a.clone(),
+                sources: vec![s1.clone()],
+            }],
+            generation_state: None,
+        }),
+        Err(IndexError::NonCanonicalManifest)
+    ));
+
+    // 5. Wrong totals (indexed_documents mismatch).
+    assert!(matches!(
+        try_load(StoredManifestFlatDeltaV1 {
+            storage_format: MANIFEST_FLAT_DELTA_STORAGE.to_owned(),
+            base_generation_id: base_id.clone(),
+            indexed_documents: 999,
+            certified_source_bytes: 225,
+            source_count: 3,
+            changes: Vec::new(),
+            added: vec![s3_entry],
+            route_additions: vec![StoredManifestRouteAdditionV1 {
+                route_identity: route_a,
+                sources: vec![s3.clone()],
+            }],
+            generation_state: None,
+        }),
+        Err(IndexError::NonCanonicalManifest)
+    ));
+
+    // 6. Explicit empty `"added":[]` is non-canonical JSON.
+    let mut raw = serde_json::to_value(StoredManifestFlatDeltaV1 {
+        storage_format: MANIFEST_FLAT_DELTA_STORAGE.to_owned(),
+        base_generation_id: base_id,
+        indexed_documents: 3,
+        certified_source_bytes: 150,
+        source_count: 2,
+        changes: vec![StoredManifestSourceChangeV1 {
+            source_identity: s1.identity().digest(),
+            source: s1_cert,
+            aggregate: s1_agg,
+        }],
+        added: Vec::new(),
+        route_additions: Vec::new(),
+        generation_state: None,
+    })
+    .unwrap();
+    raw.as_object_mut()
+        .unwrap()
+        .insert("added".to_owned(), serde_json::json!([]));
+    let non_canonical = serde_json::to_vec(&raw).unwrap();
+    assert!(matches!(
+        decode_validated_delta(&non_canonical),
+        Err(IndexError::NonCanonicalManifest)
+    ));
+    let _ = MAX_MANIFEST_DELTA_BYTES;
+}
+
+#[test]
+fn adding_one_source_to_large_manifest_cuts_written_bytes_by_orders_of_magnitude() {
+    let temp = tempfile::tempdir().unwrap();
+    let route_a = route("c");
+    let mut sources = (0..2_000)
+        .map(|i| certified_at(fixture_source(&format!("bulk-session-{i:05}")), 1, 5, 512))
+        .collect::<Vec<_>>();
+    let anchor = manifest_with_routes(vec![(route_a.clone(), sources.clone())], None);
+    let anchor_bytes = serde_json::to_vec(&anchor).unwrap();
+    let anchor_id = sha256_hex(&anchor_bytes);
+    write_manifest_bytes(temp.path(), &anchor_id, &anchor_bytes).unwrap();
+
+    sources.push(certified_at(fixture_source("bulk-session-new"), 1, 5, 512));
+    let successor = manifest_with_routes(vec![(route_a, sources)], None);
+    let full_successor_bytes = serde_json::to_vec(&successor).unwrap();
+    let prepared = prepare_successor_manifest(
+        temp.path(),
+        Arc::new(successor),
+        Some((&anchor_id, &anchor)),
+    )
+    .unwrap();
+    assert!(prepared.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
+    // Full manifest is > 2 MB for 2,000 sources; delta for 1 added source is < 3 KB (> 500x smaller).
+    assert!(
+        prepared.bytes.len() * 200 < full_successor_bytes.len(),
+        "expected flat delta ({} B) to be >200x smaller than full manifest ({} B)",
+        prepared.bytes.len(),
+        full_successor_bytes.len()
+    );
+    let (_, reopened) = persist_and_cold_reopen(temp.path(), prepared);
+    assert_eq!(reopened.sources.len(), 2_001);
 }
