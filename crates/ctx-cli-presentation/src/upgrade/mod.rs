@@ -135,4 +135,56 @@ impl UpgradeArgs {
             None => "apply",
         }
     }
+
+    pub fn validate_protocol(&self) -> Result<(), &'static str> {
+        #[cfg(unix)]
+        if matches!(self.command, Some(UpgradeCommand::ExternalReplace(_)))
+            && (self.channel.is_some() || self.dry_run)
+        {
+            return Err("external replacement does not accept --channel or --dry-run");
+        }
+        let normal_options = self.command.is_some()
+            || self.channel.is_some()
+            || self.dry_run
+            || self.format != JsonOutputFormat::Text;
+
+        if self.hosted_transaction.is_some() {
+            if normal_options || self.replacement_helper || self.parent_pid.is_some() {
+                return Err("hosted transaction cannot be combined with upgrade options");
+            }
+            return Ok(());
+        }
+
+        if self.replacement_helper {
+            #[cfg(not(windows))]
+            return Err("replacement helper is available only on Windows");
+
+            #[cfg(windows)]
+            {
+                let valid_identity = self.install_path.is_some()
+                    && self.attempt_id.is_some()
+                    && self.parent_pid.is_some_and(|pid| pid != 0);
+                if normal_options
+                    || !valid_identity
+                    || self.marker_source.is_some()
+                    || self.ownership_source.is_some()
+                    || self.binary_sha256.is_some()
+                {
+                    return Err("invalid replacement-helper process protocol");
+                }
+                return Ok(());
+            }
+        }
+
+        if self.install_path.is_some()
+            || self.attempt_id.is_some()
+            || self.parent_pid.is_some()
+            || self.marker_source.is_some()
+            || self.ownership_source.is_some()
+            || self.binary_sha256.is_some()
+        {
+            return Err("hidden process options require a matching upgrade process role");
+        }
+        Ok(())
+    }
 }

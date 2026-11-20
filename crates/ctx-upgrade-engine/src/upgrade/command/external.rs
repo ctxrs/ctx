@@ -1,8 +1,14 @@
 //! Lifecycle handoff for an installer that publishes its own executable.
 
-use std::{fs, os::unix::fs::MetadataExt as _, path::Path};
+use std::{
+    fs,
+    io::{self, BufRead as _, IsTerminal as _, Read as _, Write as _},
+    os::unix::fs::MetadataExt as _,
+    path::Path,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde_json::json;
 
 use crate::upgrade::{
     install::{
@@ -99,6 +105,38 @@ impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
             bail!("commit requested before the staged executable was published");
         }
         Ok(replaced)
+    }
+
+    /// Coordinate external replacement over redirected stdin and stdout JSON pipes.
+    pub fn run_external_replacement_stdio(
+        &self,
+        data_root: &Path,
+        command_path: &Path,
+        candidate_path: &Path,
+    ) -> Result<()> {
+        if io::stdin().is_terminal() || io::stdout().is_terminal() {
+            bail!("external replacement requires redirected stdin and stdout");
+        }
+        let mut output = io::stdout().lock();
+        let replaced =
+            self.with_external_replacement(data_root, command_path, candidate_path, || {
+                writeln!(
+                    output,
+                    "{}",
+                    json!({"schema_version": 1, "status": "ready"})
+                )?;
+                output.flush()?;
+                let mut input = Vec::new();
+                io::stdin().lock().take(7).read_until(b'\n', &mut input)?;
+                match input.as_slice() {
+                    b"commit\n" => Ok(true),
+                    b"abort\n" | b"" => Ok(false),
+                    _ => bail!("expected commit or abort on the external replacement pipe"),
+                }
+            })?;
+        let status = if replaced { "committed" } else { "aborted" };
+        writeln!(output, "{}", json!({"schema_version": 1, "status": status}))?;
+        Ok(output.flush()?)
     }
 }
 

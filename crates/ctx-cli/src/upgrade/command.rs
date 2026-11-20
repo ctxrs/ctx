@@ -15,15 +15,12 @@ use crate::{
     analytics::{
         count_bucket, UpgradeChannel, UpgradeFailureKind, UpgradeStatus, UpgradeTelemetry,
     },
-    output::JsonOutputFormat,
     ui::Ui,
 };
 use ctx_app_config::{set_auto_upgrade_mode, AppConfig, AutoUpgradeMode};
 
 use super::ports;
 
-#[cfg(unix)]
-mod external;
 mod status;
 use status::render_status;
 
@@ -130,7 +127,7 @@ pub fn run(
             #[cfg(unix)]
             Some(UpgradeCommand::ExternalReplace(args)) => {
                 telemetry.suppress_event = true;
-                external::run(&engine, &data_root, args)
+                engine.run_external_replacement_stdio(&data_root, &args.executable, &args.candidate)
             }
             None => {
                 let outcome =
@@ -158,61 +155,7 @@ fn require_managed_install_for_auto_upgrade() -> Result<()> {
 }
 
 fn validate_hidden_upgrade_protocol(args: &UpgradeArgs) -> Result<()> {
-    #[cfg(unix)]
-    if matches!(args.command, Some(UpgradeCommand::ExternalReplace(_)))
-        && (args.channel.is_some() || args.dry_run)
-    {
-        return Err(anyhow!(
-            "external replacement does not accept --channel or --dry-run"
-        ));
-    }
-    let normal_options = args.command.is_some()
-        || args.channel.is_some()
-        || args.dry_run
-        || args.format != JsonOutputFormat::Text;
-
-    if args.hosted_transaction.is_some() {
-        if normal_options || args.replacement_helper || args.parent_pid.is_some() {
-            return Err(anyhow!(
-                "hosted transaction cannot be combined with upgrade options"
-            ));
-        }
-        return Ok(());
-    }
-
-    if args.replacement_helper {
-        #[cfg(not(windows))]
-        return Err(anyhow!("replacement helper is available only on Windows"));
-
-        #[cfg(windows)]
-        {
-            let valid_identity = args.install_path.is_some()
-                && args.attempt_id.is_some()
-                && args.parent_pid.is_some_and(|pid| pid != 0);
-            if normal_options
-                || !valid_identity
-                || args.marker_source.is_some()
-                || args.ownership_source.is_some()
-                || args.binary_sha256.is_some()
-            {
-                return Err(anyhow!("invalid replacement-helper process protocol"));
-            }
-            return Ok(());
-        }
-    }
-
-    if args.install_path.is_some()
-        || args.attempt_id.is_some()
-        || args.parent_pid.is_some()
-        || args.marker_source.is_some()
-        || args.ownership_source.is_some()
-        || args.binary_sha256.is_some()
-    {
-        return Err(anyhow!(
-            "hidden process options require a matching upgrade process role"
-        ));
-    }
-    Ok(())
+    args.validate_protocol().map_err(|message| anyhow!(message))
 }
 
 fn insert_upgrade_outcome_analytics(telemetry: &mut UpgradeTelemetry, outcome: &UpgradeOutcome) {
