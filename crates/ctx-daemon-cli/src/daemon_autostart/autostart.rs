@@ -144,12 +144,24 @@ pub fn restart_daemon_with_current_environment_and_wait(
                     "ctx daemon credential-bound restart was suppressed ({reason}); retry after it clears"
                 ),
                 ctx_daemon_application::DaemonStartError::BinaryIdentity(error) => error,
-                ctx_daemon_application::DaemonStartError::Start(error) => anyhow!(
-                    "ctx daemon credential-bound restart failed: {error:#}. Run `ctx status --format json`, then `ctx daemon run` for details"
-                ),
-                ctx_daemon_application::DaemonStartError::Ready(error) => anyhow!(
-                    "ctx daemon did not become ready after credential-bound restart: {error}. Run `ctx status --format json`, then `ctx daemon run` for details"
-                ),
+                ctx_daemon_application::DaemonStartError::Start(error) => {
+                    anyhow!(
+                        "{}",
+                        credential_restart_start_failure_message(
+                            native_supervisor_is_active(data_root),
+                            &error,
+                        )
+                    )
+                }
+                ctx_daemon_application::DaemonStartError::Ready(error) => {
+                    anyhow!(
+                        "{}",
+                        credential_restart_ready_failure_message(
+                            native_supervisor_is_active(data_root),
+                            &error,
+                        )
+                    )
+                }
             })?;
         Ok(DaemonHandoff {
             pid: handoff.pid,
@@ -192,28 +204,33 @@ fn autostart_persistent_daemon_and_wait(
                 "ctx daemon start was suppressed (hosted_uninstall_active); retry after it clears or run `ctx setup --no-daemon`"
             ));
         }
-        let reuse_ready_owner = readiness == PersistentDaemonReadiness::Core
-            && application
-                .observe_ready_core_daemon(data_root, &application_config(config))?
-                .is_some();
+        let app_config = application_config(config);
+        let reuse_live_owner = readiness == PersistentDaemonReadiness::Core
+            && (application
+                .observe_ready_core_daemon(data_root, &app_config)?
+                .is_some()
+                || core_daemon_has_live_same_executable_owner(
+                    application,
+                    data_root,
+                    &app_config,
+                )?);
         // Reuse skips only native reconciliation. The ordinary start request
         // below still owns upgrade deferral, cancellation and readiness waiting.
-        if !reuse_ready_owner && daemon_autostart_suppression_reason().is_none() {
+        if !reuse_live_owner && daemon_autostart_suppression_reason().is_none() {
             super::super::daemon_supervisor::ensure_daemon_supervisor(application, data_root)
                 .context("establish ctx daemon supervision")?;
         }
         checkpoint()?;
-        let application_config = application_config(config);
         let handoff = match readiness {
             PersistentDaemonReadiness::Full => application.start_daemon_and_wait_with_cancellation(
                 data_root,
-                &application_config,
+                &app_config,
                 application_trigger(trigger),
                 checkpoint,
             ),
             PersistentDaemonReadiness::Core => application.start_core_daemon_and_wait_with_cancellation(
                 data_root,
-                &application_config,
+                &app_config,
                 application_trigger(trigger),
                 checkpoint,
             ),
@@ -231,10 +248,10 @@ fn autostart_persistent_daemon_and_wait(
                     error
                 }
                 ctx_daemon_application::DaemonStartError::Start(error) => error.context(
-                    "ctx daemon did not start. Run `ctx status --format json`, then `ctx daemon run` for details",
+                    daemon_start_failure_message(native_supervisor_is_active(data_root)),
                 ),
                 ctx_daemon_application::DaemonStartError::Ready(error) => error.context(
-                    "ctx daemon did not become ready. Run `ctx status --format json`, then `ctx daemon run` for details",
+                    daemon_ready_failure_message(native_supervisor_is_active(data_root)),
                 ),
             })?;
         Ok(DaemonSetupHandoff {
@@ -324,4 +341,226 @@ pub(super) fn daemon_restart_trigger(root: &Path) -> Option<DaemonTriggerCommand
 pub(super) fn parse_daemon_trigger(value: Option<&str>) -> Option<DaemonTriggerCommandArg> {
     ctx_daemon_application::parse_persisted_trigger(value)
         .map(super::super::daemon_supervisor::daemon_trigger_arg)
+}
+
+fn daemon_autostart_exe_path() -> Result<PathBuf> {
+    env::var("CTX_DAEMON_AUTOSTART_EXE")
+        .ok()
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(|| env::current_exe().context("resolve ctx daemon autostart executable"))
+}
+
+fn core_daemon_has_live_same_executable_owner(
+    application: &ctx_daemon_application::DaemonApplication<'_>,
+    data_root: &Path,
+    config: &ctx_daemon_application::DaemonConfigSnapshot,
+) -> Result<bool> {
+    if !config.enabled || !application.active_daemon_matches_current_executable(data_root)? {
+        return Ok(false);
+    }
+    let Some(lock) = ctx_daemon_runtime::read_pid_lock_json(&daemon_lock_path(data_root)) else {
+        return Ok(false);
+    };
+    let executable = daemon_autostart_exe_path()?;
+    if !matches!(
+        ctx_daemon_runtime::daemon_owner_metadata_identity_matches(&lock, &executable),
+        Ok(true)
+    ) {
+        return Ok(false);
+    }
+    let Some(pid) = ctx_daemon_runtime::pid_from_lock_json(&lock) else {
+        return Ok(false);
+    };
+    if !daemon_lock_is_owned_by(data_root, pid) {
+        return Ok(false);
+    }
+    let started_at_ms = lock
+        .get("started_at_ms")
+        .and_then(Value::as_i64)
+        .filter(|started| *started > 0);
+    if let (Some(status), Some(started_at_ms)) = (
+        ctx_daemon_runtime::read_daemon_status(data_root).as_ref(),
+        started_at_ms,
+    ) {
+        let matches_owner = status
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            == Some(pid)
+            && status.get("started_at_ms").and_then(Value::as_i64) == Some(started_at_ms);
+        if matches_owner && status.get("status").and_then(Value::as_str) == Some("failed") {
+            return Ok(false);
+        }
+    }
+    Ok(
+        ctx_daemon_runtime::read_pid_lock_json(&daemon_lock_path(data_root)).as_ref()
+            == Some(&lock)
+            && application.active_daemon_matches_current_executable(data_root)?,
+    )
+}
+
+fn native_supervisor_is_active(data_root: &Path) -> bool {
+    let path = daemon_root_path(data_root).join("supervisor.json");
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(receipt) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    native_supervisor_receipt_is_active(&receipt)
+}
+
+fn native_supervisor_receipt_is_active(receipt: &Value) -> bool {
+    let native_kind = matches!(
+        receipt.get("kind").and_then(Value::as_str),
+        Some("systemd_user" | "launch_agent" | "windows_task_scheduler")
+    );
+    let active_status = matches!(
+        receipt.get("status").and_then(Value::as_str),
+        Some(
+            "installed" | "registered_not_running" | "registered_unverified" | "stale_registration"
+        )
+    );
+    native_kind && active_status
+}
+
+fn daemon_start_failure_message(supervised: bool) -> &'static str {
+    if supervised {
+        "ctx daemon did not start. Run `ctx status --format json` to inspect the managed service"
+    } else {
+        "ctx daemon did not start. Run `ctx status --format json`, then `ctx daemon run` for details"
+    }
+}
+
+fn daemon_ready_failure_message(supervised: bool) -> &'static str {
+    if supervised {
+        "ctx daemon did not become ready. Run `ctx status --format json` to inspect the managed service and wait for startup to finish"
+    } else {
+        "ctx daemon did not become ready. Run `ctx status --format json`, then `ctx daemon run` for details"
+    }
+}
+
+fn credential_restart_start_failure_message(supervised: bool, error: &anyhow::Error) -> String {
+    if supervised {
+        format!(
+            "ctx daemon credential-bound restart failed: {error:#}. Run `ctx status --format json` to inspect the managed service"
+        )
+    } else {
+        format!(
+            "ctx daemon credential-bound restart failed: {error:#}. Run `ctx status --format json`, then `ctx daemon run` for details"
+        )
+    }
+}
+
+fn credential_restart_ready_failure_message(supervised: bool, error: &anyhow::Error) -> String {
+    if supervised {
+        format!(
+            "ctx daemon did not become ready after credential-bound restart: {error}. Run `ctx status --format json` to inspect the managed service and wait for startup to finish"
+        )
+    } else {
+        format!(
+            "ctx daemon did not become ready after credential-bound restart: {error}. Run `ctx status --format json`, then `ctx daemon run` for details"
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ctx_daemon_runtime::{write_daemon_status, DaemonLock};
+
+    #[test]
+    fn core_reuse_guard_preserves_live_same_executable_owner_even_without_ipc_and_rejects_failed(
+    ) -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let config = application_config(&DaemonRuntimeConfig::default());
+        let lock = DaemonLock::acquire(temp.path())?
+            .ok_or_else(|| anyhow!("test process could not acquire daemon lock"))?;
+        let started_at_ms = lock.started_at_ms().expect("lock start timestamp");
+
+        // No IPC endpoint and no status.json yet (starting up) -> still preserved!
+        let preserved = super::super::super::daemon_supervisor::with_daemon_application(|app| {
+            core_daemon_has_live_same_executable_owner(app, temp.path(), &config)
+        })?;
+        assert!(preserved);
+
+        // Running status without IPC -> preserved!
+        write_daemon_status(
+            temp.path(),
+            &json!({
+                "status": "running",
+                "pid": process::id(),
+                "started_at_ms": started_at_ms,
+                "heartbeat_at_ms": utc_now().timestamp_millis(),
+            }),
+        )?;
+        let preserved = super::super::super::daemon_supervisor::with_daemon_application(|app| {
+            core_daemon_has_live_same_executable_owner(app, temp.path(), &config)
+        })?;
+        assert!(preserved);
+
+        // Explicitly failed status for this owner -> NOT preserved.
+        write_daemon_status(
+            temp.path(),
+            &json!({
+                "status": "failed",
+                "pid": process::id(),
+                "started_at_ms": started_at_ms,
+                "heartbeat_at_ms": utc_now().timestamp_millis(),
+            }),
+        )?;
+        let preserved = super::super::super::daemon_supervisor::with_daemon_application(|app| {
+            core_daemon_has_live_same_executable_owner(app, temp.path(), &config)
+        })?;
+        assert!(!preserved);
+
+        drop(lock);
+        let preserved = super::super::super::daemon_supervisor::with_daemon_application(|app| {
+            core_daemon_has_live_same_executable_owner(app, temp.path(), &config)
+        })?;
+        assert!(!preserved);
+        Ok(())
+    }
+
+    #[test]
+    fn supervised_readiness_error_hints_avoid_suggesting_foreground_daemon_run() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        assert!(!native_supervisor_is_active(temp.path()));
+        assert!(daemon_ready_failure_message(false).contains("ctx daemon run"));
+        assert!(daemon_ready_failure_message(true).contains("ctx status --format json"));
+        assert!(!daemon_ready_failure_message(true).contains("ctx daemon run"));
+        assert!(!daemon_start_failure_message(true).contains("ctx daemon run"));
+
+        write_private_json_file(
+            &daemon_root_path(temp.path()).join("supervisor.json"),
+            &json!({
+                "schema_version": 1,
+                "kind": "launch_agent",
+                "status": "installed",
+            }),
+        )?;
+        assert!(native_supervisor_is_active(temp.path()));
+
+        write_private_json_file(
+            &daemon_root_path(temp.path()).join("supervisor.json"),
+            &json!({
+                "schema_version": 1,
+                "kind": "launch_agent",
+                "status": "disabled",
+            }),
+        )?;
+        assert!(!native_supervisor_is_active(temp.path()));
+
+        write_private_json_file(
+            &daemon_root_path(temp.path()).join("supervisor.json"),
+            &json!({
+                "schema_version": 1,
+                "kind": "cli_self_heal",
+                "status": "fallback",
+            }),
+        )?;
+        assert!(!native_supervisor_is_active(temp.path()));
+        Ok(())
+    }
 }

@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use ctx_daemon_runtime::{
-    daemon_lock_is_active, ensure_native_supervisor_with as ensure_runtime_supervisor_with,
+    daemon_lock_is_active,
+    ensure_native_supervisor_with_policy as ensure_runtime_supervisor_with_policy,
     resume_native_supervisor_with as resume_runtime_supervisor_with, NativeSupervisorBackend,
     SupervisorEnsureOutcome, SupervisorIdentity, SupervisorInstallationLock,
-    SupervisorManagerEnvironment, SupervisorManagerOperability, SupervisorResumeOutcome,
-    SupervisorSpec, SupervisorUpgradeFence,
+    SupervisorManagerEnvironment, SupervisorManagerOperability, SupervisorMutationPolicy,
+    SupervisorResumeOutcome, SupervisorSpec, SupervisorUpgradeFence,
 };
 #[cfg(test)]
 use ctx_daemon_runtime::{
@@ -56,8 +57,9 @@ use report::native_supervisor_product_authority_blocker;
 use report::revalidated_supervisor_report_with;
 use state::{
     native_supervisor_kind, native_supervisor_limitation, stored_supervisor_report,
-    write_installed_receipt, write_supervisor_receipt,
-    write_supervisor_receipt_with_environment_snapshot, SupervisorReceipt,
+    write_installed_receipt, write_installed_receipt_with_recovery_reason,
+    write_supervisor_receipt, write_supervisor_receipt_with_environment_snapshot,
+    SupervisorReceipt,
 };
 #[cfg(test)]
 use windows::*;
@@ -164,10 +166,31 @@ impl ManagedSupervisorInput {
         Ok(Self {
             data_root: data_root.to_path_buf(),
             executable: executable.to_path_buf(),
-            daemon_environment: configured_supervisor_environment(host, data_root, None)?,
+            daemon_environment: ensure_supervisor_environment(host, data_root)?,
             manager_environment: supervisor_manager_environment(host)?,
         })
     }
+}
+
+fn ensure_supervisor_environment(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+) -> Result<SupervisorEnvironmentSnapshot> {
+    let current = configured_supervisor_environment(host, data_root, None)?;
+    let receipt = stored_supervisor_report(data_root);
+    if report::has_native_registration(&receipt) {
+        if let Ok(installed) =
+            environment::installed_supervisor_environment_snapshot(data_root, &receipt)
+        {
+            // Keep the installed environment snapshot when only caller-shell
+            // process-context variables (LANG, LC_ALL, TMPDIR, TZ, etc.) differ,
+            // so verification does not reinstall a healthy supervisor.
+            if !installed.requires_restart(&current) {
+                return Ok(installed);
+            }
+        }
+    }
+    Ok(current)
 }
 
 fn configured_supervisor_environment(
@@ -239,6 +262,7 @@ pub fn ensure_daemon_supervisor(
                         .to_owned(),
                 ),
                 last_error: None,
+                recovery_reason: None,
             },
             Some(daemon_environment.contract_report()),
         )?;
@@ -267,6 +291,20 @@ fn ensure_native_supervisor_with(
     input: &ManagedSupervisorInput,
     backend: &dyn NativeSupervisorBackend<SupervisorEnvironmentSnapshot>,
 ) -> Result<DaemonSupervisorStart> {
+    ensure_native_supervisor_with_policy(
+        host,
+        input,
+        backend,
+        SupervisorMutationPolicy::AllowReinstall,
+    )
+}
+
+fn ensure_native_supervisor_with_policy(
+    host: &dyn DaemonApplicationHost,
+    input: &ManagedSupervisorInput,
+    backend: &dyn NativeSupervisorBackend<SupervisorEnvironmentSnapshot>,
+    policy: SupervisorMutationPolicy,
+) -> Result<DaemonSupervisorStart> {
     let data_root = input.data_root.as_path();
     let executable = input.executable.as_path();
     // This first probe is intentionally outside the lock: even creating the
@@ -278,27 +316,64 @@ fn ensure_native_supervisor_with(
     // admitted here, every artifact, manager, start, and receipt mutation below
     // remains serialized ahead of that disable.
     ensure_hosted_uninstall_supervisor_admission(host)?;
-    match ensure_runtime_supervisor_with(data_root, executable, &input.daemon_environment, backend)?
-    {
+    match ensure_runtime_supervisor_with_policy(
+        data_root,
+        executable,
+        &input.daemon_environment,
+        backend,
+        policy,
+    )? {
         SupervisorEnsureOutcome::Native {
             artifact,
             owner_pid,
             environment_installed,
+            recovery_reason,
         } => {
-            write_installed_receipt(
+            write_installed_receipt_with_recovery_reason(
                 data_root,
                 executable,
                 artifact,
                 owner_pid,
                 environment_installed.then(|| input.daemon_environment.contract_report()),
+                recovery_reason,
             )?;
             Ok(DaemonSupervisorStart::Native)
+        }
+        SupervisorEnsureOutcome::LiveOwnerPreserved {
+            artifact,
+            owner_pid,
+            registration_error,
+        } => {
+            write_supervisor_receipt(
+                data_root,
+                &SupervisorReceipt {
+                    kind: native_supervisor_kind().to_owned(),
+                    status: "stale_registration",
+                    autostart_supported: true,
+                    restart_supported: true,
+                    registration_verified: false,
+                    live_owner_verified: false,
+                    owner_pid: Some(owner_pid),
+                    artifact_path: artifact,
+                    executable_path: Some(executable.to_path_buf()),
+                    limitation: Some(
+                        "native supervisor registration differed from the invoking environment; preserved the live daemon owner (run `ctx index mode auto` to reinstall)"
+                            .to_owned(),
+                    ),
+                    last_error: Some(format!("{registration_error:#}")),
+                    recovery_reason: Some(format!(
+                        "preserved_live_owner: {registration_error:#}"
+                    )),
+                },
+            )?;
+            Ok(DaemonSupervisorStart::Fallback)
         }
         SupervisorEnsureOutcome::RegisteredNotRunning {
             artifact,
             initial_error,
             recovery_error,
             environment_installed,
+            recovery_reason,
         } => {
             let (limitation, last_error) = if environment_installed {
                 (
@@ -333,6 +408,7 @@ fn ensure_native_supervisor_with(
                 executable_path: Some(executable.to_path_buf()),
                 limitation: Some(limitation.to_owned()),
                 last_error: Some(last_error),
+                recovery_reason,
             };
             if environment_installed {
                 write_supervisor_receipt_with_environment_snapshot(
@@ -351,6 +427,7 @@ fn ensure_native_supervisor_with(
             artifact,
             error,
             cleanup_error,
+            recovery_reason,
         } => {
             if let Some(cleanup_error) = cleanup_error {
                 write_supervisor_receipt(
@@ -370,6 +447,7 @@ fn ensure_native_supervisor_with(
                                 .to_owned(),
                         ),
                         last_error: Some(format!("{error:#}; cleanup: {cleanup_error:#}")),
+                        recovery_reason,
                     },
                 )?;
                 return Err(error.context(format!(
@@ -398,6 +476,7 @@ fn ensure_native_supervisor_with(
                 executable_path: Some(executable.to_path_buf()),
                 limitation: Some(native_supervisor_limitation().to_owned()),
                 last_error: Some(format!("{error:#}")),
+                recovery_reason,
             };
             if authority_blocker {
                 write_supervisor_receipt_with_environment_snapshot(
@@ -490,6 +569,7 @@ fn manager_unavailable_fallback_locked(
             Some(preceding_error) => format!("{reason}; {preceding_error}"),
             None => reason,
         }),
+        recovery_reason: None,
     };
     match environment_snapshot {
         Some(environment_snapshot) => write_supervisor_receipt_with_environment_snapshot(
@@ -547,6 +627,7 @@ pub fn disable_daemon_supervisor(host: &dyn DaemonApplicationHost, data_root: &P
                         .to_owned(),
                 ),
                 last_error: None,
+                recovery_reason: None,
             },
         );
     }
@@ -578,6 +659,7 @@ pub fn disable_daemon_supervisor(host: &dyn DaemonApplicationHost, data_root: &P
                 executable_path: executable,
                 limitation: None,
                 last_error: None,
+                recovery_reason: None,
             },
         );
     }
@@ -618,6 +700,7 @@ fn disable_native_supervisor_candidate_with(
                 executable_path: executable,
                 limitation: None,
                 last_error: None,
+                recovery_reason: None,
             },
         ),
         Err(error) => {
@@ -637,6 +720,7 @@ fn disable_native_supervisor_candidate_with(
                         "native per-user registration could not be fully removed".to_owned(),
                     ),
                     last_error: Some(format!("{error:#}")),
+                    recovery_reason: None,
                 },
             )?;
             Err(error)
@@ -737,6 +821,7 @@ fn resume_daemon_supervisor_after_upgrade_with(
                         .to_owned(),
                 ),
                 last_error: None,
+                recovery_reason: None,
             };
             match environment_snapshot {
                 Some(environment_snapshot) => write_supervisor_receipt_with_environment_snapshot(
@@ -777,6 +862,7 @@ fn resume_daemon_supervisor_after_upgrade_with(
                             .to_owned(),
                     ),
                     last_error: Some(format!("{error:#}")),
+                    recovery_reason: None,
                 };
             match environment_snapshot {
                 Some(environment_snapshot) => write_supervisor_receipt_with_environment_snapshot(

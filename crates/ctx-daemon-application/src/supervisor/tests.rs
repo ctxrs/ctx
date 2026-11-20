@@ -269,6 +269,14 @@ impl NativeSupervisorBackend<SupervisorEnvironmentSnapshot> for FakeSupervisorBa
             .ok_or_else(|| anyhow!("fake native manager has no owner"))
     }
 
+    fn verify_existing_live_owner(&self, _data_root: &Path, _executable: &Path) -> Result<u32> {
+        self.state
+            .lock()
+            .unwrap()
+            .live_owner
+            .ok_or_else(|| anyhow!("fake native manager has no existing live owner"))
+    }
+
     fn prepare_start(&self, _data_root: &Path, _executable: &Path) -> Result<Option<u32>> {
         let mut state = self.state.lock().unwrap();
         state.handoffs += 1;

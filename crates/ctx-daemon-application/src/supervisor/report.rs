@@ -220,7 +220,7 @@ fn suppress_environment_restart_claim(report: &mut Value) {
     }
 }
 
-fn has_native_registration(report: &Value) -> bool {
+pub(super) fn has_native_registration(report: &Value) -> bool {
     report.get("kind").and_then(Value::as_str) == Some(native_supervisor_kind())
         && !matches!(
             report.get("status").and_then(Value::as_str),

@@ -393,3 +393,120 @@ fn installed_environment_damage_is_not_hidden_by_observer_independence() -> Resu
     );
     Ok(())
 }
+
+#[test]
+fn ensure_preserves_installed_environment_across_caller_process_context_drift() -> Result<()> {
+    const CONTEXT: &[(&str, &str)] = &[
+        ("LANG", "C.UTF-8"),
+        ("LC_ALL", "C"),
+        ("TZ", "America/Los_Angeles"),
+        ("TMPDIR", "/caller/subshell/tmp"),
+        ("TMP", "/caller/subshell/tmp"),
+        ("TEMP", "/caller/subshell/tmp"),
+        ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/caller/bus"),
+        ("XDG_RUNTIME_DIR", "/caller/runtime"),
+    ];
+    let _env_lock = crate::test_environment_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _restore =
+        RestoreTestEnvironment::capture(&CONTEXT.iter().map(|(name, _)| *name).collect::<Vec<_>>());
+    for (name, _) in CONTEXT {
+        env::remove_var(name);
+    }
+    let temp = tempfile::tempdir()?;
+    let installed_snapshot = configured_supervisor_environment(&TestHost, temp.path(), None)?;
+    let spec = install_environment_fixture(temp.path(), &installed_snapshot)?;
+    let original_environment = fs::read(spec.environment_path())?;
+    let backend = FakeSupervisorBackend::with_registration(Some(37_687));
+    backend.state.lock().unwrap().installed_environment_sha256 =
+        Some(installed_snapshot.identity_sha256().to_owned());
+
+    for (name, value) in CONTEXT {
+        env::set_var(name, value);
+    }
+    let input = ManagedSupervisorInput::new(&TestHost, temp.path(), spec.launch().program())?;
+    assert_eq!(
+        input.daemon_environment.identity_sha256(),
+        installed_snapshot.identity_sha256(),
+        "process-context-only shell drift must preserve the installed environment snapshot"
+    );
+    let verified_spec = environment::supervisor_artifact_spec(
+        spec.identity().clone(),
+        spec.launch().program(),
+        temp.path(),
+        &input.daemon_environment,
+    )?;
+    ctx_daemon_runtime::verify_supervisor_environment(&verified_spec)?;
+    backend.expect_environment(&input.daemon_environment);
+    assert_eq!(
+        ensure_native_supervisor_with(&TestHost, &input, &backend)?,
+        DaemonSupervisorStart::Native
+    );
+    let state = backend.state.lock().unwrap();
+    assert_eq!((state.installs, state.starts, state.handoffs), (0, 0, 0));
+    drop(state);
+    assert_eq!(fs::read(spec.environment_path())?, original_environment);
+    Ok(())
+}
+
+#[test]
+fn preserve_live_owner_records_recovery_reason_without_reinstalling_or_replacing_environment(
+) -> Result<()> {
+    let _env_lock = crate::test_environment_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _restore = RestoreTestEnvironment::capture(&["CODEX_HOME"]);
+    env::remove_var("CODEX_HOME");
+    let temp = tempfile::tempdir()?;
+    let installed_snapshot = configured_supervisor_environment(&TestHost, temp.path(), None)?;
+    let spec = install_environment_fixture(temp.path(), &installed_snapshot)?;
+    let original_environment = fs::read(spec.environment_path())?;
+    let backend = FakeSupervisorBackend::with_registration(Some(37_687));
+    backend.state.lock().unwrap().installed_environment_sha256 =
+        Some(installed_snapshot.identity_sha256().to_owned());
+
+    env::set_var("CODEX_HOME", "/caller/different-codex-home");
+    let input = ManagedSupervisorInput::new(&TestHost, temp.path(), spec.launch().program())?;
+    backend.expect_environment(&input.daemon_environment);
+    assert_eq!(
+        ensure_native_supervisor_with_policy(
+            &TestHost,
+            &input,
+            &backend,
+            SupervisorMutationPolicy::PreserveLiveOwner,
+        )?,
+        DaemonSupervisorStart::Fallback
+    );
+    let state = backend.state.lock().unwrap();
+    assert_eq!(
+        (
+            state.installs,
+            state.mutation_preparations,
+            state.starts,
+            state.handoffs
+        ),
+        (0, 0, 0, 0)
+    );
+    drop(state);
+    assert_eq!(fs::read(spec.environment_path())?, original_environment);
+    let receipt = stored_supervisor_report(temp.path());
+    assert_eq!(receipt["status"], "stale_registration");
+    assert_eq!(receipt["owner_pid"], 37_687);
+    assert!(receipt["recovery_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("preserved_live_owner")));
+
+    // Explicit AllowReinstall still reinstalls and records why recovery ran.
+    assert_eq!(
+        ensure_native_supervisor_with(&TestHost, &input, &backend)?,
+        DaemonSupervisorStart::Native
+    );
+    assert_eq!(backend.state.lock().unwrap().installs, 1);
+    let reinstalled = stored_supervisor_report(temp.path());
+    assert_eq!(reinstalled["status"], "installed");
+    assert!(reinstalled["recovery_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("reinstalled_registration")));
+    Ok(())
+}

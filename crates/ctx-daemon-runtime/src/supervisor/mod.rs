@@ -9,6 +9,8 @@ use anyhow::{anyhow, Context, Error, Result};
 mod artifact;
 mod lock;
 mod platform;
+#[cfg(test)]
+mod preserve_live_owner_tests;
 mod state;
 mod windows;
 
@@ -28,6 +30,12 @@ pub enum SupervisorManagerOperability {
     Unavailable { reason: String },
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SupervisorMutationPolicy {
+    AllowReinstall,
+    PreserveLiveOwner,
+}
+
 pub trait NativeSupervisorBackend<E>: Sync {
     fn probe_manager(&self, data_root: &Path) -> Result<SupervisorManagerOperability>;
     /// Perform any owner handoff required before native registration state may
@@ -39,6 +47,11 @@ pub trait NativeSupervisorBackend<E>: Sync {
     fn disable(&self, data_root: &Path) -> Result<Option<PathBuf>>;
     fn verify_registration(&self, data_root: &Path, executable: &Path) -> Result<()>;
     fn verify_live_owner(&self, data_root: &Path, executable: &Path) -> Result<u32>;
+    /// Verify whether a live, identity-verified, same-executable daemon already
+    /// owns the singleton lock, independent of native registration matching.
+    fn verify_existing_live_owner(&self, data_root: &Path, executable: &Path) -> Result<u32> {
+        crate::verify_daemon_owner_identity(data_root, executable, None)
+    }
     /// Reverify manager ownership immediately before handing off a detached
     /// owner. Returning an owner PID suppresses the start; returning `None`
     /// means any detached owner was released and the manager may start safely.
@@ -52,17 +65,25 @@ pub enum SupervisorEnsureOutcome {
         artifact: Option<PathBuf>,
         owner_pid: u32,
         environment_installed: bool,
+        recovery_reason: Option<String>,
+    },
+    LiveOwnerPreserved {
+        artifact: Option<PathBuf>,
+        owner_pid: u32,
+        registration_error: Error,
     },
     RegisteredNotRunning {
         artifact: Option<PathBuf>,
         initial_error: Error,
         recovery_error: Error,
         environment_installed: bool,
+        recovery_reason: Option<String>,
     },
     InstallFailed {
         artifact: Option<PathBuf>,
         error: Error,
         cleanup_error: Option<Error>,
+        recovery_reason: Option<String>,
     },
     ManagerUnavailable {
         artifact: Option<PathBuf>,
@@ -78,17 +99,34 @@ pub fn ensure_native_supervisor_with<E>(
     environment: &E,
     backend: &dyn NativeSupervisorBackend<E>,
 ) -> Result<SupervisorEnsureOutcome> {
+    ensure_native_supervisor_with_policy(
+        data_root,
+        executable,
+        environment,
+        backend,
+        SupervisorMutationPolicy::AllowReinstall,
+    )
+}
+
+pub fn ensure_native_supervisor_with_policy<E>(
+    data_root: &Path,
+    executable: &Path,
+    environment: &E,
+    backend: &dyn NativeSupervisorBackend<E>,
+    policy: SupervisorMutationPolicy,
+) -> Result<SupervisorEnsureOutcome> {
     if let Some(outcome) = manager_unavailable_after_probe(data_root, backend, false, None)? {
         return Ok(outcome);
     }
     let artifact = backend.artifact_path(data_root)?;
-    if backend.verify_registration(data_root, executable).is_ok() {
-        match backend.verify_live_owner(data_root, executable) {
+    let registration_error = match backend.verify_registration(data_root, executable) {
+        Ok(()) => match backend.verify_live_owner(data_root, executable) {
             Ok(owner_pid) => {
                 return Ok(SupervisorEnsureOutcome::Native {
                     artifact,
                     owner_pid,
                     environment_installed: false,
+                    recovery_reason: None,
                 });
             }
             Err(initial_live_error) => {
@@ -102,16 +140,19 @@ pub fn ensure_native_supervisor_with<E>(
                 )? {
                     return Ok(outcome);
                 }
+                let start_reason =
+                    format!("started_unrunning_registration: {initial_live_error:#}");
                 return match start_and_wait_for_native_live_owner(data_root, executable, backend) {
                     Ok(owner_pid) => Ok(SupervisorEnsureOutcome::Native {
                         artifact,
                         owner_pid,
                         environment_installed: false,
+                        recovery_reason: Some(start_reason),
                     }),
                     Err(recovery_error) => {
                         let preceding_error = format!(
-                            "initial live-owner verification: {initial_live_error:#}; recovery: {recovery_error:#}"
-                        );
+                                "initial live-owner verification: {initial_live_error:#}; recovery: {recovery_error:#}"
+                            );
                         if let Some(outcome) = manager_unavailable_after_probe(
                             data_root,
                             backend,
@@ -125,11 +166,23 @@ pub fn ensure_native_supervisor_with<E>(
                                 initial_error: initial_live_error,
                                 recovery_error,
                                 environment_installed: false,
+                                recovery_reason: Some(start_reason),
                             })
                         }
                     }
                 };
             }
+        },
+        Err(error) => error,
+    };
+
+    if policy == SupervisorMutationPolicy::PreserveLiveOwner {
+        if let Ok(owner_pid) = backend.verify_existing_live_owner(data_root, executable) {
+            return Ok(SupervisorEnsureOutcome::LiveOwnerPreserved {
+                artifact,
+                owner_pid,
+                registration_error,
+            });
         }
     }
 
@@ -145,6 +198,7 @@ pub fn ensure_native_supervisor_with<E>(
     // must be replaced.
     backend.prepare_mutation(data_root, executable)?;
 
+    let reinstall_reason = format!("reinstalled_registration: {registration_error:#}");
     let installation = backend
         .install(data_root, executable, environment)
         .and_then(|installed_artifact| {
@@ -156,6 +210,7 @@ pub fn ensure_native_supervisor_with<E>(
             artifact: Some(installed_artifact),
             owner_pid,
             environment_installed: true,
+            recovery_reason: Some(reinstall_reason),
         }),
         Err(error) => {
             let installation_error = format!("native supervisor installation: {error:#}");
@@ -190,6 +245,7 @@ pub fn ensure_native_supervisor_with<E>(
                         artifact,
                         owner_pid,
                         environment_installed: true,
+                        recovery_reason: Some(reinstall_reason),
                     }),
                     Err(recovery_error) => {
                         let preceding_error = format!(
@@ -208,6 +264,7 @@ pub fn ensure_native_supervisor_with<E>(
                                 initial_error: error,
                                 recovery_error,
                                 environment_installed: true,
+                                recovery_reason: Some(reinstall_reason),
                             })
                         }
                     }
@@ -247,6 +304,7 @@ pub fn ensure_native_supervisor_with<E>(
                     },
                     error,
                     cleanup_error,
+                    recovery_reason: Some(format!("reinstall_failed: {reinstall_reason}")),
                 })
             }
         }
