@@ -800,16 +800,28 @@ fn antigravity_accepts_only_official_fixed_transcript_leaves() {
             .join(".gemini/antigravity/brain/c/.system_generated/logs/transcript.jsonl"),
         b"{}\n",
     );
+    write_file(
+        &linux_context
+            .home()
+            .join(".gemini/antigravity-other/brain/c/.system_generated/logs/transcript.jsonl"),
+        b"{}\n",
+    );
     let report = provider_report(&linux_context, CaptureProvider::Antigravity);
-    assert_eq!(report.sources.len(), 2);
+    assert_eq!(report.sources.len(), 3);
     assert_eq!(report.sources[0].status, ProviderSourceStatus::Empty);
     assert_eq!(report.sources[1].status, ProviderSourceStatus::Available);
+    assert_eq!(report.sources[2].status, ProviderSourceStatus::Available);
     assert_automatic_role(&report.sources[0], &[b"surface", b"cli"]);
     assert_automatic_role(&report.sources[1], &[b"surface", b"ide"]);
-    assert!(!report
-        .sources
-        .iter()
-        .any(|source| source.path.to_string_lossy().contains("antigravity/brain")));
+    assert_automatic_role(&report.sources[2], &[b"surface", b"app"]);
+    assert_eq!(
+        report.sources[2].path,
+        linux_context.home().join(".gemini/antigravity/brain")
+    );
+    assert!(!report.sources.iter().any(|source| source
+        .path
+        .to_string_lossy()
+        .contains("antigravity-other/brain")));
 
     assert!(provider_report(
         &context(temp.path(), DiscoveryPlatform::OtherUnix),
@@ -817,6 +829,131 @@ fn antigravity_accepts_only_official_fixed_transcript_leaves() {
     )
     .sources
     .is_empty());
+}
+
+#[test]
+fn antigravity_discovers_t3_acp_roots_with_instance_provenance_and_skips_missing_optional_roots() {
+    let temp = tempdir();
+    let linux_context = context(temp.path(), DiscoveryPlatform::Linux);
+
+    // Without standalone app or T3 roots present, only cli and ide defaults appear.
+    let baseline = provider_report(&linux_context, CaptureProvider::Antigravity);
+    assert_eq!(baseline.sources.len(), 2);
+    assert!(baseline.issues.is_empty());
+
+    let t3_root = linux_context
+        .home()
+        .join(".t3/userdata/providers/antigravity");
+    write_file(
+        &t3_root
+            .join("instance-b/antigravity-acp/brain/s1/.system_generated/logs/transcript.jsonl"),
+        b"{}\n",
+    );
+    write_file(
+        &t3_root
+            .join("instance-a/antigravity-acp/brain/s2/.system_generated/logs/transcript.jsonl"),
+        b"{}\n",
+    );
+    fs::create_dir_all(t3_root.join("instance-no-brain/antigravity-acp")).unwrap();
+    write_file(&t3_root.join("stray-file.txt"), b"ignore\n");
+
+    let report = provider_report(&linux_context, CaptureProvider::Antigravity);
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
+    assert_eq!(report.sources.len(), 4);
+    assert_automatic_role(&report.sources[0], &[b"surface", b"cli"]);
+    assert_automatic_role(&report.sources[1], &[b"surface", b"ide"]);
+    assert_eq!(
+        report.sources[2].path,
+        t3_root.join("instance-a/antigravity-acp/brain")
+    );
+    assert_eq!(report.sources[2].status, ProviderSourceStatus::Available);
+    assert_eq!(
+        report.sources[2].route_provenance,
+        super::super::automatic_roles::automatic_route_provenance_with_native_os_str_id(
+            &[b"surface", b"t3-acp"],
+            OsStr::new("instance-a"),
+            &[],
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        report.sources[3].path,
+        t3_root.join("instance-b/antigravity-acp/brain")
+    );
+    assert_eq!(report.sources[3].status, ProviderSourceStatus::Available);
+    assert_ne!(
+        report.sources[2].route_provenance,
+        report.sources[3].route_provenance
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_t3_unsafe_instance_and_root_report_discovery_issue() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let linux_context = context(temp.path(), DiscoveryPlatform::Linux);
+    let outside = temp.path().join("outside-t3-instance");
+    write_file(
+        &outside.join("antigravity-acp/brain/s/.system_generated/logs/transcript.jsonl"),
+        b"{}\n",
+    );
+    let t3_root = linux_context
+        .home()
+        .join(".t3/userdata/providers/antigravity");
+    fs::create_dir_all(&t3_root).unwrap();
+    symlink(&outside, t3_root.join("linked-instance")).unwrap();
+
+    let report = provider_report(&linux_context, CaptureProvider::Antigravity);
+    assert_eq!(report.sources.len(), 2);
+    assert_eq!(report.issues.len(), 1);
+
+    let file_temp = tempdir();
+    let file_context = context(file_temp.path(), DiscoveryPlatform::Linux);
+    let file_t3_root = file_context
+        .home()
+        .join(".t3/userdata/providers/antigravity");
+    write_file(&file_t3_root, b"not-a-directory\n");
+    let file_report = provider_report(&file_context, CaptureProvider::Antigravity);
+    assert_eq!(file_report.sources.len(), 2);
+    assert_eq!(file_report.issues.len(), 1);
+}
+
+#[test]
+fn antigravity_configured_root_probe_prunes_large_step_subtrees() {
+    let temp = tempdir();
+    let brain = temp.path().join("custom-antigravity-brain");
+    // Session "a" has > 10,000 step subdirectories before session "z" holds the transcript.
+    let steps = brain.join("aaa-session/.system_generated/steps");
+    fs::create_dir_all(&steps).unwrap();
+    for index in 0..10_050 {
+        fs::create_dir(steps.join(format!("{index}"))).unwrap();
+    }
+    write_file(
+        &brain.join("zzz-session/.system_generated/logs/transcript_full.jsonl"),
+        b"{}\n",
+    );
+
+    let root = ctx_history_capture_model::ProviderRootDefinition {
+        id: "custom-antigravity".to_owned(),
+        provider: CaptureProvider::Antigravity,
+        path: brain.clone(),
+        group: None,
+        kind: None,
+    };
+    let configured_context = context(temp.path(), DiscoveryPlatform::Linux)
+        .with_automatic_provider_discovery(false)
+        .with_configured_provider_roots(vec![root]);
+    let report = super::super::super::discover_provider_sources_for_provider_with_context(
+        &super::super::super::TEST_PROVIDER_PROBES,
+        &configured_context,
+        CaptureProvider::Antigravity,
+    );
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].path, brain);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Available);
 }
 
 #[test]

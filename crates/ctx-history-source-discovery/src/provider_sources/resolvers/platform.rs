@@ -22,7 +22,10 @@ use super::super::{
     StaticProviderProbeCatalog,
 };
 use super::{
-    automatic_roles::{automatic_route_provenance, AUTOMATIC_ROUTE_ROLE_UNAVAILABLE_REASON},
+    automatic_roles::{
+        automatic_route_provenance, automatic_route_provenance_with_native_os_str_id,
+        AUTOMATIC_ROUTE_ROLE_UNAVAILABLE_REASON,
+    },
     dedupe_report, issue, path_presence, push_source_candidate, source_from_parts_with_data_root,
     unsupported_source, PathPresence,
 };
@@ -496,7 +499,90 @@ fn resolve_antigravity(context: &DiscoveryContext, spec: &ProviderSourceSpec) ->
             [b"surface".as_slice(), surface],
         );
     }
+    // Antigravity App 2.x uses `--app_data_dir antigravity`, storing brain
+    // transcripts under `~/.gemini/antigravity/brain`.
+    let app_root = context
+        .home()
+        .join(".gemini")
+        .join("antigravity")
+        .join("brain");
+    if !matches!(path_presence(&app_root), PathPresence::Missing) {
+        push_automatic_role_source(
+            &mut report,
+            spec,
+            exact_tree_source(spec, app_root, ANTIGRAVITY_FORMAT, ExactTree::Antigravity),
+            [b"surface".as_slice(), b"app".as_slice()],
+        );
+    }
+    resolve_t3_antigravity_roots(context, spec, &mut report);
     report
+}
+
+fn resolve_t3_antigravity_roots(
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+    report: &mut DiscoveryReport,
+) {
+    let t3_root = context
+        .home()
+        .join(".t3")
+        .join("userdata")
+        .join("providers")
+        .join("antigravity");
+    match path_presence(&t3_root) {
+        PathPresence::Missing => return,
+        PathPresence::Present if ordinary_directory(&t3_root) => {}
+        PathPresence::Present | PathPresence::Unsupported | PathPresence::Unknown(_) => {
+            report.issues.push(issue(
+                spec.provider,
+                Some(t3_root),
+                DiscoveryIssueKind::SelectorUnreconstructible,
+                UNSAFE_SOURCE_REASON,
+            ));
+            return;
+        }
+    }
+    let instances = match direct_entries(&t3_root) {
+        Ok(entries) => entries,
+        Err(_) => {
+            report.issues.push(issue(
+                spec.provider,
+                Some(t3_root),
+                DiscoveryIssueKind::SelectorUnreconstructible,
+                SELECTOR_MANUAL_REASON,
+            ));
+            return;
+        }
+    };
+    for instance_dir in instances {
+        if !ordinary_directory(&instance_dir) {
+            continue;
+        }
+        let Some(instance_id) = instance_dir.file_name() else {
+            continue;
+        };
+        let brain = instance_dir.join("antigravity-acp").join("brain");
+        if matches!(path_presence(&brain), PathPresence::Missing) {
+            continue;
+        }
+        let mut source = exact_tree_source(spec, brain, ANTIGRAVITY_FORMAT, ExactTree::Antigravity);
+        match automatic_route_provenance_with_native_os_str_id(
+            &[b"surface", b"t3-acp"],
+            instance_id,
+            &[],
+        ) {
+            Ok(route_provenance) => {
+                source.route_provenance = route_provenance;
+                push_source_candidate(&mut report.sources, source);
+            }
+            Err(_) => report.issues.push(issue(
+                spec.provider,
+                None,
+                DiscoveryIssueKind::SelectorUnreconstructible,
+                AUTOMATIC_ROUTE_ROLE_UNAVAILABLE_REASON,
+            )),
+        }
+    }
 }
 
 fn push_automatic_role_source<const N: usize>(
