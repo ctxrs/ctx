@@ -1,39 +1,11 @@
-use std::{
-    io::{self, Write},
-    time::Duration,
-};
+use std::time::Duration;
+
+pub(super) use ctx_terminal::{flush_cli_output, FinalOutputFlushError};
 
 use crate::{
     analytics::{SearchFailurePhase, SearchHealthFacts, SearchTelemetry},
     local_usage,
 };
-
-#[derive(Debug, thiserror::Error)]
-pub(super) enum FinalOutputFlushError {
-    #[error("flush CLI stdout: {0}")]
-    Stdout(io::Error),
-    #[error("flush CLI stderr: {0}")]
-    Stderr(io::Error),
-    #[error("flush CLI stdout: {stdout}; flush CLI stderr: {stderr}")]
-    Both {
-        stdout: io::Error,
-        stderr: io::Error,
-    },
-}
-
-pub(super) fn flush_cli_output(
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
-) -> std::result::Result<(), FinalOutputFlushError> {
-    let stdout_result = stdout.flush();
-    let stderr_result = stderr.flush();
-    match (stdout_result, stderr_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(stdout), Ok(())) => Err(FinalOutputFlushError::Stdout(stdout)),
-        (Ok(()), Err(stderr)) => Err(FinalOutputFlushError::Stderr(stderr)),
-        (Err(stdout), Err(stderr)) => Err(FinalOutputFlushError::Both { stdout, stderr }),
-    }
-}
 
 pub(super) fn record_search_final_delivery(
     telemetry: &mut SearchTelemetry,
