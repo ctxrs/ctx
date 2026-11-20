@@ -199,17 +199,46 @@ impl FamilyGuard {
     }
 
     pub(super) fn has_nonempty_auxiliary(&self) -> Result<bool, UsageStoreError> {
+        Ok(self.has_nonempty_wal()?
+            || self.shm.as_ref().is_some_and(|member| {
+                member
+                    .file
+                    .metadata()
+                    .map_or(true, |metadata| metadata.len() > 0)
+            }))
+    }
+
+    pub(super) fn has_nonempty_wal(&self) -> Result<bool, UsageStoreError> {
         Ok(self.wal.as_ref().is_some_and(|member| {
             member
                 .file
                 .metadata()
                 .map_or(true, |metadata| metadata.len() > 0)
-        }) || self.shm.as_ref().is_some_and(|member| {
-            member
-                .file
-                .metadata()
-                .map_or(true, |metadata| metadata.len() > 0)
         }))
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn release_auxiliaries_before_journal_delete(
+        &mut self,
+        path: &Path,
+    ) -> Result<(), UsageStoreError> {
+        self.recheck(path)?;
+        self.wal = None;
+        self.shm = None;
+        Ok(())
+    }
+
+    pub(super) fn clear_removed_auxiliaries(&mut self, path: &Path) -> Result<(), UsageStoreError> {
+        for suffix in ["-wal", "-shm"] {
+            match auxiliary_path(path, suffix).symlink_metadata() {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Ok(_) => return Err(UsageStoreError::UnsafeReadState),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.wal = None;
+        self.shm = None;
+        Ok(())
     }
 }
 
@@ -264,11 +293,17 @@ pub(super) fn capture_checkpointed_image(
     between_reads: impl FnOnce(),
 ) -> Result<Vec<u8>, UsageStoreError> {
     guard.recheck_unchanged(path)?;
-    let first = read_bounded_image(&guard.main.file)?;
+    let first = read_bounded_bytes(
+        &guard.main.file,
+        u64::try_from(MAX_DATABASE_BYTES).unwrap_or(0),
+    )?;
     guard.recheck_unchanged(path)?;
     between_reads();
     guard.recheck_unchanged(path)?;
-    let second = read_bounded_image(&guard.main.file)?;
+    let second = read_bounded_bytes(
+        &guard.main.file,
+        u64::try_from(MAX_DATABASE_BYTES).unwrap_or(0),
+    )?;
     guard.recheck_unchanged(path)?;
     if first != second {
         return Err(UsageStoreError::UnsafeReadState);
@@ -276,20 +311,46 @@ pub(super) fn capture_checkpointed_image(
     normalize_checkpointed_header(first)
 }
 
-fn read_bounded_image(file: &File) -> Result<Vec<u8>, UsageStoreError> {
+pub(super) fn capture_wal_family_images(
+    path: &Path,
+    guard: &FamilyGuard,
+) -> Result<(Vec<u8>, Vec<u8>), UsageStoreError> {
+    let wal_file = &guard
+        .wal
+        .as_ref()
+        .ok_or(UsageStoreError::UnsafeReadState)?
+        .file;
+    let max_main = u64::try_from(MAX_DATABASE_BYTES).unwrap_or(0);
+    guard.recheck_unchanged(path)?;
+    let main_first = read_bounded_bytes(&guard.main.file, max_main)?;
+    let wal_first = read_bounded_bytes(wal_file, MAX_FAMILY_BYTES)?;
+    guard.recheck_unchanged(path)?;
+    let main_second = read_bounded_bytes(&guard.main.file, max_main)?;
+    let wal_second = read_bounded_bytes(wal_file, MAX_FAMILY_BYTES)?;
+    guard.recheck_unchanged(path)?;
+    if main_first != main_second || wal_first != wal_second {
+        return Err(UsageStoreError::UnsafeReadState);
+    }
+    validate_sqlite_header(&main_first)?;
+    if main_first[18] != 2 || main_first[19] != 2 {
+        return Err(UsageStoreError::UnsafeReadState);
+    }
+    Ok((main_first, wal_first))
+}
+
+fn read_bounded_bytes(file: &File, max_bytes: u64) -> Result<Vec<u8>, UsageStoreError> {
     let expected_size =
         usize::try_from(file.metadata()?.len()).map_err(|_| UsageStoreError::GrowthLimit)?;
-    if expected_size > usize::try_from(MAX_DATABASE_BYTES).unwrap_or(usize::MAX) {
+    let max_len = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    if expected_size > max_len {
         return Err(UsageStoreError::GrowthLimit);
     }
     let mut reader = file.try_clone()?;
     reader.seek(SeekFrom::Start(0))?;
-    let limit = u64::try_from(MAX_DATABASE_BYTES)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
+    let limit = max_bytes.saturating_add(1);
     let mut image = Vec::new();
     reader.take(limit).read_to_end(&mut image)?;
-    if image.len() > usize::try_from(MAX_DATABASE_BYTES).unwrap_or(usize::MAX) {
+    if image.len() > max_len {
         return Err(UsageStoreError::GrowthLimit);
     }
     if image.len() != expected_size {
@@ -298,7 +359,7 @@ fn read_bounded_image(file: &File) -> Result<Vec<u8>, UsageStoreError> {
     Ok(image)
 }
 
-fn normalize_checkpointed_header(mut image: Vec<u8>) -> Result<Vec<u8>, UsageStoreError> {
+fn validate_sqlite_header(image: &[u8]) -> Result<(), UsageStoreError> {
     const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
     if image.len() < 100
         || image.get(..SQLITE_HEADER.len()) != Some(SQLITE_HEADER.as_slice())
@@ -316,6 +377,11 @@ fn normalize_checkpointed_header(mut image: Vec<u8>) -> Result<Vec<u8>, UsageSto
     {
         return Err(UsageStoreError::SchemaIdentity);
     }
+    Ok(())
+}
+
+fn normalize_checkpointed_header(mut image: Vec<u8>) -> Result<Vec<u8>, UsageStoreError> {
+    validate_sqlite_header(&image)?;
     // The bytes are now detached from the source. WAL-mode databases use 2 in
     // these header slots; an in-memory, read-only deserialize needs the
     // rollback-journal marker and never observes source auxiliaries.

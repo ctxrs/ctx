@@ -142,3 +142,144 @@ fn held_writer_is_best_effort_and_does_not_block_primary_path_long() {
     assert!(result.is_err());
     assert!(started.elapsed() < Duration::from_millis(100));
 }
+
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn capture_uncheckpointed_wal(
+    db_path: &std::path::Path,
+    mutate: impl FnOnce(&rusqlite::Connection),
+) -> (Vec<u8>, Vec<u8>) {
+    let original_main = fs::read(db_path).unwrap();
+    let scratch = private_tempdir();
+    let scratch_db = scratch.path().join("usage.sqlite");
+    write_private_file(&scratch_db, &original_main);
+    let conn = rusqlite::Connection::open(&scratch_db).unwrap();
+    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    mutate(&conn);
+    let wal_bytes = fs::read(scratch.path().join("usage.sqlite-wal")).unwrap();
+    assert!(!wal_bytes.is_empty());
+    drop(conn);
+    (original_main, wal_bytes)
+}
+
+#[test]
+fn stale_shm_with_empty_wal_keeps_reads_strict_and_recovers_on_write() {
+    let root = private_tempdir();
+    store::record(root.path(), operation("doctor")).unwrap();
+    let wal_path = root.path().join("usage.sqlite-wal");
+    let shm_path = root.path().join("usage.sqlite-shm");
+    write_private_file(&wal_path, &[]);
+    write_private_file(&shm_path, &[0, 0, 0]);
+
+    let blocked = read_report(root.path(), true, true);
+    assert_eq!(blocked.state, "error");
+    assert_eq!(blocked.error.unwrap().code, "usage_store_unavailable");
+    assert_eq!(fs::read(&shm_path).unwrap(), vec![0, 0, 0]);
+    assert_eq!(fs::read(&wal_path).unwrap(), Vec::<u8>::new());
+
+    store::record(root.path(), operation("doctor")).unwrap();
+    assert!(!wal_path.exists());
+    assert!(!shm_path.exists());
+
+    let recovered = read_report(root.path(), true, true);
+    assert_eq!(recovered.state, "ready");
+    assert_eq!(recovered.definitions.unwrap()[0].summary.calls, 2);
+}
+
+#[test]
+fn stale_shm_recovers_on_reset() {
+    let root = private_tempdir();
+    store::record(root.path(), operation("doctor")).unwrap();
+    let wal_path = root.path().join("usage.sqlite-wal");
+    let shm_path = root.path().join("usage.sqlite-shm");
+    write_private_file(&wal_path, &[]);
+    write_private_file(&shm_path, &[0, 0, 0]);
+
+    assert!(reset(root.path()).unwrap());
+    assert!(!wal_path.exists());
+    assert!(!shm_path.exists());
+
+    let report = read_report(root.path(), true, true);
+    assert_eq!(report.state, "empty");
+}
+
+#[test]
+fn replayable_nonempty_wal_and_stale_shm_recover_without_data_loss() {
+    let root = private_tempdir();
+    store::record(root.path(), operation("doctor")).unwrap();
+    let db_path = store::usage_path(root.path());
+    let (original_main, wal_bytes) = capture_uncheckpointed_wal(&db_path, |conn| {
+        conn.execute("UPDATE daily_usage SET calls = calls + 1", [])
+            .unwrap();
+    });
+    let wal_path = root.path().join("usage.sqlite-wal");
+    let shm_path = root.path().join("usage.sqlite-shm");
+    write_private_file(&db_path, &original_main);
+    write_private_file(&wal_path, &wal_bytes);
+    write_private_file(&shm_path, &[0, 0, 0]);
+
+    let blocked = read_report(root.path(), true, true);
+    assert_eq!(blocked.state, "error");
+    assert_eq!(fs::read(&wal_path).unwrap(), wal_bytes);
+
+    store::record(root.path(), operation("doctor")).unwrap();
+    assert!(!wal_path.exists());
+    assert!(!shm_path.exists());
+
+    let recovered = read_report(root.path(), true, true);
+    assert_eq!(recovered.state, "ready");
+    assert_eq!(recovered.definitions.unwrap()[0].summary.calls, 3);
+}
+
+#[test]
+fn corrupt_nonempty_wal_is_rejected_without_modifying_live_store() {
+    let root = private_tempdir();
+    store::record(root.path(), operation("doctor")).unwrap();
+    let db_path = store::usage_path(root.path());
+    let before_main = fs::read(&db_path).unwrap();
+    let wal_path = root.path().join("usage.sqlite-wal");
+    let shm_path = root.path().join("usage.sqlite-shm");
+    let junk = b"not a valid sqlite wal payload for usage store recovery";
+    write_private_file(&wal_path, junk);
+    write_private_file(&shm_path, &[0, 0, 0]);
+
+    let err = store::record(root.path(), operation("doctor")).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::local_usage::UsageStoreError::UnsafeReadState
+    ));
+    assert_eq!(fs::read(&db_path).unwrap(), before_main);
+    assert_eq!(fs::read(&wal_path).unwrap(), junk);
+}
+
+#[test]
+fn tampered_wal_violating_row_invariants_is_rejected_before_live_open() {
+    let root = private_tempdir();
+    store::record(root.path(), operation("doctor")).unwrap();
+    let db_path = store::usage_path(root.path());
+    let (original_main, tampered_wal) = capture_uncheckpointed_wal(&db_path, |conn| {
+        conn.pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        conn.execute("UPDATE daily_usage SET delivered_output_bytes = 0", [])
+            .unwrap();
+    });
+    let wal_path = root.path().join("usage.sqlite-wal");
+    write_private_file(&db_path, &original_main);
+    write_private_file(&wal_path, &tampered_wal);
+
+    let err = store::record(root.path(), operation("doctor")).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::local_usage::UsageStoreError::Integrity
+    ));
+    assert_eq!(fs::read(&db_path).unwrap(), original_main);
+    assert_eq!(fs::read(&wal_path).unwrap(), tampered_wal);
+}
