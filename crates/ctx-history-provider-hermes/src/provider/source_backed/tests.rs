@@ -518,6 +518,53 @@ fn legacy_v2_control_forces_refresh_but_preserves_rename_retirement_identity() {
 }
 
 #[test]
+fn hermes_incremental_escalates_to_exhaustive_when_parser_revision_changes() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/state.db");
+    create_fixture(&database);
+    let conn = Connection::open(&database).unwrap();
+    let (_, schema_evidence) = detect_hermes_schema(&conn).unwrap();
+    let schema_digest: [u8; 32] = Sha256::digest(&schema_evidence).into();
+    let session_rowid = hermes_max_rowid(&conn, "sessions").unwrap();
+    let message_rowid = hermes_max_rowid(&conn, "messages").unwrap();
+    let profile_source_descriptor = [1; 32];
+    let database_identity = [2; 32];
+
+    let mut receipt = HermesRefreshReceipt {
+        kind: HERMES_ROUTE_CONTROL_KIND.to_owned(),
+        version: HERMES_ROUTE_CONTROL_VERSION,
+        parser_revision: HERMES_SOURCE_PARSER_REVISION.to_owned(),
+        profile_source_descriptor,
+        database_identity,
+        physical_revision: [3; 32],
+        schema_evidence: schema_digest,
+        session_rowid,
+        message_rowid,
+        last_successful_exhaustive_at_ms: 1000,
+        exact_due_at_ms: 2000,
+        exhaustive_sequence: 1,
+        mode: "exhaustive".to_owned(),
+        outcome: "successful".to_owned(),
+    };
+    assert!(!hermes_incremental_requires_exhaustive(
+        &conn,
+        &receipt,
+        profile_source_descriptor,
+        database_identity,
+    )
+    .unwrap());
+
+    receipt.parser_revision = "hermes-source-backed-v5-optional-admission".to_owned();
+    assert!(hermes_incremental_requires_exhaustive(
+        &conn,
+        &receipt,
+        profile_source_descriptor,
+        database_identity,
+    )
+    .unwrap());
+}
+
+#[test]
 fn session_source_keys_are_profile_scoped_and_stable() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let first = temp.path().join("profiles/alpha/state.db");

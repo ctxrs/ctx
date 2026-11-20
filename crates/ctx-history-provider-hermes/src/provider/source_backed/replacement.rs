@@ -469,7 +469,13 @@ where
         }
     }
     let may_increment = reconciliation_demand == SourceBackedReconciliationDemand::Incremental
-        && hermes_refresh_receipt(base_route_control.as_deref()).is_some();
+        && hermes_refresh_receipt(base_route_control.as_deref()).is_some_and(|receipt| {
+            receipt.kind == HERMES_ROUTE_CONTROL_KIND
+                && receipt.version == HERMES_ROUTE_CONTROL_VERSION
+                && receipt.parser_revision == HERMES_SOURCE_PARSER_REVISION
+                && receipt.outcome == "successful"
+                && receipt.profile_source_descriptor == candidate.source.exact_descriptor_digest()
+        });
     let (mut sqlite_authority, mut snapshot, mut admitted_demand) = if may_increment {
         match open_root_authorized_snapshot_with_progress(
             &candidate.data_root,
