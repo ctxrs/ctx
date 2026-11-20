@@ -648,6 +648,7 @@ pub struct RefreshRequest {
     pub(crate) request_id: String,
     pub(crate) intent: RefreshIntent,
     pub(crate) trigger: RefreshRequestTrigger,
+    pub(crate) coalesce_pending_background: bool,
 }
 
 impl RefreshRequest {
@@ -656,6 +657,7 @@ impl RefreshRequest {
             request_id,
             intent,
             trigger,
+            coalesce_pending_background: false,
         }
     }
 
@@ -688,6 +690,15 @@ impl RefreshRequest {
 
     pub const fn trigger(&self) -> RefreshRequestTrigger {
         self.trigger
+    }
+
+    pub const fn coalesce_pending_background(&self) -> bool {
+        self.coalesce_pending_background
+    }
+
+    pub fn with_background_coalescing(mut self, coalesce_pending_background: bool) -> Self {
+        self.coalesce_pending_background = coalesce_pending_background;
+        self
     }
 
     #[doc(hidden)]

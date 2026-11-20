@@ -174,9 +174,15 @@ fn refresh_request(request: &Value) -> Result<RefreshRequest> {
     if mode == "background" && intent != RefreshIntent::AutomaticMaintenance {
         bail!("selected import requires daemon refresh mode `wait`");
     }
-    // Every IPC caller gets a durable identity. ID-less scheduler wakes use
-    // the engine's internal enqueue path and do not cross this boundary.
-    Ok(RefreshRequest::new(request_id, intent, trigger))
+    // Every IPC caller gets a durable identity. Background automatic
+    // maintenance wakes coalesce into an already-durable unstarted pending
+    // maintenance request so repeated search/MCP traffic cannot starve waits.
+    let request = RefreshRequest::new(request_id, intent, trigger);
+    Ok(if mode == "background" {
+        request.with_background_coalescing(true)
+    } else {
+        request
+    })
 }
 
 fn render_status(status: &RefreshStatus) -> Value {
