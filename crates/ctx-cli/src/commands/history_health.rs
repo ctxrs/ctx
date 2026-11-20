@@ -43,10 +43,9 @@ pub(super) fn reconcile_history_inventory(
     );
     let mut roots = HashMap::<RootIdentity, RootState>::new();
     let roots_by_provider_path = source_root_lookup(&discovery.sources);
-    let mut bytes_reconciled = true;
     for source in &discovery.sources {
         let state = roots.entry(source_root_identity(source)).or_default();
-        bytes_reconciled &= record_source_coverage(state, source);
+        record_source_coverage(state, source);
     }
     for issue in &discovery.issues {
         roots
@@ -57,10 +56,10 @@ pub(super) fn reconcile_history_inventory(
             ))
             .or_default()
             .unknown = true;
-        bytes_reconciled = false;
     }
 
     let coverage = root_coverage(&roots)?;
+    let bytes_reconciled = coverage.partial == 0 && coverage.excluded == 0 && coverage.unknown == 0;
     let excluded_bytes =
         (bytes_reconciled && health.source_failures == 0 && health.rejected_records == 0)
             .then_some(0);
@@ -87,8 +86,10 @@ type SourceRootLookup = HashMap<(String, PathBuf), RootIdentity>;
 #[derive(Debug, Default)]
 struct RootState {
     included: bool,
+    empty: bool,
     excluded: bool,
     unknown: bool,
+    missing_configured: bool,
 }
 
 fn source_root_identity(source: &ProviderSource) -> RootIdentity {
@@ -119,27 +120,20 @@ fn source_root_lookup(sources: &[ProviderSource]) -> SourceRootLookup {
         .collect()
 }
 
-fn record_source_coverage(state: &mut RootState, source: &ProviderSource) -> bool {
+fn record_source_coverage(state: &mut RootState, source: &ProviderSource) {
     match source.status {
         ProviderSourceStatus::Available => state.included = true,
-        ProviderSourceStatus::Unknown if source.exists => {
-            state.unknown = true;
-            return false;
-        }
-        ProviderSourceStatus::Unsupported if source.exists => {
-            state.excluded = true;
-            return false;
-        }
+        ProviderSourceStatus::Empty if source.exists => state.empty = true,
+        ProviderSourceStatus::Unknown if source.exists => state.unknown = true,
+        ProviderSourceStatus::Unsupported if source.exists => state.excluded = true,
         ProviderSourceStatus::Missing if source.route_provenance.configured_root().is_some() => {
-            state.unknown = true;
-            return false;
+            state.missing_configured = true;
         }
         ProviderSourceStatus::Empty
         | ProviderSourceStatus::Unknown
         | ProviderSourceStatus::Missing
         | ProviderSourceStatus::Unsupported => {}
     }
-    true
 }
 
 fn issue_root_identity(
@@ -171,11 +165,13 @@ fn root_coverage(roots: &HashMap<RootIdentity, RootState>) -> Result<HistoryRoot
     roots
         .values()
         .try_fold(HistoryRootCoverage::default(), |mut coverage, root| {
+            let root_missing =
+                root.missing_configured && !root.included && !root.empty && !root.excluded;
             let counter = if root.included && (root.excluded || root.unknown) {
                 &mut coverage.partial
             } else if root.included {
                 &mut coverage.included
-            } else if root.unknown {
+            } else if root.unknown || root_missing {
                 &mut coverage.unknown
             } else if root.excluded {
                 &mut coverage.excluded
@@ -194,93 +190,5 @@ fn checked_increment(value: u64) -> Result<u64> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ctx_history_capture::{
-        DiscoveryIssueKind, ProviderCatalogSupport, ProviderImportSupport, ProviderRouteRole,
-        ProviderSourceKind,
-    };
-    use ctx_history_core::CaptureProvider;
-
-    fn automatic_source(
-        provider: CaptureProvider,
-        status: ProviderSourceStatus,
-        path: std::path::PathBuf,
-        route_role: &'static str,
-    ) -> ProviderSource {
-        ProviderSource {
-            provider,
-            path,
-            exists: true,
-            source_format: "codex_session_jsonl_tree",
-            source_kind: ProviderSourceKind::NativeHistory,
-            import_support: ProviderImportSupport::Native,
-            catalog_support: ProviderCatalogSupport::Native,
-            status,
-            unsupported_reason: None,
-            route_provenance: ProviderSourceRouteProvenance::Automatic {
-                route_role: ProviderRouteRole::from_static(route_role),
-            },
-        }
-    }
-
-    #[test]
-    fn unknown_automatic_source_and_matching_issue_count_as_one_root() {
-        let path = std::path::PathBuf::from("/history/codex/sessions");
-        let source = automatic_source(
-            CaptureProvider::Codex,
-            ProviderSourceStatus::Unknown,
-            path.clone(),
-            "codex-sessions",
-        );
-        let issue = DiscoveryIssue {
-            provider: CaptureProvider::Codex,
-            path: Some(path),
-            kind: DiscoveryIssueKind::SelectorUnreconstructible,
-            reason: "test issue",
-        };
-
-        let lookup = source_root_lookup(std::slice::from_ref(&source));
-        let mut roots = HashMap::<RootIdentity, RootState>::new();
-        roots
-            .entry(source_root_identity(&source))
-            .or_default()
-            .unknown = true;
-        roots
-            .entry(issue_root_identity(&issue, &lookup, &[]))
-            .or_default()
-            .unknown = true;
-
-        assert_eq!(roots.len(), 1);
-        assert_eq!(
-            root_coverage(&roots).unwrap(),
-            HistoryRootCoverage {
-                unknown: 1,
-                ..HistoryRootCoverage::default()
-            }
-        );
-    }
-
-    #[test]
-    fn empty_automatic_root_is_omitted_from_human_coverage() {
-        let source = automatic_source(
-            CaptureProvider::Gemini,
-            ProviderSourceStatus::Empty,
-            std::path::PathBuf::from("/history/gemini/empty"),
-            "gemini-projects",
-        );
-        let mut roots = HashMap::<RootIdentity, RootState>::new();
-        let state = roots.entry(source_root_identity(&source)).or_default();
-
-        assert!(record_source_coverage(state, &source));
-        assert_eq!(
-            root_coverage(&roots).unwrap(),
-            HistoryRootCoverage::default()
-        );
-
-        let mut health = HistoryHealthReport::default();
-        health.record_inventory(HistoryRootCoverage::default(), Some(0));
-        assert!(health.contributing_agent_histories.is_empty());
-        assert!(!health.is_partial());
-    }
-}
+#[path = "history_health_tests.rs"]
+mod tests;
