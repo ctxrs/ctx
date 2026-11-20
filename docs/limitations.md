@@ -7,9 +7,9 @@ shipped.
 ## Provider Coverage
 
 - Codex local import is supported for documented raw `.jsonl` and standard
-  Zstandard `.jsonl.zst` rollout sources. Compressed rollout admission retains
-  at most 256 MiB of combined compressed snapshot plus decoded spool per leaf,
-  and all parallel leaves share the 1 GiB route scratch ceiling.
+  Zstandard `.jsonl.zst` rollout sources. Compressed rollout snapshots and
+  decoded spools share the 1 GiB route scratch ceiling, with worker admission
+  chosen from the largest bounded spool in the batch.
   An oversized, unreadable, or symlinked rollout is reported individually;
   other rollouts continue refreshing. Symlink targets are not followed.
 - Pi local import is supported when matching local session JSONL files exist

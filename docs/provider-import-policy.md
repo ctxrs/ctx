@@ -286,10 +286,11 @@ contract for that source family:
   restart. Older checkpoints replay once to establish the new coverage proof.
 - Standard-Zstandard Codex rollouts snapshot exactly the frozen compressed
   prefix from the retained source handle, then decode and hash that same private
-  snapshot. The compressed snapshot plus decoded spool is bounded to 256 MiB
-  per leaf; a 256x plus 16 MiB expansion bound and 128 MiB decoder-window bound
-  apply inside that ceiling. At most four maximum-size compressed leaves run in
-  parallel against the shared 1 GiB route scratch budget. Corrupt, truncated,
+  snapshot. Compressed snapshots and decoded spools share the 1 GiB route
+  scratch budget; a 256x plus 16 MiB expansion bound and 128 MiB decoder-window
+  bound apply inside that ceiling. At most four compressed leaves run in
+  parallel, capped by the largest bounded spool in the batch so concurrent
+  spools fit within the shared 1 GiB budget. Corrupt, truncated,
   over-bound, or budget-unavailable streams fail closed. A corrupt or
   over-bound leaf produces a source failure with its selector; size-limit
   diagnostics include compressed bytes, the applicable bound, and decoded
