@@ -339,6 +339,7 @@ impl CoreRefreshEngine {
         if active_pending_requests >= SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
             return Err(SourceBackedRefreshQueueFull {
                 active_pending_requests,
+                active_request_id: state.active_request_id.clone(),
             }
             .into());
         }

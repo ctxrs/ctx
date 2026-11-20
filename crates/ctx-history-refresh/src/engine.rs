@@ -234,6 +234,7 @@ pub struct CoreRefreshEngine {
 #[derive(Debug)]
 struct SourceBackedRefreshQueueFull {
     active_pending_requests: usize,
+    active_request_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -253,6 +254,7 @@ impl SourceBackedRefreshQueueFull {
             "retryable": true,
             "active_pending_requests": self.active_pending_requests,
             "max_active_pending_requests": SOURCE_REFRESH_ACTIVE_PENDING_LIMIT,
+            "active_request_id": self.active_request_id,
             "error": self.to_string(),
         }))
     }
@@ -276,12 +278,20 @@ impl SourceBackedRefreshIdempotencyConflict {
 
 impl fmt::Display for SourceBackedRefreshQueueFull {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "daemon source refresh queue is full ({}/{} active or pending requests); retry after a refresh finishes",
-            self.active_pending_requests,
-            SOURCE_REFRESH_ACTIVE_PENDING_LIMIT,
-        )
+        match self.active_request_id.as_deref() {
+            Some(active_request_id) => write!(
+                formatter,
+                "daemon source refresh queue is full ({}/{} active or pending requests; active request {active_request_id}); retry after a refresh finishes",
+                self.active_pending_requests,
+                SOURCE_REFRESH_ACTIVE_PENDING_LIMIT,
+            ),
+            None => write!(
+                formatter,
+                "daemon source refresh queue is full ({}/{} active or pending requests); retry after a refresh finishes",
+                self.active_pending_requests,
+                SOURCE_REFRESH_ACTIVE_PENDING_LIMIT,
+            ),
+        }
     }
 }
 

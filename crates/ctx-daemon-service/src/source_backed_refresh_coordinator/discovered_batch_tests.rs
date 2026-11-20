@@ -221,14 +221,9 @@ impl DiscoveredFixture {
     }
 }
 
-fn assert_burst(background: bool) -> Result<()> {
+fn assert_wait_burst() -> Result<()> {
     let fixture = DiscoveredFixture::new()?;
-    let callers = if background { 16 } else { 8 };
-    let mode = if background {
-        SourceBackedRefreshMode::Background
-    } else {
-        SourceBackedRefreshMode::Wait
-    };
+    let callers = 8;
     let engine = fixture.engine.clone();
     let root = fixture.data_root.path().to_owned();
     let runs = Arc::new(Mutex::new(Vec::new()));
@@ -239,7 +234,7 @@ fn assert_burst(background: bool) -> Result<()> {
         move |request| {
             if request["op"] == SOURCE_REFRESH_REQUEST_OP {
                 admitted += 1;
-            } else if !background && admitted == callers && engine.has_pending_request() {
+            } else if admitted == callers && engine.has_pending_request() {
                 let run = engine.run_next(&root).context("burst publication")?;
                 assert!(!run.failed, "{:#}", run.job);
                 server_runs.lock().unwrap().push(run.job);
@@ -249,52 +244,33 @@ fn assert_burst(background: bool) -> Result<()> {
                 .context("burst response")
         },
         || {
-            if background {
-                (0..callers)
+            std::thread::scope(|scope| {
+                let clients = (0..callers)
                     .map(|_| {
-                        coordinate_source_backed_refresh(
-                            &RecordingAvailability::default(),
-                            fixture.data_root.path(),
-                            mode,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                std::thread::scope(|scope| {
-                    let clients = (0..callers)
-                        .map(|_| {
-                            scope.spawn(|| {
-                                coordinate_source_backed_refresh(
-                                    &RecordingAvailability::default(),
-                                    fixture.data_root.path(),
-                                    mode,
-                                )
-                            })
+                        scope.spawn(|| {
+                            coordinate_source_backed_refresh(
+                                &RecordingAvailability::default(),
+                                fixture.data_root.path(),
+                                SourceBackedRefreshMode::Wait,
+                            )
                         })
-                        .collect::<Vec<_>>();
-                    clients
-                        .into_iter()
-                        .map(|client| client.join().unwrap())
-                        .collect()
-                })
-            }
+                    })
+                    .collect::<Vec<_>>();
+                clients
+                    .into_iter()
+                    .map(|client| client.join().unwrap())
+                    .collect::<Vec<_>>()
+            })
         },
     )?;
     let mut accepted = BTreeSet::new();
-    let mut rejected = 0;
     for observation in observations {
         let observation = observation?;
         assert_eq!(observation.pin.generation_id(), fixture.generation);
         assert!(observation.daemon_available);
-        if observation.status == "admission_rejected" {
-            assert!(observation.request_id.is_none() && observation.receipt.is_none());
-            rejected += 1;
-        } else {
-            assert!(accepted.insert(observation.request_id.context("accepted identity")?));
-        }
+        assert!(accepted.insert(observation.request_id.context("accepted identity")?));
     }
     assert_eq!(accepted.len(), 8);
-    assert_eq!(rejected, if background { 8 } else { 0 });
     assert_eq!(
         fixture
             .journal
@@ -317,19 +293,6 @@ fn assert_burst(background: bool) -> Result<()> {
         if response["ok"] == true {
             assert_eq!(request["request_id"], response["request_id"]);
         }
-    }
-    if background {
-        assert_eq!(
-            fixture.captures(),
-            0,
-            "background only admits before returning"
-        );
-        let run = fixture
-            .engine
-            .run_next(fixture.data_root.path())
-            .context("background publication")?;
-        assert!(!run.failed, "{:#}", run.job);
-        runs.lock().unwrap().push(run.job);
     }
     assert_eq!(
         fixture.captures(),
@@ -375,11 +338,119 @@ fn assert_burst(background: bool) -> Result<()> {
 
 #[test]
 fn discovered_wait_burst_keeps_eight_ids_and_one_capture() -> Result<()> {
-    assert_burst(false)
+    assert_wait_burst()
 }
+
 #[test]
-fn discovered_background_burst_admits_eight_and_rejects_overflow() -> Result<()> {
-    assert_burst(true)
+fn discovered_background_burst_coalesces_into_one_pending_slot_and_leaves_room_for_import(
+) -> Result<()> {
+    let fixture = DiscoveredFixture::new()?;
+    let callers = 16;
+    let engine = fixture.engine.clone();
+    let root = fixture.data_root.path().to_owned();
+    let (observations, exchanges) = foreground_transport_fixture(
+        fixture.data_root.path(),
+        move |request| {
+            engine
+                .handle_ipc_request(&root, request)?
+                .context("background burst response")
+        },
+        || {
+            (0..callers)
+                .map(|_| {
+                    coordinate_source_backed_refresh(
+                        &RecordingAvailability::default(),
+                        fixture.data_root.path(),
+                        SourceBackedRefreshMode::Background,
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+    )?;
+    let mut returned_ids = BTreeSet::new();
+    for observation in observations {
+        let observation = observation?;
+        assert_eq!(observation.pin.generation_id(), fixture.generation);
+        assert!(observation.daemon_available);
+        assert_ne!(observation.status, "admission_rejected");
+        assert!(returned_ids.insert(observation.request_id.context("caller identity")?));
+    }
+    assert_eq!(returned_ids.len(), callers);
+
+    let refresh_exchanges = exchanges
+        .iter()
+        .filter(|(q, _)| q["op"] == SOURCE_REFRESH_REQUEST_OP)
+        .collect::<Vec<_>>();
+    assert_eq!(refresh_exchanges.len(), callers);
+    let first_id = refresh_exchanges[0].1["request_id"]
+        .as_str()
+        .context("first durable id")?
+        .to_owned();
+    assert_eq!(refresh_exchanges[0].1["request_state"], "admission_pending");
+    for (request, response) in &refresh_exchanges[1..] {
+        assert_eq!(response["ok"], true);
+        assert_eq!(request["request_id"], response["request_id"]);
+        assert_eq!(response["maintenance_wake"], true);
+        assert_eq!(response["coalesced_into_request_id"], first_id);
+    }
+    assert_eq!(
+        fixture
+            .journal
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|job| matches!(
+                job["request_state"].as_str(),
+                Some("admission_pending" | "queued")
+            ))
+            .count(),
+        2,
+        "only the single durable pending slot writes admission markers"
+    );
+
+    // A subsequent explicit `ctx import --all` (mode: wait) must not hit queue_full.
+    let import_id = Uuid::now_v7().to_string();
+    let import_response = fixture
+        .engine
+        .handle_ipc_request(
+            fixture.data_root.path(),
+            &json!({
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "wait",
+                "trigger": "import",
+                "request_id": import_id,
+                "refresh_intent": {
+                    "kind": "selected_import",
+                    "selection": { "kind": "all" }
+                }
+            }),
+        )?
+        .context("import admission response")?;
+    assert_eq!(import_response["ok"], true, "{import_response:#}");
+    assert_eq!(import_response["request_state"], "admission_pending");
+
+    assert_eq!(
+        fixture.captures(),
+        0,
+        "background only admits before returning"
+    );
+    let first_run = fixture
+        .engine
+        .run_next(fixture.data_root.path())
+        .context("background publication")?;
+    assert!(!first_run.failed, "{:#}", first_run.job);
+    assert_eq!(first_run.job["request_id"], first_id);
+    assert_eq!(first_run.job["coalesced_requests"], (callers - 1) as u64);
+    let import_run = fixture
+        .engine
+        .run_next(fixture.data_root.path())
+        .context("import publication")?;
+    assert!(!import_run.failed, "{:#}", import_run.job);
+    assert_eq!(import_run.job["request_id"], import_id);
+    assert!(!fixture.engine.has_pending_request());
+    assert_eq!(fixture.captures(), 2);
+    Ok(())
 }
 
 fn assert_late_publication(append: bool) -> Result<()> {
@@ -389,7 +460,7 @@ fn assert_late_publication(append: bool) -> Result<()> {
     let warm_generation = &fixture.generation;
     let source_path = &fixture.source_path;
     let fixture_routes = &fixture.fixture_routes;
-    let request = |id: String| json!({"op":SOURCE_REFRESH_REQUEST_OP,"mode":"background","trigger":"search", "request_id":id,"refresh_intent":{"kind":"automatic_maintenance"}});
+    let request = |id: String| json!({"op":SOURCE_REFRESH_REQUEST_OP,"mode":"wait","trigger":"search", "request_id":id,"refresh_intent":{"kind":"automatic_maintenance"}});
     let first_id = Uuid::now_v7().to_string();
     let peer_id = Uuid::now_v7().to_string();
     let late_id = Uuid::now_v7().to_string();

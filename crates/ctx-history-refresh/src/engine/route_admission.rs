@@ -193,7 +193,21 @@ impl CoreRefreshEngine {
         let metadata = self
             .runtime
             .metadata(data_root, SourceBackedRefreshOperation::Refresh);
-        Ok(compact_json(json!({
+        Ok(Self::build_background_maintenance_wake_response(
+            request_id,
+            published_generation,
+            metadata,
+            None,
+        ))
+    }
+
+    pub(super) fn build_background_maintenance_wake_response(
+        request_id: String,
+        published_generation: Option<String>,
+        metadata: SourceRefreshRuntimeMetadata,
+        coalesced_into_request_id: Option<String>,
+    ) -> Value {
+        compact_json(json!({
             "ok": true,
             "schema_version": 1,
             "owner": "daemon",
@@ -213,7 +227,8 @@ impl CoreRefreshEngine {
             "trigger": metadata.trigger,
             "trigger_provenance": metadata.trigger_provenance,
             "maintenance_wake": true,
-        })))
+            "coalesced_into_request_id": coalesced_into_request_id,
+        }))
     }
 
     pub(super) fn finish_route_admissions_locked(

@@ -335,3 +335,149 @@ fn selected_import_requests_remain_distinct_before_execution() {
     );
     assert!(coordinator.has_pending_request());
 }
+
+#[test]
+fn repeated_background_automatic_maintenance_coalesces_without_starving_selected_import() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let coordinator = Arc::new(CoreRefreshEngine::new());
+
+    // Start one active refresh and hold it in Running so new requests must queue.
+    let active = coordinator.enqueue(None);
+    let active_id = request_id(&active);
+    let worker_coordinator = Arc::clone(&coordinator);
+    let worker = std::thread::spawn(move || {
+        worker_coordinator.run_next_with(
+            |request_id, _| {
+                let _ = started_tx.send(request_id.to_owned());
+                let _ = release_rx.recv();
+                Ok(test_publication("generation-1"))
+            },
+            || Ok(Some("generation-1".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+    });
+    assert_eq!(started_rx.recv().unwrap(), active_id);
+
+    // Flood 20 identical background search-triggered automatic maintenance requests.
+    // Only the first allocates a durable AdmissionPending successor slot; the
+    // remaining 19 coalesce into it without filling the 8-slot queue.
+    let mut successor_id = None;
+    for index in 0..20 {
+        let request_id = Uuid::now_v7().to_string();
+        let admission = coordinator
+            .submit(
+                &data_root,
+                RefreshRequest::automatic(request_id.clone(), RefreshRequestTrigger::Search)
+                    .with_background_coalescing(true),
+            )
+            .unwrap();
+        let (status, barrier) = admission.into_parts();
+        let fields = status.schema_v1_fields();
+        assert_eq!(fields["ok"], true, "request #{index} failed: {fields:#}");
+        assert_eq!(fields["request_id"], request_id);
+        if index == 0 {
+            assert_eq!(fields["request_state"], "admission_pending");
+            assert!(fields.get("maintenance_wake").is_none());
+            successor_id = Some(request_id);
+            if let Some(barrier) = barrier {
+                barrier.release(&coordinator.0);
+            }
+        } else {
+            assert_eq!(fields["request_state"], "queued");
+            assert_eq!(fields["maintenance_wake"], true);
+            assert_eq!(
+                fields["coalesced_into_request_id"].as_str(),
+                successor_id.as_deref()
+            );
+            assert!(barrier.is_none());
+        }
+    }
+    let successor_id = successor_id.expect("first background successor");
+    let successor_status = status_value(&coordinator, &successor_id);
+    assert_eq!(successor_status["coalesced_requests"], 19);
+
+    // Explicit `ctx import --all` (mode: wait) must still be admitted cleanly
+    // instead of failing with `source_refresh_queue_full (8/8)`.
+    let import_id = Uuid::now_v7().to_string();
+    let import_admission = coordinator
+        .submit(
+            &data_root,
+            RefreshRequest::selected_import(
+                import_id.clone(),
+                RefreshSelection::All,
+                SourceBackedReconciliationDemand::Exhaustive,
+            ),
+        )
+        .unwrap();
+    let (import_status, import_barrier) = import_admission.into_parts();
+    assert_eq!(import_status.schema_v1_fields()["ok"], true);
+    assert_eq!(import_status.schema_v1_fields()["request_id"], import_id);
+    assert_eq!(
+        import_status.schema_v1_fields()["request_state"],
+        "admission_pending"
+    );
+    if let Some(barrier) = import_barrier {
+        barrier.release(&coordinator.0);
+    }
+
+    let _ = release_tx.send(());
+    let first_run = worker.join().unwrap().expect("active refresh run");
+    assert!(!first_run.failed, "{:#}", first_run.job);
+}
+
+#[test]
+fn queue_full_response_names_active_request_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let coordinator = CoreRefreshEngine::new();
+    let mut first_id = None;
+    for _ in 0..SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
+        let id = Uuid::now_v7().to_string();
+        let admission = coordinator
+            .submit(
+                &data_root,
+                RefreshRequest::selected_import(
+                    id.clone(),
+                    RefreshSelection::All,
+                    SourceBackedReconciliationDemand::Exhaustive,
+                ),
+            )
+            .unwrap();
+        let (status, barrier) = admission.into_parts();
+        assert_eq!(status.schema_v1_fields()["ok"], true);
+        if first_id.is_none() {
+            first_id = Some(id);
+        }
+        if let Some(barrier) = barrier {
+            barrier.release(&coordinator.0);
+        }
+    }
+    let active_id = first_id.expect("active request id");
+    let overflow = coordinator
+        .submit(
+            &data_root,
+            RefreshRequest::selected_import(
+                Uuid::now_v7().to_string(),
+                RefreshSelection::All,
+                SourceBackedReconciliationDemand::Exhaustive,
+            ),
+        )
+        .unwrap();
+    let fields = overflow.status().schema_v1_fields();
+    assert_eq!(fields["ok"], false);
+    assert_eq!(fields["error_code"], "source_refresh_queue_full");
+    assert_eq!(fields["active_request_id"], active_id);
+    assert!(
+        fields["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("active request {active_id}")),
+        "unexpected queue-full error: {fields:#}"
+    );
+}

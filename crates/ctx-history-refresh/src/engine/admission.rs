@@ -183,6 +183,39 @@ impl CoreRefreshEngine {
             return Ok(response);
         }
 
+        if request.coalesce_pending_background && intent == RefreshIntent::AutomaticMaintenance {
+            let reconciliation_demand = intent.reconciliation_demand();
+            let coalesced_into = state
+                .active_request_id
+                .iter()
+                .chain(state.pending_request_ids.iter())
+                .find_map(|candidate_id| {
+                    let candidate = find_attempt(&state, candidate_id)?;
+                    let trigger_compatible = candidate.request_fingerprint.as_ref()
+                        == request_fingerprint
+                        || request.trigger == RefreshRequestTrigger::Search;
+                    (candidate.state == SourceBackedRefreshState::AdmissionPending
+                        && !state.admission_resolutions_in_flight.contains(candidate_id)
+                        && !candidate.admission_durability_indeterminate
+                        && candidate.intent == RefreshIntent::AutomaticMaintenance
+                        && candidate.refresh_scope == SourceBackedRefreshScope::All
+                        && candidate.reconciliation_demand >= reconciliation_demand
+                        && trigger_compatible)
+                        .then(|| candidate.request_id.clone())
+                });
+            if let Some(coalesced_into) = coalesced_into {
+                let target = find_attempt_mut(&mut state, &coalesced_into)
+                    .expect("coalesced background pending attempt");
+                target.coalesced_requests = target.coalesced_requests.saturating_add(1);
+                return Ok(Self::build_background_maintenance_wake_response(
+                    logical_request_id,
+                    previous_generation,
+                    metadata,
+                    Some(coalesced_into),
+                ));
+            }
+        }
+
         let snapshot = AdmissionReservationSnapshot::capture(&state);
         let response = match Self::enqueue_intent_locked(
             &mut state,
