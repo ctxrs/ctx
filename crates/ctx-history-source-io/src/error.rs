@@ -51,6 +51,16 @@ pub enum SourceIoError {
     SourceChangedDuringCapture,
 }
 
+impl SourceIoError {
+    pub fn is_not_found(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(source) | Self::SystemIo { source, .. }
+                if source.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+}
+
 pub type Result<T> = std::result::Result<T, SourceIoError>;
 
 pub const PROVIDER_SOURCE_IO_OPERATION_PREFIX: &str = "provider source ";

@@ -15,14 +15,14 @@ struct DiscoveredPiSource {
     cached: CachedBinding,
 }
 
-pub(super) fn discover<R: JsonlProviderRuntime>(
+pub(super) fn discover<R>(
     adapter: &PiJsonlAdapter<R>,
     root: &Path,
 ) -> Result<JsonlFamilyInventory> {
     match fs::symlink_metadata(root) {
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return JsonlFamilyInventory::missing(adapter.provider(), root);
+            return JsonlFamilyInventory::missing(CaptureProvider::Pi, root);
         }
         Err(error) => return Err(error.into()),
     }
@@ -44,10 +44,8 @@ pub(super) fn discover<R: JsonlProviderRuntime>(
     visit_bounded_tree_files_isolating_selected(
         root,
         &mut |candidate| {
-            candidate
-                .path()
-                .extension()
-                .is_some_and(|ext| ext == "jsonl")
+            let path = candidate.path();
+            path.extension().is_some_and(|ext| ext == "jsonl") && !is_omp_edit_journal(root, path)
         },
         &mut |file| {
             paths.insert(fs::canonicalize(file.path())?);
@@ -254,7 +252,7 @@ pub(super) fn discover<R: JsonlProviderRuntime>(
         .lock()
         .map_err(|_| contract("Pi binding catalog lock was poisoned"))? = next;
     JsonlFamilyInventory::present_multi_with_dispositions(
-        adapter.provider(),
+        CaptureProvider::Pi,
         root,
         vec![authority],
         leaves,
@@ -320,6 +318,15 @@ fn rejected_file(
         None => JsonlFamilyRejectedLeaf::bind_unobserved(path, relative_path, proof, 0),
     };
     Ok(leaf.with_logical_source_error(source, failure))
+}
+
+fn is_omp_edit_journal(root: &Path, path: &Path) -> bool {
+    path != root
+        && path.file_name().and_then(|name| name.to_str()) == Some("changes.jsonl")
+        && path
+            .parent()
+            .and_then(|parent| parent.strip_prefix(root).ok())
+            .is_some_and(|relative_parent| relative_parent.components().count() >= 1)
 }
 
 #[cfg(test)]

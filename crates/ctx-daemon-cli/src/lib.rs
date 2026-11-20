@@ -110,6 +110,23 @@ fn daemon_environment_preserves_the_endpoint_bound_semantic_embedding_token() {
 }
 
 #[cfg(test)]
+#[test]
+fn daemon_child_and_supervisor_allowlists_cover_all_discovery_env_keys() {
+    let supervisor = supervisor_environment_allowlist_names();
+    let child = ctx_daemon_application::daemon_child_environment_allowlist_names();
+    for key in ctx_history_capture::DISCOVERY_ENV_ALLOWLIST {
+        assert!(
+            supervisor.contains(key),
+            "supervisor allowlist is missing discovery key {key}"
+        );
+        assert!(
+            child.contains(key),
+            "daemon child allowlist is missing discovery key {key}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod semantic_executor_auth_tests {
     use std::{ffi::OsStr, path::PathBuf};
 

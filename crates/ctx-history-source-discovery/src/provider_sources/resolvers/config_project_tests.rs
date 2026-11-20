@@ -86,6 +86,32 @@ fn pi_official_root_policy_is_winner_only_and_trust_bounded() {
 }
 
 #[test]
+fn pi_probe_ignores_nested_omp_changes_jsonl_journal() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    fs::create_dir_all(&cwd).unwrap();
+    let sessions = temp.path().join("sessions");
+    write(
+        &sessions.join("-tmp-proj/2026-11-16T00-00-00-000Z_abc/changes.jsonl"),
+        "{\"type\":\"call\"}\n",
+    );
+    let ctx = context(&home, &cwd).with_env("PI_CODING_AGENT_SESSION_DIR", &sessions);
+    let only_journal = resolve(&ctx, spec(CaptureProvider::Pi));
+    assert_eq!(only_journal.sources[0].status, ProviderSourceStatus::Empty);
+
+    write(
+        &sessions.join("-tmp-proj/2026-11-16T00-00-00-000Z_abc.jsonl"),
+        "{}\n",
+    );
+    let with_session = resolve(&ctx, spec(CaptureProvider::Pi));
+    assert_eq!(
+        with_session.sources[0].status,
+        ProviderSourceStatus::Available
+    );
+}
+
+#[test]
 fn pi_session_env_replaces_agent_config_and_default_without_trimming() {
     let temp = tempdir();
     let home = temp.path().join("home");

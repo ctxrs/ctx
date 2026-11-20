@@ -178,6 +178,12 @@ pub fn supervisor_environment_allowlist_names() -> Vec<&'static str> {
     supervisor::supervisor_environment_allowlist_names()
 }
 
+/// Names the complete approved environment contract inherited by detached
+/// autostarted daemons and finite core workers.
+pub fn daemon_child_environment_allowlist_names() -> Vec<&'static str> {
+    lifecycle::daemon_child_environment_allowlist_names()
+}
+
 impl DaemonStartMode {
     const fn as_str(self) -> &'static str {
         "auto"

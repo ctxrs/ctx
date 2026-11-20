@@ -40,6 +40,7 @@ mod tests;
 use autostart_request::*;
 pub use finite_worker::{FiniteCoreWorkerLease, FiniteWorkerLease};
 use launch::configured_finite_core_worker_command;
+pub(crate) use launch::daemon_child_environment_allowlist_names;
 #[cfg(test)]
 use launch::normalized_daemon_launch_for_test;
 pub use launch::{

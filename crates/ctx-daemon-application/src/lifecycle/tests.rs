@@ -2,6 +2,7 @@ use super::*;
 use crate::{SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, SEMANTIC_EMBEDDING_TOKEN_ENV};
 use std::cell::RefCell;
 
+mod environment_allowlist_tests;
 mod executable_metadata_tests;
 mod managed_root;
 mod owner_wait_tests;

@@ -1,6 +1,5 @@
 use std::{
     ffi::{OsStr, OsString},
-    io,
     path::Path,
 };
 
@@ -35,8 +34,7 @@ impl MissingLeafFence {
         }
         let missing = matches!(
             self.directory.open_child(&self.leaf),
-            Err(ctx_history_source_io::SourceIoError::Io(error))
-                if error.kind() == io::ErrorKind::NotFound
+            Err(error) if error.is_not_found()
         );
         missing && self.directory.revalidate().is_ok() && self.root.revalidate().is_ok()
     }
@@ -67,9 +65,7 @@ pub(super) fn open_database_leaf(
                 .map(OpenDatabaseLeaf::Present)
         }
         Ok(OpenedProviderSourcePath::Directory(_)) => Err(invalid_database_leaf(path).into()),
-        Err(ctx_history_source_io::SourceIoError::Io(error))
-            if error.kind() == io::ErrorKind::NotFound =>
-        {
+        Err(error) if error.is_not_found() => {
             directory.revalidate()?;
             root.revalidate()?;
             Ok(OpenDatabaseLeaf::Missing(MissingLeafFence {

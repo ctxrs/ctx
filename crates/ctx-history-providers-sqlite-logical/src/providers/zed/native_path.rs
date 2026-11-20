@@ -296,11 +296,9 @@ impl ZedAdmittedSqliteComponent {
     ) -> ZedNativeResult<Option<Self>> {
         match Self::open(root, relative_path, invalid_reason) {
             Ok(component) => Ok(Some(component)),
-            Err(ZedNativePathError::Capture(CaptureError::Io(error)))
-                if error.kind() == io::ErrorKind::NotFound =>
-            {
-                Ok(None)
-            }
+            Err(ZedNativePathError::Capture(
+                CaptureError::Io(error) | CaptureError::SystemIo { source: error, .. },
+            )) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
     }
