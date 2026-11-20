@@ -136,6 +136,7 @@ pub(super) fn hermes_incremental_requires_exhaustive(
     let message_rowid = hermes_max_rowid(conn, "messages")?;
     Ok(prior.kind != HERMES_ROUTE_CONTROL_KIND
         || prior.version != HERMES_ROUTE_CONTROL_VERSION
+        || prior.parser_revision != HERMES_SOURCE_PARSER_REVISION
         || prior.outcome != "successful"
         || prior.profile_source_descriptor != profile_source_descriptor
         || prior.database_identity != database_identity
