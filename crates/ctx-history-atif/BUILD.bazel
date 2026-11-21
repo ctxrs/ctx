@@ -18,7 +18,6 @@ COMMON_RUSTC_ENV = {
 }
 
 ATIF_DEPS = [
-    "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-capture-runtime:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-provider-runtime:lib",
@@ -26,7 +25,6 @@ ATIF_DEPS = [
 ]
 
 ATIF_TEST_DEPS = [
-    "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-capture-runtime:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-provider-runtime:test_support_lib",

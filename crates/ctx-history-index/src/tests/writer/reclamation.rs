@@ -692,9 +692,11 @@ fn adding_new_source_to_existing_route_publishes_a_flat_delta_and_cold_reopens()
         .certify_source(appendable_certificate(&s1, 1, 1, 10))
         .unwrap();
     initial
-        .set_present_source_routes(vec![
-            SourceRouteSnapshot::present(route.clone(), vec![s1.clone()]).unwrap(),
-        ])
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            route.clone(),
+            vec![s1.clone()],
+        )
+        .unwrap()])
         .unwrap();
     let base = initial.commit(|_| true).unwrap();
 
@@ -763,7 +765,10 @@ fn adding_new_source_to_existing_route_publishes_a_flat_delta_and_cold_reopens()
     drop(appended);
     let appended_bytes = fs::read(manifest_path(temp.path(), &appended_id)).unwrap();
     let appended_json: serde_json::Value = serde_json::from_slice(&appended_bytes).unwrap();
-    assert_eq!(appended_json["storage_format"], "ctx-manifest-flat-delta-v1");
+    assert_eq!(
+        appended_json["storage_format"],
+        "ctx-manifest-flat-delta-v1"
+    );
     assert_eq!(appended_json["base_generation_id"], base.generation_id);
     assert_eq!(appended_json["changes"].as_array().unwrap().len(), 0);
     assert_eq!(appended_json["added"].as_array().unwrap().len(), 1);
@@ -773,7 +778,10 @@ fn adding_new_source_to_existing_route_publishes_a_flat_delta_and_cold_reopens()
     assert_eq!(reopened.generation_id(), appended_id);
     assert_eq!(reopened.document_count(), 3);
     assert_eq!(reopened.try_manifest().unwrap().sources.len(), 2);
-    assert_eq!(reopened.try_manifest().unwrap().generation_state(), Some(&state_1));
+    assert_eq!(
+        reopened.try_manifest().unwrap().generation_state(),
+        Some(&state_1)
+    );
     assert_eq!(reopened.count_term("appended").unwrap(), 1);
 }
 
@@ -957,11 +965,9 @@ fn query_open_uses_manifest_summary_sidecar_and_lazily_loads_full_manifest_only_
         )
         .unwrap()
     });
-    let legacy_pointer = ctx_history_index_generation::ActiveGenerationPointer::new(
-        legacy_active,
-        legacy_previous,
-    )
-    .unwrap();
+    let legacy_pointer =
+        ctx_history_index_generation::ActiveGenerationPointer::new(legacy_active, legacy_previous)
+            .unwrap();
     fs::write(
         temp.path().join("active-generation.json"),
         serde_json::to_vec(&legacy_pointer).unwrap(),

@@ -134,6 +134,7 @@ pub(super) fn published_generation_requires_rebuild(
     data_root: &Path,
     journal: &dyn RefreshJournal,
 ) -> Result<bool> {
+    prepare_generation_control_state(data_root)?;
     match open_published_generation_for_recovery(data_root, journal)? {
         PublishedGenerationOpen::Missing => Ok(false),
         PublishedGenerationOpen::RebuildRequired => Ok(true),
