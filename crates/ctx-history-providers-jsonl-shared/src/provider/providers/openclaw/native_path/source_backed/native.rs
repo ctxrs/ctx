@@ -359,7 +359,11 @@ pub(super) fn admit_compound(
 ) -> Result<CompoundAdmission> {
     let index_file = match authority.open_file(index_relative_path) {
         Ok(index) => Some(index),
-        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(CaptureError::Io(error) | CaptureError::SystemIo { source: error, .. })
+            if error.kind() == io::ErrorKind::NotFound =>
+        {
+            None
+        }
         Err(error) => return Err(error),
     };
     let index_bytes = index_file

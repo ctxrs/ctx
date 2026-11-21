@@ -622,7 +622,11 @@ fn open_optional_file(
 ) -> KimiSourceBackedResult<Option<OpenedProviderSourceFile>> {
     match authority.open_file(relative_path) {
         Ok(file) => Ok(Some(file)),
-        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(CaptureError::Io(error) | CaptureError::SystemIo { source: error, .. })
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error.into()),
     }
 }
