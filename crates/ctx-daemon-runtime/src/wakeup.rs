@@ -206,6 +206,10 @@ impl<P: CoalescingWakePayload> Wakeup<P> {
         self.signal(WAKE_SHUTDOWN);
     }
 
+    pub fn shutdown_requested(&self) -> bool {
+        self.lock_state().shutdown_signals != 0
+    }
+
     fn signal(&self, reason: u8) {
         let mut state = self.lock_state();
         state.pending |= reason;

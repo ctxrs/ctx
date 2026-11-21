@@ -28,6 +28,7 @@ pub enum FiniteCoreWorkerLease {
 pub struct FiniteWorkerLease {
     handoff: DaemonHandoff,
     child: Child,
+    lifeline: Option<std::process::ChildStdin>,
     data_root: PathBuf,
     owner_id: String,
 }
@@ -40,17 +41,18 @@ impl FiniteCoreWorkerLease {
         owner_id: Option<String>,
     ) -> io::Result<Self> {
         Ok(match child {
-            Some(child) if child.id() == handoff.pid => {
+            Some(mut child) if child.id() == handoff.pid => {
                 let Some(owner_id) = owner_id else {
-                    let mut child = child;
                     reap_owned_candidate(&mut child)?;
                     return Err(io::Error::other(
                         "owned finite worker has no stable daemon owner identity",
                     ));
                 };
+                let lifeline = child.stdin.take();
                 Self::Owned(FiniteWorkerLease {
                     handoff,
                     child,
+                    lifeline,
                     data_root,
                     owner_id,
                 })
@@ -90,6 +92,19 @@ impl FiniteWorkerLease {
         Ok(self.child.try_wait()?.is_some())
     }
 
+    /// Signals normal foreground completion over the attached parent-lifeline
+    /// pipe before releasing it so coalesced successor work on the finite
+    /// worker is not aborted as an unexpected parent death.
+    pub fn detach_for_normal_completion(&mut self) {
+        if let Some(mut lifeline) = self.lifeline.take() {
+            let _ = io::Write::write_all(
+                &mut lifeline,
+                &[ctx_daemon_runtime::FINITE_WORKER_LIFELINE_DETACH_BYTE],
+            );
+            let _ = io::Write::flush(&mut lifeline);
+        }
+    }
+
     /// This exact child capability can establish liveness without trusting a
     /// reused PID or daemon metadata retained by a different lock holder.
     pub fn observe_liveness(
@@ -123,6 +138,9 @@ impl FiniteWorkerLease {
         mut kill: impl FnMut(&mut Child) -> io::Result<()>,
         mut try_wait: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
     ) -> io::Result<()> {
+        // Closing the parent-lifeline pipe without the clean-detach sentinel
+        // notifies the finite worker immediately alongside the group interrupt.
+        self.lifeline.take();
         let mut first_error = match try_wait(&mut self.child) {
             Ok(Some(_)) => return self.finish_reaped_cleanup(None),
             Ok(None) => None,
@@ -275,6 +293,7 @@ fn reap_owned_candidate_with(
     mut kill: impl FnMut(&mut Child) -> io::Result<()>,
     mut try_wait: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
 ) -> io::Result<()> {
+    child.stdin.take();
     let mut first_error = match try_wait(child) {
         Ok(Some(_)) => return Ok(()),
         Ok(None) => None,
@@ -375,6 +394,7 @@ mod liveness_tests {
                 heartbeat_at_ms: 1,
             },
             child,
+            lifeline: None,
             data_root: temp.path().to_path_buf(),
             owner_id: "exact-owner".to_owned(),
         };

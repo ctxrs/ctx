@@ -45,6 +45,9 @@ pub(super) fn execute_source_backed_refresh(
     reconciliation_demand: SourceBackedReconciliationDemand,
     admitted: ctx_history_refresh_execution::AdmittedRefresh,
 ) -> Result<SourceBackedRefreshPublication> {
+    if coordinator.runtime.refresh_cancelled() {
+        bail!("daemon shutdown requested");
+    }
     let index_root = source_backed_index_root(data_root);
     let attempt_history_progress = coordinator.attempt_history_progress(request_id)?;
     let discovery_context = coordinator.runtime.discovery_context(data_root)?;
@@ -52,6 +55,9 @@ pub(super) fn execute_source_backed_refresh(
         journal: coordinator.journal.as_ref(),
     };
     let report_progress = |update: PhysicalRefreshProgressUpdate| {
+        if coordinator.runtime.refresh_cancelled() {
+            bail!("daemon shutdown requested");
+        }
         coordinator.persist_progress(
             data_root,
             request_id,

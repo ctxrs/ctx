@@ -246,7 +246,25 @@ struct StatusWriterRefreshJournal {
 
 #[cfg(test)]
 struct CliTestRefreshRuntime {
-    config: &'static dyn crate::DaemonConfigPort,
+    inner: DaemonRefreshRuntime,
+}
+
+#[cfg(test)]
+impl CliTestRefreshRuntime {
+    const fn new(config: &'static dyn crate::DaemonConfigPort) -> Self {
+        Self {
+            inner: DaemonRefreshRuntime::new(config),
+        }
+    }
+
+    fn with_wakeup(
+        config: &'static dyn crate::DaemonConfigPort,
+        wakeup: Arc<crate::daemon_wakeup::DaemonWakeup>,
+    ) -> Self {
+        Self {
+            inner: DaemonRefreshRuntime::with_wakeup(config, wakeup),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -256,17 +274,19 @@ impl ctx_history_refresh::RefreshRuntime for CliTestRefreshRuntime {
         data_root: &Path,
         operation: ctx_history_refresh::RefreshOperation,
     ) -> ctx_history_refresh::RefreshRuntimeMetadata {
-        DaemonRefreshRuntime::new(self.config).metadata(data_root, operation)
+        self.inner.metadata(data_root, operation)
     }
 
     fn discovery_context(&self, data_root: &Path) -> Result<ctx_history_capture::DiscoveryContext> {
-        DaemonRefreshRuntime::new(self.config)
-            .discovery_context(data_root)
-            .or_else(|_| {
-                Ok(ctx_history_capture::DiscoveryContext::from_process(
-                    data_root.join("test-home"),
-                ))
-            })
+        self.inner.discovery_context(data_root).or_else(|_| {
+            Ok(ctx_history_capture::DiscoveryContext::from_process(
+                data_root.join("test-home"),
+            ))
+        })
+    }
+
+    fn refresh_cancelled(&self) -> bool {
+        self.inner.refresh_cancelled()
     }
 }
 
@@ -309,16 +329,24 @@ impl CoreRefreshEngine {
     pub(crate) fn with_config(config: &'static dyn crate::DaemonConfigPort) -> Self {
         Self(ctx_history_refresh::RefreshEngine::new(
             Arc::new(DaemonRefreshJournal::default()),
-            Arc::new(CliTestRefreshRuntime { config }),
+            Arc::new(CliTestRefreshRuntime::new(config)),
+        ))
+    }
+
+    pub(crate) fn with_config_and_wakeup(
+        config: &'static dyn crate::DaemonConfigPort,
+        wakeup: Arc<crate::daemon_wakeup::DaemonWakeup>,
+    ) -> Self {
+        Self(ctx_history_refresh::RefreshEngine::new(
+            Arc::new(DaemonRefreshJournal::default()),
+            Arc::new(CliTestRefreshRuntime::with_wakeup(config, wakeup)),
         ))
     }
 
     pub(crate) fn with_executor(executor: Arc<dyn SourceBackedRefreshExecutor>) -> Self {
         Self(ctx_history_refresh::RefreshEngine::with_executor(
             Arc::new(DaemonRefreshJournal::default()),
-            Arc::new(CliTestRefreshRuntime {
-                config: &crate::test_support::CONFIG,
-            }),
+            Arc::new(CliTestRefreshRuntime::new(&crate::test_support::CONFIG)),
             executor,
         ))
     }
@@ -329,9 +357,7 @@ impl CoreRefreshEngine {
     ) -> Self {
         Self(ctx_history_refresh::RefreshEngine::with_executor(
             Arc::new(StatusWriterRefreshJournal { writer }),
-            Arc::new(CliTestRefreshRuntime {
-                config: &crate::test_support::CONFIG,
-            }),
+            Arc::new(CliTestRefreshRuntime::new(&crate::test_support::CONFIG)),
             executor,
         ))
     }
@@ -351,9 +377,7 @@ impl CoreRefreshEngine {
         );
         Self(ctx_history_refresh::RefreshEngine::with_runtime_for_test(
             Arc::new(StatusWriterRefreshJournal { writer }),
-            Arc::new(CliTestRefreshRuntime {
-                config: &crate::test_support::CONFIG,
-            }),
+            Arc::new(CliTestRefreshRuntime::new(&crate::test_support::CONFIG)),
             executor,
             adapted,
         ))
@@ -371,9 +395,7 @@ impl CoreRefreshEngine {
         Self(
             ctx_history_refresh::RefreshEngine::with_admission_fence_for_test(
                 Arc::new(DaemonRefreshJournal::default()),
-                Arc::new(CliTestRefreshRuntime {
-                    config: &crate::test_support::CONFIG,
-                }),
+                Arc::new(CliTestRefreshRuntime::new(&crate::test_support::CONFIG)),
                 adapted,
             ),
         )

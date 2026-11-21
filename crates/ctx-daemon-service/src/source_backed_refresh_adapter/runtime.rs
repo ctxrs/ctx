@@ -1,19 +1,35 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use ctx_history_capture::DiscoveryContext;
 use ctx_history_refresh::{RefreshOperation, RefreshRuntime, RefreshRuntimeMetadata};
 use serde_json::Value;
 
-use crate::{paths_status::read_daemon_status, DaemonConfigPort, DaemonMode};
+use crate::{
+    daemon_wakeup::DaemonWakeup, paths_status::read_daemon_status, DaemonConfigPort, DaemonMode,
+};
 
 pub(crate) struct DaemonRefreshRuntime {
     config: &'static dyn DaemonConfigPort,
+    wakeup: Option<Arc<DaemonWakeup>>,
 }
 
 impl DaemonRefreshRuntime {
     pub(crate) const fn new(config: &'static dyn DaemonConfigPort) -> Self {
-        Self { config }
+        Self {
+            config,
+            wakeup: None,
+        }
+    }
+
+    pub(crate) fn with_wakeup(
+        config: &'static dyn DaemonConfigPort,
+        wakeup: Arc<DaemonWakeup>,
+    ) -> Self {
+        Self {
+            config,
+            wakeup: Some(wakeup),
+        }
     }
 }
 
@@ -65,6 +81,12 @@ impl RefreshRuntime for DaemonRefreshRuntime {
 
     fn refresh_execution_finished(&self) {
         release_unused_allocator_pages();
+    }
+
+    fn refresh_cancelled(&self) -> bool {
+        self.wakeup
+            .as_ref()
+            .is_some_and(|wakeup| wakeup.shutdown_requested())
     }
 }
 
