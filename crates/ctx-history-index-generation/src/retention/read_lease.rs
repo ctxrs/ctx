@@ -209,7 +209,8 @@ pub(crate) fn try_generation_id_reclaim_authority(
         .map(|guard| guard.map(|guard| GenerationReclaimAuthority { _guard: guard }))
 }
 
-pub(crate) fn try_generation_directory_reclaim_authority(
+#[doc(hidden)]
+pub fn try_generation_directory_reclaim_authority(
     root: &Path,
     directory: &str,
 ) -> Result<Option<GenerationReclaimAuthority>> {
@@ -332,8 +333,9 @@ impl CertificationGuard {
     }
 }
 
+#[doc(hidden)]
 #[derive(Debug)]
-pub(crate) struct GenerationReclaimAuthority {
+pub struct GenerationReclaimAuthority {
     _guard: RangeLeaseGuard,
 }
 

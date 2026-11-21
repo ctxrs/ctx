@@ -50,6 +50,8 @@ pub struct DaemonRuntimeConfig {
     pub analytics: AnalyticsConfig,
     pub upgrade: UpgradeConfig,
     pub daemon: DaemonConfig,
+    indexing_memory_mb: Option<usize>,
+    indexing_workers: Option<usize>,
     semantic_enabled: bool,
     semantic_source: &'static str,
     semantic_executor: SemanticEmbeddingExecutorConfig,
@@ -79,6 +81,7 @@ impl DaemonRuntimeConfig {
             config.semantic_search_enabled(),
             config.semantic_search_source(),
         )
+        .with_indexing_limits(config.indexing_memory_mb(), config.indexing_workers())
         .with_semantic_embedding_executor(config.semantic_embedding_executor().clone())
         .with_semantic_builtin_throttling(
             config.semantic_builtin_throttling_configured(),
@@ -107,6 +110,8 @@ impl DaemonRuntimeConfig {
                 interval: upgrade_interval,
             },
             daemon,
+            indexing_memory_mb: None,
+            indexing_workers: None,
             semantic_enabled,
             semantic_source,
             semantic_executor: SemanticEmbeddingExecutorConfig::builtin(),
@@ -115,6 +120,24 @@ impl DaemonRuntimeConfig {
             automatic_provider_discovery: true,
             provider_roots: Vec::new(),
         }
+    }
+
+    pub fn with_indexing_limits(
+        mut self,
+        memory_mb: Option<usize>,
+        workers: Option<usize>,
+    ) -> Self {
+        self.indexing_memory_mb = memory_mb;
+        self.indexing_workers = workers;
+        self
+    }
+
+    pub const fn indexing_memory_mb(&self) -> Option<usize> {
+        self.indexing_memory_mb
+    }
+
+    pub const fn indexing_workers(&self) -> Option<usize> {
+        self.indexing_workers
     }
 
     pub fn with_provider_roots(

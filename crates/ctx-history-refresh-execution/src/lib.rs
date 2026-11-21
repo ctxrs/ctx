@@ -28,7 +28,7 @@ use ctx_history_capture::{
     automatic_provider_root_coexistence_source_lineage, automatic_source_backed_route_identity,
     build_automatic_source_backed_registry_from_report_with_retained_roots,
     discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
-    source_backed_refresh_writer_options,
+    source_backed_refresh_writer_options, source_backed_refresh_writer_options_with_limits,
     validate_automatic_provider_source_roots_outside_data_root, DiscoveryContext,
     SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
     SourceBackedCoordinatorError,
@@ -58,7 +58,9 @@ use serde_json::{json, Value};
 
 use catalog_witness::reconcile_published_catalog_witness;
 pub use coverage_reason::ZeroSourcePublicationBlockReason;
-pub use ctx_history_capture::{SourceBackedReconciliationDemand, SourceBackedRefreshScope};
+pub use ctx_history_capture::{
+    IndexingResourceLimits, SourceBackedReconciliationDemand, SourceBackedRefreshScope,
+};
 pub use current_state::SourceBackedRefreshCurrent;
 #[doc(hidden)]
 pub use execution::{exclusive_scan_stage_duration, execute_capture_owned_refresh_with};

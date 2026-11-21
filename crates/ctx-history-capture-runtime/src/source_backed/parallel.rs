@@ -39,6 +39,111 @@ const INDEXER_THREAD_CAP: usize = 8;
 const RUNTIME_THREAD_RESERVATION: usize = 1;
 const SOURCE_WORKER_THREAD_PREFIX: &str = "ctx-src-scan";
 const INTERMEDIATE_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Default Tantivy writer memory budget (512 MiB) when no explicit indexing
+/// memory limit is configured.
+pub const DEFAULT_INDEXING_MEMORY_BYTES: usize = 512 * 1024 * 1024;
+const INDEX_MEMORY_MIN_PER_THREAD_BYTES: usize = 15_000_000;
+const CONSTRAINED_MEMORY_BYTES_PER_WORKER: usize = 64 * 1024 * 1024;
+
+/// Optional user-configured memory and worker concurrency bounds for Core
+/// indexing. Leaving both fields `None` preserves the existing automatic CPU
+/// split, 512 MiB writer heap, and 256 MiB route output envelope.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct IndexingResourceLimits {
+    /// Optional explicit indexing writer memory budget in bytes.
+    pub memory_bytes: Option<usize>,
+    /// Optional explicit indexing worker concurrency bound.
+    pub workers: Option<usize>,
+}
+
+impl IndexingResourceLimits {
+    pub const fn new(memory_bytes: Option<usize>, workers: Option<usize>) -> Self {
+        Self {
+            memory_bytes,
+            workers,
+        }
+    }
+
+    pub const fn from_memory_mb_and_workers(
+        memory_mb: Option<usize>,
+        workers: Option<usize>,
+    ) -> Self {
+        let memory_bytes = match memory_mb {
+            Some(mb) => mb.checked_mul(1024 * 1024),
+            None => None,
+        };
+        Self {
+            memory_bytes,
+            workers,
+        }
+    }
+
+    /// Effective writer memory budget in bytes, guaranteed to satisfy the
+    /// single-thread Tantivy heap minimum.
+    pub fn effective_memory_bytes(self) -> usize {
+        self.memory_bytes
+            .unwrap_or(DEFAULT_INDEXING_MEMORY_BYTES)
+            .max(INDEX_MEMORY_MIN_PER_THREAD_BYTES)
+    }
+
+    /// Live prepared Core-record output envelope scaled proportionally to the
+    /// indexing memory budget while remaining within `[16 MiB, 256 MiB]`.
+    pub fn core_route_max_live_output_bytes(self) -> u64 {
+        let Some(memory_bytes) = self.memory_bytes else {
+            return crate::CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES;
+        };
+        let half = u64::try_from(memory_bytes / 2).unwrap_or(u64::MAX);
+        half.clamp(
+            crate::CORE_ROUTE_MIN_LIVE_OUTPUT_BYTES,
+            crate::CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES,
+        )
+    }
+
+    /// Chooses Tantivy indexer threads for the given CPU count while honoring
+    /// explicit worker/memory bounds and guaranteeing the per-thread heap floor.
+    pub fn indexer_threads_for_parallelism(self, available_parallelism: usize) -> usize {
+        let memory_bytes = self.effective_memory_bytes();
+        let max_threads_for_memory =
+            (memory_bytes / INDEX_MEMORY_MIN_PER_THREAD_BYTES).clamp(1, INDEXER_THREAD_CAP);
+        match self.workers {
+            Some(workers) => workers
+                .clamp(1, INDEXER_THREAD_CAP)
+                .min(max_threads_for_memory),
+            None => {
+                let cpu_threads =
+                    source_backed_refresh_indexer_threads_for_parallelism(available_parallelism);
+                let constrained_cap = if memory_bytes < DEFAULT_INDEXING_MEMORY_BYTES {
+                    (memory_bytes / CONSTRAINED_MEMORY_BYTES_PER_WORKER)
+                        .clamp(1, INDEXER_THREAD_CAP)
+                } else {
+                    INDEXER_THREAD_CAP
+                };
+                cpu_threads.min(constrained_cap).min(max_threads_for_memory)
+            }
+        }
+    }
+
+    /// Chooses leaf scanner concurrency for the given indexer thread count and
+    /// CPU count while honoring explicit worker and memory constraints.
+    pub fn leaf_worker_budget_for_parallelism(
+        self,
+        indexer_threads: usize,
+        available_parallelism: usize,
+    ) -> usize {
+        if let Some(workers) = self.workers {
+            return workers.clamp(1, MAX_PARALLEL_LEAF_WORKERS);
+        }
+        let cpu_budget = leaf_worker_budget_for_parallelism(indexer_threads, available_parallelism);
+        let memory_bytes = self.effective_memory_bytes();
+        if memory_bytes < DEFAULT_INDEXING_MEMORY_BYTES {
+            let memory_cap = (memory_bytes / CONSTRAINED_MEMORY_BYTES_PER_WORKER)
+                .clamp(1, MAX_PARALLEL_LEAF_WORKERS);
+            cpu_budget.min(memory_cap)
+        } else {
+            cpu_budget
+        }
+    }
+}
 
 #[derive(Clone)]
 struct ParallelLeafWorkerContext<P: CorePreparationPort> {
@@ -52,10 +157,27 @@ thread_local! {
 }
 
 pub fn source_backed_refresh_work_budget(indexer_threads: usize) -> usize {
+    source_backed_refresh_work_budget_with_limits(
+        indexer_threads,
+        IndexingResourceLimits::default(),
+    )
+}
+
+pub fn source_backed_refresh_work_budget_with_limits(
+    indexer_threads: usize,
+    limits: IndexingResourceLimits,
+) -> usize {
     let available_parallelism = thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
-    leaf_worker_budget_for_parallelism(indexer_threads, available_parallelism)
+    limits.leaf_worker_budget_for_parallelism(indexer_threads, available_parallelism)
+}
+
+pub fn source_backed_refresh_indexer_threads_with_limits(limits: IndexingResourceLimits) -> usize {
+    let available_parallelism = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    limits.indexer_threads_for_parallelism(available_parallelism)
 }
 
 /// Chooses one coordinated production budget for source parsing and indexing.

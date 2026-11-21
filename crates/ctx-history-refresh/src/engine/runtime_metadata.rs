@@ -37,6 +37,12 @@ pub trait RefreshRuntime: Send + Sync {
 
     fn discovery_context(&self, data_root: &Path) -> Result<DiscoveryContext>;
 
+    /// Resolves optional user-configured indexing memory and worker limits.
+    /// Callers without explicit limits inherit the built-in defaults.
+    fn indexing_limits(&self, _data_root: &Path) -> Result<IndexingResourceLimits> {
+        Ok(IndexingResourceLimits::default())
+    }
+
     /// Notifies the process host after refresh execution has returned and its
     /// scoped workers have dropped, but before publication verification and
     /// terminal completion are recorded.

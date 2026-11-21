@@ -779,6 +779,58 @@ seconds for cooperative release, then may terminate the revalidated daemon
 owner once and wait up to another five seconds before failing; supervisor
 removal happens only after ownership is released.
 
+### Indexing Memory, Workers, And Generation Upgrades
+
+On memory-constrained hosts or containers (for example, a 4 GiB cgroup
+rebuilding a large multi-gigabyte corpus), bound indexing heap and worker
+concurrency in `config.toml` or via process environment variables:
+
+```toml
+[indexing]
+mode = "auto"
+memory_mb = 128
+workers = 2
+```
+
+- `indexing.memory_mb` / `CTX_INDEXING_MEMORY_MB`: integer from `15` to `65536`
+  (MiB). When unset, the default writer budget is `512` MiB.
+- `indexing.workers` / `CTX_INDEXING_WORKERS`: integer from `1` to `16`. When
+  unset, ctx splits available CPUs between Tantivy indexer threads (capped at
+  `8`) and parallel leaf scanners (capped at `16`).
+
+Environment overrides take precedence over `config.toml` and are forwarded to
+supervised daemons, detached daemons, and finite Core workers (such as
+`ctx import --all` in manual mode).
+
+`indexing.memory_mb` is a writer and pipeline budget, not a hard OS process RSS
+ceiling. Actual peak RSS during indexing scales with:
+
+- **Tantivy writer heap:** sized to `memory_mb` on cold and upgrade rebuilds
+  (warm incremental refreshes reserve up to one-eighth of this budget for
+  bounded source replacement), plus transient segment-merge buffers during
+  compaction.
+- **Scanner-to-writer live output buffers:** scaled to `memory_bytes / 2` and
+  clamped to `16 MiB..=256 MiB` (default `256 MiB` at `512 MiB`).
+- **Changed-session identity registry:** charged at ~1 KiB per changed session
+  up to `memory_mb` so construction-time identity tracking remains bounded.
+- **Active manifests and worker scratch:** manifest metadata scales with source
+  count, and each concurrent leaf scanner holds its own parsing state. When
+  `memory_mb` is set below `512` and `workers` is unset, ctx automatically
+  scales indexer threads and leaf scanners down proportionally (`memory_mb / 64`,
+  floor `1`). When `workers` is set explicitly, Tantivy indexer threads are
+  still clamped so every thread keeps at least 15 MB of writer heap.
+
+Full lexical generation upgrades (such as a schema, analyzer, policy, or
+compression-settings upgrade) rebuild a fresh candidate generation while the
+current active generation remains searchable. Before allocating that fresh
+candidate, ctx atomically retires and reclaims an unleased `previous`
+generation slot so unleased upgrades peak at ~2x index size (`active` plus the
+new `candidate`) instead of 3x (`active`, `previous`, and `candidate`). Active
+readers holding a generation read lease, durable retention leases, and any
+flat-delta base manifest still needed by `active` are always preserved. Once
+the upgraded candidate commits, the previous active generation moves into the
+`previous` slot.
+
 For a daemon that serves and serializes only atomic Core refreshes,
 set:
 

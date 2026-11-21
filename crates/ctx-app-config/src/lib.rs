@@ -50,6 +50,8 @@ use toml_subset::*;
 pub const CONFIG_FILE: &str = "config.toml";
 pub const AUTO_UPGRADE_DEFAULT_MODE: &str = "apply";
 pub const DAEMON_MODE_ENV: &str = "CTX_DAEMON_MODE";
+pub const INDEXING_MEMORY_MB_ENV: &str = "CTX_INDEXING_MEMORY_MB";
+pub const INDEXING_WORKERS_ENV: &str = "CTX_INDEXING_WORKERS";
 pub const LOCAL_USAGE_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_BUILTIN_THROTTLING_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
@@ -64,7 +66,10 @@ pub fn normalized_analytics_environment_override() -> Option<bool> {
 }
 
 mod indexing;
-pub use indexing::IndexingMode;
+pub use indexing::{
+    IndexingConfig, IndexingMode, INDEXING_MEMORY_MB_MAX, INDEXING_MEMORY_MB_MIN,
+    INDEXING_WORKERS_MAX, INDEXING_WORKERS_MIN,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -275,11 +280,6 @@ pub struct UpgradeConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct IndexingConfig {
-    pub mode: IndexingMode,
-}
-
-#[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub mode: DaemonMode,
 }
@@ -332,6 +332,8 @@ impl Default for AppConfig {
             },
             indexing: IndexingConfig {
                 mode: IndexingMode::Automatic,
+                memory_mb: None,
+                workers: None,
             },
             blame: BlameConfig { enabled: true },
             daemon: DaemonConfig {
@@ -351,6 +353,21 @@ impl Default for AppConfig {
 impl AppConfig {
     pub const fn automatic_indexing_enabled(&self) -> bool {
         self.indexing.mode.is_automatic()
+    }
+
+    pub const fn indexing_memory_mb(&self) -> Option<usize> {
+        self.indexing.memory_mb
+    }
+
+    pub const fn indexing_memory_bytes(&self) -> Option<usize> {
+        match self.indexing.memory_mb {
+            Some(mb) => mb.checked_mul(1024 * 1024),
+            None => None,
+        }
+    }
+
+    pub const fn indexing_workers(&self) -> Option<usize> {
+        self.indexing.workers
     }
 
     pub fn auto_upgrade_mode(&self) -> AutoUpgradeMode {
@@ -482,6 +499,12 @@ impl AppConfig {
                 }
                 "indexing.mode" => {
                     indexing_mode = Some(parse_indexing_mode(value)?);
+                }
+                "indexing.memory_mb" => {
+                    self.indexing.memory_mb = Some(parse_indexing_memory_mb(value)?);
+                }
+                "indexing.workers" => {
+                    self.indexing.workers = Some(parse_indexing_workers(value)?);
                 }
                 "blame.enabled" => {
                     self.blame.enabled = parse_config_bool(key, value)?;
@@ -648,6 +671,22 @@ impl AppConfig {
         if let Ok(mode) = env::var(DAEMON_MODE_ENV) {
             if !mode.trim().is_empty() {
                 self.daemon.mode = parse_daemon_mode_text(DAEMON_MODE_ENV, mode.trim())?;
+            }
+        }
+        if let Ok(memory_mb) = env::var(INDEXING_MEMORY_MB_ENV) {
+            if !memory_mb.trim().is_empty() {
+                self.indexing.memory_mb = Some(parse_indexing_memory_mb_text(
+                    INDEXING_MEMORY_MB_ENV,
+                    memory_mb.trim(),
+                )?);
+            }
+        }
+        if let Ok(workers) = env::var(INDEXING_WORKERS_ENV) {
+            if !workers.trim().is_empty() {
+                self.indexing.workers = Some(parse_indexing_workers_text(
+                    INDEXING_WORKERS_ENV,
+                    workers.trim(),
+                )?);
             }
         }
         if let Ok(value) = env::var("CTX_SEARCH_SEMANTIC") {

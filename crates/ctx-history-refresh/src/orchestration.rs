@@ -51,6 +51,7 @@ pub(super) fn execute_source_backed_refresh(
     let index_root = source_backed_index_root(data_root);
     let attempt_history_progress = coordinator.attempt_history_progress(request_id)?;
     let discovery_context = coordinator.runtime.discovery_context(data_root)?;
+    let indexing_limits = coordinator.runtime.indexing_limits(data_root)?;
     let published_state = RetainedPublishedState {
         journal: coordinator.journal.as_ref(),
     };
@@ -93,6 +94,7 @@ pub(super) fn execute_source_backed_refresh(
             &report_progress,
         )
         .with_reconciliation_demand(reconciliation_demand)
+        .with_indexing_limits(indexing_limits)
         .with_attempt_history_progress(attempt_history_progress),
     )
 }
@@ -181,15 +183,17 @@ pub(super) fn admitted_refresh_for_test(
 
 /// Resolves one logical all-route request into immutable exact execution
 /// authority. Discovery happens once here and cannot be repeated by execution.
-pub(super) fn source_backed_route_admission_fence(
+pub(super) fn source_backed_route_admission_fence_with_limits(
     discovery: &DiscoveryContext,
     journal: &dyn RefreshJournal,
     data_root: &Path,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    limits: IndexingResourceLimits,
 ) -> Result<ctx_history_refresh_execution::AdmittedRefresh> {
     let discovery = discovery.clone().with_data_root(data_root);
+    let writer_options = source_backed_refresh_writer_options_with_limits(limits);
     let work_budget =
-        source_backed_refresh_work_budget(source_backed_refresh_writer_options().indexer_threads);
+        source_backed_refresh_work_budget_with_limits(writer_options.indexer_threads, limits);
     let discovery_started = StdInstant::now();
     let report = discover_provider_sources_with_context_and_work_budget(&discovery, work_budget);
     let discovery_duration = discovery_started.elapsed();

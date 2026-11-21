@@ -80,6 +80,16 @@
       }
     },
     {
+      "behavior": "indexing memory budget",
+      "config_key": "indexing.memory_mb",
+      "environment_variable": "CTX_INDEXING_MEMORY_MB"
+    },
+    {
+      "behavior": "indexing worker concurrency",
+      "config_key": "indexing.workers",
+      "environment_variable": "CTX_INDEXING_WORKERS"
+    },
+    {
       "behavior": "daemon scheduling mode",
       "config_key": "daemon.mode",
       "environment_variable": "CTX_DAEMON_MODE"

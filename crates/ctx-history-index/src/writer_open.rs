@@ -136,20 +136,32 @@ impl GenerationWriter {
         // schema. An opaque pointer cannot safely identify what must survive.
         if !incompatible_active_present {
             loop {
+                let retention_lease = load_generation_retention_lease(&root)?;
+                if pointer_requires_rebuild
+                    && previous_recovery::retire_unleased_previous_before_upgrade_rebuild(
+                        &root,
+                        active_authority.as_ref(),
+                        &mut active_pointer_fence,
+                        retention_lease.as_ref(),
+                    )?
+                {
+                    active_authority = load_active_publication_authority(&root)?;
+                    active_pointer_fence =
+                        ctx_history_index_generation::ActiveGenerationPointerFence::capture(
+                            &root,
+                            active_authority
+                                .as_ref()
+                                .map(ActivePublicationAuthority::pointer),
+                        )?;
+                }
                 let active_pointer_ref = active_authority
                     .as_ref()
                     .map(ActivePublicationAuthority::pointer);
-                let retention_lease = load_generation_retention_lease(&root)?;
                 retained_generation_directories = reclaim_inactive_generation_directories(
                     &root,
                     active_pointer_ref,
                     retention_lease.as_ref(),
                 )?;
-                if pointer_requires_rebuild {
-                    // Keep the old manifest closure intact without interpreting
-                    // an incompatible generation during source-backed rebuilding.
-                    break;
-                }
                 let mut retained_generation_ids = active_pointer_ref
                     .into_iter()
                     .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
@@ -160,6 +172,19 @@ impl GenerationWriter {
                         .as_ref()
                         .map(|lease| lease.generation_id().to_owned()),
                 );
+                if pointer_requires_rebuild {
+                    // Preserve the old manifest closure without interpreting
+                    // an incompatible generation during source-backed rebuilding;
+                    // reclaim unreferenced certifications and best-effort
+                    // unreferenced manifests (keeping flat-delta bases intact).
+                    reclaim_unreferenced_certifications(
+                        &root,
+                        active_pointer_ref,
+                        retention_lease.as_ref(),
+                    )?;
+                    let _ = reclaim_unreferenced_manifests(&root, &retained_generation_ids);
+                    break;
+                }
                 if let Err(error) = reclaim_unreferenced_manifests(&root, &retained_generation_ids)
                 {
                     previous_recovery::retire_missing_previous_base(
@@ -216,6 +241,7 @@ impl GenerationWriter {
                 false
             };
 
+            let mut upgrade_incompatibility_rebuild = false;
             let reusable_generation = if !rebuild_marked {
                 active_authority
                     .as_ref()
@@ -225,6 +251,7 @@ impl GenerationWriter {
                         if matches!(error, IndexError::ChecksumMismatch) {
                             Err(error)
                         } else if generation_incompatibility_requires_rebuild(&error) {
+                            upgrade_incompatibility_rebuild = true;
                             Ok(None)
                         } else {
                             Err(error)
@@ -233,6 +260,48 @@ impl GenerationWriter {
             } else {
                 None
             };
+            if upgrade_incompatibility_rebuild && !incompatible_active_present {
+                let retention_lease = load_generation_retention_lease(&root)?;
+                if previous_recovery::retire_unleased_previous_before_upgrade_rebuild(
+                    &root,
+                    active_authority.as_ref(),
+                    &mut active_pointer_fence,
+                    retention_lease.as_ref(),
+                )? {
+                    active_authority = load_active_publication_authority(&root)?;
+                    let active_pointer_ref = active_authority
+                        .as_ref()
+                        .map(ActivePublicationAuthority::pointer);
+                    active_pointer_fence =
+                        ctx_history_index_generation::ActiveGenerationPointerFence::capture(
+                            &root,
+                            active_pointer_ref,
+                        )?;
+                    retained_generation_directories = reclaim_inactive_generation_directories(
+                        &root,
+                        active_pointer_ref,
+                        retention_lease.as_ref(),
+                    )?;
+                    reclaim_unreferenced_certifications(
+                        &root,
+                        active_pointer_ref,
+                        retention_lease.as_ref(),
+                    )?;
+                    let mut retained_generation_ids = active_pointer_ref
+                        .into_iter()
+                        .flat_map(|pointer| {
+                            std::iter::once(pointer.active()).chain(pointer.previous())
+                        })
+                        .map(|slot| slot.generation_id().to_owned())
+                        .collect::<Vec<_>>();
+                    retained_generation_ids.extend(
+                        retention_lease
+                            .as_ref()
+                            .map(|lease| lease.generation_id().to_owned()),
+                    );
+                    let _ = reclaim_unreferenced_manifests(&root, &retained_generation_ids);
+                }
+            }
             let active_pointer = active_authority.map(ActivePublicationAuthority::into_pointer);
 
             let (

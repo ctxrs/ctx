@@ -101,6 +101,8 @@ pub use retention::{
     quarantine_invalid_retention_lease_with_writer_lock_held, release_generation_retention_lease,
     GenerationReadLease, GenerationRetentionLease,
 };
+#[doc(hidden)]
+pub use retention::{try_generation_directory_reclaim_authority, GenerationReclaimAuthority};
 
 pub const MANIFEST_DIRECTORY: &str = "ctx-generations";
 pub const INDEX_GENERATIONS_DIRECTORY: &str = "index-generations";

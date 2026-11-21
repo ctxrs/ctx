@@ -180,6 +180,7 @@ pub fn render_status_human(
         if let Some(generation) = report["lexical"]["generation_id"].as_str() {
             history_values.push(("Serving generation", generation.to_owned()));
         }
+        append_lexical_upgrade_fields(lexical_status, &report["lexical"], &mut history_values);
     }
     history_values.extend(history_health_fields(coverage));
     if report["daemon"]["running"].as_bool() == Some(true) {
@@ -340,6 +341,120 @@ pub fn render_status_human(
         document.append(section("Next", actions));
     }
     document
+}
+
+fn append_lexical_upgrade_fields(
+    lexical_status: &str,
+    lexical: &Value,
+    history_values: &mut Vec<(&'static str, String)>,
+) {
+    let Some(upgrade) = lexical.get("upgrade").and_then(Value::as_object) else {
+        return;
+    };
+    let est_sources = upgrade
+        .get("estimated_total_sources")
+        .and_then(Value::as_u64);
+    let est_bytes = upgrade
+        .get("estimated_total_source_bytes")
+        .and_then(Value::as_u64);
+    let processed_bytes = upgrade.get("processed_bytes").and_then(Value::as_u64);
+    let stage = upgrade
+        .get("whole_run_stage")
+        .or_else(|| upgrade.get("phase"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let eta_ms = upgrade
+        .get("estimated_remaining_millis")
+        .and_then(Value::as_u64);
+
+    if lexical_status == "rebuilding" {
+        if let Some(done) = processed_bytes {
+            let mut summary = match (est_bytes, est_sources) {
+                (Some(total), _) if total > 0 && done <= total => {
+                    let pct = ((u128::from(done) * 100) / u128::from(total)).min(100);
+                    format!(
+                        "{} of ~{} ({pct}%)",
+                        ctx_history_cli::format_bytes(done),
+                        ctx_history_cli::format_bytes(total)
+                    )
+                }
+                (Some(total), _) if total > 0 => {
+                    format!(
+                        "{} (est. ~{})",
+                        ctx_history_cli::format_bytes(done),
+                        ctx_history_cli::format_bytes(total)
+                    )
+                }
+                (_, Some(sources)) if sources > 0 => {
+                    format!(
+                        "{} processed (~{})",
+                        ctx_history_cli::format_bytes(done),
+                        counted(sources, "source", "sources")
+                    )
+                }
+                _ => format!("{} processed", ctx_history_cli::format_bytes(done)),
+            };
+            if let Some(stage) = stage {
+                summary.push_str(&format!(" ({})", stage.replace('_', " ")));
+            }
+            history_values.push(("Upgrade progress", summary));
+            if let Some(eta_ms) = eta_ms {
+                history_values.push(("Estimated remaining", format_remaining_duration(eta_ms)));
+            }
+            return;
+        }
+    }
+
+    let scope = match (est_bytes, est_sources) {
+        (Some(bytes), Some(sources)) if bytes > 0 && sources > 0 => Some(format!(
+            "~{} across {}",
+            ctx_history_cli::format_bytes(bytes),
+            counted(sources, "source", "sources")
+        )),
+        (Some(bytes), _) if bytes > 0 => Some(format!("~{}", ctx_history_cli::format_bytes(bytes))),
+        (_, Some(sources)) if sources > 0 => {
+            Some(format!("~{}", counted(sources, "source", "sources")))
+        }
+        _ => None,
+    };
+    if let Some(mut scope) = scope {
+        if lexical_status == "rebuilding" {
+            if let Some(stage) = stage {
+                scope.push_str(&format!(" ({})", stage.replace('_', " ")));
+            }
+        }
+        history_values.push(("Upgrade scope", scope));
+    }
+    if lexical_status == "rebuilding" {
+        if let Some(eta_ms) = eta_ms {
+            history_values.push(("Estimated remaining", format_remaining_duration(eta_ms)));
+        }
+    }
+}
+
+fn format_remaining_duration(millis: u64) -> String {
+    let total_seconds = millis / 1_000;
+    if total_seconds == 0 {
+        return "<1s".to_owned();
+    }
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        if minutes > 0 {
+            format!("~{hours}h {minutes:02}m")
+        } else {
+            format!("~{hours}h")
+        }
+    } else if minutes > 0 {
+        if seconds > 0 {
+            format!("~{minutes}m {seconds:02}s")
+        } else {
+            format!("~{minutes}m")
+        }
+    } else {
+        format!("~{seconds}s")
+    }
 }
 
 fn refresh_resource_detail(report: &Value) -> Option<&str> {

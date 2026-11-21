@@ -495,6 +495,14 @@ fn lexical_report(
                     "matches_current": policy_matches,
                 },
             }));
+            if reason == Some("generation_upgrade_required") {
+                value["upgrade"] = lexical_upgrade_report(
+                    manifest,
+                    index.document_count(),
+                    refresh_job,
+                    request_state,
+                );
+            }
             match ctx_history_index::active_generation_storage_metadata(&path) {
                 Ok(Some(storage))
                     if storage.generation_id() == index.generation_id()
@@ -580,6 +588,127 @@ fn lexical_state(
         },
         Some("generation_upgrade_required"),
     )
+}
+
+fn lexical_upgrade_report(
+    manifest: &ctx_history_index::GenerationManifest,
+    indexed_documents: u64,
+    refresh_job: Option<&Value>,
+    request_state: Option<&str>,
+) -> Value {
+    let rebuilding_active = matches!(
+        request_state,
+        Some("admission_pending" | "queued" | "running")
+    );
+    let progress = rebuilding_active
+        .then_some(refresh_job)
+        .flatten()
+        .and_then(|job| job.get("progress"));
+    let total_routes_known = progress
+        .and_then(|progress| progress.get("total_sources_known"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let total_routes = total_routes_known
+        .then(|| {
+            progress
+                .and_then(|progress| progress.get("total_sources"))
+                .and_then(Value::as_u64)
+        })
+        .flatten();
+    let completed_routes = rebuilding_active
+        .then(|| {
+            progress
+                .and_then(|progress| progress.get("completed_sources"))
+                .and_then(Value::as_u64)
+        })
+        .flatten();
+    let processed_bytes = rebuilding_active
+        .then(|| {
+            progress.and_then(|progress| {
+                progress
+                    .get("processed_bytes")
+                    .or_else(|| progress.get("completed_bytes"))
+                    .and_then(Value::as_u64)
+            })
+        })
+        .flatten();
+    let processed_sessions = rebuilding_active
+        .then(|| {
+            progress
+                .and_then(|progress| progress.get("processed_sessions"))
+                .and_then(Value::as_u64)
+        })
+        .flatten();
+    let processed_messages = rebuilding_active
+        .then(|| {
+            progress
+                .and_then(|progress| progress.get("processed_messages"))
+                .and_then(Value::as_u64)
+        })
+        .flatten();
+    let processed_tool_calls = rebuilding_active
+        .then(|| {
+            progress
+                .and_then(|progress| progress.get("processed_tool_calls"))
+                .and_then(Value::as_u64)
+        })
+        .flatten();
+    let completed_records = rebuilding_active
+        .then(|| {
+            progress
+                .and_then(|progress| progress.get("completed_records"))
+                .and_then(Value::as_u64)
+        })
+        .flatten();
+    let phase = rebuilding_active
+        .then(|| {
+            progress
+                .and_then(|progress| progress.get("phase"))
+                .and_then(Value::as_str)
+        })
+        .flatten();
+    let whole_run_stage = rebuilding_active
+        .then(|| {
+            progress
+                .and_then(|progress| progress.get("whole_run_stage"))
+                .and_then(Value::as_str)
+        })
+        .flatten();
+    let elapsed_millis = rebuilding_active
+        .then(|| {
+            progress
+                .and_then(|progress| progress.get("elapsed_millis"))
+                .and_then(Value::as_u64)
+        })
+        .flatten();
+    let estimated_remaining_millis = rebuilding_active
+        .then(|| {
+            progress
+                .and_then(|progress| progress.get("estimated_remaining_millis"))
+                .and_then(Value::as_u64)
+        })
+        .flatten();
+
+    let mut value = compact_json(json!({
+        "estimate_source": "active_generation_manifest",
+        "estimated_total_sources": manifest.sources.len(),
+        "estimated_total_source_bytes": manifest.certified_source_bytes,
+        "estimated_total_documents": indexed_documents,
+        "phase": phase,
+        "whole_run_stage": whole_run_stage,
+        "completed_routes": completed_routes,
+        "total_routes": total_routes,
+        "processed_bytes": processed_bytes,
+        "processed_sessions": processed_sessions,
+        "processed_messages": processed_messages,
+        "processed_tool_calls": processed_tool_calls,
+        "completed_records": completed_records,
+        "elapsed_millis": elapsed_millis,
+    }));
+    if rebuilding_active {
+        value["estimated_remaining_millis"] = json!(estimated_remaining_millis);
+    }
+    value
 }
 
 fn catalog_report(generation_id: Option<&str>, index: Option<&VerifiedIndex>) -> Value {

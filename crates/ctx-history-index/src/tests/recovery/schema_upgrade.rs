@@ -166,7 +166,7 @@ fn main_schema_22_stays_searchable_through_interrupted_rebuild_and_publication()
 }
 
 #[test]
-fn rebuild_reclaims_candidates_but_keeps_previous_and_live_reader_generations() {
+fn rebuild_reclaims_candidates_and_retires_unleased_previous_while_honoring_readers() {
     let temp = tempdir().unwrap();
     let source = source("retained-rebuild.jsonl");
     let mut reader = None;
@@ -209,6 +209,11 @@ fn rebuild_reclaims_candidates_but_keeps_previous_and_live_reader_generations() 
     let pointer_bytes = fs::read(temp.path().join("active-generation.json")).unwrap();
     let active_path = active_generation_path(temp.path());
 
+    // While a live reader holds `previous`, rebuild must keep `previous` in the
+    // pointer and on disk alongside abandoned-candidate reclamation.
+    let previous_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), previous.active().generation_id())
+            .unwrap();
     for _ in 0..5 {
         let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
             .unwrap()
@@ -229,6 +234,7 @@ fn rebuild_reclaims_candidates_but_keeps_previous_and_live_reader_generations() 
             ])
         );
         assert_eq!(reader.as_ref().unwrap().count_term("retained").unwrap(), 1);
+        assert_eq!(previous_reader.count_term("retained").unwrap(), 1);
         assert_eq!(
             VerifiedIndex::open_pinned(temp.path())
                 .unwrap()
@@ -236,19 +242,51 @@ fn rebuild_reclaims_candidates_but_keeps_previous_and_live_reader_generations() 
                 .unwrap(),
             1
         );
-        assert!(VerifiedIndex::open_pinned_generation(
-            temp.path(),
-            previous.active().generation_id()
-        )
-        .is_ok());
         assert_eq!(
             fs::read(temp.path().join("active-generation.json")).unwrap(),
             pointer_bytes
         );
         drop(writer);
     }
+
+    // Once `previous` has no live reader, opening the upgrade writer retires
+    // `previous` and reclaims its directory while keeping `active` and any
+    // externally leased reader generation intact.
+    drop(previous_reader);
+    {
+        let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        let candidate_path = temp
+            .path()
+            .join(INDEX_GENERATIONS_DIRECTORY)
+            .join(writer.candidate_directory_name.as_ref().unwrap());
+        assert!(!previous_path.exists());
+        assert_eq!(
+            generation_directories(temp.path()),
+            HashSet::from([active_path.clone(), reader_path.clone(), candidate_path])
+        );
+        let updated_pointer = load_active_generation_pointer(temp.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_pointer.active(), active.active());
+        assert!(updated_pointer.previous().is_none());
+        assert_eq!(
+            VerifiedIndex::open_pinned(temp.path())
+                .unwrap()
+                .count_term("schema22upgrademarker")
+                .unwrap(),
+            1
+        );
+        assert_eq!(reader.as_ref().unwrap().count_term("retained").unwrap(), 1);
+    }
+
+    // Once the external reader drops too, peak on-disk generations during the
+    // rebuild are bounded to two (`active` + `candidate`), and committing the
+    // upgraded generation retains `active` as `previous` (still two dirs).
     drop(reader);
-    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
         .unwrap()
         .into_writer()
         .unwrap();
@@ -256,7 +294,199 @@ fn rebuild_reclaims_candidates_but_keeps_previous_and_live_reader_generations() 
         !reader_path.exists(),
         "released readers no longer retain obsolete slots"
     );
-    assert_eq!(generation_directories(temp.path()).len(), 3);
-    assert!(previous_path.is_dir());
+    assert_eq!(generation_directories(temp.path()).len(), 2);
+    assert!(active_path.is_dir());
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "upgraded schema 23 marker"))
+        .unwrap();
+    writer.certify_source(certificate(&source, 3, 1)).unwrap();
+    let receipt = writer.commit(|_| true).unwrap();
+    let final_pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        final_pointer.active().generation_id(),
+        receipt.generation_id
+    );
+    assert_eq!(
+        final_pointer.previous().unwrap().generation_id(),
+        active.active().generation_id()
+    );
+    assert_eq!(generation_directories(temp.path()).len(), 2);
+}
+
+#[test]
+fn upgrade_rebuild_preserves_previous_under_retention_lease_until_released() {
+    let temp = tempdir().unwrap();
+    let source = source("leased-previous-rebuild.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "leased previous marker"))
+        .unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let previous = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let previous_path = active_generation_path(temp.path());
+    copy_fixture(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schema-22/index"),
+        temp.path(),
+    );
+    let active = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let active_path = active_generation_path(temp.path());
+    let pointer =
+        ActiveGenerationPointer::new(active.active().clone(), Some(previous.active().clone()))
+            .unwrap();
+    publish_active_generation_pointer(temp.path(), &pointer).unwrap();
+
+    let owner_id = "ab".repeat(32);
+    let lease = acquire_generation_retention_lease(
+        temp.path(),
+        previous.active().generation_id(),
+        "semantic_projection",
+        &owner_id,
+    )
+    .unwrap();
+
+    {
+        let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        let candidate_path = temp
+            .path()
+            .join(INDEX_GENERATIONS_DIRECTORY)
+            .join(writer.candidate_directory_name.as_ref().unwrap());
+        assert_eq!(
+            generation_directories(temp.path()),
+            HashSet::from([active_path.clone(), previous_path.clone(), candidate_path,])
+        );
+        assert_eq!(
+            load_active_generation_pointer(temp.path())
+                .unwrap()
+                .unwrap()
+                .previous()
+                .unwrap()
+                .generation_id(),
+            previous.active().generation_id()
+        );
+    }
+
+    release_generation_retention_lease(temp.path(), &lease).unwrap();
+
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    let candidate_path = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(writer.candidate_directory_name.as_ref().unwrap());
+    assert!(!previous_path.exists());
+    assert_eq!(
+        generation_directories(temp.path()),
+        HashSet::from([active_path, candidate_path])
+    );
+    assert!(load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap()
+        .previous()
+        .is_none());
+    assert_eq!(
+        VerifiedIndex::open_pinned(temp.path())
+            .unwrap()
+            .count_term("schema22upgrademarker")
+            .unwrap(),
+        1
+    );
     drop(writer);
+}
+
+#[test]
+fn settings_upgrade_retires_unleased_previous_directory_while_preserving_flat_delta_base_manifest()
+{
+    let temp = tempdir().unwrap();
+    let source = source("flat-delta-upgrade.jsonl");
+    for (revision, body) in [(1, "delta baseline"), (2, "delta updated")] {
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_core_record(document(&source, 1, body)).unwrap();
+        writer
+            .certify_source(appendable_certificate(&source, revision, 1, 10))
+            .unwrap();
+        writer.commit(|_| true).unwrap();
+    }
+
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let previous = pointer.previous().unwrap().clone();
+    let active = pointer.active().clone();
+    let active_manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(manifest_path(temp.path(), active.generation_id())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        active_manifest["storage_format"],
+        "ctx-manifest-flat-delta-v1"
+    );
+    assert_eq!(
+        active_manifest["base_generation_id"],
+        previous.generation_id()
+    );
+
+    // Hold a live reader on `active`, which pins `previous`'s manifest id key
+    // for flat-delta resolution but does NOT pin `previous`'s index directory.
+    let active_reader = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let active_path = active_generation_path(temp.path());
+    let previous_path = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(previous.directory());
+
+    // Induce an index-settings upgrade mismatch on `active`.
+    let meta_path = active_path.join("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    meta["index_settings"]["docstore_compression"] =
+        serde_json::Value::String("zstd(compression_level=1)".to_owned());
+    meta["index_settings"]["docstore_blocksize"] = serde_json::Value::from(64 * 1024);
+    fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    assert!(writer.base_manifest().is_none());
+    let candidate_path = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(writer.candidate_directory_name.as_ref().unwrap());
+    assert!(
+        !previous_path.exists(),
+        "unleased previous directory must be reclaimed before full settings rebuild"
+    );
+    assert_eq!(
+        generation_directories(temp.path()),
+        HashSet::from([active_path, candidate_path])
+    );
+    assert!(
+        manifest_path(temp.path(), previous.generation_id()).is_file(),
+        "flat-delta base manifest must survive directory retirement"
+    );
+    assert_eq!(active_reader.count_term("updated").unwrap(), 1);
+    drop(writer);
+    drop(active_reader);
 }

@@ -85,6 +85,8 @@ const DAEMON_CHILD_ENV_ALLOWLIST: &[&str] = &[
     "CTX_ANALYTICS_ENDPOINT",
     "CTX_DATA_ROOT",
     "CTX_HISTORY_PLUGIN_PATH",
+    "CTX_INDEXING_MEMORY_MB",
+    "CTX_INDEXING_WORKERS",
     "CTX_LOCAL_USAGE_ENABLED",
     "CTX_MACHINE_ID",
     "CTX_PRO_HELPER",
@@ -260,4 +262,15 @@ pub(super) fn configured_finite_core_worker_command(
         BTreeMap::new(),
         DaemonLaunchProfile::FiniteCoreWorker,
     )
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::DAEMON_CHILD_ENV_ALLOWLIST;
+
+    #[test]
+    fn daemon_child_allowlist_forwards_indexing_resource_controls() {
+        assert!(DAEMON_CHILD_ENV_ALLOWLIST.contains(&"CTX_INDEXING_MEMORY_MB"));
+        assert!(DAEMON_CHILD_ENV_ALLOWLIST.contains(&"CTX_INDEXING_WORKERS"));
+    }
 }

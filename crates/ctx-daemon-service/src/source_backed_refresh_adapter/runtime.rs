@@ -2,7 +2,9 @@ use std::{path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use ctx_history_capture::DiscoveryContext;
-use ctx_history_refresh::{RefreshOperation, RefreshRuntime, RefreshRuntimeMetadata};
+use ctx_history_refresh::{
+    IndexingResourceLimits, RefreshOperation, RefreshRuntime, RefreshRuntimeMetadata,
+};
 use serde_json::Value;
 
 use crate::{
@@ -77,6 +79,17 @@ impl RefreshRuntime for DaemonRefreshRuntime {
         self.config
             .discovery_context(_data_root)
             .context("resolve source-backed provider discovery context")
+    }
+
+    fn indexing_limits(&self, data_root: &Path) -> Result<IndexingResourceLimits> {
+        let config = self
+            .config
+            .load(data_root)
+            .context("load configured indexing memory and worker limits")?;
+        Ok(IndexingResourceLimits::from_memory_mb_and_workers(
+            config.indexing_memory_mb,
+            config.indexing_workers,
+        ))
     }
 
     fn refresh_execution_finished(&self) {

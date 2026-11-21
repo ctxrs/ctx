@@ -679,3 +679,65 @@ fn status_plain_output_equals_ansi_stripped_styled_output() {
         document.render_plain()
     );
 }
+
+#[test]
+fn upgrade_status_renders_manifest_scope_progress_and_eta_across_widths() {
+    let generation = "b2".repeat(32);
+
+    let mut awaiting = status_report(true, "awaiting_upgrade", "ready");
+    awaiting["lexical"]["search_available"] = json!(true);
+    awaiting["lexical"]["generation_id"] = json!(generation);
+    awaiting["lexical"]["reason"] = json!("generation_upgrade_required");
+    awaiting["lexical"]["upgrade"] = json!({
+        "estimate_source": "active_generation_manifest",
+        "estimated_total_sources": 420,
+        "estimated_total_source_bytes": 26_u64 * 1024 * 1024 * 1024,
+        "estimated_total_documents": 120_000,
+    });
+    for width in [32, 48, 80, 120] {
+        let ctx = context(width, ColorMode::Never);
+        let document = render_report(&ctx, &awaiting);
+        let rendered = document.render_plain();
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("Upgrade scope ~26.0 GiB across 420 sources"),
+            "{rendered}"
+        );
+        assert!(!normalized.contains("Estimated remaining"), "{rendered}");
+        assert_fits(&document, &ctx);
+    }
+
+    let mut rebuilding = status_report(true, "rebuilding", "pending");
+    rebuilding["lexical"]["search_available"] = json!(true);
+    rebuilding["lexical"]["generation_id"] = json!(generation);
+    rebuilding["lexical"]["reason"] = json!("generation_upgrade_required");
+    rebuilding["lexical"]["upgrade"] = json!({
+        "estimate_source": "active_generation_manifest",
+        "estimated_total_sources": 420,
+        "estimated_total_source_bytes": 10_u64 * 1024 * 1024 * 1024,
+        "estimated_total_documents": 120_000,
+        "phase": "parsing",
+        "whole_run_stage": "reading",
+        "processed_bytes": 2_u64 * 1024 * 1024 * 1024,
+        "estimated_remaining_millis": 135_000,
+    });
+    rebuilding["refresh"]["progress"] = json!({
+        "completed_records": 5000,
+        "processed_bytes": 2_u64 * 1024 * 1024 * 1024,
+    });
+    for width in [32, 48, 80, 120] {
+        let ctx = context(width, ColorMode::Never);
+        let document = render_report(&ctx, &rebuilding);
+        let rendered = document.render_plain();
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("Upgrade progress 2.0 GiB of ~10.0 GiB (20%) (reading)"),
+            "{rendered}"
+        );
+        assert!(
+            normalized.contains("Estimated remaining ~2m 15s"),
+            "{rendered}"
+        );
+        assert_fits(&document, &ctx);
+    }
+}

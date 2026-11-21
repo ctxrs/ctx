@@ -16,6 +16,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     scope: SourceBackedRefreshScope,
     mut physical_scope: SourceBackedRefreshScope,
     published_state: &dyn PublishedSourceBackedStatePort,
+    indexing_limits: IndexingResourceLimits,
     attempt_history_progress: ctx_history_capture_model::SharedAttemptHistoryProgress,
     report_progress: &mut dyn FnMut(
         CaptureSourceBackedDetailedRefreshProgress,
@@ -176,9 +177,9 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         .registry
         .selected_routes_use_parallel_leaf_workers(&physical_scope)
     {
-        source_backed_refresh_writer_options()
+        source_backed_refresh_writer_options_with_limits(indexing_limits)
     } else {
-        WriterOptions::default()
+        WriterOptions::for_indexing_limits(indexing_limits.memory_bytes, indexing_limits.workers)
     };
     let publication_scope = if automatic_split_active {
         SourceBackedRefreshScope::All
@@ -192,9 +193,18 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     };
     let (executor, _issues) = build.into_refresh_executor(writer_options);
     let executor = executor
+        .with_indexing_limits(indexing_limits)
         .with_base_route_controls(previous_route_controls.clone())
         .with_attempt_history_progress(attempt_history_progress);
-    let eta_execution_eligible = retained_generation.is_none()
+    let current_policy_hash = ctx_history_index::current_source_generation_policy_hash().ok();
+    let full_rebuild_from_scratch = retained_generation.as_ref().is_none_or(|generation| {
+        let manifest = generation.manifest();
+        manifest.lexical_schema_version != ctx_history_index::LEXICAL_SCHEMA_VERSION
+            || current_policy_hash
+                .as_deref()
+                .is_some_and(|current| manifest.policy_schema_hash != current)
+    });
+    let eta_execution_eligible = full_rebuild_from_scratch
         && scope == SourceBackedRefreshScope::All
         && registry_failures.is_empty();
     let mut report_attempt_progress = |mut update: CaptureSourceBackedDetailedRefreshProgress| {

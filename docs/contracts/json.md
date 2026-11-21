@@ -158,6 +158,23 @@ generation after concurrent publication, `storage` is omitted and
 `lexical.storage_error` is `"size_unavailable"`; lexical readiness is unchanged.
 A verified empty generation has zero segment bytes and nonzero metadata bytes.
 
+When `lexical.reason` is `"generation_upgrade_required"` (either
+`lexical.status: "awaiting_upgrade"` or `"rebuilding"`), `lexical.upgrade` adds
+an additive upgrade-scope and progress summary without changing schema version
+3:
+
+- `estimate_source` (`"active_generation_manifest"`), `estimated_total_sources`,
+  `estimated_total_source_bytes`, and `estimated_total_documents`, derived from
+  the currently serving verified generation's manifest;
+- while a refresh attempt is actively `admission_pending`, `queued`, or
+  `running`, live counters from that attempt (`phase`, `whole_run_stage`,
+  `completed_routes`, `total_routes` when known, `processed_bytes`,
+  `processed_sessions`, `processed_messages`, `processed_tool_calls`,
+  `completed_records`, `elapsed_millis`, and explicit nullable
+  `estimated_remaining_millis`).
+
+When `lexical.status` is `"ready"`, `lexical.upgrade` is omitted.
+
 `refresh` reports the latest observed daemon-owned refresh request and its exact
 generation binding. A generation-bound published refresh with deterministic
 record rejections but zero source failures has `refresh.status: "ready"`; its

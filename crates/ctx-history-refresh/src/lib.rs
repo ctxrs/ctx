@@ -26,8 +26,9 @@ use ctx_history_capture::{
     SourceBackedSourceFailures,
 };
 use ctx_history_capture::{
-    discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
-    source_backed_refresh_writer_options,
+    discover_provider_sources_with_context_and_work_budget,
+    source_backed_refresh_work_budget_with_limits,
+    source_backed_refresh_writer_options_with_limits,
     validate_automatic_provider_source_roots_outside_data_root, DiscoveryContext, RouteObservation,
     SourceBackedCoordinatorError, SourceBackedRouteControlExpectation, SourceBackedRouteError,
     SourceBackedRouteErrorKind, SourceBackedSourceFailureClass, SourceBackedWatchCatalog,
@@ -54,6 +55,7 @@ use uuid::Uuid;
 
 use request::SourceBackedRefreshOperation;
 
+pub use ctx_history_capture::IndexingResourceLimits;
 pub use ctx_history_capture::SourceBackedReconciliationDemand;
 pub use ctx_history_capture::SourceBackedRefreshScope;
 pub use ctx_history_capture::SourceBackedRefreshScope as RefreshScope;
@@ -110,7 +112,9 @@ use engine::TestRefreshJournal;
 use engine::{CoreRefreshEngine, SourceBackedRefreshProgressUpdate};
 #[cfg(any(test, feature = "test-support"))]
 use orchestration::admitted_refresh_for_test;
-use orchestration::{execute_source_backed_refresh, source_backed_route_admission_fence};
+use orchestration::{
+    execute_source_backed_refresh, source_backed_route_admission_fence_with_limits,
+};
 use publication::{
     open_published_generation, prepare_generation_control_state, published_generation_id,
     retained_generation_hint, verify_source_backed_publication,
