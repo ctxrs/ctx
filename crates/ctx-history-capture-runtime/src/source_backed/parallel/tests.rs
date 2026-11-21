@@ -1338,6 +1338,79 @@ fn ready_driven_transport_accepts_a_later_worker_while_the_first_job_is_withheld
     assert_eq!(results, [0, 1, 2, 3]);
 }
 
+#[test]
+fn indexing_resource_limits_preserve_defaults_and_scale_constrained_budgets() {
+    let default = IndexingResourceLimits::default();
+    assert_eq!(
+        default.effective_memory_bytes(),
+        DEFAULT_INDEXING_MEMORY_BYTES
+    );
+    assert_eq!(
+        default.core_route_max_live_output_bytes(),
+        crate::CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES
+    );
+    for available in 1..=64 {
+        let threads = default.indexer_threads_for_parallelism(available);
+        assert_eq!(
+            threads,
+            source_backed_refresh_indexer_threads_for_parallelism(available)
+        );
+        assert_eq!(
+            default.leaf_worker_budget_for_parallelism(threads, available),
+            leaf_worker_budget_for_parallelism(threads, available)
+        );
+    }
+
+    let constrained_128m = IndexingResourceLimits::from_memory_mb_and_workers(Some(128), None);
+    assert_eq!(constrained_128m.effective_memory_bytes(), 128 * 1024 * 1024);
+    assert_eq!(constrained_128m.indexer_threads_for_parallelism(16), 2);
+    assert_eq!(
+        constrained_128m.leaf_worker_budget_for_parallelism(2, 16),
+        2
+    );
+    assert_eq!(
+        constrained_128m.core_route_max_live_output_bytes(),
+        64 * 1024 * 1024
+    );
+
+    let tight_64m = IndexingResourceLimits::from_memory_mb_and_workers(Some(64), None);
+    assert_eq!(tight_64m.indexer_threads_for_parallelism(16), 1);
+    assert_eq!(tight_64m.leaf_worker_budget_for_parallelism(1, 16), 1);
+    assert_eq!(
+        tight_64m.core_route_max_live_output_bytes(),
+        32 * 1024 * 1024
+    );
+
+    let minimum_15m = IndexingResourceLimits::from_memory_mb_and_workers(Some(15), Some(8));
+    assert_eq!(minimum_15m.indexer_threads_for_parallelism(16), 1);
+    assert_eq!(minimum_15m.leaf_worker_budget_for_parallelism(1, 16), 8);
+    assert_eq!(
+        minimum_15m.core_route_max_live_output_bytes(),
+        crate::CORE_ROUTE_MIN_LIVE_OUTPUT_BYTES
+    );
+
+    let explicit_workers = IndexingResourceLimits::from_memory_mb_and_workers(None, Some(2));
+    assert_eq!(explicit_workers.indexer_threads_for_parallelism(16), 2);
+    assert_eq!(
+        explicit_workers.leaf_worker_budget_for_parallelism(2, 16),
+        2
+    );
+    assert_eq!(
+        explicit_workers.core_route_max_live_output_bytes(),
+        crate::CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES
+    );
+
+    let scaled = SourceBackedRouteResources::production_with_live_output_limit(
+        2,
+        constrained_128m.core_route_max_live_output_bytes(),
+    );
+    assert_eq!(scaled.leaf_worker_budget(), 2);
+    assert_eq!(
+        scaled.maximum_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        64 * 1024 * 1024
+    );
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct FailureOrderingSummary {
     failed_outcomes: Vec<bool>,

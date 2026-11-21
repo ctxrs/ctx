@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use anyhow::{bail, Context, Result};
 
-use super::{AutoUpgradeMode, DaemonMode, IndexingMode};
+use super::{
+    AutoUpgradeMode, DaemonMode, IndexingMode, INDEXING_MEMORY_MB_MAX, INDEXING_MEMORY_MB_MIN,
+    INDEXING_WORKERS_MAX, INDEXING_WORKERS_MIN,
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct ConfigValue {
@@ -148,6 +151,55 @@ pub(super) fn parse_indexing_mode(value: &ConfigValue) -> Result<IndexingMode> {
             value.line
         ),
     }
+}
+
+pub(super) fn parse_indexing_memory_mb(value: &ConfigValue) -> Result<usize> {
+    let parsed = parse_config_u64("indexing.memory_mb", value)?;
+    validate_indexing_memory_mb("indexing.memory_mb", parsed)
+        .with_context(|| format!("indexing.memory_mb at line {}", value.line))
+}
+
+pub(super) fn parse_indexing_memory_mb_text(key: &str, value: &str) -> Result<usize> {
+    let parsed = value
+        .parse::<u64>()
+        .with_context(|| format!("{key} must be an integer between {INDEXING_MEMORY_MB_MIN} and {INDEXING_MEMORY_MB_MAX} MiB"))?;
+    validate_indexing_memory_mb(key, parsed)
+}
+
+fn validate_indexing_memory_mb(key: &str, parsed: u64) -> Result<usize> {
+    let mb = usize::try_from(parsed).ok().filter(|mb| {
+        (INDEXING_MEMORY_MB_MIN..=INDEXING_MEMORY_MB_MAX).contains(mb)
+            && mb.checked_mul(1024 * 1024).is_some()
+    });
+    mb.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{key} must be between {INDEXING_MEMORY_MB_MIN} and {INDEXING_MEMORY_MB_MAX} MiB"
+        )
+    })
+}
+
+pub(super) fn parse_indexing_workers(value: &ConfigValue) -> Result<usize> {
+    let parsed = parse_config_u64("indexing.workers", value)?;
+    validate_indexing_workers("indexing.workers", parsed)
+        .with_context(|| format!("indexing.workers at line {}", value.line))
+}
+
+pub(super) fn parse_indexing_workers_text(key: &str, value: &str) -> Result<usize> {
+    let parsed = value.parse::<u64>().with_context(|| {
+        format!(
+            "{key} must be an integer between {INDEXING_WORKERS_MIN} and {INDEXING_WORKERS_MAX}"
+        )
+    })?;
+    validate_indexing_workers(key, parsed)
+}
+
+fn validate_indexing_workers(key: &str, parsed: u64) -> Result<usize> {
+    let workers = usize::try_from(parsed)
+        .ok()
+        .filter(|workers| (INDEXING_WORKERS_MIN..=INDEXING_WORKERS_MAX).contains(workers));
+    workers.ok_or_else(|| {
+        anyhow::anyhow!("{key} must be between {INDEXING_WORKERS_MIN} and {INDEXING_WORKERS_MAX}")
+    })
 }
 
 pub(super) fn parse_daemon_mode(value: &ConfigValue) -> Result<DaemonMode> {

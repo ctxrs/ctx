@@ -1030,3 +1030,186 @@ fn catalog_status_reports_automatic_roots_and_request_scoped_explicit_overlays()
     let pending = catalog_report(None, None);
     assert_eq!(pending["status"], "pending");
 }
+
+#[test]
+fn lexical_report_exposes_upgrade_scope_and_live_progress_only_during_upgrade() {
+    let temp = tempfile::tempdir().unwrap();
+    let index_root = temp.path().join("search/lexical");
+    let source = SourceKey::derive(
+        "codex",
+        "codex_session_jsonl",
+        "session",
+        1,
+        SourceAnchor::provider_native(
+            "session-file",
+            TypedKey::utf8("upgrade-progress.jsonl").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let native_session_key =
+        NativeSessionKey::native_id("session", TypedKey::utf8("upgrade-session-1").unwrap())
+            .unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source: &source,
+        logical_session_kind: "thread",
+        native_session_key: &native_session_key,
+    })
+    .unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &NativeItemKey::native_id("message", TypedKey::U64(1)).unwrap(),
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let mut record = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        source.clone(),
+        1,
+        "message",
+        "upgrade-status-v1",
+        "upgrade scope test",
+    )
+    .unwrap();
+    record.provider_session_id = Some("upgrade-session-1".to_owned());
+    record.native_event_id = Some(TypedKey::U64(1));
+    record.role = Some("user".to_owned());
+    record.validate_contract().unwrap();
+
+    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(record).unwrap();
+    let observation = SourceObservation::new(source, "regular-file-v1", vec![1_u8]).unwrap();
+    writer
+        .certify_source(
+            CertifiedSource::certify(
+                observation.clone(),
+                observation,
+                "upgrade-status-parser-v1",
+                [2; 32],
+                ScannedSourceCounts {
+                    complete_records: 1,
+                    retained_records: 1,
+                    indexed_documents: 1,
+                    certified_bytes: 4096,
+                    ..ScannedSourceCounts::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let current_policy = current_source_generation_policy();
+    let current_policy_hash = current_source_generation_policy_hash().unwrap();
+    let current_policy_json = serde_json::to_value(&current_policy).unwrap();
+
+    // When policy matches, lexical.upgrade is omitted.
+    let (ready, _) = lexical_report(
+        temp.path(),
+        None,
+        &current_policy_hash,
+        current_policy_json.clone(),
+        false,
+    );
+    assert_eq!(ready["status"], "ready");
+    assert!(ready.get("upgrade").is_none());
+
+    // When policy mismatches and no active rebuild is running (even if a stale
+    // published job exists), awaiting_upgrade exposes manifest scope without
+    // leaking stale progress counters.
+    let stale_job = json!({
+        "request_state": "published",
+        "progress": {
+            "phase": "published",
+            "processed_bytes": 999,
+            "estimated_remaining_millis": 1234,
+        }
+    });
+    let (awaiting, _) = lexical_report(
+        temp.path(),
+        Some(&stale_job),
+        "different-policy-hash",
+        current_policy_json.clone(),
+        false,
+    );
+    assert_eq!(awaiting["status"], "awaiting_upgrade");
+    assert_eq!(awaiting["reason"], "generation_upgrade_required");
+    assert_eq!(
+        awaiting["upgrade"]["estimate_source"],
+        "active_generation_manifest"
+    );
+    assert_eq!(awaiting["upgrade"]["estimated_total_sources"], 1);
+    assert_eq!(awaiting["upgrade"]["estimated_total_source_bytes"], 4096);
+    assert_eq!(awaiting["upgrade"]["estimated_total_documents"], 1);
+    assert!(awaiting["upgrade"].get("processed_bytes").is_none());
+    assert!(awaiting["upgrade"]
+        .get("estimated_remaining_millis")
+        .is_none());
+
+    // While a rebuild is actively running, lexical.upgrade includes both the
+    // manifest-derived estimated total and live progress/ETA fields.
+    let running_job = json!({
+        "request_state": "running",
+        "progress": {
+            "phase": "parsing",
+            "whole_run_stage": "reading",
+            "completed_sources": 2,
+            "total_sources": 5,
+            "total_sources_known": true,
+            "completed_records": 42,
+            "processed_bytes": 2048,
+            "processed_sessions": 3,
+            "processed_messages": 20,
+            "processed_tool_calls": 4,
+            "elapsed_millis": 15_000,
+            "estimated_remaining_millis": 45_000,
+        }
+    });
+    let (rebuilding, _) = lexical_report(
+        temp.path(),
+        Some(&running_job),
+        "different-policy-hash",
+        current_policy_json.clone(),
+        false,
+    );
+    assert_eq!(rebuilding["status"], "rebuilding");
+    assert_eq!(rebuilding["upgrade"]["estimated_total_sources"], 1);
+    assert_eq!(rebuilding["upgrade"]["estimated_total_source_bytes"], 4096);
+    assert_eq!(rebuilding["upgrade"]["phase"], "parsing");
+    assert_eq!(rebuilding["upgrade"]["whole_run_stage"], "reading");
+    assert_eq!(rebuilding["upgrade"]["completed_routes"], 2);
+    assert_eq!(rebuilding["upgrade"]["total_routes"], 5);
+    assert_eq!(rebuilding["upgrade"]["processed_bytes"], 2048);
+    assert_eq!(rebuilding["upgrade"]["completed_records"], 42);
+    assert_eq!(rebuilding["upgrade"]["estimated_remaining_millis"], 45_000);
+
+    // While running without a qualified ETA yet, estimated_remaining_millis
+    // stays explicitly null.
+    let unqualified_job = json!({
+        "request_state": "running",
+        "progress": {
+            "phase": "parsing",
+            "whole_run_stage": "reading",
+            "processed_bytes": 512,
+            "estimated_remaining_millis": null,
+        }
+    });
+    let (rebuilding_no_eta, _) = lexical_report(
+        temp.path(),
+        Some(&unqualified_job),
+        "different-policy-hash",
+        current_policy_json,
+        true,
+    );
+    assert_eq!(
+        rebuilding_no_eta["upgrade"]["estimated_remaining_millis"],
+        Value::Null
+    );
+}

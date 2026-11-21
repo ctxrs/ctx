@@ -98,6 +98,8 @@ pub enum DaemonSupervisor {
 #[derive(Debug, Clone)]
 pub struct DaemonConfigSnapshot {
     pub daemon: DaemonProductConfig,
+    pub indexing_memory_mb: Option<usize>,
+    pub indexing_workers: Option<usize>,
     pub semantic_enabled: bool,
     pub semantic_executor: SemanticEmbeddingExecutorConfig,
     pub semantic_builtin_throttling_configured: bool,
@@ -110,6 +112,8 @@ impl Default for DaemonConfigSnapshot {
     fn default() -> Self {
         Self {
             daemon: DaemonProductConfig::default(),
+            indexing_memory_mb: None,
+            indexing_workers: None,
             semantic_enabled: false,
             semantic_executor: SemanticEmbeddingExecutorConfig::default(),
             semantic_builtin_throttling_configured: true,
@@ -475,6 +479,8 @@ mod tests {
                 enabled: true,
                 mode: DaemonMode::Full,
             },
+            indexing_memory_mb: None,
+            indexing_workers: None,
             semantic_enabled: true,
             semantic_executor: Default::default(),
             semantic_builtin_throttling_configured: true,

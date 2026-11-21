@@ -662,9 +662,15 @@ pub(super) fn new_refresh_attempt(
     refresh_scope: SourceBackedRefreshScope,
 ) -> SourceBackedRefreshAttempt {
     let request_id = Uuid::now_v7().to_string();
-    let eta_eligible = observed_generation.is_none()
-        && intent == RefreshIntent::AutomaticMaintenance
-        && matches!(&refresh_scope, SourceBackedRefreshScope::All);
+    let full_scope_intent = matches!(
+        &intent,
+        RefreshIntent::AutomaticMaintenance
+            | RefreshIntent::SelectedImport {
+                selection: RefreshSelection::All,
+                ..
+            }
+    );
+    let eta_eligible = full_scope_intent && matches!(&refresh_scope, SourceBackedRefreshScope::All);
     let reconciliation_demand = intent.reconciliation_demand();
     SourceBackedRefreshAttempt {
         request_id: request_id.clone(),

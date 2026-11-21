@@ -63,6 +63,8 @@ fn config_snapshot_with_channel(
                 crate::composition::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
             },
         },
+        indexing_memory_mb: config.indexing_memory_mb(),
+        indexing_workers: config.indexing_workers(),
         semantic_enabled: config.semantic_search_enabled(),
         semantic_executor: config.semantic_embedding_executor().clone(),
         semantic_builtin_throttling_configured: config.semantic_builtin_throttling_configured(),

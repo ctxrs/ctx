@@ -77,6 +77,7 @@ fn execute_capture_owned_refresh_once(
 ) -> Result<SourceBackedRefreshPublication> {
     let discovery_context = execution.discovery_context;
     let reconciliation_demand = execution.reconciliation_demand;
+    let indexing_limits = execution.indexing_limits;
     let attempt_history_progress = execution.attempt_history_progress.clone();
     let route_worksets = execution
         .admitted_refresh()
@@ -118,6 +119,7 @@ fn execute_capture_owned_refresh_once(
                 scope,
                 physical_scope,
                 published_state,
+                indexing_limits,
                 attempt_history_progress,
                 report_progress,
             )
@@ -338,6 +340,7 @@ pub fn refresh_all_provider_sources_route_local(
         admitted.publication_scope(),
         SourceBackedRefreshScope::Exact(admitted.exact_routes().clone()),
         published_state,
+        IndexingResourceLimits::default(),
         Default::default(),
         report_progress,
     )
@@ -396,6 +399,7 @@ pub fn refresh_all_provider_sources_route_local_with_worksets(
         admitted.publication_scope(),
         SourceBackedRefreshScope::Exact(admitted.exact_routes().clone()),
         published_state,
+        IndexingResourceLimits::default(),
         Default::default(),
         report_progress,
     )

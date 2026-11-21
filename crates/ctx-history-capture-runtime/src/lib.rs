@@ -569,6 +569,9 @@ pub trait CorePreparationPort: Clone + Send + Sync + 'static {
 /// live, not cumulative: large routes continue streaming after the writer
 /// consumes each bounded emission.
 pub const CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
+/// Minimum live prepared Core-record output allowance when indexing memory is
+/// explicitly constrained below the default writer budget.
+pub const CORE_ROUTE_MIN_LIVE_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// A protocol emission carries at most one ordinary JSONL/Codex page worth of
 /// Core records. Fan-out projectors split additional batches at this bound.
@@ -663,9 +666,23 @@ pub struct CoreRouteResources {
 
 impl CoreRouteResources {
     pub fn production(leaf_worker_budget: usize) -> Self {
-        Self::with_byte_limits(
+        Self::production_with_live_output_limit(
             leaf_worker_budget,
             CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES,
+        )
+    }
+
+    pub fn production_with_live_output_limit(
+        leaf_worker_budget: usize,
+        maximum_live_output_bytes: u64,
+    ) -> Self {
+        let clamped_output = maximum_live_output_bytes.clamp(
+            CORE_ROUTE_MIN_LIVE_OUTPUT_BYTES,
+            CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES,
+        );
+        Self::with_byte_limits(
+            leaf_worker_budget,
+            clamped_output,
             CORE_ROUTE_MAX_PHYSICAL_SCRATCH_BYTES,
         )
     }

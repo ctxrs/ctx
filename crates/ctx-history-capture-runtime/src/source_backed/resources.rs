@@ -52,8 +52,21 @@ pub struct SourceBackedRouteResources {
 
 impl SourceBackedRouteResources {
     pub fn production(leaf_worker_budget: usize) -> Self {
+        Self::production_with_live_output_limit(
+            leaf_worker_budget,
+            crate::CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES,
+        )
+    }
+
+    pub fn production_with_live_output_limit(
+        leaf_worker_budget: usize,
+        maximum_live_output_bytes: u64,
+    ) -> Self {
         Self {
-            core: CoreRouteResources::production(leaf_worker_budget),
+            core: CoreRouteResources::production_with_live_output_limit(
+                leaf_worker_budget,
+                maximum_live_output_bytes,
+            ),
             reconciliation_demand: SourceBackedReconciliationDemand::Exhaustive,
             member_workset: None,
             intermediate_activity: Arc::new(SourceBackedIntermediateActivity::default()),

@@ -7,6 +7,7 @@ pub(super) struct SourceBackedRefreshPlan {
     pub(super) reconciliation_demand: SourceBackedReconciliationDemand,
     pub(super) route_worksets: BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
     pub(super) attempt_history_progress: SharedAttemptHistoryProgress,
+    maximum_live_output_bytes: u64,
     #[cfg(test)]
     resource_limits: Option<(u64, u64)>,
 }
@@ -19,9 +20,16 @@ impl SourceBackedRefreshPlan {
             reconciliation_demand: SourceBackedReconciliationDemand::Exhaustive,
             route_worksets: BTreeMap::new(),
             attempt_history_progress: SharedAttemptHistoryProgress::default(),
+            maximum_live_output_bytes:
+                ctx_history_capture_runtime::CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES,
             #[cfg(test)]
             resource_limits: None,
         }
+    }
+
+    pub(super) fn with_maximum_live_output_bytes(mut self, maximum_live_output_bytes: u64) -> Self {
+        self.maximum_live_output_bytes = maximum_live_output_bytes;
+        self
     }
 
     pub(super) fn with_publication_scope(mut self, scope: SourceBackedRefreshScope) -> Self {
@@ -75,10 +83,13 @@ impl SourceBackedRefreshPlan {
                 .with_member_workset(self.route_worksets.get(route).cloned())
                 .with_attempt_history_progress(self.attempt_history_progress.clone());
         }
-        SourceBackedRouteResources::production(work_budget)
-            .with_reconciliation_demand(self.reconciliation_demand)
-            .with_member_workset(self.route_worksets.get(route).cloned())
-            .with_attempt_history_progress(self.attempt_history_progress.clone())
+        SourceBackedRouteResources::production_with_live_output_limit(
+            work_budget,
+            self.maximum_live_output_bytes,
+        )
+        .with_reconciliation_demand(self.reconciliation_demand)
+        .with_member_workset(self.route_worksets.get(route).cloned())
+        .with_attempt_history_progress(self.attempt_history_progress.clone())
     }
 }
 

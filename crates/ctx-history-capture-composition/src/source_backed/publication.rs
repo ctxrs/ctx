@@ -137,6 +137,7 @@ pub struct SourceBackedRefreshExecutor {
     writer_options: WriterOptions,
     discovery_duration: Duration,
     work_budget: usize,
+    maximum_live_output_bytes: u64,
     base_route_controls: BTreeMap<SourceRouteIdentity, Vec<u8>>,
     attempt_history_progress: SharedAttemptHistoryProgress,
 }
@@ -157,9 +158,22 @@ impl SourceBackedRefreshExecutor {
             writer_options,
             discovery_duration,
             work_budget,
+            maximum_live_output_bytes:
+                ctx_history_capture_runtime::CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES,
             base_route_controls: BTreeMap::new(),
             attempt_history_progress: SharedAttemptHistoryProgress::default(),
         }
+    }
+
+    /// Applies explicit indexing memory and worker limits to scanner worker
+    /// concurrency and live route-output reservations.
+    pub fn with_indexing_limits(mut self, limits: IndexingResourceLimits) -> Self {
+        self.work_budget = source_backed_refresh_work_budget_with_limits(
+            self.writer_options.indexer_threads,
+            limits,
+        );
+        self.maximum_live_output_bytes = limits.core_route_max_live_output_bytes();
+        self
     }
 
     pub fn with_base_route_controls(
@@ -194,7 +208,8 @@ impl SourceBackedRefreshExecutor {
             SourceBackedWriterOpen::unchecked(self.writer_options.clone()),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
-                SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
+                SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All)
+                    .with_maximum_live_output_bytes(self.maximum_live_output_bytes),
                 &self.base_route_controls,
             ),
             move |update| {
@@ -218,7 +233,8 @@ impl SourceBackedRefreshExecutor {
             SourceBackedWriterOpen::unchecked(self.writer_options.clone()),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
-                SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
+                SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All)
+                    .with_maximum_live_output_bytes(self.maximum_live_output_bytes),
                 &self.base_route_controls,
             ),
             report_progress,
@@ -239,7 +255,8 @@ impl SourceBackedRefreshExecutor {
             SourceBackedWriterOpen::unchecked(self.writer_options.clone()),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
-                SourceBackedRefreshPlan::isolate(scope),
+                SourceBackedRefreshPlan::isolate(scope)
+                    .with_maximum_live_output_bytes(self.maximum_live_output_bytes),
                 &self.base_route_controls,
             ),
             move |update| {
@@ -264,7 +281,8 @@ impl SourceBackedRefreshExecutor {
             SourceBackedWriterOpen::unchecked(self.writer_options.clone()),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
-                SourceBackedRefreshPlan::isolate(scope),
+                SourceBackedRefreshPlan::isolate(scope)
+                    .with_maximum_live_output_bytes(self.maximum_live_output_bytes),
                 &self.base_route_controls,
             ),
             report_progress,
@@ -286,6 +304,7 @@ impl SourceBackedRefreshExecutor {
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
                 SourceBackedRefreshPlan::isolate(scope)
+                    .with_maximum_live_output_bytes(self.maximum_live_output_bytes)
                     .with_reconciliation_demand(reconciliation_demand),
                 &self.base_route_controls,
             ),
@@ -316,6 +335,7 @@ impl SourceBackedRefreshExecutor {
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
                 SourceBackedRefreshPlan::isolate(physical_scope)
+                    .with_maximum_live_output_bytes(self.maximum_live_output_bytes)
                     .with_publication_scope(publication_scope)
                     .with_reconciliation_demand(reconciliation_demand)
                     .with_route_worksets(route_worksets)
@@ -357,6 +377,7 @@ impl SourceBackedRefreshExecutor {
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
                 SourceBackedRefreshPlan::isolate(physical_scope)
+                    .with_maximum_live_output_bytes(self.maximum_live_output_bytes)
                     .with_publication_scope(publication_scope)
                     .with_reconciliation_demand(reconciliation_demand)
                     .with_route_worksets(route_worksets)

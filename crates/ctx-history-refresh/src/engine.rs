@@ -323,9 +323,15 @@ impl CoreRefreshEngine {
         runtime: Arc<dyn RefreshRuntime>,
         executor: Arc<dyn SourceBackedRefreshExecutor>,
     ) -> Self {
+        let admission_runtime = Arc::clone(&runtime);
         Self::with_runtime(
             executor,
-            Arc::new(source_backed_route_admission_fence),
+            Arc::new(move |discovery, journal, data_root, catalog| {
+                let limits = admission_runtime.indexing_limits(data_root)?;
+                source_backed_route_admission_fence_with_limits(
+                    discovery, journal, data_root, catalog, limits,
+                )
+            }),
             journal,
             runtime,
         )

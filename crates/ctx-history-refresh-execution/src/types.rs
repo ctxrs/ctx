@@ -340,6 +340,7 @@ pub struct SourceBackedRefreshExecution<'a> {
     pub explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
     admitted_refresh: AdmittedRefresh,
     pub discovery_context: &'a DiscoveryContext,
+    pub indexing_limits: IndexingResourceLimits,
     #[doc(hidden)]
     pub published_state: &'a dyn PublishedSourceBackedStatePort,
     #[doc(hidden)]
@@ -374,6 +375,7 @@ impl<'a> SourceBackedRefreshExecution<'a> {
             explicit_source_catalog,
             admitted_refresh,
             discovery_context,
+            indexing_limits: IndexingResourceLimits::default(),
             published_state,
             attempt_history_progress: Default::default(),
             report_progress,
@@ -382,6 +384,11 @@ impl<'a> SourceBackedRefreshExecution<'a> {
 
     pub fn with_reconciliation_demand(mut self, demand: SourceBackedReconciliationDemand) -> Self {
         self.reconciliation_demand = demand;
+        self
+    }
+
+    pub fn with_indexing_limits(mut self, limits: IndexingResourceLimits) -> Self {
+        self.indexing_limits = limits;
         self
     }
 

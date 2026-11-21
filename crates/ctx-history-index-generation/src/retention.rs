@@ -34,14 +34,16 @@ pub use repair::quarantine_invalid_retention_lease_with_writer_lock_held;
 pub(crate) use read_lease::{
     acquire_candidate_generation_directory_read_authority,
     acquire_existing_generation_directory_read_authority, ensure_generation_read_lease_coordinator,
-    try_generation_directory_reclaim_authority, try_generation_id_reclaim_authority,
-    CertificationGuard, ExistingGenerationDirectoryReadAuthority,
+    try_generation_id_reclaim_authority, CertificationGuard,
+    ExistingGenerationDirectoryReadAuthority,
 };
 pub use read_lease::{
     acquire_generation_read_lease, acquire_generation_read_lease_from_root,
     acquire_retained_generation_read_lease, acquire_retained_generation_read_lease_from_root,
     GenerationReadLease,
 };
+#[doc(hidden)]
+pub use read_lease::{try_generation_directory_reclaim_authority, GenerationReclaimAuthority};
 
 const GENERATION_RETENTION_LEASE_FILE: &str = "generation-retention-lease.json";
 const GENERATION_RETENTION_LEASE_STAGED_FILE: &str = ".generation-retention-lease.next";
