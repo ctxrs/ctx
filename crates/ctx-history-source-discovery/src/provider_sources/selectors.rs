@@ -13,7 +13,8 @@ use ctx_history_capture_model::provider_root_path_within_limit;
 
 use ctx_history_source_io::{
     open_provider_source_file, open_provider_source_path, OpenedProviderSourceFile,
-    OpenedProviderSourcePath, ProviderSourceRoot, SourceIoError,
+    OpenedProviderSourcePath, ProviderSourceRoot, SourceIoError, NON_REGULAR_PROVIDER_SOURCE_REASON,
+    REPARSE_PROVIDER_SOURCE_REASON, SYMLINK_PROVIDER_SOURCE_REASON,
 };
 
 pub(super) const MAX_SELECTOR_FILE_BYTES: usize = 1024 * 1024;
@@ -544,6 +545,107 @@ pub(super) fn read_bounded_bytes(
         .map_err(selector_open_error)
 }
 
+pub(super) struct PartitionedDirectDirectories {
+    pub(super) directories: Vec<PathBuf>,
+    pub(super) unsafe_entries: Vec<PathBuf>,
+}
+
+fn is_ignorable_direct_entry_error(error: &SourceIoError) -> bool {
+    matches!(
+        error,
+        SourceIoError::InvalidProviderTranscriptPath { reason, .. }
+            if *reason == SYMLINK_PROVIDER_SOURCE_REASON
+                || *reason == REPARSE_PROVIDER_SOURCE_REASON
+                || *reason == NON_REGULAR_PROVIDER_SOURCE_REASON
+    )
+}
+
+/// Enumerates direct child directories under `path`, isolating ignorable
+/// non-regular/symlink/reparse entries instead of failing the whole directory.
+pub(super) fn direct_ordinary_directories_partitioned(
+    path: &Path,
+) -> Result<PartitionedDirectDirectories, SelectorReadError> {
+    let opened = open_provider_source_path(path).map_err(selector_open_error)?;
+    let OpenedProviderSourcePath::Directory(directory) = opened else {
+        return Err(SelectorReadError::Unavailable);
+    };
+    let authority = directory.authority_root();
+    let names = directory
+        .entries(MAX_DIRECT_DIRECTORY_ENTRIES.saturating_add(1))
+        .map_err(selector_open_error)?;
+    if names.len() > MAX_DIRECT_DIRECTORY_ENTRIES {
+        return Err(SelectorReadError::DirectoryLimit);
+    }
+
+    let mut directory_fingerprints: Vec<(OsString, [u8; 32])> = Vec::new();
+    let mut unsafe_names: Vec<OsString> = Vec::new();
+    for name in &names {
+        match directory.open_child(name) {
+            Ok(OpenedProviderSourcePath::Directory(child)) => {
+                child.revalidate().map_err(selector_open_error)?;
+                child
+                    .authority_root()
+                    .revalidate()
+                    .map_err(selector_open_error)?;
+                directory_fingerprints.push((name.clone(), child.authority_fingerprint()));
+            }
+            Ok(OpenedProviderSourcePath::File(child)) => {
+                child.revalidate().map_err(selector_open_error)?;
+            }
+            Err(error) if is_ignorable_direct_entry_error(&error) => {
+                unsafe_names.push(name.clone());
+            }
+            Err(error) => return Err(selector_open_error(error)),
+        }
+    }
+    directory.revalidate().map_err(selector_open_error)?;
+    authority.revalidate().map_err(selector_open_error)?;
+
+    let closing_names = directory
+        .entries(MAX_DIRECT_DIRECTORY_ENTRIES.saturating_add(1))
+        .map_err(selector_open_error)?;
+    if closing_names != names {
+        return Err(SelectorReadError::Unavailable);
+    }
+    for (name, fingerprint) in &directory_fingerprints {
+        let child = directory.open_child(name).map_err(selector_open_error)?;
+        let OpenedProviderSourcePath::Directory(child_dir) = child else {
+            return Err(SelectorReadError::Unavailable);
+        };
+        if child_dir.authority_fingerprint() != *fingerprint {
+            return Err(SelectorReadError::Unavailable);
+        }
+        child_dir.revalidate().map_err(selector_open_error)?;
+        child_dir
+            .authority_root()
+            .revalidate()
+            .map_err(selector_open_error)?;
+    }
+    for name in &unsafe_names {
+        match directory.open_child(name) {
+            Err(error) if is_ignorable_direct_entry_error(&error) => {}
+            _ => return Err(SelectorReadError::Unavailable),
+        }
+    }
+    directory.revalidate().map_err(selector_open_error)?;
+    authority.revalidate().map_err(selector_open_error)?;
+
+    let mut directories = directory_fingerprints
+        .into_iter()
+        .map(|(name, _)| path.join(name))
+        .collect::<Vec<_>>();
+    let mut unsafe_entries = unsafe_names
+        .into_iter()
+        .map(|name| path.join(name))
+        .collect::<Vec<_>>();
+    sort_paths(&mut directories);
+    sort_paths(&mut unsafe_entries);
+    Ok(PartitionedDirectDirectories {
+        directories,
+        unsafe_entries,
+    })
+}
+
 pub(super) fn direct_entries(path: &Path) -> Result<Vec<PathBuf>, SelectorReadError> {
     direct_entries_filtered(path, |_| true, false)
 }
@@ -644,7 +746,11 @@ fn revalidate_opened_path(opened: &OpenedProviderSourcePath) -> ctx_history_sour
 
 fn source_path_error(error: SourceIoError) -> SourcePathError {
     match error {
-        SourceIoError::Io(error) if error.kind() == ErrorKind::NotFound => SourcePathError::Missing,
+        SourceIoError::Io(error) | SourceIoError::SystemIo { source: error, .. }
+            if error.kind() == ErrorKind::NotFound =>
+        {
+            SourcePathError::Missing
+        }
         SourceIoError::Io(error) => SourcePathError::Unavailable(error.kind()),
         SourceIoError::InvalidProviderTranscriptPath { reason, .. } => {
             SourcePathError::Unsupported(reason)

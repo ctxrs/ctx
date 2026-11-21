@@ -1,6 +1,6 @@
 //! Source-backed discovery, parsing, and complete Core projection for native JSONL providers.
 
-mod antigravity;
+pub(crate) mod antigravity;
 mod copilot;
 mod factory_ai_droid;
 mod grok_build;

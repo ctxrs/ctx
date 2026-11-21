@@ -38,10 +38,7 @@ pub(super) fn has_antigravity_transcript(root: &Path, max_entries: usize) -> Bou
     let directory = match open_provider_source_path(root) {
         Ok(OpenedProviderSourcePath::Directory(directory)) => directory,
         Ok(OpenedProviderSourcePath::File(_)) => return BoundedProbe::NotFound,
-        Err(SourceIoError::Io(error)) if error.kind() == ErrorKind::NotFound => {
-            return BoundedProbe::NotFound;
-        }
-        Err(_) => return BoundedProbe::IoError,
+        Err(error) => return classify_open_root_error(&error),
     };
     let entries = match directory.entries(max_entries.saturating_add(1)) {
         Ok(entries) => entries,
@@ -58,4 +55,46 @@ pub(super) fn has_antigravity_transcript(root: &Path, max_entries: usize) -> Bou
         }
     }
     BoundedProbe::NotFound
+}
+
+fn classify_open_root_error(error: &SourceIoError) -> BoundedProbe {
+    match error {
+        SourceIoError::Io(io_error) | SourceIoError::SystemIo { source: io_error, .. }
+            if io_error.kind() == ErrorKind::NotFound =>
+        {
+            BoundedProbe::NotFound
+        }
+        _ => BoundedProbe::IoError,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn classify_open_root_error_maps_io_and_system_io_not_found() {
+        let plain = SourceIoError::Io(io::Error::new(ErrorKind::NotFound, "missing"));
+        assert_eq!(classify_open_root_error(&plain), BoundedProbe::NotFound);
+
+        let system_not_found = SourceIoError::SystemIo {
+            operation: "provider source open",
+            source: io::Error::new(ErrorKind::NotFound, "missing on windows"),
+        };
+        assert_eq!(
+            classify_open_root_error(&system_not_found),
+            BoundedProbe::NotFound
+        );
+
+        let system_denied = SourceIoError::SystemIo {
+            operation: "provider source open",
+            source: io::Error::new(ErrorKind::PermissionDenied, "denied"),
+        };
+        assert_eq!(
+            classify_open_root_error(&system_denied),
+            BoundedProbe::IoError
+        );
+    }
 }
