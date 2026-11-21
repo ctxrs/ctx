@@ -726,17 +726,19 @@ fn optional_background_queue_full_reads_pin_without_acceptance() -> Result<()> {
         )?
         .generation_id;
         let engine = Arc::new(CoreRefreshEngine::new());
+        // Duplicate background maintenance wakes coalesce into one pending slot,
+        // so saturate all 8 slots with non-coalesceable foreground imports.
         for index in 0..8 {
             let response = engine
                 .handle_ipc_request(
                     data_root.path(),
                     &json!({
-                        "op": SOURCE_REFRESH_REQUEST_OP, "mode": "background", "trigger": "search",
+                        "op": SOURCE_REFRESH_REQUEST_OP, "mode": "wait", "trigger": "import",
                         "request_id": format!("019fcaaa-0000-7000-8000-{index:012}"),
-                        "refresh_intent": {"kind": "automatic_maintenance"},
+                        "refresh_intent": {"kind": "selected_import", "selection": {"kind": "all"}},
                     }),
                 )?
-                .context("background admission")?;
+                .context("foreground import admission")?;
             assert_eq!(response["ok"], true);
         }
         let job_path = crate::paths_status::daemon_source_backed_refresh_job_path(data_root.path());
