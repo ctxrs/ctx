@@ -2,23 +2,27 @@
 
 mod native;
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
 
-use ctx_history_core::{CaptureProvider, CoreRecord};
+use ctx_history_core::{CaptureProvider, CoreRecord, TypedKey};
 use serde_json::{Map, Value};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
     import::{
-        StoredAtifEmptyMessageStep, StoredAtifEnvelope, StoredAtifRecord, StoredAtifRecordKind,
-        StoredAtifTrajectoryHeader,
+        path_to_posix_key, resolve_local_relative_path, StoredAtifEmptyMessageStep,
+        StoredAtifEnvelope, StoredAtifRecord, StoredAtifRecordKind, StoredAtifTrajectoryHeader,
     },
     schema::{
         AtifValidationError, MessageContent, Metrics, Observation, ObservationResult,
         ReasoningEffort, SchemaVersion, Step, StepSource, SubagentTrajectoryRef, ToolCall,
         Trajectory, MAX_SUBAGENT_NESTING_DEPTH,
     },
+    ATIF_SOURCE_FORMAT,
 };
 
 use native::export_native_trajectory;
@@ -135,6 +139,7 @@ fn build_trajectory_recursive(
         ordered_children.sort_by_key(|child| embedded_subagent_index(child).unwrap_or(usize::MAX));
         let mut used_ids = HashSet::new();
         let mut embedded = Vec::with_capacity(ordered_children.len());
+        let mut embedded_doc_keys = Vec::with_capacity(ordered_children.len());
         for child in ordered_children {
             if child.records.is_empty() {
                 continue;
@@ -144,14 +149,78 @@ fn build_trajectory_recursive(
             let child_traj =
                 build_trajectory_recursive(child, options, Some(unique_id.clone()), depth + 1)?;
             embedded.push(child_traj);
+            embedded_doc_keys.push(extract_session_document_key(child));
         }
         if !embedded.is_empty() {
-            ensure_parent_references_embedded_subagents(&mut trajectory, &embedded);
+            let parent_doc_key = extract_session_document_key(session);
+            ensure_parent_references_embedded_subagents(
+                &mut trajectory,
+                parent_doc_key.as_deref(),
+                &embedded,
+                &embedded_doc_keys,
+            );
             trajectory.subagent_trajectories = Some(embedded);
         }
+    } else if !options.include_subagents {
+        strip_dangling_embedded_subagent_refs(&mut trajectory);
     }
 
     Ok(trajectory)
+}
+
+fn extract_session_document_key(session: &AtifExportSession) -> Option<String> {
+    for record in &session.records {
+        if let Some(envelope) = extract_stored_envelope(record) {
+            if let Some(key) = envelope
+                .atif
+                .trajectory
+                .and_then(|header| header.document_key)
+                .filter(|value| !value.trim().is_empty())
+            {
+                return Some(key);
+            }
+        }
+        if session.source_format == ATIF_SOURCE_FORMAT {
+            if let Some(TypedKey::Composite(parts)) = record.native_event_id.as_ref() {
+                if let Some(TypedKey::Utf8(key)) = parts.first() {
+                    if !key.trim().is_empty() {
+                        return Some(key.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn strip_dangling_embedded_subagent_refs(trajectory: &mut Trajectory) {
+    for step in &mut trajectory.steps {
+        let Some(obs) = step.observation.as_mut() else {
+            continue;
+        };
+        for result in &mut obs.results {
+            if let Some(refs) = result.subagent_trajectory_ref.as_mut() {
+                refs.retain(|sub_ref| {
+                    sub_ref
+                        .trajectory_path
+                        .as_deref()
+                        .is_some_and(|path| !path.trim().is_empty())
+                });
+                if refs.is_empty() {
+                    result.subagent_trajectory_ref = None;
+                }
+            }
+        }
+        obs.results.retain(|result| {
+            result.source_call_id.is_some()
+                || result.content.is_some()
+                || result.subagent_trajectory_ref.is_some()
+                || result.extra.is_some()
+        });
+        if obs.results.is_empty() {
+            step.observation = None;
+        }
+    }
 }
 
 fn embedded_subagent_index(child: &AtifExportSession) -> Option<usize> {
@@ -199,14 +268,54 @@ pub(super) fn allocate_unique_id(base: String, used: &mut HashSet<String>) -> St
     }
 }
 
-fn ensure_parent_references_embedded_subagents(parent: &mut Trajectory, embedded: &[Trajectory]) {
+fn ensure_parent_references_embedded_subagents(
+    parent: &mut Trajectory,
+    parent_document_key: Option<&str>,
+    embedded: &[Trajectory],
+    embedded_document_keys: &[Option<String>],
+) {
+    let mut embedded_by_doc_key: BTreeMap<&str, (&str, Option<&str>)> = BTreeMap::new();
+    let mut embedded_ids: HashSet<&str> = HashSet::with_capacity(embedded.len());
+    for (child, doc_key) in embedded.iter().zip(embedded_document_keys.iter()) {
+        if let Some(tid) = child.trajectory_id.as_deref() {
+            embedded_ids.insert(tid);
+            if let Some(key) = doc_key.as_deref() {
+                embedded_by_doc_key
+                    .entry(key)
+                    .or_insert((tid, child.session_id.as_deref()));
+            }
+        }
+    }
+
+    let parent_rel = Path::new(parent_document_key.unwrap_or(""));
     let mut already_referenced: HashSet<String> = HashSet::new();
     for step in &mut parent.steps {
         if let Some(obs) = step.observation.as_mut() {
             for result in &mut obs.results {
                 if let Some(refs) = result.subagent_trajectory_ref.as_mut() {
                     for sub_ref in refs {
+                        if let Some(raw_path) = sub_ref.trajectory_path.as_deref() {
+                            if let Some(resolved_key) =
+                                resolve_local_relative_path(parent_rel, raw_path)
+                                    .map(|path| path_to_posix_key(&path))
+                            {
+                                if let Some(&(tid, child_sid)) =
+                                    embedded_by_doc_key.get(resolved_key.as_str())
+                                {
+                                    sub_ref.trajectory_id = Some(tid.to_owned());
+                                    sub_ref.trajectory_path = None;
+                                    if sub_ref.session_id.is_none() {
+                                        sub_ref.session_id = child_sid.map(str::to_owned);
+                                    }
+                                    already_referenced.insert(tid.to_owned());
+                                    continue;
+                                }
+                            }
+                        }
                         if let Some(tid) = sub_ref.trajectory_id.as_deref() {
+                            if embedded_ids.contains(tid) && sub_ref.trajectory_path.is_some() {
+                                sub_ref.trajectory_path = None;
+                            }
                             already_referenced.insert(tid.to_owned());
                         }
                     }
@@ -457,16 +566,26 @@ fn try_reconstruct_atif_trajectory(
     }
 
     let header = header?;
+    let is_embedded = embedded_trajectory_id.is_some();
     let trajectory_id = embedded_trajectory_id.or(header.trajectory_id);
     let session_id = header.session_id.or_else(|| {
-        if trajectory_id.is_some() {
+        if is_embedded {
             None
         } else {
-            session
-                .provider_session_id
-                .clone()
+            header
+                .inherited_session_id
                 .filter(|v| !v.trim().is_empty())
-                .or_else(|| Some(session.ctx_session_id.to_string()))
+                .or_else(|| {
+                    if trajectory_id.is_some() {
+                        None
+                    } else {
+                        session
+                            .provider_session_id
+                            .clone()
+                            .filter(|v| !v.trim().is_empty())
+                            .or_else(|| Some(session.ctx_session_id.to_string()))
+                    }
+                })
         }
     });
 

@@ -84,6 +84,8 @@ pub struct StoredAtifTrajectoryHeader {
     pub is_embedded_subagent: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedded_subagent_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_key: Option<String>,
 }
 
 /// Step-level metadata carried on the first tool call or observation record
@@ -398,6 +400,7 @@ fn emit_single_trajectory(
         extra: trajectory.extra.clone(),
         is_embedded_subagent: ctx.is_embedded_subagent.then_some(true),
         embedded_subagent_index: ctx.embedded_subagent_index,
+        document_key: Some(ctx.document_key.to_owned()),
     });
     let session_cwd = extract_session_cwd(trajectory);
     let mut event_sequence = 0_u64;
