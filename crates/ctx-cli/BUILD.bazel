@@ -464,6 +464,7 @@ ctx_cli_integration_test(
     ],
     extra_crates = ["fs2"],
     extra_data = ["//crates/ctx-history-index:schema_22_fixture"],
+    extra_deps = ["//crates/ctx-history-index:lib"],
     tags = ["privacy", "security"],
 )
 

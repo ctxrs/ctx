@@ -39,7 +39,7 @@ COMPOSITION_DEPS = [
 ]
 
 COMPOSITION_TEST_DEPS = [
-    "//crates/ctx-history-atif:lib",
+    "//crates/ctx-history-atif:test_support_lib",
     "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-capture-runtime:lib",
     "//crates/ctx-history-core:lib",

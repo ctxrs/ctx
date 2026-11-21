@@ -591,8 +591,8 @@ fn inline_published_receipt_and_source_count_skip_full_manifest_reads_on_flat_de
     drop(eager);
 
     // Cold lazy open + inline Published receipt verification + source_count must perform 0 manifest reads.
-    ctx_history_index::test_support::clear_manifest_cache_for_root(temp.path()).unwrap();
-    ctx_history_index::test_support::read_metrics::reset_metadata_read_activity();
+    ctx_history_index::clear_manifest_cache_for_root(temp.path()).unwrap();
+    ctx_history_index::read_metrics::reset_metadata_read_activity();
     let lazy = VerifiedIndex::open_pinned_for_query(temp.path()).unwrap();
     assert!(!lazy.has_loaded_full_manifest());
     let parsed = published_refresh_receipt_for_index(&response, &lazy).unwrap();
@@ -601,7 +601,7 @@ fn inline_published_receipt_and_source_count_skip_full_manifest_reads_on_flat_de
         !lazy.has_loaded_full_manifest(),
         "inline Published receipt validation and source_count must stay on the authenticated summary"
     );
-    let reads = ctx_history_index::test_support::read_metrics::metadata_read_activity();
+    let reads = ctx_history_index::read_metrics::metadata_read_activity();
     assert_eq!(reads.manifest.operations, 0);
     assert_eq!(reads.manifest.bytes, 0);
 }

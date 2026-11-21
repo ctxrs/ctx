@@ -334,7 +334,6 @@ impl Directory for DurableMmapDirectory {
                 Ok(bytes)
             }
         }?;
-        #[cfg(any(test, feature = "test-support"))]
         crate::read_metrics::record(|reads| &mut reads.tantivy_control, bytes.len());
         Ok(bytes)
     }

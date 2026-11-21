@@ -48,10 +48,7 @@ HISTORY_CLI_TEST_SUPPORT_DEPS = [
 ]
 
 # Concrete semantic projection is used only by the API/renderer unit fixture.
-HISTORY_CLI_UNIT_TEST_DEPS = [
-    dep.replace(":lib", ":test_support_lib") if dep == "//crates/ctx-history-index:lib" else dep
-    for dep in HISTORY_CLI_DEPS
-] + [
+HISTORY_CLI_UNIT_TEST_DEPS = HISTORY_CLI_DEPS + [
     "//crates/ctx-semantic-index:lib",
 ]
 

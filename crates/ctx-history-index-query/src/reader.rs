@@ -876,7 +876,6 @@ impl VerifiedIndex {
             .route_is_present_nonempty(&self.generation_id, lease, route)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn has_loaded_full_manifest(&self) -> bool {
         self.manifest.has_loaded_full_manifest()

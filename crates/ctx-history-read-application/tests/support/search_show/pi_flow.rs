@@ -7,7 +7,8 @@ fn pi_parser_revision(data_root: &Path) -> String {
     let index =
         ctx_history_index::VerifiedIndex::open_pinned(data_root.join("search/lexical")).unwrap();
     index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|certificate| certificate.observation().source().provider() == "pi")
@@ -21,7 +22,8 @@ fn publish_pi_v10_predecessor(data_root: &Path) -> String {
     let (legacy_sources, routes) = {
         let index = ctx_history_index::VerifiedIndex::open_pinned(&index_root).unwrap();
         let legacy_sources = index
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .sources
             .iter()
             .filter(|certificate| certificate.observation().source().provider() == "pi")
@@ -36,7 +38,10 @@ fn publish_pi_v10_predecessor(data_root: &Path) -> String {
             })
             .collect::<Vec<_>>();
         assert_eq!(legacy_sources.len(), 2);
-        (legacy_sources, index.manifest().source_routes().to_vec())
+        (
+            legacy_sources,
+            index.try_manifest().unwrap().source_routes().to_vec(),
+        )
     };
 
     let mut records = provider_core_records(data_root, "pi");

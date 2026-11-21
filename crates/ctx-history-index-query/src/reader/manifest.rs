@@ -219,7 +219,6 @@ impl VerifiedManifestState {
         }))
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn has_loaded_full_manifest(&self) -> bool {
         match self {
             Self::Loaded(_) => true,

@@ -46,6 +46,8 @@ pub use commit_contract::{
 };
 
 pub use ctx_history_core::CoreRecord;
+#[doc(hidden)]
+pub use ctx_history_index_format::clear_manifest_cache_for_root;
 #[cfg(test)]
 pub(crate) use ctx_history_index_format::required_field;
 pub(crate) use ctx_history_index_format::{
@@ -76,6 +78,8 @@ pub(crate) use ctx_history_index_format::{
 };
 #[cfg(test)]
 pub(crate) use ctx_history_index_format::{CommitPayload, COMMIT_PAYLOAD_VERSION};
+#[doc(hidden)]
+pub use ctx_history_index_generation::read_metrics;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support {
