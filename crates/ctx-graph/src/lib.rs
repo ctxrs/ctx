@@ -141,7 +141,7 @@ pub fn search_observed(
     let started = std::time::Instant::now();
     facts.phase = observation::GraphPhase::Open;
     let result = (|| {
-        let store = Store::open_read_only(db)?;
+        let mut store = Store::open_read_only(db)?;
         facts.phase = observation::GraphPhase::Query;
         store.query_extended(text, options)
     })();

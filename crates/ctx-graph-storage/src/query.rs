@@ -50,7 +50,7 @@ const MAX_ENDPOINT_FTS_BYTES: usize = 8 * 1024 * 1024;
 
 // The handler belongs to this request, not the Store: stats and writes must
 // not inherit a query's exhausted budget, including after an error.
-struct QueryBudget<'a>(&'a Connection);
+struct QueryBudget<'a>(&'a mut Connection);
 
 impl Drop for QueryBudget<'_> {
     fn drop(&mut self) {
@@ -60,23 +60,27 @@ impl Drop for QueryBudget<'_> {
     }
 }
 
-pub(crate) fn query(conn: &Connection, text: &str, options: &QueryOptions) -> Result<GraphResult> {
-    budgeted(conn, || query_snapshot(conn, text, options))
+pub(crate) fn query(
+    conn: &mut Connection,
+    text: &str,
+    options: &QueryOptions,
+) -> Result<GraphResult> {
+    budgeted(conn, |conn| query_snapshot(conn, text, options))
 }
 pub(crate) fn neighbors(
-    conn: &Connection,
+    conn: &mut Connection,
     symbol: &str,
     options: &QueryOptions,
 ) -> Result<GraphResult> {
-    budgeted(conn, || neighbors_snapshot(conn, symbol, options))
+    budgeted(conn, |conn| neighbors_snapshot(conn, symbol, options))
 }
 pub(crate) fn path(
-    conn: &Connection,
+    conn: &mut Connection,
     source: &str,
     target: &str,
     options: &QueryOptions,
 ) -> Result<PathResult> {
-    budgeted(conn, || path_snapshot(conn, source, target, options))
+    budgeted(conn, |conn| path_snapshot(conn, source, target, options))
 }
 
 // Resolve once before bounded relationship streams, never across transactions
@@ -180,12 +184,12 @@ struct OutputBudget {
 }
 
 pub(crate) fn query_extended(
-    conn: &Connection,
+    conn: &mut Connection,
     text: &str,
     options: &SearchOptions,
     exact_only: bool,
 ) -> Result<SearchResult> {
-    catalog_budgeted(conn, || {
+    catalog_budgeted(conn, |conn| {
         validate_search(options)?;
         let text = validate_text(text)?;
         let tx = conn.unchecked_transaction()?;
@@ -208,12 +212,12 @@ enum Step {
 }
 
 pub(crate) fn path_extended(
-    conn: &Connection,
+    conn: &mut Connection,
     source: &str,
     target: &str,
     options: &SearchOptions,
 ) -> Result<PathSearchResult> {
-    catalog_budgeted(conn, || {
+    catalog_budgeted(conn, |conn| {
         validate_search(options)?;
         ensure!(
             options.traversal == Traversal::Bfs,

@@ -66,7 +66,7 @@ pub(crate) fn read_observed(
 
 fn read_inner(db: &Path, command: ReadCommand, facts: &mut GraphObservation) -> Result<Output> {
     facts.phase = observation::GraphPhase::Open;
-    let store = Store::open_read_only(db)?;
+    let mut store = Store::open_read_only(db)?;
     facts.phase = observation::GraphPhase::Query;
     let (symbol, options, navigation) = match command {
         ReadCommand::Stats => {

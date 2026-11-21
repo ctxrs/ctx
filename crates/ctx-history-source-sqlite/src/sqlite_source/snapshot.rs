@@ -337,6 +337,17 @@ fn open_root_handle_sqlite_source_snapshot_with_progress_and_hooks<E>(
     })
 }
 
+impl SqliteSourceReadSnapshot {
+    pub fn connection_mut(&mut self) -> SqliteSourceAccessResult<&mut Connection> {
+        let connection = self
+            .connection
+            .as_mut()
+            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?;
+        verify_snapshot_active(connection)?;
+        Ok(connection)
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(super) use test_api::{
     open_root_handle_sqlite_source_snapshot_before_revalidation_for_test,

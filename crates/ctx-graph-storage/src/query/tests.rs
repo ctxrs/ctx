@@ -177,9 +177,9 @@ fn common_term_search_does_not_invoke_corpus_ranking() -> Result<()> {
 
 #[test]
 fn interrupted_query_removes_its_handler() -> Result<()> {
-    let conn = Connection::open_in_memory()?;
+    let mut conn = Connection::open_in_memory()?;
     let sql = "WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<1000000) SELECT sum(n) FROM numbers";
-    let error = budgeted(&conn, || {
+    let error = budgeted(&mut conn, |conn| {
         Ok(conn.query_row(sql, [], |row| row.get::<_, i64>(0))?)
     })
     .unwrap_err();

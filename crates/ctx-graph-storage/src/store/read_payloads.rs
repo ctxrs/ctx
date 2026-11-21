@@ -30,12 +30,12 @@ pub(super) fn connect_with_flags(path: &Path, flags: OpenFlags) -> Result<Connec
 pub(super) fn connect_with_setup(
     path: &Path,
     flags: OpenFlags,
-    configure: impl FnOnce(&Connection) -> Result<()>,
+    configure: impl FnOnce(&mut Connection) -> Result<()>,
 ) -> Result<Connection> {
-    let conn = Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    let mut conn = Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .with_context(|| format!("cannot open Graf database {}", path.display()))?;
     conn.busy_timeout(Duration::from_secs(5))?;
-    configure(&conn)?;
+    configure(&mut conn)?;
     conn.pragma_update(None, "foreign_keys", true)?;
     Ok(conn)
 }

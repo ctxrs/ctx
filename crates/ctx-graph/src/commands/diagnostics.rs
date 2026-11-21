@@ -135,7 +135,7 @@ pub(crate) fn benchmark(
     );
     let path = local_database(db)?;
     regular(&path)?;
-    let store = Store::open_read_only(&path)?;
+    let mut store = Store::open_read_only(&path)?;
     let stats = store.stats()?;
     facts.stats(&stats);
     facts.phase = GraphPhase::Query;

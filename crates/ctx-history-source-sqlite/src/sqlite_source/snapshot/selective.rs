@@ -131,7 +131,7 @@ fn copy_tables<E>(
     let directory = create_snapshot_directory(&context.data_root, "provider-sqlite-snapshot-")?;
     let path = directory.path().join("source.sqlite");
     let operation = (|| {
-        let target = Connection::open_with_flags(
+        let mut target = Connection::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
@@ -161,7 +161,7 @@ fn copy_tables<E>(
             let mut bytes = 0_u64;
             report_progress(report, bytes)?;
             for table in tables {
-                copy_table(source, &target, table, bound, &mut bytes, report)?;
+                copy_table(source, &mut target, table, bound, &mut bytes, report)?;
             }
             target.execute_batch("COMMIT").map_err(private_error)?;
             report_progress(report, bytes)?;
@@ -209,7 +209,7 @@ fn copy_tables<E>(
 #[cfg(target_os = "linux")]
 fn copy_table<E>(
     source: &Connection,
-    target: &Connection,
+    target: &mut Connection,
     table: &str,
     bound: Option<SqliteSourceColumnBound>,
     bytes: &mut u64,
@@ -289,7 +289,6 @@ fn copy_table<E>(
     let parameters = vec!["?"; columns].join(",");
     let names = select
         .column_names()
-        .iter()
         .map(|name| format!("\"{}\"", name.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(",");
@@ -361,7 +360,7 @@ impl rusqlite::ToSql for BorrowedCell<'_> {
 
 #[cfg(target_os = "linux")]
 pub(in crate::sqlite_source) fn execute_schema(
-    target: &Connection,
+    target: &mut Connection,
     table: &str,
     sql: &str,
 ) -> SqliteSourceAccessResult<()> {
@@ -408,7 +407,7 @@ fn quote_identifier(name: &str) -> String {
 #[cfg(target_os = "linux")]
 fn create_bounded_schema(
     source: &Connection,
-    target: &Connection,
+    target: &mut Connection,
     table: &str,
     payload: &str,
 ) -> SqliteSourceAccessResult<()> {
@@ -583,7 +582,7 @@ fn bounded_selection(
     let columns = source
         .prepare(&format!("SELECT * FROM {table} LIMIT 0"))
         .map_err(source_error)?;
-    let names = columns.column_names();
+    let names: Vec<_> = columns.column_names().collect();
     if names
         .iter()
         .any(|name| name.eq_ignore_ascii_case(SqliteSourceColumnBound::BYTES_COLUMN))

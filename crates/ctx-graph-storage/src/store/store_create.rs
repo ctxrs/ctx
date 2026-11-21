@@ -105,7 +105,7 @@ impl Store {
     /// Configure request limits before any validation or generation reads.
     pub fn open_read_only_with(
         path: &Path,
-        configure: impl FnOnce(&Connection) -> Result<()>,
+        configure: impl FnOnce(&mut Connection) -> Result<()>,
     ) -> Result<Self> {
         let conn = connect_with_setup(path, OpenFlags::SQLITE_OPEN_READ_ONLY, configure)?;
         validate(&conn)?;

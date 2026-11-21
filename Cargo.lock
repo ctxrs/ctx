@@ -3940,9 +3940,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -5267,9 +5267,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.15"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35a133f956daabe89a61a685c2649f13d82d5aa4bd5d12d1277e1072a21c0694"
+checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -5599,9 +5599,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.4.0"
+version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b23c62fe489ac1d401ab32688cfacac3737a8978dc3343e5361464c7724fd3cb"
+checksum = "391f153431ab68664d946513ea0cb3edbca78eaf99c5a983036cacab6220d85b"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5612,13 +5612,16 @@ dependencies = [
  "http-body",
  "http-body-util",
  "indexmap",
+ "libc",
  "pastey",
+ "percent-encoding",
  "pin-project-lite",
  "rand 0.10.2",
  "rmcp-macros",
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sse-stream",
  "thiserror 2.0.18",
  "tokio",
@@ -5626,14 +5629,16 @@ dependencies = [
  "tokio-util",
  "tower-service",
  "tracing",
+ "unicode-general-category",
+ "unicode-normalization",
  "uuid",
 ]
 
 [[package]]
 name = "rmcp-macros"
-version = "3.4.0"
+version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd740c45d66ceb87e5579082abc27bd771665e464e9660a17a048c721b2a6025"
+checksum = "3598e3f36f4af2b5219b133baf7d97a2197039225adc3d4acf3dd8805b5a2aef"
 dependencies = [
  "darling 0.24.1",
  "proc-macro2",
@@ -5688,9 +5693,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.0",
  "fallible-iterator",
@@ -5718,9 +5723,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.4"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.0",
  "errno",
@@ -7365,6 +7370,12 @@ name = "unicode-bidi"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
+
+[[package]]
+name = "unicode-general-category"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
 
 [[package]]
 name = "unicode-id-start"
