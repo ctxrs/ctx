@@ -180,14 +180,90 @@ pub(super) fn prepare_projection(
     }
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/attribution-2.3.0");
     schema_upgrade::copy_fixture(&fixture.join("search"), &data_root.join("search"));
+    let repo_root = prepare_fixture_repository(data_root.parent().unwrap());
     let sessions = environment.home.join(".codex/sessions");
     fs::create_dir_all(&sessions).unwrap();
-    fs::copy(
-        fixture.join("source.jsonl"),
-        sessions.join("rollout-019fb000-0000-7000-8000-000000000300.jsonl"),
-    )
-    .unwrap();
+    write_rebound_fixture_source(
+        &fixture.join("source.jsonl"),
+        &sessions.join("rollout-019fb000-0000-7000-8000-000000000300.jsonl"),
+        &repo_root,
+    );
     fs::read_to_string(fixture.join("commit.txt")).unwrap()
+}
+
+/// Rebuilding attribution across the 2.3.0 -> current boundary re-evaluates
+/// repository-neutral Core records against the local Git repository referenced
+/// by `source.jsonl`. Bind that source to a hermetic per-test Git repository
+/// with the same remote identity instead of depending on `/tmp/ctx-230-blame-fixture`.
+fn prepare_fixture_repository(temp_root: &Path) -> PathBuf {
+    let repo = temp_root.join("ctx-230-blame-fixture-repo");
+    fs::create_dir(&repo).unwrap();
+    let repo = fs::canonicalize(&repo).unwrap();
+    let run_git = |args: &[&str]| {
+        let output = StdCommand::new("git")
+            .current_dir(&repo)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env(
+                "SystemRoot",
+                std::env::var_os("SystemRoot").unwrap_or_default(),
+            )
+            .env("HOME", temp_root)
+            .env("XDG_CONFIG_HOME", temp_root.join("git-config"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", temp_root.join("absent-gitconfig"))
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=absent-hooks",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&["init", "-q", "--initial-branch=main"]);
+    run_git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/ctx-upgrade-fixture.git",
+    ]);
+    repo
+}
+
+fn write_rebound_fixture_source(source: &Path, destination: &Path, repo_root: &Path) {
+    const FIXTURE_REPO_PATH: &str = "/tmp/ctx-230-blame-fixture/repo";
+    let repo_str = repo_root.to_str().unwrap();
+    let mut rewritten = String::new();
+    let mut updated_cwd = false;
+    let mut updated_workdir = false;
+    for line in fs::read_to_string(source).unwrap().lines() {
+        let mut entry: Value = serde_json::from_str(line).unwrap();
+        if entry["payload"]["cwd"].as_str() == Some(FIXTURE_REPO_PATH) {
+            entry["payload"]["cwd"] = Value::String(repo_str.to_owned());
+            updated_cwd = true;
+        }
+        if let Some(arguments) = entry["payload"]["arguments"].as_str() {
+            let mut parsed: Value = serde_json::from_str(arguments).unwrap();
+            if parsed["workdir"].as_str() == Some(FIXTURE_REPO_PATH) {
+                parsed["workdir"] = Value::String(repo_str.to_owned());
+                entry["payload"]["arguments"] = Value::String(parsed.to_string());
+                updated_workdir = true;
+            }
+        }
+        rewritten.push_str(&entry.to_string());
+        rewritten.push('\n');
+    }
+    assert!(updated_cwd && updated_workdir);
+    assert!(!rewritten.contains(FIXTURE_REPO_PATH));
+    fs::write(destination, rewritten).unwrap();
 }
 
 #[cfg(unix)]
