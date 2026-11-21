@@ -687,9 +687,12 @@ fn exact_tree_has_history(root: &Path, tree: ExactTree) -> Result<bool, Selector
     for candidate in direct_ordinary_directories_partitioned(root)?.directories {
         let found = match tree {
             ExactTree::Antigravity => {
-                let logs = candidate.join(".system_generated").join("logs");
-                ordinary_file(&logs.join("transcript_full.jsonl"))
-                    || ordinary_file(&logs.join("transcript.jsonl"))
+                let system_generated = candidate.join(".system_generated");
+                let logs = system_generated.join("logs");
+                ordinary_directory(&system_generated)
+                    && ordinary_directory(&logs)
+                    && (ordinary_file(&logs.join("transcript_full.jsonl"))
+                        || ordinary_file(&logs.join("transcript.jsonl")))
             }
         };
         if found {

@@ -582,7 +582,7 @@ fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
     assert_source_status(
         temp.path(),
         CaptureProvider::Antigravity,
-        ProviderSourceStatus::Empty,
+        ProviderSourceStatus::Available,
     );
     std::fs::write(
         antigravity.join("session/.system_generated/logs/transcript.jsonl"),

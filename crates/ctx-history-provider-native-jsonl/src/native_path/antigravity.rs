@@ -170,7 +170,11 @@ fn visit_antigravity_root_with_error<M, E>(
     directory: &ProviderSourceDirectory<M>,
     budget: &mut DirectJsonlInventoryBudget,
     strict_root_revalidation: bool,
-    mut on_selected: impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<M>) -> std::result::Result<(), E>,
+    mut on_selected: impl FnMut(
+        PathBuf,
+        PathBuf,
+        OpenedProviderSourceFile<M>,
+    ) -> std::result::Result<(), E>,
 ) -> std::result::Result<(), E>
 where
     M: AntigravitySourceError + From<SourceIoError>,
@@ -268,7 +272,11 @@ fn visit_session_directory<M, E>(
     session_relative: &Path,
     session_dir: &ProviderSourceDirectory<M>,
     budget: &mut DirectJsonlInventoryBudget,
-    on_selected: &mut impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<M>) -> std::result::Result<(), E>,
+    on_selected: &mut impl FnMut(
+        PathBuf,
+        PathBuf,
+        OpenedProviderSourceFile<M>,
+    ) -> std::result::Result<(), E>,
 ) -> std::result::Result<(), E>
 where
     M: AntigravitySourceError + From<SourceIoError>,
@@ -302,7 +310,11 @@ fn visit_system_generated_directory<M, E>(
     sysgen_relative: &Path,
     sysgen_dir: &ProviderSourceDirectory<M>,
     budget: &mut DirectJsonlInventoryBudget,
-    on_selected: &mut impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<M>) -> std::result::Result<(), E>,
+    on_selected: &mut impl FnMut(
+        PathBuf,
+        PathBuf,
+        OpenedProviderSourceFile<M>,
+    ) -> std::result::Result<(), E>,
 ) -> std::result::Result<(), E>
 where
     M: AntigravitySourceError + From<SourceIoError>,
@@ -334,7 +346,11 @@ fn visit_logs_directory<M, E>(
     logs_path: &Path,
     logs_relative: &Path,
     logs_dir: &ProviderSourceDirectory<M>,
-    on_selected: &mut impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<M>) -> std::result::Result<(), E>,
+    on_selected: &mut impl FnMut(
+        PathBuf,
+        PathBuf,
+        OpenedProviderSourceFile<M>,
+    ) -> std::result::Result<(), E>,
 ) -> std::result::Result<(), E>
 where
     M: AntigravitySourceError + From<SourceIoError>,
@@ -377,11 +393,13 @@ fn count_directory_with<E: From<SourceIoError>>(
 ) -> std::result::Result<(), E> {
     budget.directories = budget.directories.saturating_add(1);
     if budget.directories > PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES {
-        return Err(E::from(SourceIoError::ProviderJsonlInventoryLimitExceeded {
-            limit: ProviderJsonlInventoryLimit::Directories,
-            maximum: PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES,
-            observed: budget.directories,
-        }));
+        return Err(E::from(
+            SourceIoError::ProviderJsonlInventoryLimitExceeded {
+                limit: ProviderJsonlInventoryLimit::Directories,
+                maximum: PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES,
+                observed: budget.directories,
+            },
+        ));
     }
     Ok(())
 }
@@ -392,11 +410,13 @@ fn count_metadata_entries_with<E: From<SourceIoError>>(
 ) -> std::result::Result<(), E> {
     budget.metadata_entries = budget.metadata_entries.saturating_add(count);
     if budget.metadata_entries > PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES {
-        return Err(E::from(SourceIoError::ProviderJsonlInventoryLimitExceeded {
-            limit: ProviderJsonlInventoryLimit::MetadataEntries,
-            maximum: PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
-            observed: budget.metadata_entries,
-        }));
+        return Err(E::from(
+            SourceIoError::ProviderJsonlInventoryLimitExceeded {
+                limit: ProviderJsonlInventoryLimit::MetadataEntries,
+                maximum: PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
+                observed: budget.metadata_entries,
+            },
+        ));
     }
     Ok(())
 }

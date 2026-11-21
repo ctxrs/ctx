@@ -13,8 +13,9 @@ use ctx_history_capture_model::provider_root_path_within_limit;
 
 use ctx_history_source_io::{
     open_provider_source_file, open_provider_source_path, OpenedProviderSourceFile,
-    OpenedProviderSourcePath, ProviderSourceRoot, SourceIoError, NON_REGULAR_PROVIDER_SOURCE_REASON,
-    REPARSE_PROVIDER_SOURCE_REASON, SYMLINK_PROVIDER_SOURCE_REASON,
+    OpenedProviderSourcePath, ProviderSourceRoot, SourceIoError,
+    NON_REGULAR_PROVIDER_SOURCE_REASON, REPARSE_PROVIDER_SOURCE_REASON,
+    SYMLINK_PROVIDER_SOURCE_REASON,
 };
 
 pub(super) const MAX_SELECTOR_FILE_BYTES: usize = 1024 * 1024;
