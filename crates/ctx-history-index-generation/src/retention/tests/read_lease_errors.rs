@@ -77,6 +77,98 @@ fn generation_read_lease_preserves_directory_open_errors() {
     assert_eq!(fs::read(directory).unwrap(), b"not a generation directory");
 }
 
+#[test]
+fn flat_delta_read_lease_uses_authenticated_summary_and_meters_fallback() {
+    let root = tempdir().unwrap();
+    let base = create_slot(root.path(), 'a');
+    let delta_bytes = format!(
+        r#"{{"storage_format":"ctx-manifest-flat-delta-v1","base_generation_id":"{}","pad":"{}"}}"#,
+        base.generation_id(),
+        "x".repeat(4096),
+    );
+    let delta_id = sha256_hex(delta_bytes.as_bytes());
+    let directory = format!("generation-{}", "b".repeat(32));
+    fs::create_dir_all(
+        root.path()
+            .join(INDEX_GENERATIONS_DIRECTORY)
+            .join(&directory),
+    )
+    .unwrap();
+    write_manifest_bytes(root.path(), &delta_id, delta_bytes.as_bytes()).unwrap();
+
+    let summary_bytes = format!(
+        r#"{{"format":"ctx-manifest-summary-v1","generation_id":"{}","base_generation_id":"{}","manifest_bytes_len":{}}}"#,
+        delta_id,
+        base.generation_id(),
+        delta_bytes.len(),
+    );
+    let summary_sha256 = sha256_hex(summary_bytes.as_bytes());
+    crate::write_manifest_summary_bytes(root.path(), &delta_id, summary_bytes.as_bytes()).unwrap();
+
+    let pinned_delta = GenerationSlot::new(
+        delta_id.clone(),
+        directory.clone(),
+        sha256_hex(b"physical-b"),
+    )
+    .unwrap()
+    .with_summary_sha256(summary_sha256)
+    .unwrap();
+    let pointer = ActiveGenerationPointer::new(pinned_delta, None).unwrap();
+    publish_active_generation_pointer(root.path(), &pointer).unwrap();
+
+    // Authenticated summary acquires both target + base leases with ZERO manifest reads.
+    crate::read_metrics::reset_metadata_read_activity();
+    let lease = acquire_generation_read_lease(root.path(), &delta_id).unwrap();
+    let reads = crate::read_metrics::metadata_read_activity();
+    assert_eq!(reads.manifest.operations, 0);
+    assert_eq!(reads.manifest.bytes, 0);
+    // Base manifest is actually pinned by the acquired lease (exclusive reclaim fails).
+    assert!(
+        try_generation_id_reclaim_authority(root.path(), base.generation_id())
+            .unwrap()
+            .is_none()
+    );
+    drop(lease);
+
+    // Tampering with the summary sidecar fails the digest check and falls back to
+    // reading and metering the authoritative flat-delta manifest.
+    let tampered_summary = format!(
+        r#"{{"format":"ctx-manifest-summary-v1","generation_id":"{}","base_generation_id":"{}","manifest_bytes_len":{}}}"#,
+        delta_id,
+        "f".repeat(64),
+        delta_bytes.len(),
+    );
+    crate::write_manifest_summary_bytes(root.path(), &delta_id, tampered_summary.as_bytes())
+        .unwrap();
+    crate::read_metrics::reset_metadata_read_activity();
+    let fallback_lease = acquire_generation_read_lease(root.path(), &delta_id).unwrap();
+    let fallback_reads = crate::read_metrics::metadata_read_activity();
+    assert_eq!(fallback_reads.manifest.operations, 1);
+    assert_eq!(fallback_reads.manifest.bytes, delta_bytes.len() as u64);
+    assert!(
+        try_generation_id_reclaim_authority(root.path(), base.generation_id())
+            .unwrap()
+            .is_none()
+    );
+    drop(fallback_lease);
+
+    // An unpinned legacy pointer (no summary_sha256) ignores any sidecar and meters fallback.
+    crate::write_manifest_summary_bytes(root.path(), &delta_id, summary_bytes.as_bytes()).unwrap();
+    let unpinned_delta =
+        GenerationSlot::new(delta_id.clone(), directory, sha256_hex(b"physical-b")).unwrap();
+    publish_active_generation_pointer(
+        root.path(),
+        &ActiveGenerationPointer::new(unpinned_delta, None).unwrap(),
+    )
+    .unwrap();
+    crate::read_metrics::reset_metadata_read_activity();
+    let legacy_lease = acquire_generation_read_lease(root.path(), &delta_id).unwrap();
+    let legacy_reads = crate::read_metrics::metadata_read_activity();
+    assert_eq!(legacy_reads.manifest.operations, 1);
+    assert_eq!(legacy_reads.manifest.bytes, delta_bytes.len() as u64);
+    drop(legacy_lease);
+}
+
 #[cfg(unix)]
 #[test]
 fn existing_coordinator_permissions_recover_without_replacing_its_inode() {

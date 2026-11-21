@@ -286,7 +286,8 @@ fn unsupported_detected_format_stays_typed_and_never_executes() {
     assert!(receipt.removals.is_empty());
     assert!(VerifiedIndex::open_pinned(temp.path())
         .unwrap()
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .is_empty());
 }

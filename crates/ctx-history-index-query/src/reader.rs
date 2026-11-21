@@ -9,7 +9,8 @@ use ctx_history_index_format::{
     is_generation_id, load_publication_for_metas, load_publication_summary_for_metas,
     meta_generation, payload_generation_id, register_body_analyzer, searcher_generation,
     validate_schema, verify_or_certify_physical_integrity, verify_searcher_structure,
-    DurableMmapDirectory, GenerationManifest, VerifiedPublication,
+    DurableMmapDirectory, GenerationManifest, ManifestSourceTotals, SourceRouteIdentity,
+    VerifiedPublication,
 };
 mod manifest;
 #[cfg(any(test, feature = "test-support"))]
@@ -139,7 +140,8 @@ impl VerifiedIndex {
         if generation_id != pointer.active().generation_id() {
             return Err(IndexError::InvalidActiveGenerationPointer);
         }
-        let publication = load_publication_summary_for_metas(&root, &metas)?;
+        let publication =
+            load_publication_summary_for_metas(&root, &metas, pointer.active().summary_sha256())?;
         if publication.generation_id() != generation_id {
             return Err(IndexError::InvalidActiveGenerationPointer);
         }
@@ -152,7 +154,7 @@ impl VerifiedIndex {
     #[doc(hidden)]
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let verified = Self::open_pinned(root)?;
-        verify_searcher(&verified.searcher, verified.load_manifest()?)?;
+        verify_searcher(&verified.searcher, verified.try_manifest()?)?;
         Ok(verified)
     }
 
@@ -163,7 +165,7 @@ impl VerifiedIndex {
     pub fn scrub(root: impl AsRef<Path>) -> Result<Self> {
         let verified =
             Self::open_inner(root.as_ref(), ReopenPhysicalVerification::ScrubAndCertify)?;
-        verify_searcher(&verified.searcher, verified.load_manifest()?)?;
+        verify_searcher(&verified.searcher, verified.try_manifest()?)?;
         Ok(verified)
     }
 
@@ -806,11 +808,9 @@ impl VerifiedIndex {
     ///
     /// Reader leases and Tantivy handles are dropped before the snapshot is
     /// returned, so a subsequent writer open cannot overlap their FD lifetime.
-    pub fn into_generation_snapshot(self) -> VerifiedGenerationSnapshot {
-        let manifest = self
-            .load_manifest_arc()
-            .expect("verified generation snapshot requires a readable manifest")
-            .clone();
+    /// Returns an error if a deferred full manifest fails verification or I/O.
+    pub fn into_generation_snapshot(self) -> Result<VerifiedGenerationSnapshot> {
+        let manifest = self.load_manifest_arc()?.clone();
         let Self {
             searcher,
             manifest: _manifest_state,
@@ -829,10 +829,10 @@ impl VerifiedIndex {
             peer_lease,
             target_lease,
         );
-        VerifiedGenerationSnapshot {
+        Ok(VerifiedGenerationSnapshot {
             generation_id,
             manifest,
-        }
+        })
     }
 
     fn load_manifest_arc(&self) -> Result<&Arc<GenerationManifest>> {
@@ -842,13 +842,8 @@ impl VerifiedIndex {
 
     /// Loads and returns the full generation manifest, materializing it lazily
     /// if this reader was opened through a validated manifest summary sidecar.
-    pub fn load_manifest(&self) -> Result<&GenerationManifest> {
+    pub fn try_manifest(&self) -> Result<&GenerationManifest> {
         self.load_manifest_arc().map(Arc::as_ref)
-    }
-
-    pub fn manifest(&self) -> &GenerationManifest {
-        self.load_manifest()
-            .expect("verified index manifest must be readable")
     }
 
     pub fn certified_source_bytes(&self) -> u64 {
@@ -857,6 +852,28 @@ impl VerifiedIndex {
 
     pub fn certified_source_count(&self) -> usize {
         self.manifest.certified_source_count()
+    }
+
+    pub fn certified_source_totals(&self) -> Result<ManifestSourceTotals> {
+        self.manifest.certified_source_totals()
+    }
+
+    pub fn has_archive_sources(&self) -> bool {
+        self.manifest.has_archive_sources()
+    }
+
+    pub fn policy_schema_hash(&self) -> &str {
+        self.manifest.policy_schema_hash()
+    }
+
+    pub fn lexical_schema_version(&self) -> u32 {
+        self.manifest.lexical_schema_version()
+    }
+
+    pub fn route_is_present_nonempty(&self, route: &SourceRouteIdentity) -> Result<bool> {
+        let lease = self._reader_leases.as_ref().map(|leases| &leases.target);
+        self.manifest
+            .route_is_present_nonempty(&self.generation_id, lease, route)
     }
 
     #[cfg(any(test, feature = "test-support"))]

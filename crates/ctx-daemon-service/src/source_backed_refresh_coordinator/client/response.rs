@@ -168,5 +168,5 @@ pub(super) fn published_source_count(
         .and_then(Value::as_u64)
         .and_then(|count| usize::try_from(count).ok())
         .ok_or_else(|| anyhow!("published daemon source refresh has no unsupported route count"))?;
-    Ok(request_receipt.source_count(verified))
+    request_receipt.source_count(verified)
 }

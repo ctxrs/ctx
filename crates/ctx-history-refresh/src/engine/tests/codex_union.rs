@@ -581,7 +581,7 @@ fn registered_codex_parent_and_exact_subdir_share_route_scoped_ownership() {
     );
     assert!(first.route_results[0].outcome.is_success());
     let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert!(!verified.manifest().sources.is_empty());
+    assert!(!verified.try_manifest().unwrap().sources.is_empty());
     assert_eq!(
         complete_lexical_candidates(&verified, "automaticrootmarker", 10)
             .unwrap()
@@ -948,7 +948,7 @@ fn assert_codex_parent_child_records(
 
 fn codex_core_records(index: &VerifiedIndex) -> Vec<CoreRecord> {
     let mut records = Vec::new();
-    for source in &index.manifest().sources {
+    for source in &index.try_manifest().unwrap().sources {
         let page = index
             .source_event_page(source.observation().source(), None, 256)
             .unwrap();

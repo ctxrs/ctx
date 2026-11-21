@@ -749,7 +749,8 @@ fn logical_all_publication_withdraws_removed_root_without_deleting_history() {
     assert_eq!(
         VerifiedIndex::open_pinned(temp.path())
             .unwrap()
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .sources
             .len(),
         2
@@ -781,15 +782,13 @@ fn logical_all_publication_withdraws_removed_root_without_deleting_history() {
     assert!(receipt.route_controls.is_empty());
 
     let published = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    assert_eq!(published.manifest().sources.len(), 2);
-    assert!(published.manifest().source_route(&work_id).is_some());
-    assert!(published.manifest().source_route(&personal_id).is_some());
+    let manifest = published.try_manifest().unwrap();
+    assert_eq!(manifest.sources.len(), 2);
+    assert!(manifest.source_route(&work_id).is_some());
+    assert!(manifest.source_route(&personal_id).is_some());
     assert_eq!(search_event_candidates(&published, "workonly", 8).len(), 1);
-    assert_eq!(published.manifest().provider_roots().len(), 1);
-    assert_eq!(
-        published.manifest().provider_roots()[0].definition().id,
-        "personal"
-    );
+    assert_eq!(manifest.provider_roots().len(), 1);
+    assert_eq!(manifest.provider_roots()[0].definition().id, "personal");
 }
 
 #[test]
@@ -1212,7 +1211,8 @@ fn previously_empty_certified_missing_route_reappearance_at_precommit_retains_ba
     ));
     let retained = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), initial.commit.generation_id);
-    let retained_route = retained.manifest().source_route(&route_identity).unwrap();
+    let manifest = retained.try_manifest().unwrap();
+    let retained_route = manifest.source_route(&route_identity).unwrap();
     assert!(retained_route.sources().is_empty());
     assert_eq!(retained.document_count(), 0);
 }
@@ -1285,7 +1285,8 @@ fn certified_missing_route_reappearance_at_precommit_cannot_delete_the_route() {
 
     let retained = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), retained_generation);
-    assert!(retained.manifest().source_route(&route_id).is_some());
+    let manifest = retained.try_manifest().unwrap();
+    assert!(manifest.source_route(&route_id).is_some());
     assert_eq!(retained.document_count(), 1);
 }
 
@@ -1342,7 +1343,8 @@ fn relocated_route_rechecks_old_path_absence_at_terminal_publication() {
     ));
     let retained = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), initial.commit.generation_id);
-    assert!(retained.manifest().source_route(&preserved).is_some());
+    let manifest = retained.try_manifest().unwrap();
+    assert!(manifest.source_route(&preserved).is_some());
     assert_eq!(retained.document_count(), 1);
 }
 
@@ -1392,7 +1394,7 @@ fn mutating_refresh_rejects_an_unclaimed_base_source_from_the_same_family() {
     ));
     let retained = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);
-    assert_eq!(retained.manifest().sources, initial.sources);
+    assert_eq!(retained.try_manifest().unwrap().sources, initial.sources);
 }
 
 #[test]

@@ -628,14 +628,16 @@ impl CoreRefreshEngine {
         };
         let verified = verified.and_then(|(observed, publication, request_receipt)| {
             terminal(&request_id, request_receipt.clone())
-                .map(|(terminal, coverage_fence)| {
-                    (
+                .and_then(|(terminal, coverage_fence)| {
+                    let request_source_count = terminal.request_source_count(&request_receipt)?;
+                    Ok((
                         observed,
                         publication,
                         request_receipt,
                         terminal,
                         coverage_fence,
-                    )
+                        request_source_count,
+                    ))
                 })
                 .map_err(|error| {
                     failure_diagnostic =
@@ -662,10 +664,16 @@ impl CoreRefreshEngine {
         let mut terminal_persistence_pending = false;
         let mut covered_batch = None;
         let (failed_run, did_work, mut coverage_certificate, mut terminal_job) = match verified {
-            Ok((observed, publication, receipt, terminal, coverage_fence)) => {
+            Ok((
+                observed,
+                publication,
+                receipt,
+                terminal,
+                coverage_fence,
+                request_source_count,
+            )) => {
                 covered_batch = queued_batch
                     .and_then(|batch| batch.bind_capture(&state, &request_id, &terminal));
-                let request_source_count = terminal.request_source_count(&receipt);
                 let did_work = {
                     let attempt = find_attempt_mut(&mut state, &request_id)?;
                     attempt.finished_at_ms = Some(utc_now().timestamp_millis());

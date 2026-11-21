@@ -601,8 +601,16 @@ fn warm_exact_carries_unselected_routes_while_receipt_stays_selected() {
     assert_eq!(exact.route_results.len(), 1);
     assert_eq!(exact.route_results[0].route_identity, codex_route.as_str());
     let published = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert!(published.manifest().source_route(&codex_route).is_some());
-    assert!(published.manifest().source_route(&claude_route).is_some());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&codex_route)
+        .is_some());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&claude_route)
+        .is_some());
 }
 
 #[test]
@@ -665,7 +673,8 @@ fn disabling_automatic_discovery_stops_selection_without_deleting_retained_histo
     assert_eq!(
         VerifiedIndex::open_pinned(&index_root)
             .unwrap()
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .indexed_documents,
         1
     );
@@ -685,8 +694,15 @@ fn disabling_automatic_discovery_stops_selection_without_deleting_retained_histo
     .unwrap();
 
     let published = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert!(!published.manifest().automatic_provider_discovery());
-    assert!(published.manifest().source_route(&route).is_some());
-    assert_eq!(published.manifest().sources.len(), 1);
-    assert_eq!(published.manifest().indexed_documents, 1);
+    assert!(!published
+        .try_manifest()
+        .unwrap()
+        .automatic_provider_discovery());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&route)
+        .is_some());
+    assert_eq!(published.try_manifest().unwrap().sources.len(), 1);
+    assert_eq!(published.try_manifest().unwrap().indexed_documents, 1);
 }

@@ -34,11 +34,11 @@ fn retrieval_excluded_events_never_enter_the_source_backed_semantic_projection()
     )?)?;
     writer.commit(|_| true)?;
     let index = VerifiedIndex::open_pinned(root)?;
-    let source_digest = index.manifest().core_record_aggregates[0]
+    let source_digest = index.try_manifest().unwrap().core_record_aggregates[0]
         .source_identity_digest()
         .to_owned();
 
-    assert_eq!(index.manifest().indexed_documents, 1);
+    assert_eq!(index.try_manifest().unwrap().indexed_documents, 1);
     assert_eq!(index.semantic_eligible_event_count()?, 0);
     let semantic = index.core_semantic_event_page(None, 1)?;
     assert!(semantic.terminal);

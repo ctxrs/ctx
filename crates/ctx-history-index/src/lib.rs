@@ -59,11 +59,12 @@ pub use ctx_history_index_format::{
     AppliedProviderRoot, AppliedProviderRootSourceMembership,
     CommittedPredecessorMigrationRecovery, ConsecutiveSourceMissingCount,
     DetachedReleasedProviderRootAuthority, GenerationManifest, GenerationStateEnvelope, IndexError,
-    ProviderRootDefinition, ProviderRootSourceIdentity, Result, SourceCoreRecordAggregate,
-    SourceMissingObservationPoint, SourceRouteIdentity, SourceRouteMissingState,
-    SourceRouteSnapshot, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
-    LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN, MAX_DETACHED_RELEASED_PROVIDER_ROOTS,
-    MAX_GENERATION_STATE_BYTES, MAX_GENERATION_STATE_FORMAT_BYTES,
+    ManifestSourceTotals, ProviderRootDefinition, ProviderRootSourceIdentity, Result,
+    SourceCoreRecordAggregate, SourceMissingObservationPoint, SourceRouteIdentity,
+    SourceRouteMissingState, SourceRouteSnapshot, GENERATION_MANIFEST_VERSION,
+    LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
+    MAX_DETACHED_RELEASED_PROVIDER_ROOTS, MAX_GENERATION_STATE_BYTES,
+    MAX_GENERATION_STATE_FORMAT_BYTES,
 };
 pub use ctx_history_index_format::{
     current_semantic_generation_policy, current_semantic_generation_policy_hash,
@@ -82,8 +83,9 @@ pub(crate) use ctx_history_index_format::{CommitPayload, COMMIT_PAYLOAD_VERSION}
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support {
+    pub use ctx_history_index_format::clear_manifest_cache_for_root;
     pub use ctx_history_index_generation::{
-        AtomicPublicationStage, AtomicReplacementFailureProbe, PublicationIoProbe,
+        read_metrics, AtomicPublicationStage, AtomicReplacementFailureProbe, PublicationIoProbe,
         PublicationIoProbeGuard,
     };
 

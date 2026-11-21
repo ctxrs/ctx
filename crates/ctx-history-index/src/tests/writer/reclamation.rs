@@ -95,7 +95,7 @@ fn pinned_flat_delta_for_privacy_test(root: &Path) -> (VerifiedIndex, VerifiedIn
 fn private_flat_delta_manifest_is_reused_across_refresh_and_writer_open() {
     let temp = tempdir().unwrap();
     let (_base, delta) = pinned_flat_delta_for_privacy_test(temp.path());
-    let snapshot = delta.into_generation_snapshot();
+    let snapshot = delta.into_generation_snapshot().unwrap();
     let descriptor = manifest_path(temp.path(), snapshot.generation_id());
     let descriptor_bytes = fs::read(&descriptor).unwrap();
 
@@ -105,7 +105,8 @@ fn private_flat_delta_manifest_is_reused_across_refresh_and_writer_open() {
         ensure_generation_control_state_private(temp.path()).unwrap();
         let reopened = VerifiedIndex::open(temp.path())
             .unwrap()
-            .into_generation_snapshot();
+            .into_generation_snapshot()
+            .unwrap();
         assert!(Arc::ptr_eq(
             snapshot.test_shared_manifest(),
             reopened.test_shared_manifest()
@@ -163,12 +164,12 @@ fn writer_open_repairs_legacy_flat_delta_ancestor_before_materialization() {
         Some(pinned_delta.generation_id())
     );
     assert!(!std::ptr::eq(
-        pinned_delta.manifest(),
+        pinned_delta.try_manifest().unwrap(),
         reopened.base_manifest().unwrap()
     ));
     assert_eq!(
         serde_json::to_vec(reopened.base_manifest().unwrap()).unwrap(),
-        serde_json::to_vec(pinned_delta.manifest()).unwrap()
+        serde_json::to_vec(pinned_delta.try_manifest().unwrap()).unwrap()
     );
     assert_eq!(fs::read(&base_manifest).unwrap(), base_bytes);
     assert_eq!(fs::read(&delta_manifest).unwrap(), delta_bytes);
@@ -218,8 +219,8 @@ fn permission_repair_through_noncanonical_root_evicts_canonical_cache_entry() {
         reopened.test_shared_manifest()
     ));
     assert_eq!(
-        serde_json::to_vec(reopened.manifest()).unwrap(),
-        serde_json::to_vec(pinned.manifest()).unwrap()
+        serde_json::to_vec(reopened.try_manifest().unwrap()).unwrap(),
+        serde_json::to_vec(pinned.try_manifest().unwrap()).unwrap()
     );
     assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
     assert_eq!(
@@ -771,8 +772,8 @@ fn adding_new_source_to_existing_route_publishes_a_flat_delta_and_cold_reopens()
     let reopened = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(reopened.generation_id(), appended_id);
     assert_eq!(reopened.document_count(), 3);
-    assert_eq!(reopened.manifest().sources.len(), 2);
-    assert_eq!(reopened.manifest().generation_state(), Some(&state_1));
+    assert_eq!(reopened.try_manifest().unwrap().sources.len(), 2);
+    assert_eq!(reopened.try_manifest().unwrap().generation_state(), Some(&state_1));
     assert_eq!(reopened.count_term("appended").unwrap(), 1);
 }
 
@@ -815,14 +816,36 @@ fn query_open_uses_manifest_summary_sidecar_and_lazily_loads_full_manifest_only_
         .unwrap();
     let gen2 = second.commit(|_| true).unwrap();
 
+    // Confirm gen2 is stored as a flat delta referencing gen1 and that the active
+    // pointer cryptographically binds both summary sidecars via `summary_sha256`.
+    let gen2_manifest_bytes = fs::read(manifest_path(temp.path(), &gen2.generation_id)).unwrap();
+    let gen2_manifest_json: serde_json::Value =
+        serde_json::from_slice(&gen2_manifest_bytes).unwrap();
+    assert_eq!(
+        gen2_manifest_json["storage_format"],
+        "ctx-manifest-flat-delta-v1"
+    );
+    assert_eq!(gen2_manifest_json["base_generation_id"], gen1.generation_id);
+
     let summary1 =
         ctx_history_index_generation::manifest_summary_path(temp.path(), &gen1.generation_id);
     let summary2 =
         ctx_history_index_generation::manifest_summary_path(temp.path(), &gen2.generation_id);
     assert!(summary1.is_file());
     assert!(summary2.is_file());
+    let pointer = ctx_history_index_generation::load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pointer.active().summary_sha256(),
+        Some(ctx_history_index_generation::sha256_hex(&fs::read(&summary2).unwrap()).as_str())
+    );
+    assert_eq!(
+        pointer.previous().and_then(|slot| slot.summary_sha256()),
+        Some(ctx_history_index_generation::sha256_hex(&fs::read(&summary1).unwrap()).as_str())
+    );
 
-    // Cold query open + search + retained peer open MUST NOT read full manifests!
+    // Cold query open + search + retained peer open MUST NOT read full or flat-delta manifests!
     ctx_history_index_format::clear_manifest_cache_for_root(temp.path()).unwrap();
     ctx_history_index_generation::read_metrics::reset_metadata_read_activity();
     let mut index = VerifiedIndex::open_pinned_with_retained_peer_for_query(temp.path()).unwrap();
@@ -831,6 +854,7 @@ fn query_open_uses_manifest_summary_sidecar_and_lazily_loads_full_manifest_only_
     assert_eq!(index.document_count(), 2);
     assert_eq!(index.certified_source_count(), 1);
     assert_eq!(index.certified_source_bytes(), 40);
+    assert!(!index.has_archive_sources());
     assert_eq!(index.count_term("second").unwrap(), 1);
     let peer = index
         .take_retained_generation_peer_for_reader()
@@ -842,12 +866,12 @@ fn query_open_uses_manifest_summary_sidecar_and_lazily_loads_full_manifest_only_
     let reads = ctx_history_index_generation::read_metrics::metadata_read_activity();
     assert_eq!(
         reads.manifest.operations, 0,
-        "query open + retained peer open must skip reading full manifests"
+        "query open + retained peer open must skip reading full and flat-delta manifests"
     );
     assert_eq!(reads.manifest.bytes, 0);
 
     // Explicit lazy load materializes the full manifest cleanly under the read lease.
-    let loaded_manifest = index.load_manifest().unwrap();
+    let loaded_manifest = index.try_manifest().unwrap();
     assert!(index.has_loaded_full_manifest());
     assert_eq!(loaded_manifest.sources.len(), 1);
     assert_eq!(loaded_manifest.indexed_documents, 2);
@@ -870,17 +894,29 @@ fn query_open_uses_manifest_summary_sidecar_and_lazily_loads_full_manifest_only_
     drop(writer);
     assert!(summary2.is_file());
 
-    // A tampered summary sidecar with a mismatched document count falls back to
-    // the authoritative manifest instead of failing open, and the next writer
-    // open repairs the sidecar atomically.
+    // A tampered mode-0600 canonical summary sidecar that preserves `generation_id`,
+    // `manifest_bytes_len`, and `indexed_documents` but falsifies
+    // `certified_source_bytes` / `source_count` / `archive_source_count` MUST be
+    // rejected by `summary_sha256` verification, fall back to the authoritative
+    // manifest, and get repaired atomically on the next writer open.
     let mut tampered: ctx_history_index_format::ManifestSummary =
         serde_json::from_slice(&fs::read(&summary2).unwrap()).unwrap();
-    tampered.indexed_documents = 999;
-    fs::write(&summary2, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    tampered.certified_source_bytes = 999_999;
+    tampered.source_count = 42;
+    tampered.archive_source_count = 1;
+    fs::write(&summary2, tampered.canonical_bytes().unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&summary2, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     ctx_history_index_format::clear_manifest_cache_for_root(temp.path()).unwrap();
     let tampered_fallback = VerifiedIndex::open_pinned_for_query(temp.path()).unwrap();
     assert!(tampered_fallback.has_loaded_full_manifest());
     assert_eq!(tampered_fallback.document_count(), 2);
+    assert_eq!(tampered_fallback.certified_source_bytes(), 40);
+    assert_eq!(tampered_fallback.certified_source_count(), 1);
+    assert!(!tampered_fallback.has_archive_sources());
     drop(tampered_fallback);
 
     let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
@@ -890,7 +926,63 @@ fn query_open_uses_manifest_summary_sidecar_and_lazily_loads_full_manifest_only_
     drop(writer);
     let repaired: ctx_history_index_format::ManifestSummary =
         serde_json::from_slice(&fs::read(&summary2).unwrap()).unwrap();
-    assert_eq!(repaired.indexed_documents, 2);
+    assert_eq!(repaired.certified_source_bytes, 40);
+    assert_eq!(repaired.source_count, 1);
+    assert_eq!(repaired.archive_source_count, 0);
+
+    // After writer repair, cold query open returns to zero manifest reads.
+    ctx_history_index_format::clear_manifest_cache_for_root(temp.path()).unwrap();
+    ctx_history_index_generation::read_metrics::reset_metadata_read_activity();
+    let post_repair = VerifiedIndex::open_pinned_for_query(temp.path()).unwrap();
+    assert!(!post_repair.has_loaded_full_manifest());
+    assert_eq!(post_repair.certified_source_bytes(), 40);
+    let repair_reads = ctx_history_index_generation::read_metrics::metadata_read_activity();
+    assert_eq!(repair_reads.manifest.operations, 0);
+    assert_eq!(repair_reads.manifest.bytes, 0);
+    drop(post_repair);
+
+    // A legacy 2.4.1 active pointer without `summary_sha256` MUST NOT trust an
+    // unauthenticated mode-0600 canonical summary sidecar.
+    let legacy_active = ctx_history_index_generation::GenerationSlot::new(
+        pointer.active().generation_id().to_owned(),
+        pointer.active().directory().to_owned(),
+        pointer.active().physical_integrity_digest().to_owned(),
+    )
+    .unwrap();
+    let legacy_previous = pointer.previous().map(|slot| {
+        ctx_history_index_generation::GenerationSlot::new(
+            slot.generation_id().to_owned(),
+            slot.directory().to_owned(),
+            slot.physical_integrity_digest().to_owned(),
+        )
+        .unwrap()
+    });
+    let legacy_pointer = ctx_history_index_generation::ActiveGenerationPointer::new(
+        legacy_active,
+        legacy_previous,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("active-generation.json"),
+        serde_json::to_vec(&legacy_pointer).unwrap(),
+    )
+    .unwrap();
+    let certifications_dir = temp.path().join("integrity-certifications");
+    if certifications_dir.exists() {
+        fs::remove_dir_all(&certifications_dir).unwrap();
+    }
+    fs::write(&summary2, tampered.canonical_bytes().unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&summary2, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    ctx_history_index_format::clear_manifest_cache_for_root(temp.path()).unwrap();
+    let legacy_opened = VerifiedIndex::open_pinned_for_query(temp.path()).unwrap();
+    assert!(legacy_opened.has_loaded_full_manifest());
+    assert_eq!(legacy_opened.certified_source_bytes(), 40);
+    assert_eq!(legacy_opened.certified_source_count(), 1);
+    drop(legacy_opened);
 
     // Deleting the authoritative manifest MUST fail closed even with a valid summary sidecar.
     fs::remove_file(manifest_path(temp.path(), &gen2.generation_id)).unwrap();
@@ -899,4 +991,60 @@ fn query_open_uses_manifest_summary_sidecar_and_lazily_loads_full_manifest_only_
         VerifiedIndex::open_pinned_for_query(temp.path()),
         Err(IndexError::MissingManifest(missing)) if missing == gen2.generation_id
     ));
+}
+
+#[test]
+fn lazy_verified_index_returns_error_instead_of_panicking_when_manifest_corrupts_after_open() {
+    let temp = tempdir().unwrap();
+    let s1 = source("lazy-manifest-error.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(s1.clone()).unwrap();
+    writer
+        .add_core_record(document(&s1, 1, "lazy corruption regression"))
+        .unwrap();
+    writer
+        .certify_source(appendable_certificate(&s1, 1, 1, 24))
+        .unwrap();
+    let receipt = writer.commit(|_| true).unwrap();
+
+    // Open lazily using the authenticated summary sidecar (manifest stays unloaded).
+    ctx_history_index_format::clear_manifest_cache_for_root(temp.path()).unwrap();
+    let lazy = VerifiedIndex::open_pinned_for_query(temp.path()).unwrap();
+    assert!(!lazy.has_loaded_full_manifest());
+
+    // Corrupt `<generation_id>.json` with same-length bytes after lazy open.
+    let path = manifest_path(temp.path(), &receipt.generation_id);
+    let mut corrupted = fs::read(&path).unwrap();
+    let original_len = corrupted.len();
+    assert!(original_len > 2);
+    corrupted[original_len - 2] ^= b' ';
+    fs::write(&path, &corrupted).unwrap();
+
+    // `try_manifest()` MUST return a typed error instead of panicking.
+    let err = lazy.try_manifest().unwrap_err();
+    assert!(
+        matches!(
+            err,
+            IndexError::ManifestDigestMismatch { ref expected, .. }
+                if expected == &receipt.generation_id
+        ),
+        "expected ManifestDigestMismatch from try_manifest, got {err:?}"
+    );
+
+    // `into_generation_snapshot()` MUST also return a typed error instead of panicking.
+    let snap_err = match lazy.into_generation_snapshot() {
+        Ok(_) => panic!("corrupted manifest must fail into_generation_snapshot"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            snap_err,
+            IndexError::ManifestDigestMismatch { ref expected, .. }
+                if expected == &receipt.generation_id
+        ),
+        "expected ManifestDigestMismatch from into_generation_snapshot, got {snap_err:?}"
+    );
 }

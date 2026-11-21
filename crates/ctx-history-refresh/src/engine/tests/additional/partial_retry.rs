@@ -12,7 +12,8 @@ fn partial_publication_clears_internal_failure_history_only_for_completed_routes
                 return Err(anyhow!("stable internal refresh fixture failure"));
             }
             let retained = VerifiedIndex::open_pinned(execution.index_root)?
-                .manifest()
+                .try_manifest()
+                .unwrap()
                 .sources
                 .clone();
             let mut writer = ctx_history_index::GenerationWriter::open(

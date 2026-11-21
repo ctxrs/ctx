@@ -151,7 +151,7 @@ impl CoreFeedSnapshot for VerifiedIndex {
     }
 
     fn schema(&self) -> CoreFeedSchema {
-        let manifest = self.manifest();
+        let manifest = self.try_manifest().expect("test feed manifest must load");
         CoreFeedSchema {
             generation_manifest_version: manifest.manifest_version,
             identity_version: manifest.identity_version,
@@ -167,7 +167,7 @@ impl CoreFeedSnapshot for VerifiedIndex {
         &self,
         visit: &mut dyn FnMut(Vec<CoreSourceState>, bool) -> Result<()>,
     ) -> Result<()> {
-        let states = core_source_states(self.manifest())?;
+        let states = core_source_states(self.try_manifest()?)?;
         if states.is_empty() {
             return visit(Vec::new(), true);
         }

@@ -119,7 +119,11 @@ fn truncated_openclaw_compound_root_retains_exact_agent_membership() {
     let initial_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_marker(&initial_index, ALPHA_MARKER);
     assert_marker(&initial_index, BETA_MARKER);
-    let retained_roots = initial_index.manifest().provider_roots().to_vec();
+    let retained_roots = initial_index
+        .try_manifest()
+        .unwrap()
+        .provider_roots()
+        .to_vec();
     assert_eq!(retained_roots.len(), 1);
     assert_eq!(retained_roots[0].routes().len(), 2);
     drop(initial_index);
@@ -151,8 +155,8 @@ fn truncated_openclaw_compound_root_retains_exact_agent_membership() {
     .unwrap();
     assert!(cold_receipt.sources.is_empty());
     let cold_index = VerifiedIndex::open_pinned(&cold_index_root).unwrap();
-    assert!(cold_index.manifest().sources.is_empty());
-    assert!(cold_index.manifest().provider_roots()[0]
+    assert!(cold_index.try_manifest().unwrap().sources.is_empty());
+    assert!(cold_index.try_manifest().unwrap().provider_roots()[0]
         .routes()
         .is_empty());
     drop(cold_index);
@@ -176,7 +180,9 @@ fn truncated_openclaw_compound_root_retains_exact_agent_membership() {
     assert!(retained_receipt.failed_routes.is_empty());
     let retained_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
-        retained_index.manifest().provider_roots()[0].routes().len(),
+        retained_index.try_manifest().unwrap().provider_roots()[0]
+            .routes()
+            .len(),
         2
     );
     assert_marker(&retained_index, ALPHA_MARKER);
@@ -243,7 +249,11 @@ fn missing_openclaw_compound_root_retains_exact_agent_membership_until_restored(
     let initial_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_marker(&initial_index, ALPHA_MARKER);
     assert_marker(&initial_index, BETA_MARKER);
-    let retained_roots = initial_index.manifest().provider_roots().to_vec();
+    let retained_roots = initial_index
+        .try_manifest()
+        .unwrap()
+        .provider_roots()
+        .to_vec();
     assert_eq!(retained_roots.len(), 1);
     assert_eq!(retained_roots[0].routes().len(), 2);
     drop(initial_index);
@@ -276,8 +286,8 @@ fn missing_openclaw_compound_root_retains_exact_agent_membership_until_restored(
     .unwrap();
     assert!(cold_receipt.sources.is_empty());
     let cold_index = VerifiedIndex::open_pinned(&cold_index_root).unwrap();
-    assert!(cold_index.manifest().sources.is_empty());
-    assert!(cold_index.manifest().provider_roots()[0]
+    assert!(cold_index.try_manifest().unwrap().sources.is_empty());
+    assert!(cold_index.try_manifest().unwrap().provider_roots()[0]
         .routes()
         .is_empty());
     drop(cold_index);
@@ -301,7 +311,9 @@ fn missing_openclaw_compound_root_retains_exact_agent_membership_until_restored(
     assert!(missing_receipt.failed_routes.is_empty());
     let retained_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
-        retained_index.manifest().provider_roots()[0].routes().len(),
+        retained_index.try_manifest().unwrap().provider_roots()[0]
+            .routes()
+            .len(),
         2
     );
     assert_marker(&retained_index, ALPHA_MARKER);
@@ -322,7 +334,9 @@ fn missing_openclaw_compound_root_retains_exact_agent_membership_until_restored(
     assert!(restored_receipt.failed_routes.is_empty());
     let restored_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
-        restored_index.manifest().provider_roots()[0].routes().len(),
+        restored_index.try_manifest().unwrap().provider_roots()[0]
+            .routes()
+            .len(),
         2
     );
     assert_marker(&restored_index, ALPHA_MARKER);

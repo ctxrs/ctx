@@ -1,12 +1,14 @@
+#[cfg(test)]
+use std::time::Duration;
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use anyhow::Result;
 use chrono::SecondsFormat;
 use ctx_history_core::utc_now;
+#[cfg(test)]
 use ctx_history_index::{EventSearchFilters, VerifiedIndex};
 use ctx_history_platform::managed_data_root;
 use serde_json::{json, Value};
@@ -21,9 +23,10 @@ use crate::{
     transcript::{shell_quote_arg, write_output},
 };
 
+#[cfg(test)]
+use super::search::SearchPresentation;
 use super::search::{
-    semantic_reason_code, NormalizedSearchQuery, SearchCollection, SearchPresentation,
-    SourceSearchRequest,
+    semantic_reason_code, NormalizedSearchQuery, SearchCollection, SourceSearchRequest,
 };
 use crate::RefreshMode as RefreshArg;
 
@@ -81,6 +84,47 @@ pub(super) fn search_json(
     )
 }
 
+pub(super) fn search_json_document_from_result(
+    result: &ctx_history_read_application::SearchApplicationResult,
+    data_root: &Path,
+    refresh_mode: RefreshArg,
+    refresh_status: &str,
+    refresh_source_count: usize,
+) -> Result<Value> {
+    let query = result.query();
+    let commands = search_result_commands(&query.request, &query.collection, data_root);
+    let fallback_code = query
+        .collection
+        .semantic_fallback
+        .as_ref()
+        .and_then(|fallback| {
+            fallback
+                .code
+                .or_else(|| fallback.reason.map(semantic_reason_code))
+        });
+    let fallback_detail = query
+        .collection
+        .semantic_fallback
+        .as_ref()
+        .map(|fallback| semantic_fallback_detail(fallback.reason, &fallback.detail));
+    let generated_at = utc_now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    result.render_read_model(
+        ctx_history_read_application::SearchApplicationReadModelInput {
+            commands: &commands,
+            freshness_mode: refresh_mode.as_str(),
+            generated_at: &generated_at,
+            semantic_fallback_code: fallback_code,
+            semantic_fallback_detail: fallback_detail.as_deref(),
+            metrics: ctx_history_read_application::SearchRenderMetrics {
+                refresh_status,
+                refresh_source_count,
+                query_duration: result.query_duration(),
+            },
+        },
+    )
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn search_json_document(
     request: &SourceSearchRequest,

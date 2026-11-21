@@ -64,10 +64,8 @@ fn active_core_storage(
     let storage =
         ctx_history_index::active_generation_storage_metadata(&source_backed_index_root(data_root))
             .ok()??;
-    (storage.generation_id() == verified.generation_id()).then_some((
-        storage.logical_bytes(),
-        verified.manifest().certified_source_bytes,
-    ))
+    (storage.generation_id() == verified.generation_id())
+        .then_some((storage.logical_bytes(), verified.certified_source_bytes()))
 }
 
 #[cfg(test)]

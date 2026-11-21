@@ -809,7 +809,7 @@ fn session_registry_budget_counts_unique_changes_not_noops_or_same_session_appen
     append.commit(|_| true).unwrap();
 
     let published = VerifiedIndex::open(fixture.root.path()).unwrap();
-    assert_eq!(published.manifest().indexed_documents, 3);
+    assert_eq!(published.try_manifest().unwrap().indexed_documents, 3);
     assert_eq!(published.count_term("same").unwrap(), 2);
     assert_eq!(published.count_term("budget").unwrap(), 0);
 }

@@ -218,7 +218,8 @@ fn source_bytes(index: &VerifiedIndex, marker: &str) -> StableSourceBytes {
     assert_eq!(hits.len(), 1, "{marker}");
     let source = &hits[0].event.source;
     let route = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_routes()
         .iter()
         .find(|route| route.sources().iter().any(|member| member == source))
@@ -253,12 +254,21 @@ fn assert_filters(index: &VerifiedIndex, root_count: usize, expected_sources: us
     let hits = search_event_candidates(index, "compoundownership", 16);
     assert_eq!(hits.len(), expected_sources);
     assert_eq!(
-        index.manifest().source_routes()[0].sources().len(),
+        index.try_manifest().unwrap().source_routes()[0]
+            .sources()
+            .len(),
         expected_sources
     );
-    for root in index.manifest().provider_roots().iter().take(root_count) {
+    for root in index
+        .try_manifest()
+        .unwrap()
+        .provider_roots()
+        .iter()
+        .take(root_count)
+    {
         let allowed = index
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root_source_tokens(&[root.definition().id.clone()], &[])
             .unwrap();
         assert_eq!(allowed.len(), 1);
@@ -362,12 +372,12 @@ fn released_shared_route_build_is_independent_of_root_order() {
         assert_filters(&reverse, 2, 3);
 
         assert_eq!(
-            forward.manifest().source_routes(),
-            reverse.manifest().source_routes()
+            forward.try_manifest().unwrap().source_routes(),
+            reverse.try_manifest().unwrap().source_routes()
         );
         assert_eq!(
-            serde_json::to_vec(forward.manifest().provider_roots()).unwrap(),
-            serde_json::to_vec(reverse.manifest().provider_roots()).unwrap()
+            serde_json::to_vec(forward.try_manifest().unwrap().provider_roots()).unwrap(),
+            serde_json::to_vec(reverse.try_manifest().unwrap().provider_roots()).unwrap()
         );
         for marker in UNIQUE_MARKERS {
             assert_eq!(

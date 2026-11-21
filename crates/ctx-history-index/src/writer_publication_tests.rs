@@ -80,7 +80,8 @@ fn native_probe_observes_space_without_restricting_a_successful_cold_commit() {
     assert_eq!(
         VerifiedIndex::open(temp.path())
             .unwrap()
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .indexed_documents,
         1
     );

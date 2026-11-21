@@ -51,7 +51,8 @@ fn configured_claude_home_is_additive_and_naming_the_automatic_home_deduplicates
             .unwrap();
             let automatic_source_key = VerifiedIndex::open_pinned(&index_root)
                 .unwrap()
-                .manifest()
+                .try_manifest()
+                .unwrap()
                 .sources[0]
                 .observation()
                 .source()
@@ -124,17 +125,21 @@ fn configured_claude_home_is_additive_and_naming_the_automatic_home_deduplicates
             // config toggle as deletion authority for already indexed history.
             let expected_route_count = if same_home { 1 } else { 2 };
             assert!(published
-                .manifest()
+                .try_manifest()
+                .unwrap()
                 .source_route(&automatic_route)
                 .is_some());
             assert_eq!(
-                published.manifest().source_routes().len(),
+                published.try_manifest().unwrap().source_routes().len(),
                 expected_route_count
             );
-            assert_eq!(published.manifest().sources.len(), expected_route_count);
-            assert_eq!(published.manifest().provider_roots().len(), 1);
             assert_eq!(
-                published.manifest().provider_roots()[0].source_identity(),
+                published.try_manifest().unwrap().sources.len(),
+                expected_route_count
+            );
+            assert_eq!(published.try_manifest().unwrap().provider_roots().len(), 1);
+            assert_eq!(
+                published.try_manifest().unwrap().provider_roots()[0].source_identity(),
                 if same_home {
                     ProviderRootSourceIdentity::Released
                 } else {
@@ -142,17 +147,22 @@ fn configured_claude_home_is_additive_and_naming_the_automatic_home_deduplicates
                 }
             );
             if same_home {
-                assert!(published.manifest().sources[0]
+                assert!(published.try_manifest().unwrap().sources[0]
                     .observation()
                     .source()
                     .exact_descriptor_eq(&automatic_source_key));
             }
             assert_eq!(
-                published.manifest().provider_roots()[0].definition().id,
+                published.try_manifest().unwrap().provider_roots()[0]
+                    .definition()
+                    .id,
                 "work"
             );
             assert_eq!(
-                published.manifest().automatic_provider_discovery(),
+                published
+                    .try_manifest()
+                    .unwrap()
+                    .automatic_provider_discovery(),
                 automatic_enabled
             );
         }
@@ -218,10 +228,10 @@ fn watch_catalog_preserves_released_identity_across_path_and_group_replacement()
     .unwrap();
     let published = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
-        published.manifest().provider_roots()[0].source_identity(),
+        published.try_manifest().unwrap().provider_roots()[0].source_identity(),
         ProviderRootSourceIdentity::Released
     );
-    let published_route = published.manifest().provider_roots()[0].routes()[0].clone();
+    let published_route = published.try_manifest().unwrap().provider_roots()[0].routes()[0].clone();
     drop(published);
 
     let moved_home = fixture.join("claude-moved");
@@ -352,16 +362,22 @@ fn released_overlap_root_move_remove_and_readd_preserves_exact_identity() {
         .unwrap();
 
         let published = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert_eq!(published.manifest().sources.len(), 3);
-        assert_eq!(published.manifest().source_routes().len(), 2);
-        assert_eq!(published.manifest().provider_roots().len(), 1);
+        assert_eq!(published.try_manifest().unwrap().sources.len(), 3);
+        assert_eq!(published.try_manifest().unwrap().source_routes().len(), 2);
+        assert_eq!(published.try_manifest().unwrap().provider_roots().len(), 1);
         assert_eq!(
-            published.manifest().provider_roots()[0].source_identity(),
+            published.try_manifest().unwrap().provider_roots()[0].source_identity(),
             ProviderRootSourceIdentity::Released
         );
-        assert_eq!(published.manifest().provider_roots()[0].routes().len(), 1);
+        assert_eq!(
+            published.try_manifest().unwrap().provider_roots()[0]
+                .routes()
+                .len(),
+            1
+        );
         let allowed_source_keys = published
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root_source_tokens(&["work".to_owned()], &[])
             .unwrap();
         let work_filter = EventSearchFilters {
@@ -422,8 +438,8 @@ fn released_overlap_root_move_remove_and_readd_preserves_exact_identity() {
         )
         .unwrap();
         let removed = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert!(removed.manifest().provider_roots().is_empty());
-        assert_eq!(removed.manifest().source_routes().len(), 1);
+        assert!(removed.try_manifest().unwrap().provider_roots().is_empty());
+        assert_eq!(removed.try_manifest().unwrap().source_routes().len(), 1);
         assert_eq!(
             removed
                 .complete_lexical_search("oldautomaticcanary", 10)
@@ -468,14 +484,15 @@ fn released_overlap_root_move_remove_and_readd_preserves_exact_identity() {
         )
         .unwrap();
         let rejoined = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert_eq!(rejoined.manifest().source_routes().len(), 2);
-        assert_eq!(rejoined.manifest().provider_roots().len(), 1);
+        assert_eq!(rejoined.try_manifest().unwrap().source_routes().len(), 2);
+        assert_eq!(rejoined.try_manifest().unwrap().provider_roots().len(), 1);
         assert_eq!(
-            rejoined.manifest().provider_roots()[0].source_identity(),
+            rejoined.try_manifest().unwrap().provider_roots()[0].source_identity(),
             ProviderRootSourceIdentity::Released
         );
         let allowed_source_keys = rejoined
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root_source_tokens(&["work".to_owned()], &[])
             .unwrap();
         let work_filter = EventSearchFilters {
@@ -657,7 +674,8 @@ fn naming_a_failing_automatic_home_carries_it_while_named_peer_advances() {
     assert!(!publication.route_results.is_empty());
     let published = VerifiedIndex::open_pinned(&index_root).unwrap();
     let automatic_root = published
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_roots()
         .iter()
         .find(|root| root.definition().id == "automatic")
@@ -759,7 +777,8 @@ fn relocated_configured_root_preserves_routes_and_advances_with_peer() {
     .unwrap();
     let first = VerifiedIndex::open_pinned(&index_root).unwrap();
     let retained_routes = first
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_roots()
         .iter()
         .find(|root| root.definition().id == "retained")
@@ -822,7 +841,8 @@ fn relocated_configured_root_preserves_routes_and_advances_with_peer() {
 
     let published = VerifiedIndex::open_pinned(&index_root).unwrap();
     let retained_root = published
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_roots()
         .iter()
         .find(|root| root.definition().id == "retained")
@@ -912,7 +932,8 @@ fn removing_last_configured_claude_home_returns_to_one_automatic_route() {
     .unwrap();
     let configured_source_key = VerifiedIndex::open_pinned(&index_root)
         .unwrap()
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources[0]
         .observation()
         .source()
@@ -935,14 +956,19 @@ fn removing_last_configured_claude_home_returns_to_one_automatic_route() {
     .unwrap();
 
     let published = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(published.manifest().source_routes().len(), 1);
+    assert_eq!(published.try_manifest().unwrap().source_routes().len(), 1);
     assert!(published
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_route(&automatic_route)
         .is_some());
-    assert!(published.manifest().sources[0]
+    assert!(published.try_manifest().unwrap().sources[0]
         .observation()
         .source()
         .exact_descriptor_eq(&configured_source_key));
-    assert!(published.manifest().provider_roots().is_empty());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .provider_roots()
+        .is_empty());
 }

@@ -1071,8 +1071,10 @@ fn publish_selected_routes_generation(
     let generation_id = published.receipt().generation_id.clone();
     let (_, _, verified_index) = published.into_parts();
     let mut publication = empty_test_publication(generation_id);
-    publication.current =
-        SourceBackedRefreshCurrent::from_sources(&verified_index.manifest().sources, 0)?;
+    publication.current = SourceBackedRefreshCurrent::from_sources(
+        &verified_index.try_manifest().unwrap().sources,
+        0,
+    )?;
     publication.certified_source_count = publication.current.source_count;
     publication.certified_source_bytes = publication.current.certified_source_bytes;
     publication.route_results = selected

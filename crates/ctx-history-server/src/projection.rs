@@ -381,7 +381,8 @@ fn revision_work(
 
 fn coverage(index: &VerifiedIndex, collection: &str) -> Result<u64> {
     let state = index
-        .manifest()
+        .try_manifest()
+        .map_err(|_| Error::Unavailable)?
         .generation_state()
         .ok_or(Error::Unavailable)?;
     if state.format() != COVERAGE_FORMAT {

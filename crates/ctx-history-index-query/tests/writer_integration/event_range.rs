@@ -854,7 +854,7 @@ fn active_range_tracks_noop_rewrite_and_certified_deletion() {
     assert!(page.terminal);
     assert!(page.items.is_empty());
     assert_eq!(deleted.document_count(), 0);
-    assert!(deleted.manifest().sources.is_empty());
+    assert!(deleted.try_manifest().unwrap().sources.is_empty());
 }
 
 #[test]

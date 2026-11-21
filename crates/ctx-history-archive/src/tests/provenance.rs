@@ -29,7 +29,13 @@ fn maximum_escaped_labels_fit_certificates_without_changing_identity() {
         .core_record_by_id(event_id.as_uuid())
         .unwrap()
         .is_some());
-    assert!(index.manifest().sources[0].observation().revision().len() < 4096);
+    assert!(
+        index.try_manifest().unwrap().sources[0]
+            .observation()
+            .revision()
+            .len()
+            < 4096
+    );
 }
 
 #[test]
@@ -42,7 +48,7 @@ fn legacy_restore_enriches_labels_once_without_changing_records_or_ids() {
     let member = members(&archive).pop().unwrap();
     let mapped = map_record(&options().binding, &member, original).unwrap();
     let index = VerifiedIndex::open_pinned(root.join("search/lexical")).unwrap();
-    let certificate = index.manifest().sources[0].clone();
+    let certificate = index.try_manifest().unwrap().sources[0].clone();
     drop(index);
     let mut writer = GenerationWriter::open(root.join("search/lexical"), writer_options())
         .unwrap()

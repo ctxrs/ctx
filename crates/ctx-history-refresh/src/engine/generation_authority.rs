@@ -90,11 +90,14 @@ impl CoreRefreshTerminalSuccess {
         Self::StateOnly(Box::new(receipt))
     }
 
-    pub(super) fn request_source_count(&self, receipt: &SourceBackedRefreshReceipt) -> usize {
+    pub(super) fn request_source_count(
+        &self,
+        receipt: &SourceBackedRefreshReceipt,
+    ) -> Result<usize> {
         match self {
             Self::Verified(authority) => receipt.source_count(authority.verified_index_ref()),
             #[cfg(any(test, feature = "test-support"))]
-            Self::StateOnly(_) => receipt.state_only_source_count(),
+            Self::StateOnly(_) => Ok(receipt.state_only_source_count()),
         }
     }
 

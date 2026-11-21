@@ -146,7 +146,8 @@ impl MixedFixture {
                 &roots,
             )?;
             let pin = Arc::new(VerifiedIndex::open_pinned(execution.index_root)?);
-            let current = SourceBackedRefreshCurrent::from_sources(&pin.manifest().sources, 0)?;
+            let current =
+                SourceBackedRefreshCurrent::from_sources(&pin.try_manifest().unwrap().sources, 0)?;
             Ok(SourceBackedRefreshPublication {
                 generation_id: pin.generation_id().to_owned(),
                 published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
@@ -332,7 +333,8 @@ fn pending_root_replacement_blocked_a_stays_idle_while_b_is_due() -> Result<()> 
         assert!(!fixture.engine.has_scheduled_route_work());
         assert_eq!(
             VerifiedIndex::open_pinned(source_backed_index_root(&fixture.data_root))?
-                .manifest()
+                .try_manifest()
+                .unwrap()
                 .indexed_documents,
             2
         );
@@ -417,7 +419,7 @@ fn pending_root_replacement_paused_a_repair_is_not_starved_by_b() -> Result<()> 
     assert!(!fixture.engine.has_scheduled_route_work());
     let pin = VerifiedIndex::open_pinned(source_backed_index_root(&fixture.data_root))?;
     assert_eq!(
-        pin.manifest().provider_root_config_digest(),
+        pin.try_manifest().unwrap().provider_root_config_digest(),
         fixture.replacement.provider_root_config_digest().unwrap()
     );
     Ok(())
@@ -474,7 +476,7 @@ fn pending_root_replacement_exact_b_does_not_consume_paused_a_config_demand() ->
     assert_eq!(fixture.scopes.lock().unwrap().len(), 4);
     let pin = VerifiedIndex::open_pinned(source_backed_index_root(&fixture.data_root))?;
     assert_eq!(
-        pin.manifest().provider_root_config_digest(),
+        pin.try_manifest().unwrap().provider_root_config_digest(),
         fixture.replacement.provider_root_config_digest().unwrap()
     );
     Ok(())
@@ -525,7 +527,7 @@ fn pending_root_replacement_config_during_running_request_is_not_consumed() -> R
     assert!(!fixture.watch.provider_root_refresh_pending_for_test());
     let pin = VerifiedIndex::open_pinned(source_backed_index_root(&fixture.data_root))?;
     assert_eq!(
-        pin.manifest().provider_root_config_digest(),
+        pin.try_manifest().unwrap().provider_root_config_digest(),
         fixture.replacement.provider_root_config_digest().unwrap()
     );
     Ok(())

@@ -13,7 +13,7 @@ pub fn active_generation_requires_rebuild(
     root: impl AsRef<Path>,
     index: &VerifiedIndex,
 ) -> Result<bool> {
-    if index.manifest().lexical_schema_version != LEXICAL_SCHEMA_VERSION {
+    if index.lexical_schema_version() != LEXICAL_SCHEMA_VERSION {
         return Ok(true);
     }
     let root = root.as_ref();
@@ -356,6 +356,9 @@ impl GenerationWriter {
                         &root,
                         publication.generation_id(),
                         publication.manifest(),
+                        active_pointer
+                            .as_ref()
+                            .and_then(|pointer| pointer.active().summary_sha256()),
                     );
                     let (index, fields, opstamp, publication) = publication.into_writer_parts()?;
                     (index, None, None, None, fields, Some(publication), opstamp)

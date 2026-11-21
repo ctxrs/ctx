@@ -33,6 +33,23 @@ impl SourceBackedRefreshCurrent {
         Ok(current)
     }
 
+    pub fn from_verified_index(index: &VerifiedIndex, removed_source_count: usize) -> Result<Self> {
+        let totals = index.certified_source_totals()?;
+        Ok(Self {
+            source_count: usize::try_from(totals.source_count)
+                .map_err(|_| anyhow!("source-backed current source count overflow"))?,
+            indexed_documents: totals.indexed_documents,
+            complete_records: totals.complete_records,
+            retained_records: totals.retained_records,
+            rejected_records: totals.rejected_records,
+            ignored_records: totals.ignored_records,
+            certified_source_bytes: totals.certified_source_bytes,
+            sources_with_rejections: usize::try_from(totals.sources_with_rejections)
+                .map_err(|_| anyhow!("source-backed current rejection-source count overflow"))?,
+            removed_source_count,
+        })
+    }
+
     fn add_counts(&mut self, counts: ScannedSourceCounts) -> Result<()> {
         self.indexed_documents =
             checked_current_count(self.indexed_documents, counts.indexed_documents)?;

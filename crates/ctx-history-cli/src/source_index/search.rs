@@ -1,6 +1,7 @@
 mod snapshot;
 pub use snapshot::{cli_snapshot_search, mcp_search_with_compact, normalize_mcp_search_request};
 
+#[cfg(test)]
 mod hydration;
 mod observation;
 mod query;
@@ -47,6 +48,7 @@ use super::{
 };
 use ctx_history_read_application::{RetainedPeerRead, SearchBackend};
 
+#[cfg(test)]
 pub(in crate::source_index) use hydration::SearchPresentation;
 use observation::{
     initial_search_observation, observed_refresh_for_search, search_existing_generation_with_port,

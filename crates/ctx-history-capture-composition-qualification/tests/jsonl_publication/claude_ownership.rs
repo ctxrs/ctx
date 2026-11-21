@@ -53,11 +53,11 @@ fn claude_ownership_revision_reimports_lossy_records_with_stable_identities() {
     // row markers and old source certificate, without changing source bytes.
     let revision = "claude-shared-jsonl-core-activity-v2-record-rejections";
     let verified = VerifiedIndex::open_pinned(&index).unwrap();
-    let certificate = &verified.manifest().sources[0];
+    let certificate = &verified.try_manifest().unwrap().sources[0];
     let source = certificate.observation().source().clone();
     let mut certificate = serde_json::to_value(certificate).unwrap();
     certificate["parser_revision"] = json!(revision);
-    let routes = verified.manifest().source_routes().to_vec();
+    let routes = verified.try_manifest().unwrap().source_routes().to_vec();
     drop(verified);
     let mut writer = GenerationWriter::open(&index, writer_options())
         .unwrap()

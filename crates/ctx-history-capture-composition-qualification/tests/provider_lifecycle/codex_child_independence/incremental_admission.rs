@@ -56,7 +56,8 @@ fn complete_ownerless_records_quarantine_but_empty_and_pending_writes_do_not() {
         let index = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert!(source_records_contain(&index, PEER, "healthy-neighbor"));
         let owner_records = index
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .sources
             .iter()
             .find(|certificate| {
@@ -66,9 +67,14 @@ fn complete_ownerless_records_quarantine_but_empty_and_pending_writes_do_not() {
             .unwrap_or_default();
         assert_eq!(owner_records.len(), records);
         if failures != 0 {
-            assert!(index.manifest().sources.iter().all(|certificate| {
-                source_native_session_id(certificate.observation().source()) != Some(OWNER)
-            }));
+            assert!(index
+                .try_manifest()
+                .unwrap()
+                .sources
+                .iter()
+                .all(|certificate| {
+                    source_native_session_id(certificate.observation().source()) != Some(OWNER)
+                }));
         }
     }
 }
@@ -107,7 +113,7 @@ fn appended_owner_conflict_retains_last_good_across_repeated_imports_and_repairs
         assert!(failed.failed_routes.is_empty());
         assert_eq!(failed.logical_source_failures.total(), 1);
         let index = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert_eq!(index.manifest().sources, good_sources);
+        assert_eq!(index.try_manifest().unwrap().sources, good_sources);
         assert!(source_records_contain(&index, OWNER, "certified-message"));
         assert!(search_event_candidates(&index, "must-not-publish", 8).is_empty());
         base = failed;
@@ -226,7 +232,7 @@ fn assert_deferred_owner_member_quarantine_and_repair(metadata: serde_json::Valu
         assert_eq!(failed.logical_source_failures.total(), 1);
         assert_eq!(failed.sources, retained_sources);
         let index = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert_eq!(index.manifest().sources, retained_sources);
+        assert_eq!(index.try_manifest().unwrap().sources, retained_sources);
         assert_eq!(records_for(&index, OWNER), prior_records);
         assert_eq!(records_for(&index, PEER), peer_records);
         assert!(search_event_candidates(&index, "deferredownerleakmarker", 8).is_empty());
@@ -293,7 +299,7 @@ fn same_size_owner_rewrite_with_restored_mtime_cannot_reuse_admission() {
     assert!(failed.failed_routes.is_empty());
     assert_eq!(failed.logical_source_failures.total(), 1);
     let index = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(index.manifest().sources, cold.sources);
+    assert_eq!(index.try_manifest().unwrap().sources, cold.sources);
     assert!(source_records_contain(&index, OWNER, "certified-message"));
 }
 
@@ -319,7 +325,7 @@ fn unchanged_large_owner_prefix_reuses_checkpoint_in_new_process() {
         let index_root = root.join("index");
         let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
         let generation = initial.generation_id().to_owned();
-        let sources = initial.manifest().sources.clone();
+        let sources = initial.try_manifest().unwrap().sources.clone();
         drop(initial);
         let registry = register_tree(&[&sessions]);
         let before = process_read_bytes();

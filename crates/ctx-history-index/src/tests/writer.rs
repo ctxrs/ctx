@@ -71,12 +71,15 @@ fn commit_binds_manifest_and_searchable_documents() {
         receipt.manifest().generation_id().unwrap(),
         receipt.generation_id
     );
-    assert_eq!(receipt.manifest().sources, index.manifest().sources);
+    assert_eq!(
+        receipt.manifest().sources,
+        index.try_manifest().unwrap().sources
+    );
     assert_eq!(
         receipt.manifest().source_routes(),
-        index.manifest().source_routes()
+        index.try_manifest().unwrap().source_routes()
     );
-    assert_eq!(index.manifest().indexed_documents, 1);
+    assert_eq!(index.try_manifest().unwrap().indexed_documents, 1);
     assert_eq!(index.count_term("atomic").unwrap(), 1);
 }
 

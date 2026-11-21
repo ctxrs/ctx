@@ -201,7 +201,7 @@ fn original_identities(
 ) -> Result<BTreeMap<[u8; 32], ArchiveIdentity>> {
     let owned = crate::is_archive_root(root)?;
     let mut origins = BTreeMap::new();
-    for certificate in &index.manifest().sources {
+    for certificate in &index.try_manifest()?.sources {
         let observation = certificate.observation();
         if !owned {
             if observation.source().source_format() == "ctx_archive_v1" {

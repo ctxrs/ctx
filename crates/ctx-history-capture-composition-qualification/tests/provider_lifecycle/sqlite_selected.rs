@@ -69,7 +69,8 @@ fn goose_v15_active_wal_append_preserves_identities_and_replays_exactly() {
 
     let verified = VerifiedIndex::open_pinned(&index).unwrap();
     let source = verified
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|source| source.observation().source().provider() == CaptureProvider::Goose.as_str())

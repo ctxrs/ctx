@@ -78,7 +78,8 @@ impl ReplacementFixture {
                 )?;
             }
             let pin = Arc::new(VerifiedIndex::open_pinned(execution.index_root)?);
-            let current = SourceBackedRefreshCurrent::from_sources(&pin.manifest().sources, 0)?;
+            let current =
+                SourceBackedRefreshCurrent::from_sources(&pin.try_manifest().unwrap().sources, 0)?;
             Ok(SourceBackedRefreshPublication {
                 generation_id: pin.generation_id().to_owned(),
                 published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
@@ -184,9 +185,9 @@ impl ReplacementFixture {
     fn assert_predecessor_retained(&self) -> Result<()> {
         let pin = VerifiedIndex::open_pinned(source_backed_index_root(&self.data_root))?;
         assert_eq!(pin.generation_id(), self.generation);
-        assert_eq!(pin.manifest().indexed_documents, 1);
+        assert_eq!(pin.try_manifest().unwrap().indexed_documents, 1);
         assert_eq!(
-            pin.manifest().provider_root_config_digest(),
+            pin.try_manifest().unwrap().provider_root_config_digest(),
             self.original.provider_root_config_digest().unwrap()
         );
         Ok(())
@@ -303,7 +304,7 @@ fn pending_root_replacement_source_repair_retries_and_publishes_requested_config
     assert!(fixture.engine.run_next(&fixture.data_root).is_none());
     let pin = VerifiedIndex::open_pinned(source_backed_index_root(&fixture.data_root))?;
     assert_eq!(
-        pin.manifest().provider_root_config_digest(),
+        pin.try_manifest().unwrap().provider_root_config_digest(),
         fixture.replacement.provider_root_config_digest().unwrap()
     );
     Ok(())

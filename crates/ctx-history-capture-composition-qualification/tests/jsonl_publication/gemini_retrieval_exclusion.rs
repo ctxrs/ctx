@@ -134,7 +134,8 @@ fn gemini_provider_source(root: &Path) -> ProviderSource {
 fn indexed_records(index: &Path) -> Vec<CoreRecord> {
     let verified = VerifiedIndex::open_pinned(index).unwrap();
     let source = verified
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|source| source.observation().source().provider() == CaptureProvider::Gemini.as_str())
@@ -156,7 +157,8 @@ fn indexed_records(index: &Path) -> Vec<CoreRecord> {
 fn gemini_sources(index: &Path) -> Vec<SourceKey> {
     VerifiedIndex::open_pinned(index)
         .unwrap()
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .filter(|source| {
@@ -169,7 +171,8 @@ fn gemini_sources(index: &Path) -> Vec<SourceKey> {
 fn all_gemini_records(index: &Path) -> Vec<CoreRecord> {
     let verified = VerifiedIndex::open_pinned(index).unwrap();
     let sources = verified
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .filter(|source| {
@@ -194,7 +197,8 @@ fn all_gemini_records(index: &Path) -> Vec<CoreRecord> {
 fn certified_prefix_bytes(index: &Path) -> u64 {
     let verified = VerifiedIndex::open_pinned(index).unwrap();
     verified
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|source| source.observation().source().provider() == CaptureProvider::Gemini.as_str())

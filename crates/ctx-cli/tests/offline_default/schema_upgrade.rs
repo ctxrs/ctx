@@ -392,7 +392,7 @@ fn schema_22_scoped_provider_import_preserves_other_providers_and_explicit_sourc
             String::from_utf8_lossy(&output.stderr)
         );
         let upgraded = ctx_history_index::VerifiedIndex::open_pinned(&index).unwrap();
-        assert_eq!(upgraded.manifest().lexical_schema_version, 23);
+        assert_eq!(upgraded.lexical_schema_version(), 23);
         drop(upgraded);
 
         assert_search_marker_present(&temp, &data_root, &environment, "schema22upgrademarker");
@@ -593,14 +593,19 @@ fn rebuild_required_upgrade_preserves_released_configured_provider_root_identity
     run_import_all(&first_home);
 
     let before = ctx_history_index::VerifiedIndex::open_pinned(&index).unwrap();
-    let before_root = before.manifest().provider_root("work").unwrap();
+    let before_root = before
+        .try_manifest()
+        .unwrap()
+        .provider_root("work")
+        .unwrap();
     assert_eq!(
         before_root.source_identity(),
         ctx_history_index::ProviderRootSourceIdentity::Released
     );
     let before_routes = before_root.routes().to_vec();
     let before_sources = before
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .map(|cert| cert.observation().source().clone())
@@ -617,7 +622,7 @@ fn rebuild_required_upgrade_preserves_released_configured_provider_root_identity
     run_import_all(&first_home);
 
     let after = ctx_history_index::VerifiedIndex::open_pinned(&index).unwrap();
-    let after_root = after.manifest().provider_root("work").unwrap();
+    let after_root = after.try_manifest().unwrap().provider_root("work").unwrap();
     assert_eq!(
         after_root.source_identity(),
         ctx_history_index::ProviderRootSourceIdentity::Released,
@@ -625,7 +630,8 @@ fn rebuild_required_upgrade_preserves_released_configured_provider_root_identity
     );
     assert_eq!(after_root.routes(), before_routes.as_slice());
     let after_sources = after
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .map(|cert| cert.observation().source().clone())

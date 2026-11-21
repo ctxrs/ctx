@@ -8,7 +8,8 @@ fn terminal_receipt_fixture() -> (tempfile::TempDir, Value, VerifiedIndex) {
     let verified = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let mut publication = test_publication(generation.clone());
     publication.current =
-        SourceBackedRefreshCurrent::from_sources(&verified.manifest().sources, 0).unwrap();
+        SourceBackedRefreshCurrent::from_sources(&verified.try_manifest().unwrap().sources, 0)
+            .unwrap();
     publication.certified_source_count = publication.current.source_count;
     publication.certified_source_bytes = publication.current.certified_source_bytes;
     let receipt = SourceBackedRefreshReceipt::from_verified_publication(
@@ -107,14 +108,15 @@ fn recovery_receipt_accepts_a_published_catalog_binding_retained_outside_the_req
 #[test]
 fn verified_receipt_keeps_retryable_binding_for_a_retained_route_failure() {
     let (_temp, _response, verified) = terminal_receipt_fixture();
-    let route = verified.manifest().source_routes()[0]
+    let route = verified.try_manifest().unwrap().source_routes()[0]
         .route_identity()
         .as_str()
         .to_owned();
     let lineage = "5a".repeat(32);
     let mut publication = test_publication(verified.generation_id());
     publication.current =
-        SourceBackedRefreshCurrent::from_sources(&verified.manifest().sources, 0).unwrap();
+        SourceBackedRefreshCurrent::from_sources(&verified.try_manifest().unwrap().sources, 0)
+            .unwrap();
     publication.certified_source_count = publication.current.source_count;
     publication.certified_source_bytes = publication.current.certified_source_bytes;
     publication.route_results = vec![SourceBackedRefreshRouteResult::failed(
@@ -217,14 +219,14 @@ fn receipt_source_count_intersects_request_routes_with_certified_generation_rout
         catalog_route_bindings: Vec::new(),
     };
 
-    assert_eq!(receipt.source_count(&verified), 1);
+    assert_eq!(receipt.source_count(&verified).unwrap(), 1);
     let mut failed_carried = receipt;
     failed_carried.route_results = vec![SourceBackedRefreshRouteResult::failed(
         requested_route.as_str().to_owned(),
         "unavailable".to_owned(),
         true,
     )];
-    assert_eq!(failed_carried.source_count(&verified), 0);
+    assert_eq!(failed_carried.source_count(&verified).unwrap(), 0);
 }
 
 #[test]
@@ -453,7 +455,8 @@ fn bounded_receipt_keeps_every_route_result_exact() {
     let (_temp, _response, verified) = terminal_receipt_fixture();
     let mut publication = test_publication(verified.generation_id());
     publication.current =
-        SourceBackedRefreshCurrent::from_sources(&verified.manifest().sources, 0).unwrap();
+        SourceBackedRefreshCurrent::from_sources(&verified.try_manifest().unwrap().sources, 0)
+            .unwrap();
     publication.route_results = (0..256)
         .map(|index| {
             let route_identity = format!("{index:064x}");
@@ -495,4 +498,110 @@ fn bounded_receipt_keeps_every_route_result_exact() {
     assert_eq!(transmitted.source_failure_total(), 256);
     assert!(transmitted.source_failure_diagnostic_count() < 256);
     assert_eq!(wire, receipt.to_json());
+}
+
+#[test]
+fn inline_published_receipt_and_source_count_skip_full_manifest_reads_on_flat_delta() {
+    let temp = tempfile::tempdir().unwrap();
+    let route = SourceRouteIdentity::from_sha256("b4".repeat(32)).unwrap();
+    let absent_route = SourceRouteIdentity::from_sha256("b5".repeat(32)).unwrap();
+    let source_a = publication_pin_source_with_anchor(0xb4);
+    let source_b = publication_pin_source_with_anchor(0xb5);
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial.begin_source(source_a.clone()).unwrap();
+    initial
+        .add_core_record(publication_pin_record(&source_a))
+        .unwrap();
+    initial
+        .certify_source(publication_pin_certificate(&source_a))
+        .unwrap();
+    initial
+        .set_present_source_routes(vec![ctx_history_index::SourceRouteSnapshot::present(
+            route.clone(),
+            vec![source_a.clone()],
+        )
+        .unwrap()])
+        .unwrap();
+    let base_generation = initial.commit(|_| true).unwrap().generation_id;
+
+    // Publish a second generation adding source_b to the same route so it is stored as a flat delta.
+    let mut successor = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    successor
+        .set_source_route_plan(BTreeSet::from([route.clone()]), BTreeSet::new())
+        .unwrap();
+    successor.begin_source_route_stage(route.clone()).unwrap();
+    successor
+        .retain_unstaged_source_route_members(&route)
+        .unwrap();
+    successor.begin_source(source_b.clone()).unwrap();
+    successor
+        .add_core_record(publication_pin_record(&source_b))
+        .unwrap();
+    successor
+        .certify_source(publication_pin_certificate(&source_b))
+        .unwrap();
+    successor.finish_source_route_stage(&route).unwrap();
+    successor.set_present_source_routes(Vec::new()).unwrap();
+    let delta_generation = successor.commit(|_| true).unwrap().generation_id;
+
+    let delta_bytes = fs::read(
+        temp.path()
+            .join("ctx-generations")
+            .join(format!("{delta_generation}.json")),
+    )
+    .unwrap();
+    assert!(
+        delta_bytes.starts_with(b"{\"storage_format\":\"ctx-manifest-flat-delta-v1\""),
+        "expected flat-delta manifest for successor generation"
+    );
+
+    // Construct an inline Published daemon response matching `--refresh background`.
+    let eager = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let mut publication = test_publication(delta_generation.clone());
+    publication.current =
+        SourceBackedRefreshCurrent::from_sources(&eager.try_manifest().unwrap().sources, 0)
+            .unwrap();
+    publication.certified_source_count = publication.current.source_count;
+    publication.certified_source_bytes = publication.current.certified_source_bytes;
+    publication.route_results = vec![
+        SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true),
+        SourceBackedRefreshRouteResult::succeeded(absent_route.as_str().to_owned(), false),
+    ];
+    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+        Some(base_generation),
+        delta_generation.clone(),
+        &publication,
+    )
+    .unwrap();
+    let response = json!({
+        "previous_generation": receipt.previous_generation,
+        "published_generation": delta_generation,
+        "generation_changed": true,
+        "certified_source_count": publication.certified_source_count,
+        "certified_source_bytes": publication.certified_source_bytes,
+        "receipt": receipt.to_json(),
+    });
+    drop(eager);
+
+    // Cold lazy open + inline Published receipt verification + source_count must perform 0 manifest reads.
+    ctx_history_index::test_support::clear_manifest_cache_for_root(temp.path()).unwrap();
+    ctx_history_index::test_support::read_metrics::reset_metadata_read_activity();
+    let lazy = VerifiedIndex::open_pinned_for_query(temp.path()).unwrap();
+    assert!(!lazy.has_loaded_full_manifest());
+    let parsed = published_refresh_receipt_for_index(&response, &lazy).unwrap();
+    assert_eq!(parsed.source_count(&lazy).unwrap(), 1);
+    assert!(
+        !lazy.has_loaded_full_manifest(),
+        "inline Published receipt validation and source_count must stay on the authenticated summary"
+    );
+    let reads = ctx_history_index::test_support::read_metrics::metadata_read_activity();
+    assert_eq!(reads.manifest.operations, 0);
+    assert_eq!(reads.manifest.bytes, 0);
 }

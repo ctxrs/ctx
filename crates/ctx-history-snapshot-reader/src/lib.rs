@@ -223,7 +223,10 @@ impl CoreSnapshot {
                 "pinned generation identity changed".to_owned(),
             ));
         }
-        let actual_schema = SnapshotSchema::from_manifest(index.manifest());
+        let manifest = index
+            .try_manifest()
+            .map_err(|error| map_index_error(error, &generation_id, expected))?;
+        let actual_schema = SnapshotSchema::from_manifest(manifest);
         // VerifiedIndex has authenticated the complete supported read contract,
         // including the predecessor policy hash and unchanged Core fingerprint.
         // Custom expectations remain exact; current consumers may read any such
@@ -234,7 +237,7 @@ impl CoreSnapshot {
                 actual: actual_schema,
             });
         }
-        let actual_fingerprint = &index.manifest().core_record_contract_fingerprint;
+        let actual_fingerprint = &manifest.core_record_contract_fingerprint;
         if actual_fingerprint != &expected.core_record_fingerprint {
             return Err(SnapshotError::FingerprintMismatch {
                 expected: expected.core_record_fingerprint.clone(),
@@ -261,15 +264,15 @@ impl CoreSnapshot {
     }
 
     pub fn indexed_documents(&self) -> u64 {
-        self.index.manifest().indexed_documents
+        self.index.document_count()
     }
 
     pub fn certified_source_bytes(&self) -> u64 {
-        self.index.manifest().certified_source_bytes
+        self.index.certified_source_bytes()
     }
 
     pub fn source_count(&self) -> usize {
-        self.index.manifest().sources.len()
+        self.index.certified_source_count()
     }
 
     pub fn source_manifest_page(
@@ -572,16 +575,16 @@ impl CoreSnapshot {
     }
 
     fn source_state(&self, index: usize) -> Result<SourceState> {
-        let source = self
+        let manifest = self
             .index
-            .manifest()
+            .try_manifest()
+            .map_err(|error| map_index_error(error, self.generation_id(), &self.contract))?;
+        let source = manifest
             .sources
             .get(index)
             .map(|certificate| certificate.observation().source().clone())
             .ok_or_else(|| SnapshotError::Bounds("source offset is past the end".to_owned()))?;
-        let aggregate = self
-            .index
-            .manifest()
+        let aggregate = manifest
             .core_record_aggregates
             .get(index)
             .cloned()

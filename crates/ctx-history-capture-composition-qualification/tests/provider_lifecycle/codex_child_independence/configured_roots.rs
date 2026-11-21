@@ -59,7 +59,7 @@ fn partial_codex_home_adopts_released_identity_without_duplicate_records() {
         refresh_source_backed_generation(&index_root, &configured.registry, writer_options())
             .unwrap();
         let index = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert_eq!(index.manifest().sources.len(), 1);
+        assert_eq!(index.try_manifest().unwrap().sources.len(), 1);
         assert_eq!(
             serde_json::to_vec(&records_for(&index, native_session_id)).unwrap(),
             automatic_records
@@ -186,7 +186,8 @@ fn configured_codex_homes_with_the_same_native_session_publish_independent_sourc
 
     let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let codex_sources = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .filter(|source| source.observation().source().provider() == "codex")
@@ -325,7 +326,7 @@ fn unavailable_configured_codex_home_carries_only_itself_while_peer_refreshes() 
     let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     current
         .registry
-        .retain_unavailable_provider_root_routes(retained.manifest().provider_roots())
+        .retain_unavailable_provider_root_routes(retained.try_manifest().unwrap().provider_roots())
         .unwrap();
     fs::remove_file(&work_home).unwrap();
     fs::rename(&displaced_work_home, &work_home).unwrap();
@@ -351,7 +352,8 @@ fn unavailable_configured_codex_home_carries_only_itself_while_peer_refreshes() 
         "configured Codex work retained"
     ));
     let work_root = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_roots()
         .iter()
         .find(|root| root.definition().id == "work")
@@ -448,7 +450,8 @@ fn cold_unavailable_configured_codex_home_does_not_block_healthy_peer() {
         "configured Codex personal cold"
     ));
     let work_root = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_roots()
         .iter()
         .find(|root| root.definition().id == "work")

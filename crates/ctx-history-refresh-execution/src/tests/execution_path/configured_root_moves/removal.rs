@@ -36,13 +36,15 @@ fn exact_history_bytes(index: &VerifiedIndex, marker: &str) -> ExactHistoryBytes
         .is_some());
     let source = &event.source;
     let route = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_routes()
         .iter()
         .find(|route| route.sources().iter().any(|member| member == source))
         .unwrap();
     let certificate = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|candidate| candidate.observation().source() == source)
@@ -183,7 +185,7 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
     .unwrap();
     let automatic = VerifiedIndex::open_pinned(&index_root).unwrap();
     let baseline = exact_history_bytes(&automatic, marker);
-    assert_eq!(automatic.manifest().sources.len(), 1);
+    assert_eq!(automatic.try_manifest().unwrap().sources.len(), 1);
     drop(automatic);
 
     let definition = |path| ctx_history_capture::ProviderRootDefinition {
@@ -199,9 +201,10 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
     refresh_discovered_codex(&overlapping_discovery, &data_root, &index_root);
     let overlapping = VerifiedIndex::open_pinned(&index_root).unwrap();
     exact_history_bytes(&overlapping, marker).assert_core_history_eq(&baseline);
-    assert_eq!(overlapping.manifest().sources.len(), 1);
+    assert_eq!(overlapping.try_manifest().unwrap().sources.len(), 1);
     let overlapping_routes = overlapping
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root("work")
         .unwrap()
         .routes()
@@ -209,7 +212,8 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
     assert_eq!(overlapping_routes, vec![session_route]);
     assert_eq!(
         overlapping
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root("work")
             .unwrap()
             .source_identity(),
@@ -227,21 +231,24 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
     refresh_discovered_codex(&moved_discovery, &data_root, &index_root);
     let moved = VerifiedIndex::open_pinned(&index_root).unwrap();
     exact_history_bytes(&moved, marker).assert_core_history_eq(&baseline);
-    assert_eq!(moved.manifest().sources.len(), 1);
+    assert_eq!(moved.try_manifest().unwrap().sources.len(), 1);
     let moved_routes = moved
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root("work")
         .unwrap()
         .routes()
         .to_vec();
     assert_eq!(moved_routes, overlapping_routes);
     assert!(moved
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_route(&prompt_history_route)
         .is_none());
     assert_eq!(
         moved
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root("work")
             .unwrap()
             .source_identity(),
@@ -255,18 +262,26 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
     refresh_discovered_codex(&removed_discovery, &data_root, &index_root);
     let removed = VerifiedIndex::open_pinned(&index_root).unwrap();
     exact_history_bytes(&removed, marker).assert_core_history_eq(&baseline);
-    assert!(removed.manifest().provider_roots().is_empty());
+    assert!(removed.try_manifest().unwrap().provider_roots().is_empty());
     assert_eq!(
-        removed.manifest().detached_released_provider_roots().len(),
+        removed
+            .try_manifest()
+            .unwrap()
+            .detached_released_provider_roots()
+            .len(),
         1
     );
     assert_eq!(
-        removed.manifest().detached_released_provider_roots()[0].id(),
+        removed
+            .try_manifest()
+            .unwrap()
+            .detached_released_provider_roots()[0]
+            .id(),
         "work"
     );
     assert!(matches!(
         removed
-            .manifest()
+            .try_manifest().unwrap()
             .provider_root_source_tokens(&["work".to_owned()], &[]),
         Err(ctx_history_index::IndexError::UnknownProviderRootSelector(id)) if id == "work"
     ));
@@ -278,16 +293,22 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
     refresh_discovered_codex(&readded_discovery, &data_root, &index_root);
     let readded = VerifiedIndex::open_pinned(&index_root).unwrap();
     exact_history_bytes(&readded, marker).assert_core_history_eq(&baseline);
-    assert_eq!(readded.manifest().sources.len(), 1);
+    assert_eq!(readded.try_manifest().unwrap().sources.len(), 1);
     assert!(readded
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .detached_released_provider_roots()
         .is_empty());
-    let root = readded.manifest().provider_root("work").unwrap();
+    let root = readded
+        .try_manifest()
+        .unwrap()
+        .provider_root("work")
+        .unwrap();
     assert_eq!(root.source_identity(), ProviderRootSourceIdentity::Released);
     assert_eq!(root.routes(), moved_routes);
     let tokens = readded
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root_source_tokens(&["work".to_owned()], &["work-group".to_owned()])
         .unwrap();
     assert_eq!(tokens, vec![baseline.source_token]);
@@ -427,14 +448,21 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
     .unwrap();
     let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
     let initial_exact = exact_history_bytes(&initial, "standaloneremovalretention");
-    let route = initial.manifest().provider_root("work").unwrap().routes()[0].clone();
+    let route = initial
+        .try_manifest()
+        .unwrap()
+        .provider_root("work")
+        .unwrap()
+        .routes()[0]
+        .clone();
     let peer_route = initial
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root("personal")
         .unwrap()
         .routes()[0]
         .clone();
-    assert_eq!(initial.manifest().sources.len(), 2);
+    assert_eq!(initial.try_manifest().unwrap().sources.len(), 2);
     drop(initial);
 
     let moved_home = fixture.join("codex-work-moved");
@@ -468,7 +496,12 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
     let moved_exact = exact_history_bytes(&moved, "standaloneremovalretention");
     moved_exact.assert_core_history_eq(&initial_exact);
     assert_eq!(
-        moved.manifest().provider_root("work").unwrap().routes(),
+        moved
+            .try_manifest()
+            .unwrap()
+            .provider_root("work")
+            .unwrap()
+            .routes(),
         std::slice::from_ref(&route)
     );
     drop(moved);
@@ -496,25 +529,27 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
     )
     .unwrap();
     let removed = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(removed.manifest().provider_roots().len(), 1);
+    assert_eq!(removed.try_manifest().unwrap().provider_roots().len(), 1);
     assert_eq!(
-        removed.manifest().provider_roots()[0].definition().id,
+        removed.try_manifest().unwrap().provider_roots()[0]
+            .definition()
+            .id,
         "personal"
     );
-    assert_eq!(removed.manifest().source_routes().len(), 2);
+    assert_eq!(removed.try_manifest().unwrap().source_routes().len(), 2);
     assert_eq!(
         exact_history_bytes(&removed, "standaloneremovalretention"),
         moved_exact
     );
     assert!(matches!(
         removed
-            .manifest()
+            .try_manifest().unwrap()
             .provider_root_source_tokens(&["work".to_owned()], &[]),
         Err(ctx_history_index::IndexError::UnknownProviderRootSelector(id)) if id == "work"
     ));
     assert!(matches!(
         removed
-            .manifest()
+            .try_manifest().unwrap()
             .provider_root_source_tokens(&[], &["work-group".to_owned()]),
         Err(ctx_history_index::IndexError::UnknownProviderRootGroup(group))
             if group == "work-group"
@@ -602,16 +637,22 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
     )
     .unwrap();
     let readded = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(readded.manifest().sources.len(), 2);
-    assert_eq!(readded.manifest().source_routes().len(), 2);
+    assert_eq!(readded.try_manifest().unwrap().sources.len(), 2);
+    assert_eq!(readded.try_manifest().unwrap().source_routes().len(), 2);
     let readded_exact = exact_history_bytes(&readded, "standaloneremovalretention");
     readded_exact.assert_core_history_eq(&moved_exact);
     assert_eq!(
-        readded.manifest().provider_root("work").unwrap().routes(),
+        readded
+            .try_manifest()
+            .unwrap()
+            .provider_root("work")
+            .unwrap()
+            .routes(),
         std::slice::from_ref(&route)
     );
     let source_tokens = readded
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root_source_tokens(&["work".to_owned()], &["work-group".to_owned()])
         .unwrap();
     assert_eq!(source_tokens, vec![moved_exact.source_token.clone()]);

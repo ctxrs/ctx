@@ -43,9 +43,16 @@ fn discovery_policy_only_change_publishes_and_preserves_carried_documents() {
 
     assert_ne!(changed.generation_id, initial.generation_id);
     let published = VerifiedIndex::open(temp.path()).unwrap();
-    assert!(!published.manifest().automatic_provider_discovery());
-    assert!(published.manifest().source_route(&route).is_some());
-    assert_eq!(published.manifest().indexed_documents, 1);
+    assert!(!published
+        .try_manifest()
+        .unwrap()
+        .automatic_provider_discovery());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&route)
+        .is_some());
+    assert_eq!(published.try_manifest().unwrap().indexed_documents, 1);
     assert_eq!(published.count_term("carried").unwrap(), 1);
 }
 
@@ -113,9 +120,11 @@ fn provider_root_metadata_change_with_source_replacement_reopens_exactly() {
     let committed = moved.commit(|_| true).unwrap();
 
     let reopened = VerifiedIndex::open(temp.path()).unwrap();
-    assert!(committed.manifest().exact_snapshot_eq(reopened.manifest()));
+    assert!(committed
+        .manifest()
+        .exact_snapshot_eq(reopened.try_manifest().unwrap()));
     assert_eq!(
-        reopened.manifest().provider_roots()[0].definition(),
+        reopened.try_manifest().unwrap().provider_roots()[0].definition(),
         &moved_definition
     );
     assert_eq!(reopened.count_term("moved").unwrap(), 1);
@@ -163,14 +172,16 @@ fn valid_provider_root_removal_retires_its_last_route_without_a_replacement() {
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(
         pinned
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root_source_tokens(&["personal".to_owned()], &[])
             .unwrap(),
         vec![expected_source_token.clone()]
     );
     assert_eq!(
         pinned
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root_source_tokens(&[], &["personal".to_owned()])
             .unwrap(),
         vec![expected_source_token]
@@ -191,9 +202,13 @@ fn valid_provider_root_removal_retires_its_last_route_without_a_replacement() {
 
     let published = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(published.count_term("removed").unwrap(), 0);
-    assert!(published.manifest().sources.is_empty());
-    assert!(published.manifest().source_routes().is_empty());
-    assert!(published.manifest().provider_roots().is_empty());
+    assert!(published.try_manifest().unwrap().sources.is_empty());
+    assert!(published.try_manifest().unwrap().source_routes().is_empty());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .provider_roots()
+        .is_empty());
 }
 
 #[test]
@@ -257,8 +272,16 @@ fn authenticated_topology_transfer_reowns_an_unchanged_source_without_deleting_i
 
     let published = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(published.count_term("topology").unwrap(), 1);
-    assert!(published.manifest().source_route(&old_route).is_none());
-    assert!(published.manifest().source_route(&new_route).is_some());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&old_route)
+        .is_none());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&new_route)
+        .is_some());
 }
 
 #[test]
@@ -369,9 +392,21 @@ fn route_checkpoint_rolls_back_partial_route_and_keeps_prior_route_work() {
     assert_eq!(published.count_term("retained").unwrap(), 1);
     assert_eq!(published.count_term("successful").unwrap(), 1);
     assert_eq!(published.count_term("partial").unwrap(), 0);
-    assert!(published.manifest().source_route(&route_a).is_some());
-    assert!(published.manifest().source_route(&route_b).is_some());
-    assert!(published.manifest().source_route(&route_c).is_none());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&route_a)
+        .is_some());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&route_b)
+        .is_some());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&route_c)
+        .is_none());
 }
 
 #[test]
@@ -477,10 +512,26 @@ fn route_cohort_rollback_discards_every_member_but_keeps_prior_route_work() {
     assert_eq!(published.count_term("retained").unwrap(), 1);
     assert_eq!(published.count_term("healthy").unwrap(), 1);
     assert_eq!(published.count_term("provisional").unwrap(), 0);
-    assert!(published.manifest().source_route(&base_route).is_some());
-    assert!(published.manifest().source_route(&peer_route).is_some());
-    assert!(published.manifest().source_route(&first_route).is_none());
-    assert!(published.manifest().source_route(&second_route).is_none());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&base_route)
+        .is_some());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&peer_route)
+        .is_some());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&first_route)
+        .is_none());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&second_route)
+        .is_none());
 
     let published_generation = published.generation_id().to_owned();
     drop(published);
@@ -745,9 +796,14 @@ fn successful_route_atomically_retires_one_exact_carried_route() {
     let published = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(published.count_term("old").unwrap(), 0);
     assert_eq!(published.count_term("new").unwrap(), 1);
-    assert!(published.manifest().source_route(&old_route).is_none());
     assert!(published
-        .manifest()
+        .try_manifest()
+        .unwrap()
+        .source_route(&old_route)
+        .is_none());
+    assert!(published
+        .try_manifest()
+        .unwrap()
         .source_route(&replacement_route)
         .is_some());
 }
@@ -833,10 +889,15 @@ fn route_retirement_uses_logarithmic_canonical_member_lookup() {
     replacement.commit(|_| true).unwrap();
 
     let published = VerifiedIndex::open(temp.path()).unwrap();
-    assert!(published.manifest().source_route(&retired_route).is_none());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&retired_route)
+        .is_none());
     assert_eq!(
         published
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .source_route(&other_route)
             .unwrap()
             .sources(),

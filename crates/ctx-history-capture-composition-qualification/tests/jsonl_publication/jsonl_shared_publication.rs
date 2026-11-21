@@ -56,7 +56,8 @@ fn writer_options() -> WriterOptions {
 fn all_indexed_records(index: &Path) -> Vec<CoreRecord> {
     let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut records = verified
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .flat_map(|source| {
@@ -574,7 +575,7 @@ fn custom_history_structural_manifest_failures_retain_generation_and_restore() {
     let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);
     assert_eq!(retained.document_count(), 1);
-    assert_eq!(retained.manifest().sources, initial.sources);
+    assert_eq!(retained.try_manifest().unwrap().sources, initial.sources);
 
     fs::write(&path, valid_bytes).unwrap();
     let restored =
@@ -899,7 +900,7 @@ fn openclaw_unsupported_sqlite_root_failure_is_carried_and_restored() {
     let retained = VerifiedIndex::open_pinned(&index).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);
     assert_eq!(retained.document_count(), 1);
-    assert_eq!(retained.manifest().sources, initial.sources);
+    assert_eq!(retained.try_manifest().unwrap().sources, initial.sources);
 
     fs::remove_file(root.join("agent/openclaw-agent.sqlite")).unwrap();
     write_openclaw_lifecycle_transcript(

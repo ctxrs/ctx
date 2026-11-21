@@ -141,7 +141,8 @@ fn missing_fixture_executor(
         };
         let base = open_verified_index(execution.index_root)?;
         let base_routes = base
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .source_routes()
             .iter()
             .map(|route| route.route_identity().clone())
@@ -292,7 +293,8 @@ impl MissingFixtureHarness {
     fn missing_count(&self) -> Option<u32> {
         let index = open_verified_index(&source_backed_index_root(&self.data_root)).unwrap();
         index
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .source_route(&self.missing().route)
             .and_then(|route| route.missing_state())
             .map(|missing| missing.consecutive_missing().get())
@@ -338,7 +340,8 @@ fn idle_safety_rechecks_delete_only_the_pending_missing_route() {
 
     let index = open_verified_index(&source_backed_index_root(&harness.data_root)).unwrap();
     assert!(index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_route(&harness.missing().route)
         .is_none());
     assert_eq!(index.document_count(), 1);

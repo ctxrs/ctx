@@ -138,14 +138,9 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
             current_searchable_events,
             previous_cardinalities,
         );
-        let policy_schema_hash = exact_route_lineages.is_none().then(|| {
-            refresh
-                .pin
-                .verified_index()
-                .manifest()
-                .policy_schema_hash
-                .clone()
-        });
+        let policy_schema_hash = exact_route_lineages
+            .is_none()
+            .then(|| refresh.pin.verified_index().policy_schema_hash().to_owned());
         let catalog_content = match (exact_route_lineages, refresh.receipt.as_ref()) {
             (Some(route_lineages), Some(receipt)) => route_lineages
                 .into_iter()

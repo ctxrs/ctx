@@ -551,6 +551,7 @@ impl GenerationWriter {
             .verify_candidate(
                 &candidate_path,
                 &generation_id,
+                prepared_manifest.summary_sha256(),
                 &directory_name,
                 &committed_candidate_generation,
                 || report_progress(PublicationStage::LogicalVerification),
@@ -577,7 +578,7 @@ impl GenerationWriter {
                 let readable_predecessor = self.base_publication.is_some()
                     || VerifiedIndex::open_pinned(&root).is_ok_and(|index| {
                         index.generation_id() == pointer.active().generation_id()
-                            && index.manifest().lexical_schema_version != LEXICAL_SCHEMA_VERSION
+                            && index.lexical_schema_version() != LEXICAL_SCHEMA_VERSION
                     });
                 readable_predecessor.then(|| pointer.active().clone())
             }),
@@ -761,6 +762,7 @@ impl GenerationWriter {
         &self,
         candidate_path: &Path,
         generation_id: &str,
+        summary_sha256: &str,
         directory_name: &str,
         committed_candidate_generation: &BTreeMap<String, Option<u64>>,
         report_logical_verification: P,
@@ -813,7 +815,8 @@ impl GenerationWriter {
             generation_id.to_owned(),
             directory_name.to_owned(),
             publication.physical_integrity_audit().digest().to_owned(),
-        )?;
+        )?
+        .with_summary_sha256(summary_sha256.to_owned())?;
         Ok(VerifiedCandidate { slot, publication })
     }
 

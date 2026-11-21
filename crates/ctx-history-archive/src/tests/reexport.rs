@@ -337,7 +337,7 @@ fn committed_pointers_require_bounded_owned_paths_and_original_revision_proof() 
     let root = temp.path().join("restored");
     let receipt = restore(&archive, &root, &options()).unwrap();
     let index = VerifiedIndex::open_pinned(root.join("search/lexical")).unwrap();
-    let certificate = index.manifest().sources[0].clone();
+    let certificate = index.try_manifest().unwrap().sources[0].clone();
     let mapped = map_record(&options().binding, &member, original).unwrap();
     let output = temp.path().join("backup");
 

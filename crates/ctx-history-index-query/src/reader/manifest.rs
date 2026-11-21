@@ -4,9 +4,10 @@ use std::{
 };
 
 use ctx_history_index_format::{
-    load_materialized_manifest_for_generation, load_publication_for_metas,
+    count_archive_sources, load_materialized_manifest_for_generation, load_publication_for_metas,
     load_publication_summary_for_metas, validate_read_schema, verify_searcher_document_count,
-    GenerationManifest, LoadedPublication, LoadedPublicationSummary, ManifestSummary,
+    GenerationManifest, LoadedPublication, LoadedPublicationSummary, ManifestSourceTotals,
+    ManifestSummary, SourceRouteIdentity,
 };
 use ctx_history_index_generation::{GenerationReadLease, GenerationSlot};
 use tantivy::{schema::Schema, IndexMeta, Searcher};
@@ -30,9 +31,10 @@ impl LoadedSlotManifest {
         }
     }
 
-    /// Loads manifest metadata for a slot, using the advisory summary sidecar
-    /// when `lazy_manifest` is enabled and falling back to the authoritative
-    /// full manifest if the sidecar disagrees with the slot or schema.
+    /// Loads manifest metadata for a slot, using the cryptographically pinned
+    /// summary sidecar when `lazy_manifest` is enabled and falling back to the
+    /// authoritative full manifest if the sidecar is absent, unpinned,
+    /// mismatched, or disagrees with the slot or schema.
     pub(super) fn load_for_slot<F>(
         root: &Path,
         metas: &IndexMeta,
@@ -45,7 +47,7 @@ impl LoadedSlotManifest {
         F: FnOnce(String) -> IndexError,
     {
         let (loaded, lexical_schema_version) = if lazy_manifest {
-            match load_publication_summary_for_metas(root, metas)? {
+            match load_publication_summary_for_metas(root, metas, slot.summary_sha256())? {
                 LoadedPublicationSummary::Summary(summary)
                     if slot.generation_id() == summary.generation_id
                         && validate_read_schema(schema, summary.lexical_schema_version).is_ok() =>
@@ -88,9 +90,9 @@ impl LoadedSlotManifest {
         Ok(loaded)
     }
 
-    /// Verifies `searcher` document count against this manifest; if an advisory
-    /// summary sidecar disagrees, falls back to the authoritative full manifest
-    /// and verifies strictly against it.
+    /// Verifies `searcher` document count against this manifest; if a summary
+    /// sidecar disagrees, falls back to the authoritative full manifest and
+    /// verifies strictly against it.
     pub(super) fn verify_document_count<F>(
         &mut self,
         root: &Path,
@@ -123,7 +125,7 @@ impl LoadedSlotManifest {
 pub(super) enum VerifiedManifestState {
     Loaded(Arc<GenerationManifest>),
     Deferred {
-        summary: ManifestSummary,
+        summary: Box<ManifestSummary>,
         root: PathBuf,
         loaded: OnceLock<Arc<GenerationManifest>>,
     },
@@ -168,6 +170,53 @@ impl VerifiedManifestState {
                 usize::try_from(summary.source_count).unwrap_or(usize::MAX)
             }
         }
+    }
+
+    pub(super) fn certified_source_totals(&self) -> Result<ManifestSourceTotals> {
+        match self {
+            Self::Loaded(manifest) => ManifestSourceTotals::from_manifest(manifest),
+            Self::Deferred { summary, .. } => Ok(summary.source_totals()),
+        }
+    }
+
+    pub(super) fn has_archive_sources(&self) -> bool {
+        match self {
+            Self::Loaded(manifest) => count_archive_sources(manifest) > 0,
+            Self::Deferred { summary, .. } => summary.archive_source_count > 0,
+        }
+    }
+
+    pub(super) fn policy_schema_hash(&self) -> &str {
+        match self {
+            Self::Loaded(manifest) => &manifest.policy_schema_hash,
+            Self::Deferred { summary, .. } => &summary.policy_schema_hash,
+        }
+    }
+
+    pub(super) fn lexical_schema_version(&self) -> u32 {
+        match self {
+            Self::Loaded(manifest) => manifest.lexical_schema_version,
+            Self::Deferred { summary, .. } => summary.lexical_schema_version,
+        }
+    }
+
+    pub(super) fn route_is_present_nonempty(
+        &self,
+        generation_id: &str,
+        lease: Option<&GenerationReadLease>,
+        route: &SourceRouteIdentity,
+    ) -> Result<bool> {
+        if let Self::Deferred { summary, .. } = self {
+            if let Some(routes) = summary.present_nonempty_route_identities.as_deref() {
+                return Ok(routes
+                    .binary_search_by(|candidate| candidate.as_str().cmp(route.as_str()))
+                    .is_ok());
+            }
+        }
+        let manifest = self.load_arc(generation_id, lease)?;
+        Ok(manifest.source_route(route).is_some_and(|snapshot| {
+            snapshot.missing_state().is_none() && !snapshot.sources().is_empty()
+        }))
     }
 
     #[cfg(any(test, feature = "test-support"))]

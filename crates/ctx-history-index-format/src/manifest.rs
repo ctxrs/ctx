@@ -7,7 +7,8 @@ use std::{
 
 use ctx_history_core::{CORE_RECORD_VERSION, IDENTITY_VERSION};
 use ctx_history_index_generation::{
-    load_manifest_bytes, load_manifest_metadata, manifest_path, sha256_hex, write_manifest_bytes,
+    load_manifest_bytes, load_manifest_metadata, load_manifest_summary_bytes, manifest_path,
+    sha256_hex, write_manifest_bytes, write_manifest_summary_bytes,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::{IndexMeta, Searcher};
@@ -31,8 +32,8 @@ use crate::{
 
 mod summary;
 pub use summary::{
-    ensure_manifest_summary, write_manifest_summary_for_generation, ManifestSummary,
-    MANIFEST_SUMMARY_FORMAT,
+    count_archive_sources, ensure_manifest_summary, write_manifest_summary_for_generation,
+    ManifestSourceTotals, ManifestSummary, MANIFEST_SUMMARY_FORMAT,
 };
 
 const MAX_COMMIT_PAYLOAD_BYTES: usize = 256;
@@ -102,17 +103,53 @@ struct StoredManifestVersion {
 pub struct PreparedManifest {
     pub(super) generation_id: String,
     pub(super) bytes: Vec<u8>,
+    pub(super) summary_bytes: Vec<u8>,
+    pub(super) summary_sha256: String,
     pub(super) materialized: Arc<GenerationManifest>,
     pub(super) base_fence: Option<(String, ManifestFileIdentity)>,
 }
 
 impl PreparedManifest {
+    pub(super) fn new(
+        generation_id: String,
+        base_generation_id: Option<String>,
+        bytes: Vec<u8>,
+        materialized: Arc<GenerationManifest>,
+        base_fence: Option<(String, ManifestFileIdentity)>,
+    ) -> Result<Self> {
+        let summary = ManifestSummary::from_manifest(
+            &generation_id,
+            base_generation_id,
+            materialized.as_ref(),
+            bytes.len() as u64,
+        )?;
+        let summary_bytes = summary.canonical_bytes()?;
+        let summary_sha256 = sha256_hex(&summary_bytes);
+        Ok(Self {
+            generation_id,
+            bytes,
+            summary_bytes,
+            summary_sha256,
+            materialized,
+            base_fence,
+        })
+    }
+
     pub fn generation_id(&self) -> &str {
         &self.generation_id
     }
 
+    pub fn summary_sha256(&self) -> &str {
+        &self.summary_sha256
+    }
+
     pub fn verify_persisted(&self, root: &Path) -> Result<()> {
         if load_manifest_bytes(root, &self.generation_id)? != self.bytes {
+            return Err(IndexError::NonCanonicalManifest);
+        }
+        if load_manifest_summary_bytes(root, &self.generation_id)?.as_deref()
+            != Some(self.summary_bytes.as_slice())
+        {
             return Err(IndexError::NonCanonicalManifest);
         }
         if let Some((generation_id, expected)) = &self.base_fence {
@@ -170,7 +207,7 @@ struct DecodedCommitPayload {
 
 #[derive(Debug)]
 pub enum LoadedPublicationSummary {
-    Summary(ManifestSummary),
+    Summary(Box<ManifestSummary>),
     Full(LoadedPublication),
 }
 
@@ -237,6 +274,7 @@ pub fn active_generation_upgrade_scope(root: &Path) -> Option<ActiveGenerationUp
 pub fn load_publication_summary_for_metas(
     root: &Path,
     metas: &IndexMeta,
+    expected_summary_sha256: Option<&str>,
 ) -> Result<LoadedPublicationSummary> {
     let payload = decode_commit_payload(
         metas
@@ -244,17 +282,12 @@ pub fn load_publication_summary_for_metas(
             .as_deref()
             .ok_or(IndexError::MissingCommitPayload)?,
     )?;
-    let key = (manifest_cache_root(root), payload.generation_id.clone());
-    if let Some(manifest) = cached_manifest(root, &key)? {
-        return Ok(LoadedPublicationSummary::Full(LoadedPublication {
-            generation_id: payload.generation_id,
-            manifest,
-        }));
-    }
-    if let Some(summary) =
-        summary::try_load_validated_manifest_summary(root, &payload.generation_id)?
-    {
-        return Ok(LoadedPublicationSummary::Summary(summary));
+    if let Some(summary) = summary::try_load_validated_manifest_summary(
+        root,
+        &payload.generation_id,
+        expected_summary_sha256,
+    )? {
+        return Ok(LoadedPublicationSummary::Summary(Box::new(summary)));
     }
     let loaded = load_materialized_manifest(root, &payload.generation_id, 0)?;
     Ok(LoadedPublicationSummary::Full(LoadedPublication {
@@ -528,14 +561,26 @@ pub fn write_manifest(
     if manifest_path(root, generation_id).is_file() {
         let retained = load_materialized_manifest(root, generation_id, 0)?;
         if serde_json::to_vec(retained.as_ref())? == serde_json::to_vec(manifest)? {
-            ensure_manifest_summary(root, generation_id, manifest);
+            let bytes = load_manifest_bytes(root, generation_id)?;
+            let base_generation_id = if bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX) {
+                Some(decode_validated_delta(&bytes)?.base_generation_id)
+            } else {
+                None
+            };
+            write_manifest_summary_for_generation(
+                root,
+                generation_id,
+                base_generation_id,
+                manifest,
+                bytes.len() as u64,
+            )?;
             return Ok(());
         }
         return Err(IndexError::NonCanonicalManifest);
     }
     let bytes = serde_json::to_vec(manifest)?;
     write_manifest_bytes(root, generation_id, &bytes)?;
-    write_manifest_summary_for_generation(root, generation_id, manifest, bytes.len() as u64);
+    write_manifest_summary_for_generation(root, generation_id, None, manifest, bytes.len() as u64)?;
     Ok(())
 }
 
@@ -546,12 +591,8 @@ pub fn prepare_successor_manifest(
 ) -> Result<PreparedManifest> {
     let full = || -> Result<PreparedManifest> {
         let bytes = serde_json::to_vec(&manifest)?;
-        Ok(PreparedManifest {
-            generation_id: sha256_hex(&bytes),
-            bytes,
-            materialized: Arc::clone(&manifest),
-            base_fence: None,
-        })
+        let generation_id = sha256_hex(&bytes);
+        PreparedManifest::new(generation_id, None, bytes, Arc::clone(&manifest), None)
     };
     let Some((base_generation_id, base)) = base else {
         return full();
@@ -570,12 +611,19 @@ pub fn prepare_successor_manifest(
             })
         && manifest.exact_snapshot_eq(base)
     {
-        return Ok(PreparedManifest {
-            generation_id: base_generation_id.to_owned(),
-            bytes: load_manifest_bytes(root, base_generation_id)?,
-            materialized: manifest,
-            base_fence: None,
-        });
+        let bytes = load_manifest_bytes(root, base_generation_id)?;
+        let delta_base = if bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX) {
+            Some(decode_validated_delta(&bytes)?.base_generation_id)
+        } else {
+            None
+        };
+        return PreparedManifest::new(
+            base_generation_id.to_owned(),
+            delta_base,
+            bytes,
+            manifest,
+            None,
+        );
     }
     if let Some(delta) = prepare_flat_delta(root, &manifest, base_generation_id, base)? {
         return Ok(delta);
@@ -585,12 +633,7 @@ pub fn prepare_successor_manifest(
 
 pub fn write_prepared_manifest(root: &Path, manifest: &PreparedManifest) -> Result<()> {
     write_manifest_bytes(root, &manifest.generation_id, &manifest.bytes)?;
-    write_manifest_summary_for_generation(
-        root,
-        &manifest.generation_id,
-        manifest.materialized.as_ref(),
-        manifest.bytes.len() as u64,
-    );
+    write_manifest_summary_bytes(root, &manifest.generation_id, &manifest.summary_bytes)?;
     let key = (manifest_cache_root(root), manifest.generation_id.clone());
     let mut cache = MANIFEST_CACHE
         .get_or_init(|| Mutex::new(BTreeMap::new()))

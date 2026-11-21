@@ -106,7 +106,7 @@ fn copilot_registry(root: &Path, temp: &Path) -> SourceBackedProviderRegistry {
 
 fn core_records(index: &VerifiedIndex) -> Vec<CoreRecord> {
     let mut records = Vec::new();
-    for source in &index.manifest().sources {
+    for source in &index.try_manifest().unwrap().sources {
         let source_key = source.observation().source();
         let page = index.source_event_page(source_key, None, 256).unwrap();
         assert!(page.next_cursor.is_none());

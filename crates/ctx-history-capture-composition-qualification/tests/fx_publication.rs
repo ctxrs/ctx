@@ -111,7 +111,8 @@ fn assert_partial_receipt(receipt: &SourceBackedRefreshReceipt, expected_sources
 fn records(index: &Path) -> Vec<CoreRecord> {
     let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut records = verified
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .filter(|source| source.observation().source().provider() == CaptureProvider::Fx.as_str())
@@ -142,7 +143,8 @@ fn records_for(index: &Path, native_session_id: &str) -> Vec<CoreRecord> {
 fn source_for(index: &Path, native_session_id: &str) -> SourceKey {
     VerifiedIndex::open_pinned(index)
         .unwrap()
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|source| {

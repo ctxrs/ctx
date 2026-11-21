@@ -81,7 +81,7 @@ fn parse_published_refresh_receipt(
     let catalog_route_bindings = match verified_index {
         Some(index) => required_catalog_route_bindings(
             value.get("catalog_route_bindings"),
-            index.manifest(),
+            index,
             &route_results,
             &expected_catalog_lineages,
         )?,
@@ -168,9 +168,8 @@ fn parse_published_refresh_receipt(
     }
 
     if let Some(verified_index) = verified_index {
-        let manifest = verified_index.manifest();
-        let verified_current = SourceBackedRefreshCurrent::from_sources(
-            &manifest.sources,
+        let verified_current = SourceBackedRefreshCurrent::from_verified_index(
+            verified_index,
             current.removed_source_count,
         )?;
         if current != verified_current {
@@ -499,7 +498,7 @@ fn compact_record_rejection_class(value: Option<&str>) -> Result<String> {
 
 fn required_catalog_route_bindings(
     value: Option<&Value>,
-    manifest: &GenerationManifest,
+    verified_index: &VerifiedIndex,
     route_results: &[SourceBackedRefreshRouteResult],
     expected_catalog_lineages: &BTreeSet<String>,
 ) -> Result<Vec<ExplicitSourceCatalogRouteBinding>> {
@@ -513,6 +512,10 @@ fn required_catalog_route_bindings(
                 "published daemon source refresh receipt catalog_route_bindings must be an object"
             )
         })?;
+    if values.is_empty() && expected_catalog_lineages.is_empty() {
+        return Ok(Vec::new());
+    }
+    let manifest = verified_index.try_manifest()?;
     let retained = manifest
         .source_routes()
         .iter()

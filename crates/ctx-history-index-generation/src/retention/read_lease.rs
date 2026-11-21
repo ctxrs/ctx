@@ -161,13 +161,14 @@ fn acquire_target_read_lease(
             return Err(IndexError::GenerationRetentionLeaseOwnerMismatch);
         }
     }
-    validate_leased_target(&root, &target)?;
+    let target_manifest_len = validate_leased_target(&root, &target)?;
 
     // Discover a flat-delta dependency only after the target manifest itself
     // is pinned. Otherwise concurrent GC could unlink the target between
     // dependency discovery and acquisition of its ranges.
     let mut guards = vec![primary_guard];
-    if let Some(base_generation_id) = referenced_base_generation_id(&root, target.generation_id())?
+    if let Some(base_generation_id) =
+        referenced_base_generation_id(&root, &target, target_manifest_len)?
     {
         let base_guard =
             RangeLeaseGuard::try_shared(coordinator, generation_keys(&base_generation_id)?)?
@@ -339,7 +340,7 @@ pub struct GenerationReclaimAuthority {
     _guard: RangeLeaseGuard,
 }
 
-fn validate_leased_target(root: &GenerationReadRoot, target: &GenerationSlot) -> Result<()> {
+fn validate_leased_target(root: &GenerationReadRoot, target: &GenerationSlot) -> Result<u64> {
     target.validate()?;
     root.opened()
         .open_directory(&Path::new(INDEX_GENERATIONS_DIRECTORY).join(target.directory()))
@@ -349,17 +350,23 @@ fn validate_leased_target(root: &GenerationReadRoot, target: &GenerationSlot) ->
             },
             _ => IndexError::Io(error),
         })?;
-    validate_leased_manifest(root, target.generation_id())?;
-    Ok(())
+    validate_leased_manifest(root, target.generation_id())
 }
 
-fn validate_leased_manifest(root: &GenerationReadRoot, generation_id: &str) -> Result<()> {
-    root.open_file(&manifest_relative_path(generation_id))
-        .map(|_| ())
+fn validate_leased_manifest(root: &GenerationReadRoot, generation_id: &str) -> Result<u64> {
+    let file = root
+        .open_file(&manifest_relative_path(generation_id))
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => IndexError::MissingManifest(generation_id.to_owned()),
             _ => IndexError::Io(error),
-        })
+        })?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(IndexError::Io(std::io::Error::other(
+            "generation manifest path is not a regular file",
+        )));
+    }
+    Ok(metadata.len())
 }
 
 const MANIFEST_FLAT_DELTA_PREFIX: &[u8] = br#"{"storage_format":"ctx-manifest-flat-delta-v1","#;
@@ -370,10 +377,58 @@ struct ManifestDeltaReference {
     base_generation_id: String,
 }
 
+#[derive(Deserialize)]
+struct ManifestSummaryBaseReference {
+    format: String,
+    generation_id: String,
+    #[serde(default)]
+    base_generation_id: Option<String>,
+    manifest_bytes_len: u64,
+}
+
+fn authenticated_summary_base_generation_id(
+    root: &GenerationReadRoot,
+    target: &GenerationSlot,
+    target_manifest_len: u64,
+) -> Result<Option<Option<String>>> {
+    let Some(expected_summary_sha256) = target.summary_sha256() else {
+        return Ok(None);
+    };
+    let Some(bytes) =
+        crate::manifest::load_manifest_summary_bytes_from_read_root(root, target.generation_id())?
+    else {
+        return Ok(None);
+    };
+    if sha256_hex(&bytes) != expected_summary_sha256 {
+        return Ok(None);
+    }
+    let Ok(reference) = serde_json::from_slice::<ManifestSummaryBaseReference>(&bytes) else {
+        return Ok(None);
+    };
+    if reference.format != crate::manifest::MANIFEST_SUMMARY_FORMAT
+        || reference.generation_id != target.generation_id()
+        || reference.manifest_bytes_len != target_manifest_len
+        || reference
+            .base_generation_id
+            .as_deref()
+            .is_some_and(|base| !is_generation_id(base) || base == target.generation_id())
+    {
+        return Ok(None);
+    }
+    Ok(Some(reference.base_generation_id))
+}
+
 fn referenced_base_generation_id(
     root: &GenerationReadRoot,
-    generation_id: &str,
+    target: &GenerationSlot,
+    target_manifest_len: u64,
 ) -> Result<Option<String>> {
+    if let Some(base_generation_id) =
+        authenticated_summary_base_generation_id(root, target, target_manifest_len)?
+    {
+        return Ok(base_generation_id);
+    }
+    let generation_id = target.generation_id();
     let mut file = root
         .open_file(&manifest_relative_path(generation_id))
         .map_err(|error| match error.kind() {
@@ -383,11 +438,15 @@ fn referenced_base_generation_id(
     let mut prefix = [0_u8; 64];
     let prefix_bytes = file.read(&mut prefix)?;
     if !prefix[..prefix_bytes].starts_with(MANIFEST_FLAT_DELTA_PREFIX) {
+        #[cfg(any(test, feature = "test-support"))]
+        crate::read_metrics::record(|reads| &mut reads.manifest, prefix_bytes);
         return Ok(None);
     }
     file.rewind()?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
+    #[cfg(any(test, feature = "test-support"))]
+    crate::read_metrics::record(|reads| &mut reads.manifest, bytes.len());
     let actual = sha256_hex(&bytes);
     if actual != generation_id {
         return Err(IndexError::ManifestDigestMismatch {

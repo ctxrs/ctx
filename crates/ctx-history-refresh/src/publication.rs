@@ -196,7 +196,7 @@ pub(super) fn verify_source_backed_publication(
             verified.generation_id()
         );
     }
-    let manifest = verified.manifest();
+    let manifest = verified.try_manifest()?;
     let verified_current = SourceBackedRefreshCurrent::from_sources(
         &manifest.sources,
         publication.current.removed_source_count,

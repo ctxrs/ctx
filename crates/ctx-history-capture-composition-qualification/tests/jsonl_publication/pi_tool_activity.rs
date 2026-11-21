@@ -216,11 +216,11 @@ fn pi_nested_and_flat_calls_join_native_result_blocks_to_a_real_commit() {
 fn seed_predecessor_projection(index: &Path, records: &[CoreRecord], revision: &str) {
     let v11 = revision == "pi-shared-jsonl-v11-omp-parent-lineage";
     let verified = VerifiedIndex::open_pinned(index).unwrap();
-    let current = &verified.manifest().sources[0];
+    let current = &verified.try_manifest().unwrap().sources[0];
     let source = current.observation().source().clone();
     let mut certificate = serde_json::to_value(current).unwrap();
     certificate["parser_revision"] = json!(revision);
-    let routes = verified.manifest().source_routes().to_vec();
+    let routes = verified.try_manifest().unwrap().source_routes().to_vec();
     drop(verified);
     let mut writer = ctx_history_index::GenerationWriter::open(index, writer_options())
         .unwrap()

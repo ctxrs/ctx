@@ -150,20 +150,21 @@ impl SourceBackedRefreshReceipt {
     /// route has a present certified source contribution. Failed or missing
     /// routes do not become request contributions merely because an older
     /// source was carried forward.
-    pub fn source_count(&self, verified: &VerifiedIndex) -> usize {
+    pub fn source_count(&self, verified: &VerifiedIndex) -> Result<usize> {
         debug_assert_eq!(self.published_generation, verified.generation_id());
-        self.route_results
-            .iter()
-            .filter(|result| {
-                result.outcome.is_success()
-                    && SourceRouteIdentity::from_sha256(result.route_identity.clone())
-                        .ok()
-                        .and_then(|route| verified.manifest().source_route(&route))
-                        .is_some_and(|route| {
-                            route.missing_state().is_none() && !route.sources().is_empty()
-                        })
-            })
-            .count()
+        let mut count = 0_usize;
+        for result in &self.route_results {
+            if !result.outcome.is_success() {
+                continue;
+            }
+            let Ok(route) = SourceRouteIdentity::from_sha256(result.route_identity.clone()) else {
+                continue;
+            };
+            if verified.route_is_present_nonempty(&route)? {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     /// Whether one admitted explicit catalog lineage attempted and retained
@@ -181,7 +182,8 @@ impl SourceBackedRefreshReceipt {
             .context("terminal receipt has no exact catalog-lineage result")?;
         let route = SourceRouteIdentity::from_sha256(outcome.route_identity)
             .context("validate exact catalog route identity")?;
-        let Some(snapshot) = verified.manifest().source_route(&route) else {
+        let manifest = verified.try_manifest()?;
+        let Some(snapshot) = manifest.source_route(&route) else {
             return Ok((false, false));
         };
         if snapshot.missing_state().is_some() {
@@ -191,8 +193,7 @@ impl SourceBackedRefreshReceipt {
             .sources()
             .iter()
             .try_fold((false, false), |(attempted, usable), source_key| {
-                let source = verified
-                    .manifest()
+                let source = manifest
                     .sources
                     .iter()
                     .find(|source| source.observation().source() == source_key)
