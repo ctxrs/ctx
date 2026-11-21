@@ -515,6 +515,7 @@ fn detached_authority_change_survives_a_cold_reopen() {
     );
 }
 
+<<<<<<< HEAD
 fn certified_at(source: SourceKey, revision: u8, docs: u64, bytes: u64) -> CertifiedSource {
     let observation = SourceObservation::new(source, "fixture-revision", vec![revision]).unwrap();
     CertifiedSource::certify(
@@ -983,4 +984,164 @@ fn adding_one_source_to_large_manifest_cuts_written_bytes_by_orders_of_magnitude
     );
     let (_, reopened) = persist_and_cold_reopen(temp.path(), prepared);
     assert_eq!(reopened.sources.len(), 2_001);
+}
+
+#[test]
+fn manifest_summary_sidecar_loads_without_reading_full_manifest_and_falls_back_safely() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = fixture_source("summary-sidecar");
+    let manifest = manifest_at_revision(source, 1);
+    let generation_id = manifest.generation_id().unwrap();
+    write_manifest(temp.path(), &generation_id, &manifest).unwrap();
+
+    let summary_path =
+        ctx_history_index_generation::manifest_summary_path(temp.path(), &generation_id);
+    assert!(summary_path.is_file());
+
+    clear_manifest_cache_for_root(temp.path()).unwrap();
+    ctx_history_index_generation::read_metrics::reset_metadata_read_activity();
+    let summary = summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
+        .unwrap()
+        .expect("valid summary sidecar should load");
+    let reads = ctx_history_index_generation::read_metrics::metadata_read_activity();
+    assert_eq!(reads.manifest.operations, 0);
+    assert_eq!(reads.manifest.bytes, 0);
+    assert_eq!(summary.generation_id, generation_id);
+    assert_eq!(summary.indexed_documents, manifest.indexed_documents);
+    assert_eq!(
+        summary.certified_source_bytes,
+        manifest.certified_source_bytes
+    );
+    assert_eq!(summary.source_count, manifest.sources.len() as u64);
+
+    // Non-canonical whitespace in sidecar falls back cleanly (returns None).
+    let raw_summary = std::fs::read(&summary_path).unwrap();
+    let mut padded = raw_summary.clone();
+    padded.push(b'\n');
+    std::fs::write(&summary_path, &padded).unwrap();
+    assert!(
+        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
+            .unwrap()
+            .is_none()
+    );
+
+    // Corrupt JSON in sidecar falls back cleanly.
+    std::fs::write(&summary_path, b"{not json").unwrap();
+    assert!(
+        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
+            .unwrap()
+            .is_none()
+    );
+
+    // Length-mismatched summary falls back cleanly.
+    let mut mismatched = summary.clone();
+    mismatched.manifest_bytes_len += 1;
+    std::fs::write(&summary_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+    assert!(
+        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
+            .unwrap()
+            .is_none()
+    );
+
+    // Wrong generation_id in summary falls back cleanly.
+    let mut wrong_id = summary.clone();
+    wrong_id.generation_id = "0".repeat(64);
+    std::fs::write(&summary_path, serde_json::to_vec(&wrong_id).unwrap()).unwrap();
+    assert!(
+        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
+            .unwrap()
+            .is_none()
+    );
+
+    // Missing sidecar falls back cleanly and is backfilled by idempotent write_manifest.
+    std::fs::remove_file(&summary_path).unwrap();
+    assert!(
+        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
+            .unwrap()
+            .is_none()
+    );
+    write_manifest(temp.path(), &generation_id, &manifest).unwrap();
+    assert!(summary_path.is_file());
+    assert!(
+        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
+            .unwrap()
+            .is_some()
+    );
+
+    // Deleting the authoritative manifest MUST fail closed even when the sidecar exists!
+    std::fs::remove_file(manifest_path(temp.path(), &generation_id)).unwrap();
+    assert!(matches!(
+        summary::try_load_validated_manifest_summary(temp.path(), &generation_id),
+        Err(IndexError::MissingManifest(missing)) if missing == generation_id
+    ));
+}
+
+#[test]
+fn manifest_summary_avoids_reading_megabytes_on_large_corpus() {
+    let temp = tempfile::tempdir().unwrap();
+    let sources = (0..2_000)
+        .map(|i| {
+            let source = fixture_source(&format!("summary-scale-{i:05}"));
+            let obs = SourceObservation::new(source, "fixture-revision", vec![1]).unwrap();
+            CertifiedSource::certify(
+                obs.clone(),
+                obs,
+                "fixture-parser",
+                [1; 32],
+                ScannedSourceCounts {
+                    complete_records: 5,
+                    retained_records: 5,
+                    indexed_documents: 5,
+                    certified_bytes: 512,
+                    ..ScannedSourceCounts::default()
+                },
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let manifest = GenerationManifest::from_sources(sources).unwrap();
+    let generation_id = manifest.generation_id().unwrap();
+    write_manifest(temp.path(), &generation_id, &manifest).unwrap();
+
+    let full_bytes = std::fs::metadata(manifest_path(temp.path(), &generation_id))
+        .unwrap()
+        .len();
+    let summary_bytes = std::fs::metadata(ctx_history_index_generation::manifest_summary_path(
+        temp.path(),
+        &generation_id,
+    ))
+    .unwrap()
+    .len();
+    assert!(
+        full_bytes > 2_000_000 && summary_bytes < 1_024,
+        "expected >2 MB manifest ({full_bytes} B) and <1 KB summary ({summary_bytes} B)"
+    );
+
+    clear_manifest_cache_for_root(temp.path()).unwrap();
+    ctx_history_index_generation::read_metrics::reset_metadata_read_activity();
+    let start_summary = std::time::Instant::now();
+    let summary = summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
+        .unwrap()
+        .expect("summary should load");
+    let summary_elapsed = start_summary.elapsed();
+    let summary_reads = ctx_history_index_generation::read_metrics::metadata_read_activity();
+    assert_eq!(summary_reads.manifest.operations, 0);
+    assert_eq!(summary_reads.manifest.bytes, 0);
+    assert_eq!(summary.source_count, 2_000);
+    assert_eq!(summary.indexed_documents, 10_000);
+
+    clear_manifest_cache_for_root(temp.path()).unwrap();
+    ctx_history_index_generation::read_metrics::reset_metadata_read_activity();
+    let start_full = std::time::Instant::now();
+    let loaded = load_materialized_manifest(temp.path(), &generation_id, 0).unwrap();
+    let full_elapsed = start_full.elapsed();
+    let full_reads = ctx_history_index_generation::read_metrics::metadata_read_activity();
+    assert_eq!(full_reads.manifest.operations, 1);
+    assert_eq!(full_reads.manifest.bytes, full_bytes);
+    assert_eq!(loaded.sources.len(), 2_000);
+    eprintln!(
+        "summary_scale_measurement: sources=2000 full_bytes={full_bytes} summary_bytes={summary_bytes} full_ms={:.2} summary_ms={:.2}",
+        full_elapsed.as_secs_f64() * 1000.0,
+        summary_elapsed.as_secs_f64() * 1000.0
+    );
 }

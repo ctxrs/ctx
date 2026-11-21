@@ -152,15 +152,19 @@ thread_local! {
     static COMPLETE_SESSION_ID_TRAVERSALS: Cell<usize> = const { Cell::new(0) };
 }
 
-pub fn verify_searcher_structure(searcher: &Searcher, manifest: &GenerationManifest) -> Result<()> {
+pub fn verify_searcher_document_count(searcher: &Searcher, expected_documents: u64) -> Result<()> {
     let actual = searcher.num_docs();
-    if actual != manifest.indexed_documents {
+    if actual != expected_documents {
         return Err(IndexError::DocumentCountMismatch {
-            manifest: manifest.indexed_documents,
+            manifest: expected_documents,
             index: actual,
         });
     }
     Ok(())
+}
+
+pub fn verify_searcher_structure(searcher: &Searcher, manifest: &GenerationManifest) -> Result<()> {
+    verify_searcher_document_count(searcher, manifest.indexed_documents)
 }
 
 #[cfg(any(test, feature = "test-support"))]

@@ -6,11 +6,12 @@ use std::{
 
 use crate::{IndexError, Result};
 use ctx_history_index_format::{
-    is_generation_id, load_publication_for_metas, meta_generation, payload_generation_id,
-    register_body_analyzer, searcher_generation, validate_read_schema, validate_schema,
-    verify_or_certify_physical_integrity, verify_searcher_structure, DurableMmapDirectory,
-    GenerationManifest, VerifiedPublication,
+    is_generation_id, load_publication_for_metas, load_publication_summary_for_metas,
+    meta_generation, payload_generation_id, register_body_analyzer, searcher_generation,
+    validate_schema, verify_or_certify_physical_integrity, verify_searcher_structure,
+    DurableMmapDirectory, GenerationManifest, VerifiedPublication,
 };
+mod manifest;
 #[cfg(any(test, feature = "test-support"))]
 use ctx_history_index_format::{scrub_and_certify_physical_integrity, verify_searcher};
 use ctx_history_index_generation::{
@@ -21,6 +22,7 @@ use ctx_history_index_generation::{
     ActiveGenerationPointer, CertifiedPhysicalIntegrity, GenerationReadLease,
     GenerationRetentionLease, GenerationSlot,
 };
+use manifest::{LoadedSlotManifest, VerifiedManifestState};
 use tantivy::{ReloadPolicy, Searcher};
 
 #[cfg(any(test, feature = "test-support"))]
@@ -43,10 +45,11 @@ thread_local! {
 /// ```
 pub struct VerifiedIndex {
     pub(crate) searcher: Searcher,
-    pub(crate) manifest: Arc<GenerationManifest>,
+    manifest: VerifiedManifestState,
     pub(crate) generation_id: String,
     pub(crate) semantic_eligibility_postings: OnceLock<crate::SemanticEligibilityPostings>,
     _reader_leases: Option<ReaderLeaseBundle>,
+    lazy_manifest: bool,
 }
 
 /// Metadata-only authority for one fully verified generation.
@@ -136,7 +139,7 @@ impl VerifiedIndex {
         if generation_id != pointer.active().generation_id() {
             return Err(IndexError::InvalidActiveGenerationPointer);
         }
-        let publication = load_publication_for_metas(&root, &metas)?;
+        let publication = load_publication_summary_for_metas(&root, &metas)?;
         if publication.generation_id() != generation_id {
             return Err(IndexError::InvalidActiveGenerationPointer);
         }
@@ -149,7 +152,7 @@ impl VerifiedIndex {
     #[doc(hidden)]
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let verified = Self::open_pinned(root)?;
-        verify_searcher(&verified.searcher, &verified.manifest)?;
+        verify_searcher(&verified.searcher, verified.load_manifest()?)?;
         Ok(verified)
     }
 
@@ -160,7 +163,7 @@ impl VerifiedIndex {
     pub fn scrub(root: impl AsRef<Path>) -> Result<Self> {
         let verified =
             Self::open_inner(root.as_ref(), ReopenPhysicalVerification::ScrubAndCertify)?;
-        verify_searcher(&verified.searcher, &verified.manifest)?;
+        verify_searcher(&verified.searcher, verified.load_manifest()?)?;
         Ok(verified)
     }
 
@@ -173,7 +176,14 @@ impl VerifiedIndex {
     /// publication-time O(document-count) identity audit is not repeated for
     /// current generations.
     pub fn open_pinned(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_pinned_with_peer(root, false)
+        Self::open_pinned_with_options(root, false, false)
+    }
+
+    /// Opens the active generation for query execution using the validated
+    /// manifest summary sidecar when available, loading the full manifest
+    /// lazily only if source-level details are requested.
+    pub fn open_pinned_for_query(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_pinned_with_options(root, false, true)
     }
 
     /// Opens the active generation and retains its current pointer peer for
@@ -184,14 +194,26 @@ impl VerifiedIndex {
     /// later. Acquiring both locks from one observed pointer preserves a
     /// stable active/previous pair across concurrent publication.
     pub fn open_pinned_with_retained_peer(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_pinned_with_peer(root, true)
+        Self::open_pinned_with_options(root, true, false)
     }
 
-    fn open_pinned_with_peer(root: impl AsRef<Path>, retain_peer: bool) -> Result<Self> {
+    /// Query-path variant of [`Self::open_pinned_with_retained_peer`] that
+    /// avoids eager full-manifest deserialization when a validated summary
+    /// sidecar is available.
+    pub fn open_pinned_with_retained_peer_for_query(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_pinned_with_options(root, true, true)
+    }
+
+    fn open_pinned_with_options(
+        root: impl AsRef<Path>,
+        retain_peer: bool,
+        lazy_manifest: bool,
+    ) -> Result<Self> {
         Self::open_pinned_with_loader(
             root.as_ref(),
             |root| load_active_generation_pointer(root).map_err(IndexError::from),
             retain_peer,
+            lazy_manifest,
         )
     }
 
@@ -203,13 +225,14 @@ impl VerifiedIndex {
     where
         F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
     {
-        Self::open_pinned_with_loader(root.as_ref(), load_pointer, false)
+        Self::open_pinned_with_loader(root.as_ref(), load_pointer, false, false)
     }
 
     fn open_pinned_with_loader<F>(
         root: &Path,
         mut load_pointer: F,
         retain_peer: bool,
+        lazy_manifest: bool,
     ) -> Result<Self>
     where
         F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
@@ -225,6 +248,7 @@ impl VerifiedIndex {
             },
             None,
             retain_peer,
+            lazy_manifest,
         )
     }
 
@@ -234,6 +258,7 @@ impl VerifiedIndex {
         mut select: S,
         expected_generation_id: Option<&str>,
         retain_peer: bool,
+        lazy_manifest: bool,
     ) -> Result<Self>
     where
         F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
@@ -256,6 +281,7 @@ impl VerifiedIndex {
                     selection,
                     expected_generation_id,
                     retain_peer,
+                    lazy_manifest,
                 )
             })
         };
@@ -273,6 +299,7 @@ impl VerifiedIndex {
                     selection,
                     expected_generation_id,
                     retain_peer,
+                    lazy_manifest,
                 )
             })
         };
@@ -288,6 +315,7 @@ impl VerifiedIndex {
         selection: ReaderGenerationSelection,
         expected_generation_id: Option<&str>,
         retain_peer: bool,
+        lazy_manifest: bool,
     ) -> Result<Self> {
         let leases = Self::acquire_reader_leases(root, pointer, &selection, retain_peer)?;
         let target = &leases.target;
@@ -298,6 +326,7 @@ impl VerifiedIndex {
                     pointer,
                     target.target(),
                     ReopenPhysicalVerification::VerifyOrCertify,
+                    lazy_manifest,
                     |actual_generation_id| match expected_generation_id {
                         Some(expected_generation_id) => IndexError::PinnedGenerationMismatch {
                             expected_generation_id: expected_generation_id.to_owned(),
@@ -387,10 +416,11 @@ impl VerifiedIndex {
         predecessor_fence.validate(&root)?;
         Ok(Self {
             searcher,
-            manifest,
+            manifest: VerifiedManifestState::Loaded(manifest),
             generation_id,
             semantic_eligibility_postings: OnceLock::new(),
             _reader_leases: None,
+            lazy_manifest: false,
         })
     }
 
@@ -410,7 +440,16 @@ impl VerifiedIndex {
         root: impl AsRef<Path>,
         expected_generation_id: &str,
     ) -> Result<Self> {
-        Self::open_pinned_generation_with_peer(root, expected_generation_id, false)
+        Self::open_pinned_generation_with_options(root, expected_generation_id, false, false)
+    }
+
+    /// Query-path variant of [`Self::open_pinned_generation`] that uses the
+    /// validated summary sidecar when available.
+    pub fn open_pinned_generation_for_query(
+        root: impl AsRef<Path>,
+        expected_generation_id: &str,
+    ) -> Result<Self> {
+        Self::open_pinned_generation_with_options(root, expected_generation_id, false, true)
     }
 
     /// Opens exactly the requested retained generation and its current pointer
@@ -419,19 +458,29 @@ impl VerifiedIndex {
         root: impl AsRef<Path>,
         expected_generation_id: &str,
     ) -> Result<Self> {
-        Self::open_pinned_generation_with_peer(root, expected_generation_id, true)
+        Self::open_pinned_generation_with_options(root, expected_generation_id, true, false)
     }
 
-    fn open_pinned_generation_with_peer(
+    /// Query-path variant of [`Self::open_pinned_generation_with_retained_peer`].
+    pub fn open_pinned_generation_with_retained_peer_for_query(
+        root: impl AsRef<Path>,
+        expected_generation_id: &str,
+    ) -> Result<Self> {
+        Self::open_pinned_generation_with_options(root, expected_generation_id, true, true)
+    }
+
+    fn open_pinned_generation_with_options(
         root: impl AsRef<Path>,
         expected_generation_id: &str,
         retain_peer: bool,
+        lazy_manifest: bool,
     ) -> Result<Self> {
         Self::open_pinned_generation_with_loader(
             root.as_ref(),
             expected_generation_id,
             |root| load_active_generation_pointer(root).map_err(IndexError::from),
             retain_peer,
+            lazy_manifest,
         )
     }
 
@@ -449,6 +498,7 @@ impl VerifiedIndex {
             root.as_ref(),
             lease,
             ReopenPhysicalVerification::ReadOnly,
+            false,
         )
         .map(|(index, _)| index)
     }
@@ -457,6 +507,7 @@ impl VerifiedIndex {
         root: &Path,
         lease: &GenerationReadLease,
         physical_verification: ReopenPhysicalVerification,
+        lazy_manifest: bool,
     ) -> Result<(
         Self,
         Option<(ActiveGenerationPointer, CertifiedPhysicalIntegrity)>,
@@ -474,6 +525,7 @@ impl VerifiedIndex {
             &first_pointer,
             lease.target(),
             physical_verification,
+            lazy_manifest,
             |actual_generation_id| IndexError::PinnedGenerationMismatch {
                 expected_generation_id: lease.generation_id().to_owned(),
                 actual_generation_id,
@@ -491,6 +543,7 @@ impl VerifiedIndex {
             &observed_pointer,
             lease.target(),
             physical_verification,
+            lazy_manifest,
             |actual_generation_id| IndexError::PinnedGenerationMismatch {
                 expected_generation_id: lease.generation_id().to_owned(),
                 actual_generation_id,
@@ -513,7 +566,7 @@ impl VerifiedIndex {
         else {
             return Ok(None);
         };
-        Self::open_retained_peer_lease(lease).map(Some)
+        Self::open_retained_peer_lease(lease, self.lazy_manifest).map(Some)
     }
 
     /// Releases the active reader before opening its already-pinned peer.
@@ -527,6 +580,7 @@ impl VerifiedIndex {
             generation_id,
             semantic_eligibility_postings,
             _reader_leases,
+            lazy_manifest,
         } = self;
         let (peer, target) = match _reader_leases {
             Some(ReaderLeaseBundle { target, peer }) => (peer, Some(target)),
@@ -539,16 +593,18 @@ impl VerifiedIndex {
             target,
         );
         drop((manifest, generation_id));
-        peer.map(Self::open_retained_peer_lease).transpose()
+        peer.map(|lease| Self::open_retained_peer_lease(lease, lazy_manifest))
+            .transpose()
     }
 
-    fn open_retained_peer_lease(lease: GenerationReadLease) -> Result<Self> {
+    fn open_retained_peer_lease(lease: GenerationReadLease, lazy_manifest: bool) -> Result<Self> {
         let (mut peer, recertified) = lease
             .with_root_access(|root| {
                 Self::open_generation_read_lease_with_verification(
                     root,
                     &lease,
                     ReopenPhysicalVerification::VerifyOrCertify,
+                    lazy_manifest,
                 )
             })
             .map_err(IndexError::from)??;
@@ -582,6 +638,7 @@ impl VerifiedIndex {
             expected_generation_id,
             load_pointer,
             false,
+            false,
         )
     }
 
@@ -590,6 +647,7 @@ impl VerifiedIndex {
         expected_generation_id: &str,
         mut load_pointer: F,
         retain_peer: bool,
+        lazy_manifest: bool,
     ) -> Result<Self>
     where
         F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
@@ -631,6 +689,7 @@ impl VerifiedIndex {
             },
             Some(expected_generation_id),
             retain_peer,
+            lazy_manifest,
         )
     }
 
@@ -649,6 +708,7 @@ impl VerifiedIndex {
             &pointer,
             pointer.active(),
             physical_verification,
+            false,
             |_| IndexError::InvalidActiveGenerationPointer,
         )
         .map(|(index, _)| index)
@@ -659,22 +719,26 @@ impl VerifiedIndex {
         pointer: &ActiveGenerationPointer,
         slot: &GenerationSlot,
         physical_verification: ReopenPhysicalVerification,
-        generation_mismatch: F,
+        lazy_manifest: bool,
+        mut generation_mismatch: F,
     ) -> Result<(Self, Option<CertifiedPhysicalIntegrity>)>
     where
-        F: FnOnce(String) -> IndexError,
+        F: FnMut(String) -> IndexError,
     {
         #[cfg(any(test, feature = "test-support"))]
         VERIFIED_INDEX_REOPEN_COUNT.with(|count| count.set(count.get().saturating_add(1)));
         let index = open_slot_index(root, slot)?;
         register_body_analyzer(&index);
         let metas = index.load_metas()?;
-        let publication = load_publication_for_metas(root, &metas)?;
-        let (generation_id, manifest) = publication.into_parts();
-        validate_read_schema(&index.schema(), manifest.lexical_schema_version)?;
-        if slot.generation_id() != generation_id {
-            return Err(generation_mismatch(generation_id));
-        }
+        let schema = index.schema();
+        let mut loaded = LoadedSlotManifest::load_for_slot(
+            root,
+            &metas,
+            &schema,
+            slot,
+            lazy_manifest,
+            &mut generation_mismatch,
+        )?;
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -697,14 +761,22 @@ impl VerifiedIndex {
                 None
             }
         };
-        verify_searcher_structure(&searcher, &manifest)?;
+        loaded.verify_document_count(
+            root,
+            &metas,
+            &schema,
+            slot,
+            &searcher,
+            generation_mismatch,
+        )?;
         Ok((
             Self {
                 searcher,
-                manifest,
-                generation_id,
+                manifest: loaded.state,
+                generation_id: loaded.generation_id,
                 semantic_eligibility_postings: OnceLock::new(),
                 _reader_leases: None,
+                lazy_manifest,
             },
             recertified,
         ))
@@ -718,10 +790,11 @@ impl VerifiedIndex {
         let (searcher, manifest, generation_id) = publication.into_parts();
         Self {
             searcher,
-            manifest,
+            manifest: VerifiedManifestState::Loaded(manifest),
             generation_id,
             semantic_eligibility_postings: OnceLock::new(),
             _reader_leases: None,
+            lazy_manifest: false,
         }
     }
 
@@ -734,12 +807,17 @@ impl VerifiedIndex {
     /// Reader leases and Tantivy handles are dropped before the snapshot is
     /// returned, so a subsequent writer open cannot overlap their FD lifetime.
     pub fn into_generation_snapshot(self) -> VerifiedGenerationSnapshot {
+        let manifest = self
+            .load_manifest_arc()
+            .expect("verified generation snapshot requires a readable manifest")
+            .clone();
         let Self {
             searcher,
-            manifest,
+            manifest: _manifest_state,
             generation_id,
             semantic_eligibility_postings,
             _reader_leases,
+            lazy_manifest: _,
         } = self;
         let (peer_lease, target_lease) = match _reader_leases {
             Some(ReaderLeaseBundle { target, peer }) => (peer, Some(target)),
@@ -757,14 +835,41 @@ impl VerifiedIndex {
         }
     }
 
+    fn load_manifest_arc(&self) -> Result<&Arc<GenerationManifest>> {
+        let lease = self._reader_leases.as_ref().map(|leases| &leases.target);
+        self.manifest.load_arc(&self.generation_id, lease)
+    }
+
+    /// Loads and returns the full generation manifest, materializing it lazily
+    /// if this reader was opened through a validated manifest summary sidecar.
+    pub fn load_manifest(&self) -> Result<&GenerationManifest> {
+        self.load_manifest_arc().map(Arc::as_ref)
+    }
+
     pub fn manifest(&self) -> &GenerationManifest {
-        &self.manifest
+        self.load_manifest()
+            .expect("verified index manifest must be readable")
+    }
+
+    pub fn certified_source_bytes(&self) -> u64 {
+        self.manifest.certified_source_bytes()
+    }
+
+    pub fn certified_source_count(&self) -> usize {
+        self.manifest.certified_source_count()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn has_loaded_full_manifest(&self) -> bool {
+        self.manifest.has_loaded_full_manifest()
     }
 
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_shared_manifest(&self) -> &Arc<GenerationManifest> {
-        &self.manifest
+        self.load_manifest_arc()
+            .expect("verified index manifest must be readable")
     }
 
     #[cfg(any(test, feature = "test-support"))]

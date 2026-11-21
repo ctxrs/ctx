@@ -29,6 +29,12 @@ use crate::{
     LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
 };
 
+mod summary;
+pub use summary::{
+    ensure_manifest_summary, write_manifest_summary_for_generation, ManifestSummary,
+    MANIFEST_SUMMARY_FORMAT,
+};
+
 const MAX_COMMIT_PAYLOAD_BYTES: usize = 256;
 // Payload v2 carried up to 48 KiB of opaque metadata encoded as base64.
 const MAX_RELEASED_V2_METADATA_ENCODED_BYTES: usize = 64 * 1024;
@@ -162,6 +168,35 @@ struct DecodedCommitPayload {
     generation_id: String,
 }
 
+#[derive(Debug)]
+pub enum LoadedPublicationSummary {
+    Summary(ManifestSummary),
+    Full(LoadedPublication),
+}
+
+impl LoadedPublicationSummary {
+    pub fn generation_id(&self) -> &str {
+        match self {
+            Self::Summary(summary) => &summary.generation_id,
+            Self::Full(publication) => publication.generation_id(),
+        }
+    }
+
+    pub fn lexical_schema_version(&self) -> u32 {
+        match self {
+            Self::Summary(summary) => summary.lexical_schema_version,
+            Self::Full(publication) => publication.manifest().lexical_schema_version,
+        }
+    }
+
+    pub fn indexed_documents(&self) -> u64 {
+        match self {
+            Self::Summary(summary) => summary.indexed_documents,
+            Self::Full(publication) => publication.manifest().indexed_documents,
+        }
+    }
+}
+
 pub fn load_publication_for_metas(root: &Path, metas: &IndexMeta) -> Result<LoadedPublication> {
     let payload = decode_commit_payload(
         metas
@@ -197,6 +232,42 @@ pub fn active_generation_upgrade_scope(root: &Path) -> Option<ActiveGenerationUp
         estimated_total_source_bytes: manifest.certified_source_bytes,
         estimated_total_documents: manifest.indexed_documents,
     })
+}
+
+pub fn load_publication_summary_for_metas(
+    root: &Path,
+    metas: &IndexMeta,
+) -> Result<LoadedPublicationSummary> {
+    let payload = decode_commit_payload(
+        metas
+            .payload
+            .as_deref()
+            .ok_or(IndexError::MissingCommitPayload)?,
+    )?;
+    let key = (manifest_cache_root(root), payload.generation_id.clone());
+    if let Some(manifest) = cached_manifest(root, &key)? {
+        return Ok(LoadedPublicationSummary::Full(LoadedPublication {
+            generation_id: payload.generation_id,
+            manifest,
+        }));
+    }
+    if let Some(summary) =
+        summary::try_load_validated_manifest_summary(root, &payload.generation_id)?
+    {
+        return Ok(LoadedPublicationSummary::Summary(summary));
+    }
+    let loaded = load_materialized_manifest(root, &payload.generation_id, 0)?;
+    Ok(LoadedPublicationSummary::Full(LoadedPublication {
+        generation_id: payload.generation_id,
+        manifest: loaded,
+    }))
+}
+
+pub fn load_materialized_manifest_for_generation(
+    root: &Path,
+    generation_id: &str,
+) -> Result<Arc<GenerationManifest>> {
+    load_materialized_manifest(root, generation_id, 0)
 }
 
 fn load_materialized_manifest(
@@ -457,12 +528,15 @@ pub fn write_manifest(
     if manifest_path(root, generation_id).is_file() {
         let retained = load_materialized_manifest(root, generation_id, 0)?;
         if serde_json::to_vec(retained.as_ref())? == serde_json::to_vec(manifest)? {
+            ensure_manifest_summary(root, generation_id, manifest);
             return Ok(());
         }
         return Err(IndexError::NonCanonicalManifest);
     }
     let bytes = serde_json::to_vec(manifest)?;
-    Ok(write_manifest_bytes(root, generation_id, &bytes)?)
+    write_manifest_bytes(root, generation_id, &bytes)?;
+    write_manifest_summary_for_generation(root, generation_id, manifest, bytes.len() as u64);
+    Ok(())
 }
 
 pub fn prepare_successor_manifest(
@@ -511,6 +585,12 @@ pub fn prepare_successor_manifest(
 
 pub fn write_prepared_manifest(root: &Path, manifest: &PreparedManifest) -> Result<()> {
     write_manifest_bytes(root, &manifest.generation_id, &manifest.bytes)?;
+    write_manifest_summary_for_generation(
+        root,
+        &manifest.generation_id,
+        manifest.materialized.as_ref(),
+        manifest.bytes.len() as u64,
+    );
     let key = (manifest_cache_root(root), manifest.generation_id.clone());
     let mut cache = MANIFEST_CACHE
         .get_or_init(|| Mutex::new(BTreeMap::new()))

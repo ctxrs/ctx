@@ -73,7 +73,8 @@ pub use lock::acquire_generation_writer_lock_with_retry;
 pub use manifest::{
     ensure_generation_control_files_private_with_writer_lock_held,
     ensure_generation_control_state_private, load_manifest_bytes, load_manifest_metadata,
-    reclaim_unreferenced_manifests, write_manifest_bytes,
+    load_manifest_summary_bytes, reclaim_unreferenced_manifests, write_manifest_bytes,
+    write_manifest_summary_bytes,
 };
 pub use physical::{
     active_index_files, physical_integrity_audit, physical_integrity_audit_with_candidate_proof,
@@ -112,4 +113,9 @@ pub const GENERATION_WRITER_LOCK_FILE: &str = ".ctx-generation-writer.lock";
 pub fn manifest_path(root: &std::path::Path, generation_id: &str) -> std::path::PathBuf {
     root.join(MANIFEST_DIRECTORY)
         .join(format!("{generation_id}.json"))
+}
+
+pub fn manifest_summary_path(root: &std::path::Path, generation_id: &str) -> std::path::PathBuf {
+    root.join(MANIFEST_DIRECTORY)
+        .join(format!("{generation_id}.summary.json"))
 }

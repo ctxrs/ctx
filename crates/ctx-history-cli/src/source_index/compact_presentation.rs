@@ -32,9 +32,14 @@ pub(crate) fn open_generation_read(
             }
         },
         GenerationReadTarget::Exact(generation_id) => match request.retained_peer {
-            RetainedPeerRead::Omit => VerifiedIndex::open_pinned_generation(&root, generation_id)?,
+            RetainedPeerRead::Omit => {
+                VerifiedIndex::open_pinned_generation_for_query(&root, generation_id)?
+            }
             RetainedPeerRead::IfAvailable | RetainedPeerRead::Deferred => {
-                VerifiedIndex::open_pinned_generation_with_retained_peer(&root, generation_id)?
+                VerifiedIndex::open_pinned_generation_with_retained_peer_for_query(
+                    &root,
+                    generation_id,
+                )?
             }
         },
     };

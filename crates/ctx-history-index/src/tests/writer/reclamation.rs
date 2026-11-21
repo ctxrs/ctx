@@ -775,3 +775,128 @@ fn adding_new_source_to_existing_route_publishes_a_flat_delta_and_cold_reopens()
     assert_eq!(reopened.manifest().generation_state(), Some(&state_1));
     assert_eq!(reopened.count_term("appended").unwrap(), 1);
 }
+
+#[test]
+fn query_open_uses_manifest_summary_sidecar_and_lazily_loads_full_manifest_only_when_needed() {
+    let temp = tempdir().unwrap();
+    let s1 = source("summary-query-s1.jsonl");
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    first.begin_source(s1.clone()).unwrap();
+    first
+        .add_core_record(document(&s1, 1, "first generation search hit"))
+        .unwrap();
+    first
+        .certify_source(appendable_certificate(&s1, 1, 1, 20))
+        .unwrap();
+    let gen1 = first.commit(|_| true).unwrap();
+
+    // Publish second generation so there is also a retained peer generation.
+    let mut second = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    let base = second.begin_source_append(s1.clone()).unwrap().clone();
+    second
+        .add_core_record(document(&s1, 2, "second generation search hit"))
+        .unwrap();
+    second
+        .certify_source_append(
+            CertifiedSourceAppend::certify(
+                &base,
+                appendable_certificate(&s1, 2, 2, 40),
+                20,
+                [1; 32],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let gen2 = second.commit(|_| true).unwrap();
+
+    let summary1 =
+        ctx_history_index_generation::manifest_summary_path(temp.path(), &gen1.generation_id);
+    let summary2 =
+        ctx_history_index_generation::manifest_summary_path(temp.path(), &gen2.generation_id);
+    assert!(summary1.is_file());
+    assert!(summary2.is_file());
+
+    // Cold query open + search + retained peer open MUST NOT read full manifests!
+    ctx_history_index_format::clear_manifest_cache_for_root(temp.path()).unwrap();
+    ctx_history_index_generation::read_metrics::reset_metadata_read_activity();
+    let mut index = VerifiedIndex::open_pinned_with_retained_peer_for_query(temp.path()).unwrap();
+    assert!(!index.has_loaded_full_manifest());
+    assert_eq!(index.generation_id(), gen2.generation_id);
+    assert_eq!(index.document_count(), 2);
+    assert_eq!(index.certified_source_count(), 1);
+    assert_eq!(index.certified_source_bytes(), 40);
+    assert_eq!(index.count_term("second").unwrap(), 1);
+    let peer = index
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .expect("retained peer generation should open");
+    assert!(!peer.has_loaded_full_manifest());
+    assert_eq!(peer.generation_id(), gen1.generation_id);
+    assert_eq!(peer.document_count(), 1);
+    let reads = ctx_history_index_generation::read_metrics::metadata_read_activity();
+    assert_eq!(
+        reads.manifest.operations, 0,
+        "query open + retained peer open must skip reading full manifests"
+    );
+    assert_eq!(reads.manifest.bytes, 0);
+
+    // Explicit lazy load materializes the full manifest cleanly under the read lease.
+    let loaded_manifest = index.load_manifest().unwrap();
+    assert!(index.has_loaded_full_manifest());
+    assert_eq!(loaded_manifest.sources.len(), 1);
+    assert_eq!(loaded_manifest.indexed_documents, 2);
+    drop(peer);
+    drop(index);
+
+    // Deleting the summary sidecar falls back transparently on query open...
+    fs::remove_file(&summary2).unwrap();
+    ctx_history_index_format::clear_manifest_cache_for_root(temp.path()).unwrap();
+    let fallback = VerifiedIndex::open_pinned_for_query(temp.path()).unwrap();
+    assert!(fallback.has_loaded_full_manifest());
+    assert_eq!(fallback.generation_id(), gen2.generation_id);
+    drop(fallback);
+
+    // ...and the next writer open backfills the missing summary sidecar automatically.
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    drop(writer);
+    assert!(summary2.is_file());
+
+    // A tampered summary sidecar with a mismatched document count falls back to
+    // the authoritative manifest instead of failing open, and the next writer
+    // open repairs the sidecar atomically.
+    let mut tampered: ctx_history_index_format::ManifestSummary =
+        serde_json::from_slice(&fs::read(&summary2).unwrap()).unwrap();
+    tampered.indexed_documents = 999;
+    fs::write(&summary2, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    ctx_history_index_format::clear_manifest_cache_for_root(temp.path()).unwrap();
+    let tampered_fallback = VerifiedIndex::open_pinned_for_query(temp.path()).unwrap();
+    assert!(tampered_fallback.has_loaded_full_manifest());
+    assert_eq!(tampered_fallback.document_count(), 2);
+    drop(tampered_fallback);
+
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    drop(writer);
+    let repaired: ctx_history_index_format::ManifestSummary =
+        serde_json::from_slice(&fs::read(&summary2).unwrap()).unwrap();
+    assert_eq!(repaired.indexed_documents, 2);
+
+    // Deleting the authoritative manifest MUST fail closed even with a valid summary sidecar.
+    fs::remove_file(manifest_path(temp.path(), &gen2.generation_id)).unwrap();
+    ctx_history_index_format::clear_manifest_cache_for_root(temp.path()).unwrap();
+    assert!(matches!(
+        VerifiedIndex::open_pinned_for_query(temp.path()),
+        Err(IndexError::MissingManifest(missing)) if missing == gen2.generation_id
+    ));
+}

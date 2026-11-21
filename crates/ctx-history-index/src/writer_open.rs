@@ -352,6 +352,11 @@ impl GenerationWriter {
                 base_opstamp,
             ) = match reusable_generation {
                 Some(OpenedPinnedPublication::Published(publication)) => {
+                    ctx_history_index_format::ensure_manifest_summary(
+                        &root,
+                        publication.generation_id(),
+                        publication.manifest(),
+                    );
                     let (index, fields, opstamp, publication) = publication.into_writer_parts()?;
                     (index, None, None, None, fields, Some(publication), opstamp)
                 }
