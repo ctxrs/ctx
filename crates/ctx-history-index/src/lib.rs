@@ -46,8 +46,6 @@ pub use commit_contract::{
 };
 
 pub use ctx_history_core::CoreRecord;
-pub use ctx_history_index_format::policy;
-pub use ctx_history_index_format::project_body_search;
 #[cfg(test)]
 pub(crate) use ctx_history_index_format::required_field;
 pub(crate) use ctx_history_index_format::{
@@ -55,25 +53,23 @@ pub(crate) use ctx_history_index_format::{
     source_sort_key, INDEX_MEMORY_MIN_PER_THREAD,
 };
 pub use ctx_history_index_format::{
-    active_generation_upgrade_scope, source_token, ActiveGenerationUpgradeScope,
-    AppliedProviderRoot, AppliedProviderRootSourceMembership,
+    active_generation_upgrade_scope, current_semantic_generation_policy,
+    current_semantic_generation_policy_hash, current_source_generation_policy,
+    current_source_generation_policy_hash, policy, project_body_search, source_token,
+    ActiveGenerationUpgradeScope, AppliedProviderRoot, AppliedProviderRootSourceMembership,
     CommittedPredecessorMigrationRecovery, ConsecutiveSourceMissingCount,
-    DetachedReleasedProviderRootAuthority, GenerationManifest, GenerationStateEnvelope, IndexError,
-    ManifestSourceTotals, ProviderRootDefinition, ProviderRootSourceIdentity, Result,
-    SourceCoreRecordAggregate, SourceMissingObservationPoint, SourceRouteIdentity,
-    SourceRouteMissingState, SourceRouteSnapshot, GENERATION_MANIFEST_VERSION,
-    LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
+    DetachedReleasedProviderRootAuthority, EmbeddingGenerationPolicy, GenerationManifest,
+    GenerationStateEnvelope, IndexError, LexicalBodySelection, LexicalGenerationPolicy,
+    LexicalIndexedBodyLimit, ManifestSourceTotals, ProviderRootDefinition,
+    ProviderRootSourceIdentity, Result, SemanticCoreContentFilter, SemanticGenerationPolicy,
+    SourceCoreRecordAggregate, SourceEventClass, SourceEventRole, SourceGenerationPolicy,
+    SourceMissingObservationPoint, SourceRouteIdentity, SourceRouteMissingState,
+    SourceRouteSnapshot, StoredSourceContent, GENERATION_MANIFEST_VERSION,
+    LEXICAL_ANALYZER_VERSION, LEXICAL_INDEXED_BODY_LIMIT, LEXICAL_SCHEMA_REVISION,
+    LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN, LEXICAL_TOKENIZER_REVISION,
     MAX_DETACHED_RELEASED_PROVIDER_ROOTS, MAX_GENERATION_STATE_BYTES,
-    MAX_GENERATION_STATE_FORMAT_BYTES,
-};
-pub use ctx_history_index_format::{
-    current_semantic_generation_policy, current_semantic_generation_policy_hash,
-    current_source_generation_policy, current_source_generation_policy_hash,
-    EmbeddingGenerationPolicy, LexicalBodySelection, LexicalGenerationPolicy,
-    LexicalIndexedBodyLimit, SemanticCoreContentFilter, SemanticGenerationPolicy, SourceEventClass,
-    SourceEventRole, SourceGenerationPolicy, StoredSourceContent, LEXICAL_INDEXED_BODY_LIMIT,
-    LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION, SEMANTIC_CHUNK_OVERLAP_CHARS,
-    SEMANTIC_CHUNK_TARGET_CHARS, SEMANTIC_SOURCE_MAX_CHARS,
+    MAX_GENERATION_STATE_FORMAT_BYTES, SEMANTIC_CHUNK_OVERLAP_CHARS, SEMANTIC_CHUNK_TARGET_CHARS,
+    SEMANTIC_SOURCE_MAX_CHARS,
 };
 pub(crate) use ctx_history_index_format::{
     fields_from_schema, lexical_schema, provider_source_config_digest, validate_schema, Fields,
@@ -109,11 +105,12 @@ pub use ctx_history_index_query::{
     CoreSessionEventPage, CoreSourceEventPage, CoreSourceEventPagePlan, EventRecord,
     EventSearchCandidate, EventSearchFilters, ExcludedSessionTree, LexicalExecution, LexicalMode,
     LexicalQueryLimits, RankedEventRef, SearchContentScope, SemanticEligibility,
-    SemanticEventCursor, SemanticEventPage, SemanticFilterProjection, SessionEventCoordinate,
+    SemanticEventCursor, SemanticEventPage, SemanticFilterProjection, SemanticPassageMember,
+    SemanticPassageSource, SemanticSearchEvidence, SemanticTurnAssistant, SessionEventCoordinate,
     SessionEventCursor, SessionListError, SessionListFilters, SessionListPage, SessionRecord,
     SessionSummaryRecord, SourceEventCursor, SourceEventPage, StoredCoreEventRecord,
-    StoredCoreRecordJson, StoredCoreSourceEventPage, DEFAULT_CORE_EVENT_PAGE_BUDGET,
-    DEFAULT_SESSION_LIST_LIMIT, LEXICAL_QUERY_LIMITS,
+    StoredCoreRecordJson, StoredCoreSourceEventPage, VerifiedGenerationSnapshot, VerifiedIndex,
+    DEFAULT_CORE_EVENT_PAGE_BUDGET, DEFAULT_SESSION_LIST_LIMIT, LEXICAL_QUERY_LIMITS,
     MAX_COPIED_EVENT_LINEAGE_EVENT_AND_SESSION_IDENTITY_POSTING_VISITS,
     MAX_COPIED_EVENT_LINEAGE_OCCURRENCES, MAX_COPIED_EVENT_LINEAGE_POSTING_VISITS,
     MAX_CORE_EVENT_RANGE_PAGE_ITEMS, MAX_LEXICAL_QUERY_RESULTS, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
@@ -121,10 +118,6 @@ pub use ctx_history_index_query::{
     MAX_SESSION_EVENT_PAGE_ITEMS, MAX_SESSION_LIST_LIMIT, MAX_SOURCE_EVENT_PAGE_ITEMS,
     SHOW_COPIED_EVENT_LINEAGE_POLICY,
 };
-pub use ctx_history_index_query::{
-    SemanticPassageMember, SemanticPassageSource, SemanticSearchEvidence, SemanticTurnAssistant,
-};
-pub use ctx_history_index_query::{VerifiedGenerationSnapshot, VerifiedIndex};
 pub(crate) use identity::{
     prior_session_identity_facts, register_compact_identity, BaseWitnessSource,
 };

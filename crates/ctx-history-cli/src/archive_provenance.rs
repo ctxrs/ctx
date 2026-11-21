@@ -6,9 +6,6 @@ use ctx_history_read_application::{
 pub(crate) fn load(
     index: &VerifiedIndex,
 ) -> Result<ArchiveProvenanceMap, ctx_history_archive::ArchiveError> {
-    if !index.has_source_format("ctx_archive_v1")? {
-        return Ok(ArchiveProvenanceMap::default());
-    }
     Ok(ArchiveProvenanceMap(
         ctx_history_archive::source_identities(index)?
             .into_iter()

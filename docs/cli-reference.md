@@ -838,8 +838,10 @@ Supported options:
 - `--workspace <SUBSTRING>`: case-insensitive substring match against indexed
   session workspace, working directory, tool working directory, or project
   metadata.
-- `--no-subagents`: exclude subagent sessions (sessions with a parent session
-  link or `subagent` scope) while retaining primary and unscoped root sessions.
+- `--no-subagents`: exclude subagent sessions (`subagent` scope, `delegated` or
+  `workflow_child` relationships, or child sessions with a non-fork/non-resume
+  parent session link) while retaining primary, forked, resumed, and unscoped
+  root sessions.
 - `--limit <N>`: maximum sessions to return, from `1` to `1000` (default `50`).
 - `--format text|json`: render human-readable cards with compact unambiguous
   session IDs (`text`, default) or exact machine-readable JSON (`json`).

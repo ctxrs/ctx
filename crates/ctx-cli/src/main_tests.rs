@@ -167,7 +167,7 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
     // command nodes and `sessions` adds 1 top-level session listing command.
     assert_eq!(
         paths.len(),
-        161,
+        162,
         "unexpected public CLI grammar depth: {paths:?}"
     );
 

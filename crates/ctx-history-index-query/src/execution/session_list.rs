@@ -1,4 +1,7 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use ctx_history_index_format::SessionAuthorityKey;
 
@@ -191,22 +194,17 @@ impl VerifiedIndex {
         fields: Fields,
         provider: Option<&str>,
     ) -> Result<HashSet<Uuid>> {
-        let mut subagents = HashSet::new();
+        let mut authority_by_session: HashMap<
+            Uuid,
+            (Option<_>, Option<ProviderNativeSessionRelationship>),
+        > = HashMap::new();
         for segment in self.searcher.segment_readers() {
             let inverted = segment.inverted_index(fields.session_authority)?;
             let mut terms = inverted.terms().stream()?;
             while terms.advance() {
                 let key = SessionAuthorityKey::decode(terms.key())?;
                 let claims = key.direct_claims()?;
-                if claims.parent_session_id.is_none()
-                    || matches!(
-                        claims.relationship,
-                        Some(
-                            ProviderNativeSessionRelationship::Forked
-                                | ProviderNativeSessionRelationship::ResumedFrom
-                        )
-                    )
-                {
+                if claims.parent_session_id.is_none() && claims.relationship.is_none() {
                     continue;
                 }
                 let mut postings = inverted
@@ -215,13 +213,57 @@ impl VerifiedIndex {
                 while doc_id != TERMINATED {
                     if !segment.is_deleted(doc_id) {
                         let (session_id, _) = key.identities()?;
-                        subagents.insert(session_id.as_uuid());
+                        let entry = authority_by_session
+                            .entry(session_id.as_uuid())
+                            .or_insert((None, None));
+                        if let Some(parent_session_id) = claims.parent_session_id {
+                            match entry.0 {
+                                Some(existing) if existing == parent_session_id => {}
+                                Some(_) => {
+                                    return Err(IndexError::ConflictingProviderNativeSessionClaim(
+                                        "one session has contradictory relationship fields",
+                                    ));
+                                }
+                                None => entry.0 = Some(parent_session_id),
+                            }
+                        }
+                        if let Some(relationship) = claims.relationship {
+                            match entry.1 {
+                                Some(existing) if existing == relationship => {}
+                                Some(_) => {
+                                    return Err(IndexError::ConflictingProviderNativeSessionClaim(
+                                        "one session has contradictory relationship fields",
+                                    ));
+                                }
+                                None => entry.1 = Some(relationship),
+                            }
+                        }
                         break;
                     }
                     doc_id = postings.advance();
                 }
             }
         }
+
+        let mut subagents: HashSet<Uuid> = authority_by_session
+            .into_iter()
+            .filter_map(|(session_id, (parent_session_id, relationship))| {
+                let is_subagent = match relationship {
+                    Some(
+                        ProviderNativeSessionRelationship::Delegated
+                        | ProviderNativeSessionRelationship::WorkflowChild,
+                    ) => true,
+                    Some(
+                        ProviderNativeSessionRelationship::Forked
+                        | ProviderNativeSessionRelationship::ResumedFrom,
+                    ) => false,
+                    Some(ProviderNativeSessionRelationship::Root) | None => {
+                        parent_session_id.is_some()
+                    }
+                };
+                is_subagent.then_some(session_id)
+            })
+            .collect();
 
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
             Occur::Must,
