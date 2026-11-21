@@ -10,6 +10,16 @@
       "rationale": "Re-reviewed 2026-11-04 (America/Chicago) against fresh OSV and RustSec data and the checksum-verified locked sources. RUSTSEC-2024-0436 remains an unmaintained-crate advisory with no patched version and no reported exploitable defect. tokenizers 0.22.2 is the sole direct caller of paste 1.0.15, a compile-time proc macro: ctx-semantic-model reaches tokenizers through fastembed 5.17.2 and directly on macOS. Its two paste invocations generate serde helper identifiers from source-defined struct names; runtime history and model inputs are not macro inputs. No compatible upstream has removed this dependency since the 2026-11-01 review: tokenizers 0.22.2 remains the latest compatible release, and current stable tokenizers 0.23.2 still requires paste, including through latest fastembed 7.5.0. tokenizers 1.0.0-rc.3 removes the direct edge but replaces the tokenizer API and is outside both FastEmbed requirements. Track migration to tokenizers 1.0 with coordinated embedding and Core ML changes, or to a compatible maintained pastey-based upstream; validate numerical embedding compatibility and existing-index reuse before removing this exception. Accept the exact locked build-time maintenance risk only through 2027-02-05. Re-evaluate before expiry or when a compatible upstream removes the dependency.",
       "owner": "ctx-release-security",
       "expires": "2027-02-05"
+    },
+    {
+      "advisory_id": "RUSTSEC-2026-0543",
+      "ecosystem": "crates.io",
+      "package": "chrono",
+      "version": "0.4.45",
+      "lockfile": "Cargo.lock",
+      "rationale": "Reviewed 2026-11-21 (America/Chicago) against fresh OSV and RustSec data. RUSTSEC-2026-0543 is an unmaintained-crate informational advisory (no CVSS score, no patched version, and no reported exploitable security vulnerability) recommending migration to jiff or time. chrono 0.4.45 is the latest published 0.4 release and is used across workspace crates for RFC 3339 and UTC timestamp parsing and formatting. Track workspace-wide migration from chrono to jiff (already present in workspace dependencies) in a dedicated follow-up issue so timestamp parsing behavior across all providers and CLI filters can be validated carefully. Accept the exact locked maintenance risk only through 2027-02-21; re-evaluate before expiry or if any vulnerability is reported.",
+      "owner": "ctx-release-security",
+      "expires": "2027-02-21"
     }
   ]
 }

@@ -241,7 +241,7 @@ pub(crate) fn global(
         GlobalCommand::Query(args) => {
             ensure!(!args.text.trim().is_empty(), "query text must not be empty");
             let store = store
-                .as_ref()
+                .as_mut()
                 .context("no global aggregate exists; run ctx graph global add first")?;
             facts.phase = GraphPhase::Query;
             let started = Instant::now();

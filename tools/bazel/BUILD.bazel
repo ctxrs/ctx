@@ -284,7 +284,7 @@ cargo_vendor_sources(
         "@@rules_rust++crate+crates__portable-atomic-util-0.2.7//:portable_atomic_util",
         "@@rules_rust++crate+crates__quinn-0.11.11//:quinn",
         "@@rules_rust++crate+crates__quinn-proto-0.11.19//:quinn_proto",
-        "@@rules_rust++crate+crates__quinn-udp-0.5.15//:quinn_udp",
+        "@@rules_rust++crate+crates__quinn-udp-0.5.16//:quinn_udp",
         "@@rules_rust++crate+crates__r-efi-5.3.0//:r_efi",
         "@@rules_rust++crate+crates__r-efi-6.0.0//:r_efi",
         "@@rules_rust++crate+crates__rand-0.10.2//:rand",

@@ -5,8 +5,12 @@ impl crate::store::Store {
     /// exact-first tiers as resolve_endpoint. A relation filter selects a unique
     /// incident relation by exact spelling, normalized spelling, prefix, then
     /// substring; ties are errors. neighbors_extended remains exact-only.
-    pub fn neighbors_resolved(&self, text: &str, options: &SearchOptions) -> Result<SearchResult> {
-        catalog_budgeted(&self.conn, || {
+    pub fn neighbors_resolved(
+        &mut self,
+        text: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchResult> {
+        catalog_budgeted(&mut self.conn, |conn| {
             let mut options = options.clone();
             if let Some(relation) = &options.graph.relation {
                 ensure!(
@@ -19,7 +23,7 @@ impl crate::store::Store {
             }
             validate_search(&options)?;
             let text = validate_text(text)?;
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = conn.unchecked_transaction()?;
             let mut output = new_search(&tx, contexts("", &options))?;
             let seed = resolve_endpoint_in(&tx, text, &options)?;
             if let Some(relation) = &options.graph.relation {
@@ -36,10 +40,10 @@ impl crate::store::Store {
     /// Unicode/accent-insensitive exact, scoped qualified-tail, prefix and
     /// substring tiers. Punctuation stays literal; ties and incomplete scans
     /// return errors.
-    pub fn resolve_endpoint(&self, text: &str, options: &SearchOptions) -> Result<Node> {
-        catalog_budgeted(&self.conn, || {
+    pub fn resolve_endpoint(&mut self, text: &str, options: &SearchOptions) -> Result<Node> {
+        catalog_budgeted(&mut self.conn, |conn| {
             validate_search(options)?;
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = conn.unchecked_transaction()?;
             generation(&tx)?;
             storage_layout(&tx)?;
             let node = resolve_endpoint_in(&tx, validate_text(text)?, options)?;
@@ -50,8 +54,8 @@ impl crate::store::Store {
 
     /// Include grounded root/member/file seeds, then reverse dependencies.
     /// SearchResult.seeds distinguishes starting evidence from affected nodes.
-    pub fn impact_extended(&self, text: &str, options: &ImpactOptions) -> Result<SearchResult> {
-        catalog_budgeted(&self.conn, || {
+    pub fn impact_extended(&mut self, text: &str, options: &ImpactOptions) -> Result<SearchResult> {
+        catalog_budgeted(&mut self.conn, |conn| {
             validate_search(&options.search)?;
             let text = validate_text(text)?;
             ensure!(options.relations.len() <= 32, "at most 32 impact relations");
@@ -86,7 +90,7 @@ impl crate::store::Store {
             let relations: Vec<_> = relations.into_iter().collect();
             let mut search = options.search.clone();
             search.graph.direction = Direction::Incoming;
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = conn.unchecked_transaction()?;
             let mut output = new_search(&tx, contexts(text, &search))?;
             let (seeds, examined) = impact_seeds(&tx, text, &search, &mut output)?;
             explore_filtered(

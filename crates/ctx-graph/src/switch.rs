@@ -283,7 +283,7 @@ fn database_hash(db: &Path) -> Result<String> {
 }
 
 fn verify(db: &Path, exe: &Path, nodes: usize, edges: usize) -> Result<()> {
-    let store = Store::open(db)?;
+    let mut store = Store::open(db)?;
     let stats = store.stats()?;
     ensure!(
         stats.kind == "imported" && stats.nodes == nodes && stats.edges == edges,

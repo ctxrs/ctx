@@ -277,7 +277,7 @@ fn selected_schema_values_and_native_rowids_are_preserved() {
 #[test]
 fn selected_schema_execution_cannot_attach_or_change_unrelated_objects() {
     use super::super::snapshot::selective::execute_schema;
-    let target = Connection::open_in_memory().unwrap();
+    let mut target = Connection::open_in_memory().unwrap();
     for sql in [
         "ATTACH ':memory:' AS other",
         "CREATE TABLE unrelated(value)",
@@ -285,7 +285,7 @@ fn selected_schema_execution_cannot_attach_or_change_unrelated_objects() {
         "CREATE TRIGGER trap AFTER INSERT ON messages BEGIN SELECT 1; END",
     ] {
         assert!(
-            execute_schema(&target, "messages", sql).is_err(),
+            execute_schema(&mut target, "messages", sql).is_err(),
             "accepted {sql}"
         );
         target
@@ -294,24 +294,24 @@ fn selected_schema_execution_cannot_attach_or_change_unrelated_objects() {
             )
             .expect("a denied schema statement must clear its authorizer");
     }
-    execute_schema(&target, "messages", "CREATE TABLE messages(value)").unwrap();
+    execute_schema(&mut target, "messages", "CREATE TABLE messages(value)").unwrap();
     target
         .execute("CREATE TABLE scratch_after_success(value)", [])
         .expect("an allowed schema statement must clear its authorizer");
     assert!(execute_schema(
-        &target,
+        &mut target,
         "messages",
         "CREATE INDEX custom_collation ON messages(value COLLATE not_installed)"
     )
     .is_err());
     assert!(execute_schema(
-        &target,
+        &mut target,
         "messages",
         "CREATE INDEX custom_function ON messages(not_installed(value))"
     )
     .is_err());
     assert!(execute_schema(
-        &target,
+        &mut target,
         "messages",
         "CREATE INDEX foreign_table ON messages((SELECT value FROM other))"
     )

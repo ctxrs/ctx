@@ -374,35 +374,40 @@ impl Store {
     }
 
     pub fn query_extended(
-        &self,
+        &mut self,
         text: &str,
         options: &crate::query::SearchOptions,
     ) -> Result<crate::query::SearchResult> {
-        crate::query::query_extended(&self.conn, text, options, false)
+        crate::query::query_extended(&mut self.conn, text, options, false)
     }
     pub fn neighbors_extended(
-        &self,
+        &mut self,
         symbol: &str,
         options: &crate::query::SearchOptions,
     ) -> Result<crate::query::SearchResult> {
-        crate::query::query_extended(&self.conn, symbol, options, true)
+        crate::query::query_extended(&mut self.conn, symbol, options, true)
     }
     pub fn path_extended(
-        &self,
+        &mut self,
         source: &str,
         target: &str,
         options: &crate::query::SearchOptions,
     ) -> Result<crate::query::PathSearchResult> {
-        crate::query::path_extended(&self.conn, source, target, options)
+        crate::query::path_extended(&mut self.conn, source, target, options)
     }
 
-    pub fn query(&self, text: &str, options: &QueryOptions) -> Result<GraphResult> {
-        crate::query::query(&self.conn, text, options)
+    pub fn query(&mut self, text: &str, options: &QueryOptions) -> Result<GraphResult> {
+        crate::query::query(&mut self.conn, text, options)
     }
-    pub fn neighbors(&self, symbol: &str, options: &QueryOptions) -> Result<GraphResult> {
-        crate::query::neighbors(&self.conn, symbol, options)
+    pub fn neighbors(&mut self, symbol: &str, options: &QueryOptions) -> Result<GraphResult> {
+        crate::query::neighbors(&mut self.conn, symbol, options)
     }
-    pub fn path(&self, source: &str, target: &str, options: &QueryOptions) -> Result<PathResult> {
-        crate::query::path(&self.conn, source, target, options)
+    pub fn path(
+        &mut self,
+        source: &str,
+        target: &str,
+        options: &QueryOptions,
+    ) -> Result<PathResult> {
+        crate::query::path(&mut self.conn, source, target, options)
     }
 }

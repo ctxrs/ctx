@@ -82,14 +82,14 @@ fn graph(
                     )
                 })?;
         facts.phase = GraphPhase::Open;
-        let store = Store::open_read_only(path).map_err(|error| {
+        let mut store = Store::open_read_only(path).map_err(|error| {
             graph_facts::failed(&mut facts, &error);
             failure(UnifiedErrorCode::GraphUnavailable, format!(
                 "cannot read the selected graph snapshot: {error:#}; run ctx graph index first or select --graph-db PATH"))
         })?;
         facts.phase = GraphPhase::Query;
         let query_started = Instant::now();
-        let queried = graph_query(&store, operation, &mut facts, query_started);
+        let queried = graph_query(&mut store, operation, &mut facts, query_started);
         facts
             .query_duration
             .get_or_insert_with(|| query_started.elapsed());
@@ -115,7 +115,7 @@ fn graph(
     )
 }
 fn graph_query(
-    store: &Store,
+    store: &mut Store,
     operation: GraphOperation,
     facts: &mut graph_facts::GraphObservation,
     started: Instant,

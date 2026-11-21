@@ -32,6 +32,7 @@ Released: 2026-11-21
 - Manual imports tie their worker to the caller's stdin lifeline and cancel cleanly if the caller exits.
 - Supervised macOS daemons stay alive under load without launchd restarts interrupting concurrent searches.
 - OpenZFS source roots qualify on Linux, Codex Zstd workers share a 1 GiB scratch budget and retain subagent lifecycle notices, Hermes tool-call rows with empty content are indexed and re-parsed on parser upgrades, Pi skips OMP `changes.jsonl` and non-session files, Windows missing-path errors map cleanly across providers, configured roots no longer warn as partial when optional sub-paths are absent, local usage storage recovers from stale SHM and WAL state, and CLI stdout/stderr pipes exit cleanly on `BrokenPipe`.
+- Updated bundled SQLite (`rusqlite`/`libsqlite3-sys`), `rmcp`, `quinn-udp`, and `rustix` dependencies to versions that address the release scan's security advisories.
 
 ## 2.4.1
 

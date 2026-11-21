@@ -112,8 +112,7 @@ fn bounded_and_full_snapshots_keep_the_same_records_bytes_and_rejections() {
             .prepare(&format!("SELECT * FROM {table}"))
             .unwrap()
             .column_names()
-            .iter()
-            .map(|name| (*name).to_owned())
+            .map(str::to_owned)
             .collect::<Vec<_>>();
         for (id, payload) in [
             ("large-text", "CAST(zeroblob(?1) AS TEXT)"),

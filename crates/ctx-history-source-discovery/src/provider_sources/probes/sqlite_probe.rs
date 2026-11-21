@@ -110,7 +110,7 @@ pub(super) fn sqlite_structural_probe(
 }
 
 pub(super) fn execute_sqlite_structural_probe(
-    snapshot: SqliteSourceReadSnapshot,
+    mut snapshot: SqliteSourceReadSnapshot,
     limits: SqliteProbeLimits,
     configure: impl FnOnce(&Connection, Duration) -> rusqlite::Result<()>,
     query: impl FnOnce(&Connection) -> rusqlite::Result<bool>,
@@ -123,10 +123,10 @@ pub(super) fn execute_sqlite_structural_probe(
     let connection = if take_sqlite_probe_connection_failure_for_test() {
         Err(SqliteSourceAccessError::SnapshotNotActive)
     } else {
-        snapshot.connection()
+        snapshot.connection_mut()
     };
     #[cfg(not(test))]
-    let connection = snapshot.connection();
+    let connection = snapshot.connection_mut();
     let query_result = match connection {
         Ok(connection) => {
             let configured = connection

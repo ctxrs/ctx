@@ -1,16 +1,19 @@
 use super::*;
 
-pub(super) fn budgeted<T>(conn: &Connection, work: impl FnOnce() -> Result<T>) -> Result<T> {
-    let _budget = QueryBudget::install(conn)?;
-    query_errors(work())
+pub(super) fn budgeted<T>(
+    conn: &mut Connection,
+    work: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    let budget = QueryBudget::install(conn)?;
+    query_errors(work(budget.0))
 }
 
 pub(super) fn catalog_budgeted<T>(
-    conn: &Connection,
-    work: impl FnOnce() -> Result<T>,
+    conn: &mut Connection,
+    work: impl FnOnce(&Connection) -> Result<T>,
 ) -> Result<T> {
-    let _budget = QueryBudget::with_steps(conn, 20_000)?;
-    query_errors(work())
+    let budget = QueryBudget::with_steps(conn, 20_000)?;
+    query_errors(work(budget.0))
 }
 
 pub(super) fn query_errors<T>(result: Result<T>) -> Result<T> {
