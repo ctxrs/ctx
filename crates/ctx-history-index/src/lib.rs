@@ -3,6 +3,7 @@
 //! A Tantivy commit names a durable immutable source-revision manifest, so
 //! readers observe either the previous complete generation or the next one.
 
+mod changed_sessions;
 mod commit_contract;
 mod identity;
 mod merge_policy;
@@ -54,6 +55,17 @@ pub(crate) use ctx_history_index_format::{
     source_sort_key, INDEX_MEMORY_MIN_PER_THREAD,
 };
 pub use ctx_history_index_format::{
+    active_generation_upgrade_scope, source_token, ActiveGenerationUpgradeScope,
+    AppliedProviderRoot, AppliedProviderRootSourceMembership,
+    CommittedPredecessorMigrationRecovery, ConsecutiveSourceMissingCount,
+    DetachedReleasedProviderRootAuthority, GenerationManifest, GenerationStateEnvelope, IndexError,
+    ProviderRootDefinition, ProviderRootSourceIdentity, Result, SourceCoreRecordAggregate,
+    SourceMissingObservationPoint, SourceRouteIdentity, SourceRouteMissingState,
+    SourceRouteSnapshot, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
+    LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN, MAX_DETACHED_RELEASED_PROVIDER_ROOTS,
+    MAX_GENERATION_STATE_BYTES, MAX_GENERATION_STATE_FORMAT_BYTES,
+};
+pub use ctx_history_index_format::{
     current_semantic_generation_policy, current_semantic_generation_policy_hash,
     current_source_generation_policy, current_source_generation_policy_hash,
     EmbeddingGenerationPolicy, LexicalBodySelection, LexicalGenerationPolicy,
@@ -64,16 +76,6 @@ pub use ctx_history_index_format::{
 };
 pub(crate) use ctx_history_index_format::{
     fields_from_schema, lexical_schema, provider_source_config_digest, validate_schema, Fields,
-};
-pub use ctx_history_index_format::{
-    source_token, AppliedProviderRoot, AppliedProviderRootSourceMembership,
-    CommittedPredecessorMigrationRecovery, ConsecutiveSourceMissingCount,
-    DetachedReleasedProviderRootAuthority, GenerationManifest, GenerationStateEnvelope, IndexError,
-    ProviderRootDefinition, ProviderRootSourceIdentity, Result, SourceCoreRecordAggregate,
-    SourceMissingObservationPoint, SourceRouteIdentity, SourceRouteMissingState,
-    SourceRouteSnapshot, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
-    LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN, MAX_DETACHED_RELEASED_PROVIDER_ROOTS,
-    MAX_GENERATION_STATE_BYTES, MAX_GENERATION_STATE_FORMAT_BYTES,
 };
 #[cfg(test)]
 pub(crate) use ctx_history_index_format::{CommitPayload, COMMIT_PAYLOAD_VERSION};
@@ -186,6 +188,7 @@ use tantivy::{
 };
 use uuid::Uuid;
 
+use changed_sessions::ChangedSessionRegistry;
 #[cfg(test)]
 use ctx_history_index_format::core_content_bytes;
 use ctx_history_index_format::{
@@ -400,7 +403,7 @@ pub struct GenerationWriter {
     retained_generation_directories: ctx_history_index_generation::RetainedGenerationDirectories,
     preflight_lock: Option<DirectoryLock>,
     writer: Option<IndexWriter<IndexDocument>>,
-    merge_activation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    merge_control: Option<std::sync::Arc<merge_policy::StagingMergeControl>>,
     writer_options: WriterOptions,
     replacement_memory_bytes: usize,
     replacement_memory_used: usize,
@@ -423,7 +426,7 @@ pub struct GenerationWriter {
     partially_reconciled_routes: BTreeSet<SourceRouteIdentity>,
     partial_source_route_deltas: BTreeMap<SourceRouteIdentity, PartialSourceRouteDelta>,
     source_identities: HashMap<Uuid, [u8; 32]>,
-    changed_sessions: HashMap<Uuid, PreparedSessionIdentityFacts>,
+    changed_sessions: ChangedSessionRegistry,
     changed_session_registry_memory_bytes: usize,
     source_route_plan: Option<SourceRoutePlan>,
     active_source_route_stage: Option<SourceRouteStageCheckpoint>,
@@ -431,6 +434,8 @@ pub struct GenerationWriter {
     reusable_base_rebuild_detail: Option<String>,
     #[cfg(test)]
     index_writer_constructions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    applied_merge_threads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     before_writer_handoff: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(test)]
@@ -710,56 +715,55 @@ impl GenerationWriter {
             ));
         }
         let session_uuid = candidate.session_id.as_uuid();
-        let (merged, first_for_candidate, prior) =
-            match self.changed_sessions.get(&session_uuid).copied() {
-                Some(existing) => (
-                    merge_session_identity_facts(existing, candidate)?,
-                    false,
-                    None,
-                ),
-                None => {
-                    self.ensure_changed_session_registry_capacity()?;
-                    let prior = if let Some(base) = self.base_publication.as_ref() {
-                        let lookup = prior_session_identity_facts(
-                            base.searcher(),
-                            self.fields,
-                            candidate.session_id,
-                            |owner, core| self.base_witness_source_state(owner, core),
-                        );
-                        match lookup {
-                            Ok(prior) => prior,
-                            Err(error)
-                                if prior_session_identity_lookup_failure_is_passthrough(&error) =>
-                            {
-                                return Err(error);
-                            }
-                            Err(error) => match self.active_pointer.as_ref() {
-                                Some(pointer) => {
-                                    let classified = classify_active_integrity_failure(
-                                        &self.root,
-                                        pointer.active(),
-                                        error,
-                                    );
-                                    self.reusable_base_rebuild_detail =
-                                        Some(classified.to_string());
-                                    return Err(classified);
-                                }
-                                None => return Err(error),
-                            },
+        let existing = self.changed_sessions.get(&session_uuid)?;
+        let (merged, first_for_candidate, prior) = match existing {
+            Some(existing) => (
+                merge_session_identity_facts(existing, candidate)?,
+                false,
+                None,
+            ),
+            None => {
+                self.ensure_changed_session_registry_capacity()?;
+                let prior = if let Some(base) = self.base_publication.as_ref() {
+                    let lookup = prior_session_identity_facts(
+                        base.searcher(),
+                        self.fields,
+                        candidate.session_id,
+                        |owner, core| self.base_witness_source_state(owner, core),
+                    );
+                    match lookup {
+                        Ok(prior) => prior,
+                        Err(error)
+                            if prior_session_identity_lookup_failure_is_passthrough(&error) =>
+                        {
+                            return Err(error);
                         }
-                    } else {
-                        None
-                    };
-                    // Candidate-vs-base contradictions are intentionally outside
-                    // the active-integrity classification boundary above.
-                    let merged = match prior {
-                        Some(existing) => merge_session_identity_facts(existing, candidate)?,
-                        None => candidate,
-                    };
-                    (merged, true, prior)
-                }
-            };
-        let advances = self.changed_sessions.get(&session_uuid).copied() != Some(merged);
+                        Err(error) => match self.active_pointer.as_ref() {
+                            Some(pointer) => {
+                                let classified = classify_active_integrity_failure(
+                                    &self.root,
+                                    pointer.active(),
+                                    error,
+                                );
+                                self.reusable_base_rebuild_detail = Some(classified.to_string());
+                                return Err(classified);
+                            }
+                            None => return Err(error),
+                        },
+                    }
+                } else {
+                    None
+                };
+                // Candidate-vs-base contradictions are intentionally outside
+                // the active-integrity classification boundary above.
+                let merged = match prior {
+                    Some(existing) => merge_session_identity_facts(existing, candidate)?,
+                    None => candidate,
+                };
+                (merged, true, prior)
+            }
+        };
+        let advances = existing != Some(merged);
         let mut document = document;
         let is_replacement = matches!(&pending_source.mode, PendingSourceMode::Replace);
         let differential = pending_source.replacement.is_some();
@@ -774,14 +778,14 @@ impl GenerationWriter {
             self.add_index_document(document)?;
         }
         if first_for_candidate {
-            self.changed_sessions.insert(session_uuid, merged);
+            self.changed_sessions.insert_new(session_uuid, merged)?;
             if let Some(checkpoint) = self.active_source_route_stage.as_mut() {
                 checkpoint.changed_session_insertions.push(session_uuid);
             }
         } else if advances {
-            let previous = self.changed_sessions.insert(session_uuid, merged).ok_or(
-                IndexError::WriterInvariant("changed-session merge lost its prior registry entry"),
-            )?;
+            let previous = self
+                .changed_sessions
+                .update_existing(session_uuid, merged)?;
             if let Some(checkpoint) = self.active_source_route_stage.as_mut() {
                 checkpoint
                     .changed_session_updates

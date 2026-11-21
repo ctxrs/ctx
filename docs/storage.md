@@ -448,11 +448,16 @@ refresh waits for any triggered merge before publication completes. Thus every
 published active segment has at most 25% deletions, while exact no-op refreshes
 perform no writer or merge work.
 
-ctx suppresses merges while route or cohort staging can still roll back.
-Each replacement writer gets a fresh disabled merge control; abandoned updaters
-cannot reactivate it. After all abortable checks, ctx enables only the terminal
-writer immediately before commit. Publication waits for that writer's merges
-to finish.
+ctx defers merges during route or cohort staging while the segment count stays
+below `32` (`2 * LEXICAL_SEGMENT_MERGE_FAN_IN`). Above that ceiling, bounded
+staging compaction merges one fan-in batch at a time using the configured
+merge-thread cap so large multi-route or low-memory rebuilds do not accumulate
+unbounded open files or memory maps; any rollback after staging compaction
+quiesces in-flight merges and reclaims discarded uncommitted files before
+reopening the writer. Each replacement writer gets a fresh staging merge
+control; abandoned updaters stay disabled. After all abortable checks, ctx
+enables terminal compaction only on the live terminal writer immediately before
+commit, and publication waits for that writer's merges to finish.
 
 On Linux and macOS, generation candidates first hard-link unchanged, read-only
 base segments. If the filesystem or permissions prevent linking, they try a
@@ -805,20 +810,25 @@ supervised daemons, detached daemons, and finite Core workers (such as
 `indexing.memory_mb` is a writer and pipeline budget, not a hard OS process RSS
 ceiling. Actual peak RSS during indexing scales with:
 
-- **Tantivy writer heap:** sized to `memory_mb` on cold and upgrade rebuilds
-  (warm incremental refreshes reserve up to one-eighth of this budget for
-  bounded source replacement), plus transient segment-merge buffers during
-  compaction.
+- **Tantivy writer heap and merge threads:** sized to `memory_mb` on cold and
+  upgrade rebuilds (warm incremental refreshes reserve up to one-eighth of this
+  budget for bounded source replacement), with Tantivy's background merge thread
+  pool bounded by `min(indexer_threads, max(1, memory_mb / 128), 4)` so small
+  worker or memory budgets do not spawn a 4-thread merge storm.
 - **Scanner-to-writer live output buffers:** scaled to `memory_bytes / 2` and
   clamped to `16 MiB..=256 MiB` (default `256 MiB` at `512 MiB`).
-- **Changed-session identity registry:** charged at ~1 KiB per changed session
-  up to `memory_mb` so construction-time identity tracking remains bounded.
+- **Changed-session identity registry:** keeps a bounded hot map sized to
+  `memory_bytes / 4` (charged at ~1 KiB per entry) in RAM and spills overflow
+  entries to a private unlinked on-disk hash table, so low `memory_mb` settings
+  slow down gracefully instead of aborting large cold or upgrade rebuilds.
 - **Active manifests and worker scratch:** manifest metadata scales with source
   count, and each concurrent leaf scanner holds its own parsing state. When
   `memory_mb` is set below `512` and `workers` is unset, ctx automatically
   scales indexer threads and leaf scanners down proportionally (`memory_mb / 64`,
-  floor `1`). When `workers` is set explicitly, Tantivy indexer threads are
-  still clamped so every thread keeps at least 15 MB of writer heap.
+  floor `1`). When `workers` is set explicitly, it is clamped to available CPU
+  parallelism and split across Tantivy indexer threads and parallel leaf
+  scanners while still honoring the `memory_mb` leaf-scanner cap and the 15 MB
+  per-indexer-thread heap floor.
 
 Full lexical generation upgrades (such as a schema, analyzer, policy, or
 compression-settings upgrade) rebuild a fresh candidate generation while the

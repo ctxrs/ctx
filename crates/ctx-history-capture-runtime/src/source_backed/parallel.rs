@@ -106,9 +106,14 @@ impl IndexingResourceLimits {
         let max_threads_for_memory =
             (memory_bytes / INDEX_MEMORY_MIN_PER_THREAD_BYTES).clamp(1, INDEXER_THREAD_CAP);
         match self.workers {
-            Some(workers) => workers
-                .clamp(1, INDEXER_THREAD_CAP)
-                .min(max_threads_for_memory),
+            Some(workers) => {
+                let effective_total = workers
+                    .clamp(1, MAX_PARALLEL_LEAF_WORKERS)
+                    .min(available_parallelism.max(1));
+                (effective_total / 2)
+                    .clamp(1, INDEXER_THREAD_CAP)
+                    .min(max_threads_for_memory)
+            }
             None => {
                 let cpu_threads =
                     source_backed_refresh_indexer_threads_for_parallelism(available_parallelism);
@@ -130,17 +135,25 @@ impl IndexingResourceLimits {
         indexer_threads: usize,
         available_parallelism: usize,
     ) -> usize {
-        if let Some(workers) = self.workers {
-            return workers.clamp(1, MAX_PARALLEL_LEAF_WORKERS);
-        }
         let cpu_budget = leaf_worker_budget_for_parallelism(indexer_threads, available_parallelism);
         let memory_bytes = self.effective_memory_bytes();
-        if memory_bytes < DEFAULT_INDEXING_MEMORY_BYTES {
-            let memory_cap = (memory_bytes / CONSTRAINED_MEMORY_BYTES_PER_WORKER)
-                .clamp(1, MAX_PARALLEL_LEAF_WORKERS);
-            cpu_budget.min(memory_cap)
+        let memory_cap = if memory_bytes < DEFAULT_INDEXING_MEMORY_BYTES {
+            (memory_bytes / CONSTRAINED_MEMORY_BYTES_PER_WORKER).clamp(1, MAX_PARALLEL_LEAF_WORKERS)
         } else {
-            cpu_budget
+            MAX_PARALLEL_LEAF_WORKERS
+        };
+        let base_budget = cpu_budget.min(memory_cap);
+        match self.workers {
+            Some(workers) => {
+                let effective_total = workers
+                    .clamp(1, MAX_PARALLEL_LEAF_WORKERS)
+                    .min(available_parallelism.max(1));
+                let remaining_for_scanners = effective_total
+                    .saturating_sub(indexer_threads.clamp(1, INDEXER_THREAD_CAP))
+                    .clamp(1, MAX_PARALLEL_LEAF_WORKERS);
+                base_budget.min(remaining_for_scanners)
+            }
+            None => base_budget,
         }
     }
 }

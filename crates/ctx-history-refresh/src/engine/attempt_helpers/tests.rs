@@ -179,6 +179,18 @@ fn route_index_and_internal_failures_have_stable_retry_classes() {
             true,
         ),
         (
+            IndexError::ChangedSessionRegistryMemoryLimitExceeded {
+                attempted_entries: 16_000,
+                required_bytes: 16_384_000,
+                maximum_bytes: 15_728_640,
+                maximum_entries: 15_360,
+            }
+            .into(),
+            RefreshOutcomeCode::ResourceUnavailable,
+            RefreshOutcomeClass::ResourceUnavailable,
+            false,
+        ),
+        (
             IndexError::SchemaMismatch(1).into(),
             RefreshOutcomeCode::IndexIncompatible,
             RefreshOutcomeClass::Incompatible,
@@ -198,4 +210,19 @@ fn route_index_and_internal_failures_have_stable_retry_classes() {
         assert_eq!(outcome.class(), class);
         assert_eq!(outcome.retryable(), retryable);
     }
+
+    let registry_outcome = classify(
+        &IndexError::ChangedSessionRegistryMemoryLimitExceeded {
+            attempted_entries: 16_000,
+            required_bytes: 16_384_000,
+            maximum_bytes: 15_728_640,
+            maximum_entries: 15_360,
+        }
+        .into(),
+        &attempted_routes,
+    );
+    assert_eq!(
+        registry_outcome.retry_advice(),
+        Some(RefreshRetryAdvice::UpgradeOrReconfigure)
+    );
 }

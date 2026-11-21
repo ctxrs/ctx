@@ -517,12 +517,7 @@ impl GenerationWriter {
                     "route cohort rollback requires an active outer stage".to_owned(),
                 )
             })?;
-        if let Some(writer) = self.writer.as_mut() {
-            writer.rollback()?;
-            let (policy, activation) = merge_policy::staging_merge_policy();
-            writer.set_merge_policy(policy);
-            self.merge_activation = Some(activation);
-        }
+        self.rollback_index_writer()?;
         self.complete_inventories = checkpoint.complete_inventories;
         self.source_route_plan = Some(checkpoint.source_route_plan);
         self.pending = checkpoint.pending;
@@ -536,10 +531,10 @@ impl GenerationWriter {
         self.partial_source_route_deltas = checkpoint.partial_source_route_deltas;
         self.source_identities = checkpoint.source_identities;
         for (session_uuid, prior) in checkpoint.changed_session_updates.into_iter().rev() {
-            self.changed_sessions.insert(session_uuid, prior);
+            self.changed_sessions.restore(session_uuid, prior)?;
         }
         for session_uuid in checkpoint.changed_session_insertions {
-            if self.changed_sessions.remove(&session_uuid).is_none() {
+            if !self.changed_sessions.remove(&session_uuid)? {
                 return Err(IndexError::WriterInvariant(
                     "route cohort rollback lost a changed-session registry insertion",
                 ));
@@ -558,12 +553,7 @@ impl GenerationWriter {
         let checkpoint = self.active_source_route_stage.take().ok_or_else(|| {
             IndexError::SourceRouteStagingNotActive(route_identity.as_str().into())
         })?;
-        if let Some(writer) = self.writer.as_mut() {
-            writer.rollback()?;
-            let (policy, activation) = merge_policy::staging_merge_policy();
-            writer.set_merge_policy(policy);
-            self.merge_activation = Some(activation);
-        }
+        self.rollback_index_writer()?;
         self.complete_inventories = checkpoint.complete_inventories;
         self.source_route_plan = Some(checkpoint.source_route_plan);
         self.pending = checkpoint.pending;
@@ -577,10 +567,10 @@ impl GenerationWriter {
         self.partial_source_route_deltas = checkpoint.partial_source_route_deltas;
         self.source_identities = checkpoint.source_identities;
         for (session_uuid, prior) in checkpoint.changed_session_updates.into_iter().rev() {
-            self.changed_sessions.insert(session_uuid, prior);
+            self.changed_sessions.restore(session_uuid, prior)?;
         }
         for session_uuid in checkpoint.changed_session_insertions {
-            if self.changed_sessions.remove(&session_uuid).is_none() {
+            if !self.changed_sessions.remove(&session_uuid)? {
                 return Err(IndexError::WriterInvariant(
                     "route rollback lost a changed-session registry insertion",
                 ));

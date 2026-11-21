@@ -34,6 +34,7 @@ pub use contracts::{
 pub use ctx_history_capture_model::{
     ProviderRootDefinition, ProviderRootKind, ProviderRootSourceIdentity, SourceRouteIdentity,
 };
+pub use manifest::{active_generation_upgrade_scope, ActiveGenerationUpgradeScope};
 #[doc(hidden)]
 pub use policy::is_semantic_candidate;
 pub use policy::{

@@ -497,8 +497,11 @@ fn lexical_report(
             }));
             if reason == Some("generation_upgrade_required") {
                 value["upgrade"] = lexical_upgrade_report(
-                    manifest,
-                    index.document_count(),
+                    Some(ctx_history_index::ActiveGenerationUpgradeScope {
+                        estimated_total_sources: manifest.sources.len(),
+                        estimated_total_source_bytes: manifest.certified_source_bytes,
+                        estimated_total_documents: index.document_count(),
+                    }),
                     refresh_job,
                     request_state,
                 );
@@ -543,8 +546,8 @@ fn lexical_report(
                 None,
             )
         }
-        Err(error) => (
-            compact_json(json!({
+        Err(error) => {
+            let mut value = compact_json(json!({
                 "status": "unavailable",
                 "search_available": false,
                 "reason": "generation_verification_failed",
@@ -560,9 +563,16 @@ fn lexical_report(
                     "matches_current": Value::Null,
                 },
                 "last_error": format!("{error:#}"),
-            })),
-            None,
-        ),
+            }));
+            if ctx_history_index::generation_incompatibility_requires_rebuild(&error) {
+                value["upgrade"] = lexical_upgrade_report(
+                    ctx_history_index::active_generation_upgrade_scope(&path),
+                    refresh_job,
+                    request_state,
+                );
+            }
+            (value, None)
+        }
     }
 }
 
@@ -591,8 +601,7 @@ fn lexical_state(
 }
 
 fn lexical_upgrade_report(
-    manifest: &ctx_history_index::GenerationManifest,
-    indexed_documents: u64,
+    scope: Option<ctx_history_index::ActiveGenerationUpgradeScope>,
     refresh_job: Option<&Value>,
     request_state: Option<&str>,
 ) -> Value {
@@ -688,12 +697,26 @@ fn lexical_upgrade_report(
                 .and_then(Value::as_u64)
         })
         .flatten();
+    let (
+        estimate_source,
+        estimated_total_sources,
+        estimated_total_source_bytes,
+        estimated_total_documents,
+    ) = match scope {
+        Some(scope) => (
+            "active_generation_manifest",
+            Some(scope.estimated_total_sources),
+            Some(scope.estimated_total_source_bytes),
+            Some(scope.estimated_total_documents),
+        ),
+        None => ("unavailable", None, None, None),
+    };
 
     let mut value = compact_json(json!({
-        "estimate_source": "active_generation_manifest",
-        "estimated_total_sources": manifest.sources.len(),
-        "estimated_total_source_bytes": manifest.certified_source_bytes,
-        "estimated_total_documents": indexed_documents,
+        "estimate_source": estimate_source,
+        "estimated_total_sources": estimated_total_sources,
+        "estimated_total_source_bytes": estimated_total_source_bytes,
+        "estimated_total_documents": estimated_total_documents,
         "phase": phase,
         "whole_run_stage": whole_run_stage,
         "completed_routes": completed_routes,

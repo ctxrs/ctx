@@ -176,6 +176,29 @@ pub fn load_publication_for_metas(root: &Path, metas: &IndexMeta) -> Result<Load
     })
 }
 
+/// Read-only upgrade scope derived from the active generation's manifest
+/// without opening or verifying the physical lexical index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveGenerationUpgradeScope {
+    pub estimated_total_sources: usize,
+    pub estimated_total_source_bytes: u64,
+    pub estimated_total_documents: u64,
+}
+
+/// Best-effort read-only manifest scope lookup for an active generation whose
+/// physical index failed compatibility checks (for example,
+/// `IndexSettingsMismatch`). Never decodes unsupported manifest versions or
+/// mutates index state.
+pub fn active_generation_upgrade_scope(root: &Path) -> Option<ActiveGenerationUpgradeScope> {
+    let pointer = ctx_history_index_generation::load_active_generation_pointer(root).ok()??;
+    let manifest = load_materialized_manifest(root, pointer.active().generation_id(), 0).ok()?;
+    Some(ActiveGenerationUpgradeScope {
+        estimated_total_sources: manifest.sources.len(),
+        estimated_total_source_bytes: manifest.certified_source_bytes,
+        estimated_total_documents: manifest.indexed_documents,
+    })
+}
+
 fn load_materialized_manifest(
     root: &Path,
     generation_id: &str,

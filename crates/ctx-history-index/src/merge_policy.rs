@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc,
     },
 };
@@ -17,6 +17,13 @@ use ctx_history_index_format::{
 };
 
 const LEXICAL_MIN_LAYER_SIZE: u32 = 64;
+/// Maximum segment count deferred during route staging before bounded
+/// incremental compaction keeps open file descriptors and mmap regions capped.
+pub(crate) const STAGING_SEGMENT_CEILING: usize = LEXICAL_SEGMENT_MERGE_FAN_IN * 2;
+
+const MERGE_MODE_STAGING: u8 = 0;
+const MERGE_MODE_TERMINAL: u8 = 1;
+const MERGE_MODE_DISABLED: u8 = 2;
 
 #[derive(Debug)]
 pub(crate) struct LexicalMergePolicy {
@@ -53,28 +60,91 @@ impl MergePolicy for LexicalMergePolicy {
 }
 
 #[derive(Debug)]
-struct DeferredLexicalMergePolicy {
-    enabled: Arc<AtomicBool>,
+pub(crate) struct StagingMergeControl {
+    mode: AtomicU8,
+    staging_merges_started: AtomicBool,
+}
+
+impl StagingMergeControl {
+    fn new() -> Self {
+        Self {
+            mode: AtomicU8::new(MERGE_MODE_STAGING),
+            staging_merges_started: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn enable_terminal(&self) {
+        self.mode.store(MERGE_MODE_TERMINAL, Ordering::Release);
+    }
+
+    pub(crate) fn disable(&self) {
+        self.mode.store(MERGE_MODE_DISABLED, Ordering::Release);
+    }
+
+    pub(crate) fn staging_merges_started(&self) -> bool {
+        self.staging_merges_started.load(Ordering::Acquire)
+    }
+
+    fn mark_staging_merge_started(&self) {
+        self.staging_merges_started.store(true, Ordering::Release);
+    }
+}
+
+#[derive(Debug)]
+struct StagingLexicalMergePolicy {
+    control: Arc<StagingMergeControl>,
     terminal_policy: LexicalMergePolicy,
 }
 
-impl MergePolicy for DeferredLexicalMergePolicy {
+impl MergePolicy for StagingLexicalMergePolicy {
     fn compute_merge_candidates(&self, segments: &[SegmentMeta]) -> Vec<MergeCandidate> {
-        if self.enabled.load(Ordering::Acquire) {
-            self.terminal_policy.compute_merge_candidates(segments)
-        } else {
-            Vec::new()
+        match self.control.mode.load(Ordering::Acquire) {
+            MERGE_MODE_TERMINAL => self.terminal_policy.compute_merge_candidates(segments),
+            MERGE_MODE_DISABLED => Vec::new(),
+            _ => {
+                if segments.len() < STAGING_SEGMENT_CEILING {
+                    return Vec::new();
+                }
+                let mut candidates = self
+                    .terminal_policy
+                    .append_policy
+                    .compute_merge_candidates(segments);
+                if candidates.is_empty() {
+                    // When segments span many size tiers without reaching fan-in
+                    // in a single tier, compact the smallest fan-in batch so
+                    // staging never accumulates unbounded FDs or mmap regions.
+                    let mut ordered = segments
+                        .iter()
+                        .map(|segment| (segment.num_docs(), segment.max_doc(), segment.id()))
+                        .collect::<Vec<_>>();
+                    ordered.sort_by_key(|(num_docs, max_doc, _)| (*num_docs, *max_doc));
+                    let batch = ordered
+                        .into_iter()
+                        .take(LEXICAL_SEGMENT_MERGE_FAN_IN)
+                        .map(|(_, _, id)| id)
+                        .collect::<Vec<_>>();
+                    if batch.len() >= 2 {
+                        candidates.push(MergeCandidate(batch));
+                    }
+                } else {
+                    candidates.truncate(1);
+                }
+                if !candidates.is_empty() {
+                    self.control.mark_staging_merge_started();
+                }
+                candidates
+            }
         }
     }
 }
 
-pub(super) fn staging_merge_policy() -> (Box<dyn MergePolicy>, Arc<AtomicBool>) {
-    let enabled = Arc::new(AtomicBool::new(false));
-    let policy = DeferredLexicalMergePolicy {
-        enabled: Arc::clone(&enabled),
+pub(super) fn staging_merge_policy() -> (Box<dyn MergePolicy>, Arc<StagingMergeControl>) {
+    let control = Arc::new(StagingMergeControl::new());
+    let policy = StagingLexicalMergePolicy {
+        control: Arc::clone(&control),
         terminal_policy: LexicalMergePolicy::default(),
     };
-    (Box::new(policy), enabled)
+    (Box::new(policy), control)
 }
 
 pub(crate) fn deletion_density_exceeds_limit(segment: &SegmentMeta) -> bool {
@@ -105,22 +175,62 @@ mod tests {
         let segments = (0..LEXICAL_SEGMENT_MERGE_FAN_IN)
             .map(|_| segment(&index, 1, 0))
             .collect::<Vec<_>>();
-        let (abandoned_policy, _abandoned_activation) = staging_merge_policy();
-        let (terminal_policy, terminal_activation) = staging_merge_policy();
+        let (abandoned_policy, abandoned_control) = staging_merge_policy();
+        let (terminal_policy, terminal_control) = staging_merge_policy();
+        abandoned_control.disable();
         assert!(abandoned_policy
             .compute_merge_candidates(&segments)
             .is_empty());
         assert!(terminal_policy
             .compute_merge_candidates(&segments)
             .is_empty());
-        terminal_activation.store(true, Ordering::Release);
+        terminal_control.enable_terminal();
         assert!(!terminal_policy
             .compute_merge_candidates(&segments)
             .is_empty());
-        // A queued task on the killed updater must remain unable to start a merge.
+        // A queued task on the killed updater must remain unable to start a merge,
+        // even when segment count exceeds the staging ceiling.
+        let oversized = (0..STAGING_SEGMENT_CEILING + 8)
+            .map(|_| segment(&index, 1, 0))
+            .collect::<Vec<_>>();
         assert!(abandoned_policy
-            .compute_merge_candidates(&segments)
+            .compute_merge_candidates(&oversized)
             .is_empty());
+        assert!(!abandoned_control.staging_merges_started());
+    }
+
+    #[test]
+    fn staging_policy_defers_below_ceiling_and_compacts_at_ceiling() {
+        let index = Index::create_in_ram(Schema::builder().build());
+        let (policy, control) = staging_merge_policy();
+
+        let below_ceiling = (0..STAGING_SEGMENT_CEILING - 1)
+            .map(|_| segment(&index, 1, 0))
+            .collect::<Vec<_>>();
+        assert!(policy.compute_merge_candidates(&below_ceiling).is_empty());
+        assert!(!control.staging_merges_started());
+
+        let at_ceiling = (0..STAGING_SEGMENT_CEILING)
+            .map(|_| segment(&index, 1, 0))
+            .collect::<Vec<_>>();
+        let candidates = policy.compute_merge_candidates(&at_ceiling);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].0.len() >= LEXICAL_SEGMENT_MERGE_FAN_IN);
+        assert!(control.staging_merges_started());
+
+        // Mixed size tiers that do not reach fan-in in any single LogMergePolicy
+        // level still compact the smallest fan-in batch once the ceiling is hit.
+        let (mixed_policy, mixed_control) = staging_merge_policy();
+        let mixed_tiers = (0..STAGING_SEGMENT_CEILING)
+            .map(|tier| {
+                let docs = 1_u32 << (tier / 2).min(20);
+                segment(&index, docs, 0)
+            })
+            .collect::<Vec<_>>();
+        let mixed_candidates = mixed_policy.compute_merge_candidates(&mixed_tiers);
+        assert_eq!(mixed_candidates.len(), 1);
+        assert_eq!(mixed_candidates[0].0.len(), LEXICAL_SEGMENT_MERGE_FAN_IN);
+        assert!(mixed_control.staging_merges_started());
     }
 
     #[test]

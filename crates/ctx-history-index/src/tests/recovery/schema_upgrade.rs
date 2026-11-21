@@ -490,3 +490,96 @@ fn settings_upgrade_retires_unleased_previous_directory_while_preserving_flat_de
     drop(writer);
     drop(active_reader);
 }
+
+#[test]
+fn rebuild_marker_retires_unleased_previous_directory_and_preserves_leased_previous_and_delta_base()
+{
+    let temp = tempdir().unwrap();
+    let source = source("rebuild-marker-upgrade.jsonl");
+    for (revision, body) in [(1, "marker baseline"), (2, "marker updated")] {
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_core_record(document(&source, 1, body)).unwrap();
+        writer
+            .certify_source(appendable_certificate(&source, revision, 1, 10))
+            .unwrap();
+        writer.commit(|_| true).unwrap();
+    }
+
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let previous = pointer.previous().unwrap().clone();
+    let active = pointer.active().clone();
+    let active_path = active_generation_path(temp.path());
+    let previous_path = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(previous.directory());
+
+    crate::writer_support::mark_active_generation_for_rebuild(temp.path(), &active).unwrap();
+
+    // While a durable retention lease pins `previous`, rebuild opening must preserve it.
+    let owner_id = "cd".repeat(32);
+    let lease = acquire_generation_retention_lease(
+        temp.path(),
+        previous.generation_id(),
+        "semantic_projection",
+        &owner_id,
+    )
+    .unwrap();
+    {
+        let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        assert!(writer.base_manifest().is_none());
+        let candidate_path = temp
+            .path()
+            .join(INDEX_GENERATIONS_DIRECTORY)
+            .join(writer.candidate_directory_name.as_ref().unwrap());
+        assert!(previous_path.is_dir());
+        assert_eq!(
+            generation_directories(temp.path()),
+            HashSet::from([active_path.clone(), previous_path.clone(), candidate_path])
+        );
+    }
+
+    release_generation_retention_lease(temp.path(), &lease).unwrap();
+
+    // Once `previous` is unleased, rebuild opening retires and reclaims its
+    // directory while preserving `active` and `previous`'s flat-delta base manifest.
+    let active_reader = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    assert!(writer.base_manifest().is_none());
+    let candidate_path = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(writer.candidate_directory_name.as_ref().unwrap());
+    assert!(
+        !previous_path.exists(),
+        "unleased previous directory must be reclaimed when active-generation-rebuild-required.json is present"
+    );
+    assert_eq!(
+        generation_directories(temp.path()),
+        HashSet::from([active_path, candidate_path])
+    );
+    assert!(load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap()
+        .previous()
+        .is_none());
+    assert!(
+        manifest_path(temp.path(), previous.generation_id()).is_file(),
+        "flat-delta base manifest must survive rebuild-marker retirement"
+    );
+    assert_eq!(active_reader.count_term("updated").unwrap(), 1);
+    drop(writer);
+    drop(active_reader);
+}

@@ -406,6 +406,11 @@ pub(super) fn source_backed_refresh_failure_outcome(
                 true,
                 RefreshRetryAdvice::RetryAffectedRoutes,
             ),
+            IndexError::ChangedSessionRegistryMemoryLimitExceeded { .. } => (
+                RefreshOutcomeCode::ResourceUnavailable,
+                false,
+                RefreshRetryAdvice::UpgradeOrReconfigure,
+            ),
             IndexError::Io(_)
             | IndexError::CurrentRepublishInsufficientHeadroom { .. }
             | IndexError::CandidateFailureWithLowSpace { .. }
@@ -620,11 +625,26 @@ pub(super) fn find_attempt_mut<'a>(
         .find(|attempt| attempt.request_id == request_id)
 }
 
+fn intent_is_full_scope_for_eta(intent: &RefreshIntent) -> bool {
+    matches!(
+        intent,
+        RefreshIntent::AutomaticMaintenance
+            | RefreshIntent::SelectedImport {
+                selection: RefreshSelection::All,
+                ..
+            }
+    )
+}
+
 pub(super) fn coalesce_attempt(
     attempt: &mut SourceBackedRefreshAttempt,
     metadata: SourceRefreshRuntimeMetadata,
+    incoming_intent: &RefreshIntent,
 ) -> Value {
-    if metadata.operation == SourceBackedRefreshOperation::Import {
+    if metadata.operation == SourceBackedRefreshOperation::Import
+        && !(intent_is_full_scope_for_eta(incoming_intent)
+            && metadata.trigger_provenance != "explicit_source_catalog")
+    {
         attempt.whole_run_eta.disable();
     }
     merge_trigger_ownership(attempt, &metadata);
@@ -662,15 +682,8 @@ pub(super) fn new_refresh_attempt(
     refresh_scope: SourceBackedRefreshScope,
 ) -> SourceBackedRefreshAttempt {
     let request_id = Uuid::now_v7().to_string();
-    let full_scope_intent = matches!(
-        &intent,
-        RefreshIntent::AutomaticMaintenance
-            | RefreshIntent::SelectedImport {
-                selection: RefreshSelection::All,
-                ..
-            }
-    );
-    let eta_eligible = full_scope_intent && matches!(&refresh_scope, SourceBackedRefreshScope::All);
+    let eta_eligible = intent_is_full_scope_for_eta(&intent)
+        && matches!(&refresh_scope, SourceBackedRefreshScope::All);
     let reconciliation_demand = intent.reconciliation_demand();
     SourceBackedRefreshAttempt {
         request_id: request_id.clone(),

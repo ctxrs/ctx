@@ -331,7 +331,7 @@ impl CoreRefreshEngine {
             if let Some(coalesced_request_id) = coalesced_request_id {
                 let attempt = find_attempt_mut(state, &coalesced_request_id)
                     .expect("pending source refresh attempt");
-                return Ok(coalesce_attempt(attempt, metadata));
+                return Ok(coalesce_attempt(attempt, metadata, &intent));
             }
         }
 

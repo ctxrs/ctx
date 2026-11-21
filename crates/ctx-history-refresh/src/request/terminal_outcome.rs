@@ -430,14 +430,20 @@ fn valid_retry_contract(
                 | (true, Some(RefreshRetryAdvice::RetryRequest))
                 | (true, Some(RefreshRetryAdvice::RetryAffectedRoutes))
         ),
-        RefreshOutcomeCode::SourceRefreshInternal | RefreshOutcomeCode::ResourceUnavailable => {
-            matches!(
-                (retryable, retry_advice),
-                (true, None)
-                    | (true, Some(RefreshRetryAdvice::RetryRequest))
-                    | (true, Some(RefreshRetryAdvice::RetryAffectedRoutes))
-            )
-        }
+        RefreshOutcomeCode::SourceRefreshInternal => matches!(
+            (retryable, retry_advice),
+            (true, None)
+                | (true, Some(RefreshRetryAdvice::RetryRequest))
+                | (true, Some(RefreshRetryAdvice::RetryAffectedRoutes))
+        ),
+        RefreshOutcomeCode::ResourceUnavailable => matches!(
+            (retryable, retry_advice),
+            (true, None)
+                | (true, Some(RefreshRetryAdvice::RetryRequest))
+                | (true, Some(RefreshRetryAdvice::RetryAffectedRoutes))
+                | (false, None)
+                | (false, Some(RefreshRetryAdvice::UpgradeOrReconfigure))
+        ),
         RefreshOutcomeCode::IndexIncompatible | RefreshOutcomeCode::IndexCorruption => {
             !retryable
                 && retry_advice.is_none_or(|advice| advice == RefreshRetryAdvice::RebuildIndex)

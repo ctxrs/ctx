@@ -159,13 +159,18 @@ generation after concurrent publication, `storage` is omitted and
 A verified empty generation has zero segment bytes and nonzero metadata bytes.
 
 When `lexical.reason` is `"generation_upgrade_required"` (either
-`lexical.status: "awaiting_upgrade"` or `"rebuilding"`), `lexical.upgrade` adds
+`lexical.status: "awaiting_upgrade"` or `"rebuilding"`), or when
+`lexical.reason` is `"generation_verification_failed"` for a rebuild-requiring
+generation incompatibility (such as an index-settings or unsupported-format
+upgrade where `lexical.search_available` stays `false`), `lexical.upgrade` adds
 an additive upgrade-scope and progress summary without changing schema version
 3:
 
-- `estimate_source` (`"active_generation_manifest"`), `estimated_total_sources`,
-  `estimated_total_source_bytes`, and `estimated_total_documents`, derived from
-  the currently serving verified generation's manifest;
+- `estimate_source` (`"active_generation_manifest"` when the active generation's
+  manifest is readable, or `"unavailable"` when it is unreadable or uses an
+  unsupported format); when `estimate_source` is `"active_generation_manifest"`,
+  `estimated_total_sources`, `estimated_total_source_bytes`, and
+  `estimated_total_documents` are derived from that manifest;
 - while a refresh attempt is actively `admission_pending`, `queued`, or
   `running`, live counters from that attempt (`phase`, `whole_run_stage`,
   `completed_routes`, `total_routes` when known, `processed_bytes`,

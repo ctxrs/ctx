@@ -115,8 +115,12 @@ impl GenerationWriter {
             options.memory_bytes -= self.replacement_memory_bytes;
             let writer = construct_index_writer_with_retry(&self.index, &options)?;
             #[cfg(test)]
-            self.index_writer_constructions
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            {
+                self.index_writer_constructions
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.applied_merge_threads
+                    .store(options.merge_threads(), std::sync::atomic::Ordering::SeqCst);
+            }
             let current_metas = self.index.load_metas()?;
             let expected_generation = self
                 .base_publication
@@ -136,17 +140,61 @@ impl GenerationWriter {
                 return Err(IndexError::ConcurrentGenerationChange);
             }
 
-            // Rollback replaces Tantivy's updater without joining its merges.
-            // Only the terminal writer may start merge work.
-            let (policy, activation) = merge_policy::staging_merge_policy();
+            // Defer merges while segment count stays below the staging ceiling;
+            // bounded staging compaction activates above the ceiling and is
+            // quiesced before rollback replaces the writer.
+            let (policy, control) = merge_policy::staging_merge_policy();
             writer.set_merge_policy(policy);
-            self.merge_activation = Some(activation);
+            self.merge_control = Some(control);
             let _ = writer.garbage_collect_files().wait()?;
             self.writer = Some(writer);
         }
         self.writer.as_mut().ok_or(IndexError::WriterInvariant(
             "lazy writer construction completed without a writer",
         ))
+    }
+
+    pub(super) fn rollback_index_writer(&mut self) -> Result<()> {
+        if self.writer.is_none() {
+            return Ok(());
+        }
+        let started_staging_merges = match self.merge_control.take() {
+            Some(control) => {
+                control.disable();
+                control.staging_merges_started()
+            }
+            None => false,
+        };
+        if !started_staging_merges {
+            let writer = self.writer.as_mut().ok_or(IndexError::WriterInvariant(
+                "rollback writer disappeared before fast rollback",
+            ))?;
+            writer.rollback()?;
+            let (policy, control) = merge_policy::staging_merge_policy();
+            writer.set_merge_policy(policy);
+            self.merge_control = Some(control);
+            return Ok(());
+        }
+        // Quiesce in-flight staging merges so no abandoned merge thread can
+        // race with subsequent commits or file reclamation. Uncommitted docs
+        // flushed during shutdown are never written to meta.json and are
+        // reclaimed immediately after reopening.
+        let writer = self.writer.take().ok_or(IndexError::WriterInvariant(
+            "rollback writer disappeared before merge quiescence",
+        ))?;
+        writer.wait_merging_threads()?;
+        let mut options = self.writer_options.clone();
+        options.memory_bytes -= self.replacement_memory_bytes;
+        let writer = construct_index_writer_with_retry(&self.index, &options)?;
+        #[cfg(test)]
+        self.applied_merge_threads
+            .store(options.merge_threads(), std::sync::atomic::Ordering::SeqCst);
+        let (policy, control) = merge_policy::staging_merge_policy();
+        writer.set_merge_policy(policy);
+        let _ = writer.garbage_collect_files().wait()?;
+        self.merge_control = Some(control);
+        self.writer = Some(writer);
+        Ok(())
     }
 
     /// Prevents segment merging in tests without exposing the writer or its
@@ -348,8 +396,8 @@ impl GenerationWriter {
         let generation_id = prepared_manifest.generation_id().to_owned();
 
         self.apply_route_deletions()?;
-        let merge_activation = self
-            .merge_activation
+        let merge_control = self
+            .merge_control
             .as_ref()
             .ok_or(IndexError::WriterInvariant(
                 "terminal merge activation is missing its lazy writer",
@@ -425,9 +473,9 @@ impl GenerationWriter {
             hook(&candidate_path);
         }
         report_progress(PublicationStage::Merging)?;
-        // Enable only the terminal epoch. Killed staging epochs retain their
-        // own disabled controls.
-        merge_activation.store(true, std::sync::atomic::Ordering::Release);
+        // Enable terminal compaction only for the live terminal epoch. Killed
+        // staging epochs retain their own disabled controls.
+        merge_control.enable_terminal();
         let commit_result = prepared.commit();
         #[cfg(test)]
         let commit_result = if self.return_commit_error_after_visibility {
@@ -860,6 +908,9 @@ impl GenerationWriter {
     // Called only before candidate commit/pointer publication, with no prepared
     // borrow remaining. Failure to establish quiescence leaves safe residue.
     fn discard_after_manifest_failure(mut self) {
+        if let Some(control) = self.merge_control.take() {
+            control.disable();
+        }
         let Some(writer) = self.writer.take() else {
             return;
         };
@@ -878,6 +929,12 @@ impl GenerationWriter {
     }
 
     fn discard_candidate(&mut self) -> Result<()> {
+        if let Some(control) = self.merge_control.take() {
+            control.disable();
+        }
+        if let Some(writer) = self.writer.take() {
+            writer.wait_merging_threads()?;
+        }
         let Some(directory) = self.candidate_directory_name.take() else {
             return Ok(());
         };
