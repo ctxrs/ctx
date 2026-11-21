@@ -981,7 +981,7 @@ uses the existing local MCP `show_session` page contract; its returned
 Current Core `activity` is preserved as an additive event field; keys inside
 captured JSON values are not camelized.
 
-If the active generation changes while `show` or `search` is opening its
+If the active generation changes while `show`, `search`, or `sessions` is opening its
 verified reader, JSON mode exits nonzero and writes one error object to stderr
 with `error: "generation_changed/active_generation_race"`,
 `error_code: "generation_changed"`,

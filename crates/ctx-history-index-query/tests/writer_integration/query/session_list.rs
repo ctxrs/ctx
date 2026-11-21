@@ -359,3 +359,159 @@ fn list_sessions_bounds_stored_core_decodes_to_winning_limit_only() {
     assert!(one_less.truncated);
     assert_eq!(one_less.sessions.len(), SESSION_COUNT - 1);
 }
+
+#[test]
+fn no_subagents_retains_forked_and_resumed_primary_sessions_while_excluding_delegated() {
+    let temp = tempdir().unwrap();
+    let src = source("forked-resumed.jsonl");
+
+    let mut root = document_for_session(&src, "root-session", 1, "root");
+    root.agent_scope = Some(CoreAgentScope::Primary);
+    root.occurred_at_unix_ms = Some(1_700_000_010_000);
+
+    let mut forked = document_for_session(&src, "forked-session", 1, "forked");
+    forked.agent_scope = Some(CoreAgentScope::Primary);
+    forked.parent_session_id = Some(root.session_id);
+    forked.root_session_id = Some(root.session_id);
+    forked.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+    forked.occurred_at_unix_ms = Some(1_700_000_020_000);
+
+    let mut resumed = document_for_session(&src, "resumed-session", 1, "resumed");
+    resumed.agent_scope = Some(CoreAgentScope::Primary);
+    resumed.parent_session_id = Some(root.session_id);
+    resumed.root_session_id = Some(root.session_id);
+    resumed.session_relationship = Some(ProviderNativeSessionRelationship::ResumedFrom);
+    resumed.occurred_at_unix_ms = Some(1_700_000_030_000);
+
+    let mut delegated = document_for_session(&src, "delegated-session", 1, "delegated");
+    delegated.agent_scope = None;
+    delegated.parent_session_id = Some(root.session_id);
+    delegated.root_session_id = Some(root.session_id);
+    delegated.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
+    delegated.occurred_at_unix_ms = Some(1_700_000_040_000);
+
+    let mut forked_subagent = document_for_session(&src, "forked-subagent", 1, "subagent");
+    forked_subagent.agent_scope = Some(CoreAgentScope::Subagent);
+    forked_subagent.parent_session_id = Some(root.session_id);
+    forked_subagent.root_session_id = Some(root.session_id);
+    forked_subagent.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+    forked_subagent.occurred_at_unix_ms = Some(1_700_000_050_000);
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(src.clone()).unwrap();
+    for rec in [
+        root.clone(),
+        forked.clone(),
+        resumed.clone(),
+        delegated.clone(),
+        forked_subagent.clone(),
+    ] {
+        writer.add_core_record(rec).unwrap();
+    }
+    writer.certify_source(certificate(&src, 1, 5)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    assert!(!index.has_source_format("ctx_archive_v1").unwrap());
+    assert!(index.has_source_format("codex_session_jsonl").unwrap());
+
+    let filtered = index
+        .list_sessions(
+            &SessionListFilters {
+                no_subagents: true,
+                ..SessionListFilters::default()
+            },
+            50,
+        )
+        .unwrap();
+    let ids: Vec<_> = filtered.sessions.iter().map(|s| s.session_id).collect();
+    assert_eq!(
+        ids,
+        vec![resumed.session_id, forked.session_id, root.session_id]
+    );
+    assert_eq!(
+        filtered.sessions[0].parent_session_id,
+        Some(root.session_id)
+    );
+    assert_eq!(
+        filtered.sessions[1].parent_session_id,
+        Some(root.session_id)
+    );
+}
+
+#[test]
+fn list_sessions_hydrates_middle_tool_event_facts_consistently_with_and_without_workspace_filter() {
+    let temp = tempdir().unwrap();
+    let src = source("middle-facts.jsonl");
+
+    // First and last events are plain user/assistant messages with no facts.
+    let mut e1 = document_for_session(&src, "mid-facts", 1, "user prompt");
+    e1.occurred_at_unix_ms = Some(1_700_000_001_000);
+
+    let mut e2 = document_for_session(&src, "mid-facts", 2, "running build tool");
+    e2.occurred_at_unix_ms = Some(1_700_000_002_000);
+    e2.event_type = "tool_call".to_owned();
+    add_literal_fact(&mut e2, LiteralFactKind::ToolWorkdir, "/work/middle-app");
+    add_literal_fact(&mut e2, LiteralFactKind::Project, "middle-app");
+    add_literal_fact(&mut e2, LiteralFactKind::Branch, "feat/middle");
+
+    let mut e3 = document_for_session(&src, "mid-facts", 3, "assistant reply");
+    e3.occurred_at_unix_ms = Some(1_700_000_003_000);
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(src.clone()).unwrap();
+    for rec in [e1.clone(), e2, e3] {
+        writer.add_core_record(rec).unwrap();
+    }
+    writer.certify_source(certificate(&src, 1, 3)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+
+    let unfiltered = index
+        .list_sessions(&SessionListFilters::default(), 50)
+        .unwrap();
+    let filtered = index
+        .list_sessions(
+            &SessionListFilters {
+                workspace: Some("/work/middle-app".to_owned()),
+                ..SessionListFilters::default()
+            },
+            50,
+        )
+        .unwrap();
+
+    assert_eq!(unfiltered.sessions.len(), 1);
+    assert_eq!(filtered.sessions, unfiltered.sessions);
+    assert_eq!(
+        unfiltered.sessions[0].cwd.as_deref(),
+        Some("/work/middle-app")
+    );
+    assert_eq!(
+        unfiltered.sessions[0].project.as_deref(),
+        Some("middle-app")
+    );
+    assert_eq!(
+        unfiltered.sessions[0].branch.as_deref(),
+        Some("feat/middle")
+    );
+
+    // Multi-kilobyte workspace substring executes linearly without Tantivy RegexQuery DFA errors.
+    let long_workspace = "x".repeat(20_000);
+    let long_page = index
+        .list_sessions(
+            &SessionListFilters {
+                workspace: Some(long_workspace),
+                ..SessionListFilters::default()
+            },
+            50,
+        )
+        .unwrap();
+    assert!(long_page.sessions.is_empty());
+}

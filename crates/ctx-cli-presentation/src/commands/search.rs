@@ -147,7 +147,7 @@ pub struct SearchArgs {
     pub workspace: Option<String>,
     #[arg(
         long,
-        help = "Filter to recent history, as RFC3339 or a day window like 30d"
+        help = "Filter to recent history, as a relative window (e.g. 2h, 30d), date (YYYY-MM-DD), or RFC3339 timestamp"
     )]
     pub since: Option<String>,
     #[arg(long, help = "Search only primary agent sessions")]

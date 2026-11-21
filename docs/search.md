@@ -100,7 +100,7 @@ Search filters narrow text and JSON output:
 - repeatable `--source-root <configured-name>`;
 - repeatable `--source-group <configured-group>`;
 - `--workspace <name-or-path>`;
-- `--since <rfc3339-or-days>d`;
+- `--since <SINCE>`;
 - `--event-type <event-type>`;
 - `--content-scope all|transcript|calls|outputs`;
 - `--file <path>`;
@@ -115,7 +115,8 @@ Search filters narrow text and JSON output:
 - `--refresh background|off|wait`;
 - `--include-current-session`.
 
-`--since` accepts RFC 3339 timestamps or a day window such as `30d`.
+`--since` accepts relative windows (`30s`, `15m`, `2h`, `30d`, `2w`), calendar
+dates (`YYYY-MM-DD`, UTC midnight), or RFC 3339 timestamps.
 `--file` searches file-path metadata captured from provider records. For Codex,
 this includes literal filenames declared in complete `apply_patch` blocks in
 tool inputs: added, updated, deleted, and both old and new names for moved files.

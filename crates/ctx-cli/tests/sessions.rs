@@ -336,13 +336,13 @@ fn sessions_filters_ordering_limit_and_text_json_contracts() {
     ]));
     assert_eq!(since_date["sessions"].as_array().unwrap().len(), 2);
 
-    // --provider + --workspace filters.
+    // --provider + --workspace filters (including trailing slash from shell tab-completion).
     let claude_web = json_output(ctx(&temp).args([
         "sessions",
         "--provider",
         "claude",
         "--workspace",
-        "WEB-APP",
+        "WEB-APP/",
         "--format",
         "json",
     ]));
@@ -371,6 +371,36 @@ fn sessions_filters_ordering_limit_and_text_json_contracts() {
     assert!(text.contains("/work/ctx-core"), "{text}");
     assert!(text.contains("More sessions available."), "{text}");
 
+    // Extract the compact session ID prefix for card #2 (codex-main) and verify
+    // `ctx show session <compact_ref>` resolves that exact session cleanly.
+    let card_two_line = text
+        .lines()
+        .find(|line| line.starts_with("2. "))
+        .unwrap_or_else(|| panic!("missing card #2 line in:\n{text}"));
+    let compact_ref = card_two_line
+        .strip_prefix("2. ")
+        .and_then(|rest| rest.split(" · ").next())
+        .unwrap_or_else(|| panic!("missing compact ref in line: {card_two_line:?}"));
+    assert!(
+        (8..32).contains(&compact_ref.len()) && !compact_ref.contains('-'),
+        "expected compact hex prefix (8..32 chars, no dashes), got {compact_ref:?}"
+    );
+    assert!(
+        codex_1
+            .session_id
+            .as_uuid()
+            .simple()
+            .to_string()
+            .starts_with(compact_ref),
+        "compact ref {compact_ref:?} does not match {}",
+        codex_1.session_id.as_uuid()
+    );
+    let shown = json_output(ctx(&temp).args(["show", "session", compact_ref, "--format", "json"]));
+    assert_eq!(
+        shown["ctx_session_id"],
+        codex_1.session_id.as_uuid().to_string()
+    );
+
     // Invalid flags rejected cleanly.
     ctx(&temp)
         .args(["sessions", "--limit", "0"])
@@ -392,4 +422,100 @@ fn sessions_filters_ordering_limit_and_text_json_contracts() {
         .assert()
         .failure()
         .code(2);
+}
+
+#[test]
+fn sessions_broken_pipe_in_text_and_json_exits_cleanly_without_panic() {
+    use std::io::Read as _;
+    use std::process::Stdio;
+
+    let temp = tempdir();
+    let src = source_for("codex", "codex_session_jsonl", "pipe-sessions.jsonl");
+    let now_ms = Utc::now().timestamp_millis();
+    let long_cwd = format!("/work/{}", "segment_".repeat(40));
+
+    let mut writer = GenerationWriter::open(lexical_root(&temp), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(src.clone()).unwrap();
+    // 250 sessions with long CWDs exceed the OS pipe buffer (~64 KiB) in both text and JSON modes.
+    for index in 0..250_u64 {
+        let mut rec = record_for(
+            &src,
+            &format!("pipe-session-{index:04}"),
+            1,
+            Some(now_ms - (index as i64) * 1_000),
+            "pipe output test",
+        );
+        add_fact(
+            &mut rec,
+            LiteralFactKind::SessionCwd,
+            &format!("{long_cwd}/repo-{index:04}"),
+        );
+        add_fact(&mut rec, LiteralFactKind::Project, "pipe-project");
+        add_fact(&mut rec, LiteralFactKind::Branch, "main");
+        writer.add_core_record(rec).unwrap();
+    }
+    writer.certify_source(certify(&src, 1, 250)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let ctx_bin = assert_cmd::Command::cargo_bin("ctx")
+        .expect("resolve compiled ctx executable")
+        .get_program()
+        .to_os_string();
+    let data = data_root(&temp);
+
+    for (label, args) in [
+        (
+            "text",
+            vec!["sessions", "--limit", "250", "--format", "text"],
+        ),
+        (
+            "json",
+            vec!["sessions", "--limit", "250", "--format", "json"],
+        ),
+    ] {
+        for read_prefix in [false, true] {
+            let mut child = std::process::Command::new(&ctx_bin)
+                .args(["--data-root"])
+                .arg(&data)
+                .args(&args)
+                .env("HOME", temp.path())
+                .env("USERPROFILE", temp.path())
+                .env("CTX_ANALYTICS_ENABLED", "false")
+                .env("CTX_UPGRADE_AUTO", "off")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+
+            let mut stdout = child.stdout.take().unwrap();
+            if read_prefix {
+                let mut first = [0u8; 16];
+                let _ = stdout.read(&mut first);
+            }
+            drop(stdout);
+
+            let output = child.wait_with_output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !stderr.contains("panicked"),
+                "CLI panicked on broken pipe ({label}, read_prefix={read_prefix}): {stderr}"
+            );
+            assert!(
+                !stderr.contains("failed printing to"),
+                "CLI emitted write panic on broken pipe ({label}, read_prefix={read_prefix}): {stderr}"
+            );
+            assert!(
+                !stderr.contains("Broken pipe"),
+                "CLI emitted broken pipe error on stderr ({label}, read_prefix={read_prefix}): {stderr}"
+            );
+            assert!(
+                output.status.success(),
+                "expected clean exit on broken pipe ({label}, read_prefix={read_prefix}), got {:?}; stderr: {stderr}",
+                output.status
+            );
+        }
+    }
 }
