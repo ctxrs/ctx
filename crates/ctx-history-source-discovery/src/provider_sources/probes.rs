@@ -74,11 +74,7 @@ pub(super) fn default_location_import_probe(
         CaptureProvider::DeepSeekHarness => has_deepseek_harness_session_file(path, 10_000),
         CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             !(candidate != path
-                && candidate.file_name().and_then(|name| name.to_str()) == Some("changes.jsonl")
-                && candidate
-                    .parent()
-                    .and_then(|parent| parent.strip_prefix(path).ok())
-                    .is_some_and(|relative_parent| relative_parent.components().count() >= 1))
+                && candidate.file_name().and_then(|name| name.to_str()) == Some("changes.jsonl"))
         }),
         CaptureProvider::PrimeAgent => super::prime_agent::probe(path),
         CaptureProvider::OpenCode => path_is_file_probe(path),

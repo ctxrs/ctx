@@ -139,7 +139,8 @@ pub(super) fn visit_junie_session_event_paths(
             return Ok(JunieSessionTreeVisit::default());
         }
         Ok(OpenedProviderSourcePath::Directory(directory)) => directory.revalidate()?,
-        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(CaptureError::Io(error) | CaptureError::SystemIo { source: error, .. })
+            if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
 
@@ -152,7 +153,9 @@ pub(super) fn visit_junie_session_event_paths(
         rejections,
     } = match read_junie_index(&authority, &index_relative) {
         Ok(index) => index,
-        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(CaptureError::Io(error) | CaptureError::SystemIo { source: error, .. })
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
             authority.revalidate()?;
             return Ok(JunieSessionTreeVisit::default());
         }
@@ -167,7 +170,9 @@ pub(super) fn visit_junie_session_event_paths(
                 directory.revalidate()?;
                 continue;
             }
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(CaptureError::Io(error) | CaptureError::SystemIo { source: error, .. })
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
                 continue;
             }
             Err(error) => return Err(error),
@@ -214,7 +219,9 @@ pub(super) fn visit_junie_session_event_paths(
                 session_dir.revalidate()?;
                 continue;
             }
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(CaptureError::Io(error) | CaptureError::SystemIo { source: error, .. })
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
                 session_dir.revalidate()?;
                 continue;
             }

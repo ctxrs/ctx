@@ -151,11 +151,12 @@ fn terminal_membership_ignores_omp_changes_jsonl_churn_and_preserves_all_leaf_cl
     assert_eq!(opening.quarantined_leaves().count(), 1);
     assert_eq!(opening.pending_leaves().count(), 1);
 
-    let unbound_paths = |obs: &JsonlFamilyMembershipObservation<CaptureError>| -> BTreeSet<PathBuf> {
-        obs.unbound_routes()
-            .map(|(path, _, _)| path.to_path_buf())
-            .collect()
-    };
+    let unbound_paths =
+        |obs: &JsonlFamilyMembershipObservation<CaptureError>| -> BTreeSet<PathBuf> {
+            obs.unbound_routes()
+                .map(|(path, _, _)| path.to_path_buf())
+                .collect()
+        };
 
     let mut expected_unbound = BTreeSet::from([
         fs::canonicalize(&corrupted).unwrap(),
