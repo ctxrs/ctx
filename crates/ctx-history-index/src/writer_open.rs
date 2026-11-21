@@ -2,6 +2,36 @@ use super::*;
 
 mod previous_recovery;
 
+/// Returns whether the currently pinned active generation cannot be reused as a
+/// writable base generation and therefore requires a fresh source-backed rebuild.
+///
+/// A readable predecessor schema (such as schema 22 while current writers target
+/// schema 23) or an active rebuild marker still allows reads through
+/// [`VerifiedIndex`], while [`GenerationWriter`] opens an empty candidate with
+/// no reusable base publication.
+pub fn active_generation_requires_rebuild(
+    root: impl AsRef<Path>,
+    index: &VerifiedIndex,
+) -> Result<bool> {
+    if index.manifest().lexical_schema_version != LEXICAL_SCHEMA_VERSION {
+        return Ok(true);
+    }
+    let root = root.as_ref();
+    let Some(marker) = load_active_generation_rebuild_marker(root)? else {
+        return Ok(false);
+    };
+    if marker.generation_id != index.generation_id() {
+        return Ok(false);
+    }
+    match load_active_generation_pointer(root) {
+        Ok(Some(pointer)) => Ok(pointer.active().generation_id() == marker.generation_id
+            && pointer.active().directory() == marker.directory),
+        Ok(None) => Ok(false),
+        Err(error) if generation_incompatibility_requires_rebuild(&error) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 enum BaseGenerationExpectation<'a> {
     Unchecked,
     Exact(Option<&'a str>),

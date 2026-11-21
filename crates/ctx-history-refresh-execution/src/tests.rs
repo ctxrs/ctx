@@ -30,7 +30,11 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
         }
         let generation = match VerifiedIndex::open_pinned(&index_root) {
             Ok(index) => {
-                PublishedSourceBackedGeneration::Verified(index.into_generation_snapshot())
+                if ctx_history_index::active_generation_requires_rebuild(&index_root, &index)? {
+                    PublishedSourceBackedGeneration::RebuildRequired
+                } else {
+                    PublishedSourceBackedGeneration::Verified(index.into_generation_snapshot())
+                }
             }
             Err(IndexError::MissingActiveGenerationPointer) => {
                 PublishedSourceBackedGeneration::Missing

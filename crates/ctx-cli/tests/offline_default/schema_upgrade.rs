@@ -153,3 +153,128 @@ fn schema_22_upgrade_starts_without_search_and_keeps_search_available() {
     }
     drop(daemon);
 }
+
+#[test]
+fn schema_22_manual_import_all_incremental_and_explicit_upgrade_without_retired_route_error() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ctx-history-index/tests/fixtures/schema-22");
+    for case in ["import_all_incremental", "import_explicit_codex"] {
+        let temp = tempdir();
+        let environment = IsolatedProcessEnvironment::new(temp.path());
+        let data_root = temp.path().join("data");
+        let index = data_root.join("search/lexical");
+        copy_fixture(&fixture.join("index"), &index);
+        let sessions = environment.home.join(".codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::copy(
+            fixture.join("source.jsonl"),
+            sessions.join("rollout-019fb000-0000-7000-8000-000000000100.jsonl"),
+        )
+        .unwrap();
+        let claude = environment.home.join(".claude/projects/example");
+        fs::create_dir_all(&claude).unwrap();
+        fs::write(
+            claude.join("019fb000-0000-7000-8000-000000000200.jsonl"),
+            concat!(
+                r#"{"type":"user","uuid":"019fb000-0000-7000-8000-000000000201","sessionId":"019fb000-0000-7000-8000-000000000200","timestamp":"2026-08-17T00:00:00Z","cwd":"/example","message":{"role":"user","content":"manualimportupgrademarker"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            data_root.join("config.toml"),
+            concat!(
+                "[indexing]\nmode = \"manual\"\n",
+                "[analytics]\nenabled = false\n[upgrade]\nauto = \"off\"\n",
+                "[search]\nsemantic = false\n[blame]\nenabled = false\n",
+            ),
+        )
+        .unwrap();
+
+        let pointer_before: Value =
+            serde_json::from_slice(&fs::read(index.join("active-generation.json")).unwrap())
+                .unwrap();
+        let schema_22_generation_id = pointer_before["active"]["generation_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let mut command = isolated_local_command(&temp, &data_root, &environment);
+        command.env_remove("CTX_DAEMON_AUTOSTART_OFF");
+        if case == "import_all_incremental" {
+            command.args([
+                "import",
+                "--all",
+                "--incremental",
+                "--no-blame",
+                "--format",
+                "json",
+                "--progress",
+                "none",
+            ]);
+        } else {
+            command.args([
+                "import",
+                "--provider",
+                "codex",
+                "--path",
+                sessions.to_str().unwrap(),
+                "--no-blame",
+                "--format",
+                "json",
+                "--progress",
+                "none",
+            ]);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "case={case} failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let pointer_after: Value =
+            serde_json::from_slice(&fs::read(index.join("active-generation.json")).unwrap())
+                .unwrap();
+        assert_ne!(
+            pointer_after["active"]["generation_id"], schema_22_generation_id,
+            "case={case} did not publish a new generation"
+        );
+        assert_eq!(
+            pointer_after["previous"]["generation_id"], schema_22_generation_id,
+            "case={case} did not retain readable schema-22 predecessor"
+        );
+
+        let status_output = isolated_local_command(&temp, &data_root, &environment)
+            .args(["status", "--format=json"])
+            .output()
+            .unwrap();
+        assert!(status_output.status.success());
+        let status: Value = serde_json::from_slice(&status_output.stdout).unwrap();
+        assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+        assert_eq!(
+            status["lexical"]["lexical_schema_version"], 23,
+            "{status:#}"
+        );
+
+        let expected_markers: &[&str] = if case == "import_all_incremental" {
+            &["schema22upgrademarker", "manualimportupgrademarker"]
+        } else {
+            &["schema22upgrademarker"]
+        };
+        for marker in expected_markers {
+            let search_output = isolated_local_command(&temp, &data_root, &environment)
+                .args(["search", marker, "--refresh", "off", "--format=json"])
+                .output()
+                .unwrap();
+            assert!(search_output.status.success());
+            let results: Value = serde_json::from_slice(&search_output.stdout).unwrap();
+            assert_eq!(
+                results["results"].as_array().unwrap().len(),
+                1,
+                "case={case} marker={marker} search results: {results:#}"
+            );
+        }
+    }
+}

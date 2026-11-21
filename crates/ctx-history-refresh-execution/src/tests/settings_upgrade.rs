@@ -244,6 +244,10 @@ fn upgrade_rebuild_emits_exact_scan_progress_and_runs_under_explicit_indexing_li
     );
 }
 
+fn copy_fixture_dir(from: &Path, to: &Path) {
+    copy_dir_recursive(from, to);
+}
+
 fn copy_dir_recursive(source: &Path, destination: &Path) {
     std::fs::create_dir_all(destination).unwrap();
     #[cfg(unix)]
@@ -275,4 +279,144 @@ fn copy_dir_recursive(source: &Path, destination: &Path) {
             std::fs::set_permissions(&target, permissions).unwrap();
         }
     }
+}
+
+#[test]
+fn schema_22_state_is_rebuild_required_and_explicit_upgrade_ignores_predecessor_retirements() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ctx-history-index/tests/fixtures/schema-22");
+    copy_fixture_dir(&fixture.join("index"), &index_root);
+
+    let state = TestPublishedState.open_published_state(&data_root).unwrap();
+    assert!(matches!(
+        state.generation,
+        PublishedSourceBackedGeneration::RebuildRequired
+    ));
+    assert!(state.explicit_source_catalog.is_none());
+    assert!(state.catalog_route_bindings.is_empty());
+    assert!(state.route_controls.is_empty());
+
+    let (home, _, discovery) = discovery_fixture(temp.path());
+    let sessions = home.join(".codex/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::copy(
+        fixture.join("source.jsonl"),
+        sessions.join("rollout-019fb000-0000-7000-8000-000000000100.jsonl"),
+    )
+    .unwrap();
+    let codex_source = provider_source_for_path(CaptureProvider::Codex, sessions);
+    let report = DiscoveryReport {
+        sources: vec![codex_source.clone()],
+        issues: Vec::new(),
+    };
+    let explicit = upsert_explicit_source(&data_root, &codex_source).unwrap();
+
+    // Upgrading from schema 22 with an explicit overlay matching an automatic
+    // schema-22 route must rebuild cleanly into schema 23 without trying to
+    // retire an uncarried route from the unreadable-for-write predecessor.
+    let published = refresh_all_provider_sources_route_local(
+        &discovery,
+        report,
+        StdDuration::from_millis(1),
+        "schema-22-explicit-upgrade",
+        RefreshOperation::Refresh,
+        &data_root,
+        &index_root,
+        Some(&explicit.authority),
+        SourceBackedRefreshScope::All,
+        &TestPublishedState,
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(published.current.source_count, 1);
+
+    let upgraded = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(
+        upgraded.manifest().lexical_schema_version,
+        ctx_history_index::LEXICAL_SCHEMA_VERSION
+    );
+    assert_eq!(upgraded.count_term("schema22upgrademarker").unwrap(), 1);
+}
+
+#[test]
+fn fresh_candidate_ignores_carried_route_retirements_when_no_base_snapshot_exists() {
+    struct FixedPublishedState(VerifiedGenerationSnapshot);
+
+    impl PublishedSourceBackedStatePort for FixedPublishedState {
+        fn open_published_state(&self, _data_root: &Path) -> Result<PublishedSourceBackedState> {
+            Ok(PublishedSourceBackedState {
+                generation: PublishedSourceBackedGeneration::Verified(self.0.clone()),
+                explicit_source_catalog: None,
+                catalog_route_bindings: Vec::new(),
+                route_controls: BTreeMap::new(),
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ctx-history-index/tests/fixtures/schema-22");
+    copy_fixture_dir(&fixture.join("index"), &index_root);
+
+    let (home, _, discovery) = discovery_fixture(temp.path());
+    let sessions = home.join(".codex/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::copy(
+        fixture.join("source.jsonl"),
+        sessions.join("rollout-019fb000-0000-7000-8000-000000000100.jsonl"),
+    )
+    .unwrap();
+    let codex_source = provider_source_for_path(CaptureProvider::Codex, sessions);
+    let report = DiscoveryReport {
+        sources: vec![codex_source.clone()],
+        issues: Vec::new(),
+    };
+    let explicit = upsert_explicit_source(&data_root, &codex_source).unwrap();
+
+    // Even if a caller supplies a stale Verified schema-22 snapshot containing
+    // the automatic Codex route while refreshing with an explicit overlay (which
+    // populates `retire_after_success` with that automatic route identity),
+    // capture execution against the fresh schema-23 candidate (`base_snapshot == None`)
+    // must not fail with "retired route ... was not carried when the active route began".
+    let stale_schema_22 = VerifiedIndex::open_pinned(&index_root)
+        .unwrap()
+        .into_generation_snapshot();
+    let automatic_route = automatic_source_backed_route_identity(&codex_source).unwrap();
+    assert!(
+        stale_schema_22
+            .manifest()
+            .source_route(&automatic_route)
+            .is_some(),
+        "schema-22 fixture must contain the automatic Codex route so explicit overlay populates retire_after_success"
+    );
+    let fixed_stale = FixedPublishedState(stale_schema_22);
+    let published = refresh_all_provider_sources_route_local(
+        &discovery,
+        report,
+        StdDuration::from_millis(1),
+        "schema-22-defense-in-depth",
+        RefreshOperation::Refresh,
+        &data_root,
+        &index_root,
+        Some(&explicit.authority),
+        SourceBackedRefreshScope::All,
+        &fixed_stale,
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(published.current.source_count, 1);
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .manifest()
+            .lexical_schema_version,
+        ctx_history_index::LEXICAL_SCHEMA_VERSION
+    );
 }

@@ -174,8 +174,9 @@ impl CoreRefreshEngine {
         let Some(index) = open_published_generation(data_root, self.journal.as_ref())? else {
             return Ok(false);
         };
+        let index_root = source_backed_index_root(data_root);
         Ok(
-            index.manifest().lexical_schema_version != ctx_history_index::LEXICAL_SCHEMA_VERSION
+            ctx_history_index::active_generation_requires_rebuild(&index_root, &index)?
                 || index
                     .manifest()
                     .source_routes()

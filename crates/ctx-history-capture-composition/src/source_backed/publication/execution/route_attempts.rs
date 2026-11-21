@@ -186,6 +186,7 @@ where
         report_progress,
     } = execution;
 
+    let has_base_generation = lifecycle.base_snapshot().is_some();
     let automatic_missing_observed_at_unix_ms = source_missing_observation_time();
     let mut owners = HashMap::new();
     let mut complete_inventory_owners = Vec::new();
@@ -431,12 +432,18 @@ where
             .filter(|retirement| &retirement.owner == route_identity)
             .map(|retirement| retirement.predecessor.clone())
             .collect::<BTreeSet<_>>();
-        for retired_route in route
-            .retire_after_success
-            .iter()
-            .filter(|retired_route| !deferred_retirements.contains(*retired_route))
-            .chain(automatic_route_retirements)
-        {
+        let direct_retirements: Vec<SourceRouteIdentity> = if has_base_generation {
+            route
+                .retire_after_success
+                .iter()
+                .filter(|retired_route| !deferred_retirements.contains(*retired_route))
+                .chain(automatic_route_retirements)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for retired_route in &direct_retirements {
             lifecycle.authorize_carried_route_retirement(route_identity, retired_route)?;
         }
         let scan_result = {
@@ -606,14 +613,18 @@ where
                                 .and_then(|expectation| expectation.retirement_identity(control))
                         })
                 };
-                let dynamic_retirements = route
-                    .controlled_retire_after_success
-                    .iter()
-                    .filter(|candidate| {
-                        Some(candidate.expected_identity) == replacement_control_identity
-                    })
-                    .map(|candidate| candidate.route_identity.clone())
-                    .collect::<Vec<_>>();
+                let dynamic_retirements = if has_base_generation {
+                    route
+                        .controlled_retire_after_success
+                        .iter()
+                        .filter(|candidate| {
+                            Some(candidate.expected_identity) == replacement_control_identity
+                        })
+                        .map(|candidate| candidate.route_identity.clone())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
                 for retired_route in &dynamic_retirements {
                     lifecycle.authorize_carried_route_retirement(route_identity, retired_route)?;
                 }
@@ -649,7 +660,7 @@ where
                     &owners,
                     &complete_inventory_owners,
                 )? {
-                    let ready_deferred_retirements = if route_is_partial {
+                    let ready_deferred_retirements = if route_is_partial || !has_base_generation {
                         BTreeSet::new()
                     } else {
                         deferred_configured_root_retirements
@@ -670,11 +681,8 @@ where
                         lifecycle
                             .authorize_carried_route_retirement(route_identity, retired_route)?;
                     }
-                    for retired_route in route
-                        .retire_after_success
+                    for retired_route in direct_retirements
                         .iter()
-                        .filter(|retired_route| !deferred_retirements.contains(*retired_route))
-                        .chain(automatic_route_retirements)
                         .chain(&dynamic_retirements)
                         .chain(&ready_deferred_retirements)
                     {
