@@ -10,8 +10,10 @@ use ctx_history_jsonl::{
     OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot,
 };
 use ctx_history_source_io::{
-    open_provider_source_path_mapped as open_provider_source_path,
-    PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES, PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
+    open_provider_source_path_mapped as open_provider_source_path, SourceIoError,
+    NON_REGULAR_PROVIDER_SOURCE_REASON, PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES,
+    PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, REPARSE_PROVIDER_SOURCE_REASON,
+    SYMLINK_PROVIDER_SOURCE_REASON,
 };
 
 use super::source_backed::{
@@ -67,6 +69,41 @@ pub(super) fn discover_directory<R: NativeJsonlRuntime>(
     )
 }
 
+trait AntigravitySourceError {
+    fn is_not_found_err(&self) -> bool;
+    fn is_ignorable_entry_err(&self) -> bool;
+}
+
+impl AntigravitySourceError for CaptureError {
+    fn is_not_found_err(&self) -> bool {
+        self.is_not_found()
+    }
+
+    fn is_ignorable_entry_err(&self) -> bool {
+        self.is_ignorable_membership_entry()
+    }
+}
+
+impl AntigravitySourceError for SourceIoError {
+    fn is_not_found_err(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(error) | Self::SystemIo { source: error, .. }
+                if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+
+    fn is_ignorable_entry_err(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidProviderTranscriptPath { reason, .. }
+                if *reason == SYMLINK_PROVIDER_SOURCE_REASON
+                    || *reason == REPARSE_PROVIDER_SOURCE_REASON
+                    || *reason == NON_REGULAR_PROVIDER_SOURCE_REASON
+        )
+    }
+}
+
 /// Visits only the finite Antigravity transcript structure under `directory`,
 /// pruning tool-step and scratch subtrees (such as `.system_generated/steps/<n>`)
 /// that cannot contain official transcript leaves.
@@ -75,11 +112,75 @@ pub(super) fn visit_antigravity_root(
     directory: &ProviderSourceDirectory<CaptureError>,
     budget: &mut DirectJsonlInventoryBudget,
     strict_root_revalidation: bool,
-    mut on_selected: impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<CaptureError>) -> Result<()>,
+    on_selected: impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<CaptureError>) -> Result<()>,
 ) -> Result<()> {
-    count_directory(budget)?;
-    let names = directory.entries(PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES)?;
-    count_metadata_entries(budget, names.len())?;
+    visit_antigravity_root_with_error(
+        source_root,
+        directory,
+        budget,
+        strict_root_revalidation,
+        on_selected,
+    )
+}
+
+pub(crate) fn visit_native_jsonl_files_with<E>(
+    root: &Path,
+    visit: &mut dyn FnMut(&Path) -> std::result::Result<(), E>,
+) -> std::result::Result<usize, E>
+where
+    E: From<SourceIoError>,
+{
+    match open_provider_source_path::<SourceIoError>(root).map_err(E::from)? {
+        OpenedProviderSourcePath::File(file) => {
+            file.revalidate_same_object().map_err(E::from)?;
+            if super::super::dialect::native_jsonl_file_is_selected(
+                CaptureProvider::Antigravity,
+                root,
+                root,
+                false,
+            ) {
+                visit(root)?;
+                Ok(1)
+            } else {
+                Ok(0)
+            }
+        }
+        OpenedProviderSourcePath::Directory(directory) => {
+            let mut budget = DirectJsonlInventoryBudget::default();
+            let mut count = 0usize;
+            visit_antigravity_root_with_error::<SourceIoError, E>(
+                root,
+                &directory,
+                &mut budget,
+                false,
+                |path, _, file| {
+                    file.revalidate_same_object().map_err(E::from)?;
+                    visit(&path)?;
+                    count = count.saturating_add(1);
+                    Ok(())
+                },
+            )?;
+            Ok(count)
+        }
+    }
+}
+
+fn visit_antigravity_root_with_error<M, E>(
+    source_root: &Path,
+    directory: &ProviderSourceDirectory<M>,
+    budget: &mut DirectJsonlInventoryBudget,
+    strict_root_revalidation: bool,
+    mut on_selected: impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<M>) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E>
+where
+    M: AntigravitySourceError + From<SourceIoError>,
+    E: From<M> + From<SourceIoError>,
+{
+    count_directory_with::<E>(budget)?;
+    let names = directory
+        .entries(PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES)
+        .map_err(E::from)?;
+    count_metadata_entries_with::<E>(budget, names.len())?;
 
     let mut checked_direct_logs = false;
     for name in names {
@@ -94,14 +195,14 @@ pub(super) fn visit_antigravity_root(
         let child_relative = PathBuf::from(&name);
         let opened = match directory.open_child(&name) {
             Ok(opened) => opened,
-            Err(error) if error.is_ignorable_membership_entry() => continue,
-            Err(error) => return Err(error),
+            Err(error) if error.is_ignorable_entry_err() => continue,
+            Err(error) => return Err(E::from(error)),
         };
         let OpenedProviderSourcePath::Directory(child_dir) = opened else {
             continue;
         };
         if name == OsStr::new(SYSTEM_GENERATED_DIR) {
-            count_directory(budget)?;
+            count_directory_with::<E>(budget)?;
             visit_system_generated_directory(
                 &child_path,
                 &child_relative,
@@ -109,10 +210,10 @@ pub(super) fn visit_antigravity_root(
                 budget,
                 &mut on_selected,
             )?;
-            child_dir.revalidate_same_object()?;
+            child_dir.revalidate_same_object().map_err(E::from)?;
             continue;
         }
-        count_directory(budget)?;
+        count_directory_with::<E>(budget)?;
         visit_session_directory(
             &child_path,
             &child_relative,
@@ -120,13 +221,13 @@ pub(super) fn visit_antigravity_root(
             budget,
             &mut on_selected,
         )?;
-        child_dir.revalidate_same_object()?;
+        child_dir.revalidate_same_object().map_err(E::from)?;
     }
 
     if strict_root_revalidation {
-        directory.revalidate()?;
+        directory.revalidate().map_err(E::from)?;
     } else {
-        directory.revalidate_same_object()?;
+        directory.revalidate_same_object().map_err(E::from)?;
     }
     Ok(())
 }
@@ -162,25 +263,29 @@ pub(super) fn enumerate_selected_paths(root: &Path) -> Result<Vec<PathBuf>> {
     }
 }
 
-fn visit_session_directory(
+fn visit_session_directory<M, E>(
     session_path: &Path,
     session_relative: &Path,
-    session_dir: &ProviderSourceDirectory<CaptureError>,
+    session_dir: &ProviderSourceDirectory<M>,
     budget: &mut DirectJsonlInventoryBudget,
-    on_selected: &mut impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<CaptureError>) -> Result<()>,
-) -> Result<()> {
+    on_selected: &mut impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<M>) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E>
+where
+    M: AntigravitySourceError + From<SourceIoError>,
+    E: From<M> + From<SourceIoError>,
+{
     let sysgen_name = OsStr::new(SYSTEM_GENERATED_DIR);
     let opened = match session_dir.open_child(sysgen_name) {
         Ok(opened) => opened,
-        Err(error) if error.is_not_found() || error.is_ignorable_membership_entry() => {
+        Err(error) if error.is_not_found_err() || error.is_ignorable_entry_err() => {
             return Ok(());
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(E::from(error)),
     };
     let OpenedProviderSourcePath::Directory(sysgen_dir) = opened else {
         return Ok(());
     };
-    count_directory(budget)?;
+    count_directory_with::<E>(budget)?;
     visit_system_generated_directory(
         &session_path.join(sysgen_name),
         &session_relative.join(sysgen_name),
@@ -188,45 +293,53 @@ fn visit_session_directory(
         budget,
         on_selected,
     )?;
-    sysgen_dir.revalidate_same_object()?;
+    sysgen_dir.revalidate_same_object().map_err(E::from)?;
     Ok(())
 }
 
-fn visit_system_generated_directory(
+fn visit_system_generated_directory<M, E>(
     sysgen_path: &Path,
     sysgen_relative: &Path,
-    sysgen_dir: &ProviderSourceDirectory<CaptureError>,
+    sysgen_dir: &ProviderSourceDirectory<M>,
     budget: &mut DirectJsonlInventoryBudget,
-    on_selected: &mut impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<CaptureError>) -> Result<()>,
-) -> Result<()> {
+    on_selected: &mut impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<M>) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E>
+where
+    M: AntigravitySourceError + From<SourceIoError>,
+    E: From<M> + From<SourceIoError>,
+{
     let logs_name = OsStr::new(LOGS_DIR);
     let opened = match sysgen_dir.open_child(logs_name) {
         Ok(opened) => opened,
-        Err(error) if error.is_not_found() || error.is_ignorable_membership_entry() => {
+        Err(error) if error.is_not_found_err() || error.is_ignorable_entry_err() => {
             return Ok(());
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(E::from(error)),
     };
     let OpenedProviderSourcePath::Directory(logs_dir) = opened else {
         return Ok(());
     };
-    count_directory(budget)?;
+    count_directory_with::<E>(budget)?;
     visit_logs_directory(
         &sysgen_path.join(logs_name),
         &sysgen_relative.join(logs_name),
         &logs_dir,
         on_selected,
     )?;
-    logs_dir.revalidate_same_object()?;
+    logs_dir.revalidate_same_object().map_err(E::from)?;
     Ok(())
 }
 
-fn visit_logs_directory(
+fn visit_logs_directory<M, E>(
     logs_path: &Path,
     logs_relative: &Path,
-    logs_dir: &ProviderSourceDirectory<CaptureError>,
-    on_selected: &mut impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<CaptureError>) -> Result<()>,
-) -> Result<()> {
+    logs_dir: &ProviderSourceDirectory<M>,
+    on_selected: &mut impl FnMut(PathBuf, PathBuf, OpenedProviderSourceFile<M>) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E>
+where
+    M: AntigravitySourceError + From<SourceIoError>,
+    E: From<M>,
+{
     let full_name = OsStr::new(FULL_TRANSCRIPT_FILE);
     match logs_dir.open_child(full_name) {
         Ok(OpenedProviderSourcePath::File(file)) => {
@@ -237,8 +350,8 @@ fn visit_logs_directory(
             );
         }
         Ok(OpenedProviderSourcePath::Directory(_)) => {}
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error),
+        Err(error) if error.is_not_found_err() => {}
+        Err(error) => return Err(E::from(error)),
     }
 
     let live_name = OsStr::new(LIVE_TRANSCRIPT_FILE);
@@ -249,31 +362,41 @@ fn visit_logs_directory(
             file,
         ),
         Ok(OpenedProviderSourcePath::Directory(_)) => Ok(()),
-        Err(error) if error.is_not_found() => Ok(()),
-        Err(error) => Err(error),
+        Err(error) if error.is_not_found_err() => Ok(()),
+        Err(error) => Err(E::from(error)),
     }
 }
 
+#[cfg(test)]
 fn count_directory(budget: &mut DirectJsonlInventoryBudget) -> Result<()> {
+    count_directory_with(budget)
+}
+
+fn count_directory_with<E: From<SourceIoError>>(
+    budget: &mut DirectJsonlInventoryBudget,
+) -> std::result::Result<(), E> {
     budget.directories = budget.directories.saturating_add(1);
     if budget.directories > PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES {
-        return Err(CaptureError::ProviderJsonlInventoryLimitExceeded {
+        return Err(E::from(SourceIoError::ProviderJsonlInventoryLimitExceeded {
             limit: ProviderJsonlInventoryLimit::Directories,
             maximum: PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES,
             observed: budget.directories,
-        });
+        }));
     }
     Ok(())
 }
 
-fn count_metadata_entries(budget: &mut DirectJsonlInventoryBudget, count: usize) -> Result<()> {
+fn count_metadata_entries_with<E: From<SourceIoError>>(
+    budget: &mut DirectJsonlInventoryBudget,
+    count: usize,
+) -> std::result::Result<(), E> {
     budget.metadata_entries = budget.metadata_entries.saturating_add(count);
     if budget.metadata_entries > PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES {
-        return Err(CaptureError::ProviderJsonlInventoryLimitExceeded {
+        return Err(E::from(SourceIoError::ProviderJsonlInventoryLimitExceeded {
             limit: ProviderJsonlInventoryLimit::MetadataEntries,
             maximum: PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
             observed: budget.metadata_entries,
-        });
+        }));
     }
     Ok(())
 }

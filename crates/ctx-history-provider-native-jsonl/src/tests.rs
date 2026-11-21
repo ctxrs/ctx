@@ -67,6 +67,35 @@ fn antigravity_dialect_prefers_the_full_transcript_sibling() {
 }
 
 #[test]
+fn antigravity_visit_native_jsonl_files_with_prunes_large_step_subtrees() {
+    let temp = tempdir().unwrap();
+    let brain = temp.path().join("brain");
+    let steps = brain.join("aaa-session/.system_generated/steps");
+    fs::create_dir_all(&steps).unwrap();
+    for index in 0..=ctx_history_source_io::PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES {
+        fs::create_dir(steps.join(format!("{index}"))).unwrap();
+    }
+    fs::write(steps.join("0/transcript.jsonl"), b"{\"ignored\":true}\n").unwrap();
+    let expected = brain.join("zzz-session/.system_generated/logs/transcript_full.jsonl");
+    fs::create_dir_all(expected.parent().unwrap()).unwrap();
+    fs::write(&expected, b"{\"type\":\"user\",\"content\":\"ok\"}\n").unwrap();
+
+    let mut visited = Vec::new();
+    let count = visit_native_jsonl_files_with::<crate::NativeJsonlError>(
+        &brain,
+        CaptureProvider::Antigravity,
+        &mut |path| {
+            visited.push(path.to_path_buf());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(count, 1);
+    assert_eq!(visited, vec![expected]);
+}
+
+#[test]
 fn qoder_dialect_admits_transcript_and_direct_project_jsonl_only() {
     let temp = tempdir().unwrap();
     let root = temp.path().join("renamed-qoder-history");

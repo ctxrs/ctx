@@ -791,7 +791,7 @@ fn antigravity_accepts_only_official_fixed_transcript_leaves() {
     write_file(
         &linux_context
             .home()
-            .join(".gemini/antigravity-ide/brain/c/.system_generated/logs/transcript.jsonl"),
+            .join(".gemini/antigravity-ide/brain/c/.system_generated/logs/other.jsonl"),
         b"{}\n",
     );
     write_file(
@@ -808,8 +808,8 @@ fn antigravity_accepts_only_official_fixed_transcript_leaves() {
     );
     let report = provider_report(&linux_context, CaptureProvider::Antigravity);
     assert_eq!(report.sources.len(), 3);
-    assert_eq!(report.sources[0].status, ProviderSourceStatus::Empty);
-    assert_eq!(report.sources[1].status, ProviderSourceStatus::Available);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Available);
+    assert_eq!(report.sources[1].status, ProviderSourceStatus::Empty);
     assert_eq!(report.sources[2].status, ProviderSourceStatus::Available);
     assert_automatic_role(&report.sources[0], &[b"surface", b"cli"]);
     assert_automatic_role(&report.sources[1], &[b"surface", b"ide"]);
@@ -904,10 +904,25 @@ fn antigravity_t3_unsafe_instance_and_root_report_discovery_issue() {
         .join(".t3/userdata/providers/antigravity");
     fs::create_dir_all(&t3_root).unwrap();
     symlink(&outside, t3_root.join("linked-instance")).unwrap();
+    write_file(
+        &t3_root.join(
+            "valid-instance/antigravity-acp/brain/s-good/.system_generated/logs/transcript_full.jsonl",
+        ),
+        b"{}\n",
+    );
 
     let report = provider_report(&linux_context, CaptureProvider::Antigravity);
-    assert_eq!(report.sources.len(), 2);
+    assert_eq!(report.sources.len(), 3);
+    assert_eq!(
+        report.sources[2].path,
+        t3_root.join("valid-instance/antigravity-acp/brain")
+    );
+    assert_eq!(report.sources[2].status, ProviderSourceStatus::Available);
     assert_eq!(report.issues.len(), 1);
+    assert_eq!(
+        report.issues[0].path,
+        Some(t3_root.join("linked-instance"))
+    );
 
     let file_temp = tempdir();
     let file_context = context(file_temp.path(), DiscoveryPlatform::Linux);
@@ -918,6 +933,38 @@ fn antigravity_t3_unsafe_instance_and_root_report_discovery_issue() {
     let file_report = provider_report(&file_context, CaptureProvider::Antigravity);
     assert_eq!(file_report.sources.len(), 2);
     assert_eq!(file_report.issues.len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_brain_skips_stray_symlink_sibling_and_accepts_transcript_full() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let linux_context = context(temp.path(), DiscoveryPlatform::Linux);
+    let outside = temp.path().join("outside-session");
+    write_file(
+        &outside.join(".system_generated/logs/transcript.jsonl"),
+        b"{}\n",
+    );
+    let cli_brain = linux_context.home().join(".gemini/antigravity-cli/brain");
+    fs::create_dir_all(&cli_brain).unwrap();
+    symlink(&outside, cli_brain.join("stray-link")).unwrap();
+    write_file(
+        &cli_brain.join("valid-session/.system_generated/logs/transcript_full.jsonl"),
+        b"{}\n",
+    );
+
+    // A brain containing ONLY a symlinked session does not follow it and stays Empty.
+    let ide_brain = linux_context.home().join(".gemini/antigravity-ide/brain");
+    fs::create_dir_all(&ide_brain).unwrap();
+    symlink(&outside, ide_brain.join("only-link")).unwrap();
+
+    let report = provider_report(&linux_context, CaptureProvider::Antigravity);
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
+    assert_eq!(report.sources.len(), 2);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Available);
+    assert_eq!(report.sources[1].status, ProviderSourceStatus::Empty);
 }
 
 #[test]

@@ -8,8 +8,8 @@ use ctx_history_core::CaptureProvider;
 use super::super::{
     context::{DiscoveryContext, DiscoveryPlatform},
     selectors::{
-        direct_entries, encoded_path_within_limit, ordinary_directory, ordinary_file,
-        SelectorReadError, MAX_SOURCE_CANDIDATES_PER_PROVIDER,
+        direct_ordinary_directories_partitioned, encoded_path_within_limit, ordinary_directory,
+        ordinary_file, SelectorReadError, MAX_SOURCE_CANDIDATES_PER_PROVIDER,
     },
     types::{
         DiscoveryIssueKind, DiscoveryReport, ProviderSource, ProviderSourceKind,
@@ -542,7 +542,7 @@ fn resolve_t3_antigravity_roots(
             return;
         }
     }
-    let instances = match direct_entries(&t3_root) {
+    let entries = match direct_ordinary_directories_partitioned(&t3_root) {
         Ok(entries) => entries,
         Err(_) => {
             report.issues.push(issue(
@@ -554,10 +554,15 @@ fn resolve_t3_antigravity_roots(
             return;
         }
     };
-    for instance_dir in instances {
-        if !ordinary_directory(&instance_dir) {
-            continue;
-        }
+    for unsafe_entry in entries.unsafe_entries {
+        report.issues.push(issue(
+            spec.provider,
+            Some(unsafe_entry),
+            DiscoveryIssueKind::SelectorUnreconstructible,
+            UNSAFE_SOURCE_REASON,
+        ));
+    }
+    for instance_dir in entries.directories {
         let Some(instance_id) = instance_dir.file_name() else {
             continue;
         };
@@ -648,7 +653,7 @@ fn exact_tree_source(
                 ProviderSourceStatus::Empty,
                 Some(match tree {
                     ExactTree::Antigravity => {
-                        "path exists but no official Antigravity transcript.jsonl leaf was found"
+                        "path exists but no official Antigravity transcript leaf was found"
                     }
                 }),
             ),
@@ -679,14 +684,15 @@ fn exact_tree_source(
 }
 
 fn exact_tree_has_history(root: &Path, tree: ExactTree) -> Result<bool, SelectorReadError> {
-    for candidate in direct_entries(root)? {
-        let leaf = match tree {
-            ExactTree::Antigravity => candidate
-                .join(".system_generated")
-                .join("logs")
-                .join("transcript.jsonl"),
+    for candidate in direct_ordinary_directories_partitioned(root)?.directories {
+        let found = match tree {
+            ExactTree::Antigravity => {
+                let logs = candidate.join(".system_generated").join("logs");
+                ordinary_file(&logs.join("transcript_full.jsonl"))
+                    || ordinary_file(&logs.join("transcript.jsonl"))
+            }
         };
-        if ordinary_file(&leaf) {
+        if found {
             return Ok(true);
         }
     }

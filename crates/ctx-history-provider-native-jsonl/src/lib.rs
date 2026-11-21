@@ -182,6 +182,9 @@ pub fn visit_native_jsonl_files_with<E>(
 where
     E: From<SourceIoError>,
 {
+    if provider == ctx_history_core::CaptureProvider::Antigravity {
+        return native_path::antigravity::visit_native_jsonl_files_with(root, visit);
+    }
     visit_bounded_tree_files(
         root,
         &mut |candidate| {
