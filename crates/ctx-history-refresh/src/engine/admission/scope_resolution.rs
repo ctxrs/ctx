@@ -61,9 +61,15 @@ impl CoreRefreshEngine {
                                 )
                             })?;
                     let catalog = resolved.discovery().watch_catalog();
-                    if catalog.route_ids().next().is_some()
-                        && catalog.route_ids_for_provider(*provider).is_empty()
-                    {
+                    let has_executable_provider_route = catalog
+                        .route_ids_for_provider(*provider)
+                        .into_iter()
+                        .any(|route| {
+                            catalog
+                                .route_discovery_report(&BTreeSet::from([route]))
+                                .is_some()
+                        });
+                    if !has_executable_provider_route {
                         bail!(
                             "automatic provider `{}` discovery produced no executable source routes",
                             provider.as_str()
