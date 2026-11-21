@@ -57,6 +57,11 @@ const DIRECT_OUTPUT_BOUNDARIES: &[(&str, &[(&str, usize)])] = &[
         &[("stdout()", 2), ("stderr()", 2)],
     ),
     ("crates/ctx-upgrade-engine/build.rs", &[("println!", 3)]),
+    // External installer replacement speaks a framed JSON line protocol over redirected stdout.
+    (
+        "crates/ctx-upgrade-engine/src/upgrade/command/external.rs",
+        &[("stdout()", 2)],
+    ),
     (
         "crates/ctx-upgrade-engine/src/upgrade/install/hosted_transaction.rs",
         &[("println!", 2)],
