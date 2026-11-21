@@ -1383,22 +1383,31 @@ fn indexing_resource_limits_preserve_defaults_and_scale_constrained_budgets() {
 
     let minimum_15m = IndexingResourceLimits::from_memory_mb_and_workers(Some(15), Some(8));
     assert_eq!(minimum_15m.indexer_threads_for_parallelism(16), 1);
-    assert_eq!(minimum_15m.leaf_worker_budget_for_parallelism(1, 16), 8);
+    assert_eq!(minimum_15m.leaf_worker_budget_for_parallelism(1, 16), 1);
     assert_eq!(
         minimum_15m.core_route_max_live_output_bytes(),
         crate::CORE_ROUTE_MIN_LIVE_OUTPUT_BYTES
     );
 
-    let explicit_workers = IndexingResourceLimits::from_memory_mb_and_workers(None, Some(2));
-    assert_eq!(explicit_workers.indexer_threads_for_parallelism(16), 2);
+    let explicit_two = IndexingResourceLimits::from_memory_mb_and_workers(None, Some(2));
+    assert_eq!(explicit_two.indexer_threads_for_parallelism(16), 1);
+    assert_eq!(explicit_two.leaf_worker_budget_for_parallelism(1, 16), 1);
     assert_eq!(
-        explicit_workers.leaf_worker_budget_for_parallelism(2, 16),
-        2
-    );
-    assert_eq!(
-        explicit_workers.core_route_max_live_output_bytes(),
+        explicit_two.core_route_max_live_output_bytes(),
         crate::CORE_ROUTE_MAX_LIVE_OUTPUT_BYTES
     );
+
+    let explicit_four = IndexingResourceLimits::from_memory_mb_and_workers(None, Some(4));
+    assert_eq!(explicit_four.indexer_threads_for_parallelism(16), 2);
+    assert_eq!(explicit_four.leaf_worker_budget_for_parallelism(2, 16), 2);
+
+    let cpu_clamped = IndexingResourceLimits::from_memory_mb_and_workers(None, Some(16));
+    assert_eq!(cpu_clamped.indexer_threads_for_parallelism(4), 2);
+    assert_eq!(cpu_clamped.leaf_worker_budget_for_parallelism(2, 4), 1);
+
+    let mem_and_workers = IndexingResourceLimits::from_memory_mb_and_workers(Some(128), Some(8));
+    assert_eq!(mem_and_workers.indexer_threads_for_parallelism(16), 4);
+    assert_eq!(mem_and_workers.leaf_worker_budget_for_parallelism(4, 16), 2);
 
     let scaled = SourceBackedRouteResources::production_with_live_output_limit(
         2,

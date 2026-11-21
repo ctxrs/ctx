@@ -85,11 +85,14 @@ pub(super) fn construct_index_writer_with_retry(
     index: &Index,
     options: &WriterOptions,
 ) -> Result<IndexWriter<IndexDocument>> {
+    let writer_options = tantivy::indexer::IndexWriterOptions::builder()
+        .num_worker_threads(options.indexer_threads)
+        .memory_budget_per_thread(options.memory_bytes / options.indexer_threads)
+        .num_merge_threads(options.merge_threads())
+        .build();
     let deadline = Instant::now() + WRITER_HANDOFF_RETRY_WINDOW;
     loop {
-        match index
-            .writer_with_num_threads::<IndexDocument>(options.indexer_threads, options.memory_bytes)
-        {
+        match index.writer_with_options::<IndexDocument>(writer_options.clone()) {
             Ok(writer) => return Ok(writer),
             Err(error @ tantivy::TantivyError::LockFailure(LockError::LockBusy, _))
                 if Instant::now() >= deadline =>

@@ -286,3 +286,119 @@ fn failed_merging_progress_does_not_start_merges() {
         .join(ctx_history_index_generation::ACTIVE_GENERATION_POINTER_FILE)
         .exists());
 }
+
+#[test]
+fn staging_compaction_bounds_segments_respects_merge_thread_cap_and_quiesces_on_rollback() {
+    const COMMITTED_ROUTES: usize = crate::merge_policy::STAGING_SEGMENT_CEILING + 10;
+    const TOTAL_ROUTES: usize = COMMITTED_ROUTES + 2;
+
+    let temp = tempdir().unwrap();
+    let routes = (1..=TOTAL_ROUTES)
+        .map(|value| SourceRouteIdentity::from_sha256(format!("{value:02x}").repeat(32)).unwrap())
+        .collect::<Vec<_>>();
+    let sources = (1..=TOTAL_ROUTES)
+        .map(|value| source(&format!("bounded-staging-{value}.jsonl")))
+        .collect::<Vec<_>>();
+    let options =
+        WriterOptions::for_indexing_limits_with_parallelism(Some(15 * 1024 * 1024), Some(8), 16);
+    assert_eq!(options.indexer_threads, 1);
+    assert_eq!(options.merge_threads(), 1);
+
+    let mut writer = GenerationWriter::open(temp.path(), options)
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer
+        .set_source_route_plan(routes.iter().cloned().collect(), BTreeSet::new())
+        .unwrap();
+
+    let mut peak_segments = 0_usize;
+    for ordinal in 0..COMMITTED_ROUTES {
+        checkpoint(
+            &mut writer,
+            &routes[ordinal],
+            &sources[ordinal],
+            "boundedstaging",
+        );
+        writer
+            .writer
+            .as_ref()
+            .unwrap()
+            .garbage_collect_files()
+            .wait()
+            .unwrap();
+        peak_segments = peak_segments.max(writer.index.load_metas().unwrap().segments.len());
+    }
+    assert_eq!(writer.applied_merge_threads.load(Ordering::SeqCst), 1);
+    assert!(
+        writer
+            .merge_control
+            .as_ref()
+            .unwrap()
+            .staging_merges_started(),
+        "staging past the segment ceiling must start bounded incremental compaction"
+    );
+
+    // Wait briefly by rolling back a failed route; quiesced rollback must join
+    // any in-flight staging merge, preserve prior routes, and discard the failed one.
+    let failed_index = COMMITTED_ROUTES;
+    let survivor_index = COMMITTED_ROUTES + 1;
+    writer
+        .begin_source_route_stage(routes[failed_index].clone())
+        .unwrap();
+    writer.begin_source(sources[failed_index].clone()).unwrap();
+    writer
+        .add_core_record(document(
+            &sources[failed_index],
+            1,
+            "rolledbackafterstagingmerge",
+        ))
+        .unwrap();
+    writer
+        .rollback_source_route_stage(&routes[failed_index])
+        .unwrap();
+    assert!(!writer
+        .carry_failed_source_route_from_base(&routes[failed_index])
+        .unwrap());
+    assert_eq!(writer.applied_merge_threads.load(Ordering::SeqCst), 1);
+
+    let segments_after_quiesce = writer.index.load_metas().unwrap().segments.len();
+    assert!(
+        segments_after_quiesce < crate::merge_policy::STAGING_SEGMENT_CEILING,
+        "quiesced staging segment count {segments_after_quiesce} must stay below ceiling {} (peak={peak_segments})",
+        crate::merge_policy::STAGING_SEGMENT_CEILING
+    );
+
+    checkpoint(
+        &mut writer,
+        &routes[survivor_index],
+        &sources[survivor_index],
+        "survivorafterquiescedrollback",
+    );
+    let present = (0..COMMITTED_ROUTES)
+        .chain(std::iter::once(survivor_index))
+        .map(|ordinal| {
+            SourceRouteSnapshot::present(routes[ordinal].clone(), vec![sources[ordinal].clone()])
+                .unwrap()
+        })
+        .collect();
+    writer.set_present_source_routes(present).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let published = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(published.document_count(), (COMMITTED_ROUTES + 1) as u64);
+    assert_eq!(
+        published.count_term("boundedstaging").unwrap(),
+        COMMITTED_ROUTES
+    );
+    assert_eq!(
+        published
+            .count_term("survivorafterquiescedrollback")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        published.count_term("rolledbackafterstagingmerge").unwrap(),
+        0
+    );
+}

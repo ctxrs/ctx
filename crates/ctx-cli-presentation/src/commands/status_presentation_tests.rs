@@ -740,4 +740,34 @@ fn upgrade_status_renders_manifest_scope_progress_and_eta_across_widths() {
         );
         assert_fits(&document, &ctx);
     }
+
+    // Incompatible index rebuild (e.g. IndexSettingsMismatch) reports upgrade
+    // progress and ETA without falsely claiming search availability.
+    let mut incompatible_rebuilding = status_report(true, "unavailable", "pending");
+    incompatible_rebuilding["lexical"]["search_available"] = json!(false);
+    incompatible_rebuilding["lexical"]["reason"] = json!("generation_verification_failed");
+    incompatible_rebuilding["lexical"]["upgrade"] = json!({
+        "estimate_source": "active_generation_manifest",
+        "estimated_total_sources": 420,
+        "estimated_total_source_bytes": 10_u64 * 1024 * 1024 * 1024,
+        "estimated_total_documents": 120_000,
+        "phase": "parsing",
+        "whole_run_stage": "reading",
+        "processed_bytes": 2_u64 * 1024 * 1024 * 1024,
+        "estimated_remaining_millis": 135_000,
+    });
+    let ctx = context(80, ColorMode::Never);
+    let document = render_report(&ctx, &incompatible_rebuilding);
+    let rendered = document.render_plain();
+    let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(!normalized.contains("Search availability"), "{rendered}");
+    assert!(
+        normalized.contains("Upgrade progress 2.0 GiB of ~10.0 GiB (20%) (reading)"),
+        "{rendered}"
+    );
+    assert!(
+        normalized.contains("Estimated remaining ~2m 15s"),
+        "{rendered}"
+    );
+    assert_fits(&document, &ctx);
 }

@@ -813,3 +813,53 @@ fn session_registry_budget_counts_unique_changes_not_noops_or_same_session_appen
     assert_eq!(published.count_term("same").unwrap(), 2);
     assert_eq!(published.count_term("budget").unwrap(), 0);
 }
+
+#[test]
+fn low_memory_budget_full_rebuild_spills_changed_sessions_beyond_15_mib_entry_ratio() {
+    use crate::writer_options::CHANGED_SESSION_REGISTRY_ENTRY_CHARGE_BYTES;
+
+    const MEMORY_BYTES: usize = 15 * 1024 * 1024;
+    const DISTINCT_SESSIONS: u64 = 16_000;
+    assert!(
+        DISTINCT_SESSIONS as usize > MEMORY_BYTES / CHANGED_SESSION_REGISTRY_ENTRY_CHARGE_BYTES,
+        "regression must exceed the legacy 15 MiB / 1 KiB (15,360) hard ceiling"
+    );
+
+    let root = tempdir().unwrap();
+    let options =
+        WriterOptions::for_indexing_limits_with_parallelism(Some(MEMORY_BYTES), Some(1), 8);
+    let mut writer = GenerationWriter::open(root.path(), options)
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    let primary = source("large-low-mem-rebuild.jsonl");
+    writer.begin_source(primary.clone()).unwrap();
+    for ordinal in 1..=DISTINCT_SESSIONS {
+        writer
+            .add_core_record(document_for_session(
+                &primary,
+                &format!("spill-session-{ordinal}"),
+                ordinal,
+                "spilled rebuild body",
+            ))
+            .unwrap();
+    }
+    assert_eq!(writer.changed_sessions.len(), DISTINCT_SESSIONS as usize);
+    assert!(
+        writer.changed_sessions.has_spilled(),
+        "15 MiB budget must spill changed sessions instead of failing or growing hot RAM unbounded"
+    );
+    let max_hot_entries = (MEMORY_BYTES / 4) / CHANGED_SESSION_REGISTRY_ENTRY_CHARGE_BYTES;
+    assert!(
+        writer.changed_sessions.hot_len() <= max_hot_entries,
+        "hot session map {} exceeded bounded capacity {max_hot_entries}",
+        writer.changed_sessions.hot_len()
+    );
+    writer
+        .certify_source(certificate(&primary, 1, DISTINCT_SESSIONS))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let published = VerifiedIndex::open(root.path()).unwrap();
+    assert_eq!(published.document_count(), DISTINCT_SESSIONS);
+}

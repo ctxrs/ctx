@@ -56,7 +56,7 @@ fn failed_differential_route_restores_base_and_keeps_prior_success() {
         assert!(!writer.pending.contains_key(&source_token(&failed)));
         assert!(writer.changed_sessions.keys().all(|id| good_current
             .iter()
-            .any(|record| record.session_id.as_uuid() == *id)));
+            .any(|record| record.session_id.as_uuid() == id)));
         assert!(writer
             .carry_failed_source_route_from_base(&failed_route)
             .unwrap());

@@ -66,7 +66,11 @@ impl GenerationWriter {
             indexer_threads,
             memory_bytes: options.memory_bytes,
         };
-        let changed_session_registry_memory_bytes = options.memory_bytes;
+        let changed_session_registry_memory_bytes = options
+            .memory_bytes
+            .max(writer_options::CHANGED_SESSION_REGISTRY_MIN_CEILING_BYTES);
+        let changed_session_hot_memory_bytes =
+            (options.memory_bytes / 4).max(CHANGED_SESSION_REGISTRY_ENTRY_CHARGE_BYTES);
         let requested_root = root.as_ref().to_path_buf();
         ctx_history_platform::platform_security::ensure_private_directory(&requested_root)?;
         let directory =
@@ -260,7 +264,9 @@ impl GenerationWriter {
             } else {
                 None
             };
-            if upgrade_incompatibility_rebuild && !incompatible_active_present {
+            if (upgrade_incompatibility_rebuild || (rebuild_marked && !pointer_requires_rebuild))
+                && !incompatible_active_present
+            {
                 let retention_lease = load_generation_retention_lease(&root)?;
                 if previous_recovery::retire_unleased_previous_before_upgrade_rebuild(
                     &root,
@@ -362,6 +368,8 @@ impl GenerationWriter {
             } else {
                 0
             };
+            let changed_sessions =
+                ChangedSessionRegistry::new(root.clone(), changed_session_hot_memory_bytes);
             Ok(Self {
                 root,
                 index,
@@ -373,7 +381,7 @@ impl GenerationWriter {
                 retained_generation_directories,
                 preflight_lock: Some(preflight_lock),
                 writer: None,
-                merge_activation: None,
+                merge_control: None,
                 writer_options: options,
                 replacement_memory_bytes,
                 replacement_memory_used: 0,
@@ -395,7 +403,7 @@ impl GenerationWriter {
                 partially_reconciled_routes: BTreeSet::new(),
                 partial_source_route_deltas: BTreeMap::new(),
                 source_identities,
-                changed_sessions: HashMap::new(),
+                changed_sessions,
                 changed_session_registry_memory_bytes,
                 source_route_plan: None,
                 active_source_route_stage: None,
@@ -405,6 +413,8 @@ impl GenerationWriter {
                 index_writer_constructions: std::sync::Arc::new(
                     std::sync::atomic::AtomicUsize::new(0),
                 ),
+                #[cfg(test)]
+                applied_merge_threads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 #[cfg(test)]
                 before_writer_handoff: None,
                 #[cfg(test)]

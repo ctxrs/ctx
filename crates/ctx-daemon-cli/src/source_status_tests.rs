@@ -1205,11 +1205,100 @@ fn lexical_report_exposes_upgrade_scope_and_live_progress_only_during_upgrade() 
         temp.path(),
         Some(&unqualified_job),
         "different-policy-hash",
-        current_policy_json,
+        current_policy_json.clone(),
         true,
     );
     assert_eq!(
         rebuilding_no_eta["upgrade"]["estimated_remaining_millis"],
+        Value::Null
+    );
+
+    // Induce an IndexSettingsMismatch (a rebuild-requiring incompatibility whose
+    // active manifest is still readable): lexical.search_available stays false,
+    // while lexical.upgrade still surfaces manifest totals and live progress/ETA.
+    let pointer: serde_json::Value =
+        serde_json::from_slice(&fs::read(index_root.join("active-generation.json")).unwrap())
+            .unwrap();
+    let active_dir = pointer["active"]["directory"].as_str().unwrap();
+    let meta_path = index_root
+        .join("index-generations")
+        .join(active_dir)
+        .join("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    meta["index_settings"]["docstore_compression"] = json!("zstd(compression_level=1)");
+    meta["index_settings"]["docstore_blocksize"] = json!(64 * 1024);
+    fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+
+    let (settings_idle, _) = lexical_report(
+        temp.path(),
+        None,
+        &current_policy_hash,
+        current_policy_json.clone(),
+        false,
+    );
+    assert_eq!(settings_idle["status"], "unavailable");
+    assert_eq!(settings_idle["search_available"], false);
+    assert_eq!(settings_idle["reason"], "generation_verification_failed");
+    assert_eq!(
+        settings_idle["upgrade"]["estimate_source"],
+        "active_generation_manifest"
+    );
+    assert_eq!(settings_idle["upgrade"]["estimated_total_sources"], 1);
+    assert_eq!(
+        settings_idle["upgrade"]["estimated_total_source_bytes"],
+        4096
+    );
+    assert_eq!(settings_idle["upgrade"]["estimated_total_documents"], 1);
+    assert!(settings_idle["upgrade"].get("processed_bytes").is_none());
+
+    let (settings_running, _) = lexical_report(
+        temp.path(),
+        Some(&running_job),
+        &current_policy_hash,
+        current_policy_json.clone(),
+        true,
+    );
+    assert_eq!(settings_running["status"], "unavailable");
+    assert_eq!(settings_running["search_available"], false);
+    assert_eq!(
+        settings_running["upgrade"]["estimate_source"],
+        "active_generation_manifest"
+    );
+    assert_eq!(settings_running["upgrade"]["processed_bytes"], 2048);
+    assert_eq!(
+        settings_running["upgrade"]["estimated_remaining_millis"],
+        45_000
+    );
+
+    // Unsupported pointer/manifest version cannot read manifest totals, but still
+    // exposes lexical.upgrade with estimate_source: "unavailable" + live progress.
+    let mut unsupported_pointer = pointer;
+    unsupported_pointer["version"] = json!(999);
+    fs::write(
+        index_root.join("active-generation.json"),
+        serde_json::to_vec(&unsupported_pointer).unwrap(),
+    )
+    .unwrap();
+    let (unsupported_running, _) = lexical_report(
+        temp.path(),
+        Some(&unqualified_job),
+        &current_policy_hash,
+        current_policy_json,
+        true,
+    );
+    assert_eq!(unsupported_running["status"], "unavailable");
+    assert_eq!(unsupported_running["search_available"], false);
+    assert_eq!(
+        unsupported_running["upgrade"]["estimate_source"],
+        "unavailable"
+    );
+    assert!(unsupported_running["upgrade"]
+        .get("estimated_total_sources")
+        .is_none());
+    assert_eq!(unsupported_running["upgrade"]["processed_bytes"], 512);
+    assert_eq!(
+        unsupported_running["upgrade"]["estimated_remaining_millis"],
         Value::Null
     );
 }

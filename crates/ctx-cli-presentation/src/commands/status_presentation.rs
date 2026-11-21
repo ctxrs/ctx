@@ -181,6 +181,8 @@ pub fn render_status_human(
             history_values.push(("Serving generation", generation.to_owned()));
         }
         append_lexical_upgrade_fields(lexical_status, &report["lexical"], &mut history_values);
+    } else if report["lexical"].get("upgrade").is_some() {
+        append_lexical_upgrade_fields(lexical_status, &report["lexical"], &mut history_values);
     }
     history_values.extend(history_health_fields(coverage));
     if report["daemon"]["running"].as_bool() == Some(true) {
@@ -367,7 +369,10 @@ fn append_lexical_upgrade_fields(
         .get("estimated_remaining_millis")
         .and_then(Value::as_u64);
 
-    if lexical_status == "rebuilding" {
+    let rebuilding_active =
+        lexical_status == "rebuilding" || upgrade.contains_key("estimated_remaining_millis");
+
+    if rebuilding_active {
         if let Some(done) = processed_bytes {
             let mut summary = match (est_bytes, est_sources) {
                 (Some(total), _) if total > 0 && done <= total => {
@@ -418,14 +423,14 @@ fn append_lexical_upgrade_fields(
         _ => None,
     };
     if let Some(mut scope) = scope {
-        if lexical_status == "rebuilding" {
+        if rebuilding_active {
             if let Some(stage) = stage {
                 scope.push_str(&format!(" ({})", stage.replace('_', " ")));
             }
         }
         history_values.push(("Upgrade scope", scope));
     }
-    if lexical_status == "rebuilding" {
+    if rebuilding_active {
         if let Some(eta_ms) = eta_ms {
             history_values.push(("Estimated remaining", format_remaining_duration(eta_ms)));
         }

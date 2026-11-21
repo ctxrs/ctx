@@ -119,18 +119,116 @@ fn explicit_import_operation_upgrades_automatic_import_without_losing_ownership(
         trigger_provenance: "explicit_source_catalog",
     };
 
-    coalesce_attempt(&mut attempt, setup.clone());
-    coalesce_attempt(&mut attempt, automatic_import.clone());
-    coalesce_attempt(&mut attempt, setup);
+    coalesce_attempt(
+        &mut attempt,
+        setup.clone(),
+        &RefreshIntent::AutomaticMaintenance,
+    );
+    coalesce_attempt(
+        &mut attempt,
+        automatic_import.clone(),
+        &RefreshIntent::AutomaticMaintenance,
+    );
+    coalesce_attempt(&mut attempt, setup, &RefreshIntent::AutomaticMaintenance);
     assert_eq!(attempt.operation(), RefreshOperation::Refresh);
     assert_eq!(attempt.trigger, "import");
     assert_eq!(attempt.trigger_provenance, "import_command");
 
-    coalesce_attempt(&mut attempt, explicit_import);
-    coalesce_attempt(&mut attempt, automatic_import);
+    coalesce_attempt(
+        &mut attempt,
+        explicit_import,
+        &RefreshIntent::AutomaticMaintenance,
+    );
+    coalesce_attempt(
+        &mut attempt,
+        automatic_import,
+        &RefreshIntent::AutomaticMaintenance,
+    );
     assert_eq!(attempt.operation(), RefreshOperation::Refresh);
     assert_eq!(attempt.trigger, "import");
     assert_eq!(attempt.trigger_provenance, "explicit_source_catalog");
+}
+
+#[test]
+fn coalescing_full_scope_import_preserves_whole_run_eta_while_narrowed_import_disables_it() {
+    let total_bytes = 256 * 1024 * 1024_u64;
+    let qualify = |attempt: &mut SourceBackedRefreshAttempt| {
+        for sample in 1_u64..=6 {
+            attempt.whole_run_eta.update(
+                SourceBackedRefreshStage::Reading,
+                Some(SourceBackedExactScanProgress {
+                    completed_bytes: sample * 24 * 1024 * 1024,
+                    total_bytes,
+                }),
+                Some(sample * 8_000),
+            );
+        }
+        assert!(
+            attempt.whole_run_eta.estimated_remaining_millis().is_some(),
+            "steady full-scope progress should qualify an ETA"
+        );
+    };
+
+    let mut attempt = new_refresh_attempt(
+        None,
+        SourceRefreshRuntimeMetadata::periodic(),
+        RefreshIntent::AutomaticMaintenance,
+        SourceBackedRefreshScope::All,
+    );
+    qualify(&mut attempt);
+
+    let full_scope_import = SourceRefreshRuntimeMetadata {
+        operation: RefreshOperation::Import,
+        daemon_mode: "full".to_owned(),
+        trigger: "import",
+        trigger_provenance: "import_command",
+    };
+    let full_scope_intent = RefreshIntent::SelectedImport {
+        selection: RefreshSelection::All,
+        reconciliation_demand: SourceBackedReconciliationDemand::Exhaustive,
+    };
+    let status = coalesce_attempt(&mut attempt, full_scope_import.clone(), &full_scope_intent);
+    assert!(
+        attempt.whole_run_eta.estimated_remaining_millis().is_some(),
+        "coalescing a full-scope Import must preserve whole-run ETA"
+    );
+    assert!(status["progress"]["estimated_remaining_millis"].is_u64());
+
+    let narrowed_intent = RefreshIntent::SelectedImport {
+        selection: RefreshSelection::Provider(CaptureProvider::Codex),
+        reconciliation_demand: SourceBackedReconciliationDemand::Exhaustive,
+    };
+    coalesce_attempt(&mut attempt, full_scope_import, &narrowed_intent);
+    assert!(
+        attempt.whole_run_eta.estimated_remaining_millis().is_none(),
+        "coalescing a narrowed provider Import must disable whole-run ETA"
+    );
+
+    let mut explicit_attempt = new_refresh_attempt(
+        None,
+        SourceRefreshRuntimeMetadata::periodic(),
+        RefreshIntent::AutomaticMaintenance,
+        SourceBackedRefreshScope::All,
+    );
+    qualify(&mut explicit_attempt);
+    let explicit_catalog_import = SourceRefreshRuntimeMetadata {
+        operation: RefreshOperation::Import,
+        daemon_mode: "full".to_owned(),
+        trigger: "import",
+        trigger_provenance: "explicit_source_catalog",
+    };
+    coalesce_attempt(
+        &mut explicit_attempt,
+        explicit_catalog_import,
+        &full_scope_intent,
+    );
+    assert!(
+        explicit_attempt
+            .whole_run_eta
+            .estimated_remaining_millis()
+            .is_none(),
+        "coalescing an explicit_source_catalog Import must disable whole-run ETA"
+    );
 }
 
 #[test]
