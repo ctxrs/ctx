@@ -4,8 +4,8 @@ use ctx_daemon_runtime::{
     ensure_native_supervisor_with_policy as ensure_runtime_supervisor_with_policy,
     resume_native_supervisor_with as resume_runtime_supervisor_with, NativeSupervisorBackend,
     SupervisorEnsureOutcome, SupervisorIdentity, SupervisorInstallationLock,
-    SupervisorManagerEnvironment, SupervisorManagerOperability, SupervisorMutationPolicy,
-    SupervisorResumeOutcome, SupervisorSpec, SupervisorUpgradeFence,
+    SupervisorManagerEnvironment, SupervisorManagerOperability, SupervisorResumeOutcome,
+    SupervisorSpec, SupervisorUpgradeFence,
 };
 #[cfg(test)]
 use ctx_daemon_runtime::{
@@ -236,9 +236,19 @@ fn configured_supervisor_environment_from_snapshot(
     snapshot.with_loop_interval_seconds(loop_interval_seconds)
 }
 
+pub use ctx_daemon_runtime::SupervisorMutationPolicy;
+
 pub fn ensure_daemon_supervisor(
     host: &dyn DaemonApplicationHost,
     data_root: &Path,
+) -> Result<DaemonSupervisorStart> {
+    ensure_daemon_supervisor_with_policy(host, data_root, SupervisorMutationPolicy::AllowReinstall)
+}
+
+pub fn ensure_daemon_supervisor_with_policy(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    policy: SupervisorMutationPolicy,
 ) -> Result<DaemonSupervisorStart> {
     ensure_hosted_uninstall_supervisor_admission(host)?;
     let Some(input) = managed_supervisor_input(host, data_root)? else {
@@ -274,7 +284,7 @@ pub fn ensure_daemon_supervisor(
         Some(&input.daemon_environment),
         &input.manager_environment,
     )?;
-    ensure_native_supervisor_with(host, &input, &backend)
+    ensure_native_supervisor_with_policy(host, &input, &backend, policy)
 }
 
 fn managed_supervisor_input(
@@ -286,6 +296,7 @@ fn managed_supervisor_input(
         .transpose()
 }
 
+#[cfg(test)]
 fn ensure_native_supervisor_with(
     host: &dyn DaemonApplicationHost,
     input: &ManagedSupervisorInput,

@@ -275,3 +275,96 @@ fn advancing_owner_heartbeat_extends_observation_while_unchanged_heartbeat_stays
     );
     Ok(())
 }
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn cold_start_lock_owner_without_status_extends_observation_within_bounded_window() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let lock = ctx_daemon_runtime::DaemonLock::acquire(root.path())?.unwrap();
+    let owner = read_daemon_owner_identity(root.path())?.unwrap();
+    let config = crate::TestHost.daemon_config(root.path())?;
+    let mut tracker = StartupActivityTracker::default();
+
+    // Process-birth-verified lock owner with no status.json yet is treated as Starting.
+    assert_eq!(
+        tracker.observe(
+            DaemonHandoffObservation::Pending,
+            root.path(),
+            false,
+            &config,
+            DaemonReadinessRequirement::Core,
+        ),
+        DaemonHandoffObservation::Starting
+    );
+
+    // Bounded window expires after DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS.
+    assert!(cold_start_owner_within_window(
+        root.path(),
+        owner.started_at_ms + DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS
+    ));
+    assert!(!cold_start_owner_within_window(
+        root.path(),
+        owner.started_at_ms + DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS + 1
+    ));
+
+    // Stale status.json from a previous owner still counts as pre-status cold start.
+    write_daemon_status(
+        root.path(),
+        &json!({
+            "status": "failed",
+            "pid": owner.pid,
+            "started_at_ms": owner.started_at_ms - 10_000,
+        }),
+    )?;
+    assert_eq!(
+        tracker.observe(
+            DaemonHandoffObservation::Pending,
+            root.path(),
+            false,
+            &config,
+            DaemonReadinessRequirement::Core,
+        ),
+        DaemonHandoffObservation::Starting
+    );
+
+    // Once this owner writes its own failed status.json, cold-start grace no longer applies.
+    write_daemon_status(
+        root.path(),
+        &json!({
+            "status": "failed",
+            "pid": owner.pid,
+            "started_at_ms": owner.started_at_ms,
+        }),
+    )?;
+    assert_eq!(
+        tracker.observe(
+            DaemonHandoffObservation::Pending,
+            root.path(),
+            false,
+            &config,
+            DaemonReadinessRequirement::Core,
+        ),
+        DaemonHandoffObservation::Pending
+    );
+
+    // Removing status.json but tampering with process_creation_token fails process-birth check.
+    fs::remove_file(ctx_daemon_runtime::daemon_status_path(root.path()))?;
+    let lock_path = daemon_lock_path(root.path());
+    let original = fs::read(&lock_path)?;
+    let mut wrong_token: Value = serde_json::from_slice(&original)?;
+    wrong_token["process_creation_token"] = Value::Null;
+    fs::write(&lock_path, serde_json::to_vec(&wrong_token)?)?;
+    assert_eq!(
+        tracker.observe(
+            DaemonHandoffObservation::Pending,
+            root.path(),
+            false,
+            &config,
+            DaemonReadinessRequirement::Core,
+        ),
+        DaemonHandoffObservation::Pending
+    );
+    fs::write(&lock_path, original)?;
+    drop(lock);
+    Ok(())
+}

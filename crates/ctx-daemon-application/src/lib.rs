@@ -32,9 +32,9 @@ pub use host::{
 };
 pub use lifecycle::{
     configured_daemon_autostart_command, daemon_autostart_allowed, daemon_autostart_command,
-    daemon_autostart_suppression_reason, daemon_restart_trigger, parse_persisted_trigger,
-    spawn_detached_daemon_child, DaemonHandoff, DaemonStartError, FiniteCoreWorkerLease,
-    FiniteWorkerLease,
+    daemon_autostart_suppression_reason, daemon_owner_has_fresh_heartbeat_or_is_starting,
+    daemon_restart_trigger, parse_persisted_trigger, spawn_detached_daemon_child, DaemonHandoff,
+    DaemonStartError, FiniteCoreWorkerLease, FiniteWorkerLease,
 };
 pub use status::{
     DaemonConfigReloadContext, DaemonDiagnosticSnapshot, DaemonSemanticStatusContext,
@@ -42,6 +42,7 @@ pub use status::{
 };
 pub use supervisor::{
     DaemonSupervisorStart, DaemonSupervisorUpgradeFence, DaemonSupervisorUpgradeResume,
+    SupervisorMutationPolicy,
 };
 
 /// Narrow boundary for product-specific operations around neutral lifecycle
@@ -204,6 +205,14 @@ impl<'a> DaemonApplication<'a> {
 
     pub fn ensure_daemon_supervisor(&self, data_root: &Path) -> Result<DaemonSupervisorStart> {
         supervisor::ensure_daemon_supervisor(self.host, data_root)
+    }
+
+    pub fn ensure_daemon_supervisor_with_policy(
+        &self,
+        data_root: &Path,
+        policy: SupervisorMutationPolicy,
+    ) -> Result<DaemonSupervisorStart> {
+        supervisor::ensure_daemon_supervisor_with_policy(self.host, data_root, policy)
     }
 
     pub fn disable_daemon_supervisor(&self, data_root: &Path) -> Result<()> {

@@ -162,6 +162,16 @@ fn handoff_health_probe_timeout_adapts_within_remaining_stall_budget() {
     );
     assert_eq!(
         handoff_health_probe_timeout(Duration::ZERO, 2),
-        Duration::ZERO
+        owner_observation::DAEMON_HANDOFF_MIN_HEALTH_PROBE_TIMEOUT
     );
+    assert!(handoff_health_probe_timeout(Duration::from_millis(1), 0) > Duration::ZERO);
+    assert_eq!(
+        handoff_poll_pause(Duration::from_secs(5)),
+        DAEMON_UPGRADE_POLL_INTERVAL
+    );
+    assert_eq!(
+        handoff_poll_pause(Duration::ZERO),
+        DAEMON_UPGRADE_POLL_INTERVAL
+    );
+    assert!(handoff_poll_pause(Duration::from_millis(1)) > Duration::ZERO);
 }

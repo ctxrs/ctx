@@ -61,7 +61,8 @@ impl StartupActivityTracker {
     ) -> DaemonHandoffObservation {
         let observed = observe(observation, data_root, child_unreaped, config);
         if observed == DaemonHandoffObservation::Pending
-            && self.observe_advancing_owner_heartbeat(data_root, config, readiness)
+            && (cold_start_owner_within_window(data_root, utc_now().timestamp_millis())
+                || self.observe_advancing_owner_heartbeat(data_root, config, readiness))
         {
             DaemonHandoffObservation::Starting
         } else {
@@ -129,6 +130,40 @@ fn live_owner_heartbeat(
         .matches_private_json_token(&lock["process_creation_token"])
         && read_daemon_owner_identity(data_root).ok()?.as_ref() == Some(&owner))
     .then_some((owner, heartbeat))
+}
+
+fn cold_start_owner_within_window(data_root: &Path, now_ms: i64) -> bool {
+    let Ok(Some(owner)) = read_daemon_owner_identity(data_root) else {
+        return false;
+    };
+    if owner.started_at_ms <= 0
+        || now_ms.saturating_sub(owner.started_at_ms) > DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS
+        || owner.started_at_ms.saturating_sub(now_ms) > DAEMON_SETUP_HANDOFF_MAX_FUTURE_HEARTBEAT_MS
+    {
+        return false;
+    }
+    if let Some(status) = read_daemon_status(data_root) {
+        let status_matches_owner = status.get("pid").and_then(Value::as_u64)
+            == Some(u64::from(owner.pid))
+            && status.get("started_at_ms").and_then(Value::as_i64) == Some(owner.started_at_ms);
+        if status_matches_owner {
+            return false;
+        }
+    }
+    let Some(lock) = read_pid_lock_json(&daemon_lock_path(data_root)) else {
+        return false;
+    };
+    let Ok(process) = observe_process_cpu(owner.pid) else {
+        return false;
+    };
+    process
+        .identity
+        .matches_private_json_token(&lock["process_creation_token"])
+        && read_daemon_owner_identity(data_root)
+            .ok()
+            .flatten()
+            .as_ref()
+            == Some(&owner)
 }
 
 #[cfg(test)]

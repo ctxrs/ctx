@@ -290,11 +290,12 @@ pub(super) fn with_daemon_run_application<T>(
     operation(&application)
 }
 
-pub(super) fn ensure_daemon_supervisor(
+pub(super) fn ensure_daemon_supervisor_with_policy(
     application: &ctx_daemon_application::DaemonApplication<'_>,
     data_root: &Path,
+    policy: ctx_daemon_application::SupervisorMutationPolicy,
 ) -> Result<DaemonSupervisorStart> {
-    application.ensure_daemon_supervisor(data_root)
+    application.ensure_daemon_supervisor_with_policy(data_root, policy)
 }
 
 pub(super) fn disable_daemon_supervisor(data_root: &Path) -> Result<()> {
