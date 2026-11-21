@@ -11,7 +11,6 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
-ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-capture-runtime = { path = "../ctx-history-capture-runtime" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-provider-runtime = { path = "../ctx-history-provider-runtime" }
@@ -23,5 +22,4 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 ctx-history-source-io = { path = "../ctx-history-source-io", features = ["test-support"] }

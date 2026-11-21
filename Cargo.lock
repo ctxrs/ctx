@@ -1507,7 +1507,6 @@ name = "ctx-history-atif"
 version = "2.5.0"
 dependencies = [
  "chrono",
- "ctx-history-capture-model",
  "ctx-history-capture-runtime",
  "ctx-history-core",
  "ctx-history-provider-runtime",
@@ -1515,7 +1514,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tempfile",
  "thiserror 1.0.69",
  "uuid",
 ]
