@@ -895,7 +895,7 @@ fn oversized_codex_leaf_reports_its_selector_and_size_while_peer_publishes() {
     // Authored sparse boundary input; refusal precedes decompression.
     std::fs::File::create(&oversized)
         .unwrap()
-        .set_len(256 * 1024 * 1024 + 1)
+        .set_len(1024 * 1024 * 1024 + 1)
         .unwrap();
     let publication = run_report(
         &discovery,
@@ -916,8 +916,8 @@ fn oversized_codex_leaf_reports_its_selector_and_size_while_peer_publishes() {
     assert_eq!(failure.source_selector, oversized.display().to_string());
     assert_eq!(failure.class, "unreadable");
     assert!(!failure.carried_forward);
-    assert!(failure.detail.contains("compressed_bytes=268435457"));
-    assert!(failure.detail.contains("limit_bytes=268435456"));
+    assert!(failure.detail.contains("compressed_bytes=1073741825"));
+    assert!(failure.detail.contains("limit_bytes=1073741824"));
     assert_eq!(
         VerifiedIndex::open_pinned(&index_root)
             .unwrap()

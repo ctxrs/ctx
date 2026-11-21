@@ -144,7 +144,7 @@ fn exercise_leaf_failure(refusal: Refusal, warm: bool) {
             );
             assert!(failure.detail.contains("compressed_bytes="));
             assert!(failure.detail.contains("decoded_bytes_at_least="));
-            assert!(failure.detail.contains("limit_bytes=268435456"));
+            assert!(failure.detail.contains("limit_bytes=1073741824"));
         }
     }
     fs::remove_file(&path).unwrap();
@@ -176,22 +176,29 @@ fn refused_symlink_leaf_isolated_cold_and_warm() {
     }
 }
 
-// A standard Zstandard frame with raw blocks and a 64 KiB window, deliberately
-// larger than half the scratch cap. Compressed and decoded lengths each fit
-// their individual caps; their sum must trip the production per-leaf cap.
+// A standard Zstandard frame (~5 MiB compressed, >1 GiB decoded) with a 64 KiB
+// window. Compressed size stays well above the 256x+16 MiB expansion threshold
+// (~4.1 MiB) so compressed + decoded trips the 1 GiB per-leaf scratch cap before
+// the expansion-ratio or decoded-only limits.
 fn write_oversized_raw_zstd(path: &Path) {
     const BLOCK: usize = 64 * 1024;
-    const BLOCKS: usize = 129 * 1024 * 1024 / BLOCK;
+    const RAW_BLOCKS: usize = 80;
+    const RLE_BLOCKS: usize = 16 * 1024;
+    let total_decoded = (BLOCK * (RAW_BLOCKS + RLE_BLOCKS)) as u32;
     let mut file = fs::File::create(path).unwrap();
     file.write_all(&[0x28, 0xb5, 0x2f, 0xfd, 0x80, 0x30])
         .unwrap();
-    file.write_all(&((BLOCK * BLOCKS) as u32).to_le_bytes())
-        .unwrap();
+    file.write_all(&total_decoded.to_le_bytes()).unwrap();
     let block = [b' '; BLOCK];
-    for ordinal in 0..BLOCKS {
-        let header = ((BLOCK as u32) << 3) | u32::from(ordinal + 1 == BLOCKS);
-        file.write_all(&header.to_le_bytes()[..3]).unwrap();
+    let raw_header = ((BLOCK as u32) << 3).to_le_bytes();
+    for _ in 0..RAW_BLOCKS {
+        file.write_all(&raw_header[..3]).unwrap();
         file.write_all(&block).unwrap();
+    }
+    for ordinal in 0..RLE_BLOCKS {
+        let header = ((BLOCK as u32) << 3) | (1 << 1) | u32::from(ordinal + 1 == RLE_BLOCKS);
+        file.write_all(&header.to_le_bytes()[..3]).unwrap();
+        file.write_all(b" ").unwrap();
     }
 }
 
