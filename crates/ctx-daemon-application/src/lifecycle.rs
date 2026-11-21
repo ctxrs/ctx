@@ -29,9 +29,13 @@ mod launch;
 mod owner_observation;
 #[cfg(target_os = "linux")]
 pub(super) use owner_observation::verify_inspection_denied_owner;
-pub use owner_observation::{active_daemon_matches_current_executable, observe_ready_core_daemon};
+pub use owner_observation::{
+    active_daemon_matches_current_executable, daemon_owner_has_fresh_heartbeat_or_is_starting,
+    observe_ready_core_daemon,
+};
 use owner_observation::{
-    handoff_health_probe_timeout, read_daemon_owner_identity, recover_unusable_daemon_owner,
+    handoff_health_probe_timeout, handoff_poll_pause, read_daemon_owner_identity,
+    recover_unusable_daemon_owner,
 };
 #[cfg(test)]
 use owner_observation::{
@@ -526,10 +530,9 @@ fn start_daemon_profile_and_wait(
             },
             || deadline.set(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT),
             || {
-                std::thread::sleep(
-                    DAEMON_UPGRADE_POLL_INTERVAL
-                        .min(deadline.get().saturating_duration_since(Instant::now())),
-                )
+                std::thread::sleep(handoff_poll_pause(
+                    deadline.get().saturating_duration_since(Instant::now()),
+                ))
             },
             checkpoint,
         );
@@ -594,10 +597,9 @@ pub fn observe_daemon_and_wait(
         },
         || deadline.set(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT),
         || {
-            std::thread::sleep(
-                DAEMON_UPGRADE_POLL_INTERVAL
-                    .min(deadline.get().saturating_duration_since(Instant::now())),
-            )
+            std::thread::sleep(handoff_poll_pause(
+                deadline.get().saturating_duration_since(Instant::now()),
+            ))
         },
     )
 }

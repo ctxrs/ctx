@@ -52,8 +52,11 @@ pub fn maybe_autostart_daemon(
             return;
         }
         if daemon_autostart_suppression_reason().is_none() {
-            match super::super::daemon_supervisor::ensure_daemon_supervisor(application, data_root)
-            {
+            match super::super::daemon_supervisor::ensure_daemon_supervisor_with_policy(
+                application,
+                data_root,
+                ctx_daemon_application::SupervisorMutationPolicy::PreserveLiveOwner,
+            ) {
                 Ok(_) => {}
                 Err(_) => return,
             }
@@ -190,6 +193,21 @@ enum PersistentDaemonReadiness {
     Core,
 }
 
+fn supervisor_mutation_policy_for_trigger(
+    trigger: DaemonTriggerCommandArg,
+) -> ctx_daemon_application::SupervisorMutationPolicy {
+    match trigger {
+        DaemonTriggerCommandArg::Setup => {
+            ctx_daemon_application::SupervisorMutationPolicy::AllowReinstall
+        }
+        DaemonTriggerCommandArg::Import
+        | DaemonTriggerCommandArg::Search
+        | DaemonTriggerCommandArg::Semantic => {
+            ctx_daemon_application::SupervisorMutationPolicy::PreserveLiveOwner
+        }
+    }
+}
+
 fn autostart_persistent_daemon_and_wait(
     data_root: &Path,
     config: &DaemonRuntimeConfig,
@@ -205,6 +223,7 @@ fn autostart_persistent_daemon_and_wait(
             ));
         }
         let app_config = application_config(config);
+        let policy = supervisor_mutation_policy_for_trigger(trigger);
         let reuse_live_owner = readiness == PersistentDaemonReadiness::Core
             && (application
                 .observe_ready_core_daemon(data_root, &app_config)?
@@ -214,11 +233,19 @@ fn autostart_persistent_daemon_and_wait(
                     data_root,
                     &app_config,
                 )?);
-        // Reuse skips only native reconciliation. The ordinary start request
-        // below still owns upgrade deferral, cancellation and readiness waiting.
-        if !reuse_live_owner && daemon_autostart_suppression_reason().is_none() {
-            super::super::daemon_supervisor::ensure_daemon_supervisor(application, data_root)
-                .context("establish ctx daemon supervision")?;
+        // Reconcile supervision under the trigger's policy (PreserveLiveOwner for
+        // retrieval paths so registration drift records `stale_registration` in
+        // supervisor.json without booting out a live healthy daemon).
+        if daemon_autostart_suppression_reason().is_none() {
+            let supervisor_result =
+                super::super::daemon_supervisor::ensure_daemon_supervisor_with_policy(
+                    application,
+                    data_root,
+                    policy,
+                );
+            if !reuse_live_owner {
+                supervisor_result.context("establish ctx daemon supervision")?;
+            }
         }
         checkpoint()?;
         let handoff = match readiness {
@@ -375,23 +402,20 @@ fn core_daemon_has_live_same_executable_owner(
     if !daemon_lock_is_owned_by(data_root, pid) {
         return Ok(false);
     }
-    let started_at_ms = lock
+    let Some(started_at_ms) = lock
         .get("started_at_ms")
         .and_then(Value::as_i64)
-        .filter(|started| *started > 0);
-    if let (Some(status), Some(started_at_ms)) = (
+        .filter(|started| *started > 0)
+    else {
+        return Ok(false);
+    };
+    if !ctx_daemon_application::daemon_owner_has_fresh_heartbeat_or_is_starting(
         ctx_daemon_runtime::read_daemon_status(data_root).as_ref(),
+        pid,
         started_at_ms,
+        utc_now().timestamp_millis(),
     ) {
-        let matches_owner = status
-            .get("pid")
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            == Some(pid)
-            && status.get("started_at_ms").and_then(Value::as_i64) == Some(started_at_ms);
-        if matches_owner && status.get("status").and_then(Value::as_str) == Some("failed") {
-            return Ok(false);
-        }
+        return Ok(false);
     }
     Ok(
         ctx_daemon_runtime::read_pid_lock_json(&daemon_lock_path(data_root)).as_ref()
@@ -500,6 +524,38 @@ mod tests {
         })?;
         assert!(preserved);
 
+        // Stale heartbeat with applied config -> NOT preserved.
+        write_daemon_status(
+            temp.path(),
+            &json!({
+                "status": "running",
+                "pid": process::id(),
+                "started_at_ms": started_at_ms,
+                "heartbeat_at_ms": utc_now().timestamp_millis() - 60_000,
+                "config_reload": { "status": "applied" },
+            }),
+        )?;
+        let preserved = super::super::super::daemon_supervisor::with_daemon_application(|app| {
+            core_daemon_has_live_same_executable_owner(app, temp.path(), &config)
+        })?;
+        assert!(!preserved);
+
+        // Stale heartbeat while config reload is still pending -> preserved!
+        write_daemon_status(
+            temp.path(),
+            &json!({
+                "status": "running",
+                "pid": process::id(),
+                "started_at_ms": started_at_ms,
+                "heartbeat_at_ms": utc_now().timestamp_millis() - 60_000,
+                "config_reload": { "status": "pending" },
+            }),
+        )?;
+        let preserved = super::super::super::daemon_supervisor::with_daemon_application(|app| {
+            core_daemon_has_live_same_executable_owner(app, temp.path(), &config)
+        })?;
+        assert!(preserved);
+
         // Explicitly failed status for this owner -> NOT preserved.
         write_daemon_status(
             temp.path(),
@@ -515,12 +571,44 @@ mod tests {
         })?;
         assert!(!preserved);
 
+        // Missing status.json with stale started_at_ms in lock -> NOT preserved.
+        fs::remove_file(ctx_daemon_runtime::daemon_status_path(temp.path()))?;
+        let lock_path = daemon_lock_path(temp.path());
+        let original_lock = fs::read(&lock_path)?;
+        let mut stale_lock: Value = serde_json::from_slice(&original_lock)?;
+        stale_lock["started_at_ms"] = json!(utc_now().timestamp_millis() - 60_000);
+        fs::write(&lock_path, serde_json::to_vec(&stale_lock)?)?;
+        let preserved = super::super::super::daemon_supervisor::with_daemon_application(|app| {
+            core_daemon_has_live_same_executable_owner(app, temp.path(), &config)
+        })?;
+        assert!(!preserved);
+        fs::write(&lock_path, original_lock)?;
+
         drop(lock);
         let preserved = super::super::super::daemon_supervisor::with_daemon_application(|app| {
             core_daemon_has_live_same_executable_owner(app, temp.path(), &config)
         })?;
         assert!(!preserved);
         Ok(())
+    }
+
+    #[test]
+    fn supervisor_mutation_policy_reserves_reinstall_for_setup_and_preserves_live_owner_for_retrieval(
+    ) {
+        assert_eq!(
+            supervisor_mutation_policy_for_trigger(DaemonTriggerCommandArg::Setup),
+            ctx_daemon_application::SupervisorMutationPolicy::AllowReinstall
+        );
+        for trigger in [
+            DaemonTriggerCommandArg::Search,
+            DaemonTriggerCommandArg::Import,
+            DaemonTriggerCommandArg::Semantic,
+        ] {
+            assert_eq!(
+                supervisor_mutation_policy_for_trigger(trigger),
+                ctx_daemon_application::SupervisorMutationPolicy::PreserveLiveOwner
+            );
+        }
     }
 
     #[test]

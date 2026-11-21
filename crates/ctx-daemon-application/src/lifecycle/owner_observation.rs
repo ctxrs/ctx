@@ -47,18 +47,34 @@ pub(super) fn read_daemon_owner_identity(data_root: &Path) -> Result<Option<Daem
     }))
 }
 
+pub(super) const DAEMON_HANDOFF_MIN_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+const DAEMON_HANDOFF_MIN_POLL_PAUSE: Duration = Duration::from_millis(10);
+
 pub(super) fn handoff_health_probe_timeout(remaining: Duration, stalled_probes: usize) -> Duration {
     let target = match stalled_probes {
         0 => DAEMON_HEALTH_TIMEOUT,
         1 => DAEMON_HEALTH_TIMEOUT.saturating_mul(3),
         _ => DAEMON_RECOVERY_HEALTH_TIMEOUT,
     };
-    remaining.min(target)
+    remaining
+        .min(target)
+        .max(DAEMON_HANDOFF_MIN_HEALTH_PROBE_TIMEOUT)
 }
 
-pub(super) fn owner_has_fresh_heartbeat_or_is_starting(
+pub(super) fn handoff_poll_pause(remaining: Duration) -> Duration {
+    if remaining.is_zero() {
+        DAEMON_UPGRADE_POLL_INTERVAL
+    } else {
+        DAEMON_UPGRADE_POLL_INTERVAL
+            .min(remaining)
+            .max(DAEMON_HANDOFF_MIN_POLL_PAUSE)
+    }
+}
+
+pub fn daemon_owner_has_fresh_heartbeat_or_is_starting(
     status: Option<&Value>,
-    owner: &DaemonOwnerIdentity,
+    pid: u32,
+    started_at_ms: i64,
     now_ms: i64,
 ) -> bool {
     let within_fresh_window = |timestamp_ms: i64| {
@@ -70,12 +86,12 @@ pub(super) fn owner_has_fresh_heartbeat_or_is_starting(
         let status_pid = status
             .get("pid")
             .and_then(Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok());
+            .and_then(|value| u32::try_from(value).ok());
         let status_started_at_ms = status
             .get("started_at_ms")
             .and_then(Value::as_i64)
-            .filter(|started_at_ms| *started_at_ms > 0);
-        if status_pid == Some(owner.pid) && status_started_at_ms == Some(owner.started_at_ms) {
+            .filter(|value| *value > 0);
+        if status_pid == Some(pid) && status_started_at_ms == Some(started_at_ms) {
             if status.get("status").and_then(Value::as_str) != Some("running") {
                 return false;
             }
@@ -92,7 +108,15 @@ pub(super) fn owner_has_fresh_heartbeat_or_is_starting(
                 .is_some_and(within_fresh_window);
         }
     }
-    within_fresh_window(owner.started_at_ms)
+    within_fresh_window(started_at_ms)
+}
+
+pub(super) fn owner_has_fresh_heartbeat_or_is_starting(
+    status: Option<&Value>,
+    owner: &DaemonOwnerIdentity,
+    now_ms: i64,
+) -> bool {
+    daemon_owner_has_fresh_heartbeat_or_is_starting(status, owner.pid, owner.started_at_ms, now_ms)
 }
 
 pub(super) fn probe_daemon_lifecycle_endpoint_with_retries(
