@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use ctx_cli_presentation::commands::archive_atif::{self, ArchiveAtifArgs};
 pub(super) use ctx_cli_presentation::commands::archive_export::digest;
 use ctx_cli_presentation::commands::archive_export::{self, ExportArgs};
 
@@ -22,12 +23,21 @@ impl ArchiveArgs {
     pub(super) fn telemetry_operation(
         &self,
     ) -> Option<ctx_client_observability::analytics::HostedOperationV1> {
-        use ctx_client_observability::analytics::HostedOperationV1 as Operation;
-        Some(match self.command {
-            ArchiveCommand::Export(_) => Operation::ArchiveExport,
-            ArchiveCommand::Restore { .. } => Operation::ArchiveRestore,
-            _ => return None,
-        })
+        use ctx_client_observability::analytics::HostedOperationV1 as Op;
+        match self.command {
+            ArchiveCommand::Export(_) => Some(Op::ArchiveExport),
+            ArchiveCommand::Restore { .. } => Some(Op::ArchiveRestore),
+            ArchiveCommand::Atif(_) | ArchiveCommand::Verify { .. } => None,
+        }
+    }
+
+    pub(super) fn observed_operation(&self) -> Option<super::HostedOperation> {
+        use super::HostedOperation as Op;
+        match self.command {
+            ArchiveCommand::Verify { .. } => Some(Op::ArchiveVerify),
+            ArchiveCommand::Atif(_) => None,
+            _ => self.telemetry_operation().map(Op::Existing),
+        }
     }
 }
 
@@ -35,6 +45,8 @@ impl ArchiveArgs {
 enum ArchiveCommand {
     /// Save a coherent snapshot of retained normalized history; no provider files or credentials.
     Export(ExportArgs),
+    /// Export selected sessions as ATIF v1.8 JSON trajectory files.
+    Atif(ArchiveAtifArgs),
     /// Check the complete inventory, normalized records, and content digests.
     Verify { archive: PathBuf },
     /// Restore retained history into a new or archive-owned local data root.
@@ -47,30 +59,12 @@ enum ArchiveCommand {
 }
 
 pub(super) fn run(args: &ArchiveArgs, root: Option<&Path>, ui: &mut Ui) -> Result<()> {
-    match &args.command {
+    let (value, text) = match &args.command {
         ArchiveCommand::Export(options) => {
-            let root = super::data_root(root)?;
-            let (value, text) = archive_export::run(options, &root, ui.stdout_context())?;
-            super::print_result(args.format, value, text, ui)
+            archive_export::run(options, &super::data_root(root)?, ui.stdout_context())?
         }
-        ArchiveCommand::Verify { archive } => {
-            let manifest = ctx_history_archive::verify(archive)?;
-            let text = format!(
-                "Verified {} sessions and {} records in {}",
-                manifest.members,
-                manifest.records,
-                archive.display()
-            );
-            super::print_result(
-                args.format,
-                json!({
-                    "schema_version": 1, "operation": "archive_verify", "archive": archive,
-                    "manifest": manifest
-                }),
-                text,
-                ui,
-            )
-        }
+        ArchiveCommand::Atif(options) => archive_atif::run(options, &super::data_root(root)?)?,
+        ArchiveCommand::Verify { archive } => archive_export::verify(archive)?,
         ArchiveCommand::Restore {
             archive,
             expected_predecessors,
@@ -96,15 +90,14 @@ pub(super) fn run(args: &ArchiveArgs, root: Option<&Path>, ui: &mut Ui) -> Resul
                 .context("disable automatic provider discovery for the archive root")?;
             drop(restore_lock);
             let receipt = ctx_history_archive::restore(archive, &root, &options)?;
-            super::print_result(
-                args.format,
+            (
                 json!({
                     "schema_version": 1, "operation": "archive_restore", "receipt": receipt,
                     "automatic_indexing": false, "automatic_source_discovery": false
                 }),
                 format!("Restored retained history into {}\nAutomatic indexing and default provider discovery are off for this archive root.", root.display()),
-                ui,
             )
         }
-    }
+    };
+    super::print_result(args.format, value, text, ui)
 }

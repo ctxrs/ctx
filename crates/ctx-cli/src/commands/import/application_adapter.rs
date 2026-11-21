@@ -51,9 +51,9 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
         data_root: &Path,
         path: &Path,
         provider: Option<CaptureProvider>,
-        custom_jsonl: bool,
+        input_format: Option<ctx_history_refresh::ExplicitInputFormat>,
     ) -> Result<ProviderSource> {
-        explicit_source_for_admission(data_root, path, provider, custom_jsonl)
+        explicit_source_for_admission(data_root, path, provider, input_format)
     }
 
     fn prepare_plugin(

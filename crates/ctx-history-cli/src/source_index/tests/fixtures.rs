@@ -485,7 +485,7 @@ fn show_session_args(id: Option<&str>, provider_session: Option<&str>) -> ShowSe
         source_id: None,
         mode: TranscriptMode::Lite,
         max_events: None,
-        format: OutputFormat::Json,
+        format: crate::SessionOutputFormat::Json,
         out: None,
     }
 }

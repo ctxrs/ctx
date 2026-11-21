@@ -602,6 +602,8 @@ ctx import --provider codebuddy
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/agent/sessions
 ctx import --input-format ctx-history-jsonl-v2 --path ./history.jsonl
+ctx import --input-format atif-v1 --path ./trajectory.json
+ctx import --input-format atif-v1 --path ./trajectories/
 ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json
 ctx import --resume
@@ -734,6 +736,7 @@ ctx show session <ctx-session-id> --mode log --format jsonl
 ctx show session <ctx-session-id> --max-events 4096 --format json
 ctx show session <ctx-session-id> --format markdown --out transcript.md
 ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+ctx show session <ctx-session-id> --format atif --out trajectory.json
 ctx show session --provider-session <provider-session-id> --provider-key <provider-key> --source-id <source-id>
 ctx show event <ctx-event-id> --window 3 --format text
 ctx show event <ctx-event-id> --before 5 --after 10 --format json
@@ -743,7 +746,9 @@ ctx show event <ctx-event-id> --before 5 --after 10 --format json
 `--mode lite`, a compact agent-readable transcript with user messages and final
 assistant messages. `--mode full` keeps all user/assistant/system message
 events, and `--mode log` renders all imported events including tool and command
-activity. `--format` accepts `text`, `markdown`, `json`, or `jsonl`. Without
+activity. `--format` accepts `text`, `markdown`, `json`, `jsonl`, or `atif`
+(ATIF v1.8 JSON including tool calls, observations, and embedded subagent
+trajectories; see [`atif-format.md`](atif-format.md)). Without
 `--out`, `show session` writes to stdout. With `--out`, it writes the rendered
 transcript artifact to that path and prints nothing on success. Sessions over
 the bounded presentation limit require `--max-events`; the value is capped at
@@ -751,7 +756,7 @@ the bounded presentation limit require `--max-events`; the value is capped at
 
 `show event` renders one ctx-owned event hit. `--before` and `--after` include
 neighboring events in the same session; `--window N` is shorthand for
-`--before N --after N`. It accepts the same output formats as `show session`.
+`--before N --after N`. It accepts `text`, `markdown`, `json`, or `jsonl`.
 In ordinary human output, event-window `Time` rows use the
 executing OS local time zone and the exact
 `YYYY-MM-DD HH:MM:SS ZONE` shape, without milliseconds. The same local format
@@ -1246,7 +1251,9 @@ ctx index wait --format json
 ctx sources --format json
 ctx import --format json
 ctx show session <ctx-session-id> --format json
+ctx show session <ctx-session-id> --format atif
 ctx show event <ctx-event-id> --format json
+ctx archive atif --out <dir> --format json
 ctx search <query>|--term <term>|--file <path> --format json
 ctx docs list --format json
 ctx docs search <query> --format json

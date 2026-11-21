@@ -5,7 +5,8 @@ use ctx_history_cli::{
     EventContentProjectionArg, EventQueryDirection, EventQueryScope, EventQueryWireRequest,
     JsonOutputFormat, ListEventsArgs, ListEventsContentProjection, ListEventsDirection,
     ListEventsRequest, ListEventsScope, LocateRequest, OutputFormat, RefreshMode, SearchArgs,
-    SearchBackend, SearchBackendArg, SearchRequest, ShowRequest, TranscriptMode,
+    SearchBackend, SearchBackendArg, SearchRequest, SessionOutputFormat, ShowRequest,
+    TranscriptMode,
 };
 use ctx_history_index::{CoreEventRangeDirection, CoreEventRangeScope, SearchContentScope};
 use ctx_history_read_application::SearchBackend as ExecutionSearchBackend;
@@ -181,7 +182,7 @@ fn show_and_locate_requests_preserve_custom_route_qualifiers() {
         source_id: Some("threads".to_owned()),
         mode: TranscriptMode::Lite,
         max_events: None,
-        format: OutputFormat::Json,
+        format: SessionOutputFormat::Json,
         out: None,
     };
     assert!(matches!(

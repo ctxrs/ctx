@@ -15,6 +15,7 @@ test-support = ["ctx-history-jsonl/test-support", "ctx-history-provider-codex/te
 
 [dependencies]
 chrono.workspace = true
+ctx-history-atif = { path = "../ctx-history-atif" }
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-capture-runtime = { path = "../ctx-history-capture-runtime" }
 ctx-history-core = { path = "../ctx-history-core" }

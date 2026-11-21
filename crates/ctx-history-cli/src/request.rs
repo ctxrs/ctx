@@ -38,6 +38,27 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionOutputFormat {
+    Text,
+    Json,
+    Jsonl,
+    Markdown,
+    Atif,
+}
+
+impl SessionOutputFormat {
+    pub const fn as_standard(self) -> Option<OutputFormat> {
+        match self {
+            Self::Text => Some(OutputFormat::Text),
+            Self::Json => Some(OutputFormat::Json),
+            Self::Jsonl => Some(OutputFormat::Jsonl),
+            Self::Markdown => Some(OutputFormat::Markdown),
+            Self::Atif => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressMode {
     Auto,
     Plain,
@@ -107,6 +128,7 @@ pub enum ListEventsContentProjection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportFormat {
     CtxHistoryJsonlV2,
+    AtifV1,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,7 +170,7 @@ pub enum ShowRequest {
         source_id: Option<String>,
         mode: TranscriptMode,
         max_events: Option<usize>,
-        format: OutputFormat,
+        format: SessionOutputFormat,
         out: Option<PathBuf>,
     },
     Event {
@@ -263,7 +285,7 @@ mod tests {
             source_id: None,
             mode: TranscriptMode::Lite,
             max_events: None,
-            format: OutputFormat::Markdown,
+            format: SessionOutputFormat::Markdown,
             out: Some(PathBuf::from("out.md")),
         });
 

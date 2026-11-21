@@ -180,7 +180,7 @@ where
         .as_deref()
         .context("explicit source catalog import requires --path")?;
     let source = host
-        .explicit_source(data_root, path, request.provider, request.custom_jsonl)
+        .explicit_source(data_root, path, request.provider, request.input_format)
         .map_err(|source| classify_import_path_admission_error(path, source))?;
     if source.status == ProviderSourceStatus::Unsupported {
         return unsupported_source_report(request.resume, &source, host);
@@ -335,7 +335,7 @@ fn exact_report(
         )),
         provider_refresh: requested_succeeded.then_some(ProviderRefreshFacts {
             provider: upsert.provider,
-            mode: if request.custom_jsonl {
+            mode: if request.input_format.is_some() {
                 ProviderRefreshModeFact::ExplicitFormat
             } else {
                 ProviderRefreshModeFact::ExplicitPath

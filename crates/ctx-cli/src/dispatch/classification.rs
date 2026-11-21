@@ -37,7 +37,7 @@ pub(super) fn command_json_output(command: &CommandRoot) -> bool {
 
 pub(super) fn show_json_output(args: &ShowArgs) -> bool {
     match &args.target {
-        ShowTarget::Session(args) => args.format == OutputFormat::Json,
+        ShowTarget::Session(args) => args.format.is_json(),
         ShowTarget::Event(args) => args.format == OutputFormat::Json,
     }
 }
@@ -52,8 +52,7 @@ pub(super) fn command_machine_readable_output(command: &CommandRoot, json_output
         CommandRoot::Show(args) => {
             matches!(
                 &args.target,
-                ShowTarget::Session(args)
-                    if matches!(args.format, OutputFormat::Jsonl | OutputFormat::Markdown)
+                ShowTarget::Session(args) if args.format.is_machine_readable()
             ) || matches!(
                 &args.target,
                 ShowTarget::Event(args)
@@ -154,8 +153,10 @@ pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDe
         CommandRoot::Show(args) => match &args.target {
             ShowTarget::Session(args) => CliOperation::ShowSession(ShowTelemetry {
                 target_kind: TargetKind::Session,
-                transcript_mode: Some(crate::observability_product::transcript_mode(args.mode)),
-                output_format: crate::observability_product::render_format(args.format),
+                transcript_mode: Some(crate::observability_product::transcript_mode(
+                    args.effective_mode(),
+                )),
+                output_format: args.format.render_format(),
                 writes_out_file: args.out.is_some(),
                 provider_lookup: args.provider.is_some() || args.provider_session.is_some(),
                 window: None,

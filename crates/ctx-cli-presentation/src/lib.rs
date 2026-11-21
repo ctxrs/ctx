@@ -29,7 +29,7 @@ pub mod ui {
 #[cfg(test)]
 mod test_support;
 
-pub use output::{JsonOutputFormat, OutputFormat};
+pub use output::{JsonOutputFormat, OutputFormat, SessionOutputFormat};
 pub use progress::ProgressArg;
 pub use provider_args::{
     cli_supported_provider, parse_native_provider_arg, parse_provider_arg, ImportFormatArg,

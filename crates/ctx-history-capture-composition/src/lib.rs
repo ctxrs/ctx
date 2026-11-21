@@ -2,6 +2,7 @@
 
 pub mod source_backed;
 
+pub use ctx_history_atif as atif;
 pub use ctx_history_provider_runtime::{CaptureError, ProviderAdapterContext, Result};
 pub use ctx_history_source_discovery::{
     path_presence, provider_source_spec, provider_source_specs,

@@ -167,6 +167,14 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         CatalogLineage
     ),
     route!(
+        Custom,
+        ctx_history_atif::ATIF_SOURCE_FORMAT,
+        false,
+        true,
+        CatalogLineage,
+        CatalogLineage
+    ),
+    route!(
         Codex,
         "codex_session_jsonl_tree" => "codex_session_jsonl",
         true,
@@ -531,6 +539,7 @@ mod oracle_tests {
 
     const BASELINE_REGISTRY_INVENTORY: &str = "\
 Custom|ctx_history_jsonl_v2|ctx_history_jsonl_v2|false|true|CatalogLineage|none|CatalogLineage
+Custom|atif_v1|atif_v1|false|true|CatalogLineage|none|CatalogLineage
 Codex|codex_session_jsonl_tree|codex_session_jsonl|true|true|DiscoveredWinner|none|ProviderSource
 Codex|codex_history_jsonl|codex_history_jsonl|true|true|DiscoveredWinner|none|ProviderSource
 Codex|codex_session_jsonl|codex_session_jsonl|false|true|ExplicitPath|none|ProviderSource

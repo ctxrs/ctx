@@ -120,7 +120,7 @@ impl CaptureAdmissionPort for FakeHost {
         _: &Path,
         _: &Path,
         _: Option<CaptureProvider>,
-        _: bool,
+        _: Option<ctx_history_refresh::ExplicitInputFormat>,
     ) -> Result<ProviderSource> {
         self.push("explicit_source");
         Ok(self.exact_source.clone())

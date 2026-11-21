@@ -315,6 +315,15 @@ const TOPICS: &[DocTopic] = &[
         body: include_str!("../../../docs/custom-history-import-format.md"),
     },
     DocTopic {
+        id: "atif-format",
+        title: "ATIF v1.8 Import And Export",
+        audience: "human-agent",
+        summary: "Import and export agent trajectories in Harbor ATIF v1.8 JSON format.",
+        tags: &["atif", "trajectory", "import", "export", "harbor", "schema"],
+        source_path: "docs/atif-format.md",
+        body: include_str!("../../../docs/atif-format.md"),
+    },
+    DocTopic {
         id: "history-source-plugins",
         title: "History Source Plugins",
         audience: "integrator-agent",

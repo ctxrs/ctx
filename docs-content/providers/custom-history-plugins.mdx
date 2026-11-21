@@ -76,6 +76,7 @@ A file can also be imported directly without a plugin manifest:
 
 ```bash
 ctx import --input-format ctx-history-jsonl-v2 --path ./history.jsonl
+ctx import --input-format atif-v1 --path ./trajectory.json
 ```
 
 For the complete contracts, use the installed docs:
@@ -83,9 +84,11 @@ For the complete contracts, use the installed docs:
 ```bash
 ctx docs show history-source-plugins
 ctx docs show custom-history-import-format
+ctx docs show atif-format
 ```
 
 The same docs are in the public repository:
 
 - [History source plugins](https://github.com/ctxrs/ctx/blob/main/docs/history-source-plugins.md)
 - [Custom history import format](https://github.com/ctxrs/ctx/blob/main/docs/custom-history-import-format.md)
+- [ATIF v1.8 import and export](https://github.com/ctxrs/ctx/blob/main/docs/atif-format.md)

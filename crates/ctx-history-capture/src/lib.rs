@@ -65,6 +65,7 @@ pub fn hermes_route_control_database_identity(control: &[u8]) -> Option<[u8; 32]
     ctx_history_capture_composition::hermes_route_control_database_identity(control)
 }
 
+pub use ctx_history_capture_composition::atif;
 pub use provider::source_backed::register_nanoclaw_source_backed_route_with_base_sources;
 pub use provider::source_backed::{
     automatic_provider_root_coexistence_route_identity,
@@ -76,11 +77,12 @@ pub use provider::source_backed::{
     refresh_source_backed_generation_for_routes,
     refresh_source_backed_generation_with_detailed_progress,
     refresh_source_backed_generation_with_progress, register_astrbot_source_backed_route,
-    register_codex_prompt_history_source_backed_route, register_crush_source_backed_route,
-    register_cursor_source_backed_route, register_custom_history_source_backed_route,
-    register_forgecode_explicit_source_backed_route, register_gemini_source_backed_route,
-    register_goose_source_backed_route, register_hermes_explicit_source_backed_route,
-    register_landed_source_backed_route, register_landed_source_backed_route_with_data_root,
+    register_atif_source_backed_route, register_codex_prompt_history_source_backed_route,
+    register_crush_source_backed_route, register_cursor_source_backed_route,
+    register_custom_history_source_backed_route, register_forgecode_explicit_source_backed_route,
+    register_gemini_source_backed_route, register_goose_source_backed_route,
+    register_hermes_explicit_source_backed_route, register_landed_source_backed_route,
+    register_landed_source_backed_route_with_data_root,
     register_landed_source_backed_route_with_data_root_and_lineage,
     register_lingma_source_backed_route, register_nanoclaw_source_backed_route,
     register_shelley_source_backed_route, register_warp_source_backed_route,

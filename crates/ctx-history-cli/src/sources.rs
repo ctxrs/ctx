@@ -470,6 +470,8 @@ fn human_path(path: &Path, home: Option<&Path>) -> String {
 fn human_source_format(format: &str) -> String {
     if format == "ctx_history_jsonl_v2" {
         "ctx history".to_owned()
+    } else if format == "atif_v1" {
+        "ATIF trajectory".to_owned()
     } else if format.contains("sqlite") || format.contains("database") {
         "Session database".to_owned()
     } else if format.contains("transcript") || format.contains("trajectory") {

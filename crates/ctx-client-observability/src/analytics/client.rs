@@ -282,6 +282,7 @@ pub enum RenderFormat {
     Json,
     Jsonl,
     Markdown,
+    Atif,
 }
 
 impl RenderFormat {
@@ -291,6 +292,7 @@ impl RenderFormat {
             Self::Json => "json",
             Self::Jsonl => "jsonl",
             Self::Markdown => "markdown",
+            Self::Atif => "atif",
         }
     }
 }
@@ -484,6 +486,7 @@ pub enum DocTopicId {
     Storage,
     Providers,
     CustomHistoryImportFormat,
+    AtifFormat,
     HistorySourcePlugins,
     ProviderSupport,
     ProviderImportPolicy,
@@ -513,6 +516,7 @@ impl DocTopicId {
             "storage" => Self::Storage,
             "providers" => Self::Providers,
             "custom-history-import-format" => Self::CustomHistoryImportFormat,
+            "atif-format" => Self::AtifFormat,
             "history-source-plugins" => Self::HistorySourcePlugins,
             "provider-support" => Self::ProviderSupport,
             "provider-import-policy" => Self::ProviderImportPolicy,
@@ -543,6 +547,7 @@ impl DocTopicId {
             Self::Storage => "storage",
             Self::Providers => "providers",
             Self::CustomHistoryImportFormat => "custom-history-import-format",
+            Self::AtifFormat => "atif-format",
             Self::HistorySourcePlugins => "history-source-plugins",
             Self::ProviderSupport => "provider-support",
             Self::ProviderImportPolicy => "provider-import-policy",

@@ -23,6 +23,15 @@ ctx archive export --output ./history-snapshot --origin my-laptop
 ctx archive verify ./history-snapshot
 ```
 
+To export selected sessions as standalone Harbor ATIF v1.8 JSON trajectory files
+instead of a ctx backup archive, use `ctx archive atif`:
+
+```sh
+ctx archive atif --out ./atif-trajectories --provider codex --format json
+```
+
+See [`atif-format.md`](atif-format.md) for ATIF v1.8 import and export options.
+
 Reuse the same origin name for later snapshots from this history. Each export
 needs a new output directory. Without selection flags, export includes all indexed
 sources and sessions. `--source` and `--session` remain available for full Core

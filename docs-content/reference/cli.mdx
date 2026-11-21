@@ -131,6 +131,8 @@ ctx import --provider roo
 ctx import --path ~/.codex/sessions
 ctx import --provider opencode --path ~/.local/share/opencode/opencode.db
 ctx import --input-format ctx-history-jsonl-v2 --path ./history.jsonl
+ctx import --input-format atif-v1 --path ./trajectory.json
+ctx import --input-format atif-v1 --path ./trajectories/
 ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json
 ctx import --resume
@@ -153,6 +155,8 @@ refresh; ctx does not execute a plugin command or manage an exporter cursor. See
 ctx show session <ctx-session-id>
 ctx show session <ctx-session-id> --format json
 ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+ctx show session <ctx-session-id> --format atif --out trajectory.json
+ctx archive atif --out ./atif-trajectories --provider codex --format json
 ctx show event <ctx-event-id> --window 3
 ctx show event <ctx-event-id> --before 5 --after 10
 ctx show event <ctx-event-id> --format json
@@ -174,7 +178,7 @@ ctx mcp serve
 
 Default text output is intended for humans and agents reading command output. JSON output is intended for scripts, `jq`, and exact field extraction. Treat it as private local data unless it has been reviewed and redacted.
 
-`show session` defaults to `--mode lite`. Valid modes are `lite`, `full`, and `log`.
+`show session` defaults to `--mode lite`. Valid modes are `lite`, `full`, and `log`. Pass `--format atif` on `show session` (or use `ctx archive atif --out <dir>` for filtered multi-session batches) to export validated Harbor ATIF v1.8 JSON trajectories including tool calls, observations, and embedded subagent trajectories.
 
 `search` defaults to session-diverse results and `--refresh background`, which serves the latest published generation and may wake the persistent daemon in automatic indexing mode. In manual mode, background search does not start or wake a process. Results include primary and subagent sessions unless `--primary-only` is supplied. Use repeatable `--term` for explicit multi-term search. Use `--session <ctx-session-id>` to drill into one session, `--exclude-session <ctx-session-id-or-prefix>` to remove an exact resolved session (repeatable), `--events` for dense event-level results, and `--verbose` for expanded text diagnostics. `--session` conflicts with `--exclude-session`; exclusions require a full ctx session ID or unambiguous prefix, not a provider session ID. Use `--refresh off` to query published generations without starting or waking a process, or `--refresh wait` to request authoritative Core publication before querying. `--limit` is capped at `200`. Search JSON includes a top-level `freshness` object describing the refresh mode and outcome.
 
