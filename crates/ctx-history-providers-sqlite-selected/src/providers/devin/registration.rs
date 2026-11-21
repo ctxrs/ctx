@@ -7,7 +7,6 @@
 
 use std::{
     ffi::OsString,
-    io,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -284,9 +283,7 @@ fn observe_devin_inventory(data_root: &Path, path: &Path) -> DevinResult<DevinPh
         Ok(OpenedProviderSourcePath::Directory(_)) => Err(
             crate::sqlite_common::invalid_database_leaf(&path, &DEVIN_SOURCE_PATH_REASONS).into(),
         ),
-        Err(ctx_history_source_io::SourceIoError::Io(error))
-            if error.kind() == io::ErrorKind::NotFound =>
-        {
+        Err(error) if error.is_not_found() => {
             directory.revalidate()?;
             root.revalidate()?;
             Ok(DevinPhysicalInventory::Missing(DevinMissingLeafFence {
@@ -362,8 +359,7 @@ impl DevinMissingLeafFence {
         }
         let missing = matches!(
             self.directory.open_child(&self.leaf),
-            Err(ctx_history_source_io::SourceIoError::Io(error))
-                if error.kind() == io::ErrorKind::NotFound
+            Err(error) if error.is_not_found()
         );
         missing && self.directory.revalidate().is_ok() && self.root.revalidate().is_ok()
     }

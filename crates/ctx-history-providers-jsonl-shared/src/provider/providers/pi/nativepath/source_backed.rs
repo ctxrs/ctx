@@ -32,8 +32,9 @@ use crate::{
     provider::source_backed::{
         family::jsonl::{
             JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
-            JsonlFileObservation, JsonlMutableFirstRecord, JsonlRecordRef,
+            JsonlFamilyMembershipObservation, JsonlFamilyProjectionMode, JsonlFamilyProjector,
+            JsonlFamilyWorkerContext, JsonlFileObservation, JsonlMutableFirstRecord,
+            JsonlRecordRef,
         },
         FallbackEventIdentityState,
     },
@@ -176,6 +177,14 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
         discovery::discover(self, root)
+    }
+
+    fn observe_terminal_membership(
+        &self,
+        root: &Path,
+        opening: &JsonlFamilyInventory,
+    ) -> Result<JsonlFamilyMembershipObservation<CaptureError>> {
+        discovery::observe_terminal_membership(root, opening)
     }
 
     fn projector(

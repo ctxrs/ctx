@@ -333,9 +333,7 @@ impl RetainedWarpDirectory {
                     "Warp SQLite leaf is a directory",
                 ));
             }
-            Err(ctx_history_source_io::SourceIoError::Io(error))
-                if error.kind() == io::ErrorKind::NotFound =>
-            {
+            Err(error) if error.is_not_found() => {
                 self.revalidate()?;
                 return Ok(None);
             }

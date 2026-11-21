@@ -509,13 +509,21 @@ fn revalidate_missing_database(
 ) -> OpenCodeSourceBackedResult<()> {
     let directory = source_root.directory()?;
     match directory.open_child(database_leaf) {
-        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if capture_error_is_not_found(&error) => {}
         Err(error) => return Err(error.into()),
         Ok(_) => return Err(CaptureError::SourceChangedDuringCapture.into()),
     }
     directory.revalidate()?;
     source_root.revalidate()?;
     Ok(())
+}
+
+fn capture_error_is_not_found(error: &CaptureError) -> bool {
+    matches!(
+        error,
+        CaptureError::Io(io_error) | CaptureError::SystemIo { source: io_error, .. }
+            if io_error.kind() == std::io::ErrorKind::NotFound
+    )
 }
 
 fn install_terminal_fence(
@@ -546,9 +554,7 @@ fn retained_terminal_fence(
 
 fn source_missing(error: &OpenCodeSourceBackedError) -> bool {
     match error {
-        OpenCodeSourceBackedError::Capture(CaptureError::Io(error)) => {
-            error.kind() == std::io::ErrorKind::NotFound
-        }
+        OpenCodeSourceBackedError::Capture(error) => capture_error_is_not_found(error),
         OpenCodeSourceBackedError::SqliteSource(SqliteSourceAccessError::Io { source, .. }) => {
             source.kind() == std::io::ErrorKind::NotFound
         }
@@ -590,11 +596,9 @@ pub(super) fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRoute
         {
             SourceBackedRouteErrorKind::ResourceUnavailable
         }
-        OpenCodeSourceBackedError::Capture(CaptureError::Io(error))
-            if unavailable_io(error.kind()) =>
-        {
-            SourceBackedRouteErrorKind::Unavailable
-        }
+        OpenCodeSourceBackedError::Capture(
+            CaptureError::Io(error) | CaptureError::SystemIo { source: error, .. },
+        ) if unavailable_io(error.kind()) => SourceBackedRouteErrorKind::Unavailable,
         OpenCodeSourceBackedError::SqliteSource(SqliteSourceAccessError::Io { source, .. })
             if unavailable_io(source.kind()) =>
         {
@@ -628,4 +632,36 @@ fn unavailable_io(kind: std::io::ErrorKind) -> bool {
         kind,
         std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn windows_system_io_not_found_and_unavailable_are_classified() {
+        let sys_not_found = CaptureError::SystemIo {
+            operation: "provider source open",
+            source: io::Error::new(io::ErrorKind::NotFound, "missing on windows"),
+        };
+        assert!(capture_error_is_not_found(&sys_not_found));
+        let wrapped = OpenCodeSourceBackedError::Capture(sys_not_found);
+        assert!(source_missing(&wrapped));
+        assert_eq!(
+            route_error(wrapped).kind,
+            SourceBackedRouteErrorKind::Unavailable
+        );
+
+        let sys_denied = OpenCodeSourceBackedError::Capture(CaptureError::SystemIo {
+            operation: "provider source open",
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "denied on windows"),
+        });
+        assert!(!source_missing(&sys_denied));
+        assert_eq!(
+            route_error(sys_denied).kind,
+            SourceBackedRouteErrorKind::Unavailable
+        );
+    }
 }
