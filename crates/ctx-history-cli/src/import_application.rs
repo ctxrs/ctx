@@ -8,7 +8,7 @@ use ctx_history_ingest_application::{
     IngestRefreshPort, IngestReport, IngestRequest, RefreshSelection, SourceDiscoveryPort,
     SourceStats,
 };
-use ctx_history_refresh::ExplicitSourceCatalogUpsert;
+use ctx_history_refresh::{ExplicitInputFormat, ExplicitSourceCatalogUpsert};
 use ctx_terminal::Ui;
 
 use crate::{
@@ -27,7 +27,7 @@ pub trait ImportApplicationPort {
         data_root: &Path,
         path: &Path,
         provider: Option<CaptureProvider>,
-        custom_jsonl: bool,
+        input_format: Option<ExplicitInputFormat>,
     ) -> Result<ProviderSource>;
 
     fn prepare_plugin(
@@ -86,7 +86,10 @@ fn ingest_request(request: ImportRequest) -> IngestRequest {
     IngestRequest {
         path: request.path,
         provider: request.provider.map(HistoryProvider::capture_provider),
-        custom_jsonl: request.input_format.is_some(),
+        input_format: request.input_format.map(|format| match format {
+            crate::ImportFormat::CtxHistoryJsonlV2 => ExplicitInputFormat::CtxHistoryJsonlV2,
+            crate::ImportFormat::AtifV1 => ExplicitInputFormat::AtifV1,
+        }),
         history_source: request.history_source,
         history_source_manifests: request.history_source_manifests,
         all: request.all,
@@ -136,10 +139,10 @@ impl<P: ImportApplicationPort> CaptureAdmissionPort for HistoryImportHost<'_, P>
         data_root: &Path,
         path: &Path,
         provider: Option<CaptureProvider>,
-        custom_jsonl: bool,
+        input_format: Option<ExplicitInputFormat>,
     ) -> Result<ProviderSource> {
         self.port
-            .explicit_source(data_root, path, provider, custom_jsonl)
+            .explicit_source(data_root, path, provider, input_format)
     }
 
     fn prepare_plugin(

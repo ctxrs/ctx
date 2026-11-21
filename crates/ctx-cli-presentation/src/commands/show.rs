@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 
 use crate::analytics::ShowTelemetry;
 use crate::local_usage::CliUsage;
-use crate::output::OutputFormat;
+use crate::output::{OutputFormat, SessionOutputFormat};
 use crate::provider_args::ProviderArg;
 use crate::transcript::TranscriptMode;
 use crate::ui::Ui;
@@ -41,10 +41,19 @@ pub struct ShowSessionArgs {
     pub mode: TranscriptMode,
     #[arg(long, help = "Return at most this many selected transcript events")]
     pub max_events: Option<usize>,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-    pub format: OutputFormat,
+    #[arg(long, value_enum, default_value_t = SessionOutputFormat::Text)]
+    pub format: SessionOutputFormat,
     #[arg(long)]
     pub out: Option<PathBuf>,
+}
+
+impl ShowSessionArgs {
+    pub const fn effective_mode(&self) -> TranscriptMode {
+        match self.format {
+            SessionOutputFormat::Atif => TranscriptMode::Log,
+            _ => self.mode,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -96,7 +105,7 @@ pub fn run_show(
                     TranscriptMode::Log => ctx_history_cli::TranscriptMode::Log,
                 },
                 max_events: args.max_events,
-                format: history_output_format(args.format),
+                format: history_session_output_format(args.format),
                 out: args.out,
             })
         }
@@ -123,6 +132,18 @@ fn history_provider(provider: ProviderArg) -> ctx_history_cli::ProviderArg {
     ctx_history_cli::ProviderArg(ctx_history_cli::HistoryProvider::from(
         provider.capture_provider(),
     ))
+}
+
+fn history_session_output_format(
+    format: SessionOutputFormat,
+) -> ctx_history_cli::SessionOutputFormat {
+    match format {
+        SessionOutputFormat::Text => ctx_history_cli::SessionOutputFormat::Text,
+        SessionOutputFormat::Json => ctx_history_cli::SessionOutputFormat::Json,
+        SessionOutputFormat::Jsonl => ctx_history_cli::SessionOutputFormat::Jsonl,
+        SessionOutputFormat::Markdown => ctx_history_cli::SessionOutputFormat::Markdown,
+        SessionOutputFormat::Atif => ctx_history_cli::SessionOutputFormat::Atif,
+    }
 }
 
 fn history_output_format(format: OutputFormat) -> ctx_history_cli::OutputFormat {

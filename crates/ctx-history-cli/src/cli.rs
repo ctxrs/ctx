@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::provider_args::ProviderArg;
 use crate::{
     output::JsonOutputFormat, OutputFormat, RefreshMode, SearchBackend, SearchContentScope,
-    SearchRequest, TranscriptMode,
+    SearchRequest, SessionOutputFormat, TranscriptMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +70,7 @@ pub struct ShowSessionArgs {
     pub source_id: Option<String>,
     pub mode: TranscriptMode,
     pub max_events: Option<usize>,
-    pub format: OutputFormat,
+    pub format: SessionOutputFormat,
     pub out: Option<PathBuf>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]

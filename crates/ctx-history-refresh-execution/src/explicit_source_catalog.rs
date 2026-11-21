@@ -15,9 +15,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::provider_source_for_path;
 use ctx_history_capture::{
     automatic_source_backed_route_identity, explicit_source_catalog_lineage,
-    provider_source_for_path_with_data_root, register_custom_history_source_backed_route,
-    register_forgecode_explicit_source_backed_route, register_goose_source_backed_route,
-    register_hermes_explicit_source_backed_route,
+    provider_source_for_path_with_data_root, register_atif_source_backed_route,
+    register_custom_history_source_backed_route, register_forgecode_explicit_source_backed_route,
+    register_goose_source_backed_route, register_hermes_explicit_source_backed_route,
     register_landed_source_backed_route_with_data_root,
     register_landed_source_backed_route_with_data_root_and_lineage,
     register_lingma_source_backed_route, register_nanoclaw_source_backed_route_with_base_sources,
@@ -45,7 +45,7 @@ use crate::{
 };
 
 use route_coverage::*;
-use source_helpers::{custom_provider_source, goose_platform_root};
+use source_helpers::{atif_provider_source, custom_provider_source, goose_platform_root};
 use storage::{
     authority_for, decode_digest, encode_hex, sort_and_validate_entries, validate_approved_path,
 };
@@ -55,7 +55,14 @@ const CATALOG_MAX_ENTRIES: usize = 256;
 const CATALOG_MAX_PATH_BYTES: usize = 16 * 1024;
 const CATALOG_REQUEST_WIRE_MAX_BYTES: usize = 20 * 1024;
 const CUSTOM_SOURCE_FORMAT: &str = "ctx_history_jsonl_v2";
+const ATIF_SOURCE_FORMAT: &str = ctx_history_capture::atif::ATIF_SOURCE_FORMAT;
 const RETIRED_CUSTOM_V1_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExplicitInputFormat {
+    CtxHistoryJsonlV2,
+    AtifV1,
+}
 static RETIRED_CUSTOM_V1_ROUTE: SourceBackedProviderRouteMetadata =
     SourceBackedProviderRouteMetadata {
         provider: CaptureProvider::Custom,
@@ -355,6 +362,16 @@ pub fn explicit_source_for_path(
     provider: Option<CaptureProvider>,
     custom_history_jsonl: bool,
 ) -> Result<ProviderSource> {
+    let input_format = custom_history_jsonl.then_some(ExplicitInputFormat::CtxHistoryJsonlV2);
+    explicit_source_for_path_with_format(data_root, path, provider, input_format)
+}
+
+pub fn explicit_source_for_path_with_format(
+    data_root: &Path,
+    path: &Path,
+    provider: Option<CaptureProvider>,
+    input_format: Option<ExplicitInputFormat>,
+) -> Result<ProviderSource> {
     let metadata = explicit_source_path_symlink_metadata(path)
         .with_context(|| format!("approve explicit source path {}", path.display()))?;
     reject_symlinked_explicit_source_root(path, &metadata)?;
@@ -376,12 +393,14 @@ pub fn explicit_source_for_path(
     )
     .context("validate explicit provider root before bounded SQLite admission")?;
 
-    let source = if custom_history_jsonl {
-        custom_provider_source(approved, true)?
-    } else {
-        let provider = provider
-            .context("ctx import --path requires --provider for native provider history")?;
-        provider_source_for_path_with_data_root(provider, approved, data_root)
+    let source = match input_format {
+        Some(ExplicitInputFormat::CtxHistoryJsonlV2) => custom_provider_source(approved, true)?,
+        Some(ExplicitInputFormat::AtifV1) => atif_provider_source(approved, true)?,
+        None => {
+            let provider = provider
+                .context("ctx import --path requires --provider for native provider history")?;
+            provider_source_for_path_with_data_root(provider, approved, data_root)
+        }
     };
     let metadata = explicit_source_path_symlink_metadata(path)
         .with_context(|| format!("revalidate explicit source path {}", path.display()))?;
@@ -657,9 +676,12 @@ fn register_enabled_catalog_route(
     let format_route = route_metadata(source.provider, source.source_format)?;
     match format_route.constructor {
         SourceBackedRouteConstructor::CatalogLineage => match source.provider {
-            CaptureProvider::Custom => {
-                register_custom_history_source_backed_route(registry, source, lineage)?
-            }
+            CaptureProvider::Custom => match source.source_format {
+                ATIF_SOURCE_FORMAT => {
+                    register_atif_source_backed_route(registry, source, lineage)?
+                }
+                _ => register_custom_history_source_backed_route(registry, source, lineage)?,
+            },
             CaptureProvider::NanoClaw => {
                 register_nanoclaw_source_backed_route_with_base_sources(
                     registry,
@@ -888,7 +910,10 @@ fn source_from_catalog_entry(data_root: &Path, entry: &CatalogEntry) -> Result<P
         .with_context(|| format!("check catalog source path {}", entry.path.display()))?;
     reject_symlinked_explicit_source_root(&entry.path, &path_metadata)?;
     if provider == CaptureProvider::Custom {
-        return custom_provider_source(entry.path.clone(), true);
+        return match entry.source_format.as_str() {
+            ATIF_SOURCE_FORMAT => atif_provider_source(entry.path.clone(), true),
+            _ => custom_provider_source(entry.path.clone(), true),
+        };
     }
     let observed = provider_source_for_path_with_data_root(provider, entry.path.clone(), data_root);
     if observed.source_format != route_metadata.source_format {

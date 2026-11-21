@@ -1,7 +1,9 @@
 # Custom History Import Format
 
 `ctx-history-jsonl-v2` is the public JSONL format for importing session history
-from tools without a built-in local-history adapter.
+from tools without a built-in local-history adapter. For Harbor Agent Trajectory
+Interchange Format (ATIF v1.0 through v1.8) JSON files and directories, use
+`--input-format atif-v1` instead; see [`atif-format.md`](atif-format.md).
 
 This is a breaking contract. `ctx-history-jsonl-v1` is unsupported: ctx does
 not accept it as an input-format alias and does not translate v1 records. An

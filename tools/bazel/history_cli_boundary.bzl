@@ -13,6 +13,7 @@ _CARGO_WORKSPACE_BUILD_DATA = [
     "//crates/ctx-daemon-cli:BUILD.bazel",
     "//crates/ctx-daemon-runtime:BUILD.bazel",
     "//crates/ctx-daemon-service:BUILD.bazel",
+    "//crates/ctx-history-atif:BUILD.bazel",
     "//crates/ctx-history-capture-model:BUILD.bazel",
     "//crates/ctx-history-capture:BUILD.bazel",
     "//crates/ctx-history-provider-gemini:BUILD.bazel",

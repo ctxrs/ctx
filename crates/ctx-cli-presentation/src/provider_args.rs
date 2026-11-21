@@ -13,6 +13,17 @@ pub struct ProviderArg(CaptureProvider);
 pub enum ImportFormatArg {
     #[value(name = "ctx-history-jsonl-v2")]
     CtxHistoryJsonlV2,
+    #[value(name = "atif-v1")]
+    AtifV1,
+}
+
+impl ImportFormatArg {
+    pub const fn into_import_format(self) -> ctx_history_cli::ImportFormat {
+        match self {
+            Self::CtxHistoryJsonlV2 => ctx_history_cli::ImportFormat::CtxHistoryJsonlV2,
+            Self::AtifV1 => ctx_history_cli::ImportFormat::AtifV1,
+        }
+    }
 }
 
 impl NativeProviderArg {

@@ -1140,6 +1140,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ctx-attribution",
+ "ctx-history-atif",
  "ctx-history-core",
  "ctx-history-index",
  "ctx-history-platform",
@@ -1502,6 +1503,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctx-history-atif"
+version = "2.4.1"
+dependencies = [
+ "chrono",
+ "ctx-history-capture-model",
+ "ctx-history-capture-runtime",
+ "ctx-history-core",
+ "ctx-history-provider-runtime",
+ "ctx-history-source-io",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "ctx-history-capture"
 version = "2.4.1"
 dependencies = [
@@ -1520,6 +1539,7 @@ name = "ctx-history-capture-composition"
 version = "2.4.1"
 dependencies = [
  "chrono",
+ "ctx-history-atif",
  "ctx-history-capture-model",
  "ctx-history-capture-runtime",
  "ctx-history-core",

@@ -27,7 +27,7 @@ impl ImportApplicationPort for ImportHost {
         _: &Path,
         _: &Path,
         _: Option<CaptureProvider>,
-        _: bool,
+        _: Option<ctx_history_refresh::ExplicitInputFormat>,
     ) -> Result<ProviderSource> {
         panic!("plugin import must use plugin preparation")
     }

@@ -2,6 +2,7 @@
 
 RUST_FORMAT_TARGETS = [
     "//crates/ctx-history-archive:unit_tests",
+    "//crates/ctx-history-atif:unit_tests",
     "//crates/ctx-history-server:unit_tests",
     "//crates/ctx-history-sharing:unit_tests",
     "//crates/ctx-cli:hosted_history_tests",
@@ -30,6 +31,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-history-ingest-application:history_source_plugins_tests",
     "//crates/ctx-cli-contract-tests:hosted_uninstall_fence_tests",
     "//crates/ctx-history-ingest-application:import_change_reporting_tests",
+    "//crates/ctx-cli-qualification:atif_v18_tests",
     "//crates/ctx-cli-qualification:index_tests",
     "//crates/ctx-agent-application:integrations_mcp_tests",
     "//crates/ctx-agent-application:integrations_tests",

@@ -17,6 +17,7 @@ RELEASE_PACKAGE_AUDIT_PACKAGE_DATA = [
     "//crates/ctx-daemon-application:cargo_package_data",
     "//crates/ctx-daemon-runtime:cargo_package_data",
     "//crates/ctx-daemon-service:cargo_package_data",
+    "//crates/ctx-history-atif:cargo_package_data",
     "//crates/ctx-history-capture:cargo_package_data",
     "//crates/ctx-history-capture-composition:cargo_package_data",
     "//crates/ctx-history-capture-model:cargo_package_data",

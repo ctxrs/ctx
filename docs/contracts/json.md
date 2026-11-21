@@ -1603,3 +1603,15 @@ written archive. `conversations_truncated` and each conversation's
 and eight distinct workspace values per displayed conversation. A successful
 plan always has `selection_complete: true`; all selected conversations are exported
 regardless of presentation limits.
+
+## ATIF v1.8 export
+
+`ctx show session <ctx-session-id> --format atif` writes a validated Harbor
+ATIF v1.8 JSON trajectory document (`schema_version: "ATIF-v1.8"`, `agent`,
+sequential `steps`, optional `final_metrics`, and embedded
+`subagent_trajectories`) to stdout or `--out <file>`.
+
+`ctx archive atif --out <dir> --format json` writes validated `.atif.json`
+files into `<dir>` and returns `schema_version: 1`, `operation: "archive_atif"`,
+`atif_schema_version: "ATIF-v1.8"`, `generation_id`, `output_dir`,
+`sessions_exported`, `subagents_embedded`, `steps_exported`, and `files`.

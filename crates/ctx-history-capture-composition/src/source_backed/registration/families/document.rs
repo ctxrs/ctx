@@ -156,6 +156,28 @@ pub fn register_nanoclaw_source_backed_route_with_base_sources(
     )
 }
 
+/// Registers one caller-owned ATIF v1.0-v1.8 trajectory file or directory route.
+/// The path is only a resolver location; `catalog_lineage` remains the durable
+/// source identity.
+pub fn register_atif_source_backed_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    catalog_lineage: [u8; 32],
+) -> SourceBackedCoordinatorResult<()> {
+    let adapter = ctx_history_atif::AtifDocumentTreeAdapter::<CaptureProviderRuntime>::new(
+        source.path.clone(),
+        catalog_lineage,
+    )
+    .map_err(|error| invalid_route(source.provider, error.to_string()))?;
+    crate::provider::source_backed::family::document::register_replacement_document_tree_route_with_authority(
+        registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        SourceBackedSelectorAuthority::CatalogLineage,
+        adapter,
+    )
+}
+
 pub fn register_nanoclaw_source_backed_route_with_selection(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,

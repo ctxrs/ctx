@@ -21,13 +21,8 @@ impl std::fmt::Display for OutputFailure {
 impl std::error::Error for OutputFailure {}
 
 pub(super) fn operation(command: &HostedCommand) -> Option<super::HostedOperation> {
-    use super::HostedOperation as Operation;
     match command {
-        HostedCommand::Archive(args) => Some(
-            args.telemetry_operation()
-                .map(Operation::Existing)
-                .unwrap_or(Operation::ArchiveVerify),
-        ),
+        HostedCommand::Archive(args) => args.observed_operation(),
         HostedCommand::Server(args) => args.observed_operation(),
         HostedCommand::Remote(args) => Some(args.observed_operation()),
     }

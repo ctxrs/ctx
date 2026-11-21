@@ -41,6 +41,25 @@ pub struct ExportArgs {
     session: Vec<String>,
 }
 
+pub fn verify(archive: &Path) -> Result<(serde_json::Value, String)> {
+    let manifest = ctx_history_archive::verify(archive)?;
+    let text = format!(
+        "Verified {} sessions and {} records in {}",
+        manifest.members,
+        manifest.records,
+        archive.display()
+    );
+    Ok((
+        json!({
+            "schema_version": 1,
+            "operation": "archive_verify",
+            "archive": archive,
+            "manifest": manifest
+        }),
+        text,
+    ))
+}
+
 pub fn run(
     args: &ExportArgs,
     root: &Path,

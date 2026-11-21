@@ -6,16 +6,17 @@ use ctx_history_capture::{ProviderSource, SourceBackedRouteError, SourceBackedRo
 use ctx_history_core::CaptureProvider;
 
 pub(crate) use ctx_history_refresh::{
-    relocate_explicit_source, upsert_explicit_source, ExplicitSourceRelocationAuthority,
+    explicit_source_for_path_with_format, relocate_explicit_source, upsert_explicit_source,
+    ExplicitInputFormat, ExplicitSourceRelocationAuthority,
 };
 
 pub(crate) fn explicit_source_for_admission(
     data_root: &Path,
     path: &Path,
     provider: Option<CaptureProvider>,
-    custom_history_jsonl: bool,
+    input_format: Option<ExplicitInputFormat>,
 ) -> Result<ProviderSource> {
-    ctx_history_refresh::explicit_source_for_path(data_root, path, provider, custom_history_jsonl)
+    explicit_source_for_path_with_format(data_root, path, provider, input_format)
 }
 
 pub(crate) fn relocation_authority_for_import(

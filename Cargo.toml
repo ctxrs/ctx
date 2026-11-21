@@ -50,6 +50,7 @@ members = [
     "crates/ctx-history-providers-sqlite-logical",
     "crates/ctx-history-ingest-application",
     "crates/ctx-history-core",
+    "crates/ctx-history-atif",
     "crates/ctx-history-archive",
     "crates/ctx-history-server",
     "crates/ctx-history-sharing",

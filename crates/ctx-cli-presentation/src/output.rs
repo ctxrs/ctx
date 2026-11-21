@@ -15,6 +15,46 @@ pub enum OutputFormat {
     Jsonl,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SessionOutputFormat {
+    Text,
+    Markdown,
+    Json,
+    Jsonl,
+    Atif,
+}
+
+impl SessionOutputFormat {
+    pub const fn is_json(self) -> bool {
+        matches!(self, Self::Json | Self::Atif)
+    }
+
+    pub const fn is_machine_readable(self) -> bool {
+        !matches!(self, Self::Text)
+    }
+
+    /// The shared transcript format, or `None` for the local-only ATIF export.
+    pub const fn plain(self) -> Option<OutputFormat> {
+        match self {
+            Self::Text => Some(OutputFormat::Text),
+            Self::Markdown => Some(OutputFormat::Markdown),
+            Self::Json => Some(OutputFormat::Json),
+            Self::Jsonl => Some(OutputFormat::Jsonl),
+            Self::Atif => None,
+        }
+    }
+
+    pub const fn render_format(self) -> crate::analytics::RenderFormat {
+        match self {
+            Self::Text => crate::analytics::RenderFormat::Text,
+            Self::Markdown => crate::analytics::RenderFormat::Markdown,
+            Self::Json => crate::analytics::RenderFormat::Json,
+            Self::Jsonl => crate::analytics::RenderFormat::Jsonl,
+            Self::Atif => crate::analytics::RenderFormat::Atif,
+        }
+    }
+}
+
 impl From<OutputFormat> for ctx_terminal::OutputFormat {
     fn from(value: OutputFormat) -> Self {
         match value {

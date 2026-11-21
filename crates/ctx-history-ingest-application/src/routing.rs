@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use ctx_history_core::CaptureProvider;
-use ctx_history_refresh::{ExplicitSourceCatalogUpsert, RefreshSelection};
+use ctx_history_refresh::{ExplicitInputFormat, ExplicitSourceCatalogUpsert, RefreshSelection};
 use ctx_history_source_discovery::{
     validate_automatic_provider_source_roots_outside_data_root, DiscoveryIssueKind,
     DiscoveryReport, ProviderSource, ProviderSourceStatus,
@@ -33,7 +33,7 @@ pub trait CaptureAdmissionPort {
         data_root: &Path,
         path: &Path,
         provider: Option<CaptureProvider>,
-        custom_jsonl: bool,
+        input_format: Option<ExplicitInputFormat>,
     ) -> Result<ProviderSource>;
     fn prepare_plugin(
         &mut self,
@@ -93,7 +93,7 @@ pub fn automatic_source_preflight(
 pub struct IngestRequest {
     pub path: Option<PathBuf>,
     pub provider: Option<CaptureProvider>,
-    pub custom_jsonl: bool,
+    pub input_format: Option<ExplicitInputFormat>,
     pub history_source: Option<String>,
     pub history_source_manifests: Vec<PathBuf>,
     pub all: bool,
@@ -111,13 +111,13 @@ pub enum IngestRoute {
 }
 
 pub fn validate_ingest_request(request: &IngestRequest) -> Result<IngestRoute> {
-    if request.custom_jsonl && request.path.is_none() {
+    if request.input_format.is_some() && request.path.is_none() {
         return Err(anyhow!(
             "ctx import --input-format requires --path for a source-backed catalog entry"
         ));
     }
-    if request.path.is_some() && !request.custom_jsonl && request.provider.is_none() {
-        return Err(anyhow!("ctx import --path requires --provider for native provider history; use `ctx import --provider codex --path <path>` or `ctx import --input-format ctx-history-jsonl-v2 --path <file>"));
+    if request.path.is_some() && request.input_format.is_none() && request.provider.is_none() {
+        return Err(anyhow!("ctx import --path requires --provider for native provider history; use `ctx import --provider codex --path <path>`, `ctx import --input-format ctx-history-jsonl-v2 --path <file>`, or `ctx import --input-format atif-v1 --path <file-or-dir>`"));
     }
     if request.history_source.is_some() || !request.history_source_manifests.is_empty() {
         if request.all {
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn routing_rejects_format_without_path_before_any_port() {
         let request = IngestRequest {
-            custom_jsonl: true,
+            input_format: Some(ExplicitInputFormat::CtxHistoryJsonlV2),
             ..IngestRequest::default()
         };
         assert!(validate_ingest_request(&request).is_err());

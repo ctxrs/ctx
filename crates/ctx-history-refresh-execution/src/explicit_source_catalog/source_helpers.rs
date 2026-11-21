@@ -29,6 +29,46 @@ pub(super) fn custom_provider_source(path: PathBuf, exists: bool) -> Result<Prov
     })
 }
 
+pub(super) fn atif_provider_source(path: PathBuf, exists: bool) -> Result<ProviderSource> {
+    if exists {
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("inspect ATIF source {}", path.display()))?;
+        if !metadata.is_file() && !metadata.is_dir() {
+            bail!(
+                "ATIF source must be a regular JSON file or directory: {}",
+                path.display()
+            );
+        }
+        if metadata.is_file()
+            && !path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        {
+            bail!(
+                "ATIF source file must have a .json extension: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(ProviderSource {
+        provider: CaptureProvider::Custom,
+        path,
+        exists,
+        source_format: ATIF_SOURCE_FORMAT,
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Explicit,
+        catalog_support: ProviderCatalogSupport::None,
+        status: if exists {
+            ProviderSourceStatus::Available
+        } else {
+            ProviderSourceStatus::Missing
+        },
+        unsupported_reason: None,
+        route_provenance: Default::default(),
+    })
+}
+
 pub(super) fn goose_platform_root(database: &Path) -> Result<PathBuf> {
     let sessions = database.parent().ok_or_else(|| {
         anyhow!(

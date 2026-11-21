@@ -76,10 +76,11 @@ pub use provider_sources::{
     MAX_DISCOVERY_ISSUE_MESSAGE_BYTES,
 };
 pub use source_index::{
-    cli_snapshot_search, copied_lineage_summary, mcp_search_with_compact,
+    cli_snapshot_search, copied_lineage_summary, export_archive_atif, mcp_search_with_compact,
     mcp_show_event_application, mcp_show_session_application, normalize_mcp_search_request,
     render_snapshot_search, run_locate, run_search, run_show, validate_explicit_semantic_scope,
-    McpSearchError, McpSearchExecutionFailure, ShowApplicationError, SourceSearchRequest,
+    ArchiveAtifExportedFile, ArchiveAtifReceipt, ArchiveAtifRequest, McpSearchError,
+    McpSearchExecutionFailure, ShowApplicationError, SourceSearchRequest,
 };
 pub use sources::{run_sources, SourcesDiscoveryObservation, SourcesExecutionObservation};
 
@@ -100,8 +101,8 @@ pub use progress::{
 pub use request::{
     HistoryProvider, ImportFormat, ImportRequest, ListEventsContentProjection, ListEventsDirection,
     ListEventsRequest, ListEventsScope, ListRequest, LocateRequest, OutputFormat, ProgressMode,
-    RefreshMode, SearchBackend, SearchContentScope, SearchRequest, SetupRequest, ShowRequest,
-    SourceIndexRequest, SourcesRequest, TranscriptMode,
+    RefreshMode, SearchBackend, SearchContentScope, SearchRequest, SessionOutputFormat,
+    SetupRequest, ShowRequest, SourceIndexRequest, SourcesRequest, TranscriptMode,
 };
 pub use search_filters::parse_since_filter;
 pub use transcript::{shell_quote_arg, write_output, TranscriptOutput};

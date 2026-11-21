@@ -152,17 +152,21 @@ fn show_observed(
                 &client.connection().collection,
             )?;
             observed.facts.limit = args.max_events.map(|limit| limit as u64);
+            let format = args
+                .format
+                .plain()
+                .ok_or_else(|| anyhow::anyhow!("shared show supports text, json, or jsonl"))?;
             observed.stage = RemoteStage::Render;
             let mut cursor = None;
             let mut returned = 0_usize;
             let mut first = true;
             // Stream pages through the ordinary CLI instead of retaining a
             // whole transcript in memory. Every page rechecks server authority.
-            if args.format == OutputFormat::Json {
+            if format == OutputFormat::Json {
                 ui.write_stdout_bytes(
                     b"{\"schema_version\":1,\"scope\":\"shared\",\"mode\":\"log\",\"events\":[",
                 )?;
-            } else if args.format == OutputFormat::Text {
+            } else if format == OutputFormat::Text {
                 render::notice(
                     ui,
                     "Shared session log: all retained events, including tool activity.",
@@ -185,7 +189,7 @@ fn show_observed(
                     "remote history returned a non-advancing cursor"
                 );
                 for event in page.events {
-                    match args.format {
+                    match format {
                         OutputFormat::Json => {
                             if !first {
                                 ui.write_stdout_bytes(b",")?;
@@ -205,7 +209,7 @@ fn show_observed(
                     break;
                 }
             }
-            if args.format == OutputFormat::Json {
+            if format == OutputFormat::Json {
                 ui.write_stdout_bytes(b"],\"next_cursor\":")?;
                 ui.write_stdout_bytes(&serde_json::to_vec(&cursor)?)?;
                 ui.write_stdout_bytes(b"}\n")?;

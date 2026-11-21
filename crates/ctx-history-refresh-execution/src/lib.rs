@@ -71,9 +71,9 @@ pub use execution::{
 #[cfg(any(test, feature = "test-support"))]
 pub use explicit_source_catalog::explicit_source_catalog_authority_for_test;
 pub use explicit_source_catalog::{
-    explicit_source_for_path, relocate_explicit_source, upsert_explicit_source,
-    validate_explicit_relocation_source, ExplicitSourceCatalogAuthority,
-    ExplicitSourceCatalogRouteBinding, ExplicitSourceCatalogUpsert,
+    explicit_source_for_path, explicit_source_for_path_with_format, relocate_explicit_source,
+    upsert_explicit_source, validate_explicit_relocation_source, ExplicitInputFormat,
+    ExplicitSourceCatalogAuthority, ExplicitSourceCatalogRouteBinding, ExplicitSourceCatalogUpsert,
     ExplicitSourceRelocationAuthority,
 };
 use explicit_source_path::canonicalize_explicit_source_path;

@@ -57,6 +57,8 @@ source_paths=(
   crates/ctx-terminal/src
   crates/ctx-managed-pair-engine/src
   crates/ctx-upgrade-engine/src
+  crates/ctx-history-atif/Cargo.toml
+  crates/ctx-history-atif/src
   crates/ctx-history-capture/src
   crates/ctx-history-capture-composition/src
   crates/ctx-history-provider-gemini/src
@@ -115,7 +117,7 @@ check_file() {
   esac
 
   case "${policy_path}" in
-    crates/ctx-history-openclaw-schema/Cargo.toml|crates/ctx-history-provider-hermes/Cargo.toml|crates/ctx-history-provider-openclaw-sqlite/Cargo.toml|crates/ctx-history-providers-sqlite-inventory/Cargo.toml)
+    crates/ctx-history-atif/Cargo.toml|crates/ctx-history-openclaw-schema/Cargo.toml|crates/ctx-history-provider-hermes/Cargo.toml|crates/ctx-history-provider-openclaw-sqlite/Cargo.toml|crates/ctx-history-providers-sqlite-inventory/Cargo.toml)
       if ! LC_ALL=C grep -q -E '^[[:space:]]*version\.workspace[[:space:]]*=[[:space:]]*true[[:space:]]*$' "${path}" \
         || LC_ALL=C grep -q -E '^[[:space:]]*version[[:space:]]*=' "${path}"; then
         printf 'release product crate must inherit the workspace version: %s\n' "${path}" >&2

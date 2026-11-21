@@ -30,7 +30,7 @@ use crate::{
     provider_args::ProviderArg,
     transcript::TranscriptOutput,
     ui::{canonical_human_output_bytes, RenderContext, Ui},
-    TranscriptMode,
+    SessionOutputFormat, TranscriptMode,
 };
 
 use super::{
@@ -187,7 +187,8 @@ pub fn run_show(
         ShowTarget::Event(args) if args.format == OutputFormat::Json
     ) || matches!(
         &args.target,
-        ShowTarget::Session(args) if args.format == OutputFormat::Json
+        ShowTarget::Session(args)
+            if matches!(args.format, SessionOutputFormat::Json | SessionOutputFormat::Atif)
     );
     let result = run_show_inner(args, data_root, telemetry, local_usage, ui);
     render_show_error(result, json_output, ui)
@@ -274,9 +275,9 @@ fn run_show_inner(
             Ok(())
         }
         ShowTarget::Session(args) => {
-            let human_output = args.format == OutputFormat::Text && args.out.is_none();
-            let result = resolve_lookup_for_output(
-                stream_cli_session(
+            let human_output = args.format == SessionOutputFormat::Text && args.out.is_none();
+            let outcome = match args.format.as_standard() {
+                Some(format) => stream_cli_session(
                     &data_root,
                     args.id,
                     args.provider_session,
@@ -284,12 +285,25 @@ fn run_show_inner(
                     args.provider_key,
                     args.source_id,
                     args.mode,
-                    args.format,
+                    format,
                     args.max_events,
                     args.out,
                     ui,
-                )
-                .map_err(externalize_query_error),
+                ),
+                None => super::atif_export::export_cli_session_atif(
+                    &data_root,
+                    args.id,
+                    args.provider_session,
+                    args.provider.map(ProviderArg::capture_provider),
+                    args.provider_key,
+                    args.source_id,
+                    args.max_events,
+                    args.out,
+                    ui,
+                ),
+            };
+            let result = resolve_lookup_for_output(
+                outcome.map_err(externalize_query_error),
                 human_output,
                 r#"ctx search "<query>" --verbose"#,
                 ui,

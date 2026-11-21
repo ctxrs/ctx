@@ -152,6 +152,8 @@ pub(super) fn cli_show(args: &ShowArgs) -> Result<()> {
             );
             ensure!(args.max_events != Some(0), "--max-events must be positive");
             args.format
+                .plain()
+                .ok_or_else(|| anyhow::anyhow!("shared show supports text, json, or jsonl"))?
         }
         ShowTarget::Event(args) => {
             ensure!(args.before == 0 && args.after == 0 && args.window.is_none_or(|n| n == 0), "shared event show returns the exact cited event; open its session citation for surrounding events");

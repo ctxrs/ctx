@@ -50,6 +50,7 @@ WORKSPACE_RELEASE_PACKAGES = {
     "ctx-daemon-application",
     "ctx-daemon-runtime",
     "ctx-daemon-service",
+    "ctx-history-atif",
     "ctx-history-capture",
     "ctx-history-capture-composition",
     "ctx-history-capture-model",

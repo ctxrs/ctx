@@ -13,6 +13,7 @@ RUST_SRCS = glob(["src/**/*.rs"])
 PROD_SRCS = glob(["src/**/*.rs"], exclude = RUST_PROD_SRC_EXCLUDES)
 
 COMPOSITION_DEPS = [
+    "//crates/ctx-history-atif:lib",
     "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-capture-runtime:lib",
     "//crates/ctx-history-core:lib",
@@ -38,6 +39,7 @@ COMPOSITION_DEPS = [
 ]
 
 COMPOSITION_TEST_DEPS = [
+    "//crates/ctx-history-atif:lib",
     "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-capture-runtime:lib",
     "//crates/ctx-history-core:lib",
