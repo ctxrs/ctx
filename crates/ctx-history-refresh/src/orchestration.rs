@@ -17,7 +17,19 @@ impl PublishedSourceBackedStatePort for RetainedPublishedState<'_> {
                 PublishedSourceBackedGeneration::RebuildRequired
             }
             PublishedGenerationOpen::Verified(index) => {
-                PublishedSourceBackedGeneration::Verified((*index).into_generation_snapshot())
+                let index_root = source_backed_index_root(data_root);
+                if ctx_history_index::active_generation_requires_rebuild(&index_root, &index)
+                    .with_context(|| {
+                        format!(
+                            "inspect reusable active Core generation {}",
+                            index_root.display()
+                        )
+                    })?
+                {
+                    PublishedSourceBackedGeneration::RebuildRequired
+                } else {
+                    PublishedSourceBackedGeneration::Verified((*index).into_generation_snapshot())
+                }
             }
         };
         let verified_generation = match &generation {

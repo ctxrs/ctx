@@ -488,6 +488,7 @@ impl GenerationWriterOpenOutcome {
 }
 
 mod writer_open;
+pub use writer_open::active_generation_requires_rebuild;
 
 impl GenerationWriter {
     /// Starts replacing every lexical document owned by `source`.

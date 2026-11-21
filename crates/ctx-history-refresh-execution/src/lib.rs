@@ -300,8 +300,17 @@ pub fn source_backed_watch_catalog(
         .context("validate provider roots before deriving source watch catalog")?;
     let index_root = source_backed_index_root(data_root);
     let retained_generation = match VerifiedIndex::open_pinned(&index_root) {
-        Ok(index) => Some(index.into_generation_snapshot()),
+        Ok(index) => {
+            if ctx_history_index::active_generation_requires_rebuild(&index_root, &index)? {
+                None
+            } else {
+                Some(index.into_generation_snapshot())
+            }
+        }
         Err(IndexError::MissingActiveGenerationPointer) => None,
+        Err(error) if ctx_history_index::generation_incompatibility_requires_rebuild(&error) => {
+            None
+        }
         Err(error) => return Err(error.into()),
     };
     let retained_provider_roots =

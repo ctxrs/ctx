@@ -175,9 +175,11 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
             );
             carried_unselected_route_ids
                 .retain(|route| !registry.provider_root_route_retirements.contains(route));
-            lifecycle.set_authorized_topology_route_retirements(
-                registry.provider_root_route_retirements.clone(),
-            )?;
+            if lifecycle.base_snapshot().is_some() {
+                lifecycle.set_authorized_topology_route_retirements(
+                    registry.provider_root_route_retirements.clone(),
+                )?;
+            }
         }
         if matches!(&plan.publication_scope, SourceBackedRefreshScope::Exact(_))
             && carried_unselected_route_ids.is_empty()
@@ -332,17 +334,19 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
             }
             successful_this_attempt.insert(route_identity.clone());
         }
-        for barrier in &registry.automatic_split_cohort_barriers {
-            if barrier.cohort.iter().any(|route| {
-                !successful_this_attempt.contains(route) || partial_routes.contains(route)
-            }) {
-                return Err(SourceBackedCoordinatorError::InvalidRoute {
-                    provider: CaptureProvider::Unknown,
-                    detail: format!(
-                        "automatic split cohort did not terminally succeed before retiring {}",
-                        barrier.predecessor.as_str()
-                    ),
-                });
+        if lifecycle.base_snapshot().is_some() {
+            for barrier in &registry.automatic_split_cohort_barriers {
+                if barrier.cohort.iter().any(|route| {
+                    !successful_this_attempt.contains(route) || partial_routes.contains(route)
+                }) {
+                    return Err(SourceBackedCoordinatorError::InvalidRoute {
+                        provider: CaptureProvider::Unknown,
+                        detail: format!(
+                            "automatic split cohort did not terminally succeed before retiring {}",
+                            barrier.predecessor.as_str()
+                        ),
+                    });
+                }
             }
         }
         if install_provider_roots {

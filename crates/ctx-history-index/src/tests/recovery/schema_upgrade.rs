@@ -583,3 +583,60 @@ fn rebuild_marker_retires_unleased_previous_directory_and_preserves_leased_previ
     drop(writer);
     drop(active_reader);
 }
+
+#[test]
+fn active_generation_requires_rebuild_classifies_schema_22_and_rebuild_marker() {
+    let schema_22_dir = tempdir().unwrap();
+    copy_fixture(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schema-22/index"),
+        schema_22_dir.path(),
+    );
+    let schema_22 = VerifiedIndex::open_pinned(schema_22_dir.path()).unwrap();
+    assert_eq!(schema_22.manifest().lexical_schema_version, 22);
+    assert!(active_generation_requires_rebuild(schema_22_dir.path(), &schema_22).unwrap());
+    drop(schema_22);
+
+    let current_dir = tempdir().unwrap();
+    let src = source("rebuild-classifier.jsonl");
+    let mut writer = GenerationWriter::open(current_dir.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(src.clone()).unwrap();
+    writer
+        .add_core_record(document(&src, 1, "clean schema 23 record"))
+        .unwrap();
+    writer.certify_source(certificate(&src, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let first = VerifiedIndex::open_pinned(current_dir.path()).unwrap();
+    assert!(!active_generation_requires_rebuild(current_dir.path(), &first).unwrap());
+
+    let pointer = load_active_generation_pointer(current_dir.path())
+        .unwrap()
+        .unwrap();
+    writer_support::mark_active_generation_for_rebuild(current_dir.path(), pointer.active())
+        .unwrap();
+    assert!(active_generation_requires_rebuild(current_dir.path(), &first).unwrap());
+    drop(first);
+
+    // Publishing a fresh generation clears the marker for the active generation;
+    // writing a stale marker for the previous generation must not mark the new active one.
+    let mut writer = GenerationWriter::open(current_dir.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    assert!(writer.base_manifest().is_none());
+    writer.begin_source(src.clone()).unwrap();
+    writer
+        .add_core_record(document(&src, 1, "rebuilt schema 23 record"))
+        .unwrap();
+    writer.certify_source(certificate(&src, 2, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    writer_support::mark_active_generation_for_rebuild(current_dir.path(), pointer.active())
+        .unwrap();
+    let second = VerifiedIndex::open_pinned(current_dir.path()).unwrap();
+    assert_ne!(second.generation_id(), pointer.active().generation_id());
+    assert!(!active_generation_requires_rebuild(current_dir.path(), &second).unwrap());
+}
