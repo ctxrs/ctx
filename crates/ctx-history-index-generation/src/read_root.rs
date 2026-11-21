@@ -257,6 +257,45 @@ pub(crate) fn has_active_read_root() -> bool {
     ACTIVE_READ_ROOTS.with(|roots| !roots.borrow().is_empty())
 }
 
+pub(crate) enum RegisteredPrivateRead {
+    Unregistered,
+    Rejected,
+    Bytes(Vec<u8>),
+}
+
+pub(crate) fn read_registered_private_file_bounded(
+    root: &Path,
+    relative: &Path,
+    max_bytes: usize,
+) -> io::Result<RegisteredPrivateRead> {
+    let Some(root) = registered_read_directory(root)? else {
+        return Ok(RegisteredPrivateRead::Unregistered);
+    };
+    let file = match root.open_file(relative) {
+        Ok(file) => file,
+        Err(_) => return Ok(RegisteredPrivateRead::Rejected),
+    };
+    let Ok(metadata) = file.metadata() else {
+        return Ok(RegisteredPrivateRead::Rejected);
+    };
+    if !metadata.is_file()
+        || metadata.len() > max_bytes as u64
+        || ctx_history_platform::platform_security::verify_private_file_handle(&file).is_err()
+    {
+        return Ok(RegisteredPrivateRead::Rejected);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    if file
+        .take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > max_bytes
+    {
+        return Ok(RegisteredPrivateRead::Rejected);
+    }
+    Ok(RegisteredPrivateRead::Bytes(bytes))
+}
+
 pub(crate) fn read_registered_file(root: &Path, relative: &Path) -> io::Result<Option<Vec<u8>>> {
     let Some(root) = registered_read_directory(root)? else {
         return Ok(None);

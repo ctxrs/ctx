@@ -115,7 +115,7 @@ impl VerifiedIndex {
 
     fn validate_source_event_source(&self, source: &SourceKey) -> Result<()> {
         let retained = self
-            .manifest
+            .load_manifest()?
             .sources
             .iter()
             .find(|candidate| candidate.observation().source() == source)

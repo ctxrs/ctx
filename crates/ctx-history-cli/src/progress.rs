@@ -130,7 +130,7 @@ impl<'a> ProgressReporter<'a> {
             index.session_count()?,
             index.event_type_count("message")?,
             index.event_type_count("tool_call")?,
-            index.manifest().certified_source_bytes,
+            index.certified_source_bytes(),
         );
         self.0.source_refresh(snapshot).map_err(anyhow::Error::new)
     }

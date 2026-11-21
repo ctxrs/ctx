@@ -81,13 +81,36 @@ fn production_merge_policy_bounds_repeated_tiny_appends_amortized() {
     );
     let index = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(index.document_count(), append_count as u64 + 1);
+    let (canonical_manifests, summary_sidecars) = manifest_dir_counts(temp.path());
     assert_eq!(
-        fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
-            .unwrap()
-            .count(),
-        3,
+        canonical_manifests, 3,
         "publication should retain bounded active/grace deltas plus their shared full anchor"
     );
+    assert_eq!(
+        summary_sidecars, 3,
+        "manifest summary sidecars should stay 1:1 with retained manifests"
+    );
+}
+
+fn manifest_dir_counts(root: &Path) -> (usize, usize) {
+    let mut canonical = 0;
+    let mut summaries = 0;
+    for entry in fs::read_dir(root.join(MANIFEST_DIRECTORY)).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        let name = name.to_str().unwrap();
+        if name.strip_suffix(".json").is_some_and(is_generation_id) {
+            canonical += 1;
+        } else if name
+            .strip_suffix(".summary.json")
+            .is_some_and(is_generation_id)
+        {
+            summaries += 1;
+        } else {
+            panic!("unexpected file in ctx-generations: {name}");
+        }
+    }
+    (canonical, summaries)
 }
 
 #[test]
@@ -347,12 +370,14 @@ fn postcommit_delete_recommit_cannot_replace_the_active_generation() {
         1,
         "writer restart must reclaim the rejected candidate generation"
     );
+    let (canonical_manifests, summary_sidecars) = manifest_dir_counts(temp.path());
     assert_eq!(
-        fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
-            .unwrap()
-            .count(),
-        1,
+        canonical_manifests, 1,
         "only the active manifest may remain"
+    );
+    assert_eq!(
+        summary_sidecars, 1,
+        "only the active manifest summary sidecar may remain"
     );
 }
 
@@ -467,12 +492,10 @@ fn production_merge_policy_bounds_repeated_substantial_replacements() {
             active_segments <= 2,
             "replacement reclamation exposed {active_segments} active segments"
         );
+        let (canonical_manifests, summary_sidecars) = manifest_dir_counts(temp.path());
         assert!(
-            fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
-                .unwrap()
-                .count()
-                <= 3,
-            "current/grace deltas and their shared full anchor must remain bounded"
+            canonical_manifests <= 3 && summary_sidecars <= 3,
+            "current/grace deltas, their shared full anchor, and summary sidecars must remain bounded"
         );
         assert!(
             fs::read_dir(temp.path().join(INDEX_GENERATIONS_DIRECTORY))

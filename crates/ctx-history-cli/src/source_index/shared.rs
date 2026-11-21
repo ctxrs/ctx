@@ -297,9 +297,9 @@ pub(super) fn open_index_with_retained_peer(data_root: &Path) -> Result<Verified
 fn open_index_with(data_root: &Path, retain_peer: bool) -> Result<VerifiedIndex> {
     let root = index_root(data_root);
     let index = match if retain_peer {
-        VerifiedIndex::open_pinned_with_retained_peer(&root)
+        VerifiedIndex::open_pinned_with_retained_peer_for_query(&root)
     } else {
-        VerifiedIndex::open_pinned(&root)
+        VerifiedIndex::open_pinned_for_query(&root)
     } {
         Ok(index) => index,
         Err(error @ IndexError::MissingActiveGenerationPointer) => {

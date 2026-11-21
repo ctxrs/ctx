@@ -189,7 +189,15 @@ fn windows_validation_failure_after_terminal_seal_keeps_predecessor() {
         let candidate_manifest = fs::read_dir(root.join(MANIFEST_DIRECTORY))
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .find(|path| path.is_file() && path != &baseline_manifest)
+            .find(|path| {
+                path.is_file()
+                    && path != &baseline_manifest
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(|name| name.strip_suffix(".json"))
+                        .is_some_and(is_generation_id)
+            })
             .expect("candidate manifest must be durable before pointer publication");
         let bytes = mismatched_same_size_bytes(&candidate_manifest);
         fs::write(&candidate_manifest, bytes).unwrap();

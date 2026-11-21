@@ -334,7 +334,7 @@ impl VerifiedIndex {
         if let Some(strict_budget) = strict_budget {
             super::execution::validate_core_event_page_budget(strict_budget)?;
         }
-        let source_token = self.event_range_source_token(selection);
+        let source_token = self.event_range_source_token(selection)?;
         if selection.filters.source_identity.is_some() && source_token.is_none() {
             if cursor.is_some() {
                 return Err(CoreEventRangeError::InvalidCursorCoordinate);
@@ -445,12 +445,18 @@ impl VerifiedIndex {
         Ok(())
     }
 
-    fn event_range_source_token(&self, selection: &CoreEventRangeSelection) -> Option<String> {
-        let expected = selection.filters.source_identity?;
-        self.manifest.sources.iter().find_map(|certified| {
+    fn event_range_source_token(
+        &self,
+        selection: &CoreEventRangeSelection,
+    ) -> CoreEventRangeResult<Option<String>> {
+        let Some(expected) = selection.filters.source_identity else {
+            return Ok(None);
+        };
+        let manifest = self.load_manifest().map_err(CoreEventRangeError::Index)?;
+        Ok(manifest.sources.iter().find_map(|certified| {
             let source = certified.observation().source();
             (source.identity().as_uuid() == expected).then(|| source_token(source))
-        })
+        }))
     }
 
     fn event_range_candidates(

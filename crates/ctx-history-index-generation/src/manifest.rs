@@ -11,17 +11,25 @@ use tantivy::directory::Lock;
 use uuid::Uuid;
 
 use ctx_history_platform::platform_security::{
-    ensure_private_directory, ensure_private_file, verify_private_file,
+    ensure_private_directory, ensure_private_file, verify_private_file, verify_private_file_handle,
 };
 
 use crate::retention::{
     ensure_generation_read_lease_coordinator, try_generation_id_reclaim_authority,
 };
 use crate::{
-    is_generation_id, manifest_path, sha256_hex, sync_directory, DurableMmapDirectory,
-    GenerationError, Result, ACTIVE_GENERATION_POINTER_FILE, GENERATION_WRITER_LOCK_FILE,
-    INDEX_GENERATIONS_DIRECTORY, MANIFEST_DIRECTORY,
+    is_generation_id, manifest_path, manifest_summary_path, sha256_hex, sync_directory,
+    DurableMmapDirectory, GenerationError, Result, ACTIVE_GENERATION_POINTER_FILE,
+    GENERATION_WRITER_LOCK_FILE, INDEX_GENERATIONS_DIRECTORY, MANIFEST_DIRECTORY,
 };
+
+const MAX_MANIFEST_SUMMARY_BYTES: usize = 16 * 1024;
+
+fn manifest_summary_generation_id(file_name: &str) -> Option<&str> {
+    file_name
+        .strip_suffix(".summary.json")
+        .filter(|generation_id| is_generation_id(generation_id))
+}
 
 /// Repairs legacy generation control files before any reader captures their
 /// immutable identities. The writer lock serializes this metadata-only repair
@@ -55,11 +63,11 @@ pub fn ensure_generation_control_files_private_with_writer_lock_held(root: &Path
     for entry in fs::read_dir(&manifest_directory)? {
         let entry = entry?;
         let file_name = entry.file_name();
-        let is_manifest = file_name
-            .to_str()
-            .and_then(|name| name.strip_suffix(".json"))
-            .is_some_and(is_generation_id);
-        if !is_manifest {
+        let is_manifest_control = file_name.to_str().is_some_and(|name| {
+            name.strip_suffix(".json").is_some_and(is_generation_id)
+                || manifest_summary_generation_id(name).is_some()
+        });
+        if !is_manifest_control {
             continue;
         }
         repaired |= repair_private_control_file(&entry.path())?;
@@ -180,6 +188,104 @@ pub fn write_manifest_bytes(root: &Path, generation_id: &str, bytes: &[u8]) -> R
     Ok(())
 }
 
+/// Loads the advisory summary sidecar bytes for one generation if present,
+/// owner-private, and bounded. Missing, symlinked, permissive, or oversized
+/// sidecars return `Ok(None)` so callers fall back to loading the authoritative
+/// manifest.
+pub fn load_manifest_summary_bytes(root: &Path, generation_id: &str) -> Result<Option<Vec<u8>>> {
+    if !is_generation_id(generation_id) {
+        return Err(GenerationError::InvalidGenerationId);
+    }
+    let relative_path = Path::new(MANIFEST_DIRECTORY).join(format!("{generation_id}.summary.json"));
+    let bytes = match crate::read_root::read_registered_private_file_bounded(
+        root,
+        &relative_path,
+        MAX_MANIFEST_SUMMARY_BYTES,
+    ) {
+        Ok(crate::read_root::RegisteredPrivateRead::Bytes(bytes)) => bytes,
+        Ok(crate::read_root::RegisteredPrivateRead::Rejected) | Err(_) => return Ok(None),
+        Ok(crate::read_root::RegisteredPrivateRead::Unregistered) => {
+            let path = root.join(&relative_path);
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(_) => return Ok(None),
+            };
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() > MAX_MANIFEST_SUMMARY_BYTES as u64
+                || verify_private_file(&path).is_err()
+            {
+                return Ok(None);
+            }
+            let Ok(file) = File::open(&path) else {
+                return Ok(None);
+            };
+            let Ok(file_metadata) = file.metadata() else {
+                return Ok(None);
+            };
+            if !file_metadata.is_file()
+                || file_metadata.len() > MAX_MANIFEST_SUMMARY_BYTES as u64
+                || verify_private_file_handle(&file).is_err()
+            {
+                return Ok(None);
+            }
+            let mut bytes = Vec::with_capacity(usize::try_from(file_metadata.len()).unwrap_or(0));
+            if file
+                .take((MAX_MANIFEST_SUMMARY_BYTES as u64).saturating_add(1))
+                .read_to_end(&mut bytes)
+                .is_err()
+            {
+                return Ok(None);
+            }
+            bytes
+        }
+    };
+    if bytes.len() > MAX_MANIFEST_SUMMARY_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+/// Durably publishes the advisory summary sidecar for one generation manifest
+/// with private permissions (0600) and atomic rename.
+pub fn write_manifest_summary_bytes(root: &Path, generation_id: &str, bytes: &[u8]) -> Result<()> {
+    if !is_generation_id(generation_id) {
+        return Err(GenerationError::InvalidGenerationId);
+    }
+    let directory = root.join(MANIFEST_DIRECTORY);
+    ensure_private_directory(&directory)?;
+    let path = manifest_summary_path(root, generation_id);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            if fs::read(&path).is_ok_and(|existing| existing == bytes) {
+                ensure_private_file(&path)?;
+                File::open(&path)?.sync_all()?;
+                sync_directory(&directory)?;
+                return Ok(());
+            }
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            fs::remove_file(&path)?;
+            sync_directory(&directory)?;
+        }
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "generation manifest summary path is not a regular file",
+            )
+            .into());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let durable_directory =
+        DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
+    let relative_path = Path::new(MANIFEST_DIRECTORY).join(format!("{generation_id}.summary.json"));
+    durable_directory.atomic_write(&relative_path, bytes)?;
+    Ok(())
+}
+
 fn quarantine_manifest(directory: &Path, path: &Path, generation_id: &str) -> Result<()> {
     let quarantine = directory.join(format!(
         ".{generation_id}.corrupt-{}",
@@ -211,6 +317,7 @@ pub fn reclaim_unreferenced_manifests(
         let immutable_generation = file_name
             .strip_suffix(".json")
             .filter(|generation_id| is_generation_id(generation_id));
+        let summary_generation = manifest_summary_generation_id(file_name);
         let corrupt_quarantine = file_name
             .strip_prefix('.')
             .and_then(|name| name.split_once(".corrupt-"))
@@ -219,6 +326,7 @@ pub fn reclaim_unreferenced_manifests(
             });
         let obsolete_integrity_sidecar = is_legacy_generation_integrity_sidecar(file_name);
         let unretained_generation = immutable_generation
+            .or(summary_generation)
             .filter(|generation_id| !retained_generation_ids.contains(*generation_id));
         let should_remove =
             unretained_generation.is_some() || corrupt_quarantine || obsolete_integrity_sidecar;
@@ -441,5 +549,93 @@ mod tests {
         assert!(manifest_path(root.path(), &delta).is_file());
         assert!(manifest_path(root.path(), &base).is_file());
         assert!(!manifest_path(root.path(), &reclaimed).exists());
+    }
+
+    #[test]
+    fn summary_sidecar_roundtrip_repairs_permissions_and_reclaims_with_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let retained_bytes = b"retained-manifest";
+        let reclaimed_bytes = b"reclaimed-manifest";
+        let retained = sha256_hex(retained_bytes);
+        let reclaimed = sha256_hex(reclaimed_bytes);
+        write_manifest_bytes(root.path(), &retained, retained_bytes).unwrap();
+        write_manifest_bytes(root.path(), &reclaimed, reclaimed_bytes).unwrap();
+        let summary_bytes = br#"{"format":"ctx-manifest-summary-v1"}"#;
+        write_manifest_summary_bytes(root.path(), &retained, summary_bytes).unwrap();
+        write_manifest_summary_bytes(root.path(), &reclaimed, summary_bytes).unwrap();
+
+        assert_eq!(
+            load_manifest_summary_bytes(root.path(), &retained)
+                .unwrap()
+                .as_deref(),
+            Some(summary_bytes.as_slice())
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let summary_path = manifest_summary_path(root.path(), &retained);
+            fs::set_permissions(&summary_path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(
+                load_manifest_summary_bytes(root.path(), &retained).unwrap(),
+                None
+            );
+            let (_, repaired) = ensure_generation_control_state_private(root.path()).unwrap();
+            assert!(repaired);
+            assert_eq!(
+                fs::metadata(&summary_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                load_manifest_summary_bytes(root.path(), &retained)
+                    .unwrap()
+                    .as_deref(),
+                Some(summary_bytes.as_slice())
+            );
+        }
+
+        reclaim_unreferenced_manifests(root.path(), std::slice::from_ref(&retained)).unwrap();
+        assert!(manifest_summary_path(root.path(), &retained).is_file());
+        assert!(!manifest_summary_path(root.path(), &reclaimed).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn summary_sidecar_symlink_is_ignored_on_read_and_replaced_without_touching_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let root = tempfile::tempdir().unwrap();
+        let generation_id = "ab".repeat(32);
+        let directory = root.path().join(MANIFEST_DIRECTORY);
+        ensure_private_directory(&directory).unwrap();
+        let outside = root.path().join("outside-summary");
+        fs::write(&outside, b"keep-me").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
+        let summary_path = manifest_summary_path(root.path(), &generation_id);
+        symlink(&outside, &summary_path).unwrap();
+
+        assert_eq!(
+            load_manifest_summary_bytes(root.path(), &generation_id).unwrap(),
+            None
+        );
+
+        let replacement = br#"{"format":"ctx-manifest-summary-v1"}"#;
+        write_manifest_summary_bytes(root.path(), &generation_id, replacement).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"keep-me");
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            load_manifest_summary_bytes(root.path(), &generation_id)
+                .unwrap()
+                .as_deref(),
+            Some(replacement.as_slice())
+        );
+        assert_eq!(
+            fs::metadata(&summary_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

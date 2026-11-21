@@ -11,12 +11,20 @@ thread_local! {
 }
 
 pub fn open_verified_index(index_root: &Path) -> std::result::Result<VerifiedIndex, IndexError> {
-    open_verified_index_with_peer(index_root, false)
+    open_verified_index_with_options(index_root, false, false)
 }
 
 fn open_verified_index_with_peer(
     index_root: &Path,
     retain_peer: bool,
+) -> std::result::Result<VerifiedIndex, IndexError> {
+    open_verified_index_with_options(index_root, retain_peer, true)
+}
+
+fn open_verified_index_with_options(
+    index_root: &Path,
+    retain_peer: bool,
+    lazy_manifest: bool,
 ) -> std::result::Result<VerifiedIndex, IndexError> {
     #[cfg(any(test, feature = "test-support"))]
     VERIFIED_INDEX_OPEN_COUNT.with(|count| {
@@ -24,10 +32,11 @@ fn open_verified_index_with_peer(
             count.set(Some(current.saturating_add(1)));
         }
     });
-    if retain_peer {
-        VerifiedIndex::open_pinned_with_retained_peer(index_root)
-    } else {
-        VerifiedIndex::open_pinned(index_root)
+    match (retain_peer, lazy_manifest) {
+        (true, true) => VerifiedIndex::open_pinned_with_retained_peer_for_query(index_root),
+        (true, false) => VerifiedIndex::open_pinned_with_retained_peer(index_root),
+        (false, true) => VerifiedIndex::open_pinned_for_query(index_root),
+        (false, false) => VerifiedIndex::open_pinned(index_root),
     }
 }
 
@@ -60,9 +69,12 @@ fn open_retained_verified_index(
         }
     });
     if retain_peer {
-        VerifiedIndex::open_pinned_generation_with_retained_peer(index_root, generation_id)
+        VerifiedIndex::open_pinned_generation_with_retained_peer_for_query(
+            index_root,
+            generation_id,
+        )
     } else {
-        VerifiedIndex::open_pinned_generation(index_root, generation_id)
+        VerifiedIndex::open_pinned_generation_for_query(index_root, generation_id)
     }
 }
 

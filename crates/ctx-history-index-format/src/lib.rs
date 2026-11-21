@@ -77,10 +77,12 @@ pub use index_document::{
 };
 #[doc(hidden)]
 pub use manifest::{
-    canonical_commit_payload, clear_manifest_cache_for_root, load_publication_for_metas,
-    meta_generation, payload_generation_id, prepare_successor_manifest, reconcile_commit_error,
-    searcher_generation, write_manifest, write_prepared_manifest, LoadedPublication,
-    PreparedManifest,
+    canonical_commit_payload, clear_manifest_cache_for_root, ensure_manifest_summary,
+    load_materialized_manifest_for_generation, load_publication_for_metas,
+    load_publication_summary_for_metas, meta_generation, payload_generation_id,
+    prepare_successor_manifest, reconcile_commit_error, searcher_generation, write_manifest,
+    write_manifest_summary_for_generation, write_prepared_manifest, LoadedPublication,
+    LoadedPublicationSummary, ManifestSummary, PreparedManifest, MANIFEST_SUMMARY_FORMAT,
 };
 #[doc(hidden)]
 pub use record_digest::{accumulate_core_record, core_record_accumulator_leaf, core_record_leaf};
@@ -103,10 +105,10 @@ pub use verification::{
     load_active_publication_authority, open_pinned_publication, open_publication_candidate,
     verify_and_bind_publication_candidate, verify_and_bind_publication_candidate_with_progress,
     verify_and_bind_reusable_publication, verify_pinned_publication_authority,
-    verify_publication_candidate, verify_searcher_structure, ActivePublicationAuthority,
-    CandidatePublicationVerificationError, EmptyPublicationIndex, OpenedPinnedPublication,
-    OpenedPublicationCandidate, PinnedPublication, ReusablePublicationError,
-    VerifiedCandidatePublication, VerifiedPublication,
+    verify_publication_candidate, verify_searcher_document_count, verify_searcher_structure,
+    ActivePublicationAuthority, CandidatePublicationVerificationError, EmptyPublicationIndex,
+    OpenedPinnedPublication, OpenedPublicationCandidate, PinnedPublication,
+    ReusablePublicationError, VerifiedCandidatePublication, VerifiedPublication,
 };
 #[doc(hidden)]
 pub use verification_record::{

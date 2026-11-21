@@ -70,7 +70,7 @@ impl HistoryHealthReport {
 /// `certified_source_bytes` is deliberately called processed data here. It is
 /// not total discovery-inventory size and cannot establish excluded bytes.
 pub fn history_health_report(index: &VerifiedIndex) -> Result<HistoryHealthReport, IndexError> {
-    let manifest = index.manifest();
+    let manifest = index.load_manifest()?;
     let contributing_agent_histories = manifest
         .sources
         .iter()

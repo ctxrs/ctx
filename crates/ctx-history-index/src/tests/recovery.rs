@@ -288,11 +288,10 @@ fn terminal_activation_fence_rejects_candidate_manifest_replacement() {
             .map(|entry| entry.unwrap())
             .find(|entry| {
                 entry.file_type().unwrap().is_file()
-                    && entry.file_name().to_str() != Some(baseline_manifest.as_str())
-                    && entry
-                        .path()
-                        .extension()
-                        .is_some_and(|extension| extension == "json")
+                    && entry.file_name().to_str().is_some_and(|name| {
+                        name != baseline_manifest.as_str()
+                            && name.strip_suffix(".json").is_some_and(is_generation_id)
+                    })
             })
             .unwrap()
             .path();
