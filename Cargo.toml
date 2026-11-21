@@ -101,7 +101,7 @@ ignored-paths = [
 ]
 
 [workspace.package]
-version = "2.4.1"
+version = "2.5.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/ctxrs/ctx"
