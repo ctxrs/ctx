@@ -40,7 +40,7 @@ pub(super) fn fold_metadata_case(value: &str) -> String {
 }
 
 impl AsciiFoldSubstring {
-    fn new(needle: &str) -> Result<Self> {
+    pub(super) fn new(needle: &str) -> Result<Self> {
         let needle = fold_metadata_case(needle).into_bytes();
         let mut failure = Vec::with_capacity(needle.len());
         failure.push(0);

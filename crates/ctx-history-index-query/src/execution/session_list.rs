@@ -4,109 +4,16 @@ use ctx_history_index_format::SessionAuthorityKey;
 
 use super::*;
 
+mod collectors;
+use collectors::{
+    validate_session_list_fast_fields, EventDocAnchor, SessionActivityCollector,
+    SessionFastAggregate, SessionIdSetCollector,
+};
+
 const WORKSPACE_TERM_SET_THRESHOLD: usize = 1_024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EventDocAnchor {
-    occurred_at_unix_ms: Option<i64>,
-    event_sequence: u64,
-    event_id: Uuid,
-    address: DocAddress,
-}
-
-impl EventDocAnchor {
-    fn is_earlier_than(self, other: Self) -> bool {
-        (self.event_sequence, self.occurred_at_unix_ms, self.event_id)
-            < (
-                other.event_sequence,
-                other.occurred_at_unix_ms,
-                other.event_id,
-            )
-    }
-
-    fn is_later_than(self, other: Self) -> bool {
-        (self.occurred_at_unix_ms, self.event_sequence, self.event_id)
-            > (
-                other.occurred_at_unix_ms,
-                other.event_sequence,
-                other.event_id,
-            )
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SessionFastAggregate {
-    events: u64,
-    started_at_unix_ms: Option<i64>,
-    last_activity_at_unix_ms: Option<i64>,
-    max_event_sequence: u64,
-    first_event: EventDocAnchor,
-    last_event: EventDocAnchor,
-}
-
-impl SessionFastAggregate {
-    fn singleton(anchor: EventDocAnchor) -> Self {
-        Self {
-            events: 1,
-            started_at_unix_ms: anchor.occurred_at_unix_ms,
-            last_activity_at_unix_ms: anchor.occurred_at_unix_ms,
-            max_event_sequence: anchor.event_sequence,
-            first_event: anchor,
-            last_event: anchor,
-        }
-    }
-
-    fn record_event(&mut self, anchor: EventDocAnchor) -> std::result::Result<(), ()> {
-        self.events = self.events.checked_add(1).ok_or(())?;
-        self.started_at_unix_ms =
-            min_timestamp(self.started_at_unix_ms, anchor.occurred_at_unix_ms);
-        self.last_activity_at_unix_ms =
-            max_timestamp(self.last_activity_at_unix_ms, anchor.occurred_at_unix_ms);
-        self.max_event_sequence = self.max_event_sequence.max(anchor.event_sequence);
-        if anchor.is_earlier_than(self.first_event) {
-            self.first_event = anchor;
-        }
-        if anchor.is_later_than(self.last_event) {
-            self.last_event = anchor;
-        }
-        Ok(())
-    }
-
-    fn merge(&mut self, other: Self) -> std::result::Result<(), ()> {
-        self.events = self.events.checked_add(other.events).ok_or(())?;
-        self.started_at_unix_ms = min_timestamp(self.started_at_unix_ms, other.started_at_unix_ms);
-        self.last_activity_at_unix_ms = max_timestamp(
-            self.last_activity_at_unix_ms,
-            other.last_activity_at_unix_ms,
-        );
-        self.max_event_sequence = self.max_event_sequence.max(other.max_event_sequence);
-        if other.first_event.is_earlier_than(self.first_event) {
-            self.first_event = other.first_event;
-        }
-        if other.last_event.is_later_than(self.last_event) {
-            self.last_event = other.last_event;
-        }
-        Ok(())
-    }
-}
-
-fn min_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
-    match (left, right) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
-}
-
-fn max_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
-    match (left, right) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
-}
+const MISSING_CWD: u8 = 0b001;
+const MISSING_PROJECT: u8 = 0b010;
+const MISSING_BRANCH: u8 = 0b100;
 
 impl VerifiedIndex {
     /// Lists indexed sessions from this pinned verified generation, ordered
@@ -153,7 +60,7 @@ impl VerifiedIndex {
                 fields,
                 provider,
                 workspace,
-                excluded_subagents.clone(),
+                excluded_subagents.as_deref(),
             )?;
             if matches.is_empty() {
                 return Ok(SessionListPage {
@@ -178,7 +85,7 @@ impl VerifiedIndex {
             .search(
                 activity_query.as_ref(),
                 &SessionActivityCollector {
-                    allowed_sessions: workspace_matches.clone(),
+                    allowed_sessions: workspace_matches,
                     excluded_sessions: excluded_subagents,
                 },
             )
@@ -223,14 +130,32 @@ impl VerifiedIndex {
                     .ok_or(IndexError::InvalidStoredDocumentField("session_id"))?,
                 None => filtered_aggregate,
             };
-            let workspace_doc = workspace_matches
-                .as_ref()
-                .and_then(|matches| matches.get(&session_id))
-                .map(|anchor| anchor.address);
-            let partial =
-                self.hydrate_winning_session(session_id, aggregate, workspace_doc, fields)?;
+            let partial = self.hydrate_winning_session(session_id, aggregate, fields)?;
             coordinates.push((partial.session_id, partial.source_owner));
             hydrated.push(partial);
+        }
+
+        let incomplete: HashMap<Uuid, (u8, DocAddress, DocAddress)> = hydrated
+            .iter()
+            .filter_map(|partial| {
+                let mask = partial.facts.missing_fact_mask();
+                (mask != 0).then_some((
+                    partial.session_id.as_uuid(),
+                    (
+                        mask,
+                        partial.last_event_address,
+                        partial.first_event_address,
+                    ),
+                ))
+            })
+            .collect();
+        if !incomplete.is_empty() {
+            let missing_fact_docs = self.collect_missing_fact_docs(fields, &incomplete)?;
+            for partial in &mut hydrated {
+                if let Some(anchor) = missing_fact_docs.get(&partial.session_id.as_uuid()) {
+                    partial.merge_address(&self.searcher, anchor.address, fields)?;
+                }
+            }
         }
 
         let grouping_claims = self.session_grouping_claims(&coordinates)?;
@@ -245,9 +170,9 @@ impl VerifiedIndex {
                 provider_session_id: partial.provider_session_id,
                 parent_session_id: claims.parent_session_id.or(partial.parent_session_id),
                 root_session_id: claims.root_session_id.or(partial.root_session_id),
-                cwd: partial.cwd,
-                project: partial.project,
-                branch: partial.branch,
+                cwd: partial.facts.resolved_cwd(),
+                project: partial.facts.project,
+                branch: partial.facts.branch,
                 started_at_unix_ms: partial.started_at_unix_ms,
                 last_activity_at_unix_ms: partial.last_activity_at_unix_ms,
                 events: partial.events,
@@ -272,7 +197,16 @@ impl VerifiedIndex {
             let mut terms = inverted.terms().stream()?;
             while terms.advance() {
                 let key = SessionAuthorityKey::decode(terms.key())?;
-                if key.direct_claims()?.parent_session_id.is_none() {
+                let claims = key.direct_claims()?;
+                if claims.parent_session_id.is_none()
+                    || matches!(
+                        claims.relationship,
+                        Some(
+                            ProviderNativeSessionRelationship::Forked
+                                | ProviderNativeSessionRelationship::ResumedFrom
+                        )
+                    )
+                {
                     continue;
                 }
                 let mut postings = inverted
@@ -316,37 +250,212 @@ impl VerifiedIndex {
         fields: Fields,
         provider: Option<&str>,
         workspace: &str,
-        excluded_subagents: Option<Arc<HashSet<Uuid>>>,
+        excluded_subagents: Option<&HashSet<Uuid>>,
+    ) -> Result<HashSet<Uuid>> {
+        let needle = AsciiFoldSubstring::new(workspace)?;
+        let workspace_fields = [
+            fields.fact_workspace,
+            fields.fact_session_cwd,
+            fields.fact_tool_workdir,
+            fields.fact_project,
+        ];
+        let mut matched = HashSet::new();
+        for segment in self.searcher.segment_readers() {
+            let provider_bitmap = if let Some(provider) = provider {
+                let inverted = segment.inverted_index(fields.provider)?;
+                let term = Term::from_field_text(fields.provider, provider);
+                let Some(mut postings) = inverted.read_postings(&term, IndexRecordOption::Basic)?
+                else {
+                    continue;
+                };
+                let word_count = usize::try_from(segment.max_doc())
+                    .map_err(|_| IndexError::CountOverflow)?
+                    .div_ceil(u64::BITS as usize);
+                let mut bits = vec![0_u64; word_count];
+                let mut any = false;
+                let mut doc = postings.doc();
+                while doc != TERMINATED {
+                    if !segment.is_deleted(doc) {
+                        let idx = usize::try_from(doc).map_err(|_| IndexError::CountOverflow)?;
+                        bits[idx / 64] |= 1_u64 << (idx % 64);
+                        any = true;
+                    }
+                    doc = postings.advance();
+                }
+                if !any {
+                    continue;
+                }
+                Some(bits)
+            } else {
+                None
+            };
+
+            let fast = segment.fast_fields();
+            let session_high = fast.u64(SESSION_ID_HIGH_FIELD)?;
+            let session_low = fast.u64(SESSION_ID_LOW_FIELD)?;
+
+            for field in workspace_fields {
+                let inverted = segment.inverted_index(field)?;
+                let mut terms = inverted.terms().stream()?;
+                while terms.advance() {
+                    let key = terms.key();
+                    std::str::from_utf8(key)
+                        .map_err(|_| IndexError::InvalidStoredDocumentField("literal_fact"))?;
+                    if !needle.matches(key) {
+                        continue;
+                    }
+                    let mut postings = inverted
+                        .read_postings_from_terminfo(terms.value(), IndexRecordOption::Basic)?;
+                    let mut doc = postings.doc();
+                    while doc != TERMINATED {
+                        if !segment.is_deleted(doc)
+                            && provider_bitmap
+                                .as_deref()
+                                .is_none_or(|bits| doc_bit_is_set(bits, doc))
+                        {
+                            let (Some(high), Some(low)) =
+                                (session_high.first(doc), session_low.first(doc))
+                            else {
+                                return Err(IndexError::InvalidStoredDocumentField(
+                                    SESSION_ID_HIGH_FIELD,
+                                ));
+                            };
+                            let session_id =
+                                Uuid::from_u128((u128::from(high) << 64) | u128::from(low));
+                            if excluded_subagents
+                                .is_none_or(|excluded| !excluded.contains(&session_id))
+                            {
+                                matched.insert(session_id);
+                            }
+                        }
+                        doc = postings.advance();
+                    }
+                }
+            }
+        }
+        Ok(matched)
+    }
+
+    fn collect_missing_fact_docs(
+        &self,
+        fields: Fields,
+        incomplete: &HashMap<Uuid, (u8, DocAddress, DocAddress)>,
     ) -> Result<HashMap<Uuid, EventDocAnchor>> {
-        let workspace_query = literal_fact_union_contains_query(
-            [
-                fields.fact_workspace,
-                fields.fact_session_cwd,
-                fields.fact_tool_workdir,
-                fields.fact_project,
-            ],
-            "workspace",
-            workspace,
-        )?;
-        let query: Box<dyn Query> = match provider {
-            Some(provider) => Box::new(BooleanQuery::new(vec![
-                (
-                    Occur::Must,
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(fields.provider, provider),
-                        IndexRecordOption::Basic,
-                    )),
-                ),
-                (Occur::Must, workspace_query),
-            ])),
-            None => workspace_query,
-        };
-        Ok(self.searcher.search(
-            query.as_ref(),
-            &LatestSessionDocCollector {
-                excluded_sessions: excluded_subagents,
-            },
-        )?)
+        let mut best: HashMap<Uuid, (u8, EventDocAnchor)> = HashMap::new();
+        let fact_specs = [
+            (fields.fact_session_cwd, MISSING_CWD, 5_u8),
+            (fields.fact_workspace, MISSING_CWD, 4_u8),
+            (fields.fact_tool_workdir, MISSING_CWD, 3_u8),
+            (fields.fact_project, MISSING_PROJECT, 2_u8),
+            (fields.fact_branch, MISSING_BRANCH, 1_u8),
+        ];
+
+        for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
+            let segment_ord =
+                SegmentOrdinal::try_from(segment_ord).map_err(|_| IndexError::CountOverflow)?;
+            let session_inverted = segment.inverted_index(fields.session_id)?;
+            let mut candidates: Vec<(DocId, Uuid, u8)> = Vec::new();
+            let mut segment_missing_union = 0_u8;
+
+            for (&session_id, &(missing_mask, last_addr, first_addr)) in incomplete {
+                let term = Term::from_field_text(fields.session_id, &session_id.to_string());
+                let Some(mut postings) =
+                    session_inverted.read_postings(&term, IndexRecordOption::Basic)?
+                else {
+                    continue;
+                };
+                let mut doc = postings.doc();
+                while doc != TERMINATED {
+                    if !segment.is_deleted(doc) {
+                        let address = DocAddress::new(segment_ord, doc);
+                        if address != last_addr && address != first_addr {
+                            candidates.push((doc, session_id, missing_mask));
+                            segment_missing_union |= missing_mask;
+                        }
+                    }
+                    doc = postings.advance();
+                }
+            }
+            if candidates.is_empty() {
+                continue;
+            }
+            candidates.sort_unstable_by_key(|(doc_id, _, _)| *doc_id);
+
+            let fast = segment.fast_fields();
+            let event_high = fast.u64(EVENT_ID_HIGH_FIELD)?;
+            let event_low = fast.u64(EVENT_ID_LOW_FIELD)?;
+            let event_sequence = fast.u64(EVENT_SEQUENCE_FIELD)?;
+            let occurred_at_unix_ms = fast.i64(OCCURRED_AT_UNIX_MS_FIELD)?;
+
+            for (field, mask_bit, priority) in fact_specs {
+                if segment_missing_union & mask_bit == 0 {
+                    continue;
+                }
+                let field_candidates: Vec<(DocId, Uuid)> = candidates
+                    .iter()
+                    .filter_map(|&(doc_id, session_id, mask)| {
+                        ((mask & mask_bit) != 0).then_some((doc_id, session_id))
+                    })
+                    .collect();
+                if field_candidates.is_empty() {
+                    continue;
+                }
+                let max_field_doc = field_candidates
+                    .last()
+                    .map(|(doc_id, _)| *doc_id)
+                    .unwrap_or(0);
+                let inverted = segment.inverted_index(field)?;
+                let mut terms = inverted.terms().stream()?;
+                while terms.advance() {
+                    let mut postings = inverted
+                        .read_postings_from_terminfo(terms.value(), IndexRecordOption::Basic)?;
+                    let mut doc = postings.doc();
+                    for &(target_doc, session_id) in &field_candidates {
+                        if doc == TERMINATED || doc > max_field_doc {
+                            break;
+                        }
+                        if doc < target_doc {
+                            doc = postings.seek(target_doc);
+                        }
+                        if doc == target_doc {
+                            let (Some(high), Some(low), Some(sequence)) = (
+                                event_high.first(doc),
+                                event_low.first(doc),
+                                event_sequence.first(doc),
+                            ) else {
+                                return Err(IndexError::InvalidStoredDocumentField(
+                                    EVENT_ID_HIGH_FIELD,
+                                ));
+                            };
+                            let anchor = EventDocAnchor {
+                                occurred_at_unix_ms: occurred_at_unix_ms.first(doc),
+                                event_sequence: sequence,
+                                event_id: Uuid::from_u128(
+                                    (u128::from(high) << 64) | u128::from(low),
+                                ),
+                                address: DocAddress::new(segment_ord, doc),
+                            };
+                            best.entry(session_id)
+                                .and_modify(|(best_prio, best_anchor)| {
+                                    if priority > *best_prio
+                                        || (priority == *best_prio
+                                            && anchor.is_later_than(*best_anchor))
+                                    {
+                                        *best_prio = priority;
+                                        *best_anchor = anchor;
+                                    }
+                                })
+                                .or_insert((priority, anchor));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(best
+            .into_iter()
+            .map(|(session_id, (_, anchor))| (session_id, anchor))
+            .collect())
     }
 
     fn collect_whole_session_aggregates(
@@ -373,7 +482,6 @@ impl VerifiedIndex {
         &self,
         expected_session_id: Uuid,
         aggregate: SessionFastAggregate,
-        workspace_doc: Option<DocAddress>,
         fields: Fields,
     ) -> Result<HydratedSessionSummary> {
         let primary_record =
@@ -389,60 +497,33 @@ impl VerifiedIndex {
             .map_or((None, None), |(key, id)| {
                 (Some(key.to_owned()), Some(id.to_owned()))
             });
-        let mut provider_session_id = primary_record.provider_session_id.clone();
-        let mut parent_session_id = primary_record.parent_session_id;
-        let mut root_session_id = primary_record.root_session_id;
         let mut facts = ExtractedSessionFacts::default();
         facts.extract_from(&primary_record.core_record);
 
-        let mut extra_addresses = Vec::with_capacity(2);
-        if aggregate.first_event.address != aggregate.last_event.address {
-            extra_addresses.push(aggregate.first_event.address);
-        }
-        if let Some(workspace_address) = workspace_doc {
-            if workspace_address != aggregate.last_event.address
-                && workspace_address != aggregate.first_event.address
-            {
-                extra_addresses.push(workspace_address);
-            }
-        }
-
-        for address in extra_addresses {
-            if facts.is_complete() && provider_session_id.is_some() {
-                break;
-            }
-            let record = stored_core_event_record(&self.searcher, address, fields)?;
-            if record.session_id != stable_session_id {
-                return Err(IndexError::InvalidStoredDocumentField("session_id"));
-            }
-            if provider_session_id.is_none() {
-                provider_session_id = record.provider_session_id.clone();
-            }
-            if parent_session_id.is_none() {
-                parent_session_id = record.parent_session_id;
-            }
-            if root_session_id.is_none() {
-                root_session_id = record.root_session_id;
-            }
-            facts.extract_from(&record.core_record);
-        }
-
-        Ok(HydratedSessionSummary {
+        let mut summary = HydratedSessionSummary {
             session_id: stable_session_id,
             source_owner,
             provider: primary_record.provider.clone(),
             provider_key,
             source_id,
-            provider_session_id,
-            parent_session_id,
-            root_session_id,
-            cwd: facts.resolved_cwd(),
-            project: facts.project,
-            branch: facts.branch,
+            provider_session_id: primary_record.provider_session_id.clone(),
+            parent_session_id: primary_record.parent_session_id,
+            root_session_id: primary_record.root_session_id,
+            facts,
+            first_event_address: aggregate.first_event.address,
+            last_event_address: aggregate.last_event.address,
             started_at_unix_ms: aggregate.started_at_unix_ms,
             last_activity_at_unix_ms: aggregate.last_activity_at_unix_ms,
             events: aggregate.events,
-        })
+        };
+
+        if aggregate.first_event.address != aggregate.last_event.address
+            && !summary.is_metadata_complete()
+        {
+            summary.merge_address(&self.searcher, aggregate.first_event.address, fields)?;
+        }
+
+        Ok(summary)
     }
 }
 
@@ -455,12 +536,53 @@ struct HydratedSessionSummary {
     provider_session_id: Option<String>,
     parent_session_id: Option<StableEntityId>,
     root_session_id: Option<StableEntityId>,
-    cwd: Option<String>,
-    project: Option<String>,
-    branch: Option<String>,
+    facts: ExtractedSessionFacts,
+    first_event_address: DocAddress,
+    last_event_address: DocAddress,
     started_at_unix_ms: Option<i64>,
     last_activity_at_unix_ms: Option<i64>,
     events: u64,
+}
+
+impl HydratedSessionSummary {
+    fn is_metadata_complete(&self) -> bool {
+        let custom_source_complete =
+            self.provider != "custom" || (self.provider_key.is_some() && self.source_id.is_some());
+        self.facts.is_complete() && self.provider_session_id.is_some() && custom_source_complete
+    }
+
+    fn merge_address(
+        &mut self,
+        searcher: &tantivy::Searcher,
+        address: DocAddress,
+        fields: Fields,
+    ) -> Result<()> {
+        let record = stored_core_event_record(searcher, address, fields)?;
+        if record.session_id != self.session_id {
+            return Err(IndexError::InvalidStoredDocumentField("session_id"));
+        }
+        if self.provider_key.is_none() || self.source_id.is_none() {
+            if let Some((key, id)) = record.event.custom_source_identity() {
+                if self.provider_key.is_none() {
+                    self.provider_key = Some(key.to_owned());
+                }
+                if self.source_id.is_none() {
+                    self.source_id = Some(id.to_owned());
+                }
+            }
+        }
+        if self.provider_session_id.is_none() {
+            self.provider_session_id = record.provider_session_id.clone();
+        }
+        if self.parent_session_id.is_none() {
+            self.parent_session_id = record.parent_session_id;
+        }
+        if self.root_session_id.is_none() {
+            self.root_session_id = record.root_session_id;
+        }
+        self.facts.extract_from(&record.core_record);
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -475,6 +597,20 @@ struct ExtractedSessionFacts {
 impl ExtractedSessionFacts {
     fn is_complete(&self) -> bool {
         self.session_cwd.is_some() && self.project.is_some() && self.branch.is_some()
+    }
+
+    fn missing_fact_mask(&self) -> u8 {
+        let mut mask = 0;
+        if self.resolved_cwd().is_none() {
+            mask |= MISSING_CWD;
+        }
+        if self.project.is_none() {
+            mask |= MISSING_PROJECT;
+        }
+        if self.branch.is_none() {
+            mask |= MISSING_BRANCH;
+        }
+        mask
     }
 
     fn extract_from(&mut self, record: &CoreRecord) {
@@ -507,6 +643,14 @@ impl ExtractedSessionFacts {
     }
 }
 
+fn doc_bit_is_set(bits: &[u64], doc: DocId) -> bool {
+    let Ok(idx) = usize::try_from(doc) else {
+        return false;
+    };
+    bits.get(idx / 64)
+        .is_some_and(|word| (word & (1_u64 << (idx % 64))) != 0)
+}
+
 fn compare_ranked_sessions(
     left: &(Uuid, SessionFastAggregate),
     right: &(Uuid, SessionFastAggregate),
@@ -523,7 +667,7 @@ fn build_activity_query(
     fields: Fields,
     provider: Option<&str>,
     since_unix_ms: Option<i64>,
-    workspace_matches: Option<&HashMap<Uuid, EventDocAnchor>>,
+    workspace_matches: Option<&HashSet<Uuid>>,
 ) -> Box<dyn Query> {
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     if let Some(provider) = provider {
@@ -553,7 +697,7 @@ fn build_activity_query(
                 Occur::Must,
                 Box::new(TermSetQuery::new(
                     workspace_matches
-                        .keys()
+                        .iter()
                         .map(|session_id| {
                             Term::from_field_text(fields.session_id, &session_id.to_string())
                         })
@@ -566,375 +710,5 @@ fn build_activity_query(
         Box::new(AllQuery)
     } else {
         Box::new(BooleanQuery::new(clauses))
-    }
-}
-
-fn validate_session_list_fast_fields(searcher: &tantivy::Searcher) -> Result<()> {
-    for segment in searcher.segment_readers() {
-        let fast = segment.fast_fields();
-        fast.u64(SESSION_ID_HIGH_FIELD)?;
-        fast.u64(SESSION_ID_LOW_FIELD)?;
-        fast.u64(EVENT_ID_HIGH_FIELD)?;
-        fast.u64(EVENT_ID_LOW_FIELD)?;
-        fast.u64(EVENT_SEQUENCE_FIELD)?;
-        fast.i64(OCCURRED_AT_UNIX_MS_FIELD)?;
-    }
-    Ok(())
-}
-
-struct SessionIdSetCollector;
-
-struct SessionIdSetSegmentCollector {
-    high: tantivy::columnar::Column<u64>,
-    low: tantivy::columnar::Column<u64>,
-    session_ids: HashSet<Uuid>,
-    invalid: bool,
-}
-
-struct SessionIdSetSegmentFruit {
-    session_ids: HashSet<Uuid>,
-    invalid: bool,
-}
-
-impl Collector for SessionIdSetCollector {
-    type Fruit = HashSet<Uuid>;
-    type Child = SessionIdSetSegmentCollector;
-
-    fn for_segment(
-        &self,
-        _segment_local_id: SegmentOrdinal,
-        segment: &SegmentReader,
-    ) -> tantivy::Result<Self::Child> {
-        Ok(SessionIdSetSegmentCollector {
-            high: segment.fast_fields().u64(SESSION_ID_HIGH_FIELD)?,
-            low: segment.fast_fields().u64(SESSION_ID_LOW_FIELD)?,
-            session_ids: HashSet::new(),
-            invalid: false,
-        })
-    }
-
-    fn requires_scoring(&self) -> bool {
-        false
-    }
-
-    fn merge_fruits(
-        &self,
-        segment_fruits: Vec<SessionIdSetSegmentFruit>,
-    ) -> tantivy::Result<Self::Fruit> {
-        let mut merged = HashSet::new();
-        for fruit in segment_fruits {
-            if fruit.invalid {
-                return Err(tantivy::TantivyError::InvalidArgument(
-                    "session identity fast field is absent".to_owned(),
-                ));
-            }
-            merged.extend(fruit.session_ids);
-        }
-        Ok(merged)
-    }
-}
-
-impl SegmentCollector for SessionIdSetSegmentCollector {
-    type Fruit = SessionIdSetSegmentFruit;
-
-    fn collect(&mut self, doc: DocId, _score: Score) {
-        let (Some(high), Some(low)) = (self.high.first(doc), self.low.first(doc)) else {
-            self.invalid = true;
-            return;
-        };
-        self.session_ids
-            .insert(Uuid::from_u128((u128::from(high) << 64) | u128::from(low)));
-    }
-
-    fn harvest(self) -> Self::Fruit {
-        SessionIdSetSegmentFruit {
-            session_ids: self.session_ids,
-            invalid: self.invalid,
-        }
-    }
-}
-
-struct LatestSessionDocCollector {
-    excluded_sessions: Option<Arc<HashSet<Uuid>>>,
-}
-
-struct LatestSessionDocSegmentCollector {
-    segment_ord: SegmentOrdinal,
-    session_high: tantivy::columnar::Column<u64>,
-    session_low: tantivy::columnar::Column<u64>,
-    event_high: tantivy::columnar::Column<u64>,
-    event_low: tantivy::columnar::Column<u64>,
-    event_sequence: tantivy::columnar::Column<u64>,
-    occurred_at_unix_ms: tantivy::columnar::Column<i64>,
-    excluded_sessions: Option<Arc<HashSet<Uuid>>>,
-    latest: HashMap<Uuid, EventDocAnchor>,
-    invalid: bool,
-}
-
-struct LatestSessionDocSegmentFruit {
-    latest: HashMap<Uuid, EventDocAnchor>,
-    invalid: bool,
-}
-
-impl Collector for LatestSessionDocCollector {
-    type Fruit = HashMap<Uuid, EventDocAnchor>;
-    type Child = LatestSessionDocSegmentCollector;
-
-    fn for_segment(
-        &self,
-        segment_local_id: SegmentOrdinal,
-        segment: &SegmentReader,
-    ) -> tantivy::Result<Self::Child> {
-        let fast = segment.fast_fields();
-        Ok(LatestSessionDocSegmentCollector {
-            segment_ord: segment_local_id,
-            session_high: fast.u64(SESSION_ID_HIGH_FIELD)?,
-            session_low: fast.u64(SESSION_ID_LOW_FIELD)?,
-            event_high: fast.u64(EVENT_ID_HIGH_FIELD)?,
-            event_low: fast.u64(EVENT_ID_LOW_FIELD)?,
-            event_sequence: fast.u64(EVENT_SEQUENCE_FIELD)?,
-            occurred_at_unix_ms: fast.i64(OCCURRED_AT_UNIX_MS_FIELD)?,
-            excluded_sessions: self.excluded_sessions.clone(),
-            latest: HashMap::new(),
-            invalid: false,
-        })
-    }
-
-    fn requires_scoring(&self) -> bool {
-        false
-    }
-
-    fn merge_fruits(
-        &self,
-        segment_fruits: Vec<LatestSessionDocSegmentFruit>,
-    ) -> tantivy::Result<Self::Fruit> {
-        let mut merged: HashMap<Uuid, EventDocAnchor> = HashMap::new();
-        for fruit in segment_fruits {
-            if fruit.invalid {
-                return Err(tantivy::TantivyError::InvalidArgument(
-                    "session list fast field is absent".to_owned(),
-                ));
-            }
-            for (session_id, anchor) in fruit.latest {
-                merged
-                    .entry(session_id)
-                    .and_modify(|existing| {
-                        if anchor.is_later_than(*existing) {
-                            *existing = anchor;
-                        }
-                    })
-                    .or_insert(anchor);
-            }
-        }
-        Ok(merged)
-    }
-}
-
-impl SegmentCollector for LatestSessionDocSegmentCollector {
-    type Fruit = LatestSessionDocSegmentFruit;
-
-    fn collect(&mut self, doc: DocId, _score: Score) {
-        let (
-            Some(session_high),
-            Some(session_low),
-            Some(event_high),
-            Some(event_low),
-            Some(event_sequence),
-        ) = (
-            self.session_high.first(doc),
-            self.session_low.first(doc),
-            self.event_high.first(doc),
-            self.event_low.first(doc),
-            self.event_sequence.first(doc),
-        )
-        else {
-            self.invalid = true;
-            return;
-        };
-        let session_id =
-            Uuid::from_u128((u128::from(session_high) << 64) | u128::from(session_low));
-        if self
-            .excluded_sessions
-            .as_deref()
-            .is_some_and(|excluded| excluded.contains(&session_id))
-        {
-            return;
-        }
-        let anchor = EventDocAnchor {
-            occurred_at_unix_ms: self.occurred_at_unix_ms.first(doc),
-            event_sequence,
-            event_id: Uuid::from_u128((u128::from(event_high) << 64) | u128::from(event_low)),
-            address: DocAddress::new(self.segment_ord, doc),
-        };
-        self.latest
-            .entry(session_id)
-            .and_modify(|existing| {
-                if anchor.is_later_than(*existing) {
-                    *existing = anchor;
-                }
-            })
-            .or_insert(anchor);
-    }
-
-    fn harvest(self) -> Self::Fruit {
-        LatestSessionDocSegmentFruit {
-            latest: self.latest,
-            invalid: self.invalid,
-        }
-    }
-}
-
-struct SessionActivityCollector {
-    allowed_sessions: Option<Arc<HashMap<Uuid, EventDocAnchor>>>,
-    excluded_sessions: Option<Arc<HashSet<Uuid>>>,
-}
-
-struct SessionActivitySegmentCollector {
-    segment_ord: SegmentOrdinal,
-    session_high: tantivy::columnar::Column<u64>,
-    session_low: tantivy::columnar::Column<u64>,
-    event_high: tantivy::columnar::Column<u64>,
-    event_low: tantivy::columnar::Column<u64>,
-    event_sequence: tantivy::columnar::Column<u64>,
-    occurred_at_unix_ms: tantivy::columnar::Column<i64>,
-    allowed_sessions: Option<Arc<HashMap<Uuid, EventDocAnchor>>>,
-    excluded_sessions: Option<Arc<HashSet<Uuid>>>,
-    aggregates: HashMap<Uuid, SessionFastAggregate>,
-    invalid: bool,
-    overflowed: bool,
-}
-
-struct SessionActivitySegmentFruit {
-    aggregates: HashMap<Uuid, SessionFastAggregate>,
-    invalid: bool,
-    overflowed: bool,
-}
-
-impl Collector for SessionActivityCollector {
-    type Fruit = HashMap<Uuid, SessionFastAggregate>;
-    type Child = SessionActivitySegmentCollector;
-
-    fn for_segment(
-        &self,
-        segment_local_id: SegmentOrdinal,
-        segment: &SegmentReader,
-    ) -> tantivy::Result<Self::Child> {
-        let fast = segment.fast_fields();
-        Ok(SessionActivitySegmentCollector {
-            segment_ord: segment_local_id,
-            session_high: fast.u64(SESSION_ID_HIGH_FIELD)?,
-            session_low: fast.u64(SESSION_ID_LOW_FIELD)?,
-            event_high: fast.u64(EVENT_ID_HIGH_FIELD)?,
-            event_low: fast.u64(EVENT_ID_LOW_FIELD)?,
-            event_sequence: fast.u64(EVENT_SEQUENCE_FIELD)?,
-            occurred_at_unix_ms: fast.i64(OCCURRED_AT_UNIX_MS_FIELD)?,
-            allowed_sessions: self.allowed_sessions.clone(),
-            excluded_sessions: self.excluded_sessions.clone(),
-            aggregates: HashMap::new(),
-            invalid: false,
-            overflowed: false,
-        })
-    }
-
-    fn requires_scoring(&self) -> bool {
-        false
-    }
-
-    fn merge_fruits(
-        &self,
-        segment_fruits: Vec<SessionActivitySegmentFruit>,
-    ) -> tantivy::Result<Self::Fruit> {
-        let mut merged: HashMap<Uuid, SessionFastAggregate> = HashMap::new();
-        for fruit in segment_fruits {
-            if fruit.invalid {
-                return Err(tantivy::TantivyError::InvalidArgument(
-                    "session list fast field is absent".to_owned(),
-                ));
-            }
-            if fruit.overflowed {
-                return Err(tantivy::TantivyError::InvalidArgument(
-                    "session event count overflowed".to_owned(),
-                ));
-            }
-            for (session_id, aggregate) in fruit.aggregates {
-                match merged.entry(session_id) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(aggregate);
-                    }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        if entry.get_mut().merge(aggregate).is_err() {
-                            return Err(tantivy::TantivyError::InvalidArgument(
-                                "session event count overflowed".to_owned(),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(merged)
-    }
-}
-
-impl SegmentCollector for SessionActivitySegmentCollector {
-    type Fruit = SessionActivitySegmentFruit;
-
-    fn collect(&mut self, doc: DocId, _score: Score) {
-        let (
-            Some(session_high),
-            Some(session_low),
-            Some(event_high),
-            Some(event_low),
-            Some(event_sequence),
-        ) = (
-            self.session_high.first(doc),
-            self.session_low.first(doc),
-            self.event_high.first(doc),
-            self.event_low.first(doc),
-            self.event_sequence.first(doc),
-        )
-        else {
-            self.invalid = true;
-            return;
-        };
-        let session_id =
-            Uuid::from_u128((u128::from(session_high) << 64) | u128::from(session_low));
-        if self
-            .excluded_sessions
-            .as_deref()
-            .is_some_and(|excluded| excluded.contains(&session_id))
-        {
-            return;
-        }
-        if self
-            .allowed_sessions
-            .as_deref()
-            .is_some_and(|allowed| !allowed.contains_key(&session_id))
-        {
-            return;
-        }
-        let anchor = EventDocAnchor {
-            occurred_at_unix_ms: self.occurred_at_unix_ms.first(doc),
-            event_sequence,
-            event_id: Uuid::from_u128((u128::from(event_high) << 64) | u128::from(event_low)),
-            address: DocAddress::new(self.segment_ord, doc),
-        };
-        match self.aggregates.entry(session_id) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(SessionFastAggregate::singleton(anchor));
-            }
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                if entry.get_mut().record_event(anchor).is_err() {
-                    self.overflowed = true;
-                }
-            }
-        }
-    }
-
-    fn harvest(self) -> Self::Fruit {
-        SessionActivitySegmentFruit {
-            aggregates: self.aggregates,
-            invalid: self.invalid,
-            overflowed: self.overflowed,
-        }
     }
 }

@@ -553,7 +553,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "--workspace <WORKSPACE>",
                 "Filter by stored workspace",
                 "--since <SINCE>",
-                "Filter to recent history, as RFC3339 or a day window like 30d",
+                "Filter to recent history, as a relative window (e.g. 2h, 30d), date (YYYY-MM-DD)",
                 "--primary-only",
                 "Search only primary agent sessions",
                 "--content-scope <CONTENT_SCOPE>",

@@ -82,14 +82,24 @@ pub fn parse_since_filter_at(
 ) -> Result<chrono::DateTime<Utc>> {
     let trimmed = value.trim();
     if let Some(days) = trimmed.strip_suffix('d') {
-        let days: i64 = days
-            .parse()
-            .with_context(|| format!("invalid since day window: {value}"))?;
-        if days < 0 {
+        if days.is_empty() {
+            return Err(anyhow!(
+                "invalid since day window: {value}: expected non-negative integer digits before 'd'"
+            ));
+        }
+        if days.starts_with('-') {
             return Err(anyhow!(
                 "invalid since day window: {value}: value must be non-negative"
             ));
         }
+        if !days.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(anyhow!(
+                "invalid since day window: {value}: expected non-negative integer digits before 'd'"
+            ));
+        }
+        let days: i64 = days
+            .parse()
+            .with_context(|| format!("invalid since day window: {value}"))?;
         let duration = Duration::try_days(days)
             .ok_or_else(|| anyhow!("invalid since day window: {value}: value too large"))?;
         let since = now
@@ -98,14 +108,19 @@ pub fn parse_since_filter_at(
         return Ok(since);
     }
     if let Some((amount, unit)) = split_relative_since_window(trimmed) {
-        let amount: i64 = amount
-            .parse()
-            .with_context(|| format!("invalid since window: {value}"))?;
-        if amount < 0 {
+        if amount.starts_with('-') {
             return Err(anyhow!(
                 "invalid since window: {value}: value must be non-negative"
             ));
         }
+        if !amount.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(anyhow!(
+                "invalid since window: {value}: expected non-negative integer digits before '{unit}'"
+            ));
+        }
+        let amount: i64 = amount
+            .parse()
+            .with_context(|| format!("invalid since window: {value}"))?;
         let duration = match unit {
             's' => Duration::try_seconds(amount),
             'm' => Duration::try_minutes(amount),
@@ -118,6 +133,17 @@ pub fn parse_since_filter_at(
             .checked_sub_signed(duration)
             .ok_or_else(|| anyhow!("invalid since window: {value}: value too large"))?;
         return Ok(since);
+    }
+    if let Some(unit) = unsupported_relative_since_unit(trimmed) {
+        if matches!(unit, 'S' | 'M' | 'H' | 'D' | 'W') {
+            let lower = unit.to_ascii_lowercase();
+            return Err(anyhow!(
+                "invalid since window: {value}: duration units must be lowercase (use '{lower}' instead of '{unit}'; supported units: s, m, h, d, w)"
+            ));
+        }
+        return Err(anyhow!(
+            "invalid since window: {value}: unsupported duration unit '{unit}' (supported units: s, m, h, d, w)"
+        ));
     }
     if is_calendar_date(trimmed) {
         let date = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
@@ -139,6 +165,16 @@ fn split_relative_since_window(value: &str) -> Option<(&str, char)> {
     }
     let amount = value.strip_suffix(unit)?;
     (!amount.is_empty()).then_some((amount, unit))
+}
+
+fn unsupported_relative_since_unit(value: &str) -> Option<char> {
+    let unit = value.chars().next_back()?;
+    if !unit.is_ascii_alphabetic() {
+        return None;
+    }
+    let prefix = value.strip_suffix(unit)?;
+    let digits = prefix.strip_prefix(['+', '-']).unwrap_or(prefix);
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())).then_some(unit)
 }
 
 fn is_calendar_date(value: &str) -> bool {
@@ -201,17 +237,39 @@ mod tests {
             "",
             "-2h",
             "-1d",
+            "+2h",
+            "+1d",
+            "+30s",
             "500000000d",
             "999999999999999999h",
             "2026-02-30",
             "2026-13-01",
+            "d",
             "h",
             "1.5h",
+            "1.5d",
+            "2H",
+            "30D",
+            "5q",
         ] {
             assert!(
                 parse_since_filter_at(invalid, now).is_err(),
                 "expected error for {invalid:?}"
             );
         }
+
+        let upper_h = parse_since_filter_at("2H", now).unwrap_err().to_string();
+        assert!(upper_h.contains("lowercase"), "{upper_h}");
+        assert!(upper_h.contains("'h'"), "{upper_h}");
+
+        let upper_d = parse_since_filter_at("30D", now).unwrap_err().to_string();
+        assert!(upper_d.contains("lowercase"), "{upper_d}");
+        assert!(upper_d.contains("'d'"), "{upper_d}");
+
+        let unknown = parse_since_filter_at("5q", now).unwrap_err().to_string();
+        assert!(
+            unknown.contains("unsupported duration unit 'q'"),
+            "{unknown}"
+        );
     }
 }

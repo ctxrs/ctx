@@ -68,6 +68,28 @@ impl VerifiedIndex {
         u64::try_from(self.searcher.search(&query, &Count)?).map_err(|_| IndexError::CountOverflow)
     }
 
+    /// Returns whether this generation contains at least one live document with
+    /// the exact `source_format` term using only Tantivy inverted indexes.
+    pub fn has_source_format(&self, source_format: &str) -> Result<bool> {
+        let field = fields_from_schema(self.searcher.schema())?.source_format;
+        let term = Term::from_field_text(field, source_format);
+        for segment in self.searcher.segment_readers() {
+            let inverted = segment.inverted_index(field)?;
+            let Some(mut postings) = inverted.read_postings(&term, IndexRecordOption::Basic)?
+            else {
+                continue;
+            };
+            let mut doc_id = postings.doc();
+            while doc_id != TERMINATED {
+                if !segment.is_deleted(doc_id) {
+                    return Ok(true);
+                }
+                doc_id = postings.advance();
+            }
+        }
+        Ok(false)
+    }
+
     fn event_records_for_query(
         &self,
         query: &dyn Query,

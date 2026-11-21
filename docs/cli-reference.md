@@ -1066,7 +1066,9 @@ Filters:
 - `--provider codex|pi|claude|opencode|kilo|kiro-cli|crush|goose|antigravity|gemini|tabnine|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|auggie|junie|firebender|forgecode|deepagents|mistral-vibe|mux|rovodev|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|cline|roo|lingma|qoder|warp|codebuddy|devin|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
-- `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;
+- `--since <SINCE>`, as a relative window (`30s`, `15m`, `2h`, `30d`, `2w`),
+  calendar date (`YYYY-MM-DD`, UTC midnight), or RFC 3339 timestamp (for
+  example `2026-06-01T00:00:00Z` or `30d`);
 - `--event-type <event-type>`, one of `message`, `tool_call`, `tool_output`,
   `command_started`, `command_output`, `command_finished`, `file_touched`,
   `vcs_change`, `artifact`, `summary`, or `notice`;

@@ -51,7 +51,9 @@ pub enum SessionsApplicationError<GenerationError> {
 }
 
 pub struct SessionsApplicationResult {
-    generation: PinnedGenerationRead,
+    target: GenerationReadTarget,
+    generation_id: String,
+    retained_generation_id: Option<String>,
     pub page: SessionListPage,
     pub read_model: Value,
     pub compact_read_model: Option<Value>,
@@ -59,7 +61,11 @@ pub struct SessionsApplicationResult {
 
 impl SessionsApplicationResult {
     pub fn receipt(&self) -> GenerationReadReceipt<'_> {
-        self.generation.receipt()
+        GenerationReadReceipt {
+            target: &self.target,
+            generation_id: &self.generation_id,
+            retained_generation_id: self.retained_generation_id.as_deref(),
+        }
     }
 
     pub const fn page(&self) -> &SessionListPage {
@@ -90,6 +96,40 @@ pub fn validate_sessions_limit(limit: usize) -> Result<usize> {
     Ok(limit)
 }
 
+fn normalize_workspace_filter(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("workspace filter cannot be empty"));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(anyhow!(
+            "workspace filter cannot contain control characters"
+        ));
+    }
+    let normalized = if trimmed.chars().all(|ch| ch == '/' || ch == '\\') {
+        if trimmed.starts_with('\\') {
+            "\\"
+        } else {
+            "/"
+        }
+    } else {
+        let stripped = trimmed.trim_end_matches(['/', '\\']);
+        if stripped.len() == 2
+            && stripped.as_bytes()[0].is_ascii_alphabetic()
+            && stripped.as_bytes()[1] == b':'
+            && trimmed
+                .as_bytes()
+                .get(2)
+                .is_some_and(|byte| *byte == b'\\' || *byte == b'/')
+        {
+            &trimmed[..3]
+        } else {
+            stripped
+        }
+    };
+    Ok(normalized.to_owned())
+}
+
 pub fn prepare_session_list_filters(
     request: &SessionsRequest,
 ) -> Result<(SessionListFilters, usize)> {
@@ -100,16 +140,11 @@ pub fn prepare_session_list_filters(
         .map(parse_since_filter)
         .transpose()?
         .map(|since| since.timestamp_millis());
-    let workspace = match request.workspace.as_deref() {
-        Some(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return Err(anyhow!("workspace filter cannot be empty"));
-            }
-            Some(trimmed.to_owned())
-        }
-        None => None,
-    };
+    let workspace = request
+        .workspace
+        .as_deref()
+        .map(normalize_workspace_filter)
+        .transpose()?;
     let filters = SessionListFilters {
         since_unix_ms,
         provider: request.provider.map(|p| p.as_str().to_owned()),
@@ -131,7 +166,7 @@ pub fn execute_sessions<Generation: GenerationReadPort>(
     let (filters, limit) =
         prepare_session_list_filters(&request).map_err(SessionsApplicationError::Query)?;
     let retained_peer = if compact_projection {
-        RetainedPeerRead::IfAvailable
+        RetainedPeerRead::Deferred
     } else {
         RetainedPeerRead::Omit
     };
@@ -143,19 +178,47 @@ pub fn execute_sessions<Generation: GenerationReadPort>(
         },
     )
     .map_err(SessionsApplicationError::Generation)?;
+    let target = generation.receipt().target.clone();
+    let generation_id = generation.index().generation_id().to_owned();
     let page = PinnedHistoryQuery::new(generation.index(), generation.retained_peer())
         .sessions(&filters, limit)
         .map_err(SessionsApplicationError::Query)?;
     let read_model = sessions_read_model(&page, generation.archive_provenance());
-    let compact_read_model = compact_projection
-        .then(|| {
+    let (compact_read_model, retained_generation_id) = if !compact_projection {
+        (None, None)
+    } else if page.sessions.is_empty() {
+        (Some(read_model.clone()), None)
+    } else if generation.is_deferred_without_peer() {
+        let current =
+            crate::compact_presentation::prepare_deferred_current(generation.index(), &read_model)
+                .map_err(SessionsApplicationError::Projection)?;
+        let retained_peer = generation
+            .into_deferred_peer_for_projection()
+            .map_err(SessionsApplicationError::Projection)?;
+        let retained_id = retained_peer
+            .as_ref()
+            .map(|peer| peer.generation_id().to_owned());
+        let projected = crate::compact_presentation::project_deferred(
+            &read_model,
+            current,
+            retained_peer.as_ref(),
+        )
+        .map_err(SessionsApplicationError::Projection)?;
+        (Some(projected), retained_id)
+    } else {
+        let retained_id = generation
+            .retained_peer()
+            .map(|peer| peer.generation_id().to_owned());
+        let projected =
             CompactPresentationProjection::new(generation.index(), generation.retained_peer())
                 .project(&read_model)
-        })
-        .transpose()
-        .map_err(SessionsApplicationError::Projection)?;
+                .map_err(SessionsApplicationError::Projection)?;
+        (Some(projected), retained_id)
+    };
     Ok(SessionsApplicationResult {
-        generation,
+        target,
+        generation_id,
+        retained_generation_id,
         page,
         read_model,
         compact_read_model,
@@ -345,5 +408,91 @@ mod tests {
             ..SessionsRequest::default()
         })
         .is_err());
+    }
+
+    #[test]
+    fn prepare_session_list_filters_normalizes_workspace_trailing_slashes_and_rejects_controls() {
+        for (input, expected) in [
+            ("/work/app/", "/work/app"),
+            ("  /work/app///  ", "/work/app"),
+            ("/", "/"),
+            ("///", "/"),
+            (r"C:\work\app\", r"C:\work\app"),
+            (r"C:\", r"C:\"),
+            ("my-repo", "my-repo"),
+        ] {
+            let (filters, _) = prepare_session_list_filters(&SessionsRequest {
+                workspace: Some(input.to_owned()),
+                ..SessionsRequest::default()
+            })
+            .unwrap();
+            assert_eq!(
+                filters.workspace.as_deref(),
+                Some(expected),
+                "input={input:?}"
+            );
+        }
+
+        for invalid in ["foo\nbar", "foo\rbar", "foo\tbar", "foo\x1b[31mbar", "a\0b"] {
+            let err = prepare_session_list_filters(&SessionsRequest {
+                workspace: Some(invalid.to_owned()),
+                ..SessionsRequest::default()
+            })
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("control characters"),
+                "expected control-char error for {invalid:?}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn execute_sessions_uses_deferred_peer_and_skips_peer_open_when_empty() {
+        use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
+
+        let temp = tempfile::tempdir().unwrap();
+        let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        writer.commit(|_| true).unwrap();
+
+        let mut seen_retained_peer = None;
+        let mut port = |req: &GenerationReadRequest| -> anyhow::Result<crate::GenerationRead> {
+            seen_retained_peer = Some(req.retained_peer);
+            let index = VerifiedIndex::open_pinned_with_retained_peer(temp.path())?;
+            Ok(crate::GenerationRead::new(index, None))
+        };
+
+        let compact = execute_sessions(
+            SessionsApplicationRequest {
+                request: SessionsRequest::default(),
+                generation_target: GenerationReadTarget::Active,
+                compact_projection: true,
+            },
+            &mut port,
+        )
+        .unwrap();
+        assert_eq!(seen_retained_peer, Some(RetainedPeerRead::Deferred));
+        assert!(compact.page().sessions.is_empty());
+        assert!(compact.receipt().retained_generation_id.is_none());
+
+        let mut json_retained_peer = None;
+        let mut json_port = |req: &GenerationReadRequest| -> anyhow::Result<crate::GenerationRead> {
+            json_retained_peer = Some(req.retained_peer);
+            let index = VerifiedIndex::open_pinned(temp.path())?;
+            Ok(crate::GenerationRead::new(index, None))
+        };
+        let json_res = execute_sessions(
+            SessionsApplicationRequest {
+                request: SessionsRequest::default(),
+                generation_target: GenerationReadTarget::Active,
+                compact_projection: false,
+            },
+            &mut json_port,
+        )
+        .unwrap();
+        assert_eq!(json_retained_peer, Some(RetainedPeerRead::Omit));
+        assert!(json_res.compact_read_model.is_none());
     }
 }
