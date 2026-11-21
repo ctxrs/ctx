@@ -15,17 +15,22 @@ use ctx_history_capture::atif::{
 };
 use ctx_history_core::{
     AgentScope as CoreAgentScope, CaptureProvider, CoreRecord, ProviderNativeSessionRelationship,
+    MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use ctx_history_index::{
-    CoreEventRangeDirection, CoreEventRangeFilters, CoreEventRangeSelection, SessionRecord,
-    VerifiedIndex, DEFAULT_CORE_EVENT_PAGE_BUDGET,
+    CoreEventPageBudget, CoreEventRangeDirection, CoreEventRangeFilters, CoreEventRangeSelection,
+    SessionRecord, VerifiedIndex, DEFAULT_CORE_EVENT_PAGE_BUDGET,
+};
+use ctx_history_read_application::{
+    reference_needs_retained_peer, resolve_show_session_with_refs, CompactRefResolver,
+    GenerationReadRequest, GenerationReadTarget, RetainedPeerRead,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{transcript::TranscriptOutput, ui::Ui};
 
-use super::{shared::open_index, show::SessionStreamResult};
+use super::{open_generation_read, shared::externalize_query_error, show::SessionStreamResult};
 
 const EXPORT_PAGE_SIZE: usize = 128;
 
@@ -115,9 +120,25 @@ pub(super) fn export_cli_session_atif(
     if max_events == Some(0) {
         bail!("--max-events must be positive");
     }
-    let index = open_index(data_root)?;
-    let session = ctx_history_read_application::resolve_show_session(
-        &index,
+    let retained_peer = if selector
+        .as_deref()
+        .is_some_and(reference_needs_retained_peer)
+    {
+        RetainedPeerRead::IfAvailable
+    } else {
+        RetainedPeerRead::Omit
+    };
+    let generation = open_generation_read(
+        data_root,
+        &GenerationReadRequest {
+            target: GenerationReadTarget::Active,
+            retained_peer,
+        },
+    )?;
+    let index = generation.index();
+    let refs = CompactRefResolver::new(index, generation.retained_peer());
+    let session = resolve_show_session_with_refs(
+        &refs,
         selector.as_deref(),
         provider_session_id.as_deref(),
         provider,
@@ -126,8 +147,15 @@ pub(super) fn export_cli_session_atif(
     )?;
 
     let mut visited = HashSet::new();
-    let export_session =
-        load_export_session_tree(&index, &session, max_events, true, 0, &mut visited)?;
+    let mut remaining_events = max_events;
+    let export_session = load_export_session_tree(
+        index,
+        &session,
+        &mut remaining_events,
+        true,
+        0,
+        &mut visited,
+    )?;
     let total_records = count_session_records(&export_session);
     let trajectory = export_session_to_trajectory(
         &export_session,
@@ -183,26 +211,38 @@ pub fn export_archive_atif(
         filters,
     )?;
 
-    let index = open_index(data_root)?;
+    let retained_peer = if request
+        .sessions
+        .iter()
+        .any(|selector| reference_needs_retained_peer(selector))
+    {
+        RetainedPeerRead::IfAvailable
+    } else {
+        RetainedPeerRead::Omit
+    };
+    let generation = open_generation_read(
+        data_root,
+        &GenerationReadRequest {
+            target: GenerationReadTarget::Active,
+            retained_peer,
+        },
+    )?;
+    let index = generation.index();
+    let refs = CompactRefResolver::new(index, generation.retained_peer());
     let generation_id = index.generation_id().to_owned();
 
     let mut explicit_sessions: BTreeMap<Uuid, SessionRecord> = BTreeMap::new();
     for selector in &request.sessions {
-        let resolved = ctx_history_read_application::resolve_show_session(
-            &index,
-            Some(selector.as_str()),
-            None,
-            None,
-            None,
-            None,
-        )?;
+        let resolved =
+            resolve_show_session_with_refs(&refs, Some(selector.as_str()), None, None, None, None)
+                .map_err(externalize_query_error)?;
         explicit_sessions.insert(resolved.session_id.as_uuid(), resolved);
     }
 
     let selected_ids: BTreeSet<Uuid> = if explicit_sessions.is_empty() {
-        collect_matching_session_ids(&index, &selection)?
+        collect_matching_session_ids(index, &selection)?
     } else if has_range_filters {
-        let filtered_ids = collect_matching_session_ids(&index, &selection)?;
+        let filtered_ids = collect_matching_session_ids(index, &selection)?;
         explicit_sessions
             .keys()
             .copied()
@@ -225,19 +265,27 @@ pub fn export_archive_atif(
     }
 
     // When embedding subagents, avoid emitting duplicate standalone files for
-    // child sessions whose ancestor is already included in this export batch.
-    let mut roots: Vec<SessionRecord> = Vec::with_capacity(selected_records.len());
+    // child sessions whose ancestor is already included in this export batch
+    // along an acyclic chain within MAX_SUBAGENT_NESTING_DEPTH.
+    let mut roots: Vec<(usize, SessionRecord)> = Vec::with_capacity(selected_records.len());
     for session in selected_records.values() {
-        if request.include_subagents
-            && has_selected_embedding_ancestor(&index, session, &selected_records)?
-        {
-            continue;
+        if request.include_subagents {
+            let ancestor_depth = embedding_ancestor_depth(index, session, &selected_records)?;
+            if ancestor_depth.is_some_and(|depth| depth <= MAX_SUBAGENT_NESTING_DEPTH) {
+                continue;
+            }
+            roots.push((ancestor_depth.unwrap_or(0), session.clone()));
+        } else {
+            roots.push((0, session.clone()));
         }
-        roots.push(session.clone());
     }
-    roots.sort_by(|left, right| {
-        left.first_occurred_at_unix_ms
-            .cmp(&right.first_occurred_at_unix_ms)
+    roots.sort_by(|(left_depth, left), (right_depth, right)| {
+        left_depth
+            .cmp(right_depth)
+            .then_with(|| {
+                left.first_occurred_at_unix_ms
+                    .cmp(&right.first_occurred_at_unix_ms)
+            })
             .then_with(|| left.session_id.as_uuid().cmp(&right.session_id.as_uuid()))
     });
 
@@ -247,44 +295,76 @@ pub fn export_archive_atif(
     let mut files = Vec::with_capacity(roots.len());
     let mut subagents_embedded = 0_usize;
     let mut steps_exported = 0_usize;
+    let mut exported_session_ids: HashSet<Uuid> = HashSet::new();
+    let mut attempted_root_ids: HashSet<Uuid> = HashSet::new();
 
-    for root in roots {
-        let mut visited = HashSet::new();
-        let export_session = load_export_session_tree(
-            &index,
+    for (_, root) in roots {
+        let root_uuid = root.session_id.as_uuid();
+        if request.include_subagents && exported_session_ids.contains(&root_uuid) {
+            continue;
+        }
+        attempted_root_ids.insert(root_uuid);
+        let exported = export_archive_root(
+            index,
             &root,
-            None,
+            &request.out_dir,
             request.include_subagents,
-            0,
-            &mut visited,
+            &mut exported_session_ids,
         )?;
-        let trajectory = export_session_to_trajectory(
-            &export_session,
-            AtifExportOptions {
-                include_subagents: request.include_subagents,
-            },
-        )?;
-        let rendered = export_trajectory_json_pretty(&trajectory)?;
+        subagents_embedded = subagents_embedded.saturating_add(exported.subagents);
+        steps_exported = steps_exported.saturating_add(exported.steps);
+        files.push(exported);
+    }
 
-        let provider = parse_capture_provider(&root.provider);
-        let filename = safe_trajectory_filename(provider, root.session_id.as_uuid());
-        let dest_path = request.out_dir.join(&filename);
-        write_file_atomically(&dest_path, rendered.as_bytes())?;
-
-        let subagent_count = count_embedded_subagents(&trajectory);
-        let step_count = trajectory.steps.len();
-        subagents_embedded = subagents_embedded.saturating_add(subagent_count);
-        steps_exported = steps_exported.saturating_add(step_count);
-
-        files.push(ArchiveAtifExportedFile {
-            path: dest_path,
-            filename,
-            ctx_session_id: root.session_id.as_uuid().to_string(),
-            provider: root.provider,
-            provider_session_id: root.provider_session_id,
-            steps: step_count,
-            subagents: subagent_count,
-        });
+    // Fallback pass: guarantee zero selected sessions vanish silently even if
+    // an ancestor chain had cycles, exceeded MAX_SUBAGENT_NESTING_DEPTH, or
+    // failed to reach a descendant.
+    if request.include_subagents {
+        loop {
+            let remaining: BTreeSet<Uuid> = selected_records
+                .keys()
+                .copied()
+                .filter(|id| !exported_session_ids.contains(id) && !attempted_root_ids.contains(id))
+                .collect();
+            if remaining.is_empty() {
+                break;
+            }
+            let mut candidates: Vec<&SessionRecord> = remaining
+                .iter()
+                .filter_map(|id| selected_records.get(id))
+                .filter(|session| {
+                    session
+                        .parent_session_id
+                        .map(|parent| parent.as_uuid())
+                        .is_none_or(|parent_id| !remaining.contains(&parent_id))
+                })
+                .collect();
+            if candidates.is_empty() {
+                candidates = remaining
+                    .iter()
+                    .filter_map(|id| selected_records.get(id))
+                    .collect();
+            }
+            candidates.sort_by(|left, right| {
+                left.first_occurred_at_unix_ms
+                    .cmp(&right.first_occurred_at_unix_ms)
+                    .then_with(|| left.session_id.as_uuid().cmp(&right.session_id.as_uuid()))
+            });
+            let Some(fallback_root) = candidates.first().copied().cloned() else {
+                break;
+            };
+            attempted_root_ids.insert(fallback_root.session_id.as_uuid());
+            let exported = export_archive_root(
+                index,
+                &fallback_root,
+                &request.out_dir,
+                true,
+                &mut exported_session_ids,
+            )?;
+            subagents_embedded = subagents_embedded.saturating_add(exported.subagents);
+            steps_exported = steps_exported.saturating_add(exported.steps);
+            files.push(exported);
+        }
     }
 
     Ok(ArchiveAtifReceipt {
@@ -298,6 +378,61 @@ pub fn export_archive_atif(
         steps_exported,
         files,
     })
+}
+
+fn export_archive_root(
+    index: &VerifiedIndex,
+    root: &SessionRecord,
+    out_dir: &Path,
+    include_subagents: bool,
+    exported_session_ids: &mut HashSet<Uuid>,
+) -> Result<ArchiveAtifExportedFile> {
+    let mut visited = if include_subagents {
+        exported_session_ids.clone()
+    } else {
+        HashSet::new()
+    };
+    let mut remaining_events = None;
+    let export_session = load_export_session_tree(
+        index,
+        root,
+        &mut remaining_events,
+        include_subagents,
+        0,
+        &mut visited,
+    )?;
+    let trajectory =
+        export_session_to_trajectory(&export_session, AtifExportOptions { include_subagents })?;
+    let rendered = export_trajectory_json_pretty(&trajectory)?;
+
+    let provider = parse_capture_provider(&root.provider);
+    let filename = safe_trajectory_filename(provider, root.session_id.as_uuid());
+    let dest_path = out_dir.join(&filename);
+    write_file_atomically(&dest_path, rendered.as_bytes())?;
+
+    collect_exported_session_ids(&export_session, exported_session_ids);
+
+    let subagent_count = count_embedded_subagents(&trajectory);
+    let step_count = trajectory.steps.len();
+
+    Ok(ArchiveAtifExportedFile {
+        path: dest_path,
+        filename,
+        ctx_session_id: root.session_id.as_uuid().to_string(),
+        provider: root.provider.clone(),
+        provider_session_id: root.provider_session_id.clone(),
+        steps: step_count,
+        subagents: subagent_count,
+    })
+}
+
+fn collect_exported_session_ids(session: &AtifExportSession, out: &mut HashSet<Uuid>) {
+    if !session.records.is_empty() {
+        out.insert(session.ctx_session_id);
+    }
+    for child in &session.children {
+        collect_exported_session_ids(child, out);
+    }
 }
 
 fn is_embeddable_subagent(session: &SessionRecord) -> bool {
@@ -315,24 +450,27 @@ fn is_embeddable_subagent(session: &SessionRecord) -> bool {
     }
 }
 
-fn has_selected_embedding_ancestor(
+fn embedding_ancestor_depth(
     index: &VerifiedIndex,
     session: &SessionRecord,
     selected: &BTreeMap<Uuid, SessionRecord>,
-) -> Result<bool> {
+) -> Result<Option<usize>> {
     if !is_embeddable_subagent(session) {
-        return Ok(false);
+        return Ok(None);
     }
     let mut seen = HashSet::new();
     seen.insert(session.session_id.as_uuid());
     let mut current_parent = session.parent_session_id.map(|id| id.as_uuid());
     let mut hops = 0_usize;
+    let mut topmost_selected_hops: Option<usize> = None;
     while let Some(parent_id) = current_parent {
-        if hops >= MAX_SUBAGENT_NESTING_DEPTH || !seen.insert(parent_id) {
-            break;
+        if !seen.insert(parent_id) {
+            // Cyclic parent chain: never suppress members as embedded.
+            return Ok(None);
         }
+        hops = hops.saturating_add(1);
         if selected.contains_key(&parent_id) {
-            return Ok(true);
+            topmost_selected_hops = Some(hops);
         }
         let Some(parent_record) = index.session_by_id(parent_id)? else {
             break;
@@ -341,9 +479,18 @@ fn has_selected_embedding_ancestor(
             break;
         }
         current_parent = parent_record.parent_session_id.map(|id| id.as_uuid());
-        hops += 1;
     }
-    Ok(false)
+    Ok(topmost_selected_hops)
+}
+
+#[cfg(test)]
+pub(super) fn has_selected_embedding_ancestor(
+    index: &VerifiedIndex,
+    session: &SessionRecord,
+    selected: &BTreeMap<Uuid, SessionRecord>,
+) -> Result<bool> {
+    Ok(embedding_ancestor_depth(index, session, selected)?
+        .is_some_and(|depth| depth <= MAX_SUBAGENT_NESTING_DEPTH))
 }
 
 fn collect_matching_session_ids(
@@ -376,7 +523,7 @@ fn collect_matching_session_ids(
 fn load_export_session_tree(
     index: &VerifiedIndex,
     session: &SessionRecord,
-    max_events: Option<usize>,
+    remaining_events: &mut Option<usize>,
     include_subagents: bool,
     depth: usize,
     visited: &mut HashSet<Uuid>,
@@ -384,9 +531,24 @@ fn load_export_session_tree(
     let session_uuid = session.session_id.as_uuid();
     visited.insert(session_uuid);
 
-    let records = load_session_core_records(index, session_uuid, max_events)?;
+    if *remaining_events == Some(0) {
+        return Ok(AtifExportSession {
+            ctx_session_id: session_uuid,
+            provider: parse_capture_provider(&session.provider),
+            provider_session_id: session.provider_session_id.clone(),
+            source_format: session.source_format.clone(),
+            records: Vec::new(),
+            children: Vec::new(),
+        });
+    }
+
+    let records = load_session_core_records(index, session_uuid, *remaining_events)?;
+    if let Some(remaining) = remaining_events.as_mut() {
+        *remaining = remaining.saturating_sub(records.len());
+    }
+
     let mut children = Vec::new();
-    if include_subagents && depth < MAX_SUBAGENT_NESTING_DEPTH {
+    if include_subagents && depth < MAX_SUBAGENT_NESTING_DEPTH && *remaining_events != Some(0) {
         let child_ids = collect_direct_child_session_ids(index, session_uuid)?;
         let mut child_records = Vec::new();
         for child_id in child_ids {
@@ -405,11 +567,20 @@ fn load_export_session_tree(
                 .then_with(|| left.session_id.as_uuid().cmp(&right.session_id.as_uuid()))
         });
         for child_session in child_records {
+            if *remaining_events == Some(0) {
+                break;
+            }
             if visited.contains(&child_session.session_id.as_uuid()) {
                 continue;
             }
-            let child_tree =
-                load_export_session_tree(index, &child_session, None, true, depth + 1, visited)?;
+            let child_tree = load_export_session_tree(
+                index,
+                &child_session,
+                remaining_events,
+                true,
+                depth + 1,
+                visited,
+            )?;
             if !child_tree.records.is_empty() {
                 children.push(child_tree);
             }
@@ -431,19 +602,24 @@ fn load_session_core_records(
     session_id: Uuid,
     max_events: Option<usize>,
 ) -> Result<Vec<CoreRecord>> {
-    let selection = CoreEventRangeSelection::all(CoreEventRangeFilters {
-        session_id: Some(session_id),
-        direction: CoreEventRangeDirection::Ascending,
-        ..CoreEventRangeFilters::default()
-    })?;
+    if max_events == Some(0) {
+        return Ok(Vec::new());
+    }
+    let page_budget =
+        CoreEventPageBudget::new(MAX_ENCODED_CORE_RECORD_BYTES, MAX_CORE_CONTENT_BYTES);
     let mut records = Vec::new();
     let mut cursor = None;
     loop {
-        let page = index.core_event_range_page_with_budget(
-            &selection,
+        let page_limit = max_events.map_or(EXPORT_PAGE_SIZE, |limit| {
+            limit
+                .saturating_sub(records.len())
+                .clamp(1, EXPORT_PAGE_SIZE)
+        });
+        let page = index.core_session_event_page_with_budget(
+            session_id,
             cursor.as_ref(),
-            EXPORT_PAGE_SIZE,
-            DEFAULT_CORE_EVENT_PAGE_BUDGET,
+            page_limit,
+            page_budget,
         )?;
         for event in page.items {
             records.push(event.core_record);

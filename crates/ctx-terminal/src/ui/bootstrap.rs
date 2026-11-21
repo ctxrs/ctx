@@ -89,5 +89,8 @@ pub fn scan_machine_output_hint(arguments: &[OsString]) -> bool {
 }
 
 fn machine_format(value: &str) -> bool {
-    matches!(value, "json" | "jsonl" | "csv" | "raw" | "markdown")
+    matches!(
+        value,
+        "json" | "jsonl" | "csv" | "raw" | "markdown" | "atif"
+    )
 }

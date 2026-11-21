@@ -492,6 +492,34 @@ fn import_atif_directory_resolves_external_subagents_continuations_and_ignores_n
     );
     assert_eq!(embedded_receipt["subagents_embedded"], 1);
 
+    // Verify embedded export rewrote root.json's external trajectory_path ref in place
+    // instead of leaving a stale trajectory_path or appending a duplicate ObservationResult.
+    let embedded_root_file = embedded_receipt["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["subagents"] == 1)
+        .expect("root file with 1 embedded subagent");
+    let embedded_root_traj =
+        parse_atif_bytes(&fs::read(embedded_root_file["path"].as_str().unwrap()).unwrap())
+            .expect("embedded root ATIF valid");
+    let root_obs = embedded_root_traj.steps[0]
+        .observation
+        .as_ref()
+        .expect("root observation present");
+    assert_eq!(
+        root_obs.results.len(),
+        1,
+        "must update external ref in place instead of appending duplicate ObservationResult"
+    );
+    let root_refs = root_obs.results[0]
+        .subagent_trajectory_ref
+        .as_ref()
+        .expect("subagent_trajectory_ref present");
+    assert_eq!(root_refs.len(), 1);
+    assert_eq!(root_refs[0].trajectory_id.as_deref(), Some("ext-worker-1"));
+    assert_eq!(root_refs[0].trajectory_path, None);
+
     let archive_flat = temp.path().join("atif-dir-flat");
     let flat_receipt = json_output(ctx(&temp).args([
         "archive",
@@ -503,6 +531,123 @@ fn import_atif_directory_resolves_external_subagents_continuations_and_ignores_n
     ]));
     assert_eq!(flat_receipt["sessions_exported"], 3);
     assert_eq!(flat_receipt["subagents_embedded"], 0);
+
+    // Standalone worker export under --no-subagents populates inherited session_id.
+    let flat_worker_file = flat_receipt["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["provider_session_id"] == "ext-worker-1")
+        .expect("standalone worker file in flat export");
+    let flat_worker_traj =
+        parse_atif_bytes(&fs::read(flat_worker_file["path"].as_str().unwrap()).unwrap())
+            .expect("flat worker ATIF valid");
+    assert_eq!(flat_worker_traj.session_id.as_deref(), Some("dir-run-001"));
+}
+
+#[test]
+fn import_and_archive_atif_handles_cyclic_external_trajectory_paths_without_dropping_sessions() {
+    let temp = daemon_test_root();
+    let dir = temp.path().join("atif-cycle");
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("a.json"),
+        json!({
+            "schema_version": "ATIF-v1.8",
+            "session_id": "cycle-run-a",
+            "trajectory_id": "cycle-traj-a",
+            "agent": { "name": "cycle-agent-a", "version": "1.0.0" },
+            "steps": [
+                {
+                    "step_id": 1,
+                    "timestamp": "2026-06-24T15:00:00Z",
+                    "source": "agent",
+                    "message": "cyclic-external-alpha referencing b.json",
+                    "observation": {
+                        "results": [
+                            {
+                                "subagent_trajectory_ref": [
+                                    { "trajectory_path": "b.json" }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    fs::write(
+        dir.join("b.json"),
+        json!({
+            "schema_version": "ATIF-v1.8",
+            "session_id": "cycle-run-b",
+            "trajectory_id": "cycle-traj-b",
+            "agent": { "name": "cycle-agent-b", "version": "1.0.0" },
+            "steps": [
+                {
+                    "step_id": 1,
+                    "timestamp": "2026-06-24T15:00:05Z",
+                    "source": "agent",
+                    "message": "cyclic-external-beta referencing a.json",
+                    "observation": {
+                        "results": [
+                            {
+                                "subagent_trajectory_ref": [
+                                    { "trajectory_path": "a.json" }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let report = json_output(ctx(&temp).args([
+        "import",
+        "--input-format",
+        "atif-v1",
+        "--path",
+        dir.to_str().unwrap(),
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(report["totals"]["current_rejected_records"], 0);
+    wait_for_import_generation(&temp, &report);
+
+    for needle in ["cyclic-external-alpha", "cyclic-external-beta"] {
+        let search =
+            json_output(ctx(&temp).args(["search", needle, "--refresh", "off", "--format=json"]));
+        assert!(
+            !search["results"].as_array().unwrap().is_empty(),
+            "missing `{needle}`: {search:#}"
+        );
+        assert_eq!(
+            search["results"][0]["agent_scope"], "primary",
+            "cyclic files must not emit mutual Subagent links: {search:#}"
+        );
+    }
+
+    let archive_out = temp.path().join("atif-cycle-out");
+    let receipt = json_output(ctx(&temp).args([
+        "archive",
+        "atif",
+        "--out",
+        archive_out.to_str().unwrap(),
+        "--format=json",
+    ]));
+    assert_eq!(
+        receipt["sessions_exported"], 2,
+        "cyclic external trajectory files must both export instead of vanishing: {receipt:#}"
+    );
+    assert_eq!(receipt["subagents_embedded"], 0);
 }
 
 #[test]
@@ -779,12 +924,12 @@ fn cli_surface_rejects_show_event_atif_and_serves_embedded_atif_docs() {
     let temp = support::tempdir();
 
     let event_err = ctx(&temp)
+        .env("FORCE_COLOR", "1")
         .args([
             "show",
             "event",
             "00000000-0000-0000-0000-000000000000",
-            "--format",
-            "atif",
+            "--format=atif",
         ])
         .output()
         .unwrap();
@@ -792,7 +937,11 @@ fn cli_surface_rejects_show_event_atif_and_serves_embedded_atif_docs() {
     let stderr = String::from_utf8_lossy(&event_err.stderr);
     assert!(
         stderr.contains("invalid value 'atif'"),
-        "expected clap to reject --format atif on show event, got: {stderr}"
+        "expected clap to reject --format=atif on show event, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "expected pre-parse --format=atif Clap error to stay uncolored in machine mode, got: {stderr:?}"
     );
 
     let docs = json_output(ctx(&temp).args(["docs", "show", "atif-format", "--format=json"]));

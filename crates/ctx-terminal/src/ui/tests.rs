@@ -211,6 +211,16 @@ fn bootstrap_conservatively_recognizes_explicit_machine_output() {
     ])));
     assert!(scan_machine_output_hint(&args(&[
         "ctx",
+        "show",
+        "session",
+        "bad",
+        "--format=atif"
+    ])));
+    assert!(scan_machine_output_hint(&args(&[
+        "ctx", "show", "event", "bad", "--format", "atif"
+    ])));
+    assert!(scan_machine_output_hint(&args(&[
+        "ctx",
         "setup",
         "--progress",
         "json"
@@ -227,6 +237,12 @@ fn bootstrap_conservatively_recognizes_explicit_machine_output() {
         "search",
         "--",
         "--format=json"
+    ])));
+    assert!(!scan_machine_output_hint(&args(&[
+        "ctx",
+        "search",
+        "--",
+        "--format=atif"
     ])));
 }
 

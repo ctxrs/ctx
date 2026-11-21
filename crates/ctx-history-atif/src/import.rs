@@ -8,8 +8,7 @@ pub use projection::{
     StoredAtifEmptyMessageStep, StoredAtifEnvelope, StoredAtifRecord, StoredAtifRecordKind,
     StoredAtifTrajectoryHeader, ATIF_STORED_METADATA_VERSION,
 };
-#[cfg(test)]
-pub(crate) use source_backed::resolve_local_relative_path;
+pub(crate) use source_backed::{path_to_posix_key, resolve_local_relative_path};
 pub use source_backed::{
     AtifDocumentLeaf, AtifDocumentTreeAdapter, AtifTreeAuthority, ATIF_MAX_DIRECTORY_DEPTH,
     ATIF_MAX_DISCOVERED_FILES, ATIF_MAX_FILE_BYTES, ATIF_PARSER_REVISION,

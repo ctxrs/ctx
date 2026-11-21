@@ -565,6 +565,7 @@ where
             }
         }
     }
+    prune_cyclic_parent_edges(&mut parent_edges);
 
     sink.begin_source(source.clone())?;
     let mut emitted_event_ids = HashSet::new();
@@ -633,6 +634,42 @@ where
     })
 }
 
+fn prune_cyclic_parent_edges(edges: &mut BTreeMap<String, ExternalParentEdge>) {
+    let mut cycle_nodes: HashSet<String> = HashSet::new();
+    let mut visited_global: HashSet<String> = HashSet::new();
+
+    for start_key in edges.keys() {
+        if visited_global.contains(start_key) {
+            continue;
+        }
+        let mut path: Vec<String> = Vec::new();
+        let mut path_index: BTreeMap<String, usize> = BTreeMap::new();
+        let mut current = start_key.as_str();
+
+        while let Some(edge) = edges.get(current) {
+            if let Some(&cycle_start) = path_index.get(current) {
+                for node in &path[cycle_start..] {
+                    cycle_nodes.insert(node.clone());
+                }
+                break;
+            }
+            if visited_global.contains(current) {
+                break;
+            }
+            path_index.insert(current.to_owned(), path.len());
+            path.push(current.to_owned());
+            current = edge.parent_key.as_str();
+        }
+        for node in path {
+            visited_global.insert(node);
+        }
+    }
+
+    if !cycle_nodes.is_empty() {
+        edges.retain(|child_key, _| !cycle_nodes.contains(child_key));
+    }
+}
+
 fn resolve_lineage_link(
     key: &str,
     docs: &BTreeMap<String, LoadedAtifDocument>,
@@ -640,27 +677,34 @@ fn resolve_lineage_link(
 ) -> Option<AtifLineageLink> {
     let edge = edges.get(key)?;
     let parent_doc = docs.get(&edge.parent_key)?;
-    // Walk to root with cycle guard.
+    let self_doc = docs.get(key)?;
+    if parent_doc.session_id == self_doc.session_id {
+        return None;
+    }
+    // Walk to root; reject any cyclic lineage chain.
     let mut visited = HashSet::new();
     visited.insert(key);
     let mut current_key = edge.parent_key.as_str();
     let mut root_doc = parent_doc;
     let mut inherited_session_id = parent_doc.trajectory.session_id.clone();
-    while visited.insert(current_key) {
-        if let Some(next_edge) = edges.get(current_key) {
-            if let Some(next_doc) = docs.get(&next_edge.parent_key) {
-                root_doc = next_doc;
-                if inherited_session_id.is_none() {
-                    inherited_session_id = next_doc.trajectory.session_id.clone();
-                }
-                current_key = next_edge.parent_key.as_str();
-                continue;
-            }
+    loop {
+        if !visited.insert(current_key) {
+            return None;
         }
-        break;
-    }
-    if parent_doc.session_id == docs.get(key)?.session_id {
-        return None;
+        let Some(next_edge) = edges.get(current_key) else {
+            break;
+        };
+        let Some(next_doc) = docs.get(&next_edge.parent_key) else {
+            break;
+        };
+        if next_doc.session_id == self_doc.session_id {
+            return None;
+        }
+        root_doc = next_doc;
+        if inherited_session_id.is_none() {
+            inherited_session_id = next_doc.trajectory.session_id.clone();
+        }
+        current_key = next_edge.parent_key.as_str();
     }
     Some(AtifLineageLink {
         parent_session_id: parent_doc.session_id,
@@ -800,7 +844,7 @@ fn is_json_extension(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
 }
 
-fn path_to_posix_key(path: &Path) -> String {
+pub(crate) fn path_to_posix_key(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
             Component::Normal(segment) => Some(segment.to_string_lossy().into_owned()),
@@ -835,4 +879,99 @@ fn io_route_error(error: SourceIoError) -> SourceBackedRouteError {
 
 fn internal_error(detail: String) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::import::parse_atif_str;
+    use ctx_history_core::SourceAnchor;
+    use serde_json::json;
+
+    fn test_doc(source: &SourceKey, key: &str, session_id: Option<&str>) -> LoadedAtifDocument {
+        let mut obj = json!({
+            "schema_version": "ATIF-v1.8",
+            "agent": { "name": "cycle-agent", "version": "1.0.0" },
+            "steps": [{ "step_id": 1, "source": "user", "message": format!("doc {key}") }]
+        });
+        if let Some(sid) = session_id {
+            obj["session_id"] = json!(sid);
+        }
+        let trajectory = parse_atif_str(&obj.to_string()).expect("valid ATIF doc");
+        let (_, derived_id) =
+            derive_atif_document_session_id(source, key, &trajectory).expect("derived session id");
+        LoadedAtifDocument {
+            relative_path: PathBuf::from(key),
+            relative_key: key.to_owned(),
+            trajectory,
+            session_id: derived_id,
+        }
+    }
+
+    #[test]
+    fn prune_cyclic_parent_edges_breaks_cycles_while_preserving_acyclic_children() {
+        let source = SourceKey::derive(
+            CaptureProvider::Custom.as_str(),
+            ATIF_SOURCE_FORMAT,
+            ATIF_SOURCE_SCHEMA_VARIANT,
+            ATIF_SOURCE_IDENTITY_VERSION,
+            SourceAnchor::CatalogLineage([42_u8; 32]),
+        )
+        .unwrap();
+
+        let mut docs = BTreeMap::new();
+        docs.insert(
+            "a.json".to_owned(),
+            test_doc(&source, "a.json", Some("run-a")),
+        );
+        docs.insert(
+            "b.json".to_owned(),
+            test_doc(&source, "b.json", Some("run-b")),
+        );
+        docs.insert("c.json".to_owned(), test_doc(&source, "c.json", None));
+
+        // a.json <-> b.json cycle, with c.json delegated from a.json.
+        let mut edges = BTreeMap::new();
+        edges.insert(
+            "b.json".to_owned(),
+            ExternalParentEdge {
+                parent_key: "a.json".to_owned(),
+                relationship: ProviderNativeSessionRelationship::Delegated,
+                agent_scope: AgentScope::Subagent,
+            },
+        );
+        edges.insert(
+            "a.json".to_owned(),
+            ExternalParentEdge {
+                parent_key: "b.json".to_owned(),
+                relationship: ProviderNativeSessionRelationship::Delegated,
+                agent_scope: AgentScope::Subagent,
+            },
+        );
+        edges.insert(
+            "c.json".to_owned(),
+            ExternalParentEdge {
+                parent_key: "a.json".to_owned(),
+                relationship: ProviderNativeSessionRelationship::Delegated,
+                agent_scope: AgentScope::Subagent,
+            },
+        );
+
+        // Even before pruning, resolve_lineage_link rejects cyclic chains.
+        assert!(resolve_lineage_link("a.json", &docs, &edges).is_none());
+        assert!(resolve_lineage_link("b.json", &docs, &edges).is_none());
+
+        // Pruning drops only the cycle edges (a.json, b.json) and keeps c.json -> a.json.
+        prune_cyclic_parent_edges(&mut edges);
+        assert!(!edges.contains_key("a.json"));
+        assert!(!edges.contains_key("b.json"));
+        assert!(edges.contains_key("c.json"));
+
+        assert!(resolve_lineage_link("a.json", &docs, &edges).is_none());
+        assert!(resolve_lineage_link("b.json", &docs, &edges).is_none());
+        let c_link = resolve_lineage_link("c.json", &docs, &edges).expect("c.json keeps parent a");
+        assert_eq!(c_link.parent_session_id, docs["a.json"].session_id);
+        assert_eq!(c_link.root_session_id, docs["a.json"].session_id);
+        assert_eq!(c_link.inherited_session_id.as_deref(), Some("run-a"));
+    }
 }

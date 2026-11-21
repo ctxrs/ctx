@@ -1,4 +1,5 @@
 mod activity;
+mod atif_export;
 mod compact_authority;
 mod semantic_fallback;
 mod semantic_passage;

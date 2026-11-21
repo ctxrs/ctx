@@ -1057,3 +1057,264 @@ fn native_export_normalizes_anthropic_cached_and_cache_creation_tokens() {
     assert_eq!(final_metrics.total_cached_tokens, Some(800));
     assert_eq!(final_metrics.total_completion_tokens, Some(45));
 }
+
+#[test]
+fn no_subagents_strips_embedded_only_refs_and_populates_inherited_session_id() {
+    let doc = json!({
+        "schema_version": "ATIF-v1.8",
+        "session_id": "run-no-sub-001",
+        "trajectory_id": "root-no-sub",
+        "agent": { "name": "orchestrator", "version": "1.0.0" },
+        "steps": [
+            {
+                "step_id": 1,
+                "source": "agent",
+                "message": "Spawned embedded and external workers",
+                "observation": {
+                    "results": [
+                        {
+                            "content": "Embedded worker summary",
+                            "subagent_trajectory_ref": [
+                                { "trajectory_id": "sub-embedded-1", "session_id": "run-no-sub-001" }
+                            ]
+                        },
+                        {
+                            "subagent_trajectory_ref": [
+                                { "trajectory_id": "sub-embedded-only" }
+                            ]
+                        },
+                        {
+                            "subagent_trajectory_ref": [
+                                { "trajectory_path": "subagents/external.json" }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "step_id": 2,
+                "source": "system",
+                "message": "Compaction step with embedded-only observation",
+                "observation": {
+                    "results": [
+                        {
+                            "subagent_trajectory_ref": [
+                                { "trajectory_id": "sub-embedded-1" }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ],
+        "subagent_trajectories": [
+            {
+                "schema_version": "ATIF-v1.8",
+                "trajectory_id": "sub-embedded-1",
+                "agent": { "name": "worker", "version": "1.0.0" },
+                "steps": [
+                    { "step_id": 1, "source": "user", "message": "Subtask without own session_id" }
+                ]
+            }
+        ]
+    });
+
+    let traj = parse_atif_str(&doc.to_string()).expect("fixture parses");
+    let source = test_source_key();
+    let records = project_trajectory_to_core_records(&AtifProjectionInput {
+        source: &source,
+        document_key: "parent.json",
+        trajectory: &traj,
+        lineage: None,
+    })
+    .expect("projection succeeds");
+
+    let root_id = records[0].session_id;
+    let root_records: Vec<CoreRecord> = records
+        .iter()
+        .filter(|r| r.session_id == root_id)
+        .cloned()
+        .collect();
+    let child_records: Vec<CoreRecord> = records
+        .iter()
+        .filter(|r| r.session_id != root_id)
+        .cloned()
+        .collect();
+
+    // 1. Exporting parent with include_subagents == false strips embedded-only refs,
+    //    prunes empty ObservationResult / Observation, and preserves external trajectory_path refs.
+    let parent_flat = export_session_to_trajectory(
+        &AtifExportSession {
+            ctx_session_id: root_id.as_uuid(),
+            provider: CaptureProvider::Custom,
+            provider_session_id: root_records[0].provider_session_id.clone(),
+            source_format: ATIF_SOURCE_FORMAT.to_owned(),
+            records: root_records,
+            children: Vec::new(),
+        },
+        AtifExportOptions {
+            include_subagents: false,
+        },
+    )
+    .expect("flat parent export succeeds");
+
+    assert!(parent_flat.subagent_trajectories.is_none());
+    let step1_obs = parent_flat.steps[0]
+        .observation
+        .as_ref()
+        .expect("step 1 keeps content + external ref");
+    assert_eq!(step1_obs.results.len(), 2);
+    assert!(step1_obs.results[0].content.is_some());
+    assert!(step1_obs.results[0].subagent_trajectory_ref.is_none());
+    let preserved_refs = step1_obs.results[1]
+        .subagent_trajectory_ref
+        .as_ref()
+        .expect("external trajectory_path ref preserved");
+    assert_eq!(preserved_refs.len(), 1);
+    assert_eq!(
+        preserved_refs[0].trajectory_path.as_deref(),
+        Some("subagents/external.json")
+    );
+    assert!(
+        parent_flat.steps[1].observation.is_none(),
+        "step 2 observation with only embedded refs should be pruned"
+    );
+
+    // 2. Exporting the embedded subagent standalone under --no-subagents populates
+    //    session_id from StoredAtifTrajectoryHeader.inherited_session_id.
+    let child_standalone = export_session_to_trajectory(
+        &AtifExportSession {
+            ctx_session_id: child_records[0].session_id.as_uuid(),
+            provider: CaptureProvider::Custom,
+            provider_session_id: child_records[0].provider_session_id.clone(),
+            source_format: ATIF_SOURCE_FORMAT.to_owned(),
+            records: child_records,
+            children: Vec::new(),
+        },
+        AtifExportOptions {
+            include_subagents: false,
+        },
+    )
+    .expect("standalone embedded subagent export succeeds");
+
+    assert_eq!(
+        child_standalone.session_id.as_deref(),
+        Some("run-no-sub-001")
+    );
+    assert_eq!(
+        child_standalone.trajectory_id.as_deref(),
+        Some("sub-embedded-1")
+    );
+}
+
+#[test]
+fn external_trajectory_path_subagent_updates_parent_ref_in_place_when_embedded() {
+    let source = test_source_key();
+    let parent_doc = json!({
+        "schema_version": "ATIF-v1.5",
+        "session_id": "ext-embed-run",
+        "agent": { "name": "parent-agent", "version": "1.0.0" },
+        "steps": [
+            {
+                "step_id": 1,
+                "source": "agent",
+                "message": "Delegating to external worker",
+                "observation": {
+                    "results": [
+                        {
+                            "content": "delegated",
+                            "subagent_trajectory_ref": [
+                                {
+                                    "session_id": "ext-embed-run",
+                                    "trajectory_path": "subagents/worker.json"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ]
+    });
+    let worker_doc = json!({
+        "schema_version": "ATIF-v1.7",
+        "trajectory_id": "ext-worker-42",
+        "agent": { "name": "worker-agent", "version": "1.0.0" },
+        "steps": [
+            { "step_id": 1, "source": "user", "message": "Run external task" }
+        ]
+    });
+
+    let parent_traj = parse_atif_str(&parent_doc.to_string()).expect("parent parses");
+    let worker_traj = parse_atif_str(&worker_doc.to_string()).expect("worker parses");
+
+    let parent_records = project_trajectory_to_core_records(&AtifProjectionInput {
+        source: &source,
+        document_key: "runs/root.json",
+        trajectory: &parent_traj,
+        lineage: None,
+    })
+    .expect("parent projects");
+    let parent_session_id = parent_records[0].session_id;
+    let worker_records = project_trajectory_to_core_records(&AtifProjectionInput {
+        source: &source,
+        document_key: "runs/subagents/worker.json",
+        trajectory: &worker_traj,
+        lineage: Some(&crate::import::AtifLineageLink {
+            parent_session_id,
+            root_session_id: parent_session_id,
+            relationship: ProviderNativeSessionRelationship::Delegated,
+            agent_scope: AgentScope::Subagent,
+            inherited_session_id: Some("ext-embed-run".to_owned()),
+        }),
+    })
+    .expect("worker projects");
+
+    let exported = export_session_to_trajectory(
+        &AtifExportSession {
+            ctx_session_id: parent_session_id.as_uuid(),
+            provider: CaptureProvider::Custom,
+            provider_session_id: parent_records[0].provider_session_id.clone(),
+            source_format: ATIF_SOURCE_FORMAT.to_owned(),
+            records: parent_records,
+            children: vec![AtifExportSession {
+                ctx_session_id: worker_records[0].session_id.as_uuid(),
+                provider: CaptureProvider::Custom,
+                provider_session_id: worker_records[0].provider_session_id.clone(),
+                source_format: ATIF_SOURCE_FORMAT.to_owned(),
+                records: worker_records,
+                children: Vec::new(),
+            }],
+        },
+        AtifExportOptions {
+            include_subagents: true,
+        },
+    )
+    .expect("external-to-embedded export succeeds");
+
+    let obs = exported.steps[0]
+        .observation
+        .as_ref()
+        .expect("observation present");
+    assert_eq!(
+        obs.results.len(),
+        1,
+        "must update existing ObservationResult in place instead of appending a duplicate: {obs:#?}"
+    );
+    let refs = obs.results[0]
+        .subagent_trajectory_ref
+        .as_ref()
+        .expect("subagent_trajectory_ref present");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].trajectory_id.as_deref(), Some("ext-worker-42"));
+    assert_eq!(
+        refs[0].trajectory_path, None,
+        "stale relative trajectory_path must be cleared when embedded"
+    );
+    assert_eq!(refs[0].session_id.as_deref(), Some("ext-embed-run"));
+
+    let embedded = exported
+        .subagent_trajectories
+        .as_ref()
+        .expect("worker embedded");
+    assert_eq!(embedded.len(), 1);
+    assert_eq!(embedded[0].trajectory_id.as_deref(), Some("ext-worker-42"));
+}
