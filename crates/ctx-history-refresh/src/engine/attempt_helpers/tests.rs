@@ -225,4 +225,35 @@ fn route_index_and_internal_failures_have_stable_retry_classes() {
         registry_outcome.retry_advice(),
         Some(RefreshRetryAdvice::UpgradeOrReconfigure)
     );
+
+    let route_limit_error = anyhow::Error::new(SourceBackedCoordinatorError::RouteScan {
+        provider: CaptureProvider::Codex,
+        source: SourceBackedRouteError {
+            kind: SourceBackedRouteErrorKind::ResourceLimitExceeded,
+            detail: "changed-session registry limit exceeded".to_owned(),
+            diagnostic: Some(
+                ctx_history_capture::SourceBackedRouteFailureDiagnostic::IndexMemoryLimit,
+            ),
+        },
+    });
+    let route_limit_outcome = classify(&route_limit_error, &attempted_routes);
+    assert_eq!(
+        route_limit_outcome.code(),
+        RefreshOutcomeCode::ResourceUnavailable
+    );
+    assert_eq!(
+        route_limit_outcome.class(),
+        RefreshOutcomeClass::ResourceUnavailable
+    );
+    assert!(!route_limit_outcome.retryable());
+    assert_eq!(
+        route_limit_outcome.retry_advice(),
+        Some(RefreshRetryAdvice::UpgradeOrReconfigure)
+    );
+    let diagnostic =
+        RefreshFailureDiagnostic::new(RefreshFailureStage::Execution, Some(&route_limit_error));
+    assert_eq!(
+        diagnostic.reason,
+        Some(RefreshFailureReason::IndexMemoryLimit)
+    );
 }

@@ -139,7 +139,8 @@ pub(crate) mod provider {
         const fn route_error_severity(kind: SourceBackedRouteErrorKind) -> u8 {
             match kind {
                 SourceBackedRouteErrorKind::Internal => 6,
-                SourceBackedRouteErrorKind::ResourceUnavailable => 5,
+                SourceBackedRouteErrorKind::ResourceUnavailable
+                | SourceBackedRouteErrorKind::ResourceLimitExceeded => 5,
                 SourceBackedRouteErrorKind::SourceChanged => 4,
                 SourceBackedRouteErrorKind::InvalidSource => 3,
                 SourceBackedRouteErrorKind::Unsupported => 2,

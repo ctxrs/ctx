@@ -139,8 +139,8 @@ impl ChangedSessionRegistry {
         uuid: Uuid,
         facts: PreparedSessionIdentityFacts,
     ) -> Result<PreparedSessionIdentityFacts> {
-        if let Some(previous) = self.hot.insert(uuid, facts) {
-            return Ok(previous);
+        if let Some(slot) = self.hot.get_mut(&uuid) {
+            return Ok(std::mem::replace(slot, facts));
         }
         let previous = self
             .spill
@@ -196,9 +196,13 @@ impl ChangedSessionRegistry {
             self.spill = Some(SpilledSessionTable::create(&self.root, initial_capacity)?);
         }
         let spill = self.spill.as_mut().expect("spill table just initialized");
-        let entries = std::mem::take(&mut self.hot);
-        for (uuid, facts) in entries {
-            spill.upsert(uuid, facts)?;
+        let mut entries = std::mem::take(&mut self.hot).into_iter();
+        while let Some((uuid, facts)) = entries.next() {
+            if let Err(error) = spill.upsert(uuid, facts) {
+                self.hot.insert(uuid, facts);
+                self.hot.extend(entries);
+                return Err(error);
+            }
         }
         Ok(())
     }

@@ -129,6 +129,7 @@ fn route_reason(
         Diagnostic::Io(kind) => RefreshFailureReason::from_io(kind),
         Diagnostic::OutputLimit => Some(RefreshFailureReason::RouteOutputLimit),
         Diagnostic::ScratchLimit => Some(RefreshFailureReason::RouteScratchLimit),
+        Diagnostic::IndexMemoryLimit => Some(RefreshFailureReason::IndexMemoryLimit),
     }
 }
 
@@ -148,7 +149,8 @@ fn failure_reason(error: &anyhow::Error) -> Option<RefreshFailureReason> {
                 return RefreshFailureReason::from_io(error.kind());
             }
             match error {
-                IndexError::IndexMemoryTooSmall { .. } => {
+                IndexError::IndexMemoryTooSmall { .. }
+                | IndexError::ChangedSessionRegistryMemoryLimitExceeded { .. } => {
                     return Some(RefreshFailureReason::IndexMemoryLimit)
                 }
                 IndexError::VerificationScratchLimitExceeded { .. } => {
