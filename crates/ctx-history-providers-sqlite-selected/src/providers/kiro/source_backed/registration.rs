@@ -1,6 +1,5 @@
 use std::{
     ffi::{OsStr, OsString},
-    io,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -323,9 +322,7 @@ fn observe_kiro_inventory(
             )))
         }
         Ok(OpenedProviderSourcePath::Directory(_)) => Err(invalid_database_leaf(&path).into()),
-        Err(ctx_history_source_io::SourceIoError::Io(error))
-            if error.kind() == io::ErrorKind::NotFound =>
-        {
+        Err(error) if error.is_not_found() => {
             directory.revalidate()?;
             root.revalidate()?;
             Ok(KiroPhysicalInventory::Missing(KiroMissingLeafFence {
@@ -388,8 +385,7 @@ impl KiroMissingLeafFence {
         }
         let missing = matches!(
             self.directory.open_child(&self.leaf),
-            Err(ctx_history_source_io::SourceIoError::Io(error))
-                if error.kind() == io::ErrorKind::NotFound
+            Err(error) if error.is_not_found()
         );
         missing && self.directory.revalidate().is_ok() && self.root.revalidate().is_ok()
     }

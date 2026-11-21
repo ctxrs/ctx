@@ -51,7 +51,7 @@ pub(super) fn discover<R>(
             paths.insert(fs::canonicalize(file.path())?);
             Ok(())
         },
-        &mut |path, error| {
+        &mut |path, error: CaptureError| {
             rejected.push(reject_unreadable_file(
                 &authority,
                 path,
@@ -320,13 +320,49 @@ fn rejected_file(
     Ok(leaf.with_logical_source_error(source, failure))
 }
 
+pub(super) fn observe_terminal_membership(
+    root: &Path,
+    opening: &JsonlFamilyInventory,
+) -> Result<JsonlFamilyMembershipObservation<CaptureError>> {
+    if opening.root_missing() {
+        return JsonlFamilyMembershipObservation::observe(root, opening);
+    }
+    let mut selected = BTreeSet::new();
+    let mut isolated = Vec::new();
+    visit_bounded_tree_files_isolating_selected(
+        root,
+        &mut |candidate| {
+            let path = candidate.path();
+            path.extension().is_some_and(|ext| ext == "jsonl") && !is_omp_edit_journal(root, path)
+        },
+        &mut |file| {
+            selected.insert(fs::canonicalize(file.path())?);
+            Ok(())
+        },
+        &mut |path, error: CaptureError| {
+            if !(error.is_ignorable_membership_entry()
+                || error.is_source_unavailable()
+                || matches!(&error, CaptureError::Io(source) if source.kind() == io::ErrorKind::PermissionDenied))
+            {
+                return Err(error);
+            }
+            if fs::symlink_metadata(path)?.is_dir() {
+                return Err(error);
+            }
+            isolated.push(std::path::absolute(path)?);
+            Ok(())
+        },
+    )?;
+    selected.extend(isolated);
+    JsonlFamilyMembershipObservation::observe_selected_paths(opening, selected)
+}
+
 fn is_omp_edit_journal(root: &Path, path: &Path) -> bool {
     path != root
         && path.file_name().and_then(|name| name.to_str()) == Some("changes.jsonl")
         && path
             .parent()
-            .and_then(|parent| parent.strip_prefix(root).ok())
-            .is_some_and(|relative_parent| relative_parent.components().count() >= 1)
+            .is_some_and(|parent| parent.strip_prefix(root).is_ok())
 }
 
 #[cfg(test)]
