@@ -443,6 +443,95 @@ fn no_subagents_retains_forked_and_resumed_primary_sessions_while_excluding_dele
 }
 
 #[test]
+fn no_subagents_coalesces_sparse_authority_witnesses_and_excludes_parentless_delegated() {
+    let temp = tempdir().unwrap();
+    let src = source("sparse-authority.jsonl");
+
+    let mut root = document_for_session(&src, "root-sparse", 1, "root");
+    root.agent_scope = Some(CoreAgentScope::Primary);
+    root.occurred_at_unix_ms = Some(1_700_000_010_000);
+
+    // Event 1 carries parent_session_id without relationship; event 2 carries Forked.
+    let mut sparse_forked_1 = document_for_session(&src, "sparse-forked", 1, "forked event 1");
+    sparse_forked_1.parent_session_id = Some(root.session_id);
+    sparse_forked_1.root_session_id = Some(root.session_id);
+    sparse_forked_1.session_relationship = None;
+    sparse_forked_1.occurred_at_unix_ms = Some(1_700_000_020_000);
+
+    let mut sparse_forked_2 = document_for_session(&src, "sparse-forked", 2, "forked event 2");
+    sparse_forked_2.parent_session_id = None;
+    sparse_forked_2.root_session_id = None;
+    sparse_forked_2.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+    sparse_forked_2.occurred_at_unix_ms = Some(1_700_000_021_000);
+
+    // Event 1 carries ResumedFrom; event 2 carries parent_session_id without relationship.
+    let mut sparse_resumed_1 = document_for_session(&src, "sparse-resumed", 1, "resumed event 1");
+    sparse_resumed_1.session_relationship = Some(ProviderNativeSessionRelationship::ResumedFrom);
+    sparse_resumed_1.occurred_at_unix_ms = Some(1_700_000_030_000);
+
+    let mut sparse_resumed_2 = document_for_session(&src, "sparse-resumed", 2, "resumed event 2");
+    sparse_resumed_2.parent_session_id = Some(root.session_id);
+    sparse_resumed_2.root_session_id = Some(root.session_id);
+    sparse_resumed_2.session_relationship = None;
+    sparse_resumed_2.occurred_at_unix_ms = Some(1_700_000_031_000);
+
+    // Delegated and WorkflowChild without parent_session_id must still be excluded.
+    let mut parentless_delegated =
+        document_for_session(&src, "parentless-delegated", 1, "delegated without parent");
+    parentless_delegated.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
+    parentless_delegated.occurred_at_unix_ms = Some(1_700_000_040_000);
+
+    let mut parentless_workflow = document_for_session(
+        &src,
+        "parentless-workflow",
+        1,
+        "workflow child without parent",
+    );
+    parentless_workflow.session_relationship =
+        Some(ProviderNativeSessionRelationship::WorkflowChild);
+    parentless_workflow.occurred_at_unix_ms = Some(1_700_000_050_000);
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(src.clone()).unwrap();
+    for rec in [
+        root.clone(),
+        sparse_forked_1.clone(),
+        sparse_forked_2,
+        sparse_resumed_1.clone(),
+        sparse_resumed_2,
+        parentless_delegated,
+        parentless_workflow,
+    ] {
+        writer.add_core_record(rec).unwrap();
+    }
+    writer.certify_source(certificate(&src, 1, 7)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let filtered = index
+        .list_sessions(
+            &SessionListFilters {
+                no_subagents: true,
+                ..SessionListFilters::default()
+            },
+            50,
+        )
+        .unwrap();
+    let ids: Vec<_> = filtered.sessions.iter().map(|s| s.session_id).collect();
+    assert_eq!(
+        ids,
+        vec![
+            sparse_resumed_1.session_id,
+            sparse_forked_1.session_id,
+            root.session_id,
+        ]
+    );
+}
+
+#[test]
 fn list_sessions_hydrates_middle_tool_event_facts_consistently_with_and_without_workspace_filter() {
     let temp = tempdir().unwrap();
     let src = source("middle-facts.jsonl");

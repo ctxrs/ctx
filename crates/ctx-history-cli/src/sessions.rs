@@ -105,7 +105,12 @@ fn handle_sessions_error(
             Err(anyhow::Error::new(error))
         }
         SessionsApplicationError::Query(error) => Err(externalize_sessions_query_error(error)),
-        SessionsApplicationError::Projection(error) => Err(error),
+        SessionsApplicationError::Projection(error) => render_active_generation_race(
+            Err::<(), _>(error),
+            json_output,
+            ActiveGenerationRaceCommand::Sessions,
+            ui,
+        ),
     }
 }
 
@@ -235,5 +240,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("invalid --since"), "{err}");
+    }
+
+    #[test]
+    fn deferred_projection_generation_race_renders_active_generation_race_diagnostic() {
+        let (mut ui, captured_stderr) = test_ui();
+        let err = handle_sessions_error(
+            SessionsApplicationError::Projection(anyhow::Error::new(
+                IndexError::ConcurrentGenerationChange,
+            )),
+            false,
+            &mut ui,
+        )
+        .unwrap_err();
+        assert!(err.is::<crate::RenderedCliError>(), "{err:?}");
+        ui.flush().unwrap();
+        let stderr = captured_stderr.text();
+        assert!(
+            stderr.contains("generation") || stderr.contains("retry") || stderr.contains("updated"),
+            "{stderr}"
+        );
     }
 }
