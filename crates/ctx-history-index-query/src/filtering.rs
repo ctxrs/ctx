@@ -694,7 +694,7 @@ pub(super) fn metadata_contains_query(
     .map_err(IndexError::from)
 }
 
-fn literal_fact_union_contains_query<const N: usize>(
+pub(super) fn literal_fact_union_contains_query<const N: usize>(
     fields: [tantivy::schema::Field; N],
     field_name: &'static str,
     value: &str,

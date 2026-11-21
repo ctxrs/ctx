@@ -12,6 +12,8 @@ mod reverse_lineage;
 mod search;
 #[path = "query/semantic_pages.rs"]
 mod semantic_pages;
+#[path = "query/session_list.rs"]
+mod session_list;
 #[path = "query/session_pages.rs"]
 mod session_pages;
 #[path = "query/source_pages.rs"]

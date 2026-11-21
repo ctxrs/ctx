@@ -473,6 +473,16 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
+    name = "sessions_tests",
+    src = "tests/sessions.rs",
+    extra_crates = ["chrono"],
+    extra_deps = [
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+    ],
+)
+
+ctx_cli_integration_test(
     name = "unified_context_tests",
     src = "tests/unified_context.rs",
     extra_srcs = [

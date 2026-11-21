@@ -57,6 +57,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-agent-application:skill_tests",
     "//crates/ctx-agent-application:slash_command_e2e_tests",
     "//crates/ctx-history-ingest-application:self_contained_core_content_tests",
+    "//crates/ctx-cli:sessions_tests",
     "//crates/ctx-cli:status_store_cutover_tests",
     "//crates/ctx-cli-qualification:stats_tests",
     "//crates/ctx-cli:unit_tests",

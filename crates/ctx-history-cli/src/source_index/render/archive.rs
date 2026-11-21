@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::ui::{Document, RenderContext, Token};
 
-pub(super) fn fields(
+pub(crate) fn fields(
     document: &mut Document,
     context: &RenderContext,
     value: &Value,

@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use ctx_history_cli::{
     list_events_selection_from_request, ContentScopeArg, EventContentProjection,
     EventContentProjectionArg, EventQueryDirection, EventQueryScope, EventQueryWireRequest,
-    JsonOutputFormat, ListEventsArgs, ListEventsContentProjection, ListEventsDirection,
-    ListEventsRequest, ListEventsScope, LocateRequest, OutputFormat, RefreshMode, SearchArgs,
-    SearchBackend, SearchBackendArg, SearchRequest, SessionOutputFormat, ShowRequest,
+    HistoryProvider, JsonOutputFormat, ListEventsArgs, ListEventsContentProjection,
+    ListEventsDirection, ListEventsRequest, ListEventsScope, LocateRequest, OutputFormat,
+    ProviderArg, RefreshMode, SearchArgs, SearchBackend, SearchBackendArg, SearchRequest,
+    SessionOutputFormat, SessionsArgs, SessionsRequest, ShowRequest, SourceIndexRequest,
     TranscriptMode,
 };
 use ctx_history_index::{CoreEventRangeDirection, CoreEventRangeScope, SearchContentScope};
@@ -210,4 +211,33 @@ fn show_and_locate_requests_preserve_custom_route_qualifiers() {
             ..
         } if provider_key == "amp" && source_id == "threads"
     ));
+}
+
+#[test]
+fn sessions_args_convert_cleanly_to_application_request() {
+    let neutral = SessionsRequest::from(SessionsArgs {
+        since: Some("2h".to_owned()),
+        provider: Some(ProviderArg(HistoryProvider::Native(
+            ctx_history_core::CaptureProvider::Codex,
+        ))),
+        workspace: Some("ctx".to_owned()),
+        no_subagents: true,
+        limit: 25,
+        format: JsonOutputFormat::Json,
+    });
+    assert_eq!(neutral.format, OutputFormat::Json);
+    assert!(matches!(
+        SourceIndexRequest::Sessions(neutral.clone()),
+        SourceIndexRequest::Sessions(_)
+    ));
+
+    let execution = ctx_history_read_application::SessionsRequest::from(neutral);
+    assert_eq!(execution.since.as_deref(), Some("2h"));
+    assert_eq!(
+        execution.provider,
+        Some(ctx_history_core::CaptureProvider::Codex)
+    );
+    assert_eq!(execution.workspace.as_deref(), Some("ctx"));
+    assert!(execution.no_subagents);
+    assert_eq!(execution.limit, 25);
 }

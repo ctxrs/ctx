@@ -5,6 +5,7 @@ mod lineage;
 mod lookup;
 mod pages;
 mod search;
+mod session_list;
 mod sessions;
 
 impl VerifiedIndex {

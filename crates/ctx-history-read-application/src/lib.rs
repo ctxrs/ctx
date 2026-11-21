@@ -23,6 +23,7 @@ mod search;
 mod search_read_model;
 mod selector;
 mod semantic;
+mod sessions;
 mod show;
 mod show_read_model;
 
@@ -49,7 +50,8 @@ pub use event_read_model::{
 };
 pub use filters::{
     normalize_source_identity_filter, normalize_source_identity_filters, parse_since_filter,
-    SourceIdentityFilterArgs, SourceIdentityFilterError, SourceIdentityFilters,
+    parse_since_filter_at, SourceIdentityFilterArgs, SourceIdentityFilterError,
+    SourceIdentityFilters,
 };
 pub use generation::{
     GenerationRead, GenerationReadAuthorityError, GenerationReadError, GenerationReadPort,
@@ -105,6 +107,11 @@ pub use selector::{
 pub use semantic::{
     HistorySemanticBatch, HistorySemanticError, HistorySemanticPort, HistorySemanticQuery,
     SemanticAvailability, SemanticReason,
+};
+pub use sessions::{
+    execute_sessions, prepare_session_list_filters, sessions_read_model, validate_sessions_limit,
+    SessionsApplicationError, SessionsApplicationRequest, SessionsApplicationResult,
+    SessionsRequest, DEFAULT_SESSIONS_LIMIT, MAX_SESSIONS_LIMIT,
 };
 pub use show::{
     execute_show_event, execute_show_session_page, execute_show_session_stream,

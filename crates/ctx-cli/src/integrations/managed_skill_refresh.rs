@@ -47,6 +47,7 @@ fn command_is_refresh_eligible(command: &CommandRoot) -> bool {
         | CommandRoot::Index(_)
         | CommandRoot::Show(_)
         | CommandRoot::List(_)
+        | CommandRoot::Sessions(_)
         | CommandRoot::Locate(_)
         | CommandRoot::Docs(_)
         | CommandRoot::Integrations(_)
@@ -109,6 +110,7 @@ mod tests {
             &["ctx", "sources"][..],
             &["ctx", "show", "event", "deadbeef"][..],
             &["ctx", "list", "events"][..],
+            &["ctx", "sessions"][..],
             &["ctx", "locate", "event", "deadbeef"][..],
             &["ctx", "docs", "list"][..],
             &["ctx", "integrations", "status", "skill"][..],

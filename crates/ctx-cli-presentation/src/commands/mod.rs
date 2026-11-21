@@ -12,6 +12,7 @@ mod index_dashboard;
 pub mod list;
 pub mod locate;
 pub mod search;
+pub mod sessions;
 pub mod show;
 pub mod sources;
 pub mod stats;
@@ -35,6 +36,7 @@ pub use search::{CliRefreshArg, ContentScopeArg, SearchArgs, SearchBackendArg};
 pub use semantic::{
     render_semantic_disabled, render_semantic_status, SemanticArgs, SemanticCommand,
 };
+pub use sessions::SessionsArgs;
 pub use setup::{render_setup_human, SetupArgs, SetupDaemonState};
 pub use show::{ShowArgs, ShowEventArgs, ShowSessionArgs, ShowTarget};
 pub use sources::SourcesArgs;
