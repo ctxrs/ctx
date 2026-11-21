@@ -847,7 +847,6 @@ fn read_certification(path: &Path) -> Option<Vec<u8>> {
     )
     .read_to_end(&mut bytes)
     .ok()?;
-    #[cfg(any(test, feature = "test-support"))]
     crate::read_metrics::record(|reads| &mut reads.certification, bytes.len());
     if bytes.len() > MAX_CERTIFICATION_BYTES || bytes.len() != length {
         return None;

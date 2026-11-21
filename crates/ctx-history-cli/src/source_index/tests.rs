@@ -1188,14 +1188,13 @@ fn cold_read_only_search_stack_skips_full_manifest_reads_on_flat_delta_generatio
     let config = history_snapshot(false, false);
 
     // 1. CLI snapshot search (includes compact projection + retained peer lookup + archive provenance).
-    ctx_history_index::test_support::clear_manifest_cache_for_root(&index_root(temp.path()))
-        .unwrap();
-    ctx_history_index::test_support::read_metrics::reset_metadata_read_activity();
+    ctx_history_index::clear_manifest_cache_for_root(&index_root(temp.path())).unwrap();
+    ctx_history_index::read_metrics::reset_metadata_read_activity();
     let (cli_value, _context, cli_compact, _obs) =
         cli_snapshot_search(search_request.clone(), temp.path(), config.clone()).unwrap();
     assert_eq!(cli_value["results"].as_array().unwrap().len(), 1);
     assert_eq!(cli_compact["results"].as_array().unwrap().len(), 1);
-    let cli_reads = ctx_history_index::test_support::read_metrics::metadata_read_activity();
+    let cli_reads = ctx_history_index::read_metrics::metadata_read_activity();
     assert_eq!(
         cli_reads.manifest.operations, 0,
         "cli_snapshot_search must not read full or flat-delta manifests"
@@ -1203,14 +1202,13 @@ fn cold_read_only_search_stack_skips_full_manifest_reads_on_flat_delta_generatio
     assert_eq!(cli_reads.manifest.bytes, 0);
 
     // 2. MCP search with compact projection.
-    ctx_history_index::test_support::clear_manifest_cache_for_root(&index_root(temp.path()))
-        .unwrap();
-    ctx_history_index::test_support::read_metrics::reset_metadata_read_activity();
+    ctx_history_index::clear_manifest_cache_for_root(&index_root(temp.path())).unwrap();
+    ctx_history_index::read_metrics::reset_metadata_read_activity();
     let (mcp_value, _context, mcp_compact, _obs) =
         mcp_search_with_compact(search_request.clone(), temp.path(), config).unwrap();
     assert_eq!(mcp_value["results"].as_array().unwrap().len(), 1);
     assert_eq!(mcp_compact["results"].as_array().unwrap().len(), 1);
-    let mcp_reads = ctx_history_index::test_support::read_metrics::metadata_read_activity();
+    let mcp_reads = ctx_history_index::read_metrics::metadata_read_activity();
     assert_eq!(
         mcp_reads.manifest.operations, 0,
         "mcp_search_with_compact must not read full or flat-delta manifests"
@@ -1218,9 +1216,8 @@ fn cold_read_only_search_stack_skips_full_manifest_reads_on_flat_delta_generatio
     assert_eq!(mcp_reads.manifest.bytes, 0);
 
     // 3. Direct search_existing_generation_with_port (compact projection + retained peer).
-    ctx_history_index::test_support::clear_manifest_cache_for_root(&index_root(temp.path()))
-        .unwrap();
-    ctx_history_index::test_support::read_metrics::reset_metadata_read_activity();
+    ctx_history_index::clear_manifest_cache_for_root(&index_root(temp.path())).unwrap();
+    ctx_history_index::read_metrics::reset_metadata_read_activity();
     let index =
         VerifiedIndex::open_pinned_with_retained_peer_for_query(index_root(temp.path())).unwrap();
     assert!(!index.has_loaded_full_manifest());
@@ -1230,7 +1227,7 @@ fn cold_read_only_search_stack_skips_full_manifest_reads_on_flat_delta_generatio
     assert_eq!(generation_id, second_generation);
     assert_eq!(port_value["results"].as_array().unwrap().len(), 1);
     assert_eq!(port_compact["results"].as_array().unwrap().len(), 1);
-    let port_reads = ctx_history_index::test_support::read_metrics::metadata_read_activity();
+    let port_reads = ctx_history_index::read_metrics::metadata_read_activity();
     assert_eq!(
         port_reads.manifest.operations, 0,
         "search_existing_generation_with_port must not read full or flat-delta manifests"

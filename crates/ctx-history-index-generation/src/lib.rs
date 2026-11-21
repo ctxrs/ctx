@@ -85,7 +85,7 @@ pub use physical::{
 #[cfg(any(test, feature = "test-support"))]
 pub use physical::{checksum_walks, hashed_artifact_bytes, reset_physical_verification_activity};
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub mod read_metrics;
 #[cfg(any(test, feature = "test-support"))]
 pub use publication_probe::{

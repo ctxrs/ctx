@@ -438,14 +438,12 @@ fn referenced_base_generation_id(
     let mut prefix = [0_u8; 64];
     let prefix_bytes = file.read(&mut prefix)?;
     if !prefix[..prefix_bytes].starts_with(MANIFEST_FLAT_DELTA_PREFIX) {
-        #[cfg(any(test, feature = "test-support"))]
         crate::read_metrics::record(|reads| &mut reads.manifest, prefix_bytes);
         return Ok(None);
     }
     file.rewind()?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    #[cfg(any(test, feature = "test-support"))]
     crate::read_metrics::record(|reads| &mut reads.manifest, bytes.len());
     let actual = sha256_hex(&bytes);
     if actual != generation_id {

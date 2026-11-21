@@ -32,9 +32,9 @@ APPLICATION_DEPS = [
 
 APPLICATION_TEST_DEPS = [
     "//crates/ctx-history-core:lib",
-    "//crates/ctx-history-index-format:lib",
+    "//crates/ctx-history-index-format:test_support_lib",
     "//crates/ctx-history-index-query:test_support_lib",
-    "//crates/ctx-history-index:lib",
+    "//crates/ctx-history-index:test_support_lib",
 ]
 
 rust_library(

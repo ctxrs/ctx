@@ -461,7 +461,7 @@ fn generation_manifest(temp: &TempDir, generation: &str) -> (GenerationManifest,
         )
     });
     assert_eq!(index.generation_id(), generation);
-    let manifest = index.manifest().clone();
+    let manifest = index.try_manifest().unwrap().clone();
     let value = serde_json::to_value(&manifest).unwrap();
     (manifest, value)
 }
