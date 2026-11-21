@@ -221,6 +221,10 @@ impl DaemonWakeup {
         self.inner.signal_shutdown();
     }
 
+    pub(crate) fn shutdown_requested(&self) -> bool {
+        self.inner.shutdown_requested()
+    }
+
     pub(super) fn wait(&self, timeout: Duration) -> DaemonWake {
         let wake = self.inner.wait(timeout);
         DaemonWake {

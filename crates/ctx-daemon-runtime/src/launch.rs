@@ -95,13 +95,26 @@ pub fn spawn_detached(launch: NormalizedLaunch) -> io::Result<Child> {
     })
 }
 
+/// Internal environment flag instructing a finite Core worker spawned via
+/// [`spawn_attached`] to monitor its inherited stdin pipe as a parent lifeline.
+pub const FINITE_WORKER_LIFELINE_ENV: &str = "CTX_INTERNAL_FINITE_WORKER_LIFELINE";
+
+/// Single byte written by the owning CLI over the parent-lifeline pipe before
+/// normal exit so a finite worker can finish any coalesced successor work
+/// instead of treating EOF as abnormal parent death.
+pub const FINITE_WORKER_LIFELINE_DETACH_BYTE: u8 = b'D';
+
 /// Spawns a finite foreground worker in the caller's terminal/console group.
 ///
-/// The worker deliberately stays in the invoking terminal/console, but has a
-/// private process group.  That gives the foreground client a precise graceful
-/// interrupt target without granting it authority over a pre-existing daemon.
+/// The worker deliberately stays in the invoking terminal/console, has a
+/// private process group, and receives a piped parent-lifeline stdin so an
+/// uncatchable death of the owning CLI (SIGKILL, OOM, crash) closes the pipe
+/// and signals the finite worker to abort instead of rebuilding orphaned.
 pub fn spawn_attached(launch: NormalizedLaunch) -> io::Result<Child> {
     spawn_with(launch, |command| {
+        command
+            .stdin(Stdio::piped())
+            .env(FINITE_WORKER_LIFELINE_ENV, "1");
         #[cfg(unix)]
         unsafe {
             command.pre_exec(|| {

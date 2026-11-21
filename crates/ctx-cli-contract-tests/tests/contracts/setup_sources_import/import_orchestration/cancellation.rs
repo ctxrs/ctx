@@ -559,6 +559,176 @@ fn blocked_import_sigint_exits_130_and_reaps_only_its_finite_worker() {
     }
 }
 
+#[cfg(unix)]
+struct BlockedManualImportWorker {
+    _temp: tempfile::TempDir,
+    root: PathBuf,
+    client: SourceRefreshDaemon,
+    client_pid: u32,
+    worker_pid: u32,
+    worker: NativeProcessProbe,
+    lock_path: PathBuf,
+    gates: [PathBuf; 4],
+}
+
+#[cfg(unix)]
+impl BlockedManualImportWorker {
+    fn start() -> Self {
+        let temp = tempdir();
+        let root = data_root(&temp);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("config.toml"),
+            "[indexing]\nmode = \"manual\"\n\n[search]\nsemantic = false\n",
+        )
+        .unwrap();
+        write_codex_setup_session(&temp);
+
+        let daemon_gate = root.join(".block-daemon-main-after-ready-for-test");
+        let daemon_blocked = root.join(".daemon-main-blocked-after-ready-for-test");
+        let refresh_gate = root.join(".block-source-refresh-after-availability-for-test");
+        let refresh_blocked = root.join(".source-refresh-blocked-after-availability-for-test");
+        fs::write(&daemon_gate, b"block\n").unwrap();
+        fs::write(&refresh_gate, b"block\n").unwrap();
+
+        let prepared = ctx(&temp);
+        let mut command = StdCommand::new(prepared.get_program());
+        for (name, value) in prepared.get_envs() {
+            match value {
+                Some(value) => {
+                    command.env(name, value);
+                }
+                None => {
+                    command.env_remove(name);
+                }
+            }
+        }
+        command
+            .args([
+                "import",
+                "--provider",
+                "codex",
+                "--progress",
+                "none",
+                "--quiet",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut client = SourceRefreshDaemon {
+            child: Some(command.spawn().expect("start blocked finite import")),
+        };
+        let client_pid = client.child.as_ref().unwrap().id();
+
+        let marker_deadline = Instant::now() + Duration::from_secs(15);
+        while !(daemon_blocked.exists() && refresh_blocked.exists()) {
+            if let Some(status) = client.child.as_mut().unwrap().try_wait().unwrap() {
+                panic!("finite import exited before its cancellation gates: {status}");
+            }
+            assert!(
+                Instant::now() < marker_deadline,
+                "finite import did not reach both cancellation gates"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let lock_path = root.join("daemon/daemon.lock");
+        let lock: Value = serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+        let worker_pid = u32::try_from(lock["pid"].as_u64().expect("finite worker pid")).unwrap();
+        assert_ne!(worker_pid, client_pid);
+        assert_private_worker_group(worker_pid);
+        let worker =
+            NativeProcessProbe::open(worker_pid).expect("open finite worker process probe");
+        worker.assert_running();
+        Self {
+            _temp: temp,
+            root,
+            client,
+            client_pid,
+            worker_pid,
+            worker,
+            lock_path,
+            gates: [daemon_gate, daemon_blocked, refresh_gate, refresh_blocked],
+        }
+    }
+
+    fn cleanup_gates(&self) {
+        for path in &self.gates {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn blocked_import_sigterm_exits_130_and_reaps_only_its_finite_worker() {
+    let mut blocked = BlockedManualImportWorker::start();
+    assert_eq!(
+        unsafe { libc::kill(blocked.client_pid as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    let exit_deadline = Instant::now() + Duration::from_secs(8);
+    let status = loop {
+        if let Some(status) = blocked.client.child.as_mut().unwrap().try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "SIGTERM finite import did not exit within the reap bound"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let output = blocked
+        .client
+        .child
+        .take()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert_eq!(status.code(), Some(130));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    blocked.worker.assert_exited();
+    assert!(!blocked
+        .root
+        .join("daemon/source-refresh-endpoint.json")
+        .exists());
+    let released: Value = serde_json::from_slice(&fs::read(&blocked.lock_path).unwrap()).unwrap();
+    assert_eq!(released["pid"], blocked.worker_pid);
+    assert_eq!(released["released"], true, "{released:#}");
+    blocked.cleanup_gates();
+}
+
+#[cfg(unix)]
+#[test]
+fn killed_import_sigkill_stops_its_auto_started_finite_worker_via_lifeline() {
+    let mut blocked = BlockedManualImportWorker::start();
+    // Uncatchable SIGKILL bypasses ForegroundOperationGuard cleanup. The OS
+    // closes the lifeline stdin pipe, signaling the finite Core worker to exit
+    // instead of continuing orphaned in manual mode.
+    assert_eq!(
+        unsafe { libc::kill(blocked.client_pid as libc::pid_t, libc::SIGKILL) },
+        0
+    );
+    let _ = blocked.client.child.take().unwrap().wait().unwrap();
+
+    let worker_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if unsafe { libc::kill(blocked.worker_pid as libc::pid_t, 0) } == -1
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < worker_deadline,
+            "auto-started finite worker {} kept running after parent SIGKILL",
+            blocked.worker_pid
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    blocked.worker.assert_exited();
+    blocked.cleanup_gates();
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn blocked_search_wait_sigint_exits_130_and_reaps_only_its_finite_worker() {

@@ -158,12 +158,12 @@ impl ForegroundOperationGuard {
     }
 
     fn finish(mut self) -> bool {
-        let interrupted = self.finish_inner();
+        let interrupted = self.finish_inner(true);
         self.active = false;
         interrupted
     }
 
-    fn finish_inner(&mut self) -> bool {
+    fn finish_inner(&mut self, normal_completion: bool) -> bool {
         let mut current = ACTIVE_OPERATION.with(|slot| {
             slot.replace(self.previous.take())
                 .expect("foreground operation state must remain installed")
@@ -215,6 +215,11 @@ impl ForegroundOperationGuard {
                 break;
             }
         }
+        if normal_completion && !interrupted {
+            for lease in &mut current.leases {
+                lease.detach_for_normal_completion();
+            }
+        }
         interrupted
     }
 }
@@ -222,7 +227,7 @@ impl ForegroundOperationGuard {
 impl Drop for ForegroundOperationGuard {
     fn drop(&mut self) {
         if self.active {
-            let _ = self.finish_inner();
+            let _ = self.finish_inner(false);
         }
     }
 }

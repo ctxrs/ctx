@@ -41,6 +41,12 @@ pub trait RefreshRuntime: Send + Sync {
     /// scoped workers have dropped, but before publication verification and
     /// terminal completion are recorded.
     fn refresh_execution_finished(&self) {}
+
+    /// Returns true when the owning daemon is shutting down and an in-flight
+    /// refresh should abort cooperatively so locks and temp candidates unwind.
+    fn refresh_cancelled(&self) -> bool {
+        false
+    }
 }
 
 pub(super) type SourceRefreshRuntimeMetadata = RefreshRuntimeMetadata;

@@ -26,7 +26,6 @@ use crate::{
 
 use super::source_backed_refresh_coordinator::CoreRefreshEngine;
 use super::{
-    daemon_process_signal::install_daemon_process_signal_handler,
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
         daemon_retry_due, daemon_run_start_mode, daemon_scheduled_refresh_due,
@@ -372,9 +371,7 @@ where
     let mut auto_upgrade_handoff = None;
     let wakeup = Arc::new(DaemonWakeup::default());
     let lifecycle_state = Arc::new(DaemonLifecycleState::starting());
-    if args.handle_process_signals {
-        install_daemon_process_signal_handler(Arc::clone(&wakeup), Arc::clone(&lifecycle_state))?;
-    }
+    install_daemon_shutdown_handlers(&args, &wakeup, &lifecycle_state)?;
     let active_result = (|| -> Result<bool> {
         let mut failed = false;
         let mut runtime = DaemonRuntime {
@@ -406,7 +403,7 @@ where
         // Recover the durable queue into the exact coordinator that will own
         // IPC before publishing the source-refresh endpoint. Otherwise a
         // restart-time admission could overwrite the unrecovered queue root.
-        recover_source_refresh_coordinator_before_ipc(&mut runtime, data_root, ports.config)?;
+        recover_source_refresh_with_wakeup(&mut runtime, data_root, ports.config, &wakeup)?;
         let stop_disabled = reload_daemon_runtime_config(
             data_root,
             &args,
@@ -732,6 +729,9 @@ where
                 &config_reload.to_json(),
             )?;
             failed |= iteration.failed;
+            if wakeup.shutdown_requested() {
+                break;
+            }
             if finite_worker {
                 let pending_core_refresh = source_refresh
                     .is_some_and(|source_refresh| source_refresh.has_pending_request());

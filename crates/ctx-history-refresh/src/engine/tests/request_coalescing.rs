@@ -481,3 +481,100 @@ fn queue_full_response_names_active_request_id() {
         "unexpected queue-full error: {fields:#}"
     );
 }
+
+#[test]
+fn runtime_refresh_cancelled_aborts_before_execution_and_on_progress_callbacks() {
+    struct CancellableRuntime {
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl RefreshRuntime for CancellableRuntime {
+        fn metadata(
+            &self,
+            _data_root: &Path,
+            operation: RefreshOperation,
+        ) -> RefreshRuntimeMetadata {
+            RefreshRuntimeMetadata {
+                operation,
+                ..RefreshRuntimeMetadata::default()
+            }
+        }
+
+        fn discovery_context(&self, data_root: &Path) -> Result<DiscoveryContext> {
+            Ok(DiscoveryContext::from_process(data_root.join("test-home")))
+        }
+
+        fn refresh_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+    }
+
+    struct ProgressCancellingExecutor {
+        calls: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl SourceBackedRefreshExecutor for ProgressCancellingExecutor {
+        fn refresh(
+            &self,
+            execution: SourceBackedRefreshExecution<'_>,
+        ) -> Result<SourceBackedRefreshPublication> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.cancelled.store(true, Ordering::SeqCst);
+            execution.report_progress("refreshing", 0, 1, None, None, None)?;
+            Ok(test_publication("should-not-publish"))
+        }
+    }
+
+    for cancel_before_start in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(cancel_before_start));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = super::super::CoreRefreshEngine::with_journal_for_test(
+            Arc::new(TestRefreshJournal::default()),
+            Arc::new(CancellableRuntime {
+                cancelled: Arc::clone(&cancelled),
+            }),
+            Arc::new(ProgressCancellingExecutor {
+                calls: Arc::clone(&calls),
+                cancelled: Arc::clone(&cancelled),
+            }),
+        );
+        let request_id = Uuid::now_v7().to_string();
+        let admission = engine
+            .submit(
+                &data_root,
+                RefreshRequest::selected_import(
+                    request_id.clone(),
+                    RefreshSelection::All,
+                    SourceBackedReconciliationDemand::Exhaustive,
+                ),
+            )
+            .unwrap();
+        let (_status, barrier) = admission.into_parts();
+        if let Some(barrier) = barrier {
+            barrier.release(&engine);
+        }
+        engine
+            .complete_pending_admission_for_test(&data_root, &request_id, BTreeMap::new())
+            .unwrap();
+
+        let run = engine.run_next(&data_root).expect("cancelled refresh run");
+        assert!(run.failed, "{:#}", run.job);
+        assert_eq!(run.job["request_state"], "failed", "{:#}", run.job);
+        assert!(
+            run.job["last_error"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("daemon shutdown requested")),
+            "cancel_before_start={cancel_before_start}: {:#}",
+            run.job
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            usize::from(!cancel_before_start),
+            "cancel_before_start={cancel_before_start}"
+        );
+    }
+}

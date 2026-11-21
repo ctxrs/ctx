@@ -11,12 +11,45 @@ pub(super) fn acquire_daemon_lock(
     }
 }
 
+pub(super) fn install_daemon_shutdown_handlers(
+    args: &DaemonRunArgs,
+    wakeup: &Arc<DaemonWakeup>,
+    lifecycle_state: &Arc<DaemonLifecycleState>,
+) -> Result<()> {
+    crate::daemon_process_signal::install_daemon_shutdown_handlers(
+        args.handle_process_signals,
+        args.profile == DaemonRunProfile::FiniteCoreWorker,
+        Arc::clone(wakeup),
+        Arc::clone(lifecycle_state),
+    )
+}
+
+#[cfg(test)]
 pub(super) fn recover_source_refresh_coordinator_before_ipc(
     runtime: &mut DaemonRuntime,
     data_root: &Path,
     config: &'static dyn DaemonConfigPort,
 ) -> Result<Arc<CoreRefreshEngine>> {
     let source_refresh = Arc::new(crate::source_backed_refresh_adapter::refresh_engine(config));
+    source_refresh
+        .recover_interrupted_publication(data_root)
+        .context("recover interrupted Core refresh before daemon readiness")?;
+    runtime.source_refresh_coordinator = Some(Arc::clone(&source_refresh));
+    Ok(source_refresh)
+}
+
+pub(super) fn recover_source_refresh_with_wakeup(
+    runtime: &mut DaemonRuntime,
+    data_root: &Path,
+    config: &'static dyn DaemonConfigPort,
+    wakeup: &Arc<DaemonWakeup>,
+) -> Result<Arc<CoreRefreshEngine>> {
+    let source_refresh = Arc::new(
+        crate::source_backed_refresh_adapter::refresh_engine_with_wakeup(
+            config,
+            Arc::clone(wakeup),
+        ),
+    );
     source_refresh
         .recover_interrupted_publication(data_root)
         .context("recover interrupted Core refresh before daemon readiness")?;
