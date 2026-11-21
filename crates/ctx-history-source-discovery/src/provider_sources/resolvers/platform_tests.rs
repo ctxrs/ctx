@@ -919,10 +919,7 @@ fn antigravity_t3_unsafe_instance_and_root_report_discovery_issue() {
     );
     assert_eq!(report.sources[2].status, ProviderSourceStatus::Available);
     assert_eq!(report.issues.len(), 1);
-    assert_eq!(
-        report.issues[0].path,
-        Some(t3_root.join("linked-instance"))
-    );
+    assert_eq!(report.issues[0].path, Some(t3_root.join("linked-instance")));
 
     let file_temp = tempdir();
     let file_context = context(file_temp.path(), DiscoveryPlatform::Linux);

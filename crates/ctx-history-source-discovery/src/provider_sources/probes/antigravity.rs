@@ -1,8 +1,12 @@
-use std::{io::ErrorKind, path::Path};
+use std::{ffi::OsStr, io::ErrorKind, path::Path};
 
-use ctx_history_source_io::{open_provider_source_path, OpenedProviderSourcePath, SourceIoError};
+use ctx_history_source_io::{
+    open_provider_source_path, OpenedProviderSourcePath, ProviderSourceDirectory, SourceIoError,
+    NON_REGULAR_PROVIDER_SOURCE_REASON, REPARSE_PROVIDER_SOURCE_REASON,
+    SYMLINK_PROVIDER_SOURCE_REASON,
+};
 
-use super::{path_metadata_probe, BoundedProbe, PathProbe};
+use super::BoundedProbe;
 
 pub(super) fn has_antigravity_transcript(root: &Path, max_entries: usize) -> BoundedProbe {
     let is_transcript_name = |path: &Path| {
@@ -11,35 +15,21 @@ pub(super) fn has_antigravity_transcript(root: &Path, max_entries: usize) -> Bou
             Some("transcript_full.jsonl" | "transcript.jsonl")
         )
     };
-    let dir_has_transcript = |dir: &Path| {
-        for leaf in ["transcript_full.jsonl", "transcript.jsonl"] {
-            match path_metadata_probe(&dir.join(leaf)) {
-                PathProbe::File => return BoundedProbe::Found,
-                PathProbe::IoError => return BoundedProbe::IoError,
-                PathProbe::Dir | PathProbe::Other | PathProbe::Missing => {}
-            }
-        }
-        BoundedProbe::NotFound
-    };
-    match path_metadata_probe(root) {
-        PathProbe::File => return BoundedProbe::from_bool(is_transcript_name(root)),
-        PathProbe::Dir => {}
-        PathProbe::Missing | PathProbe::Other => return BoundedProbe::NotFound,
-        PathProbe::IoError => return BoundedProbe::IoError,
-    }
-    match dir_has_transcript(root) {
-        BoundedProbe::NotFound => {}
-        outcome => return outcome,
-    }
-    match dir_has_transcript(&root.join(".system_generated").join("logs")) {
-        BoundedProbe::NotFound => {}
-        outcome => return outcome,
-    }
     let directory = match open_provider_source_path(root) {
+        Ok(OpenedProviderSourcePath::File(_)) => {
+            return BoundedProbe::from_bool(is_transcript_name(root));
+        }
         Ok(OpenedProviderSourcePath::Directory(directory)) => directory,
-        Ok(OpenedProviderSourcePath::File(_)) => return BoundedProbe::NotFound,
         Err(error) => return classify_open_root_error(&error),
     };
+    match dir_has_transcript(&directory) {
+        BoundedProbe::NotFound => {}
+        outcome => return outcome,
+    }
+    match session_dir_has_transcript(&directory) {
+        BoundedProbe::NotFound => {}
+        outcome => return outcome,
+    }
     let entries = match directory.entries(max_entries.saturating_add(1)) {
         Ok(entries) => entries,
         Err(_) => return BoundedProbe::IoError,
@@ -48,23 +38,73 @@ pub(super) fn has_antigravity_transcript(root: &Path, max_entries: usize) -> Bou
         return BoundedProbe::BudgetExhausted;
     }
     for name in entries {
-        let logs = root.join(name).join(".system_generated").join("logs");
-        match dir_has_transcript(&logs) {
-            BoundedProbe::NotFound => {}
-            outcome => return outcome,
+        match directory.open_child(&name) {
+            Ok(OpenedProviderSourcePath::Directory(session_dir)) => {
+                match session_dir_has_transcript(&session_dir) {
+                    BoundedProbe::NotFound => {}
+                    outcome => return outcome,
+                }
+            }
+            Ok(OpenedProviderSourcePath::File(_)) => {}
+            Err(error) if is_ignorable_child_error(&error) => {}
+            Err(_) => return BoundedProbe::IoError,
         }
     }
     BoundedProbe::NotFound
 }
 
-fn classify_open_root_error(error: &SourceIoError) -> BoundedProbe {
-    match error {
-        SourceIoError::Io(io_error) | SourceIoError::SystemIo { source: io_error, .. }
-            if io_error.kind() == ErrorKind::NotFound =>
-        {
-            BoundedProbe::NotFound
+fn session_dir_has_transcript(directory: &ProviderSourceDirectory) -> BoundedProbe {
+    let system_generated = match directory.open_child(OsStr::new(".system_generated")) {
+        Ok(OpenedProviderSourcePath::Directory(dir)) => dir,
+        Ok(OpenedProviderSourcePath::File(_)) => return BoundedProbe::NotFound,
+        Err(error) if is_ignorable_child_error(&error) => return BoundedProbe::NotFound,
+        Err(_) => return BoundedProbe::IoError,
+    };
+    let logs = match system_generated.open_child(OsStr::new("logs")) {
+        Ok(OpenedProviderSourcePath::Directory(dir)) => dir,
+        Ok(OpenedProviderSourcePath::File(_)) => return BoundedProbe::NotFound,
+        Err(error) if is_ignorable_child_error(&error) => return BoundedProbe::NotFound,
+        Err(_) => return BoundedProbe::IoError,
+    };
+    dir_has_transcript(&logs)
+}
+
+fn dir_has_transcript(directory: &ProviderSourceDirectory) -> BoundedProbe {
+    for leaf in ["transcript_full.jsonl", "transcript.jsonl"] {
+        match directory.open_child(OsStr::new(leaf)) {
+            Ok(OpenedProviderSourcePath::File(_)) => return BoundedProbe::Found,
+            Ok(OpenedProviderSourcePath::Directory(_)) => {}
+            Err(error) if is_ignorable_child_error(&error) => {}
+            Err(_) => return BoundedProbe::IoError,
         }
-        _ => BoundedProbe::IoError,
+    }
+    BoundedProbe::NotFound
+}
+
+fn is_not_found_error(error: &SourceIoError) -> bool {
+    matches!(
+        error,
+        SourceIoError::Io(io_error) | SourceIoError::SystemIo { source: io_error, .. }
+            if io_error.kind() == ErrorKind::NotFound
+    )
+}
+
+fn is_ignorable_child_error(error: &SourceIoError) -> bool {
+    is_not_found_error(error)
+        || matches!(
+            error,
+            SourceIoError::InvalidProviderTranscriptPath { reason, .. }
+                if *reason == SYMLINK_PROVIDER_SOURCE_REASON
+                    || *reason == REPARSE_PROVIDER_SOURCE_REASON
+                    || *reason == NON_REGULAR_PROVIDER_SOURCE_REASON
+        )
+}
+
+fn classify_open_root_error(error: &SourceIoError) -> BoundedProbe {
+    if is_not_found_error(error) {
+        BoundedProbe::NotFound
+    } else {
+        BoundedProbe::IoError
     }
 }
 
