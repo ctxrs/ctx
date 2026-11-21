@@ -28,7 +28,13 @@ impl CoreRefreshEngine {
         provider_root_refresh: bool,
     ) -> Result<Option<SourceBackedRefreshScope>> {
         let observed_generation = self.observed_published_generation(data_root)?;
-        let full_rebuild_pending = self.full_rebuild_pending_for_watch(data_root)?;
+        let generation_requires_rebuild =
+            crate::publication::published_generation_requires_rebuild(
+                data_root,
+                self.journal.as_ref(),
+            )?;
+        let split_migration_pending = self.split_migration_pending_for_watch(data_root)?;
+        let full_rebuild_pending = generation_requires_rebuild || split_migration_pending;
         let all_scope_widening_possible = provider_root_refresh
             || full_rebuild_pending
             || (cold_all && observed_generation.is_none());
@@ -113,6 +119,15 @@ impl CoreRefreshEngine {
                 && state.dirty_routes.all_routes_ready(now_ms);
             let refresh_scope = if provider_root_all {
                 SourceBackedRefreshScope::All
+            } else if generation_requires_rebuild {
+                // A fresh rebuild writer has no reusable base generation to
+                // carry unselected routes. Never fall back to an Exact partial
+                // publication while a generation rebuild is pending; wait for
+                // paused or withheld peers instead of dropping routes.
+                if paused_routes_present || provider_root_refresh {
+                    return Ok(None);
+                }
+                SourceBackedRefreshScope::All
             } else if provider_root_refresh {
                 // A full config publication must wait for every withheld peer.
                 // Preserve those ledger entries and admit only eligible work.
@@ -120,10 +135,8 @@ impl CoreRefreshEngine {
                     return Ok(None);
                 }
                 SourceBackedRefreshScope::Exact(routes)
-            } else if full_rebuild_pending && !paused_routes_present {
-                // Schema upgrades and collapsed-route migrations need the
-                // complete catalog. A fresh writer cannot carry unselected
-                // predecessor routes into its replacement generation.
+            } else if split_migration_pending && !paused_routes_present {
+                // Collapsed-route migrations need the complete catalog.
                 SourceBackedRefreshScope::All
             } else if retry_intent.is_none()
                 && cold_all
@@ -166,7 +179,7 @@ impl CoreRefreshEngine {
         Ok(Some(refresh_scope))
     }
 
-    fn full_rebuild_pending_for_watch(&self, data_root: &Path) -> Result<bool> {
+    fn split_migration_pending_for_watch(&self, data_root: &Path) -> Result<bool> {
         let catalog = self.lock_state().watch_catalog.clone();
         let Some(catalog) = catalog else {
             return Ok(false);
@@ -174,15 +187,11 @@ impl CoreRefreshEngine {
         let Some(index) = open_published_generation(data_root, self.journal.as_ref())? else {
             return Ok(false);
         };
-        let index_root = source_backed_index_root(data_root);
-        Ok(
-            ctx_history_index::active_generation_requires_rebuild(&index_root, &index)?
-                || index
-                    .manifest()
-                    .source_routes()
-                    .iter()
-                    .any(|route| catalog.has_automatic_split_legacy_route(route.route_identity())),
-        )
+        Ok(index
+            .manifest()
+            .source_routes()
+            .iter()
+            .any(|route| catalog.has_automatic_split_legacy_route(route.route_identity())))
     }
 
     pub(super) fn background_maintenance_wake_response(

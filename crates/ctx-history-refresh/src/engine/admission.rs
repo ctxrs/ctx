@@ -516,15 +516,15 @@ impl CoreRefreshEngine {
         &self,
         data_root: &Path,
         claim: &PendingAdmissionClaim,
-        resolution: Result<ctx_history_refresh_execution::AdmittedRefresh>,
+        resolution: Result<scope_resolution::ResolvedPendingAdmission>,
     ) -> Result<Option<SourceBackedRefreshRun>> {
-        let resolution = resolution.and_then(|authority| {
+        let resolution = resolution.and_then(|resolved| {
             let observation_fence = self.sample_admission_observations(
-                &authority,
+                &resolved.authority,
                 claim.watch_catalog_revision,
                 &claim.route_event_watermarks,
             )?;
-            Ok((authority, observation_fence))
+            Ok((resolved, observation_fence))
         });
         let mut state = self.lock_state();
         state
@@ -551,7 +551,7 @@ impl CoreRefreshEngine {
             return Ok(None);
         }
         match resolution {
-            Ok((resolution, observation_fence)) => {
+            Ok((resolved, observation_fence)) => {
                 if !observation_fence.still_matches(&state) {
                     return Ok(None);
                 }
@@ -559,8 +559,9 @@ impl CoreRefreshEngine {
                     data_root,
                     &mut state,
                     &claim.request_id,
-                    resolution,
+                    resolved.authority,
                     observation_fence.route_observations,
+                    resolved.allow_rebuild_widening,
                 )?;
                 Ok(None)
             }
@@ -613,6 +614,7 @@ impl CoreRefreshEngine {
         request_id: &str,
         authority: ctx_history_refresh_execution::AdmittedRefresh,
         route_observations: BTreeMap<SourceRouteIdentity, String>,
+        allow_rebuild_widening: bool,
     ) -> Result<()> {
         let snapshot = AdmissionResolutionSnapshot::capture(state);
         let automatic_retry_checkpoints = state.automatic_retry_checkpoints.clone();
@@ -626,12 +628,18 @@ impl CoreRefreshEngine {
                 SourceBackedRefreshScope::Exact(authority.exact_routes().clone())
             }
         };
+        let widened_for_rebuild =
+            allow_rebuild_widening && authority_scope == SourceBackedRefreshScope::All;
         if matches!(&attempt.refresh_scope, SourceBackedRefreshScope::Exact(_))
             && attempt.refresh_scope != authority_scope
+            && !widened_for_rebuild
         {
             bail!("scoped source refresh admission would widen its persisted exact scope");
         }
         attempt.refresh_scope = authority_scope;
+        if widened_for_rebuild {
+            attempt.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
+        }
         attempt.admitted_authority = Some(authority);
         attempt.route_observations = route_observations;
         attempt.automatic_retry_checkpoints = automatic_retry_checkpoints;
@@ -780,6 +788,7 @@ impl CoreRefreshEngine {
             request_id,
             admitted,
             route_observations,
+            false,
         )
     }
 }

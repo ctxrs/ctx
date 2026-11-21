@@ -1,4 +1,5 @@
 use super::*;
+use crate::ExplicitSourcePathMissing;
 use std::collections::BTreeMap;
 
 pub(crate) struct CanonicalizedCatalogBindings {
@@ -84,5 +85,112 @@ impl ExplicitSourceCatalogAuthority {
             build,
             &snapshot,
         )
+    }
+
+    pub(crate) fn register_retained_routes_for_rebuild(
+        &self,
+        data_root: &Path,
+        previous_bindings: &[ExplicitSourceCatalogRouteBinding],
+        replaced_catalog: Option<&Self>,
+        build: &mut SourceBackedAutomaticRegistryBuild,
+    ) -> Result<Vec<ExplicitSourceCatalogRouteBinding>> {
+        let replaced_authorities = replaced_catalog
+            .map(|catalog| Self::authority_keys(&catalog.entries))
+            .transpose()?
+            .unwrap_or_default();
+        let bound_routes = self.bound_routes(previous_bindings)?;
+        let mut bindings = Vec::with_capacity(bound_routes.len());
+        for (entry, previous_route) in bound_routes {
+            let authority = (
+                entry.provider()?.as_str().to_owned(),
+                entry.certified_source_format()?.to_owned(),
+            );
+            if replaced_authorities.contains(&authority) {
+                bindings.push(ExplicitSourceCatalogRouteBinding {
+                    catalog_lineage: entry.catalog_lineage.clone(),
+                    route_identity: previous_route.as_str().to_owned(),
+                });
+                continue;
+            }
+            if let Some(coverage) = automatic_route_coverage_binding(&build.registry, entry)? {
+                bindings.push(ExplicitSourceCatalogRouteBinding {
+                    catalog_lineage: entry.catalog_lineage.clone(),
+                    route_identity: coverage.route_identity.as_str().to_owned(),
+                });
+                continue;
+            }
+            let source = match source_from_catalog_entry(data_root, entry) {
+                Ok(source) => source,
+                Err(error) if error.downcast_ref::<ExplicitSourcePathMissing>().is_some() => {
+                    bindings.push(ExplicitSourceCatalogRouteBinding {
+                        catalog_lineage: entry.catalog_lineage.clone(),
+                        route_identity: previous_route.as_str().to_owned(),
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            validate_explicit_source_root(data_root, &source)?;
+            let before = build
+                .registry
+                .routes()
+                .filter_map(|route| route.route_identity.clone())
+                .collect::<BTreeSet<_>>();
+            register_enabled_catalog_route(
+                data_root,
+                &mut build.registry,
+                source,
+                entry.lineage()?,
+                &[],
+            )
+            .with_context(|| {
+                format!(
+                    "register retained explicit route {} {} for full rebuild",
+                    entry.provider,
+                    entry.path.display()
+                )
+            })?;
+            if let Some(preserved) = entry.route_identity.as_ref() {
+                let constructed = build
+                    .registry
+                    .routes()
+                    .filter_map(|route| route.route_identity.clone())
+                    .filter(|identity| !before.contains(identity))
+                    .collect::<Vec<_>>();
+                let [constructed] = constructed.as_slice() else {
+                    bail!(
+                        "retained relocated catalog lineage {} constructed {} routes instead of one",
+                        entry.catalog_lineage,
+                        constructed.len()
+                    );
+                };
+                build.registry.preserve_explicit_route_identity(
+                    constructed,
+                    ctx_history_index::SourceRouteIdentity::from_sha256(preserved.clone())?,
+                    entry.relocate_from.as_deref().ok_or_else(|| {
+                        anyhow!("preserved relocation route has no exact old-path witness")
+                    })?,
+                )?;
+            }
+            let added = build
+                .registry
+                .routes()
+                .filter_map(|route| route.route_identity.clone())
+                .filter(|identity| !before.contains(identity))
+                .collect::<Vec<_>>();
+            let [route_identity] = added.as_slice() else {
+                bail!(
+                    "retained explicit catalog lineage {} registered {} executable routes instead of one",
+                    entry.catalog_lineage,
+                    added.len()
+                );
+            };
+            bindings.push(ExplicitSourceCatalogRouteBinding {
+                catalog_lineage: entry.catalog_lineage.clone(),
+                route_identity: route_identity.as_str().to_owned(),
+            });
+        }
+        bindings.sort_by(|left, right| left.catalog_lineage.cmp(&right.catalog_lineage));
+        Ok(bindings)
     }
 }

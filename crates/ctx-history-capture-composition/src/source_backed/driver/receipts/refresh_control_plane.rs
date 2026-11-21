@@ -56,6 +56,13 @@ impl SourceBackedProviderRegistry {
         route.metadata.route_identity = Some(preserved);
         Ok(())
     }
+
+    pub fn set_predecessor_released_provider_roots(
+        &mut self,
+        authorities: Vec<ctx_history_index::DetachedReleasedProviderRootAuthority>,
+    ) {
+        self.predecessor_released_provider_roots = authorities;
+    }
 }
 
 fn relocation_source_remains_absent(path: &Path) -> bool {

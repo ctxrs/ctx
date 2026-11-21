@@ -36,7 +36,9 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         previous_explicit_source_catalog,
         previous_catalog_route_bindings,
         requested_explicit_source_catalog,
-        retained_generation,
+        write_base_generation,
+        continuity_predecessor,
+        requires_rebuild,
         exact_base_generation,
         requested_catalog_route_bindings,
         previous_route_controls,
@@ -49,7 +51,15 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         physical_routes,
         published_state,
     )?;
-    let base_route_ids = retained_generation
+    if requires_rebuild && matches!(scope, SourceBackedRefreshScope::Exact(_)) {
+        bail!("exact partial source refresh is forbidden while the active Core generation requires a full rebuild");
+    }
+    let reconciliation_demand = if requires_rebuild {
+        SourceBackedReconciliationDemand::Exhaustive
+    } else {
+        reconciliation_demand
+    };
+    let base_route_ids = write_base_generation
         .as_ref()
         .map(|generation| {
             generation
@@ -79,20 +89,24 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     // from which an incremental member scan could carry the unvisited source
     // family. Promote only those ownership transitions to exhaustive route
     // work; ordinary watcher appends retain their member worksets.
-    let route_worksets = route_worksets
-        .iter()
-        .filter(|(route, _)| {
-            !reactivated_automatic_routes.contains(*route)
-                && !split_plan.required_routes().contains(*route)
-        })
-        .map(|(route, members)| (route.clone(), members.clone()))
-        .collect::<BTreeMap<_, _>>();
+    let route_worksets = if requires_rebuild {
+        BTreeMap::new()
+    } else {
+        route_worksets
+            .iter()
+            .filter(|(route, _)| {
+                !reactivated_automatic_routes.contains(*route)
+                    && !split_plan.required_routes().contains(*route)
+            })
+            .map(|(route, members)| (route.clone(), members.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
     if scope == SourceBackedRefreshScope::All
         && reconciliation_demand == SourceBackedReconciliationDemand::Exhaustive
     {
         register_automatic_hermes_profile_rename_retirements(
             &mut build,
-            retained_generation.as_ref(),
+            write_base_generation.as_ref(),
             &previous_catalog_route_bindings,
             &previous_route_controls,
         )?;
@@ -110,7 +124,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     }
     let registry_route_failures = if matches!(scope, SourceBackedRefreshScope::All) {
         reject_blocking_automatic_registry_issues(&build.issues)?;
-        automatic_registry_route_failures(&build.issues, retained_generation.as_ref())?
+        automatic_registry_route_failures(&build.issues, write_base_generation.as_ref())?
     } else {
         Vec::new()
     };
@@ -118,7 +132,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         automatic_registry_route_less_blockers(&build.issues, &registry_route_failures);
     let registry_failures =
         terminal_registry_route_failures(registry_route_failures, &build.registry, &physical_scope);
-    let previous_nonempty_routes = retained_generation
+    let previous_nonempty_routes = continuity_predecessor
         .as_ref()
         .map(|generation| {
             generation
@@ -156,7 +170,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
             )
             .collect::<BTreeSet<_>>(),
     };
-    if retained_generation.is_none()
+    if write_base_generation.is_none()
         && !registry_failures.is_empty()
         && selected_registry_route_count(&build.registry, &physical_scope) == 0
     {
@@ -181,14 +195,14 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     } else {
         WriterOptions::for_indexing_limits(indexing_limits.memory_bytes, indexing_limits.workers)
     };
-    let publication_scope = if automatic_split_active {
+    let publication_scope = if automatic_split_active || requires_rebuild {
         SourceBackedRefreshScope::All
     } else {
         provider_root_publication_scope(
             &scope,
             &physical_scope,
             &build.registry,
-            retained_generation.as_ref(),
+            write_base_generation.as_ref(),
         )
     };
     let (executor, _issues) = build.into_refresh_executor(writer_options);
@@ -197,7 +211,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         .with_base_route_controls(previous_route_controls.clone())
         .with_attempt_history_progress(attempt_history_progress);
     let current_policy_hash = ctx_history_index::current_source_generation_policy_hash().ok();
-    let full_rebuild_from_scratch = retained_generation.as_ref().is_none_or(|generation| {
+    let full_rebuild_from_scratch = write_base_generation.as_ref().is_none_or(|generation| {
         let manifest = generation.manifest();
         manifest.lexical_schema_version != ctx_history_index::LEXICAL_SCHEMA_VERSION
             || current_policy_hash
@@ -221,7 +235,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
             physical_scope,
             publication_scope,
             reconciliation_demand,
-            retained_generation.as_ref(),
+            continuity_predecessor.as_ref(),
             exact_base_generation,
             route_worksets.clone(),
             &mut report_attempt_progress,
@@ -265,7 +279,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     publication::preserve_carried_rejection_diagnostics(
                         &mut route_results,
                         context.snapshot(),
-                        retained_generation.as_ref(),
+                        write_base_generation.as_ref(),
                     )
                     .map_err(|_| IndexError::InvalidGenerationStateEnvelope)?;
                 let (published_explicit_source_catalog, catalog_route_bindings) =
@@ -310,7 +324,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     terminal_coverage_error = Some(error);
                     return Err(IndexError::InvalidGenerationStateEnvelope);
                 }
-                let mut route_observations = retained_generation
+                let mut route_observations = write_base_generation
                     .as_ref()
                     .map(|generation| {
                         SourceBackedGenerationState::decode_from_manifest(generation.manifest())
@@ -404,7 +418,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     publication::preserve_carried_rejection_diagnostics(
         &mut route_results,
         receipt.commit.snapshot(),
-        retained_generation.as_ref(),
+        write_base_generation.as_ref(),
     )?;
     let mut catalog_route_bindings = generation_state.catalog_route_bindings().to_vec();
     for binding in &requested_catalog_route_bindings {

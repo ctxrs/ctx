@@ -299,14 +299,11 @@ pub fn source_backed_watch_catalog(
     validate_automatic_provider_source_roots_outside_data_root(data_root, report.sources.iter())
         .context("validate provider roots before deriving source watch catalog")?;
     let index_root = source_backed_index_root(data_root);
+    // Keep any readable predecessor snapshot (including schema-22 or
+    // rebuild-marked generations) so configured Released provider roots retain
+    // their source-identity authority in watch catalogs and during rebuilds.
     let retained_generation = match VerifiedIndex::open_pinned(&index_root) {
-        Ok(index) => {
-            if ctx_history_index::active_generation_requires_rebuild(&index_root, &index)? {
-                None
-            } else {
-                Some(index.into_generation_snapshot())
-            }
-        }
+        Ok(index) => Some(index.into_generation_snapshot()),
         Err(IndexError::MissingActiveGenerationPointer) => None,
         Err(error) if ctx_history_index::generation_incompatibility_requires_rebuild(&error) => {
             None
@@ -543,7 +540,16 @@ pub fn source_backed_admitted_discovery_from_report(
     )?;
     reject_blocking_automatic_registry_issues(&merged.build.issues)?;
     let watch_catalog = merged.build.registry.watch_catalog();
-    let selected_routes = if explicit_source_catalog.is_some() {
+    let selected_routes = if coverage == AdmittedRefreshCoverage::CompleteCatalog
+        && (explicit_source_catalog.is_none() || merged.requires_rebuild)
+    {
+        // A newly admitted automatic-maintenance or full-rebuild request owns
+        // the complete catalog snapshot, including retained missing routes and
+        // retained explicit catalog routes whose lifecycle state must advance.
+        // This is the admission boundary; exact retries reconstruct only their
+        // persisted route-local catalog authority.
+        watch_catalog.route_ids().cloned().collect()
+    } else if explicit_source_catalog.is_some() {
         merged
             .requested_catalog_route_bindings
             .iter()
@@ -551,12 +557,6 @@ pub fn source_backed_admitted_discovery_from_report(
                 SourceRouteIdentity::from_sha256(binding.route_identity.clone()).map_err(Into::into)
             })
             .collect::<Result<BTreeSet<_>>>()?
-    } else if coverage == AdmittedRefreshCoverage::CompleteCatalog {
-        // A newly admitted automatic-maintenance request owns the complete
-        // catalog snapshot, including retained missing routes whose lifecycle
-        // state must advance. This is the admission boundary; exact retries
-        // reconstruct only their persisted route-local catalog authority.
-        watch_catalog.route_ids().cloned().collect()
     } else {
         watch_catalog
             .route_ids()
@@ -568,15 +568,19 @@ pub fn source_backed_admitted_discovery_from_report(
             .cloned()
             .collect()
     };
-    let route_worksets = explicit_source_catalog
-        .map(|catalog| {
-            catalog.automatic_route_worksets(
-                &merged.build.registry,
-                &merged.requested_catalog_route_bindings,
-            )
-        })
-        .transpose()?
-        .unwrap_or_default();
+    let route_worksets = if merged.requires_rebuild {
+        BTreeMap::new()
+    } else {
+        explicit_source_catalog
+            .map(|catalog| {
+                catalog.automatic_route_worksets(
+                    &merged.build.registry,
+                    &merged.requested_catalog_route_bindings,
+                )
+            })
+            .transpose()?
+            .unwrap_or_default()
+    };
     let admission_failure_policy = match coverage {
         AdmittedRefreshCoverage::CompleteCatalog => {
             AutomaticRegistryAdmissionFailurePolicy::SystemicOnly
@@ -592,7 +596,7 @@ pub fn source_backed_admitted_discovery_from_report(
     }
     let registry_failures = automatic_registry_route_failures(
         &merged.build.issues,
-        merged.retained_generation.as_ref(),
+        merged.write_base_generation.as_ref(),
     )?;
     if selected_routes.is_empty() {
         if coverage == AdmittedRefreshCoverage::SelectedRoutes && !registry_failures.is_empty() {

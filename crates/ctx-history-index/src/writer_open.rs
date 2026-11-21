@@ -339,6 +339,8 @@ impl GenerationWriter {
                 }
             }
             let active_pointer = active_authority.map(ActivePublicationAuthority::into_pointer);
+            let opened_empty =
+                matches!(reusable_generation, Some(OpenedPinnedPublication::Empty(_)));
 
             let (
                 index,
@@ -376,6 +378,8 @@ impl GenerationWriter {
                     )
                 }
             };
+            let requires_full_rebuild = rebuild_marked
+                || (active_pointer.is_some() && base_publication.is_none() && !opened_empty);
             let core_record_preparer = CoreRecordPreparer::new(
                 fields,
                 active_pointer
@@ -419,6 +423,7 @@ impl GenerationWriter {
                 replacement_work: writer_replacement::ReplacementWork::default(),
                 fields,
                 base_publication,
+                requires_full_rebuild,
                 base_opstamp,
                 core_record_preparer,
                 complete_inventories: Vec::new(),
@@ -427,6 +432,7 @@ impl GenerationWriter {
                 route_deletions: HashSet::new(),
                 present_source_routes: None,
                 applied_provider_roots: None,
+                predecessor_released_provider_roots: Vec::new(),
                 authorized_topology_route_retirements: None,
                 observed_missing_routes: HashMap::new(),
                 route_publication_revalidations: Vec::new(),
@@ -470,6 +476,29 @@ impl GenerationWriter {
         self.base_publication
             .as_ref()
             .map(PinnedPublication::manifest)
+    }
+
+    /// Returns whether this writer opened a fresh candidate to replace an
+    /// active generation that could not be reused as a writable base.
+    pub fn requires_full_rebuild(&self) -> bool {
+        self.requires_full_rebuild
+    }
+
+    /// Carries detached `Released` configured-root authority from a readable
+    /// predecessor generation into a fresh rebuild candidate that has no
+    /// reusable writable base.
+    pub fn set_predecessor_released_provider_roots(
+        &mut self,
+        authorities: Vec<DetachedReleasedProviderRootAuthority>,
+    ) -> Result<()> {
+        if self.base_publication.is_some() {
+            return Err(IndexError::InvalidProviderRoots(
+                "predecessor released provider roots apply only when no reusable base exists"
+                    .to_owned(),
+            ));
+        }
+        self.predecessor_released_provider_roots = authorities;
+        Ok(())
     }
 
     /// Returns the exact persisted manifest descriptor captured with the base

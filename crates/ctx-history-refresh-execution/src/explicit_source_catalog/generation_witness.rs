@@ -68,7 +68,7 @@ impl ExplicitSourceCatalogAuthority {
         Ok((Some(authority), bindings))
     }
 
-    fn authority_keys(entries: &[CatalogEntry]) -> Result<BTreeSet<(String, String)>> {
+    pub(super) fn authority_keys(entries: &[CatalogEntry]) -> Result<BTreeSet<(String, String)>> {
         entries
             .iter()
             .map(|entry| {

@@ -20,13 +20,13 @@ impl CoreRefreshEngine {
             return Ok(false);
         };
         let build_rearmed_routes = durable_build_rearmed_automatic_retry_routes(&job)?;
-        let verified = open_generation_for_request_recovery(data_root)?;
+        let (verified, rebuild_required) = open_generation_for_request_recovery(data_root)?;
         let active_generation = verified
             .as_ref()
             .map(|verified| verified.generation_id().to_owned());
         let mut queued_successors = recover_queued_successors(&job)?;
         for successor in &mut queued_successors {
-            require_scoped_rehydration(successor)?;
+            require_scoped_rehydration(successor, rebuild_required)?;
         }
         let request_state = job
             .get("request_state")
@@ -148,7 +148,7 @@ impl CoreRefreshEngine {
         if interrupted_running {
             root.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
         }
-        require_scoped_rehydration(&mut root)?;
+        require_scoped_rehydration(&mut root, rebuild_required)?;
         let request_id = root.request_id.clone();
         let automatic_retry_checkpoints = root.automatic_retry_checkpoints.clone();
         {
@@ -201,32 +201,53 @@ impl CoreRefreshEngine {
     }
 }
 
-fn open_generation_for_request_recovery(data_root: &Path) -> Result<Option<Arc<VerifiedIndex>>> {
+fn open_generation_for_request_recovery(
+    data_root: &Path,
+) -> Result<(Option<Arc<VerifiedIndex>>, bool)> {
     let index_root = source_backed_index_root(data_root);
     if !index_root.is_dir() {
-        return Ok(None);
+        return Ok((None, false));
     }
     match open_verified_index(&index_root) {
-        Ok(index) => Ok(Some(Arc::new(index))),
-        Err(IndexError::MissingActiveGenerationPointer) => Ok(None),
-        Err(error) if generation_incompatibility_requires_recovery_rebuild(&error) => Ok(None),
+        Ok(index) => {
+            let rebuild_required =
+                ctx_history_index::active_generation_requires_rebuild(&index_root, &index)?;
+            Ok((Some(Arc::new(index)), rebuild_required))
+        }
+        Err(IndexError::MissingActiveGenerationPointer) => Ok((None, false)),
+        Err(error) if generation_incompatibility_requires_recovery_rebuild(&error) => {
+            Ok((None, true))
+        }
         Err(error) => {
             Err(error).with_context(|| format!("open verified Core index {}", index_root.display()))
         }
     }
 }
 
-fn require_scoped_rehydration(attempt: &mut SourceBackedRefreshAttempt) -> Result<()> {
-    if matches!(
+fn require_scoped_rehydration(
+    attempt: &mut SourceBackedRefreshAttempt,
+    rebuild_required: bool,
+) -> Result<()> {
+    let is_scoped_import = matches!(
         attempt.intent,
         RefreshIntent::SelectedImport {
             selection: RefreshSelection::Provider(_) | RefreshSelection::ExactSource(_),
             ..
         }
-    ) && attempt.state == SourceBackedRefreshState::Queued
+    );
+    if is_scoped_import
+        && !rebuild_required
+        && attempt.state == SourceBackedRefreshState::Queued
         && !matches!(attempt.refresh_scope, SourceBackedRefreshScope::Exact(_))
     {
         bail!("durable resolved scoped source refresh has no exact physical scope");
+    }
+    if rebuild_required
+        && matches!(attempt.intent, RefreshIntent::SelectedImport { .. })
+        && matches!(attempt.refresh_scope, SourceBackedRefreshScope::Exact(_))
+    {
+        attempt.refresh_scope = SourceBackedRefreshScope::All;
+        attempt.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
     }
     attempt.admitted_authority = None;
     attempt.state = SourceBackedRefreshState::AdmissionPending;

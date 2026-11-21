@@ -66,8 +66,11 @@ impl GenerationWriter {
                 })
             })
             .unwrap_or_else(|| (true, provider_source_config_digest(true, &[]), Vec::new()));
-        let detached_released_provider_roots =
-            detached_released_provider_root_authorities(self.base_manifest(), &provider_roots)?;
+        let detached_released_provider_roots = detached_released_provider_root_authorities(
+            self.base_manifest(),
+            &self.predecessor_released_provider_roots,
+            &provider_roots,
+        )?;
         let manifest = GenerationManifest::from_parts_with_record_aggregates_and_provider_roots_and_detached_authorities(
             sources,
             record_aggregates,
@@ -156,28 +159,46 @@ impl GenerationWriter {
 
 fn detached_released_provider_root_authorities(
     base: Option<&GenerationManifest>,
+    predecessor_released: &[DetachedReleasedProviderRootAuthority],
     current: &[AppliedProviderRoot],
 ) -> Result<Vec<DetachedReleasedProviderRootAuthority>> {
-    let Some(base) = base else {
-        return Ok(Vec::new());
-    };
     let mut authorities = BTreeMap::new();
-    for authority in base.detached_released_provider_roots() {
-        if current
-            .iter()
-            .all(|root| root.definition().id != authority.id())
-        {
-            authorities.insert(authority.id().to_owned(), authority.clone());
+    if let Some(base) = base {
+        for authority in base.detached_released_provider_roots() {
+            if current
+                .iter()
+                .all(|root| root.definition().id != authority.id())
+            {
+                authorities.insert(authority.id().to_owned(), authority.clone());
+            }
         }
-    }
-    for root in base.provider_roots() {
-        if current
-            .iter()
-            .any(|current| current.definition().id == root.definition().id)
-        {
-            continue;
+        for root in base.provider_roots() {
+            if current
+                .iter()
+                .any(|current| current.definition().id == root.definition().id)
+            {
+                continue;
+            }
+            if let Some(authority) = DetachedReleasedProviderRootAuthority::from_applied(root)? {
+                if authorities.contains_key(authority.id()) {
+                    continue;
+                }
+                if authorities.len() == MAX_DETACHED_RELEASED_PROVIDER_ROOTS {
+                    return Err(IndexError::InvalidProviderRoots(
+                        "detached released root authority capacity is exhausted".to_owned(),
+                    ));
+                }
+                authorities.insert(authority.id().to_owned(), authority);
+            }
         }
-        if let Some(authority) = DetachedReleasedProviderRootAuthority::from_applied(root)? {
+    } else {
+        for authority in predecessor_released {
+            if current
+                .iter()
+                .any(|root| root.definition().id == authority.id())
+            {
+                continue;
+            }
             if authorities.contains_key(authority.id()) {
                 continue;
             }
@@ -186,7 +207,7 @@ fn detached_released_provider_root_authorities(
                     "detached released root authority capacity is exhausted".to_owned(),
                 ));
             }
-            authorities.insert(authority.id().to_owned(), authority);
+            authorities.insert(authority.id().to_owned(), authority.clone());
         }
     }
     // Active roots consume a compatible authority. A same-name incompatible
@@ -239,7 +260,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            detached_released_provider_root_authorities(Some(&base), &[]),
+            detached_released_provider_root_authorities(Some(&base), &[], &[]),
             Err(IndexError::InvalidProviderRoots(detail))
                 if detail == "detached released root authority capacity is exhausted"
         ));
@@ -280,7 +301,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            detached_released_provider_root_authorities(Some(&base), &[replacement])
+            detached_released_provider_root_authorities(Some(&base), &[], &[replacement])
                 .unwrap()
                 .is_empty()
         );

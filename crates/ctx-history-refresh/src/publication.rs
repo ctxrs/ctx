@@ -118,6 +118,27 @@ pub(super) fn open_published_generation(
     )
 }
 
+pub(super) fn published_generation_requires_rebuild(
+    data_root: &Path,
+    journal: &dyn RefreshJournal,
+) -> Result<bool> {
+    match open_published_generation_for_recovery(data_root, journal)? {
+        PublishedGenerationOpen::Missing => Ok(false),
+        PublishedGenerationOpen::RebuildRequired => Ok(true),
+        PublishedGenerationOpen::Verified(index) => {
+            let index_root = source_backed_index_root(data_root);
+            ctx_history_index::active_generation_requires_rebuild(&index_root, &index).with_context(
+                || {
+                    format!(
+                        "inspect reusable active Core generation {}",
+                        index_root.display()
+                    )
+                },
+            )
+        }
+    }
+}
+
 pub(super) fn open_published_generation_for_recovery(
     data_root: &Path,
     journal: &dyn RefreshJournal,

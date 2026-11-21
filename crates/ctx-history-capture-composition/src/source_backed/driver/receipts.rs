@@ -497,6 +497,8 @@ pub struct SourceBackedProviderRegistry {
     pub(in super::super) routes: SourceBackedRouteRegistry<SourceBackedRoute>,
     pub(in super::super) codex_generation: Option<Arc<CodexGenerationNormalizationCoordinatorV0>>,
     pub(in super::super) applied_provider_roots: Option<(bool, String, Vec<AppliedProviderRoot>)>,
+    pub(in super::super) predecessor_released_provider_roots:
+        Vec<ctx_history_index::DetachedReleasedProviderRootAuthority>,
     pub(in super::super) provider_root_route_retirements: BTreeSet<SourceRouteIdentity>,
     pub(in super::super) provider_root_route_withdrawals: BTreeSet<SourceRouteIdentity>,
     pub(in super::super) automatic_split_cohort_barriers: Vec<AutomaticSplitCohortBarrier>,

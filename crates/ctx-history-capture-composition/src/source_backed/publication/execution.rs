@@ -100,6 +100,15 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
         };
         // Exact/watch preserves pinned aliases; cold exact commits admitted definitions.
         let base_snapshot = lifecycle.base_snapshot();
+        if matches!(&plan.publication_scope, SourceBackedRefreshScope::Exact(_))
+            && base_snapshot.is_none()
+            && lifecycle.requires_full_rebuild()
+        {
+            return Err(SourceBackedCoordinatorError::InvalidRoute {
+                provider: CaptureProvider::Unknown,
+                detail: "exact partial publication is forbidden while the active Core generation requires a full rebuild".to_owned(),
+            });
+        }
         let base_route_content = source_route_content_fingerprints(base_snapshot.as_ref());
         let base_provider_roots = base_snapshot
             .as_ref()
@@ -132,6 +141,13 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                 let digest = applied_provider_root_config_digest(*automatic, &roots);
                 lifecycle.set_applied_provider_roots(*automatic, digest, roots)?;
             }
+        }
+        if lifecycle.base_snapshot().is_none()
+            && !registry.predecessor_released_provider_roots.is_empty()
+        {
+            lifecycle.set_predecessor_released_provider_roots(
+                registry.predecessor_released_provider_roots.clone(),
+            )?;
         }
         if matches!(&plan.publication_scope, SourceBackedRefreshScope::All) {
             // Omitted base routes carry unless a typed topology transition

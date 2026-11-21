@@ -31,7 +31,9 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
         let generation = match VerifiedIndex::open_pinned(&index_root) {
             Ok(index) => {
                 if ctx_history_index::active_generation_requires_rebuild(&index_root, &index)? {
-                    PublishedSourceBackedGeneration::RebuildRequired
+                    PublishedSourceBackedGeneration::RebuildRequired {
+                        predecessor: Some(index.into_generation_snapshot()),
+                    }
                 } else {
                     PublishedSourceBackedGeneration::Verified(index.into_generation_snapshot())
                 }
@@ -42,24 +44,30 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
             Err(error)
                 if ctx_history_index::generation_incompatibility_requires_rebuild(&error) =>
             {
-                PublishedSourceBackedGeneration::RebuildRequired
+                PublishedSourceBackedGeneration::RebuildRequired { predecessor: None }
             }
             Err(error) => return Err(error.into()),
         };
-        let verified_generation = match &generation {
-            PublishedSourceBackedGeneration::Verified(generation) => Some(generation),
-            PublishedSourceBackedGeneration::Missing
-            | PublishedSourceBackedGeneration::RebuildRequired => None,
-        };
         let (explicit_source_catalog, catalog_route_bindings, route_controls) =
-            if let Some(generation) = verified_generation.as_ref() {
-                let state =
-                    SourceBackedGenerationState::decode_from_manifest(generation.manifest())?;
-                (
-                    state.applied_explicit_source_catalog().cloned(),
-                    state.catalog_route_bindings().to_vec(),
-                    state.route_controls().clone(),
-                )
+            if let Some(predecessor) = generation.readable_predecessor() {
+                if generation.requires_rebuild()
+                    && predecessor.manifest().generation_state().is_none()
+                {
+                    (None, Vec::new(), BTreeMap::new())
+                } else {
+                    let state =
+                        SourceBackedGenerationState::decode_from_manifest(predecessor.manifest())?;
+                    let route_controls = if generation.requires_rebuild() {
+                        BTreeMap::new()
+                    } else {
+                        state.route_controls().clone()
+                    };
+                    (
+                        state.applied_explicit_source_catalog().cloned(),
+                        state.catalog_route_bindings().to_vec(),
+                        route_controls,
+                    )
+                }
             } else {
                 (None, Vec::new(), BTreeMap::new())
             };

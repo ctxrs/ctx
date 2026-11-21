@@ -82,6 +82,7 @@ ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
     compile_data = ["//:Cargo.toml"],
+    data = ["//crates/ctx-history-index:schema_22_fixture"],
     crate_name = "ctx_history_refresh",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
