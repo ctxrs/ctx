@@ -1,7 +1,9 @@
 use super::*;
 
 mod lexical;
+mod sessions;
 pub use lexical::*;
+pub use sessions::*;
 
 /// Maximum number of complete semantic event records retained in one page.
 pub const MAX_SEMANTIC_EVENT_PAGE_ITEMS: usize = 64;

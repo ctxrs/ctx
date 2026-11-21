@@ -812,6 +812,38 @@ provider-session IDs can repeat across exporters, so add the exporter route
 JSON output may expose transcript content, MCP arguments/responses, and local
 workspace metadata, so treat it as private local data.
 
+## Sessions
+
+```bash
+ctx sessions
+ctx sessions --since 2h --no-subagents
+ctx sessions --provider codex --workspace ctx --limit 25
+ctx sessions --since 2026-08-01 --format json
+```
+
+`sessions` lists indexed sessions from the active verified Core/Tantivy
+generation, ordered by most recent session activity first (untimestamped
+sessions appear last). It reads only the pinned index generation and does not
+reopen provider transcripts at query time.
+
+Supported options:
+
+- `--since <SINCE>`: include only sessions with at least one event at or after
+  the threshold. Accepts relative windows (`30s`, `15m`, `2h`, `30d`, `2w`),
+  calendar dates (`YYYY-MM-DD`, UTC midnight), or RFC 3339 timestamps. Returned
+  `started_at`, `last_activity_at`, and `events` still reflect the whole indexed
+  session.
+- `--provider <PROVIDER>`: filter by one provider (for example `codex`,
+  `claude`, `cursor`, `pi`, `copilot-cli`, `opencode`, or `custom`).
+- `--workspace <SUBSTRING>`: case-insensitive substring match against indexed
+  session workspace, working directory, tool working directory, or project
+  metadata.
+- `--no-subagents`: exclude subagent sessions (sessions with a parent session
+  link or `subagent` scope) while retaining primary and unscoped root sessions.
+- `--limit <N>`: maximum sessions to return, from `1` to `1000` (default `50`).
+- `--format text|json`: render human-readable cards with compact unambiguous
+  session IDs (`text`, default) or exact machine-readable JSON (`json`).
+
 ## Locate
 
 ```bash
@@ -1254,6 +1286,7 @@ ctx show session <ctx-session-id> --format json
 ctx show session <ctx-session-id> --format atif
 ctx show event <ctx-event-id> --format json
 ctx archive atif --out <dir> --format json
+ctx sessions --format json
 ctx search <query>|--term <term>|--file <path> --format json
 ctx docs list --format json
 ctx docs search <query> --format json

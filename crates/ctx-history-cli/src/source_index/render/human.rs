@@ -8,11 +8,11 @@ pub(super) fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-pub(super) fn push_heading(document: &mut Document, text: &str, token: Token) {
+pub(crate) fn push_heading(document: &mut Document, text: &str, token: Token) {
     document.push_line(Line::styled(text, token));
 }
 
-pub(super) fn push_wrapped(
+pub(crate) fn push_wrapped(
     document: &mut Document,
     context: &RenderContext,
     indent: usize,
@@ -32,7 +32,7 @@ pub(super) fn push_wrapped(
     }
 }
 
-pub(super) fn push_prefixed(
+pub(crate) fn push_prefixed(
     document: &mut Document,
     context: &RenderContext,
     indent: usize,
@@ -63,7 +63,7 @@ pub(super) fn push_prefixed(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn push_field(
+pub(crate) fn push_field(
     document: &mut Document,
     context: &RenderContext,
     indent: usize,
@@ -116,7 +116,7 @@ pub(super) fn push_field(
     }
 }
 
-pub(super) fn push_action(
+pub(crate) fn push_action(
     document: &mut Document,
     context: &RenderContext,
     indent: usize,

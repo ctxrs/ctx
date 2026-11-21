@@ -25,6 +25,7 @@ mod provider_sources;
 mod request;
 mod search_filters;
 mod semantic;
+mod sessions;
 mod source_index;
 mod sources;
 mod transcript;
@@ -37,7 +38,7 @@ mod test_query_authority;
 
 pub use cli::{
     ContentScopeArg, LocateArgs, LocateEventArgs, LocateSessionArgs, LocateTarget, SearchArgs,
-    SearchBackendArg, ShowArgs, ShowEventArgs, ShowSessionArgs, ShowTarget,
+    SearchBackendArg, SessionsArgs, ShowArgs, ShowEventArgs, ShowSessionArgs, ShowTarget,
 };
 pub use ctx_history_capture::{ProviderRootDefinition, ProviderRootKind};
 pub use ctx_history_core::parse_capture_provider_name;
@@ -75,6 +76,7 @@ pub use provider_sources::{
     CliSourceDiscoveryPort, SourceInfo, DEFAULT_VISIBLE_SOURCE_PROVIDERS, MAX_DISCOVERY_ISSUES,
     MAX_DISCOVERY_ISSUE_MESSAGE_BYTES,
 };
+pub use sessions::{run_sessions, DEFAULT_SESSIONS_LIMIT, MAX_SESSIONS_LIMIT};
 pub use source_index::{
     cli_snapshot_search, copied_lineage_summary, export_archive_atif, mcp_search_with_compact,
     mcp_show_event_application, mcp_show_session_application, normalize_mcp_search_request,
@@ -102,7 +104,7 @@ pub use request::{
     HistoryProvider, ImportFormat, ImportRequest, ListEventsContentProjection, ListEventsDirection,
     ListEventsRequest, ListEventsScope, ListRequest, LocateRequest, OutputFormat, ProgressMode,
     RefreshMode, SearchBackend, SearchContentScope, SearchRequest, SessionOutputFormat,
-    SetupRequest, ShowRequest, SourceIndexRequest, SourcesRequest, TranscriptMode,
+    SessionsRequest, SetupRequest, ShowRequest, SourceIndexRequest, SourcesRequest, TranscriptMode,
 };
 pub use search_filters::parse_since_filter;
 pub use transcript::{shell_quote_arg, write_output, TranscriptOutput};

@@ -14,9 +14,10 @@ const ACTIVE_GENERATION_RACE_DETAIL: &str =
     "the active searchable generation changed while the command was opening it";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ActiveGenerationRaceCommand {
+pub(crate) enum ActiveGenerationRaceCommand {
     Search,
     Show,
+    Sessions,
 }
 
 impl ActiveGenerationRaceCommand {
@@ -24,6 +25,7 @@ impl ActiveGenerationRaceCommand {
         match self {
             Self::Search => "History changed during search",
             Self::Show => "History changed while opening this item",
+            Self::Sessions => "History changed while listing sessions",
         }
     }
 
@@ -35,6 +37,9 @@ impl ActiveGenerationRaceCommand {
             Self::Show => {
                 "A refresh published a new searchable generation while ctx was opening the previous one. Retry the same show command."
             }
+            Self::Sessions => {
+                "A refresh published a new searchable generation while ctx was opening the previous one. Retry the same sessions command."
+            }
         }
     }
 }
@@ -45,7 +50,7 @@ pub(super) use ctx_history_read_application::{
     validate_ctx_id, validate_session_selector, MissingLookupError, MissingLookupKind,
 };
 
-pub(super) fn externalize_query_error(error: anyhow::Error) -> anyhow::Error {
+pub(crate) fn externalize_query_error(error: anyhow::Error) -> anyhow::Error {
     if let Some(limit) =
         error.downcast_ref::<ctx_history_read_application::ContentQueryLimitError>()
     {
@@ -203,7 +208,7 @@ pub(super) fn resolve_lookup_for_output<T>(
     }
 }
 
-pub(super) fn render_active_generation_race<T>(
+pub(crate) fn render_active_generation_race<T>(
     result: Result<T>,
     json_output: bool,
     command: ActiveGenerationRaceCommand,

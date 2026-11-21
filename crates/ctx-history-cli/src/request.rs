@@ -263,12 +263,35 @@ pub struct SourcesRequest {
     pub format: OutputFormat,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionsRequest {
+    pub since: Option<String>,
+    pub provider: Option<HistoryProvider>,
+    pub workspace: Option<String>,
+    pub no_subagents: bool,
+    pub limit: usize,
+    pub format: OutputFormat,
+}
+
+impl From<SessionsRequest> for ctx_history_read_application::SessionsRequest {
+    fn from(request: SessionsRequest) -> Self {
+        Self {
+            since: request.since,
+            provider: request.provider.map(HistoryProvider::capture_provider),
+            workspace: request.workspace,
+            no_subagents: request.no_subagents,
+            limit: request.limit,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SourceIndexRequest {
     Search(SearchRequest),
     Show(ShowRequest),
     Locate(LocateRequest),
     List(ListRequest),
+    Sessions(SessionsRequest),
 }
 
 #[cfg(test)]

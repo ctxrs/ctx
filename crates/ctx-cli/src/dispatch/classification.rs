@@ -16,6 +16,7 @@ pub(super) fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Import(args) => args.format.is_json(),
         CommandRoot::Show(args) => show_json_output(args),
         CommandRoot::List(_) => true,
+        CommandRoot::Sessions(args) => args.format.is_json(),
         CommandRoot::Locate(args) => match &args.target {
             crate::LocateTarget::Session(args) => args.format.is_json(),
             crate::LocateTarget::Event(args) => args.format.is_json(),
@@ -174,22 +175,8 @@ pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDe
                 events_returned: None,
             }),
         },
-        CommandRoot::List(args) => match &args.target {
-            crate::commands::list::ListTarget::Events(args) => {
-                CliOperation::ShowEvent(ShowTelemetry {
-                    target_kind: TargetKind::Events,
-                    transcript_mode: None,
-                    output_format: match args.format {
-                        crate::commands::list::EventQueryFormat::Json => RenderFormat::Json,
-                        crate::commands::list::EventQueryFormat::Jsonl => RenderFormat::Jsonl,
-                    },
-                    writes_out_file: false,
-                    provider_lookup: !args.provider.is_empty(),
-                    window: None,
-                    events_returned: None,
-                })
-            }
-        },
+        CommandRoot::List(args) => ctx_cli_presentation::commands::list::operation(args),
+        CommandRoot::Sessions(args) => ctx_cli_presentation::commands::sessions::operation(args),
         CommandRoot::Locate(args) => match &args.target {
             crate::LocateTarget::Session(args) => CliOperation::Locate(LocateTelemetry {
                 target_kind: TargetKind::Session,

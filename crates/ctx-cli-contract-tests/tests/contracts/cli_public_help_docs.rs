@@ -157,6 +157,7 @@ fn help_exposes_session_retrieval_commands() {
         "import",
         "show",
         "list",
+        "sessions",
         "locate",
         "search",
         "docs",
@@ -487,6 +488,19 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             ],
         ),
         (
+            "sessions",
+            vec![
+                "Usage: ctx sessions",
+                "--since <SINCE>",
+                "--provider <PROVIDER>",
+                "--workspace <WORKSPACE>",
+                "--no-subagents",
+                "--limit <LIMIT>",
+                "--format <FORMAT>",
+                "List indexed sessions",
+            ],
+        ),
+        (
             "docs",
             vec![
                 "Usage: ctx docs",
@@ -631,6 +645,7 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         &["show", "session", "--help"],
         &["show", "event", "--help"],
         &["list", "events", "--help"],
+        &["sessions", "--help"],
         &["search", "--help"],
         &["docs", "list", "--help"],
         &["docs", "search", "--help"],

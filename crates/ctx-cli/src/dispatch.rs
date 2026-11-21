@@ -7,9 +7,9 @@ use ctx_history_platform::default_data_root;
 use crate::{
     analytics::{
         self, count_bucket, ClientOperationDraft, DocsTelemetry, DoctorTelemetry, IndexTelemetry,
-        IntegrationTelemetry, LocateTelemetry, RenderFormat, SearchTelemetry, SetupTelemetry,
-        ShowTelemetry, SourcesTelemetry, StatusTelemetry, TargetKind, UpgradeMode,
-        UpgradeOperation, UpgradeTelemetry,
+        IntegrationTelemetry, LocateTelemetry, SearchTelemetry, SetupTelemetry, ShowTelemetry,
+        SourcesTelemetry, StatusTelemetry, TargetKind, UpgradeMode, UpgradeOperation,
+        UpgradeTelemetry,
     },
     cli::{CommandRoot, DaemonCommand, DaemonTriggerCommandArg, ImportArgs},
     commands::{
@@ -537,6 +537,15 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut local_usage_draft,
             &mut ui,
         ),
+        CommandRoot::Sessions(args) => {
+            ctx_cli_presentation::commands::sessions::run_sessions_with_draft(
+                args,
+                data_root.clone(),
+                analytics_draft.as_mut(),
+                &mut local_usage_draft,
+                &mut ui,
+            )
+        }
         CommandRoot::Locate(args) => run_locate(
             args,
             data_root.clone(),

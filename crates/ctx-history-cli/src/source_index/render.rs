@@ -31,9 +31,9 @@ use super::search::{
 use crate::RefreshMode as RefreshArg;
 
 mod activity;
-mod archive;
+pub(crate) mod archive;
 pub(in crate::source_index) use archive::append as append_archive_provenance;
-mod human;
+pub(crate) mod human;
 mod locate;
 mod search;
 mod show;
@@ -48,7 +48,7 @@ pub(in crate::source_index) use ctx_history_read_application::{
     search_snippet_fragment, SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
 };
 
-pub(super) fn pretty_json_stdout_bytes(value: &Value) -> Result<usize> {
+pub(crate) fn pretty_json_stdout_bytes(value: &Value) -> Result<usize> {
     Ok(serde_json::to_string_pretty(value)?.len().saturating_add(1))
 }
 

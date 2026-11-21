@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anstyle::{AnsiColor, Color, Style};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use ctx_cli_presentation::commands::{DoctorArgs, SemanticArgs, SetupArgs, StatusArgs};
+use ctx_cli_presentation::commands::{
+    DoctorArgs, SemanticArgs, SessionsArgs, SetupArgs, StatusArgs,
+};
 
 use crate::{
     commands,
@@ -151,6 +153,8 @@ pub(crate) enum CommandRoot {
     Show(ShowArgs),
     #[command(about = "List filtered events from one immutable Core generation")]
     List(ListArgs),
+    #[command(about = "List indexed sessions")]
+    Sessions(SessionsArgs),
     #[command(about = "Locate Core source identity for an indexed session or event")]
     Locate(LocateArgs),
     #[command(about = "Search indexed history, the local graph, or both")]

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::provider_args::ProviderArg;
 use crate::{
     output::JsonOutputFormat, OutputFormat, RefreshMode, SearchBackend, SearchContentScope,
-    SearchRequest, SessionOutputFormat, TranscriptMode,
+    SearchRequest, SessionOutputFormat, SessionsRequest, TranscriptMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +104,32 @@ pub struct LocateSessionArgs {
 pub struct LocateEventArgs {
     pub id: String,
     pub format: JsonOutputFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionsArgs {
+    pub since: Option<String>,
+    pub provider: Option<ProviderArg>,
+    pub workspace: Option<String>,
+    pub no_subagents: bool,
+    pub limit: usize,
+    pub format: JsonOutputFormat,
+}
+
+impl From<SessionsArgs> for SessionsRequest {
+    fn from(args: SessionsArgs) -> Self {
+        Self {
+            since: args.since,
+            provider: args.provider.map(|value| value.0),
+            workspace: args.workspace,
+            no_subagents: args.no_subagents,
+            limit: args.limit,
+            format: match args.format {
+                JsonOutputFormat::Text => OutputFormat::Text,
+                JsonOutputFormat::Json => OutputFormat::Json,
+            },
+        }
+    }
 }
 
 impl From<SearchArgs> for SearchRequest {

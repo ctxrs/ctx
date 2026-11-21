@@ -17,8 +17,8 @@ Progress-event JSON is stderr progress output and does not include
 
 All machine timestamp fields remain exact UTC RFC 3339 values with their
 contracted millisecond precision. The OS-local, no-millisecond presentation
-used by selected ordinary human `search`, `show`, and `locate` fields
-does not apply to JSON, JSONL, MCP structured content, filters, storage,
+used by selected ordinary human `search`, `sessions`, `show`, and `locate`
+fields does not apply to JSON, JSONL, MCP structured content, filters, storage,
 other durable processing, or text/Markdown transcript artifacts.
 
 ## Setup
@@ -995,6 +995,34 @@ boolean `retryable`. An uncertified empty generation reports
 `source_unavailable` and is retryable; malformed or unknown publication
 metadata reports `publication_authority_invalid` and is not retryable. These
 states are distinct from a genuinely missing Core generation.
+
+## Sessions
+
+```bash
+ctx sessions --format json
+ctx sessions --since 2h --provider codex --workspace ctx --no-subagents --limit 50 --format json
+```
+
+Sessions reads only the active verified Core/Tantivy generation and returns one
+`session_list` object:
+
+- `schema_version: 1` and `payload_type: "session_list"`;
+- `generation_id`: the verified Core generation ID read for the listing;
+- `truncated`: `true` when more matching sessions existed beyond `--limit`,
+  otherwise `false`;
+- `sessions`: array ordered by newest `last_activity_at` first (untimestamped
+  sessions last), where each item contains:
+  - `ctx_session_id` (full ctx UUID) and `provider`;
+  - `provider_key` and `source_id` when present (custom history sources);
+  - `provider_session_id`, `parent_ctx_session_id`, and `root_ctx_session_id`
+    when known (omitted when absent);
+  - `cwd`, `project`, and `branch` when present in indexed session metadata;
+  - `started_at` and `last_activity_at` as UTC RFC 3339 millisecond timestamps
+    for the whole session (omitted when the session has no supported event
+    timestamps);
+  - `events`: whole-session indexed event count (`integer`);
+  - `archive_provenance`: creator-supplied archive labels when the session comes
+    from an imported archive (omitted otherwise).
 
 ## Locate
 

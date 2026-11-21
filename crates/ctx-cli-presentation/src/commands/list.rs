@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use crate::{analytics::ShowTelemetry, local_usage::CliUsage, ui::Ui};
+use crate::{
+    analytics::{RenderFormat, ShowTelemetry, TargetKind},
+    local_usage::CliUsage,
+    ui::Ui,
+};
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
@@ -128,6 +132,25 @@ pub mod events {
 }
 
 pub use events::{EventQueryFormat, ListEventsArgs};
+
+pub fn operation(args: &ListArgs) -> ctx_client_observability::operation_descriptor::CliOperation {
+    match &args.target {
+        ListTarget::Events(args) => {
+            ctx_client_observability::operation_descriptor::CliOperation::ShowEvent(ShowTelemetry {
+                target_kind: TargetKind::Events,
+                transcript_mode: None,
+                output_format: match args.format {
+                    EventQueryFormat::Json => RenderFormat::Json,
+                    EventQueryFormat::Jsonl => RenderFormat::Jsonl,
+                },
+                writes_out_file: false,
+                provider_lookup: !args.provider.is_empty(),
+                window: None,
+                events_returned: None,
+            })
+        }
+    }
+}
 
 pub fn run_list(
     args: ListArgs,

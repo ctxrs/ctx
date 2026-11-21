@@ -86,6 +86,7 @@ fn foreground_analytics_eligibility_is_closed_and_remote_safe() {
         vec!["ctx", "index", "wait", "--format=json"],
         vec!["ctx", "doctor"],
         vec!["ctx", "show", "event", "deadbeef"],
+        vec!["ctx", "sessions"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(
@@ -123,6 +124,7 @@ fn deprecated_control_warnings_are_limited_to_foreground_text_commands() {
         vec!["ctx", "setup", "--progress", "json"],
         vec!["ctx", "import", "--progress", "json"],
         vec!["ctx", "doctor", "--format=json"],
+        vec!["ctx", "sessions", "--format=json"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(!crate::dispatch::command_deprecation_warning_eligible(
@@ -134,6 +136,7 @@ fn deprecated_control_warnings_are_limited_to_foreground_text_commands() {
         vec!["ctx", "status"],
         vec!["ctx", "setup", "--progress", "plain"],
         vec!["ctx", "doctor"],
+        vec!["ctx", "sessions"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(crate::dispatch::command_deprecation_warning_eligible(
@@ -161,10 +164,10 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
     // targets; hidden compatibility aliases do not add grammar nodes.
     // The original 63 nodes remain; graph contributes its nested command tree
     // and Sift owns its subcommands. Archive/server/remote add 30 explicit
-    // command nodes without changing the existing local paths.
+    // command nodes and `sessions` adds 1 top-level session listing command.
     assert_eq!(
         paths.len(),
-        160,
+        161,
         "unexpected public CLI grammar depth: {paths:?}"
     );
 
