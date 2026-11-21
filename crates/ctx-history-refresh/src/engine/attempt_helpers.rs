@@ -33,6 +33,7 @@ pub(super) fn source_backed_refresh_failure_type(
                     Some(SourceBackedRefreshFailureType::SourceChanged)
                 }
                 SourceBackedRouteErrorKind::ResourceUnavailable
+                | SourceBackedRouteErrorKind::ResourceLimitExceeded
                 | SourceBackedRouteErrorKind::Internal => None,
             };
         }
@@ -144,9 +145,13 @@ pub(super) fn source_backed_refresh_failure_outcome(
                         )
                 })
             });
-        let resource_unavailable = failures
-            .iter()
-            .any(|failure| failure.kind() == SourceBackedRouteErrorKind::ResourceUnavailable);
+        let resource_unavailable = failures.iter().any(|failure| {
+            matches!(
+                failure.kind(),
+                SourceBackedRouteErrorKind::ResourceUnavailable
+                    | SourceBackedRouteErrorKind::ResourceLimitExceeded
+            )
+        });
         let first_kind = failures[0].kind();
         let homogeneous = failures.iter().all(|failure| failure.kind() == first_kind);
         let code = if resource_unavailable {
@@ -158,6 +163,7 @@ pub(super) fn source_backed_refresh_failure_outcome(
                 SourceBackedRouteErrorKind::InvalidSource => RefreshOutcomeCode::MalformedSource,
                 SourceBackedRouteErrorKind::Unsupported => RefreshOutcomeCode::UnsupportedSchema,
                 SourceBackedRouteErrorKind::ResourceUnavailable
+                | SourceBackedRouteErrorKind::ResourceLimitExceeded
                 | SourceBackedRouteErrorKind::Internal => unreachable!(),
             }
         } else {
@@ -166,7 +172,13 @@ pub(super) fn source_backed_refresh_failure_outcome(
         let retryable = !retryable_routes.is_empty();
         let retry_advice = if retryable {
             RefreshRetryAdvice::RetryAffectedRoutes
-        } else if homogeneous && first_kind == SourceBackedRouteErrorKind::Unsupported {
+        } else if homogeneous
+            && matches!(
+                first_kind,
+                SourceBackedRouteErrorKind::Unsupported
+                    | SourceBackedRouteErrorKind::ResourceLimitExceeded
+            )
+        {
             RefreshRetryAdvice::UpgradeOrReconfigure
         } else {
             RefreshRetryAdvice::InspectSources
@@ -350,6 +362,11 @@ pub(super) fn source_backed_refresh_failure_outcome(
                 RefreshOutcomeCode::ResourceUnavailable,
                 true,
                 RefreshRetryAdvice::RetryAffectedRoutes,
+            ),
+            SourceBackedRouteErrorKind::ResourceLimitExceeded => (
+                RefreshOutcomeCode::ResourceUnavailable,
+                false,
+                RefreshRetryAdvice::UpgradeOrReconfigure,
             ),
             SourceBackedRouteErrorKind::Internal => (
                 RefreshOutcomeCode::SourceRefreshFailed,

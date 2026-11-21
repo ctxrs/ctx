@@ -320,8 +320,17 @@ where
         .ok_or(IndexError::WriterInvariant(
             "staged no-op is missing its verified base manifest",
         ))?;
+    let started_staging_merges = match generation.merge_control.take() {
+        Some(merge_control) => {
+            merge_control.disable();
+            merge_control.staging_merges_started()
+        }
+        None => false,
+    };
     if let Some(mut writer) = generation.writer.take() {
-        writer.rollback()?;
+        if !started_staging_merges {
+            writer.rollback()?;
+        }
         writer.wait_merging_threads()?;
     }
     Ok(true)

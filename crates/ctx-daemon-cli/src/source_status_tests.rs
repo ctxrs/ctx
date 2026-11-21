@@ -1213,17 +1213,55 @@ fn lexical_report_exposes_upgrade_scope_and_live_progress_only_during_upgrade() 
         Value::Null
     );
 
-    // Induce an IndexSettingsMismatch (a rebuild-requiring incompatibility whose
-    // active manifest is still readable): lexical.search_available stays false,
-    // while lexical.upgrade still surfaces manifest totals and live progress/ETA.
+    // Physical corruption (ChecksumMismatch) is not an upgrade rebuild, so
+    // lexical.upgrade must stay absent even when the active manifest parses.
     let pointer: serde_json::Value =
         serde_json::from_slice(&fs::read(index_root.join("active-generation.json")).unwrap())
             .unwrap();
     let active_dir = pointer["active"]["directory"].as_str().unwrap();
-    let meta_path = index_root
-        .join("index-generations")
-        .join(active_dir)
-        .join("meta.json");
+    let active_generation_dir = index_root.join("index-generations").join(active_dir);
+    let store_path = fs::read_dir(&active_generation_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("store"))
+        .expect("published generation should have a .store segment file");
+    let original_store = fs::read(&store_path).unwrap();
+    let original_store_perms = fs::metadata(&store_path).unwrap().permissions();
+    let mut writable_store_perms = original_store_perms.clone();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        writable_store_perms.set_mode(writable_store_perms.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    writable_store_perms.set_readonly(false);
+    fs::set_permissions(&store_path, writable_store_perms.clone()).unwrap();
+    let mut corrupted_store = original_store.clone();
+    corrupted_store[0] ^= 0x5a;
+    fs::write(&store_path, &corrupted_store).unwrap();
+    fs::set_permissions(&store_path, original_store_perms.clone()).unwrap();
+    let (corrupted_report, _) = lexical_report(
+        temp.path(),
+        Some(&running_job),
+        &current_policy_hash,
+        current_policy_json.clone(),
+        true,
+    );
+    assert_eq!(corrupted_report["status"], "unavailable");
+    assert_eq!(corrupted_report["search_available"], false);
+    assert_eq!(corrupted_report["reason"], "generation_verification_failed");
+    assert!(
+        corrupted_report.get("upgrade").is_none(),
+        "ChecksumMismatch corruption must not report lexical.upgrade: {corrupted_report}"
+    );
+    fs::set_permissions(&store_path, writable_store_perms).unwrap();
+    fs::write(&store_path, &original_store).unwrap();
+    fs::set_permissions(&store_path, original_store_perms).unwrap();
+
+    // Induce an IndexSettingsMismatch (a rebuild-requiring incompatibility whose
+    // active manifest is still readable): lexical.search_available stays false,
+    // while lexical.upgrade still surfaces manifest totals and live progress/ETA.
+    let meta_path = active_generation_dir.join("meta.json");
     let mut meta: serde_json::Value =
         serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
     meta["index_settings"]["docstore_compression"] = json!("zstd(compression_level=1)");

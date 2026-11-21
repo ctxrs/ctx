@@ -91,6 +91,25 @@ fn storage_full_keeps_its_typed_resource_cause_through_capture() {
 }
 
 #[test]
+fn changed_session_registry_limit_maps_to_non_retryable_resource_limit_with_diagnostic() {
+    let error =
+        IndexCaptureLifecycle::route_error(IndexError::ChangedSessionRegistryMemoryLimitExceeded {
+            attempted_entries: 16_000,
+            required_bytes: 16_384_000,
+            maximum_bytes: 15_728_640,
+            maximum_entries: 15_360,
+        });
+    assert_eq!(
+        error.kind,
+        ctx_history_capture_runtime::SourceBackedRouteErrorKind::ResourceLimitExceeded
+    );
+    assert_eq!(
+        error.diagnostic,
+        Some(ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic::IndexMemoryLimit)
+    );
+}
+
+#[test]
 fn index_preparation_delegates_exact_size_and_capacity_without_reencoding() {
     let temporary = crate::test_support_paths::tempdir().unwrap();
     let writer = GenerationWriter::open(

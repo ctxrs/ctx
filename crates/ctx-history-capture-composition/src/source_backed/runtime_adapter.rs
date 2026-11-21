@@ -214,6 +214,9 @@ impl CaptureLifecycleSink for IndexCaptureLifecycle {
 
     fn route_error(error: Self::Error) -> ctx_history_capture_runtime::SourceBackedRouteError {
         let kind = match &error {
+            IndexError::ChangedSessionRegistryMemoryLimitExceeded { .. } => {
+                ctx_history_capture_runtime::SourceBackedRouteErrorKind::ResourceLimitExceeded
+            }
             IndexError::CurrentRepublishInsufficientHeadroom { .. }
             | IndexError::CandidateFailureWithLowSpace { .. }
             | IndexError::IndexMemoryTooSmall { .. }
@@ -228,6 +231,21 @@ impl CaptureLifecycleSink for IndexCaptureLifecycle {
             route.diagnostic = Some(
                 ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic::Io(error.kind()),
             );
+        } else {
+            match &error {
+                IndexError::IndexMemoryTooSmall { .. }
+                | IndexError::ChangedSessionRegistryMemoryLimitExceeded { .. } => {
+                    route.diagnostic = Some(
+                        ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic::IndexMemoryLimit,
+                    );
+                }
+                IndexError::VerificationScratchLimitExceeded { .. } => {
+                    route.diagnostic = Some(
+                        ctx_history_capture_runtime::SourceBackedRouteFailureDiagnostic::ScratchLimit,
+                    );
+                }
+                _ => {}
+            }
         }
         if matches!(
             route.diagnostic,

@@ -564,7 +564,7 @@ fn lexical_report(
                 },
                 "last_error": format!("{error:#}"),
             }));
-            if ctx_history_index::generation_incompatibility_requires_rebuild(&error) {
+            if ctx_history_index::generation_incompatibility_requires_recovery_rebuild(&error) {
                 value["upgrade"] = lexical_upgrade_report(
                     ctx_history_index::active_generation_upgrade_scope(&path),
                     refresh_job,

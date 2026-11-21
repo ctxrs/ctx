@@ -65,6 +65,7 @@ pub enum SourceBackedRouteErrorKind {
     InvalidSource,
     Unsupported,
     ResourceUnavailable,
+    ResourceLimitExceeded,
     Internal,
 }
 
@@ -75,7 +76,7 @@ impl SourceBackedRouteErrorKind {
             Self::SourceChanged => Some(SourceBackedSourceFailureClass::SourceChanged),
             Self::InvalidSource => Some(SourceBackedSourceFailureClass::Unreadable),
             Self::Unsupported => Some(SourceBackedSourceFailureClass::Incompatible),
-            Self::ResourceUnavailable | Self::Internal => None,
+            Self::ResourceUnavailable | Self::ResourceLimitExceeded | Self::Internal => None,
         }
     }
 
@@ -102,6 +103,7 @@ pub enum SourceBackedRouteFailureDiagnostic {
     Io(std::io::ErrorKind),
     OutputLimit,
     ScratchLimit,
+    IndexMemoryLimit,
 }
 
 impl SourceBackedRouteError {
@@ -137,7 +139,8 @@ impl SourceBackedRouteError {
 const fn route_error_severity(kind: SourceBackedRouteErrorKind) -> u8 {
     match kind {
         SourceBackedRouteErrorKind::Internal => 6,
-        SourceBackedRouteErrorKind::ResourceUnavailable => 5,
+        SourceBackedRouteErrorKind::ResourceUnavailable
+        | SourceBackedRouteErrorKind::ResourceLimitExceeded => 5,
         SourceBackedRouteErrorKind::SourceChanged => 4,
         SourceBackedRouteErrorKind::InvalidSource => 3,
         SourceBackedRouteErrorKind::Unsupported => 2,
@@ -239,9 +242,9 @@ where
     #[error("retained source deletion {source_id} could not be recertified: {detail}")]
     RetainedDeletionRecertification { source_id: String, detail: String },
     #[error("source-backed refresh progress callback failed: {0}")]
-    Progress(SourceBackedRouteError),
+    Progress(#[source] SourceBackedRouteError),
     #[error("source-backed Core-record emission failed: {0}")]
-    CoreEmission(SourceBackedRouteError),
+    CoreEmission(#[source] SourceBackedRouteError),
     #[error("logical-source outcome is inconsistent: {detail}")]
     InvalidLogicalSourceFailure { detail: &'static str },
     #[error("selected source-backed route {route_id} is unknown or not executable")]
@@ -657,7 +660,10 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
         let (prepared_records, reservation) = batch.into_prepared();
         for prepared in prepared_records {
             self.report_index_writer_activity()?;
-            self.lifecycle.add_prepared(prepared)?;
+            self.lifecycle
+                .add_prepared(prepared)
+                .map_err(L::route_error)
+                .map_err(SourceBackedCoordinatorError::CoreEmission)?;
             self.flush_intermediate_activity()?;
         }
         drop(reservation);
