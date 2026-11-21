@@ -220,6 +220,69 @@ fn suppress_environment_restart_claim(report: &mut Value) {
     }
 }
 
+pub(super) fn supervisor_matches_live_owner_without_drift(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    config: &crate::DaemonConfigSnapshot,
+) -> Result<bool> {
+    let receipt = stored_supervisor_report(data_root);
+    let Some(executable) = safely_supported_managed_install(host, data_root)? else {
+        return Ok(
+            receipt.get("kind").and_then(Value::as_str) == Some("cli_self_heal")
+                && receipt.get("status").and_then(Value::as_str) == Some("fallback"),
+        );
+    };
+    if receipt.get("kind").and_then(Value::as_str) != Some(native_supervisor_kind())
+        || receipt.get("status").and_then(Value::as_str) != Some("installed")
+        || receipt
+            .get("registration_verified")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || receipt.get("live_owner_verified").and_then(Value::as_bool) != Some(true)
+    {
+        return Ok(false);
+    }
+    if receipt
+        .get("executable_path")
+        .and_then(Value::as_str)
+        .map(Path::new)
+        != Some(executable.as_path())
+    {
+        return Ok(false);
+    }
+    let Some(artifact_path) = receipt
+        .get("artifact_path")
+        .and_then(Value::as_str)
+        .map(Path::new)
+    else {
+        return Ok(false);
+    };
+    if !artifact_path.is_file() {
+        return Ok(false);
+    }
+    let receipt_owner_pid = receipt
+        .get("owner_pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
+    let lock_owner_pid =
+        ctx_daemon_runtime::read_pid_lock_json(&ctx_daemon_runtime::daemon_lock_path(data_root))
+            .as_ref()
+            .and_then(ctx_daemon_runtime::pid_from_lock_json);
+    if receipt_owner_pid.is_none() || receipt_owner_pid != lock_owner_pid {
+        return Ok(false);
+    }
+    let Ok(installed) = environment::installed_supervisor_environment_snapshot(data_root, &receipt)
+    else {
+        return Ok(false);
+    };
+    let Ok(current) = supervisor_environment_snapshot(host).and_then(|snapshot| {
+        configured_supervisor_environment_for_config(snapshot, data_root, None, config)
+    }) else {
+        return Ok(false);
+    };
+    Ok(!installed.requires_restart(&current))
+}
+
 pub(super) fn has_native_registration(report: &Value) -> bool {
     report.get("kind").and_then(Value::as_str) == Some(native_supervisor_kind())
         && !matches!(

@@ -510,3 +510,288 @@ fn preserve_live_owner_records_recovery_reason_without_reinstalling_or_replacing
         .is_some_and(|reason| reason.contains("reinstalled_registration")));
     Ok(())
 }
+
+#[test]
+fn preserve_live_owner_records_detached_and_inspection_denied_receipts_without_mutation(
+) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("ctx");
+    let input = ManagedSupervisorInput::new(&TestHost, temp.path(), &executable)?;
+
+    // Valid registration + detached live owner -> preserved without handoff/start.
+    let detached_backend = FakeSupervisorBackend::with_registration(None);
+    detached_backend.state.lock().unwrap().detached_owner_live = true;
+    detached_backend.state.lock().unwrap().existing_live_owner = Some(42_101);
+    assert_eq!(
+        ensure_native_supervisor_with_policy(
+            &TestHost,
+            &input,
+            &detached_backend,
+            SupervisorMutationPolicy::PreserveLiveOwner,
+        )?,
+        DaemonSupervisorStart::Fallback
+    );
+    {
+        let state = detached_backend.state.lock().unwrap();
+        assert!(state.detached_owner_live);
+        assert_eq!((state.handoffs, state.starts, state.installs), (0, 0, 0));
+    }
+    let receipt = stored_supervisor_report(temp.path());
+    assert_eq!(receipt["status"], "registered_not_running");
+    assert_eq!(receipt["registration_verified"], true);
+    assert_eq!(receipt["live_owner_verified"], false);
+    assert_eq!(receipt["owner_pid"], 42_101);
+    assert!(receipt["recovery_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("preserved_live_owner")));
+
+    // Valid registration + denied inspection -> registered_unverified without handoff/start or PID claim.
+    let denied_registered = FakeSupervisorBackend::with_registration(None);
+    denied_registered
+        .state
+        .lock()
+        .unwrap()
+        .live_owner_inspection_denied = Some(42_102);
+    assert_eq!(
+        ensure_native_supervisor_with_policy(
+            &TestHost,
+            &input,
+            &denied_registered,
+            SupervisorMutationPolicy::PreserveLiveOwner,
+        )?,
+        DaemonSupervisorStart::Fallback
+    );
+    {
+        let state = denied_registered.state.lock().unwrap();
+        assert_eq!((state.handoffs, state.starts, state.installs), (0, 0, 0));
+    }
+    let receipt = stored_supervisor_report(temp.path());
+    assert_eq!(receipt["status"], "registered_unverified");
+    assert_eq!(receipt["registration_verified"], true);
+    assert_eq!(receipt["live_owner_verified"], false);
+    assert!(receipt["owner_pid"].is_null());
+    assert!(receipt["recovery_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("preserved_unverified_live_owner")));
+
+    // Stale/missing registration + denied inspection -> stale_registration without mutation/install.
+    let denied_stale = FakeSupervisorBackend::default();
+    denied_stale
+        .state
+        .lock()
+        .unwrap()
+        .existing_owner_inspection_denied = Some(42_103);
+    assert_eq!(
+        ensure_native_supervisor_with_policy(
+            &TestHost,
+            &input,
+            &denied_stale,
+            SupervisorMutationPolicy::PreserveLiveOwner,
+        )?,
+        DaemonSupervisorStart::Fallback
+    );
+    {
+        let state = denied_stale.state.lock().unwrap();
+        assert_eq!(
+            (
+                state.mutation_preparations,
+                state.installs,
+                state.handoffs,
+                state.starts
+            ),
+            (0, 0, 0, 0)
+        );
+    }
+    let receipt = stored_supervisor_report(temp.path());
+    assert_eq!(receipt["status"], "stale_registration");
+    assert_eq!(receipt["registration_verified"], false);
+    assert_eq!(receipt["live_owner_verified"], false);
+    assert!(receipt["owner_pid"].is_null());
+    assert!(receipt["recovery_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("preserved_unverified_live_owner")));
+    Ok(())
+}
+
+#[test]
+fn local_steady_state_check_detects_drift_without_spawning_manager_subprocesses() -> Result<()> {
+    struct ManagedTestHost(PathBuf);
+
+    impl DaemonApplicationHost for ManagedTestHost {
+        fn hosted_uninstall_active(&self) -> Result<bool> {
+            TestHost.hosted_uninstall_active()
+        }
+        fn hosted_uninstall_active_for_executable(&self, executable: &Path) -> Result<bool> {
+            TestHost.hosted_uninstall_active_for_executable(executable)
+        }
+        fn managed_install_executable(&self) -> Result<Option<PathBuf>> {
+            Ok(Some(self.0.clone()))
+        }
+        fn installation_upgrade_active(&self) -> Result<bool> {
+            TestHost.installation_upgrade_active()
+        }
+        fn automatic_upgrade_recovery_allowed(&self, data_root: &Path) -> Result<bool> {
+            TestHost.automatic_upgrade_recovery_allowed(data_root)
+        }
+        fn daemon_config(&self, data_root: &Path) -> Result<crate::DaemonConfigSnapshot> {
+            TestHost.daemon_config(data_root)
+        }
+        fn observe_daemon_config(&self, data_root: &Path) -> Result<crate::DaemonConfigSnapshot> {
+            TestHost.observe_daemon_config(data_root)
+        }
+        fn persisted_daemon_enabled(&self, data_root: &Path) -> Result<bool> {
+            TestHost.persisted_daemon_enabled(data_root)
+        }
+        fn defer_restart_for_upgrade_handoff(
+            &self,
+            data_root: &Path,
+            trigger: crate::DaemonTrigger,
+        ) -> Result<Option<ctx_daemon_runtime::DaemonHandoffRestartDeferral>> {
+            TestHost.defer_restart_for_upgrade_handoff(data_root, trigger)
+        }
+        fn request_lifecycle_wakeup(
+            &self,
+            data_root: &Path,
+            request: Value,
+            timeout: Duration,
+            response_limit: u64,
+        ) -> Result<Option<Value>> {
+            TestHost.request_lifecycle_wakeup(data_root, request, timeout, response_limit)
+        }
+        fn home_dir(&self) -> Option<PathBuf> {
+            TestHost.home_dir()
+        }
+        fn run_daemon_service(
+            &self,
+            data_root: &Path,
+            request: crate::DaemonHostRunRequest,
+        ) -> Result<()> {
+            TestHost.run_daemon_service(data_root, request)
+        }
+        fn set_daemon_enabled(&self, data_root: &Path, enabled: bool) -> Result<()> {
+            TestHost.set_daemon_enabled(data_root, enabled)
+        }
+        fn request_daemon_shutdown(
+            &self,
+            data_root: &Path,
+            timeout: Duration,
+            response_limit: u64,
+        ) -> Result<()> {
+            TestHost.request_daemon_shutdown(data_root, timeout, response_limit)
+        }
+        fn terminate_current_executable_daemon(&self, data_root: &Path) -> Result<()> {
+            TestHost.terminate_current_executable_daemon(data_root)
+        }
+        fn remove_released_daemon_service_artifacts(&self, data_root: &Path) -> Result<()> {
+            TestHost.remove_released_daemon_service_artifacts(data_root)
+        }
+        fn cancel_core_finalization_generation_lease(
+            &self,
+            data_root: &Path,
+            reason: &str,
+        ) -> Result<()> {
+            TestHost.cancel_core_finalization_generation_lease(data_root, reason)
+        }
+        fn observe_source_refresh_endpoint(
+            &self,
+            identity_path: &Path,
+        ) -> crate::DaemonEndpointObservation {
+            TestHost.observe_source_refresh_endpoint(identity_path)
+        }
+        fn deliver_daemon_events(
+            &self,
+            data_root: &Path,
+            events: &[ctx_client_observability::analytics::PublicEventV1],
+        ) {
+            TestHost.deliver_daemon_events(data_root, events);
+        }
+    }
+
+    let _env_lock = crate::test_environment_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _restore = RestoreTestEnvironment::capture(&["CTX_DATA_ROOT", "CODEX_HOME", "LANG", "TZ"]);
+    let temp = tempfile::tempdir()?;
+    env::set_var("CTX_DATA_ROOT", temp.path());
+    env::remove_var("CODEX_HOME");
+    env::remove_var("LANG");
+    env::remove_var("TZ");
+
+    let config = TestHost.daemon_config(temp.path())?;
+    let _lock = ctx_daemon_runtime::DaemonLock::acquire(temp.path())?.expect("daemon lock");
+    let executable = temp.path().join("ctx");
+    let host = ManagedTestHost(executable.clone());
+
+    // Missing receipt -> needs reconciliation.
+    assert!(!supervisor_matches_live_owner_without_drift(
+        &host,
+        temp.path(),
+        &config
+    )?);
+
+    let snapshot = configured_supervisor_environment(&host, temp.path(), None)?;
+    let spec = install_environment_fixture(temp.path(), &snapshot)?;
+    let artifact = spec.identity().artifact_path().to_path_buf();
+    fs::write(&artifact, b"installed native service")?;
+    write_installed_receipt(
+        temp.path(),
+        &executable,
+        Some(artifact.clone()),
+        std::process::id(),
+        Some(snapshot.contract_report()),
+    )?;
+
+    // Exact match -> fast path.
+    assert!(supervisor_matches_live_owner_without_drift(
+        &host,
+        temp.path(),
+        &config
+    )?);
+
+    // Caller process-context drift only -> still fast path.
+    env::set_var("LANG", "C.UTF-8");
+    env::set_var("TZ", "America/Chicago");
+    assert!(supervisor_matches_live_owner_without_drift(
+        &host,
+        temp.path(),
+        &config
+    )?);
+
+    // Policy/provider drift -> requires reconciliation.
+    env::set_var("CODEX_HOME", "/other/codex-home");
+    assert!(!supervisor_matches_live_owner_without_drift(
+        &host,
+        temp.path(),
+        &config
+    )?);
+    env::remove_var("CODEX_HOME");
+    assert!(supervisor_matches_live_owner_without_drift(
+        &host,
+        temp.path(),
+        &config
+    )?);
+
+    // Missing artifact file -> requires reconciliation.
+    fs::remove_file(&artifact)?;
+    assert!(!supervisor_matches_live_owner_without_drift(
+        &host,
+        temp.path(),
+        &config
+    )?);
+    fs::write(&artifact, b"installed native service")?;
+
+    // Owner PID mismatch -> requires reconciliation.
+    write_installed_receipt(
+        temp.path(),
+        &executable,
+        Some(artifact),
+        std::process::id().saturating_add(1),
+        Some(snapshot.contract_report()),
+    )?;
+    assert!(!supervisor_matches_live_owner_without_drift(
+        &host,
+        temp.path(),
+        &config
+    )?);
+    Ok(())
+}

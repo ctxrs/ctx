@@ -215,6 +215,14 @@ impl<'a> DaemonApplication<'a> {
         supervisor::ensure_daemon_supervisor_with_policy(self.host, data_root, policy)
     }
 
+    pub fn supervisor_matches_live_owner_without_drift(
+        &self,
+        data_root: &Path,
+        config: &DaemonConfigSnapshot,
+    ) -> Result<bool> {
+        supervisor::supervisor_matches_live_owner_without_drift(self.host, data_root, config)
+    }
+
     pub fn disable_daemon_supervisor(&self, data_root: &Path) -> Result<()> {
         supervisor::disable_daemon_supervisor(self.host, data_root)
     }

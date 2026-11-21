@@ -238,6 +238,14 @@ fn configured_supervisor_environment_from_snapshot(
 
 pub use ctx_daemon_runtime::SupervisorMutationPolicy;
 
+pub fn supervisor_matches_live_owner_without_drift(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    config: &crate::DaemonConfigSnapshot,
+) -> Result<bool> {
+    report::supervisor_matches_live_owner_without_drift(host, data_root, config)
+}
+
 pub fn ensure_daemon_supervisor(
     host: &dyn DaemonApplicationHost,
     data_root: &Path,
@@ -352,30 +360,17 @@ fn ensure_native_supervisor_with_policy(
         }
         SupervisorEnsureOutcome::LiveOwnerPreserved {
             artifact,
-            owner_pid,
-            registration_error,
+            registration_verified,
+            owner,
+            reason,
         } => {
-            write_supervisor_receipt(
+            state::write_preserved_live_owner_receipt(
                 data_root,
-                &SupervisorReceipt {
-                    kind: native_supervisor_kind().to_owned(),
-                    status: "stale_registration",
-                    autostart_supported: true,
-                    restart_supported: true,
-                    registration_verified: false,
-                    live_owner_verified: false,
-                    owner_pid: Some(owner_pid),
-                    artifact_path: artifact,
-                    executable_path: Some(executable.to_path_buf()),
-                    limitation: Some(
-                        "native supervisor registration differed from the invoking environment; preserved the live daemon owner (run `ctx index mode auto` to reinstall)"
-                            .to_owned(),
-                    ),
-                    last_error: Some(format!("{registration_error:#}")),
-                    recovery_reason: Some(format!(
-                        "preserved_live_owner: {registration_error:#}"
-                    )),
-                },
+                executable,
+                artifact,
+                registration_verified,
+                &owner,
+                reason.as_ref(),
             )?;
             Ok(DaemonSupervisorStart::Fallback)
         }

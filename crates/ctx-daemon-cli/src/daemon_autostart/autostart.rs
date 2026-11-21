@@ -216,77 +216,108 @@ fn autostart_persistent_daemon_and_wait(
     checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<DaemonSetupHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
-        checkpoint()?;
-        if application.daemon_start_is_fenced() {
-            return Err(anyhow!(
-                "ctx daemon start was suppressed (hosted_uninstall_active); retry after it clears or run `ctx setup --no-daemon`"
-            ));
-        }
-        let app_config = application_config(config);
-        let policy = supervisor_mutation_policy_for_trigger(trigger);
-        let reuse_live_owner = readiness == PersistentDaemonReadiness::Core
-            && (application
-                .observe_ready_core_daemon(data_root, &app_config)?
-                .is_some()
-                || core_daemon_has_live_same_executable_owner(
-                    application,
-                    data_root,
-                    &app_config,
-                )?);
-        // Reconcile supervision under the trigger's policy (PreserveLiveOwner for
-        // retrieval paths so registration drift records `stale_registration` in
-        // supervisor.json without booting out a live healthy daemon).
-        if daemon_autostart_suppression_reason().is_none() {
-            let supervisor_result =
+        autostart_persistent_daemon_and_wait_with(
+            application,
+            data_root,
+            config,
+            trigger,
+            readiness,
+            checkpoint,
+            |application, data_root, policy| {
                 super::super::daemon_supervisor::ensure_daemon_supervisor_with_policy(
                     application,
                     data_root,
                     policy,
-                );
-            if !reuse_live_owner {
-                supervisor_result.context("establish ctx daemon supervision")?;
-            }
-        }
-        checkpoint()?;
-        let handoff = match readiness {
-            PersistentDaemonReadiness::Full => application.start_daemon_and_wait_with_cancellation(
-                data_root,
-                &app_config,
-                application_trigger(trigger),
-                checkpoint,
-            ),
-            PersistentDaemonReadiness::Core => application.start_core_daemon_and_wait_with_cancellation(
-                data_root,
-                &app_config,
-                application_trigger(trigger),
-                checkpoint,
-            ),
-        }
-            .map_err(|error| match error {
-                ctx_daemon_application::DaemonStartError::Suppressed(reason) =>
-                    ctx_daemon_service::SourceBackedRefreshDaemonUnavailable::new(Some(format!(
-                        "ctx daemon start was suppressed ({reason}); retry after it clears or run `ctx setup --no-daemon`"
-                    ))).into(),
-                ctx_daemon_application::DaemonStartError::BinaryIdentity(error) => error,
-                ctx_daemon_application::DaemonStartError::Start(error)
-                | ctx_daemon_application::DaemonStartError::Ready(error)
-                    if super::super::finite_worker_owner::finite_worker_interrupted(&error) =>
-                {
-                    error
-                }
-                ctx_daemon_application::DaemonStartError::Start(error) => error.context(
-                    daemon_start_failure_message(native_supervisor_is_active(data_root)),
-                ),
-                ctx_daemon_application::DaemonStartError::Ready(error) => error.context(
-                    daemon_ready_failure_message(native_supervisor_is_active(data_root)),
-                ),
-            })?;
-        Ok(DaemonSetupHandoff {
-            handoff: DaemonHandoff {
-                pid: handoff.pid,
-                heartbeat_at_ms: handoff.heartbeat_at_ms,
+                )
             },
-        })
+        )
+    })
+}
+
+fn autostart_persistent_daemon_and_wait_with(
+    application: &ctx_daemon_application::DaemonApplication<'_>,
+    data_root: &Path,
+    config: &DaemonRuntimeConfig,
+    trigger: DaemonTriggerCommandArg,
+    readiness: PersistentDaemonReadiness,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+    ensure_supervisor: impl FnOnce(
+        &ctx_daemon_application::DaemonApplication<'_>,
+        &Path,
+        ctx_daemon_application::SupervisorMutationPolicy,
+    )
+        -> Result<super::super::daemon_supervisor::DaemonSupervisorStart>,
+) -> Result<DaemonSetupHandoff> {
+    checkpoint()?;
+    if application.daemon_start_is_fenced() {
+        return Err(anyhow!(
+            "ctx daemon start was suppressed (hosted_uninstall_active); retry after it clears or run `ctx setup --no-daemon`"
+        ));
+    }
+    let app_config = application_config(config);
+    let policy = supervisor_mutation_policy_for_trigger(trigger);
+    let reuse_live_owner = readiness == PersistentDaemonReadiness::Core
+        && (application
+            .observe_ready_core_daemon(data_root, &app_config)?
+            .is_some()
+            || core_daemon_has_live_same_executable_owner(application, data_root, &app_config)?);
+    let reconcile_supervisor = !reuse_live_owner
+        || policy == ctx_daemon_application::SupervisorMutationPolicy::AllowReinstall
+        || !application
+            .supervisor_matches_live_owner_without_drift(data_root, &app_config)
+            .unwrap_or(false);
+    // Keep the zero-subprocess fast path on steady-state retrieval when a live
+    // Core daemon already matches a healthy local supervisor receipt without
+    // drift. Reconcile under the trigger's policy only on drift or unhealthy /
+    // missing receipt state (`PreserveLiveOwner` for retrieval paths).
+    if reconcile_supervisor && daemon_autostart_suppression_reason().is_none() {
+        let supervisor_result = ensure_supervisor(application, data_root, policy);
+        if !reuse_live_owner {
+            supervisor_result.context("establish ctx daemon supervision")?;
+        }
+    }
+    checkpoint()?;
+    let handoff = match readiness {
+        PersistentDaemonReadiness::Full => application.start_daemon_and_wait_with_cancellation(
+            data_root,
+            &app_config,
+            application_trigger(trigger),
+            checkpoint,
+        ),
+        PersistentDaemonReadiness::Core => application
+            .start_core_daemon_and_wait_with_cancellation(
+                data_root,
+                &app_config,
+                application_trigger(trigger),
+                checkpoint,
+            ),
+    }
+    .map_err(|error| match error {
+        ctx_daemon_application::DaemonStartError::Suppressed(reason) => {
+            ctx_daemon_service::SourceBackedRefreshDaemonUnavailable::new(Some(format!(
+                "ctx daemon start was suppressed ({reason}); retry after it clears or run `ctx setup --no-daemon`"
+            )))
+            .into()
+        }
+        ctx_daemon_application::DaemonStartError::BinaryIdentity(error) => error,
+        ctx_daemon_application::DaemonStartError::Start(error)
+        | ctx_daemon_application::DaemonStartError::Ready(error)
+            if super::super::finite_worker_owner::finite_worker_interrupted(&error) =>
+        {
+            error
+        }
+        ctx_daemon_application::DaemonStartError::Start(error) => {
+            error.context(daemon_start_failure_message(native_supervisor_is_active(data_root)))
+        }
+        ctx_daemon_application::DaemonStartError::Ready(error) => {
+            error.context(daemon_ready_failure_message(native_supervisor_is_active(data_root)))
+        }
+    })?;
+    Ok(DaemonSetupHandoff {
+        handoff: DaemonHandoff {
+            pid: handoff.pid,
+            heartbeat_at_ms: handoff.heartbeat_at_ms,
+        },
     })
 }
 
@@ -589,6 +620,272 @@ mod tests {
             core_daemon_has_live_same_executable_owner(app, temp.path(), &config)
         })?;
         assert!(!preserved);
+        Ok(())
+    }
+
+    #[test]
+    fn autostart_persistent_daemon_and_wait_preserves_fast_path_and_reconciles_drift_under_policy(
+    ) -> Result<()> {
+        struct ReadyLiveOwnerHost {
+            config: ctx_daemon_application::DaemonConfigSnapshot,
+            managed_executable: Option<PathBuf>,
+        }
+
+        impl ctx_daemon_application::DaemonApplicationHost for ReadyLiveOwnerHost {
+            fn hosted_uninstall_active(&self) -> Result<bool> {
+                Ok(false)
+            }
+            fn hosted_uninstall_active_for_executable(&self, _executable: &Path) -> Result<bool> {
+                Ok(false)
+            }
+            fn managed_install_executable(&self) -> Result<Option<PathBuf>> {
+                Ok(self.managed_executable.clone())
+            }
+            fn installation_upgrade_active(&self) -> Result<bool> {
+                Ok(false)
+            }
+            fn automatic_upgrade_recovery_allowed(&self, _data_root: &Path) -> Result<bool> {
+                Ok(false)
+            }
+            fn daemon_config(
+                &self,
+                _data_root: &Path,
+            ) -> Result<ctx_daemon_application::DaemonConfigSnapshot> {
+                Ok(self.config.clone())
+            }
+            fn observe_daemon_config(
+                &self,
+                _data_root: &Path,
+            ) -> Result<ctx_daemon_application::DaemonConfigSnapshot> {
+                Ok(self.config.clone())
+            }
+            fn persisted_daemon_enabled(&self, _data_root: &Path) -> Result<bool> {
+                Ok(self.config.enabled)
+            }
+            fn defer_restart_for_upgrade_handoff(
+                &self,
+                _data_root: &Path,
+                _trigger: ctx_daemon_application::DaemonTrigger,
+            ) -> Result<Option<ctx_daemon_runtime::DaemonHandoffRestartDeferral>> {
+                Ok(None)
+            }
+            fn request_lifecycle_wakeup(
+                &self,
+                _data_root: &Path,
+                _request: Value,
+                _timeout: StdDuration,
+                _response_limit: u64,
+            ) -> Result<Option<Value>> {
+                Ok(Some(json!({
+                    "schema_version": 1,
+                    "ok": true,
+                    "owner": "daemon",
+                    "service": "lifecycle",
+                    "pid": process::id(),
+                    "readiness": "ready",
+                })))
+            }
+            fn home_dir(&self) -> Option<PathBuf> {
+                env::var_os("HOME").map(PathBuf::from)
+            }
+            fn run_daemon_service(
+                &self,
+                _data_root: &Path,
+                _request: ctx_daemon_application::DaemonHostRunRequest,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn set_daemon_enabled(&self, _data_root: &Path, _enabled: bool) -> Result<()> {
+                Ok(())
+            }
+            fn request_daemon_shutdown(
+                &self,
+                _data_root: &Path,
+                _timeout: StdDuration,
+                _response_limit: u64,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn terminate_current_executable_daemon(&self, _data_root: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn remove_released_daemon_service_artifacts(&self, _data_root: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn cancel_core_finalization_generation_lease(
+                &self,
+                _data_root: &Path,
+                _reason: &str,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn observe_source_refresh_endpoint(
+                &self,
+                _identity_path: &Path,
+            ) -> ctx_daemon_application::DaemonEndpointObservation {
+                ctx_daemon_application::DaemonEndpointObservation::default()
+            }
+            fn deliver_daemon_events(
+                &self,
+                _data_root: &Path,
+                _events: &[ctx_client_observability::analytics::PublicEventV1],
+            ) {
+            }
+        }
+
+        let environment = crate::test_environment::EnvironmentGuard::capture(&[
+            "CI",
+            DAEMON_AUTOSTART_OFF_ENV,
+            DAEMON_BACKGROUND_CHILD_ENV,
+            "CTX_DATA_ROOT",
+        ]);
+        environment.set("CI", None);
+        environment.set(DAEMON_AUTOSTART_OFF_ENV, None);
+        environment.set(DAEMON_BACKGROUND_CHILD_ENV, None);
+
+        let temp = tempfile::tempdir()?;
+        environment.set("CTX_DATA_ROOT", Some(temp.path().as_os_str()));
+        let config = DaemonRuntimeConfig::default();
+        let app_config = application_config(&config);
+        let lock = DaemonLock::acquire(temp.path())?
+            .ok_or_else(|| anyhow!("test process could not acquire daemon lock"))?;
+        let started_at_ms = lock.started_at_ms().expect("lock start timestamp");
+        let now_ms = utc_now().timestamp_millis();
+        write_daemon_status(
+            temp.path(),
+            &json!({
+                "status": "running",
+                "pid": process::id(),
+                "started_at_ms": started_at_ms,
+                "heartbeat_at_ms": now_ms,
+                "config_reload": {
+                    "status": "applied",
+                    "applied": {
+                        "daemon_enabled": app_config.enabled,
+                        "daemon_mode": app_config.mode.as_str(),
+                        "semantic_enabled": app_config.semantic_enabled,
+                        "semantic_executor": app_config.semantic_executor,
+                        "semantic_contract_fingerprint": app_config.semantic_contract_fingerprint,
+                        "semantic_builtin_throttling_configured": app_config.semantic_builtin_throttling_configured,
+                        "semantic_builtin_throttling_effective": app_config.semantic_builtin_throttling_effective,
+                    }
+                }
+            }),
+        )?;
+
+        let host = ReadyLiveOwnerHost {
+            config: app_config.clone(),
+            managed_executable: None,
+        };
+        let application = ctx_daemon_application::DaemonApplication::new(&host);
+
+        // Missing supervisor.json -> enters reconciliation under PreserveLiveOwner
+        // and still completes retrieval even if supervision returns an error.
+        let mut observed_policies = Vec::new();
+        let handoff = autostart_persistent_daemon_and_wait_with(
+            &application,
+            temp.path(),
+            &config,
+            DaemonTriggerCommandArg::Search,
+            PersistentDaemonReadiness::Core,
+            &mut || Ok(()),
+            |_, _, policy| {
+                observed_policies.push(policy);
+                Err(anyhow!("simulated supervisor drift"))
+            },
+        )?;
+        assert_eq!(handoff.handoff.pid, process::id());
+        assert_eq!(
+            observed_policies,
+            vec![ctx_daemon_application::SupervisorMutationPolicy::PreserveLiveOwner]
+        );
+
+        // Steady-state healthy receipt -> zero-subprocess fast path (0 supervisor calls,
+        // no supervisor-installation.lock created).
+        let receipt_path = daemon_root_path(temp.path()).join("supervisor.json");
+        write_private_json_file(
+            &receipt_path,
+            &json!({
+                "schema_version": 1,
+                "kind": "cli_self_heal",
+                "status": "fallback",
+            }),
+        )?;
+        let mut steady_calls = 0usize;
+        let handoff = autostart_persistent_daemon_and_wait_with(
+            &application,
+            temp.path(),
+            &config,
+            DaemonTriggerCommandArg::Search,
+            PersistentDaemonReadiness::Core,
+            &mut || Ok(()),
+            |_, _, _| {
+                steady_calls += 1;
+                Ok(super::super::super::daemon_supervisor::DaemonSupervisorStart::Fallback)
+            },
+        )?;
+        assert_eq!(handoff.handoff.pid, process::id());
+        assert_eq!(
+            steady_calls, 0,
+            "steady-state Core search must stay on the zero-subprocess fast path"
+        );
+        assert!(
+            !daemon_root_path(temp.path())
+                .join("supervisor-installation.lock")
+                .exists(),
+            "steady-state Core search must not acquire supervisor-installation.lock"
+        );
+
+        // Managed install with unhealthy/drifted receipt -> enters PreserveLiveOwner.
+        let managed_host = ReadyLiveOwnerHost {
+            config: app_config,
+            managed_executable: Some(daemon_autostart_exe_path()?),
+        };
+        let managed_app = ctx_daemon_application::DaemonApplication::new(&managed_host);
+        let mut drift_policies = Vec::new();
+        let handoff = autostart_persistent_daemon_and_wait_with(
+            &managed_app,
+            temp.path(),
+            &config,
+            DaemonTriggerCommandArg::Search,
+            PersistentDaemonReadiness::Core,
+            &mut || Ok(()),
+            |_, _, policy| {
+                drift_policies.push(policy);
+                Ok(super::super::super::daemon_supervisor::DaemonSupervisorStart::Fallback)
+            },
+        )?;
+        assert_eq!(handoff.handoff.pid, process::id());
+        assert_eq!(
+            drift_policies,
+            vec![ctx_daemon_application::SupervisorMutationPolicy::PreserveLiveOwner]
+        );
+
+        // Explicit Setup always reconciles with AllowReinstall and propagates failures.
+        let mut setup_policies = Vec::new();
+        let setup_error = autostart_persistent_daemon_and_wait_with(
+            &managed_app,
+            temp.path(),
+            &config,
+            DaemonTriggerCommandArg::Setup,
+            PersistentDaemonReadiness::Full,
+            &mut || Ok(()),
+            |_, _, policy| {
+                setup_policies.push(policy);
+                Err(anyhow!("setup supervisor error"))
+            },
+        )
+        .err()
+        .expect("setup must propagate supervisor errors");
+        assert_eq!(
+            setup_policies,
+            vec![ctx_daemon_application::SupervisorMutationPolicy::AllowReinstall]
+        );
+        assert!(
+            format!("{setup_error:#}").contains("establish ctx daemon supervision"),
+            "{setup_error:#}"
+        );
+        drop(lock);
         Ok(())
     }
 
