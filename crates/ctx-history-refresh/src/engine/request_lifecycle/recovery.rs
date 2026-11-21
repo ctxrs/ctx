@@ -228,20 +228,6 @@ fn require_scoped_rehydration(
     attempt: &mut SourceBackedRefreshAttempt,
     rebuild_required: bool,
 ) -> Result<()> {
-    let is_scoped_import = matches!(
-        attempt.intent,
-        RefreshIntent::SelectedImport {
-            selection: RefreshSelection::Provider(_) | RefreshSelection::ExactSource(_),
-            ..
-        }
-    );
-    if is_scoped_import
-        && !rebuild_required
-        && attempt.state == SourceBackedRefreshState::Queued
-        && !matches!(attempt.refresh_scope, SourceBackedRefreshScope::Exact(_))
-    {
-        bail!("durable resolved scoped source refresh has no exact physical scope");
-    }
     if rebuild_required
         && matches!(attempt.intent, RefreshIntent::SelectedImport { .. })
         && matches!(attempt.refresh_scope, SourceBackedRefreshScope::Exact(_))

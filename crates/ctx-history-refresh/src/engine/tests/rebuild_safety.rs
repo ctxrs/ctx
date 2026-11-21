@@ -611,3 +611,189 @@ fn exact_automatic_maintenance_admission_is_rejected_against_rebuild_required_ge
         run.job
     );
 }
+
+#[test]
+fn widened_scoped_import_recovers_after_active_generation_advances_to_current_schema() {
+    let base = std::env::temp_dir().canonicalize().unwrap();
+    let temp = tempfile::tempdir_in(base).unwrap();
+    let data_root = temp.path().join("data");
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    copy_fixture_dir(
+        &schema_22_fixture_root().join("index"),
+        &source_backed_index_root(&data_root),
+    );
+
+    let codex_sessions = home.join(".codex/sessions/2026/01/01");
+    fs::create_dir_all(&codex_sessions).unwrap();
+    fs::copy(
+        schema_22_fixture_root().join("source.jsonl"),
+        codex_sessions.join("rollout-019fb000-0000-7000-8000-000000000100.jsonl"),
+    )
+    .unwrap();
+
+    let runtime: Arc<dyn RefreshRuntime> = Arc::new(RebuildTestRuntime { home, cwd });
+
+    // First run a real schema-22 -> schema-23 upgrade once to produce a valid
+    // schema-23 index directory with canonical generation-owned state.
+    let upgraded_index_template = temp.path().join("upgraded-template-data");
+    ctx_history_platform::platform_security::establish_private_data_root(&upgraded_index_template)
+        .unwrap();
+    copy_fixture_dir(
+        &schema_22_fixture_root().join("index"),
+        &source_backed_index_root(&upgraded_index_template),
+    );
+    let seed_engine = super::super::CoreRefreshEngine::new(
+        Arc::new(TestRefreshJournal::default()),
+        Arc::clone(&runtime),
+    );
+    let seed_admission = seed_engine
+        .submit(
+            &upgraded_index_template,
+            RefreshRequest::selected_import(
+                "019fcbbb-0000-7000-8000-000000000900".to_owned(),
+                RefreshSelection::Provider(CaptureProvider::Codex),
+                SourceBackedReconciliationDemand::Incremental,
+            ),
+        )
+        .unwrap();
+    let (_, seed_barrier) = seed_admission.into_parts();
+    if let Some(barrier) = seed_barrier {
+        barrier.release(&seed_engine);
+    }
+    assert!(seed_engine
+        .resolve_pending_admission(&upgraded_index_template)
+        .unwrap()
+        .is_none());
+    let seed_run = seed_engine
+        .run_next(&upgraded_index_template)
+        .expect("seed upgrade must publish schema 23");
+    assert!(!seed_run.failed, "{:#}", seed_run.job);
+
+    for simulated_state in ["queued", "running"] {
+        let journal = Arc::new(TestRefreshJournal::default());
+        let engine = super::super::CoreRefreshEngine::new(
+            Arc::clone(&journal) as Arc<dyn RefreshJournal>,
+            Arc::clone(&runtime),
+        );
+        let req_id = format!(
+            "019fcbbb-0000-7000-8000-00000000090{}",
+            if simulated_state == "queued" { 1 } else { 2 }
+        );
+        let admission = engine
+            .submit(
+                &data_root,
+                RefreshRequest::selected_import(
+                    req_id.clone(),
+                    RefreshSelection::Provider(CaptureProvider::Codex),
+                    SourceBackedReconciliationDemand::Incremental,
+                ),
+            )
+            .unwrap();
+        let (_, barrier) = admission.into_parts();
+        if let Some(barrier) = barrier {
+            barrier.release(&engine);
+        }
+        assert!(engine
+            .resolve_pending_admission(&data_root)
+            .unwrap()
+            .is_none());
+
+        // Simulate the crash window: durable core-refresh.json holds the widened
+        // `refresh_scope: {"kind": "all"}` in `queued` or `running`, while
+        // active-generation.json on disk has already been upgraded to schema 23.
+        let mut persisted_job = journal.load(&data_root).unwrap().unwrap();
+        persisted_job["request_state"] = json!(simulated_state);
+        assert_eq!(persisted_job["refresh_scope"]["kind"], "all");
+
+        let upgraded_root = temp.path().join(format!("upgraded-{simulated_state}"));
+        ctx_history_platform::platform_security::establish_private_data_root(&upgraded_root)
+            .unwrap();
+        copy_fixture_dir(
+            &source_backed_index_root(&upgraded_index_template),
+            &source_backed_index_root(&upgraded_root),
+        );
+        let upgraded_journal = Arc::new(TestRefreshJournal::default());
+        upgraded_journal
+            .store(&upgraded_root, &persisted_job)
+            .unwrap();
+
+        let recovered = super::super::CoreRefreshEngine::new(
+            upgraded_journal as Arc<dyn RefreshJournal>,
+            Arc::clone(&runtime),
+        );
+        assert!(
+            recovered
+                .recover_interrupted_publication(&upgraded_root)
+                .unwrap(),
+            "recovery must not wedge when widened {simulated_state} job recovers against schema 23"
+        );
+        if let Some(failed) = recovered.resolve_pending_admission(&upgraded_root).unwrap() {
+            panic!(
+                "expected recovered {simulated_state} job admission to succeed, got: {:#}",
+                failed.job
+            );
+        }
+        let state = recovered.lock_state();
+        let attempt = find_attempt(&state, &req_id).unwrap();
+        assert_eq!(attempt.state, SourceBackedRefreshState::Queued);
+        assert!(
+            matches!(attempt.refresh_scope, SourceBackedRefreshScope::Exact(_)),
+            "recovered scoped import must re-narrow back to Exact against upgraded schema 23"
+        );
+    }
+}
+
+#[test]
+fn provider_rebuild_admission_rejects_provider_with_no_executable_routes_even_when_catalog_is_empty(
+) {
+    let base = std::env::temp_dir().canonicalize().unwrap();
+    let temp = tempfile::tempdir_in(base).unwrap();
+    let data_root = temp.path().join("data");
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    copy_fixture_dir(
+        &schema_22_fixture_root().join("index"),
+        &source_backed_index_root(&data_root),
+    );
+
+    let runtime: Arc<dyn RefreshRuntime> = Arc::new(RebuildTestRuntime { home, cwd });
+    let engine = super::super::CoreRefreshEngine::new(
+        Arc::new(TestRefreshJournal::default()),
+        Arc::clone(&runtime),
+    );
+    let req_id = "019fcccc-0000-7000-8000-000000000903".to_owned();
+    let admission = engine
+        .submit(
+            &data_root,
+            RefreshRequest::selected_import(
+                req_id,
+                RefreshSelection::Provider(CaptureProvider::Gemini),
+                SourceBackedReconciliationDemand::Incremental,
+            ),
+        )
+        .unwrap();
+    let (_, barrier) = admission.into_parts();
+    if let Some(barrier) = barrier {
+        barrier.release(&engine);
+    }
+    let run = engine
+        .resolve_pending_admission(&data_root)
+        .unwrap()
+        .expect("empty provider rebuild admission must fail instead of publishing empty");
+    assert!(run.failed);
+    assert!(
+        run.job["last_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("produced no executable source routes"),
+        "{:#}",
+        run.job
+    );
+}
