@@ -143,7 +143,11 @@ fn production_refresh_persists_both_split_publications_without_provider_roots() 
     };
     let bridge = run_report(&discovery, report(), &data_root, &index_root).unwrap();
     let bridge_index = bridge.verified_index.as_ref().unwrap();
-    assert!(bridge_index.manifest().source_route(&legacy).is_some());
+    assert!(bridge_index
+        .try_manifest()
+        .unwrap()
+        .source_route(&legacy)
+        .is_some());
     let bridge_state =
         SourceBackedGenerationState::decode_from_verified_index(bridge_index).unwrap();
     assert!(bridge_state.route_controls().contains_key(&legacy));
@@ -151,7 +155,8 @@ fn production_refresh_persists_both_split_publications_without_provider_roots() 
     let successor = run_report(&discovery, report(), &data_root, &index_root).unwrap();
     let successor_index = successor.verified_index.as_ref().unwrap();
     let final_routes = successor_index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_routes()
         .iter()
         .map(|route| route.route_identity().clone())
@@ -210,7 +215,11 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
     )
     .unwrap();
     let cold_index = cold.verified_index.as_ref().unwrap();
-    assert!(cold_index.manifest().source_route(&alpha_route).is_some());
+    assert!(cold_index
+        .try_manifest()
+        .unwrap()
+        .source_route(&alpha_route)
+        .is_some());
     let cold_state = SourceBackedGenerationState::decode_from_verified_index(cold_index).unwrap();
     assert!(cold_state.route_controls().contains_key(&alpha_route));
     drop(cold);
@@ -224,15 +233,24 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
     };
     let warm = run_report(&discovery, warm_report(), &data_root, &index_root).unwrap();
     let warm_index = warm.verified_index.as_ref().unwrap();
-    assert!(warm_index.manifest().source_route(&alpha_route).is_none());
-    assert!(warm_index.manifest().source_route(&beta_route).is_some());
+    assert!(warm_index
+        .try_manifest()
+        .unwrap()
+        .source_route(&alpha_route)
+        .is_none());
+    assert!(warm_index
+        .try_manifest()
+        .unwrap()
+        .source_route(&beta_route)
+        .is_some());
     let warm_state = SourceBackedGenerationState::decode_from_verified_index(warm_index).unwrap();
     assert!(!warm_state.route_controls().contains_key(&alpha_route));
     assert!(warm_state.route_controls().contains_key(&beta_route));
 
     let warm_snapshot = VerifiedIndex::open_pinned(&index_root)
         .unwrap()
-        .into_generation_snapshot();
+        .into_generation_snapshot()
+        .unwrap();
     assert_eq!(warm_snapshot.generation_id(), warm_index.generation_id());
     let manifest_state =
         SourceBackedGenerationState::decode_from_manifest(warm_snapshot.manifest()).unwrap();
@@ -249,9 +267,21 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
     let subsequent = run_report(&discovery, warm_report(), &data_root, &index_root).unwrap();
     assert_eq!(subsequent.generation_id, warm.generation_id);
     let subsequent = subsequent.verified_index.as_ref().unwrap();
-    assert!(subsequent.manifest().source_route(&alpha_route).is_none());
-    assert!(subsequent.manifest().source_route(&beta_route).is_some());
-    assert!(warm_index.manifest().source_route(&beta_route).is_some());
+    assert!(subsequent
+        .try_manifest()
+        .unwrap()
+        .source_route(&alpha_route)
+        .is_none());
+    assert!(subsequent
+        .try_manifest()
+        .unwrap()
+        .source_route(&beta_route)
+        .is_some());
+    assert!(warm_index
+        .try_manifest()
+        .unwrap()
+        .source_route(&beta_route)
+        .is_some());
 }
 
 fn registry_policy_automatic_route_identity(source: &ProviderSource) -> SourceRouteIdentity {
@@ -491,7 +521,8 @@ fn distinct_nanoclaw_registry_failures_match_retained_automatic_routes() {
     writer.commit(|_| true).unwrap();
     let retained = VerifiedIndex::open_pinned(&index_root)
         .unwrap()
-        .into_generation_snapshot();
+        .into_generation_snapshot()
+        .unwrap();
 
     let issues = sources.map(|source| SourceBackedAutomaticRegistryIssue::Unavailable {
         source,
@@ -565,7 +596,7 @@ fn mixed_codex_and_unsupported_warp_routes_continue_with_typed_evidence() {
     assert!(is_sha256_identity(&failure.route_identity));
     assert!(is_sha256_identity(&failure.source_identity));
     let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(verified.manifest().sources.len(), 1);
+    assert_eq!(verified.try_manifest().unwrap().sources.len(), 1);
     assert_eq!(
         verified
             .complete_lexical_search("registrypolicyvalidmarker", 10)
@@ -659,7 +690,7 @@ fn all_route_execution_preserves_a_healthy_peer_during_source_local_registration
     assert_eq!(failures[0].class, "unreadable");
     assert!(failures[0].detail.contains("not a database"));
     let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(verified.manifest().sources.len(), 1);
+    assert_eq!(verified.try_manifest().unwrap().sources.len(), 1);
     assert_eq!(
         verified
             .complete_lexical_search("registrypolicyvalidmarker", 10)
@@ -757,10 +788,14 @@ fn unsupported_warp_preserves_same_epoch_last_good_route_as_stale() {
     );
     let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), retained_generation);
-    assert!(retained.manifest().source_route(&route_identity).is_some());
-    assert_eq!(retained.manifest().sources.len(), 1);
+    assert!(retained
+        .try_manifest()
+        .unwrap()
+        .source_route(&route_identity)
+        .is_some());
+    assert_eq!(retained.try_manifest().unwrap().sources.len(), 1);
     assert_eq!(
-        retained.manifest().sources[0]
+        retained.try_manifest().unwrap().sources[0]
             .observation()
             .source()
             .provider(),

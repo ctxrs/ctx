@@ -4,12 +4,12 @@ pub(super) fn overdue_hermes_exact_routes(
     index: &VerifiedIndex,
     now_ms: i64,
     expectation: impl Fn(&SourceRouteIdentity) -> Option<SourceBackedRouteControlExpectation>,
-) -> BTreeSet<SourceRouteIdentity> {
-    let manifest = index.manifest();
-    let route_controls = SourceBackedGenerationState::decode_from_verified_index(index)
+) -> Result<BTreeSet<SourceRouteIdentity>> {
+    let manifest = index.try_manifest()?;
+    let route_controls = SourceBackedGenerationState::decode_from_manifest(manifest)
         .map(|state| state.route_controls().clone())
         .unwrap_or_default();
-    manifest
+    Ok(manifest
         .source_routes()
         .iter()
         .filter_map(|route| {
@@ -21,7 +21,7 @@ pub(super) fn overdue_hermes_exact_routes(
                 .unwrap_or(true)
                 .then(|| route.route_identity().clone())
         })
-        .collect()
+        .collect())
 }
 
 pub(super) fn hermes_routes_requiring_control_recovery(
@@ -229,7 +229,11 @@ mod tests {
             ctx_history_capture::hermes_route_control_exact_due_for_profile,
             Some(ctx_history_capture::hermes_route_control_database_identity),
         );
-        assert!(overdue_hermes_exact_routes(&future, 1_000, |_| { Some(expectation) }).is_empty());
+        assert!(
+            overdue_hermes_exact_routes(&future, 1_000, |_| { Some(expectation) })
+                .unwrap()
+                .is_empty()
+        );
         let overdue = hermes_route_control_index(
             &temp.path().join("overdue"),
             &route,
@@ -237,7 +241,7 @@ mod tests {
             1_000,
         );
         assert_eq!(
-            overdue_hermes_exact_routes(&overdue, 1_000, |_| Some(expectation)),
+            overdue_hermes_exact_routes(&overdue, 1_000, |_| Some(expectation)).unwrap(),
             BTreeSet::from([route])
         );
     }
@@ -277,7 +281,11 @@ mod tests {
             ("malformed", Some(b"malformed".to_vec())),
         ] {
             let persisted = empty_hermes_route_index(&temp.path().join(case), &route, control);
-            let persisted_route = persisted.manifest().source_route(&route).unwrap();
+            let persisted_route = persisted
+                .try_manifest()
+                .unwrap()
+                .source_route(&route)
+                .unwrap();
             assert!(persisted_route.sources().is_empty());
             let controls = SourceBackedGenerationState::decode_from_verified_index(&persisted)
                 .unwrap()
@@ -288,7 +296,8 @@ mod tests {
             assert_eq!(
                 overdue_hermes_exact_routes(&persisted, 1_000, |_| {
                     catalog.route_control_expectation(&route).copied()
-                }),
+                })
+                .unwrap(),
                 BTreeSet::from([route.clone()])
             );
         }

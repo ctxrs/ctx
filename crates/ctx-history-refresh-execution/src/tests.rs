@@ -32,10 +32,10 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
             Ok(index) => {
                 if ctx_history_index::active_generation_requires_rebuild(&index_root, &index)? {
                     PublishedSourceBackedGeneration::RebuildRequired {
-                        predecessor: Some(index.into_generation_snapshot()),
+                        predecessor: Some(index.into_generation_snapshot()?),
                     }
                 } else {
-                    PublishedSourceBackedGeneration::Verified(index.into_generation_snapshot())
+                    PublishedSourceBackedGeneration::Verified(index.into_generation_snapshot()?)
                 }
             }
             Err(IndexError::MissingActiveGenerationPointer) => {
@@ -400,7 +400,8 @@ fn route_local_rejects_a_stale_verified_generation_before_staging() {
     let first = publish_pin_source(&index_root, publication_pin_source_with_anchor(0x91));
     let verified_generation = VerifiedIndex::open_pinned(&index_root)
         .unwrap()
-        .into_generation_snapshot();
+        .into_generation_snapshot()
+        .unwrap();
     assert_eq!(verified_generation.generation_id(), first);
     let second = publish_pin_source(&index_root, publication_pin_source_with_anchor(0x93));
     assert_ne!(second, first);

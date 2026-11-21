@@ -313,8 +313,9 @@ pub fn event_query_receipt<'a>(
     next_cursor: Option<&'a str>,
     terminal: bool,
     truncated: bool,
-) -> EventQueryReceipt<'a> {
-    let sources = &index.manifest().sources;
+) -> Result<EventQueryReceipt<'a>, ctx_history_index_query::IndexError> {
+    let manifest = index.try_manifest()?;
+    let sources = &manifest.sources;
     let sources_with_frontier = sources
         .iter()
         .filter(|source| source.frontier().is_some())
@@ -326,7 +327,7 @@ pub fn event_query_receipt<'a>(
     } else {
         "partial"
     };
-    EventQueryReceipt {
+    Ok(EventQueryReceipt {
         schema_version: EVENT_QUERY_SCHEMA_VERSION,
         generation_id,
         domain: &request.domain,
@@ -349,9 +350,9 @@ pub fn event_query_receipt<'a>(
             status: frontier_status,
             certified_sources: sources.len(),
             sources_with_frontier,
-            certified_bytes: index.manifest().certified_source_bytes,
+            certified_bytes: manifest.certified_source_bytes,
         },
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -364,8 +365,8 @@ pub fn event_query_page_read_model<'a>(
     terminal: bool,
     truncated: bool,
     usage: EventQueryPageUsage,
-) -> EventQueryPageReadModel<'a> {
-    EventQueryPageReadModel {
+) -> Result<EventQueryPageReadModel<'a>, ctx_history_index_query::IndexError> {
+    Ok(EventQueryPageReadModel {
         receipt: event_query_receipt(
             index,
             request,
@@ -373,11 +374,11 @@ pub fn event_query_page_read_model<'a>(
             next_cursor,
             terminal,
             truncated,
-        ),
+        )?,
         payload_type: "event_range_page",
         events,
         usage,
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -389,8 +390,8 @@ pub fn event_query_completion_read_model<'a>(
     terminal: bool,
     truncated: bool,
     usage: EventQueryCompletionUsage,
-) -> EventQueryCompletionReadModel<'a> {
-    EventQueryCompletionReadModel {
+) -> Result<EventQueryCompletionReadModel<'a>, ctx_history_index_query::IndexError> {
+    Ok(EventQueryCompletionReadModel {
         receipt: event_query_receipt(
             index,
             request,
@@ -398,10 +399,10 @@ pub fn event_query_completion_read_model<'a>(
             next_cursor,
             terminal,
             truncated,
-        ),
+        )?,
         record_type: "event_range_completion",
         usage,
-    }
+    })
 }
 
 pub fn event_query_event_read_model(generation_id: &str, ordinal: usize, event: Value) -> Value {

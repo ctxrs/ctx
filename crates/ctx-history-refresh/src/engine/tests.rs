@@ -799,7 +799,7 @@ fn publish_selected_routes(
     let retained = open_verified_index(execution.index_root).ok();
     let retain_rejection_fixture = retained
         .as_ref()
-        .is_some_and(|index| !index.manifest().sources.is_empty());
+        .is_some_and(|index| !index.try_manifest().unwrap().sources.is_empty());
     let mut writer =
         ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
             .into_writer()
@@ -815,7 +815,7 @@ fn publish_selected_routes(
     };
     let mut source_routes = retained
         .as_ref()
-        .map(|index| index.manifest().source_routes().to_vec())
+        .map(|index| index.try_manifest().unwrap().source_routes().to_vec())
         .unwrap_or_default();
     for route in selected {
         if source_routes
@@ -831,7 +831,7 @@ fn publish_selected_routes(
     let mut all_sources = retained
         .as_ref()
         .into_iter()
-        .flat_map(|index| index.manifest().sources.iter())
+        .flat_map(|index| index.try_manifest().unwrap().sources.iter())
         .map(|source| source.observation().source().clone())
         .collect::<Vec<_>>();
     if let Some(source) = staged_source {

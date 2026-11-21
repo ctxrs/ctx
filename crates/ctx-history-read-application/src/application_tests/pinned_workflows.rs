@@ -560,14 +560,9 @@ fn structured_read_models_are_composed_from_pinned_query_results() {
     assert_eq!(wire.filters, json!({}));
     assert_eq!(wire.direction, "ascending");
     assert_eq!(wire.page_items(), 100);
-    let receipt = serde_json::to_value(event_query_receipt(
-        &index,
-        &wire,
-        index.generation_id(),
-        None,
-        false,
-        true,
-    ))
+    let receipt = serde_json::to_value(
+        event_query_receipt(&index, &wire, index.generation_id(), None, false, true).unwrap(),
+    )
     .unwrap();
     assert_eq!(receipt["generation_id"], index.generation_id());
     assert_eq!(receipt["freshness"]["mode"], "pinned");

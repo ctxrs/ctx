@@ -159,18 +159,27 @@ fn rollback_publication(cohort: bool, disable_terminal_merges: bool) {
     writer.commit(|_| true).unwrap();
 
     let published = VerifiedIndex::open(temp.path()).unwrap();
-    assert_eq!(published.manifest().indexed_documents, 17);
+    assert_eq!(published.try_manifest().unwrap().indexed_documents, 17);
     assert_eq!(published.count_term("survivor").unwrap(), 16);
     assert_eq!(published.count_term("afterrollback").unwrap(), 1);
     assert_eq!(published.count_term("discarded").unwrap(), 0);
     assert_eq!(published.count_term("discardedcohort").unwrap(), 0);
-    assert!(published.manifest().source_route(&routes[16]).is_none());
+    assert!(published
+        .try_manifest()
+        .unwrap()
+        .source_route(&routes[16])
+        .is_none());
     if cohort {
-        assert!(published.manifest().source_route(&routes[17]).is_none());
+        assert!(published
+            .try_manifest()
+            .unwrap()
+            .source_route(&routes[17])
+            .is_none());
     }
     for ordinal in (0..16).chain(std::iter::once(last)) {
         assert!(published
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .source_route(&routes[ordinal])
             .is_some());
     }

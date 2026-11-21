@@ -558,7 +558,7 @@ fn register_explicit_source_catalog_snapshot_routes(
     let needs_nanoclaw_checkpoint = !nanoclaw_lineages.is_empty();
     let base_certificates =
         if let Some(index) = base_generation.filter(|_| needs_nanoclaw_checkpoint) {
-            let certificates = index
+            index
                 .manifest()
                 .sources
                 .iter()
@@ -572,8 +572,7 @@ fn register_explicit_source_catalog_snapshot_routes(
                         )
                 })
                 .cloned()
-                .collect();
-            certificates
+                .collect()
         } else {
             Vec::new()
         };
@@ -598,9 +597,14 @@ fn register_explicit_source_catalog_snapshot_routes(
             CaptureProvider::NanoClaw | CaptureProvider::Shelley
         ) {
             let identity = automatic_source_backed_route_identity(&source)?;
-            base_generation
-                .is_some_and(|index| index.manifest().source_route(&identity).is_some())
-                .then_some(identity)
+            match base_generation {
+                Some(index) => index
+                    .manifest()
+                    .source_route(&identity)
+                    .is_some()
+                    .then_some(identity),
+                None => None,
+            }
         } else {
             None
         };

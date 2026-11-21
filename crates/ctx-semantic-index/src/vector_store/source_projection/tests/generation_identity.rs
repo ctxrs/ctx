@@ -218,7 +218,10 @@ fn incremental_delta_reopens_catches_up_and_acknowledges_verified_generation() -
         })
         .into_value_or_panic();
     let initial_generation_id = initial.generation_id().to_owned();
-    assert_eq!(initial.manifest().generation_id()?, initial_generation_id);
+    assert_eq!(
+        initial.try_manifest().unwrap().generation_id()?,
+        initial_generation_id
+    );
 
     let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
@@ -235,7 +238,7 @@ fn incremental_delta_reopens_catches_up_and_acknowledges_verified_generation() -
         .into_value_or_panic();
     let published_generation_id = published.generation_id().to_owned();
     assert_ne!(
-        published.manifest().generation_id()?,
+        published.try_manifest().unwrap().generation_id()?,
         published_generation_id
     );
     drop(published);
@@ -243,7 +246,7 @@ fn incremental_delta_reopens_catches_up_and_acknowledges_verified_generation() -
     let reopened = VerifiedIndex::open_pinned(&root)?;
     assert_eq!(reopened.generation_id(), published_generation_id);
     assert_ne!(
-        reopened.manifest().generation_id()?,
+        reopened.try_manifest().unwrap().generation_id()?,
         reopened.generation_id()
     );
     let generation =
@@ -329,6 +332,8 @@ fn expected_publication_route(attempt: FixturePublicationAttempt) -> Vec<Publica
         route.extend(atomic_stages(PublicationIoProbe::CandidateMetadata));
         route.extend(other);
     }
+    // Publication durably writes `<generation_id>.summary.json` alongside `<generation_id>.json`.
+    route.extend(other);
     route.extend(common_publication_stages());
     route
 }

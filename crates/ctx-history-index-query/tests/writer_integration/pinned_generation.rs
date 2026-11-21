@@ -508,7 +508,7 @@ fn generation_snapshot_releases_handles_before_lease_and_reclaims_retired_genera
     let first_path = active_generation_path(temp.path());
     let reader = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let shared_manifest = Arc::clone(reader.test_shared_manifest());
-    let snapshot = reader.into_generation_snapshot();
+    let snapshot = reader.into_generation_snapshot().unwrap();
 
     assert_eq!(snapshot.generation_id(), first.generation_id);
     assert!(Arc::ptr_eq(

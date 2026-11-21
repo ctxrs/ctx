@@ -188,7 +188,7 @@ impl CoreRefreshEngine {
             return Ok(false);
         };
         Ok(index
-            .manifest()
+            .try_manifest()?
             .source_routes()
             .iter()
             .any(|route| catalog.has_automatic_split_legacy_route(route.route_identity())))

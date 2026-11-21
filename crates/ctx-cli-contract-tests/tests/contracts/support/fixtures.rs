@@ -137,7 +137,8 @@ pub(crate) fn provider_core_records(data_root: &Path, provider: &str) -> Vec<Cor
     )
     .unwrap();
     let sources = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .map(|certificate| certificate.observation().source())

@@ -180,8 +180,8 @@ fn deletion_requires_final_inventory_revalidation() {
     assert!(accepted_receipt.manifest().source_routes().is_empty());
     let current = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(current.count_term("retained").unwrap(), 0);
-    assert!(current.manifest().sources.is_empty());
-    assert!(current.manifest().source_routes().is_empty());
+    assert!(current.try_manifest().unwrap().sources.is_empty());
+    assert!(current.try_manifest().unwrap().source_routes().is_empty());
 }
 
 #[test]
@@ -213,12 +213,14 @@ fn generation_manifests_retain_only_current_sources() {
     deleting.delete_source(deletion, inventory).unwrap();
     let deleted_receipt = deleting.commit(|_| true).unwrap();
     let deleted = VerifiedIndex::open(temp.path()).unwrap();
-    assert_eq!(deleted.manifest().sources.len(), 1);
+    assert_eq!(deleted.try_manifest().unwrap().sources.len(), 1);
     assert_eq!(
-        deleted.manifest().sources[0].observation().source(),
+        deleted.try_manifest().unwrap().sources[0]
+            .observation()
+            .source(),
         &retained
     );
-    assert_eq!(deleted.manifest().source_routes().len(), 1);
+    assert_eq!(deleted.try_manifest().unwrap().source_routes().len(), 1);
 
     let mut unrelated = GenerationWriter::open(temp.path(), WriterOptions::default())
         .unwrap()
@@ -237,8 +239,8 @@ fn generation_manifests_retain_only_current_sources() {
         deleted_receipt.generation_id,
         unrelated_receipt.generation_id
     );
-    assert_eq!(carried.manifest().sources.len(), 1);
-    assert_eq!(carried.manifest().source_routes().len(), 1);
+    assert_eq!(carried.try_manifest().unwrap().sources.len(), 1);
+    assert_eq!(carried.try_manifest().unwrap().source_routes().len(), 1);
 
     let returning = source_for_provider("codex", "codex_prompt_history_jsonl", "removed.jsonl");
     assert_eq!(returning, removed);
@@ -257,11 +259,16 @@ fn generation_manifests_retain_only_current_sources() {
     republishing.commit(|_| true).unwrap();
 
     let returned = VerifiedIndex::open(temp.path()).unwrap();
-    assert_eq!(returned.manifest().source_routes().len(), 2);
-    assert!(returned.manifest().sources.iter().any(|source| source
-        .observation()
-        .source()
-        .exact_descriptor_eq(&returning)));
+    assert_eq!(returned.try_manifest().unwrap().source_routes().len(), 2);
+    assert!(returned
+        .try_manifest()
+        .unwrap()
+        .sources
+        .iter()
+        .any(|source| source
+            .observation()
+            .source()
+            .exact_descriptor_eq(&returning)));
 }
 
 #[test]
@@ -320,7 +327,7 @@ fn replacement_atomically_removes_old_source_documents() {
     let index = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(index.count_term("retired").unwrap(), 0);
     assert_eq!(index.count_term("current").unwrap(), 1);
-    assert_eq!(index.manifest().sources.len(), 1);
+    assert_eq!(index.try_manifest().unwrap().sources.len(), 1);
 }
 
 #[test]
@@ -360,7 +367,12 @@ fn certified_append_indexes_only_the_delta() {
     assert_eq!(index.document_count(), 2);
     assert_eq!(index.count_term("base").unwrap(), 1);
     assert_eq!(index.count_term("delta").unwrap(), 1);
-    assert_eq!(index.manifest().sources[0].counts().indexed_documents, 2);
+    assert_eq!(
+        index.try_manifest().unwrap().sources[0]
+            .counts()
+            .indexed_documents,
+        2
+    );
 }
 
 #[test]
@@ -515,7 +527,7 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
     writer.commit(|_| true).unwrap();
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
-    let mut stale_manifest = index.manifest().clone();
+    let mut stale_manifest = index.try_manifest().unwrap().clone();
     const STALE_LEXICAL_SCHEMA: u32 = 15;
     stale_manifest.lexical_schema_version = STALE_LEXICAL_SCHEMA;
     let stale_generation_id = stale_manifest.generation_id().unwrap();
@@ -749,7 +761,7 @@ fn verified_open_rejects_mismatched_core_contract_fingerprint() {
     writer.commit(|_| true).unwrap();
 
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
-    let mut mismatched_manifest = pinned.manifest().clone();
+    let mut mismatched_manifest = pinned.try_manifest().unwrap().clone();
     mismatched_manifest.core_record_contract_fingerprint =
         PRIOR_REPOSITORY_CONTRACT_FINGERPRINT.to_owned();
     let index = open_unverified_generation(temp.path()).0.index().clone();
@@ -802,7 +814,7 @@ fn verified_open_rejects_mismatched_active_policy() {
     let mut mismatched_policy = current_source_generation_policy();
     mismatched_policy.lexical.event_projector_revision += 1;
     let mismatched_policy_hash = mismatched_policy.canonical_sha256().unwrap();
-    let mut mismatched_manifest = pinned.manifest().clone();
+    let mut mismatched_manifest = pinned.try_manifest().unwrap().clone();
     mismatched_manifest.policy_schema_hash = mismatched_policy_hash.clone();
     let index = open_unverified_generation(temp.path()).0.index().clone();
     publish_unchecked_generation(temp.path(), &index, mismatched_manifest, &[], Vec::new());

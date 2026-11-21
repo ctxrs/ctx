@@ -125,7 +125,8 @@ fn automatic_codex_root_replacement_retires_archived_only_sources() {
     let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         index
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .sources
             .iter()
             .filter(|source| source.observation().source().provider() == "codex")
@@ -239,7 +240,8 @@ fn automatic_codex_root_replacement_partial_inventory_carries_archived_members()
         let index = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(
             index
-                .manifest()
+                .try_manifest()
+                .unwrap()
                 .sources
                 .iter()
                 .filter(|source| source.observation().source().provider() == "codex")

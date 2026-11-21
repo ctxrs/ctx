@@ -78,7 +78,8 @@ fn append_jsonl(path: &Path, record: &Value) {
 fn mux_records(index: &Path) -> Vec<CoreRecord> {
     let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut records = verified
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .flat_map(|source| {

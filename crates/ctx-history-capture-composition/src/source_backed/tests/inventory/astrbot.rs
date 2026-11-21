@@ -116,7 +116,8 @@ fn released_astrbot_root_scans_only_its_inventory_and_cannot_absorb_named_peer()
         ("second", "astrbotrootbeta", "astrbotrootalpha"),
     ] {
         let allowed_source_keys = published
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root_source_tokens(&[root.to_owned()], &[])
             .unwrap();
         let filters = ctx_history_index::EventSearchFilters {

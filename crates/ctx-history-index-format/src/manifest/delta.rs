@@ -442,9 +442,10 @@ pub(super) fn prepare_flat_delta(
             sources: sources.into_values().collect(),
         })
         .collect();
+    let anchor_generation_id = accumulated.anchor_generation_id;
     let delta = StoredManifestFlatDeltaV1 {
         storage_format: MANIFEST_FLAT_DELTA_STORAGE.to_owned(),
-        base_generation_id: accumulated.anchor_generation_id,
+        base_generation_id: anchor_generation_id.clone(),
         indexed_documents: manifest.indexed_documents,
         certified_source_bytes: manifest.certified_source_bytes,
         source_count: manifest.sources.len(),
@@ -457,12 +458,13 @@ pub(super) fn prepare_flat_delta(
     if bytes.len() > MAX_MANIFEST_DELTA_BYTES {
         return Ok(None);
     }
-    Ok(Some(PreparedManifest {
-        generation_id: sha256_hex(&bytes),
+    Ok(Some(PreparedManifest::new(
+        sha256_hex(&bytes),
+        Some(anchor_generation_id),
         bytes,
-        materialized: Arc::clone(manifest),
+        Arc::clone(manifest),
         base_fence,
-    }))
+    )?))
 }
 
 fn accumulated_manifest_delta(

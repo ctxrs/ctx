@@ -55,8 +55,10 @@ fn native_openclaw_v19_discovery_import_repeat_and_readonly() {
     let cold = refresh_source_backed_generation(&index_root, &registry, options()).unwrap();
     assert!(cold.failed_routes.is_empty());
     let index = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(index.manifest().sources.len(), 1);
-    let source = index.manifest().sources[0].observation().source();
+    assert_eq!(index.try_manifest().unwrap().sources.len(), 1);
+    let source = index.try_manifest().unwrap().sources[0]
+        .observation()
+        .source();
     let items = index
         .core_source_event_page(source, None, 128)
         .unwrap()

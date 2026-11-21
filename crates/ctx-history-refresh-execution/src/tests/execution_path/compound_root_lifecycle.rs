@@ -223,7 +223,8 @@ fn stable_record_bytes(index: &VerifiedIndex, marker: &str) -> (String, Vec<u8>)
 
 fn assert_root_filter(index: &VerifiedIndex, id: &str, expected: usize) {
     let allowed = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root_source_tokens(&[id.to_owned()], &[])
         .unwrap();
     let hits = index
@@ -256,7 +257,8 @@ fn initial_count(index: &VerifiedIndex) -> usize {
 
 fn certificate_bytes(index: &VerifiedIndex, token: &str) -> Vec<u8> {
     let source = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|source| ctx_history_index::source_token(source.observation().source()) == token)
@@ -281,7 +283,8 @@ fn stable_source_bytes(index: &VerifiedIndex, marker: &str) -> StableSourceBytes
     let event = exact_event(index, &hits[0]);
     let source = &event.source;
     let route = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_routes()
         .iter()
         .find(|route| route.sources().iter().any(|member| member == source))
@@ -309,7 +312,8 @@ fn stable_source_bytes(index: &VerifiedIndex, marker: &str) -> StableSourceBytes
 
 fn assert_root_marker(index: &VerifiedIndex, id: &str, marker: &str, expected: usize) {
     let allowed = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root_source_tokens(&[id.to_owned()], &[])
         .unwrap();
     let hits = index
@@ -517,9 +521,14 @@ fn unavailable_only_released_member_is_carried_while_automatic_peer_advances() {
 
         refresh(&base, provider, roots, true, &data_root, &index_root);
         let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert_eq!(initial.manifest().source_routes()[0].sources().len(), 2);
+        assert_eq!(
+            initial.try_manifest().unwrap().source_routes()[0]
+                .sources()
+                .len(),
+            2
+        );
         let alpha = stable_source_bytes(&initial, "lifecycleinitial0");
-        let route = initial.manifest().provider_roots()[0].routes()[0].clone();
+        let route = initial.try_manifest().unwrap().provider_roots()[0].routes()[0].clone();
         assert_root_filter(&initial, "alpha", 1);
         drop(initial);
 
@@ -542,11 +551,13 @@ fn unavailable_only_released_member_is_carried_while_automatic_peer_advances() {
         );
         assert_eq!(stable_source_bytes(&missing, "lifecycleinitial0"), alpha);
         assert_eq!(
-            missing.manifest().source_routes()[0].sources().len(),
+            missing.try_manifest().unwrap().source_routes()[0]
+                .sources()
+                .len(),
             2,
             "{provider:?} dropped a retained shared-route member"
         );
-        let retained = &missing.manifest().provider_roots()[0];
+        let retained = &missing.try_manifest().unwrap().provider_roots()[0];
         assert_eq!(retained.definition().id, "alpha");
         assert_eq!(retained.routes(), &[route]);
         assert_eq!(retained.exact_source_memberships().len(), 1);
@@ -572,10 +583,15 @@ fn removing_final_released_alias_preserves_shared_route_history_without_refreshi
 
         refresh(&base, provider, roots, true, &data_root, &index_root);
         let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert_eq!(initial.manifest().source_routes()[0].sources().len(), 2);
+        assert_eq!(
+            initial.try_manifest().unwrap().source_routes()[0]
+                .sources()
+                .len(),
+            2
+        );
         let alpha = stable_source_bytes(&initial, "lifecycleinitial0");
         let automatic = stable_source_bytes(&initial, "lifecycleinitial1");
-        let route = initial.manifest().provider_roots()[0].routes()[0].clone();
+        let route = initial.try_manifest().unwrap().provider_roots()[0].routes()[0].clone();
         drop(initial);
 
         match provider {
@@ -592,11 +608,16 @@ fn removing_final_released_alias_preserves_shared_route_history_without_refreshi
 
         refresh(&base, provider, &[], false, &data_root, &index_root);
         let removed = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert!(removed.manifest().provider_roots().is_empty());
-        assert_eq!(removed.manifest().source_routes()[0].sources().len(), 2);
+        assert!(removed.try_manifest().unwrap().provider_roots().is_empty());
+        assert_eq!(
+            removed.try_manifest().unwrap().source_routes()[0]
+                .sources()
+                .len(),
+            2
+        );
         assert!(matches!(
             removed
-                .manifest()
+                .try_manifest().unwrap()
                 .provider_root_source_tokens(&["alpha".to_owned()], &[]),
             Err(ctx_history_index::IndexError::UnknownProviderRootSelector(id)) if id == "alpha"
         ));
@@ -606,7 +627,8 @@ fn removing_final_released_alias_preserves_shared_route_history_without_refreshi
             automatic
         );
         assert_eq!(
-            serde_json::to_vec(removed.manifest().source_routes()[0].route_identity()).unwrap(),
+            serde_json::to_vec(removed.try_manifest().unwrap().source_routes()[0].route_identity())
+                .unwrap(),
             serde_json::to_vec(&route).unwrap()
         );
         assert!(removed
@@ -621,10 +643,10 @@ fn removing_final_released_alias_preserves_shared_route_history_without_refreshi
 
         refresh(&base, provider, &[], true, &data_root, &index_root);
         let resumed = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert!(resumed.manifest().provider_roots().is_empty());
+        assert!(resumed.try_manifest().unwrap().provider_roots().is_empty());
         assert!(matches!(
             resumed
-                .manifest()
+                .try_manifest().unwrap()
                 .provider_root_source_tokens(&["alpha".to_owned()], &[]),
             Err(ctx_history_index::IndexError::UnknownProviderRootSelector(id)) if id == "alpha"
         ));
@@ -650,7 +672,7 @@ fn removing_final_released_alias_preserves_shared_route_history_without_refreshi
             1
         );
         assert_eq!(
-            resumed.manifest().source_routes()[0].route_identity(),
+            resumed.try_manifest().unwrap().source_routes()[0].route_identity(),
             &route
         );
     }
@@ -672,7 +694,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
         let initial_alpha = stable_record_bytes(&initial, "lifecycleinitial0");
         let initial_automatic = stable_record_bytes(&initial, "lifecycleinitial2");
         let initial_automatic_certificate = certificate_bytes(&initial, &initial_automatic.0);
-        let route = initial.manifest().provider_roots()[0].routes()[0].clone();
+        let route = initial.try_manifest().unwrap().provider_roots()[0].routes()[0].clone();
         drop(initial);
 
         match provider {
@@ -734,14 +756,16 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
             refresh(&base, provider, &roots, true, &data_root, &index_root);
             let moved_index = VerifiedIndex::open_pinned(&index_root).unwrap();
             assert_eq!(
-                moved_index.manifest().provider_roots()[0].routes(),
+                moved_index.try_manifest().unwrap().provider_roots()[0].routes(),
                 std::slice::from_ref(&route)
             );
             assert_eq!(
                 stable_record_bytes(&moved_index, "lifecycleinitial0"),
                 initial_alpha
             );
-            let encoded = serde_json::to_vec(&moved_index.manifest().provider_roots()[0]).unwrap();
+            let encoded =
+                serde_json::to_vec(&moved_index.try_manifest().unwrap().provider_roots()[0])
+                    .unwrap();
             let restarted: AppliedProviderRoot = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(restarted.exact_source_memberships().len(), 1);
         }
@@ -763,7 +787,8 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
             1
         );
         let alpha = missing
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_roots()
             .iter()
             .find(|root| root.definition().id == "alpha")
@@ -804,18 +829,23 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
         }
         refresh(&base, provider, &roots[1..], false, &data_root, &index_root);
         let removed = VerifiedIndex::open_pinned(&index_root).unwrap();
-        assert_eq!(removed.manifest().provider_roots().len(), 1);
+        assert_eq!(removed.try_manifest().unwrap().provider_roots().len(), 1);
         assert!(matches!(
             removed
-                .manifest()
+                .try_manifest().unwrap()
                 .provider_root_source_tokens(&["alpha".to_owned()], &[]),
             Err(ctx_history_index::IndexError::UnknownProviderRootSelector(id)) if id == "alpha"
         ));
         assert_eq!(
-            removed.manifest().provider_roots()[0].definition().id,
+            removed.try_manifest().unwrap().provider_roots()[0]
+                .definition()
+                .id,
             "beta"
         );
-        assert_eq!(removed.manifest().provider_roots()[0].routes(), &[route]);
+        assert_eq!(
+            removed.try_manifest().unwrap().provider_roots()[0].routes(),
+            &[route]
+        );
         assert_root_filter(&removed, "beta", 1);
         assert_eq!(
             stable_record_bytes(&removed, "lifecycleinitial0"),

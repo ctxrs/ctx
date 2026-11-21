@@ -27,10 +27,10 @@ impl PublishedSourceBackedStatePort for RetainedPublishedState<'_> {
                     })?
                 {
                     PublishedSourceBackedGeneration::RebuildRequired {
-                        predecessor: Some((*index).into_generation_snapshot()),
+                        predecessor: Some((*index).into_generation_snapshot()?),
                     }
                 } else {
-                    PublishedSourceBackedGeneration::Verified((*index).into_generation_snapshot())
+                    PublishedSourceBackedGeneration::Verified((*index).into_generation_snapshot()?)
                 }
             }
         };

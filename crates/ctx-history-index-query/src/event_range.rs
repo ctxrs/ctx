@@ -452,7 +452,7 @@ impl VerifiedIndex {
         let Some(expected) = selection.filters.source_identity else {
             return Ok(None);
         };
-        let manifest = self.load_manifest().map_err(CoreEventRangeError::Index)?;
+        let manifest = self.try_manifest().map_err(CoreEventRangeError::Index)?;
         Ok(manifest.sources.iter().find_map(|certified| {
             let source = certified.observation().source();
             (source.identity().as_uuid() == expected).then(|| source_token(source))

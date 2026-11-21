@@ -480,12 +480,24 @@ fn codex_rollout_ownership_quarantine_retries_after_file_repair() {
     assert!(search_event_candidates(&index, neighbor_marker, 32)
         .into_iter()
         .any(|candidate| candidate.event.provider_session_id.as_deref() == Some(valid_session_id)));
-    assert!(index.manifest().sources.iter().any(|certificate| {
-        source_native_session_id(certificate.observation().source()) == Some(repairable_session_id)
-    }));
-    assert!(index.manifest().sources.iter().all(|certificate| {
-        source_native_session_id(certificate.observation().source()) != Some(conflicting_session_id)
-    }));
+    assert!(index
+        .try_manifest()
+        .unwrap()
+        .sources
+        .iter()
+        .any(|certificate| {
+            source_native_session_id(certificate.observation().source())
+                == Some(repairable_session_id)
+        }));
+    assert!(index
+        .try_manifest()
+        .unwrap()
+        .sources
+        .iter()
+        .all(|certificate| {
+            source_native_session_id(certificate.observation().source())
+                != Some(conflicting_session_id)
+        }));
     assert!(source_records_contain(
         &index,
         repairable_session_id,

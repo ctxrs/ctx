@@ -70,8 +70,12 @@ impl OwnedMember {
 /// Read only metadata belonging to the pinned generation. Older certificates
 /// without retained declarations remain readable and omit these labels.
 pub fn source_identities(index: &VerifiedIndex) -> Result<BTreeMap<[u8; 32], ArchiveIdentity>> {
+    if !index.has_archive_sources() {
+        return Ok(BTreeMap::new());
+    }
+    let manifest = index.try_manifest()?;
     let mut sources = BTreeMap::new();
-    for certificate in &index.manifest().sources {
+    for certificate in &manifest.sources {
         let observation = certificate.observation();
         if observation.source().source_format() == "ctx_archive_v1"
             && observation.revision_kind() == OBSERVATION_KIND

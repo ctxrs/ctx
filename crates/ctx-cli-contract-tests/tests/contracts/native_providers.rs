@@ -829,7 +829,8 @@ fn shelley_lifecycle_snapshot(data_root: &Path) -> ShelleyLifecycleSnapshot {
     let records = provider_core_records(data_root, "shelley");
     let index = VerifiedIndex::open_pinned(data_root.join("search/lexical")).unwrap();
     let route_ownership = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_routes()
         .iter()
         .filter_map(|route| {

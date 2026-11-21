@@ -200,13 +200,14 @@ fn unchanged_v15_lineage_certificate_is_replaced_by_v17_direct_only_projection()
     let source = source_key(SESSION_ID);
     let current = VerifiedIndex::open_pinned(&index).unwrap();
     let current_certificate = current
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|certificate| certificate.observation().source() == &source)
         .unwrap()
         .clone();
-    let current_routes = current.manifest().source_routes().to_vec();
+    let current_routes = current.try_manifest().unwrap().source_routes().to_vec();
     let mut stale_records = published_session(&index, SESSION_ID);
     assert_eq!(stale_records.len(), 1);
     let literal_parent = stale_records[0]
@@ -269,7 +270,8 @@ fn unchanged_v15_lineage_certificate_is_replaced_by_v17_direct_only_projection()
     let replaced_index = VerifiedIndex::open_pinned(&index).unwrap();
     assert_eq!(
         replaced_index
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .sources
             .iter()
             .find(|certificate| certificate.observation().source() == &source)

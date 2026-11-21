@@ -119,13 +119,13 @@ impl DaemonWatchRuntime {
             return;
         };
         let published_matches = match pin_published_generation(data_root) {
-            Ok(Some(published)) => {
-                published
-                    .verified_index()
-                    .manifest()
-                    .provider_root_config_digest()
-                    == desired_digest
-            }
+            Ok(Some(published)) => match published.verified_index().try_manifest() {
+                Ok(manifest) => manifest.provider_root_config_digest() == desired_digest,
+                Err(error) => {
+                    let _ = write_degraded_wakeup_receipt(data_root, &error.into());
+                    false
+                }
+            },
             Ok(None) => false,
             Err(error) => {
                 let _ = write_degraded_wakeup_receipt(data_root, &error);
@@ -231,13 +231,19 @@ impl DaemonWatchRuntime {
                         match (previous_digest.as_deref(), current_digest.as_deref()) {
                             (Some(previous), Some(current)) => previous != current,
                             (None, Some(current)) => match pin_published_generation(data_root) {
-                                Ok(Some(published)) => {
-                                    published
-                                        .verified_index()
-                                        .manifest()
-                                        .provider_root_config_digest()
-                                        != current
-                                }
+                                Ok(Some(published)) => match published
+                                    .verified_index()
+                                    .try_manifest()
+                                {
+                                    Ok(manifest) => {
+                                        manifest.provider_root_config_digest() != current
+                                    }
+                                    Err(error) => {
+                                        let _ =
+                                            write_degraded_wakeup_receipt(data_root, &error.into());
+                                        true
+                                    }
+                                },
                                 Ok(None) => false,
                                 Err(error) => {
                                     let _ = write_degraded_wakeup_receipt(data_root, &error);

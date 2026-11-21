@@ -90,7 +90,7 @@ fn present_unsupported_only_refresh_fails_cold_and_reports_against_a_warm_genera
     assert!(!failed_route.outcome.is_success());
     let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), retained_generation);
-    assert_eq!(retained.manifest().sources.len(), 1);
+    assert_eq!(retained.try_manifest().unwrap().sources.len(), 1);
 }
 
 #[test]

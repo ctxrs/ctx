@@ -53,7 +53,7 @@ fn main_schema_22_stays_searchable_through_interrupted_rebuild_and_publication()
     // This is the actual predecessor writer's output, not a current index
     // relabeled as schema 22. The authored input and producer pin accompany it.
     let old = VerifiedIndex::open(temp.path()).unwrap();
-    assert_eq!(old.manifest().lexical_schema_version, 22);
+    assert_eq!(old.try_manifest().unwrap().lexical_schema_version, 22);
     assert_eq!(old.count_term("schema22upgrademarker").unwrap(), 1);
     let (searcher, _) = open_unverified_generation(temp.path());
     let address = searcher
@@ -63,7 +63,7 @@ fn main_schema_22_stays_searchable_through_interrupted_rebuild_and_publication()
         .next()
         .unwrap();
     let record = decoded_stored_core(&searcher, address);
-    let certificate = old.manifest().sources[0].clone();
+    let certificate = old.try_manifest().unwrap().sources[0].clone();
 
     let active_path = active_generation_path(temp.path());
     for attempt in 0..5 {
@@ -123,13 +123,13 @@ fn main_schema_22_stays_searchable_through_interrupted_rebuild_and_publication()
     let root = temp.path().to_path_buf();
     restarted.before_pointer_switch = Some(Box::new(move |_| {
         let still_old = VerifiedIndex::open_pinned(&root).unwrap();
-        assert_eq!(still_old.manifest().lexical_schema_version, 22);
+        assert_eq!(still_old.try_manifest().unwrap().lexical_schema_version, 22);
         assert_eq!(still_old.count_term("schema22upgrademarker").unwrap(), 1);
     }));
     restarted.commit(|_| true).unwrap();
     let current = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(
-        current.manifest().lexical_schema_version,
+        current.try_manifest().unwrap().lexical_schema_version,
         LEXICAL_SCHEMA_VERSION
     );
     assert_eq!(current.count_term("schema22upgrademarker").unwrap(), 1);
@@ -592,7 +592,7 @@ fn active_generation_requires_rebuild_classifies_schema_22_and_rebuild_marker() 
         schema_22_dir.path(),
     );
     let schema_22 = VerifiedIndex::open_pinned(schema_22_dir.path()).unwrap();
-    assert_eq!(schema_22.manifest().lexical_schema_version, 22);
+    assert_eq!(schema_22.lexical_schema_version(), 22);
     assert!(active_generation_requires_rebuild(schema_22_dir.path(), &schema_22).unwrap());
     drop(schema_22);
 

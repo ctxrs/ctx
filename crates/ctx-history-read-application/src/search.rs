@@ -96,7 +96,7 @@ pub(crate) fn search_filters_with_refs(
         || !request.source_groups.is_empty())
     .then(|| {
         index
-            .load_manifest()
+            .try_manifest()
             .map_err(anyhow::Error::from)?
             .provider_root_source_tokens(&request.source_roots, &request.source_groups)
             .map_err(anyhow::Error::from)

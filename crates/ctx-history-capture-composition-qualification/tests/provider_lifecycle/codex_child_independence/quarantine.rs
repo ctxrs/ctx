@@ -144,10 +144,15 @@ fn codex_prefix_ownership_quarantine_retains_prior_source_and_repairs() {
     assert!(quarantined.failed_routes.is_empty());
     assert_eq!(quarantined.logical_source_failures.total(), 1);
     let index = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(index.manifest().sources, initial.sources);
-    assert!(index.manifest().sources.iter().any(|certificate| {
-        source_native_session_id(certificate.observation().source()) == Some(native_session_id)
-    }));
+    assert_eq!(index.try_manifest().unwrap().sources, initial.sources);
+    assert!(index
+        .try_manifest()
+        .unwrap()
+        .sources
+        .iter()
+        .any(|certificate| {
+            source_native_session_id(certificate.observation().source()) == Some(native_session_id)
+        }));
     assert!(source_records_contain(
         &index,
         native_session_id,
@@ -238,9 +243,14 @@ fn malformed_late_session_meta_quarantines_only_its_rollout() {
     for marker in ["malformedmetabeforemarker", "malformedmetaaftermarker"] {
         assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
     }
-    assert!(index.manifest().sources.iter().all(|certificate| {
-        source_native_session_id(certificate.observation().source()) != Some(malformed_id)
-    }));
+    assert!(index
+        .try_manifest()
+        .unwrap()
+        .sources
+        .iter()
+        .all(|certificate| {
+            source_native_session_id(certificate.observation().source()) != Some(malformed_id)
+        }));
     assert!(search_event_candidates(&index, "malformedmetaquarantinedmarker", 8).is_empty());
 }
 

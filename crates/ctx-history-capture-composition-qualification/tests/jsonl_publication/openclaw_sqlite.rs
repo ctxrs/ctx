@@ -162,7 +162,8 @@ fn registered_registry(data_root: &Path, database: &Path) -> SourceBackedProvide
 fn records(index_root: &Path) -> Vec<CoreRecord> {
     let index = VerifiedIndex::open_pinned(index_root).unwrap();
     let mut records = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .flat_map(|source| {

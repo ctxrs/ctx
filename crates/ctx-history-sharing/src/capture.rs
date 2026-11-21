@@ -116,20 +116,19 @@ pub(crate) fn export_index_control(
     visit: &mut impl FnMut(&SessionMember, &SessionScope) -> Result<()>,
     stop: &AtomicBool,
 ) -> Result<Manifest> {
+    let manifest = index.try_manifest().map_err(|_| Error::Archive)?;
     let mut sources = BTreeSet::new();
     for selection in selections {
         if let Some(source) = &selection.source_id {
             sources.insert(source.clone());
         } else if let Some(path) = &selection.profile_root {
-            for root in index
-                .manifest()
+            for root in manifest
                 .provider_roots()
                 .iter()
                 .filter(|r| &r.definition().path == path)
             {
                 sources.extend(
-                    index
-                        .manifest()
+                    manifest
                         .provider_root_source_tokens(&[root.definition().id.clone()], &[])
                         .map_err(|_| Error::Archive)?,
                 );
@@ -176,10 +175,10 @@ fn session_scope(
     stop: &AtomicBool,
 ) -> Result<SessionScope> {
     let source_id = hex(&member.source.identity().digest());
+    let manifest = index.try_manifest().map_err(|_| Error::Archive)?;
     let mut profile_roots = Vec::new();
-    for root in index.manifest().provider_roots() {
-        let tokens = index
-            .manifest()
+    for root in manifest.provider_roots() {
+        let tokens = manifest
             .provider_root_source_tokens(&[root.definition().id.clone()], &[])
             .map_err(|_| Error::Archive)?;
         if tokens.contains(&source_id) {

@@ -67,6 +67,8 @@ pub struct GenerationSlot {
     generation_id: String,
     directory: String,
     physical_integrity_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary_sha256: Option<String>,
 }
 
 impl GenerationSlot {
@@ -79,9 +81,16 @@ impl GenerationSlot {
             generation_id,
             directory,
             physical_integrity_digest,
+            summary_sha256: None,
         };
         slot.validate()?;
         Ok(slot)
+    }
+
+    pub fn with_summary_sha256(mut self, summary_sha256: String) -> Result<Self> {
+        self.summary_sha256 = Some(summary_sha256);
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn generation_id(&self) -> &str {
@@ -96,6 +105,10 @@ impl GenerationSlot {
         &self.physical_integrity_digest
     }
 
+    pub fn summary_sha256(&self) -> Option<&str> {
+        self.summary_sha256.as_deref()
+    }
+
     pub fn names_are_valid(generation_id: &str, directory: &str) -> bool {
         is_generation_id(generation_id) && is_generation_directory_name(directory)
     }
@@ -103,6 +116,10 @@ impl GenerationSlot {
     pub fn validate(&self) -> Result<()> {
         if !Self::names_are_valid(&self.generation_id, &self.directory)
             || !is_generation_id(&self.physical_integrity_digest)
+            || self
+                .summary_sha256
+                .as_deref()
+                .is_some_and(|digest| !is_generation_id(digest))
         {
             return Err(IndexError::InvalidActiveGenerationPointer);
         }
@@ -786,6 +803,69 @@ mod tests {
             load_active_generation_pointer(root.path()).unwrap(),
             Some(pointer)
         );
+    }
+
+    #[test]
+    fn active_pointer_supports_optional_canonical_summary_sha256() {
+        let root = tempfile::tempdir().unwrap();
+        let summary_digest = "5".repeat(64);
+        let active = GenerationSlot::new(
+            "1".repeat(64),
+            format!("generation-{}", "1".repeat(32)),
+            "2".repeat(64),
+        )
+        .unwrap()
+        .with_summary_sha256(summary_digest.clone())
+        .unwrap();
+        let legacy_previous = GenerationSlot::new(
+            "3".repeat(64),
+            format!("generation-{}", "3".repeat(32)),
+            "4".repeat(64),
+        )
+        .unwrap();
+        let pointer = ActiveGenerationPointer::new(active, Some(legacy_previous)).unwrap();
+        assert!(matches!(
+            publish_active_generation_pointer(root.path(), &pointer).unwrap(),
+            PointerPublicationOutcome::Durable
+        ));
+        let loaded = load_active_generation_pointer(root.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, pointer);
+        assert_eq!(
+            loaded.active().summary_sha256(),
+            Some(summary_digest.as_str())
+        );
+        assert_eq!(loaded.previous().unwrap().summary_sha256(), None);
+
+        // Explicit null summary_sha256 is non-canonical and rejected.
+        let explicit_null = format!(
+            "{{\"version\":2,\"active\":{{\"generation_id\":\"{}\",\"directory\":\"generation-{}\",\"physical_integrity_digest\":\"{}\",\"summary_sha256\":null}},\"previous\":null}}",
+            "1".repeat(64),
+            "1".repeat(32),
+            "2".repeat(64),
+        );
+        fs::write(
+            root.path().join(ACTIVE_GENERATION_POINTER_FILE),
+            explicit_null.as_bytes(),
+        )
+        .unwrap();
+        assert!(matches!(
+            load_active_generation_pointer(root.path()),
+            Err(IndexError::InvalidActiveGenerationPointer)
+        ));
+
+        // Malformed summary_sha256 is rejected.
+        assert!(matches!(
+            GenerationSlot::new(
+                "1".repeat(64),
+                format!("generation-{}", "1".repeat(32)),
+                "2".repeat(64),
+            )
+            .unwrap()
+            .with_summary_sha256("not-a-digest".to_owned()),
+            Err(IndexError::InvalidActiveGenerationPointer)
+        ));
     }
 
     #[test]

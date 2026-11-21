@@ -72,7 +72,7 @@ pub(crate) fn export_selected(
         CREATE TABLE members(path TEXT PRIMARY KEY, source TEXT NOT NULL,
             session TEXT NOT NULL, records INTEGER NOT NULL); BEGIN",
     )?;
-    for certificate in &index.manifest().sources {
+    for certificate in &index.try_manifest()?.sources {
         control()?;
         let source = certificate.observation().source();
         if !selection.includes_source(source)? {

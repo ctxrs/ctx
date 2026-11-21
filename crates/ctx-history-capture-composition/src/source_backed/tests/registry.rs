@@ -765,7 +765,7 @@ fn real_shared_resource_exhaustion_aborts_warm_refresh_and_retains_complete_prio
     let retained = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);
     assert_eq!(retained.document_count(), 2);
-    assert_eq!(retained.manifest().sources, initial_sources);
+    assert_eq!(retained.try_manifest().unwrap().sources, initial_sources);
 }
 
 #[test]

@@ -617,8 +617,8 @@ fn mixed_core_roles_build_and_pin_only_the_semantic_candidate() -> Result<()> {
     writer.commit(|_| true)?;
     let index = VerifiedIndex::open_pinned(root)?;
 
-    assert_eq!(index.manifest().indexed_documents, 2);
-    let source_aggregate = &index.manifest().core_record_aggregates[0];
+    assert_eq!(index.try_manifest().unwrap().indexed_documents, 2);
+    let source_aggregate = &index.try_manifest().unwrap().core_record_aggregates[0];
     assert_eq!(source_aggregate.indexed_documents(), 2);
     assert_eq!(index.semantic_eligible_event_count()?, 1);
     let core_page = index.core_source_event_page(&fixture_source.source, None, 2)?;

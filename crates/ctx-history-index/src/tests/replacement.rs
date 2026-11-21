@@ -48,7 +48,10 @@ fn seed(root: &Path, source: &SourceKey, records: &[CoreRecord]) {
 
 fn assert_records(root: &Path, expected: &[CoreRecord]) {
     let index = VerifiedIndex::open(root).unwrap();
-    assert_eq!(index.manifest().indexed_documents, expected.len() as u64);
+    assert_eq!(
+        index.try_manifest().unwrap().indexed_documents,
+        expected.len() as u64
+    );
     for record in expected {
         assert_eq!(
             index
@@ -123,7 +126,10 @@ fn paired(
     );
     let actual = VerifiedIndex::open(differential.path()).unwrap();
     let control = VerifiedIndex::open(ordinary.path()).unwrap();
-    assert!(actual.manifest().exact_snapshot_eq(control.manifest()));
+    assert!(actual
+        .try_manifest()
+        .unwrap()
+        .exact_snapshot_eq(control.try_manifest().unwrap()));
     for term in ["before", "edited", "appended", "inserted"] {
         assert_eq!(
             actual.count_term(term).unwrap(),

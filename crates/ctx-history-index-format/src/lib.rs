@@ -77,12 +77,13 @@ pub use index_document::{
 };
 #[doc(hidden)]
 pub use manifest::{
-    canonical_commit_payload, clear_manifest_cache_for_root, ensure_manifest_summary,
-    load_materialized_manifest_for_generation, load_publication_for_metas,
+    canonical_commit_payload, clear_manifest_cache_for_root, count_archive_sources,
+    ensure_manifest_summary, load_materialized_manifest_for_generation, load_publication_for_metas,
     load_publication_summary_for_metas, meta_generation, payload_generation_id,
     prepare_successor_manifest, reconcile_commit_error, searcher_generation, write_manifest,
     write_manifest_summary_for_generation, write_prepared_manifest, LoadedPublication,
-    LoadedPublicationSummary, ManifestSummary, PreparedManifest, MANIFEST_SUMMARY_FORMAT,
+    LoadedPublicationSummary, ManifestSourceTotals, ManifestSummary, PreparedManifest,
+    MANIFEST_SUMMARY_FORMAT,
 };
 #[doc(hidden)]
 pub use record_digest::{accumulate_core_record, core_record_accumulator_leaf, core_record_leaf};

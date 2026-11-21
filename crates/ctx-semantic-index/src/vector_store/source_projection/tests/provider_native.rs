@@ -62,7 +62,7 @@ fn provider_native_copies_enter_semantic_projection_without_target_resolution() 
     writer.commit(|_| true)?;
     let index = VerifiedIndex::open_pinned(root)?;
 
-    assert_eq!(index.manifest().indexed_documents, 3);
+    assert_eq!(index.try_manifest().unwrap().indexed_documents, 3);
     assert!(index
         .core_source_event_page(&fixture.sources[0].source, None, 1)?
         .items[0]

@@ -146,8 +146,12 @@ fn real_engine_lost_acks_beyond_three_return_terminal_without_an_extra_status_re
                                 WriterOptions,
                             };
                             let prior = pin_active_verified_generation(&server_root)?;
-                            let mut routes =
-                                prior.verified_index().manifest().source_routes().to_vec();
+                            let mut routes = prior
+                                .verified_index()
+                                .try_manifest()
+                                .unwrap()
+                                .source_routes()
+                                .to_vec();
                             let added_route = SourceRouteIdentity::from_sha256("ab".repeat(32))?;
                             assert!(!routes
                                 .iter()

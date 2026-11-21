@@ -73,7 +73,7 @@ fn main_schema_22_blame_survives_upgrade_and_reports_actual_pins() {
     );
 
     let index = VerifiedIndex::open_pinned(&fixture.index_root).unwrap();
-    let certificate = index.manifest().sources[0].clone();
+    let certificate = index.try_manifest().unwrap().sources[0].clone();
     let records = old
         .record_page(
             certificate.observation().source(),

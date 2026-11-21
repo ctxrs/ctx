@@ -96,6 +96,6 @@ fn manifest_failure_reclaims_only_its_candidate_and_preserves_visible_publicatio
         );
         let index = VerifiedIndex::open_pinned(&fixture.root).unwrap();
         assert_reader_terms(&index, "candidate", "previous");
-        assert_eq!(index.manifest().indexed_documents, 1);
+        assert_eq!(index.try_manifest().unwrap().indexed_documents, 1);
     }
 }

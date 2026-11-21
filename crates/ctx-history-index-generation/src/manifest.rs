@@ -23,7 +23,23 @@ use crate::{
     GENERATION_WRITER_LOCK_FILE, INDEX_GENERATIONS_DIRECTORY, MANIFEST_DIRECTORY,
 };
 
-const MAX_MANIFEST_SUMMARY_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_MANIFEST_SUMMARY_BYTES: usize = 16 * 1024;
+pub(crate) const MANIFEST_SUMMARY_FORMAT: &str = "ctx-manifest-summary-v1";
+
+pub(crate) fn load_manifest_summary_bytes_from_read_root(
+    root: &crate::GenerationReadRoot,
+    generation_id: &str,
+) -> Result<Option<Vec<u8>>> {
+    if !is_generation_id(generation_id) {
+        return Err(GenerationError::InvalidGenerationId);
+    }
+    let relative_path = Path::new(MANIFEST_DIRECTORY).join(format!("{generation_id}.summary.json"));
+    Ok(crate::read_root::read_private_file_bounded(
+        root.opened(),
+        &relative_path,
+        MAX_MANIFEST_SUMMARY_BYTES,
+    ))
+}
 
 fn manifest_summary_generation_id(file_name: &str) -> Option<&str> {
     file_name

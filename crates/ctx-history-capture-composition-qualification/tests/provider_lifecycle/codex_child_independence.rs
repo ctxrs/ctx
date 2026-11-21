@@ -382,7 +382,8 @@ fn route_identity(registry: &SourceBackedProviderRegistry, root: &Path) -> Sourc
 
 fn certificate_for(index: &VerifiedIndex, native_session_id: &str) -> CertifiedSource {
     index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|certificate| {
@@ -498,7 +499,7 @@ fn install_single_source_records(
     records: Vec<CoreRecord>,
 ) -> String {
     let current = VerifiedIndex::open_pinned(index_root).unwrap();
-    let routes = current.manifest().source_routes().to_vec();
+    let routes = current.try_manifest().unwrap().source_routes().to_vec();
     assert_eq!(
         routes
             .iter()

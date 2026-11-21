@@ -453,7 +453,8 @@ fn encode_page(
                 content_bytes,
                 oversized_singleton,
             },
-        );
+        )
+        .map_err(CoreEventRangeError::Index)?;
         let mut encoded = serde_json::to_vec(&model)?;
         let observed = encoded.len().saturating_add(1);
         if observed == bytes {
@@ -619,7 +620,8 @@ fn encode_completion(
                 content_bytes,
                 oversized_singleton_pages,
             },
-        );
+        )
+        .map_err(CoreEventRangeError::Index)?;
         let mut encoded = serde_json::to_vec(&model)?;
         let observed = prior_output_bytes
             .saturating_add(encoded.len())

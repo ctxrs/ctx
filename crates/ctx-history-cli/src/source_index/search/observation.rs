@@ -6,7 +6,9 @@ use ctx_history_read_application::{
 };
 use serde_json::Value;
 
-use super::super::{compact_presentation::generation_read, render::search_json_document};
+use super::super::{
+    compact_presentation::generation_read, render::search_json_document_from_result,
+};
 use super::{
     application_search_failure, refresh_for_search, HistorySemanticPort, RefreshArg,
     RefreshOutcome, SearchRefreshContext, SourceSearchRequest, SourceSearchResult,
@@ -116,17 +118,12 @@ pub(super) fn search_existing_generation_with_port<P: HistorySemanticPort>(
     let query = result.query();
     observe_search_collection(observation, &query.collection);
     observation.failure_phase = Some(SearchFailurePhase::ResultProjection);
-    let value = search_json_document(
-        &query.request,
+    let value = search_json_document_from_result(
+        &result,
         data_root,
-        result.index(),
-        &query.collection,
-        &query.filters,
-        &query.presentations,
         refresh.mode,
         refresh.status,
         refresh.source_count,
-        result.query_duration(),
     )?;
     observation.failure_phase = None;
     Ok((value, result))

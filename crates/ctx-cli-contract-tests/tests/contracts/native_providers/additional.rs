@@ -422,7 +422,8 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
     )
     .unwrap();
     let retained_cline_route = retained
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_routes()
         .iter()
         .find(|route| route.route_identity().as_str() == cline_route_identity.as_str().unwrap())

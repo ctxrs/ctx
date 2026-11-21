@@ -106,7 +106,7 @@ impl SourceBackedSemanticGeneration {
         semantic_policy: SemanticGenerationPolicy,
         model_descriptor: String,
     ) -> Result<Self> {
-        let manifest = index.manifest();
+        let manifest = index.try_manifest()?;
         if LEXICAL_SCHEMA_VERSION != SOURCE_INPUT_LEXICAL_SCHEMA_VERSION
             || manifest.lexical_schema_version != SOURCE_INPUT_LEXICAL_SCHEMA_VERSION
         {

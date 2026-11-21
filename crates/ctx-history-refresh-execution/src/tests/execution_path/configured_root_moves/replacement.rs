@@ -90,14 +90,19 @@ fn moving_named_qoder_transcript_tree_preserves_supported_layouts_and_identity()
         .complete_lexical_search(NESTED_MARKER, 8)
         .unwrap()
         .is_empty());
-    let first_root_manifest = first.manifest().provider_root(ROOT_ID).unwrap();
+    let first_root_manifest = first
+        .try_manifest()
+        .unwrap()
+        .provider_root(ROOT_ID)
+        .unwrap();
     assert_eq!(
         first_root_manifest.source_identity(),
         ProviderRootSourceIdentity::NamedV1
     );
     let first_routes = first_root_manifest.routes().to_vec();
     let first_sources = first
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .map(|source| {
@@ -130,7 +135,11 @@ fn moving_named_qoder_transcript_tree_preserves_supported_layouts_and_identity()
     run_report(&moved_discovery, moved_report, &data_root, &index_root).unwrap();
 
     let moved = VerifiedIndex::open_pinned(&index_root).unwrap();
-    let moved_root_manifest = moved.manifest().provider_root(ROOT_ID).unwrap();
+    let moved_root_manifest = moved
+        .try_manifest()
+        .unwrap()
+        .provider_root(ROOT_ID)
+        .unwrap();
     assert_eq!(moved_root_manifest.routes(), first_routes);
     assert_eq!(moved_root_manifest.definition().path, moved_root);
     assert_eq!(
@@ -138,7 +147,8 @@ fn moving_named_qoder_transcript_tree_preserves_supported_layouts_and_identity()
         ProviderRootSourceIdentity::NamedV1
     );
     let moved_sources = moved
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .map(|source| {
@@ -237,10 +247,15 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
     )
     .unwrap();
     let initial_index = VerifiedIndex::open_pinned(&index_root).unwrap();
-    let predecessor_root = initial_index.manifest().provider_root("work").unwrap();
+    let predecessor_root = initial_index
+        .try_manifest()
+        .unwrap()
+        .provider_root("work")
+        .unwrap();
     let predecessor_routes = predecessor_root.routes().to_vec();
     let predecessor_tokens = initial_index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root_source_tokens(&["work".to_owned()], &[])
         .unwrap();
     drop(initial_index);
@@ -311,7 +326,11 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
             .len(),
         1
     );
-    let failed_root = failed_index.manifest().provider_root("work").unwrap();
+    let failed_root = failed_index
+        .try_manifest()
+        .unwrap()
+        .provider_root("work")
+        .unwrap();
     assert_eq!(failed_root.definition().provider, CaptureProvider::Codex);
     assert_eq!(failed_root.definition().path, work_home);
     assert_eq!(
@@ -321,7 +340,8 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
     assert_eq!(failed_root.routes(), predecessor_routes);
     assert!(failed_root.exact_source_memberships().is_empty());
     let work_tokens = failed_index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root_source_tokens(&["work".to_owned()], &[])
         .unwrap();
     assert_eq!(work_tokens, predecessor_tokens);
@@ -368,18 +388,21 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
     .unwrap();
     let succeeded = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(
-        predecessor_routes
-            .iter()
-            .all(|route| succeeded.manifest().source_route(route).is_none()),
+        predecessor_routes.iter().all(|route| succeeded
+            .try_manifest()
+            .unwrap()
+            .source_route(route)
+            .is_none()),
         "predecessor routes {:?} remain in {:?}; replacement root is {:?}",
         predecessor_routes,
         succeeded
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .source_routes()
             .iter()
             .map(|route| route.route_identity().clone())
             .collect::<Vec<_>>(),
-        succeeded.manifest().provider_root("work")
+        succeeded.try_manifest().unwrap().provider_root("work")
     );
     assert!(succeeded
         .complete_lexical_search("atomicpredecessorhistory", 8)
@@ -391,7 +414,8 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
         .all(|result| result.outcome.is_success()));
     assert_eq!(
         succeeded
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root("work")
             .unwrap()
             .definition()
@@ -399,7 +423,8 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
         CaptureProvider::Claude
     );
     let work_tokens = succeeded
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root_source_tokens(&["work".to_owned()], &[])
         .unwrap();
     assert_eq!(
@@ -459,7 +484,8 @@ fn failed_same_provider_kind_replacement_keeps_predecessor_until_success() {
     .unwrap();
     let predecessor = VerifiedIndex::open_pinned(&index_root).unwrap();
     let predecessor_route = predecessor
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root("work")
         .unwrap()
         .routes()[0]
@@ -501,7 +527,11 @@ fn failed_same_provider_kind_replacement_keeps_predecessor_until_success() {
     )
     .unwrap();
     let failed = VerifiedIndex::open_pinned(&index_root).unwrap();
-    let failed_root = failed.manifest().provider_root("work").unwrap();
+    let failed_root = failed
+        .try_manifest()
+        .unwrap()
+        .provider_root("work")
+        .unwrap();
     assert_eq!(
         failed_root.definition().kind,
         Some(ProviderRootKind::OpenHandsLegacyPersistence)
@@ -534,13 +564,18 @@ fn failed_same_provider_kind_replacement_keeps_predecessor_until_success() {
     )
     .unwrap();
     let succeeded = VerifiedIndex::open_pinned(&index_root).unwrap();
-    let succeeded_root = succeeded.manifest().provider_root("work").unwrap();
+    let succeeded_root = succeeded
+        .try_manifest()
+        .unwrap()
+        .provider_root("work")
+        .unwrap();
     assert_eq!(
         succeeded_root.definition().kind,
         Some(ProviderRootKind::OpenHandsCurrentConversations)
     );
     assert!(succeeded
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_route(&predecessor_route)
         .is_none());
     assert!(succeeded
@@ -611,7 +646,11 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
             initial_receipt.route_results
         );
         let initial_index = VerifiedIndex::open_pinned(&index_root).unwrap();
-        let predecessor_root = initial_index.manifest().provider_root("work").unwrap();
+        let predecessor_root = initial_index
+            .try_manifest()
+            .unwrap()
+            .provider_root("work")
+            .unwrap();
         assert_eq!(
             predecessor_root.source_identity(),
             ProviderRootSourceIdentity::NamedV1
@@ -619,7 +658,8 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
         assert!(predecessor_root.exact_source_memberships().is_empty());
         let predecessor_routes = predecessor_root.routes().to_vec();
         let predecessor_tokens = initial_index
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root_source_tokens(&["work".to_owned()], &[])
             .unwrap();
         assert_eq!(
@@ -721,7 +761,11 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
             .iter()
             .any(|result| result.outcome.failure_class().is_some()));
         let failed_index = VerifiedIndex::open_pinned(&index_root).unwrap();
-        let failed_root = failed_index.manifest().provider_root("work").unwrap();
+        let failed_root = failed_index
+            .try_manifest()
+            .unwrap()
+            .provider_root("work")
+            .unwrap();
         assert_eq!(failed_root.definition().provider, CaptureProvider::Claude);
         assert_eq!(
             failed_root.source_identity(),
@@ -731,7 +775,8 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
             .iter()
             .all(|route| failed_root.routes().contains(route)));
         let failed_tokens = failed_index
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .provider_root_source_tokens(&["work".to_owned()], &[])
             .unwrap();
         assert_eq!(failed_tokens, predecessor_tokens);
@@ -789,7 +834,8 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
                 .unwrap()
                 .is_empty());
             let reverted_tokens = reverted
-                .manifest()
+                .try_manifest()
+                .unwrap()
                 .provider_root_source_tokens(&["work".to_owned()], &[])
                 .unwrap();
             assert_eq!(reverted_tokens, predecessor_tokens);
@@ -847,7 +893,11 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
             succeeded.route_results
         );
         let succeeded_index = VerifiedIndex::open_pinned(&index_root).unwrap();
-        let succeeded_root = succeeded_index.manifest().provider_root("work").unwrap();
+        let succeeded_root = succeeded_index
+            .try_manifest()
+            .unwrap()
+            .provider_root("work")
+            .unwrap();
         assert_eq!(succeeded_root.definition().provider, CaptureProvider::Codex);
         assert!(succeeded_root.exact_source_memberships().is_empty());
         assert!(predecessor_routes
@@ -932,8 +982,11 @@ fn moving_a_named_claude_home_preserves_route_and_source_identity() {
     )
     .unwrap();
     let first = VerifiedIndex::open_pinned(&index_root).unwrap();
-    let first_route = first.manifest().provider_roots()[0].routes()[0].clone();
-    let first_source = first.manifest().sources[0].observation().source().clone();
+    let first_route = first.try_manifest().unwrap().provider_roots()[0].routes()[0].clone();
+    let first_source = first.try_manifest().unwrap().sources[0]
+        .observation()
+        .source()
+        .clone();
     drop(first);
 
     let second_home = fixture.join("claude-work-new");
@@ -965,20 +1018,22 @@ fn moving_a_named_claude_home_preserves_route_and_source_identity() {
     .unwrap();
 
     let moved = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(moved.manifest().source_routes().len(), 1);
+    assert_eq!(moved.try_manifest().unwrap().source_routes().len(), 1);
     assert_eq!(
-        moved.manifest().provider_roots()[0].routes(),
+        moved.try_manifest().unwrap().provider_roots()[0].routes(),
         &[first_route]
     );
     assert_eq!(
-        moved.manifest().provider_roots()[0].definition().path,
+        moved.try_manifest().unwrap().provider_roots()[0]
+            .definition()
+            .path,
         second_home
     );
     assert_eq!(
-        moved.manifest().provider_roots()[0].source_identity(),
+        moved.try_manifest().unwrap().provider_roots()[0].source_identity(),
         ProviderRootSourceIdentity::NamedV1
     );
-    assert!(moved.manifest().sources[0]
+    assert!(moved.try_manifest().unwrap().sources[0]
         .observation()
         .source()
         .exact_descriptor_eq(&first_source));
@@ -1058,8 +1113,11 @@ fn moving_a_named_codex_home_preserves_route_and_source_identity() {
     )
     .unwrap();
     let first = VerifiedIndex::open_pinned(&index_root).unwrap();
-    let first_route = first.manifest().provider_roots()[0].routes()[0].clone();
-    let first_source = first.manifest().sources[0].observation().source().clone();
+    let first_route = first.try_manifest().unwrap().provider_roots()[0].routes()[0].clone();
+    let first_source = first.try_manifest().unwrap().sources[0]
+        .observation()
+        .source()
+        .clone();
     drop(first);
 
     let second_home = fixture.join("codex-work-new");
@@ -1091,16 +1149,18 @@ fn moving_a_named_codex_home_preserves_route_and_source_identity() {
     .unwrap();
 
     let moved = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(moved.manifest().source_routes().len(), 1);
+    assert_eq!(moved.try_manifest().unwrap().source_routes().len(), 1);
     assert_eq!(
-        moved.manifest().provider_roots()[0].routes(),
+        moved.try_manifest().unwrap().provider_roots()[0].routes(),
         &[first_route]
     );
     assert_eq!(
-        moved.manifest().provider_roots()[0].definition().path,
+        moved.try_manifest().unwrap().provider_roots()[0]
+            .definition()
+            .path,
         second_home
     );
-    assert!(moved.manifest().sources[0]
+    assert!(moved.try_manifest().unwrap().sources[0]
         .observation()
         .source()
         .exact_descriptor_eq(&first_source));
@@ -1239,13 +1299,18 @@ fn same_id_provider_replacement_retires_old_routes_and_publishes_the_new_root() 
             .len(),
         1
     );
-    assert_eq!(replaced.manifest().source_routes().len(), 1);
-    assert_eq!(replaced.manifest().provider_roots().len(), 1);
+    assert_eq!(replaced.try_manifest().unwrap().source_routes().len(), 1);
+    assert_eq!(replaced.try_manifest().unwrap().provider_roots().len(), 1);
     assert_eq!(
-        replaced.manifest().provider_roots()[0]
+        replaced.try_manifest().unwrap().provider_roots()[0]
             .definition()
             .provider,
         CaptureProvider::Codex
     );
-    assert_eq!(replaced.manifest().provider_roots()[0].routes().len(), 1);
+    assert_eq!(
+        replaced.try_manifest().unwrap().provider_roots()[0]
+            .routes()
+            .len(),
+        1
+    );
 }

@@ -1133,4 +1133,109 @@ fn missing_root_does_not_reclassify_an_unrelated_refresh_io_error() {
         .is_none());
 }
 
+#[test]
+fn cold_read_only_search_stack_skips_full_manifest_reads_on_flat_delta_generation() {
+    let temp = tempdir().unwrap();
+    write_test_generation(temp.path());
+    let first_generation = active_generation_id(temp.path());
+
+    // Append a second message to the same rollout file and refresh to publish a flat delta
+    // with `first_generation` retained as the peer generation.
+    let sessions = temp.path().join("sessions");
+    let source = sessions.join(format!("rollout-{TEST_SESSION_ID}.jsonl"));
+    let mut existing = fs::read_to_string(&source).unwrap();
+    existing.push_str(&format!(
+        "{}\n",
+        serde_json::to_string(&json!({
+            "timestamp": "2026-07-28T12:00:05Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": format!("{TEST_QUERY} flatdeltafollowup")
+                }]
+            }
+        }))
+        .unwrap()
+    ));
+    fs::write(&source, existing).unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        provider_source_for_path(CaptureProvider::Codex, sessions),
+        SourceBackedRouteSelection::ExplicitManual,
+    )
+    .unwrap();
+    refresh_source_backed_generation(index_root(temp.path()), &registry, WriterOptions::default())
+        .unwrap();
+
+    let second_generation = active_generation_id(temp.path());
+    assert_ne!(second_generation, first_generation);
+    let delta_manifest_bytes = fs::read(
+        index_root(temp.path())
+            .join("ctx-generations")
+            .join(format!("{second_generation}.json")),
+    )
+    .unwrap();
+    assert!(
+        delta_manifest_bytes.starts_with(b"{\"storage_format\":\"ctx-manifest-flat-delta-v1\""),
+        "second generation should be persisted as a flat delta"
+    );
+
+    let search_request = request(RefreshArg::Off);
+    let config = history_snapshot(false, false);
+
+    // 1. CLI snapshot search (includes compact projection + retained peer lookup + archive provenance).
+    ctx_history_index::test_support::clear_manifest_cache_for_root(&index_root(temp.path()))
+        .unwrap();
+    ctx_history_index::test_support::read_metrics::reset_metadata_read_activity();
+    let (cli_value, _context, cli_compact, _obs) =
+        cli_snapshot_search(search_request.clone(), temp.path(), config.clone()).unwrap();
+    assert_eq!(cli_value["results"].as_array().unwrap().len(), 1);
+    assert_eq!(cli_compact["results"].as_array().unwrap().len(), 1);
+    let cli_reads = ctx_history_index::test_support::read_metrics::metadata_read_activity();
+    assert_eq!(
+        cli_reads.manifest.operations, 0,
+        "cli_snapshot_search must not read full or flat-delta manifests"
+    );
+    assert_eq!(cli_reads.manifest.bytes, 0);
+
+    // 2. MCP search with compact projection.
+    ctx_history_index::test_support::clear_manifest_cache_for_root(&index_root(temp.path()))
+        .unwrap();
+    ctx_history_index::test_support::read_metrics::reset_metadata_read_activity();
+    let (mcp_value, _context, mcp_compact, _obs) =
+        mcp_search_with_compact(search_request.clone(), temp.path(), config).unwrap();
+    assert_eq!(mcp_value["results"].as_array().unwrap().len(), 1);
+    assert_eq!(mcp_compact["results"].as_array().unwrap().len(), 1);
+    let mcp_reads = ctx_history_index::test_support::read_metrics::metadata_read_activity();
+    assert_eq!(
+        mcp_reads.manifest.operations, 0,
+        "mcp_search_with_compact must not read full or flat-delta manifests"
+    );
+    assert_eq!(mcp_reads.manifest.bytes, 0);
+
+    // 3. Direct search_existing_generation_with_port (compact projection + retained peer).
+    ctx_history_index::test_support::clear_manifest_cache_for_root(&index_root(temp.path()))
+        .unwrap();
+    ctx_history_index::test_support::read_metrics::reset_metadata_read_activity();
+    let index =
+        VerifiedIndex::open_pinned_with_retained_peer_for_query(index_root(temp.path())).unwrap();
+    assert!(!index.has_loaded_full_manifest());
+    let (port_value, port_compact, generation_id) =
+        search_existing_generation_with_compact_projection(&search_request, index, temp.path())
+            .unwrap();
+    assert_eq!(generation_id, second_generation);
+    assert_eq!(port_value["results"].as_array().unwrap().len(), 1);
+    assert_eq!(port_compact["results"].as_array().unwrap().len(), 1);
+    let port_reads = ctx_history_index::test_support::read_metrics::metadata_read_activity();
+    assert_eq!(
+        port_reads.manifest.operations, 0,
+        "search_existing_generation_with_port must not read full or flat-delta manifests"
+    );
+    assert_eq!(port_reads.manifest.bytes, 0);
+}
+
 mod additional;

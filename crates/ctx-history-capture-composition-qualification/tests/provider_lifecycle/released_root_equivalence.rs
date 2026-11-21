@@ -348,7 +348,7 @@ fn publication_bytes(
     );
     assert!(!receipt.sources.is_empty());
     let index = VerifiedIndex::open_pinned(index_root).unwrap();
-    let manifest = index.manifest();
+    let manifest = index.try_manifest().unwrap();
     let mut sources = manifest
         .sources
         .iter()
@@ -450,7 +450,8 @@ fn only_record_matching(index_root: &Path, marker: &str) -> CoreRecord {
 fn auggie_record_owned_by_root(index_root: &Path, root_id: &str, marker: &str) -> CoreRecord {
     let index = VerifiedIndex::open_pinned(index_root).unwrap();
     let allowed = index
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_root_source_tokens(&[root_id.to_owned()], &[])
         .unwrap();
     assert_eq!(allowed.len(), 1, "{root_id} must own one Auggie source");
@@ -916,13 +917,15 @@ fn moved_openhands_current_root_retains_released_authority_through_full_lifecycl
             );
             let missing_index = VerifiedIndex::open_pinned(&index_root).unwrap();
             assert!(missing_index
-                .manifest()
+                .try_manifest()
+                .unwrap()
                 .source_route(&automatic_route)
                 .unwrap()
                 .missing_state()
                 .is_none());
             restarted = serde_json::from_slice(
-                &serde_json::to_vec(&missing_index.manifest().provider_roots()[0]).unwrap(),
+                &serde_json::to_vec(&missing_index.try_manifest().unwrap().provider_roots()[0])
+                    .unwrap(),
             )
             .unwrap();
         }

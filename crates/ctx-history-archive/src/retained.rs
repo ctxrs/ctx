@@ -69,12 +69,7 @@ pub(crate) fn export_pinned(
     identity.validate()?;
     let owned = crate::is_archive_root(root)?;
     if !owned {
-        if index
-            .manifest()
-            .sources
-            .iter()
-            .any(|s| s.observation().source().source_format() == "ctx_archive_v1")
-        {
+        if index.has_archive_sources() {
             return Err(invalid(
                 "restored history requires its archive-owned root for faithful export",
             ));
@@ -111,7 +106,7 @@ pub(crate) fn export_pinned(
         CREATE INDEX imports_member ON imports(snapshot,path);
         CREATE TABLE members(path TEXT PRIMARY KEY, metadata TEXT NOT NULL); BEGIN;",
     )?;
-    for certificate in &index.manifest().sources {
+    for certificate in &index.try_manifest()?.sources {
         let observation = certificate.observation();
         if observation.source().source_format() != "ctx_archive_v1"
             || !matches!(

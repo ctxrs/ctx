@@ -154,10 +154,7 @@ impl CoreRefreshEngine {
     ) {
         let authority = self.pinned_core_publication();
         let reusable_authority = authority.as_deref().filter(|authority| {
-            authority
-                .verified_index_ref()
-                .manifest()
-                .lexical_schema_version
+            authority.verified_index_ref().lexical_schema_version()
                 == ctx_history_index::LEXICAL_SCHEMA_VERSION
         });
         let generation_state = reusable_authority.and_then(|authority| {
@@ -165,10 +162,9 @@ impl CoreRefreshEngine {
                 .ok()
         });
         let missing_routes = reusable_authority
-            .map(|authority| {
-                authority
-                    .verified_index_ref()
-                    .manifest()
+            .and_then(|authority| authority.verified_index_ref().try_manifest().ok())
+            .map(|manifest| {
+                manifest
                     .source_routes()
                     .iter()
                     .filter(|snapshot| snapshot.missing_state().is_some())
@@ -364,7 +360,7 @@ impl CoreRefreshEngine {
         };
         let generation_id = index.generation_id().to_owned();
         let pending = index
-            .manifest()
+            .try_manifest()?
             .source_routes()
             .iter()
             .filter(|route| route.missing_state().is_some())
@@ -415,7 +411,7 @@ impl CoreRefreshEngine {
             &index,
             i64::try_from(now_ms).unwrap_or(i64::MAX),
             |route| catalog.route_control_expectation(route).copied(),
-        );
+        )?;
         if routes.is_empty() {
             return Ok(false);
         }

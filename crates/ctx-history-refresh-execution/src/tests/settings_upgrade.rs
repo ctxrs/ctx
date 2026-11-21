@@ -239,8 +239,7 @@ fn upgrade_rebuild_emits_exact_scan_progress_and_runs_under_explicit_indexing_li
     assert_eq!(
         VerifiedIndex::open_pinned(&index_root)
             .unwrap()
-            .manifest()
-            .lexical_schema_version,
+            .lexical_schema_version(),
         ctx_history_index::LEXICAL_SCHEMA_VERSION
     );
 }
@@ -339,7 +338,7 @@ fn schema_22_state_is_rebuild_required_and_explicit_upgrade_ignores_predecessor_
 
     let upgraded = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
-        upgraded.manifest().lexical_schema_version,
+        upgraded.lexical_schema_version(),
         ctx_history_index::LEXICAL_SCHEMA_VERSION
     );
     assert_eq!(
@@ -396,7 +395,8 @@ fn fresh_candidate_ignores_carried_route_retirements_when_no_base_snapshot_exist
     // must not fail with "retired route ... was not carried when the active route began".
     let stale_schema_22 = VerifiedIndex::open_pinned(&index_root)
         .unwrap()
-        .into_generation_snapshot();
+        .into_generation_snapshot()
+        .unwrap();
     let automatic_route = automatic_source_backed_route_identity(&codex_source).unwrap();
     assert!(
         stale_schema_22
@@ -424,8 +424,7 @@ fn fresh_candidate_ignores_carried_route_retirements_when_no_base_snapshot_exist
     assert_eq!(
         VerifiedIndex::open_pinned(&index_root)
             .unwrap()
-            .manifest()
-            .lexical_schema_version,
+            .lexical_schema_version(),
         ctx_history_index::LEXICAL_SCHEMA_VERSION
     );
 }
@@ -560,7 +559,7 @@ fn rewrite_schema_22_manifest_metadata(
     ctx_history_index_format::clear_manifest_cache_for_root(index_root).unwrap();
     let reopened = VerifiedIndex::open_pinned(index_root).unwrap();
     assert_eq!(reopened.generation_id(), new_generation_id);
-    assert_eq!(reopened.manifest().lexical_schema_version, 22);
+    assert_eq!(reopened.lexical_schema_version(), 22);
     new_generation_id
 }
 
@@ -701,7 +700,7 @@ fn schema_22_all_rebuild_retains_manifest_explicit_source_catalog_and_data() {
 
     let upgraded = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
-        upgraded.manifest().lexical_schema_version,
+        upgraded.lexical_schema_version(),
         ctx_history_index::LEXICAL_SCHEMA_VERSION
     );
     assert_eq!(
@@ -833,7 +832,7 @@ fn rebuild_required_upgrade_preserves_released_and_detached_configured_provider_
 
     let upgraded = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
-        upgraded.manifest().lexical_schema_version,
+        upgraded.lexical_schema_version(),
         ctx_history_index::LEXICAL_SCHEMA_VERSION
     );
     assert_eq!(
@@ -843,7 +842,11 @@ fn rebuild_required_upgrade_preserves_released_and_detached_configured_provider_
             .len(),
         1
     );
-    let applied_work = upgraded.manifest().provider_root("work").unwrap();
+    let applied_work = upgraded
+        .try_manifest()
+        .unwrap()
+        .provider_root("work")
+        .unwrap();
     assert_eq!(
         applied_work.source_identity(),
         ProviderRootSourceIdentity::Released
@@ -854,7 +857,8 @@ fn rebuild_required_upgrade_preserves_released_and_detached_configured_provider_
     );
     assert!(
         upgraded
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .detached_released_provider_roots()
             .iter()
             .any(|authority| authority.id() == detached_released.id()),
@@ -894,14 +898,19 @@ fn rebuild_required_upgrade_preserves_released_and_detached_configured_provider_
     .unwrap();
 
     let rebuilt = VerifiedIndex::open_pinned(&index_root).unwrap();
-    let applied_after = rebuilt.manifest().provider_root("work").unwrap();
+    let applied_after = rebuilt
+        .try_manifest()
+        .unwrap()
+        .provider_root("work")
+        .unwrap();
     assert_eq!(
         applied_after.source_identity(),
         ProviderRootSourceIdentity::Released
     );
     assert_eq!(applied_after.routes(), &[expected_released_route]);
     assert!(rebuilt
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .detached_released_provider_roots()
         .iter()
         .any(|authority| authority.id() == detached_released.id()));

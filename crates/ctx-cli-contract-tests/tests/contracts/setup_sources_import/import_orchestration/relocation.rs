@@ -48,7 +48,8 @@ fn explicit_custom_relocation_preserves_route_source_session_and_event_identity(
     )
     .unwrap();
     assert!(retained
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_routes()
         .iter()
         .any(|route| { route.route_identity().as_str() == first_route.as_str().unwrap() }));
@@ -143,7 +144,8 @@ fn failed_explicit_replacement_preserves_retained_relocation_witness() {
     )
     .unwrap();
     assert!(retained
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_routes()
         .iter()
         .any(|route| route.route_identity().as_str() == first_route.as_str().unwrap()));
@@ -208,12 +210,14 @@ fn replaced_explicit_custom_route_cannot_reuse_a_stale_relocation_witness() {
     )
     .unwrap();
     assert!(!replaced
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_routes()
         .iter()
         .any(|route| route.route_identity().as_str() == first_route.as_str().unwrap()));
     assert!(replaced
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .source_routes()
         .iter()
         .any(|route| route.route_identity().as_str() == replacement_route.as_str().unwrap()));

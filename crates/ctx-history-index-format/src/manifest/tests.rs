@@ -515,7 +515,6 @@ fn detached_authority_change_survives_a_cold_reopen() {
     );
 }
 
-<<<<<<< HEAD
 fn certified_at(source: SourceKey, revision: u8, docs: u64, bytes: u64) -> CertifiedSource {
     let observation = SourceObservation::new(source, "fixture-revision", vec![revision]).unwrap();
     CertifiedSource::certify(
@@ -987,7 +986,7 @@ fn adding_one_source_to_large_manifest_cuts_written_bytes_by_orders_of_magnitude
 }
 
 #[test]
-fn manifest_summary_sidecar_loads_without_reading_full_manifest_and_falls_back_safely() {
+fn manifest_summary_sidecar_requires_pinned_digest_and_rejects_tampering() {
     let temp = tempfile::tempdir().unwrap();
     let source = fixture_source("summary-sidecar");
     let manifest = manifest_at_revision(source, 1);
@@ -997,83 +996,176 @@ fn manifest_summary_sidecar_loads_without_reading_full_manifest_and_falls_back_s
     let summary_path =
         ctx_history_index_generation::manifest_summary_path(temp.path(), &generation_id);
     assert!(summary_path.is_file());
+    let raw_summary = std::fs::read(&summary_path).unwrap();
+    let expected_sha256 = sha256_hex(&raw_summary);
+
+    // An unpinned pointer (None) MUST NOT accept an unauthenticated summary sidecar.
+    assert!(
+        summary::try_load_validated_manifest_summary(temp.path(), &generation_id, None)
+            .unwrap()
+            .is_none()
+    );
 
     clear_manifest_cache_for_root(temp.path()).unwrap();
     ctx_history_index_generation::read_metrics::reset_metadata_read_activity();
-    let summary = summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
-        .unwrap()
-        .expect("valid summary sidecar should load");
+    let summary = summary::try_load_validated_manifest_summary(
+        temp.path(),
+        &generation_id,
+        Some(&expected_sha256),
+    )
+    .unwrap()
+    .expect("valid pinned summary sidecar should load");
     let reads = ctx_history_index_generation::read_metrics::metadata_read_activity();
     assert_eq!(reads.manifest.operations, 0);
     assert_eq!(reads.manifest.bytes, 0);
     assert_eq!(summary.generation_id, generation_id);
+    assert_eq!(summary.base_generation_id, None);
     assert_eq!(summary.indexed_documents, manifest.indexed_documents);
     assert_eq!(
         summary.certified_source_bytes,
         manifest.certified_source_bytes
     );
     assert_eq!(summary.source_count, manifest.sources.len() as u64);
+    assert_eq!(summary.archive_source_count, 0);
 
-    // Non-canonical whitespace in sidecar falls back cleanly (returns None).
-    let raw_summary = std::fs::read(&summary_path).unwrap();
+    // Tampering with certified_source_bytes or source_count (even with 0600 mode
+    // and canonical JSON) MUST be rejected by the pinned digest check!
+    for mutate in [
+        Box::new(|tampered: &mut ManifestSummary| tampered.certified_source_bytes += 9_999)
+            as Box<dyn Fn(&mut ManifestSummary)>,
+        Box::new(|tampered: &mut ManifestSummary| tampered.source_count += 1),
+        Box::new(|tampered: &mut ManifestSummary| tampered.archive_source_count = 1),
+    ] {
+        let mut tampered = summary.clone();
+        mutate(&mut tampered);
+        let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
+        ctx_history_index_generation::write_manifest_summary_bytes(
+            temp.path(),
+            &generation_id,
+            &tampered_bytes,
+        )
+        .unwrap();
+        assert!(
+            summary::try_load_validated_manifest_summary(
+                temp.path(),
+                &generation_id,
+                Some(&expected_sha256),
+            )
+            .unwrap()
+            .is_none(),
+            "tampered summary sidecar must be rejected by digest check"
+        );
+    }
+
+    // Non-canonical whitespace in sidecar is rejected.
     let mut padded = raw_summary.clone();
     padded.push(b'\n');
     std::fs::write(&summary_path, &padded).unwrap();
-    assert!(
-        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
-            .unwrap()
-            .is_none()
-    );
+    assert!(summary::try_load_validated_manifest_summary(
+        temp.path(),
+        &generation_id,
+        Some(&expected_sha256),
+    )
+    .unwrap()
+    .is_none());
 
-    // Corrupt JSON in sidecar falls back cleanly.
+    // Corrupt JSON in sidecar is rejected.
     std::fs::write(&summary_path, b"{not json").unwrap();
-    assert!(
-        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
-            .unwrap()
-            .is_none()
-    );
+    assert!(summary::try_load_validated_manifest_summary(
+        temp.path(),
+        &generation_id,
+        Some(&expected_sha256),
+    )
+    .unwrap()
+    .is_none());
 
-    // Length-mismatched summary falls back cleanly.
-    let mut mismatched = summary.clone();
-    mismatched.manifest_bytes_len += 1;
-    std::fs::write(&summary_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
-    assert!(
-        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
-            .unwrap()
-            .is_none()
-    );
-
-    // Wrong generation_id in summary falls back cleanly.
-    let mut wrong_id = summary.clone();
-    wrong_id.generation_id = "0".repeat(64);
-    std::fs::write(&summary_path, serde_json::to_vec(&wrong_id).unwrap()).unwrap();
-    assert!(
-        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
-            .unwrap()
-            .is_none()
-    );
-
-    // Missing sidecar falls back cleanly and is backfilled by idempotent write_manifest.
+    // Missing sidecar falls back cleanly and is repaired by ensure_manifest_summary.
     std::fs::remove_file(&summary_path).unwrap();
-    assert!(
-        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
-            .unwrap()
-            .is_none()
+    assert!(summary::try_load_validated_manifest_summary(
+        temp.path(),
+        &generation_id,
+        Some(&expected_sha256),
+    )
+    .unwrap()
+    .is_none());
+    ensure_manifest_summary(
+        temp.path(),
+        &generation_id,
+        &manifest,
+        Some(&expected_sha256),
     );
-    write_manifest(temp.path(), &generation_id, &manifest).unwrap();
     assert!(summary_path.is_file());
-    assert!(
-        summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
-            .unwrap()
-            .is_some()
+    assert_eq!(
+        summary::try_load_validated_manifest_summary(
+            temp.path(),
+            &generation_id,
+            Some(&expected_sha256),
+        )
+        .unwrap(),
+        Some(summary)
     );
 
-    // Deleting the authoritative manifest MUST fail closed even when the sidecar exists!
+    // Deleting the authoritative manifest MUST fail closed even when the sidecar matches!
     std::fs::remove_file(manifest_path(temp.path(), &generation_id)).unwrap();
     assert!(matches!(
-        summary::try_load_validated_manifest_summary(temp.path(), &generation_id),
+        summary::try_load_validated_manifest_summary(
+            temp.path(),
+            &generation_id,
+            Some(&expected_sha256),
+        ),
         Err(IndexError::MissingManifest(missing)) if missing == generation_id
     ));
+}
+
+#[test]
+fn flat_delta_prepared_manifest_writes_and_authenticates_summary_with_base_generation_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let route_a = route("d");
+    let s1 = fixture_source("delta-summary-s1");
+    let s2 = fixture_source("delta-summary-s2");
+    let anchor = manifest_with_routes(
+        vec![(route_a.clone(), vec![certified_at(s1.clone(), 1, 2, 100)])],
+        None,
+    );
+    let anchor_id = anchor.generation_id().unwrap();
+    write_manifest(temp.path(), &anchor_id, &anchor).unwrap();
+
+    let successor = manifest_with_routes(
+        vec![(
+            route_a,
+            vec![certified_at(s1, 1, 2, 100), certified_at(s2, 1, 3, 250)],
+        )],
+        None,
+    );
+    let prepared = prepare_successor_manifest(
+        temp.path(),
+        Arc::new(successor),
+        Some((&anchor_id, &anchor)),
+    )
+    .unwrap();
+    assert!(prepared.bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX));
+    write_prepared_manifest(temp.path(), &prepared).unwrap();
+    prepared.verify_persisted(temp.path()).unwrap();
+
+    let delta_id = prepared.generation_id().to_owned();
+    let summary_sha256 = prepared.summary_sha256().to_owned();
+    clear_manifest_cache_for_root(temp.path()).unwrap();
+    ctx_history_index_generation::read_metrics::reset_metadata_read_activity();
+    let loaded =
+        summary::try_load_validated_manifest_summary(temp.path(), &delta_id, Some(&summary_sha256))
+            .unwrap()
+            .expect("flat-delta summary sidecar should authenticate");
+    let reads = ctx_history_index_generation::read_metrics::metadata_read_activity();
+    assert_eq!(reads.manifest.operations, 0);
+    assert_eq!(reads.manifest.bytes, 0);
+    assert_eq!(
+        loaded.base_generation_id.as_deref(),
+        Some(anchor_id.as_str())
+    );
+    assert_eq!(loaded.source_count, 2);
+    assert_eq!(loaded.indexed_documents, 5);
+    assert_eq!(loaded.certified_source_bytes, 350);
+    assert_eq!(loaded.archive_source_count, 0);
 }
 
 #[test]
@@ -1106,12 +1198,11 @@ fn manifest_summary_avoids_reading_megabytes_on_large_corpus() {
     let full_bytes = std::fs::metadata(manifest_path(temp.path(), &generation_id))
         .unwrap()
         .len();
-    let summary_bytes = std::fs::metadata(ctx_history_index_generation::manifest_summary_path(
-        temp.path(),
-        &generation_id,
-    ))
-    .unwrap()
-    .len();
+    let summary_path =
+        ctx_history_index_generation::manifest_summary_path(temp.path(), &generation_id);
+    let summary_raw = std::fs::read(&summary_path).unwrap();
+    let summary_sha256 = sha256_hex(&summary_raw);
+    let summary_bytes = summary_raw.len() as u64;
     assert!(
         full_bytes > 2_000_000 && summary_bytes < 1_024,
         "expected >2 MB manifest ({full_bytes} B) and <1 KB summary ({summary_bytes} B)"
@@ -1120,9 +1211,13 @@ fn manifest_summary_avoids_reading_megabytes_on_large_corpus() {
     clear_manifest_cache_for_root(temp.path()).unwrap();
     ctx_history_index_generation::read_metrics::reset_metadata_read_activity();
     let start_summary = std::time::Instant::now();
-    let summary = summary::try_load_validated_manifest_summary(temp.path(), &generation_id)
-        .unwrap()
-        .expect("summary should load");
+    let summary = summary::try_load_validated_manifest_summary(
+        temp.path(),
+        &generation_id,
+        Some(&summary_sha256),
+    )
+    .unwrap()
+    .expect("summary should load");
     let summary_elapsed = start_summary.elapsed();
     let summary_reads = ctx_history_index_generation::read_metrics::metadata_read_activity();
     assert_eq!(summary_reads.manifest.operations, 0);

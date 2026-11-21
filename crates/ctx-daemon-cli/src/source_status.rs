@@ -125,7 +125,7 @@ pub fn source_epoch_status_report(
 
     let indexed_items = admitted_index.map(VerifiedIndex::document_count);
     let indexed_events = indexed_items;
-    let indexed_sources = admitted_index.map(|index| index.manifest().sources.len() as u64);
+    let indexed_sources = admitted_index.map(|index| index.certified_source_count() as u64);
     let indexed_sessions = admitted_index
         .map(|index| index.session_count())
         .transpose()?;
@@ -465,9 +465,14 @@ fn lexical_report(
     let published_generation = refresh_job
         .and_then(|job| job.get("published_generation"))
         .and_then(Value::as_str);
-    match super::source_backed_refresh_coordinator::open_verified_index(&path) {
+    match super::source_backed_refresh_coordinator::open_verified_index(&path).and_then(|index| {
+        index.try_manifest()?;
+        Ok(index)
+    }) {
         Ok(index) => {
-            let manifest = index.manifest();
+            let Ok(manifest) = index.try_manifest() else {
+                unreachable!("verified manifest was just loaded");
+            };
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;
             let generation_matches =
                 published_generation.map(|generation| generation == index.generation_id());
@@ -742,7 +747,7 @@ fn catalog_report(generation_id: Option<&str>, index: Option<&VerifiedIndex>) ->
         "explicit_import_authority": "request_scoped_overlay",
         "persisted_explicit_roots": false,
         "generation_id": generation_id,
-        "certified_sources": index.map(|index| index.manifest().sources.len()),
+        "certified_sources": index.map(VerifiedIndex::certified_source_count),
     }))
 }
 

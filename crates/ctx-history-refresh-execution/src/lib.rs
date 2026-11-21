@@ -303,7 +303,7 @@ pub fn source_backed_watch_catalog(
     // rebuild-marked generations) so configured Released provider roots retain
     // their source-identity authority in watch catalogs and during rebuilds.
     let retained_generation = match VerifiedIndex::open_pinned(&index_root) {
-        Ok(index) => Some(index.into_generation_snapshot()),
+        Ok(index) => Some(index.into_generation_snapshot()?),
         Err(IndexError::MissingActiveGenerationPointer) => None,
         Err(error) if ctx_history_index::generation_incompatibility_requires_rebuild(&error) => {
             None

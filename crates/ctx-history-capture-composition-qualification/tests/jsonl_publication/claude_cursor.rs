@@ -104,7 +104,8 @@ fn indexed_records(
 ) -> Vec<CoreRecord> {
     let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut records = verified
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .filter(|source| source.observation().source().provider() == provider.as_str())
@@ -140,7 +141,8 @@ fn lexical_match_count(index: &VerifiedIndex, text: &str) -> usize {
 fn certified_prefix_bytes(index: &Path, provider: CaptureProvider) -> u64 {
     let verified = VerifiedIndex::open_pinned(index).unwrap();
     verified
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|source| source.observation().source().provider() == provider.as_str())
@@ -386,14 +388,15 @@ fn cursor_top_level_role_revision_reparses_unchanged_prior_rejection_state() {
 
     let current = VerifiedIndex::open_pinned(&index).unwrap();
     let current_certificate = current
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|source| source.observation().source().provider() == CaptureProvider::Cursor.as_str())
         .unwrap()
         .clone();
     let source = current_certificate.observation().source().clone();
-    let source_routes = current.manifest().source_routes().to_vec();
+    let source_routes = current.try_manifest().unwrap().source_routes().to_vec();
     let current_counts = current_certificate.counts();
     assert_eq!(current_counts.complete_records, 1);
     assert_eq!(current_counts.certified_bytes, source_bytes.len() as u64);
@@ -426,7 +429,8 @@ fn cursor_top_level_role_revision_reparses_unchanged_prior_rejection_state() {
 
     let prior = VerifiedIndex::open_pinned(&index).unwrap();
     let prior_source = prior
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .find(|certificate| certificate.observation().source() == &source)
@@ -628,7 +632,8 @@ fn automatic_claude_root_replacement_retires_sources_absent_from_strict_subset()
     let verified = VerifiedIndex::open_pinned(&index).unwrap();
     assert_eq!(
         verified
-            .manifest()
+            .try_manifest()
+            .unwrap()
             .sources
             .iter()
             .filter(|source| source.observation().source().provider() == "claude")
@@ -739,7 +744,8 @@ fn claude_roots_with_the_same_relative_session_path_publish_independent_sources(
 
     let verified = VerifiedIndex::open_pinned(&index).unwrap();
     let claude_sources = verified
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .sources
         .iter()
         .filter(|source| source.observation().source().provider() == "claude")
@@ -868,9 +874,10 @@ fn unavailable_configured_claude_home_carries_only_itself_while_peer_refreshes()
     let work_records = indexed_records(&index, CaptureProvider::Claude, "work-session");
     assert_literal_bodies(&work_records, &["work retained marker"]);
     let published = VerifiedIndex::open_pinned(&index).unwrap();
-    assert_eq!(published.manifest().provider_roots().len(), 2);
+    assert_eq!(published.try_manifest().unwrap().provider_roots().len(), 2);
     assert!(published
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_roots()
         .iter()
         .all(|root| root.routes().len() == 1));
@@ -956,13 +963,15 @@ fn cold_unavailable_configured_claude_home_does_not_block_healthy_peer() {
     );
     let published = VerifiedIndex::open_pinned(&index).unwrap();
     let personal_root = published
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_roots()
         .iter()
         .find(|root| root.definition().id == "personal")
         .unwrap();
     let work_root = published
-        .manifest()
+        .try_manifest()
+        .unwrap()
         .provider_roots()
         .iter()
         .find(|root| root.definition().id == "work")

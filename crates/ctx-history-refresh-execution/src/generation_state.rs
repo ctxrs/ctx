@@ -153,7 +153,7 @@ impl SourceBackedGenerationState {
     /// Decodes generation-owned refresh state and binds every retained route
     /// and diagnostic back to the exact verified manifest that owns it.
     pub fn decode_from_verified_index(index: &VerifiedIndex) -> ctx_history_index::Result<Self> {
-        Self::decode_from_manifest(index.manifest())
+        Self::decode_from_manifest(index.try_manifest()?)
     }
 
     pub fn decode_from_manifest(manifest: &GenerationManifest) -> ctx_history_index::Result<Self> {
