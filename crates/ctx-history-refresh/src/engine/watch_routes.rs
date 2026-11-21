@@ -153,12 +153,18 @@ impl CoreRefreshEngine {
         budget: StdDuration,
     ) {
         let authority = self.pinned_core_publication();
-        let generation_state = authority.as_deref().and_then(|authority| {
+        let reusable_authority = authority.as_deref().filter(|authority| {
+            authority
+                .verified_index_ref()
+                .manifest()
+                .lexical_schema_version
+                == ctx_history_index::LEXICAL_SCHEMA_VERSION
+        });
+        let generation_state = reusable_authority.and_then(|authority| {
             SourceBackedGenerationState::decode_from_verified_index(authority.verified_index_ref())
                 .ok()
         });
-        let missing_routes = authority
-            .as_deref()
+        let missing_routes = reusable_authority
             .map(|authority| {
                 authority
                     .verified_index_ref()
@@ -399,6 +405,12 @@ impl CoreRefreshEngine {
         let Some(index) = open_published_generation(data_root, self.journal.as_ref())? else {
             return Ok(false);
         };
+        let index_root = source_backed_index_root(data_root);
+        if ctx_history_index::active_generation_requires_rebuild(&index_root, &index)? {
+            // Do not emit a Hermes-only Exact publish against a predecessor
+            // that cannot carry non-Hermes routes; let the full rebuild run.
+            return Ok(false);
+        }
         let routes = overdue_hermes_exact_routes(
             &index,
             i64::try_from(now_ms).unwrap_or(i64::MAX),

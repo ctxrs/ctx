@@ -411,6 +411,7 @@ pub struct GenerationWriter {
     replacement_work: writer_replacement::ReplacementWork,
     fields: Fields,
     base_publication: Option<PinnedPublication>,
+    requires_full_rebuild: bool,
     base_opstamp: u64,
     core_record_preparer: CoreRecordPreparer,
     complete_inventories: Vec<CertifiedSourceInventory>,
@@ -419,6 +420,7 @@ pub struct GenerationWriter {
     route_deletions: HashSet<SourceKey>,
     present_source_routes: Option<Vec<SourceRouteSnapshot>>,
     applied_provider_roots: Option<(bool, String, Vec<AppliedProviderRoot>)>,
+    predecessor_released_provider_roots: Vec<DetachedReleasedProviderRootAuthority>,
     authorized_topology_route_retirements: Option<BTreeSet<SourceRouteIdentity>>,
     observed_missing_routes: HashMap<SourceRouteIdentity, SourceRouteSnapshot>,
     route_publication_revalidations:

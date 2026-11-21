@@ -14,7 +14,7 @@ impl PublishedSourceBackedStatePort for RetainedPublishedState<'_> {
         let generation = match open_published_generation_for_recovery(data_root, self.journal)? {
             PublishedGenerationOpen::Missing => PublishedSourceBackedGeneration::Missing,
             PublishedGenerationOpen::RebuildRequired => {
-                PublishedSourceBackedGeneration::RebuildRequired
+                PublishedSourceBackedGeneration::RebuildRequired { predecessor: None }
             }
             PublishedGenerationOpen::Verified(index) => {
                 let index_root = source_backed_index_root(data_root);
@@ -26,19 +26,19 @@ impl PublishedSourceBackedStatePort for RetainedPublishedState<'_> {
                         )
                     })?
                 {
-                    PublishedSourceBackedGeneration::RebuildRequired
+                    PublishedSourceBackedGeneration::RebuildRequired {
+                        predecessor: Some((*index).into_generation_snapshot()),
+                    }
                 } else {
                     PublishedSourceBackedGeneration::Verified((*index).into_generation_snapshot())
                 }
             }
         };
-        let verified_generation = match &generation {
-            PublishedSourceBackedGeneration::Verified(generation) => Some(generation),
-            PublishedSourceBackedGeneration::Missing
-            | PublishedSourceBackedGeneration::RebuildRequired => None,
-        };
         let (explicit_source_catalog, catalog_route_bindings, route_controls) =
-            retained_generation_state(verified_generation)?;
+            retained_generation_state(
+                generation.readable_predecessor(),
+                generation.requires_rebuild(),
+            )?;
         Ok(PublishedSourceBackedState {
             generation,
             explicit_source_catalog,

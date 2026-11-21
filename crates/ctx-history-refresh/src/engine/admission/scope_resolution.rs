@@ -1,19 +1,99 @@
 use super::*;
 
+pub(super) struct ResolvedPendingAdmission {
+    pub(super) authority: ctx_history_refresh_execution::AdmittedRefresh,
+    pub(super) allow_rebuild_widening: bool,
+}
+
 impl CoreRefreshEngine {
     pub(super) fn resolve_pending_admission_claim(
         &self,
         data_root: &Path,
         claim: &PendingAdmissionClaim,
-    ) -> Result<ctx_history_refresh_execution::AdmittedRefresh> {
+    ) -> Result<ResolvedPendingAdmission> {
         let discovery = self
             .runtime
             .discovery_context(data_root)?
             .with_data_root(data_root);
+        let rebuild_required = crate::publication::published_generation_requires_rebuild(
+            data_root,
+            self.journal.as_ref(),
+        )?;
         if let (RefreshIntent::AutomaticMaintenance, SourceBackedRefreshScope::Exact(routes)) =
             (&claim.intent, &claim.persisted_scope)
         {
-            return self.resolve_exact_maintenance_admission(data_root, claim, routes);
+            if rebuild_required {
+                bail!(
+                    "cannot run exact automatic maintenance refresh while the active Core generation requires a full rebuild"
+                );
+            }
+            return self
+                .resolve_exact_maintenance_admission(data_root, claim, routes)
+                .map(|authority| ResolvedPendingAdmission {
+                    authority,
+                    allow_rebuild_widening: false,
+                });
+        }
+        if rebuild_required {
+            return match &claim.intent {
+                RefreshIntent::AutomaticMaintenance
+                | RefreshIntent::SelectedImport {
+                    selection: RefreshSelection::All,
+                    ..
+                } => {
+                    let resolved =
+                        (self.admission_fence)(&discovery, self.journal.as_ref(), data_root, None)?;
+                    Ok(ResolvedPendingAdmission {
+                        authority: resolved,
+                        allow_rebuild_widening: true,
+                    })
+                }
+                RefreshIntent::SelectedImport {
+                    selection: RefreshSelection::Provider(provider),
+                    ..
+                } => {
+                    let resolved =
+                        (self.admission_fence)(&discovery, self.journal.as_ref(), data_root, None)
+                            .with_context(|| {
+                                format!(
+                                    "resolve full-rebuild admission for automatic provider `{}`",
+                                    provider.as_str()
+                                )
+                            })?;
+                    let catalog = resolved.discovery().watch_catalog();
+                    if catalog.route_ids().next().is_some()
+                        && catalog.route_ids_for_provider(*provider).is_empty()
+                    {
+                        bail!(
+                            "automatic provider `{}` discovery produced no executable source routes",
+                            provider.as_str()
+                        );
+                    }
+                    Ok(ResolvedPendingAdmission {
+                        authority: resolved,
+                        allow_rebuild_widening: true,
+                    })
+                }
+                RefreshIntent::SelectedImport {
+                    selection: RefreshSelection::ExactSource(authority),
+                    ..
+                } => {
+                    authority
+                        .validate_source_roots(data_root)
+                        .context("validate explicit source roots before full-rebuild admission")?;
+                    let resolved = (self.admission_fence)(
+                        &discovery,
+                        self.journal.as_ref(),
+                        data_root,
+                        Some(authority),
+                    )
+                    .context("resolve full-rebuild explicit-catalog source refresh admission")?;
+                    Ok(ResolvedPendingAdmission {
+                        authority: resolved,
+                        allow_rebuild_widening: true,
+                    })
+                }
+            };
         }
         match &claim.intent {
             RefreshIntent::AutomaticMaintenance
@@ -24,6 +104,10 @@ impl CoreRefreshEngine {
                 let resolved =
                     (self.admission_fence)(&discovery, self.journal.as_ref(), data_root, None)?;
                 self.bound_resolved_admission(claim, resolved)
+                    .map(|authority| ResolvedPendingAdmission {
+                        authority,
+                        allow_rebuild_widening: false,
+                    })
             }
             RefreshIntent::SelectedImport {
                 selection: RefreshSelection::Provider(provider),
@@ -41,6 +125,10 @@ impl CoreRefreshEngine {
                             "resolve automatic provider `{}` source refresh admission",
                             provider.as_str()
                         )
+                    })
+                    .map(|authority| ResolvedPendingAdmission {
+                        authority,
+                        allow_rebuild_widening: false,
                     })
             }
             RefreshIntent::SelectedImport {
@@ -60,6 +148,10 @@ impl CoreRefreshEngine {
                 let duration = started.elapsed();
                 self.resolve_scoped_admission_report(data_root, claim, &discovery, report, duration)
                     .context("resolve explicit-catalog source refresh admission")
+                    .map(|authority| ResolvedPendingAdmission {
+                        authority,
+                        allow_rebuild_widening: false,
+                    })
             }
         }
     }

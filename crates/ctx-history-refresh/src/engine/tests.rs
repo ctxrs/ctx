@@ -1274,3 +1274,6 @@ mod publication_lifecycle_tests;
 
 #[path = "tests/durable_receipt.rs"]
 mod durable_receipt_tests;
+
+#[path = "tests/rebuild_safety.rs"]
+mod rebuild_safety_tests;

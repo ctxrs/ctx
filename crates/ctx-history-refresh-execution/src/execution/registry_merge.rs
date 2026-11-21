@@ -34,13 +34,19 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
         catalog_route_bindings: previous_catalog_route_bindings,
         route_controls: previous_route_controls,
     } = published_state.open_published_state(data_root)?;
-    let (retained_generation, exact_base_generation) = match published_generation {
-        PublishedSourceBackedGeneration::Missing => (None, true),
-        PublishedSourceBackedGeneration::RebuildRequired => (None, false),
-        PublishedSourceBackedGeneration::Verified(generation) => (Some(generation), true),
-    };
+    let (write_base_generation, continuity_predecessor, requires_rebuild, exact_base_generation) =
+        match published_generation {
+            PublishedSourceBackedGeneration::Missing => (None, None, false, true),
+            PublishedSourceBackedGeneration::RebuildRequired { predecessor } => {
+                let has_predecessor = predecessor.is_some();
+                (None, predecessor, true, has_predecessor)
+            }
+            PublishedSourceBackedGeneration::Verified(generation) => {
+                (Some(generation.clone()), Some(generation), false, true)
+            }
+        };
     let retained_provider_roots =
-        configured_retained_provider_roots(discovery, retained_generation.as_ref())?;
+        configured_retained_provider_roots(discovery, continuity_predecessor.as_ref())?;
     let mut build = build_automatic_source_backed_registry_from_report_with_retained_roots(
         discovery,
         data_root,
@@ -48,55 +54,98 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
         &retained_provider_roots,
     );
     build.discovery_duration = discovery_duration;
+    if requires_rebuild {
+        if let Some(predecessor) = continuity_predecessor.as_ref() {
+            let mut released_authorities = predecessor
+                .manifest()
+                .detached_released_provider_roots()
+                .to_vec();
+            for root in predecessor.manifest().provider_roots() {
+                if let Some(authority) =
+                    ctx_history_index::DetachedReleasedProviderRootAuthority::from_applied(root)?
+                {
+                    if !released_authorities
+                        .iter()
+                        .any(|existing| existing.id() == authority.id())
+                    {
+                        released_authorities.push(authority);
+                    }
+                }
+            }
+            build
+                .registry
+                .set_predecessor_released_provider_roots(released_authorities);
+        }
+    }
     let requested_catalog_route_bindings = explicit_source_catalog
         .map(|catalog| {
             catalog.register_routes_after_discovery_merge(
                 data_root,
-                retained_generation.as_ref(),
+                write_base_generation.as_ref(),
                 &mut build,
             )
         })
         .transpose()?
         .unwrap_or_default();
-    let canonicalized_previous = previous_explicit_source_catalog
-        .as_ref()
-        .map(|catalog| {
-            catalog.canonicalize_published_bindings(
-                &previous_catalog_route_bindings,
-                &build.registry,
-                admitted_automatic_routes,
-            )
-        })
-        .transpose()?;
-    let reactivated_automatic_routes = canonicalized_previous
-        .as_ref()
-        .map(|canonicalized| canonicalized.transitioned_routes.clone())
-        .unwrap_or_default();
-    for (replacement, retired) in canonicalized_previous
-        .as_ref()
-        .map(|canonicalized| canonicalized.retirements.clone())
-        .unwrap_or_default()
-    {
-        build
-            .registry
-            .retire_routes_after_success(&replacement, retired)?;
-    }
-    let previous_catalog_route_bindings = canonicalized_previous
-        .map(|canonicalized| canonicalized.bindings)
-        .unwrap_or(previous_catalog_route_bindings);
-    let route_retirements = ExplicitSourceCatalogAuthority::replacement_route_retirements(
-        previous_explicit_source_catalog
+    let (reactivated_automatic_routes, previous_catalog_route_bindings) = if requires_rebuild {
+        let bindings = previous_explicit_source_catalog
             .as_ref()
-            .map(|catalog| (catalog, previous_catalog_route_bindings.as_slice())),
-        explicit_source_catalog
-            .map(|catalog| (catalog, requested_catalog_route_bindings.as_slice())),
-    )?;
-    for (replacement, retired) in route_retirements {
-        build
-            .registry
-            .retire_routes_after_success(&replacement, retired)?;
-    }
-    let removed_provider_root_routes = retained_generation
+            .map(|catalog| {
+                catalog.register_retained_routes_for_rebuild(
+                    data_root,
+                    &previous_catalog_route_bindings,
+                    explicit_source_catalog,
+                    &mut build,
+                )
+            })
+            .transpose()?
+            .unwrap_or(previous_catalog_route_bindings);
+        (BTreeSet::new(), bindings)
+    } else {
+        let canonicalized_previous = previous_explicit_source_catalog
+            .as_ref()
+            .map(|catalog| {
+                catalog.canonicalize_published_bindings(
+                    &previous_catalog_route_bindings,
+                    &build.registry,
+                    admitted_automatic_routes,
+                )
+            })
+            .transpose()?;
+        let reactivated_automatic_routes = canonicalized_previous
+            .as_ref()
+            .map(|canonicalized| canonicalized.transitioned_routes.clone())
+            .unwrap_or_default();
+        for (replacement, retired) in canonicalized_previous
+            .as_ref()
+            .map(|canonicalized| canonicalized.retirements.clone())
+            .unwrap_or_default()
+        {
+            build
+                .registry
+                .retire_routes_after_success(&replacement, retired)?;
+        }
+        let previous_catalog_route_bindings = canonicalized_previous
+            .map(|canonicalized| canonicalized.bindings)
+            .unwrap_or(previous_catalog_route_bindings);
+        let route_retirements = ExplicitSourceCatalogAuthority::replacement_route_retirements(
+            previous_explicit_source_catalog
+                .as_ref()
+                .map(|catalog| (catalog, previous_catalog_route_bindings.as_slice())),
+            explicit_source_catalog
+                .map(|catalog| (catalog, requested_catalog_route_bindings.as_slice())),
+        )?;
+        for (replacement, retired) in route_retirements {
+            build
+                .registry
+                .retire_routes_after_success(&replacement, retired)?;
+        }
+        (
+            reactivated_automatic_routes,
+            previous_catalog_route_bindings,
+        )
+    };
+    let removed_provider_root_routes = write_base_generation
         .as_ref()
         .map(|generation| {
             removed_configured_provider_root_routes(
@@ -105,7 +154,7 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
             )
         })
         .unwrap_or_default();
-    if let Some(retained) = retained_generation.as_ref() {
+    if let Some(retained) = write_base_generation.as_ref() {
         build
             .registry
             .retain_unavailable_provider_root_routes(retained.manifest().provider_roots())?;
@@ -125,7 +174,7 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
         .executable_route_identities()
         .into_iter()
         .collect::<BTreeSet<_>>();
-    if let Some(retained) = retained_generation.as_ref() {
+    if let Some(retained) = write_base_generation.as_ref() {
         for predecessor in retained.manifest().provider_roots() {
             let Some(desired) = discovery
                 .configured_provider_roots()
@@ -170,7 +219,7 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
             }
         }
     }
-    if let Some(retained) = retained_generation.as_ref() {
+    if let Some(retained) = write_base_generation.as_ref() {
         for root in retained.manifest().provider_roots().iter().filter(|root| {
             root.source_identity() == ProviderRootSourceIdentity::Released
                 && !discovery
@@ -212,7 +261,9 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
         previous_explicit_source_catalog,
         previous_catalog_route_bindings,
         requested_explicit_source_catalog: explicit_source_catalog.cloned(),
-        retained_generation,
+        write_base_generation,
+        continuity_predecessor,
+        requires_rebuild,
         exact_base_generation,
         requested_catalog_route_bindings,
         previous_route_controls,
@@ -225,6 +276,10 @@ pub(super) fn provider_root_publication_scope(
     registry: &ctx_history_capture::SourceBackedProviderRegistry,
     retained: Option<&VerifiedGenerationSnapshot>,
 ) -> SourceBackedRefreshScope {
+    let rebuild_or_upgrade = matches!(requested, SourceBackedRefreshScope::All)
+        && retained.is_none_or(|retained| {
+            retained.manifest().lexical_schema_version != ctx_history_index::LEXICAL_SCHEMA_VERSION
+        });
     let changed = matches!(requested, SourceBackedRefreshScope::All)
         && retained.zip(registry.applied_provider_roots()).is_some_and(
             |(retained, (automatic, digest, roots))| {
@@ -234,7 +289,7 @@ pub(super) fn provider_root_publication_scope(
                     || roots != manifest.provider_roots()
             },
         );
-    if changed {
+    if rebuild_or_upgrade || changed {
         SourceBackedRefreshScope::All
     } else {
         physical.clone()

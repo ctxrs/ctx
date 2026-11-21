@@ -175,6 +175,17 @@ impl IndexCaptureLifecycle {
             expected_base_generation.map(VerifiedGenerationSnapshot::generation_id),
         )?)
     }
+
+    pub(crate) fn requires_full_rebuild(&self) -> bool {
+        self.0.requires_full_rebuild()
+    }
+
+    pub(crate) fn set_predecessor_released_provider_roots(
+        &mut self,
+        authorities: Vec<ctx_history_index::DetachedReleasedProviderRootAuthority>,
+    ) -> IndexCaptureResult<()> {
+        self.0.set_predecessor_released_provider_roots(authorities)
+    }
 }
 
 fn capture_lifecycle_open_outcome(

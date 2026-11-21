@@ -289,8 +289,31 @@ impl fmt::Debug for SourceBackedRefreshPublication {
 
 pub enum PublishedSourceBackedGeneration {
     Missing,
-    RebuildRequired,
+    RebuildRequired {
+        predecessor: Option<VerifiedGenerationSnapshot>,
+    },
     Verified(VerifiedGenerationSnapshot),
+}
+
+impl PublishedSourceBackedGeneration {
+    pub const fn requires_rebuild(&self) -> bool {
+        matches!(self, Self::RebuildRequired { .. })
+    }
+
+    pub fn reusable_write_base(&self) -> Option<&VerifiedGenerationSnapshot> {
+        match self {
+            Self::Verified(generation) => Some(generation),
+            Self::Missing | Self::RebuildRequired { .. } => None,
+        }
+    }
+
+    pub fn readable_predecessor(&self) -> Option<&VerifiedGenerationSnapshot> {
+        match self {
+            Self::Verified(generation) => Some(generation),
+            Self::RebuildRequired { predecessor } => predecessor.as_ref(),
+            Self::Missing => None,
+        }
+    }
 }
 
 pub struct PublishedSourceBackedState {

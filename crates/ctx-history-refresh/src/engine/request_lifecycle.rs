@@ -89,6 +89,11 @@ impl CoreRefreshEngine {
 
     pub fn enqueue_periodic(&self, data_root: &Path) -> Result<Value> {
         let observed_generation = self.observed_published_generation(data_root)?;
+        let generation_requires_rebuild =
+            crate::publication::published_generation_requires_rebuild(
+                data_root,
+                self.journal.as_ref(),
+            )?;
         let mut state = self.lock_state();
         let paused_routes = state
             .automatic_retry_checkpoints
@@ -98,6 +103,14 @@ impl CoreRefreshEngine {
             .collect::<BTreeSet<_>>();
         let refresh_scope = if paused_routes.is_empty() {
             SourceBackedRefreshScope::All
+        } else if generation_requires_rebuild {
+            let request_id = state
+                .attempts
+                .back()
+                .map(|attempt| attempt.request_id.as_str())
+                .ok_or_else(|| anyhow!("paused automatic refresh has no durable status"))?;
+            return projected_status_json(&state, request_id)
+                .ok_or_else(|| anyhow!("paused automatic refresh status disappeared"));
         } else {
             let healthy_routes = state
                 .known_route_ids
