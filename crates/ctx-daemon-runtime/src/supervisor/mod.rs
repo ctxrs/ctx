@@ -60,6 +60,12 @@ pub trait NativeSupervisorBackend<E>: Sync {
 }
 
 #[derive(Debug)]
+pub enum PreservedLiveOwner {
+    Verified { pid: u32 },
+    InspectionDenied { error: Error },
+}
+
+#[derive(Debug)]
 pub enum SupervisorEnsureOutcome {
     Native {
         artifact: Option<PathBuf>,
@@ -69,8 +75,9 @@ pub enum SupervisorEnsureOutcome {
     },
     LiveOwnerPreserved {
         artifact: Option<PathBuf>,
-        owner_pid: u32,
-        registration_error: Error,
+        registration_verified: bool,
+        owner: PreservedLiveOwner,
+        reason: Option<Error>,
     },
     RegisteredNotRunning {
         artifact: Option<PathBuf>,
@@ -130,6 +137,26 @@ pub fn ensure_native_supervisor_with_policy<E>(
                 });
             }
             Err(initial_live_error) => {
+                if policy == SupervisorMutationPolicy::PreserveLiveOwner {
+                    if initial_live_error.is::<crate::ProcessExecutableInspectionDenied>() {
+                        return Ok(SupervisorEnsureOutcome::LiveOwnerPreserved {
+                            artifact,
+                            registration_verified: true,
+                            owner: PreservedLiveOwner::InspectionDenied {
+                                error: initial_live_error,
+                            },
+                            reason: None,
+                        });
+                    }
+                    if let Some(owner) = preserved_live_owner(data_root, executable, backend) {
+                        return Ok(SupervisorEnsureOutcome::LiveOwnerPreserved {
+                            artifact,
+                            registration_verified: true,
+                            owner,
+                            reason: Some(initial_live_error),
+                        });
+                    }
+                }
                 if let Some(outcome) = manager_unavailable_after_probe(
                     data_root,
                     backend,
@@ -177,11 +204,12 @@ pub fn ensure_native_supervisor_with_policy<E>(
     };
 
     if policy == SupervisorMutationPolicy::PreserveLiveOwner {
-        if let Ok(owner_pid) = backend.verify_existing_live_owner(data_root, executable) {
+        if let Some(owner) = preserved_live_owner(data_root, executable, backend) {
             return Ok(SupervisorEnsureOutcome::LiveOwnerPreserved {
                 artifact,
-                owner_pid,
-                registration_error,
+                registration_verified: false,
+                owner,
+                reason: Some(registration_error),
             });
         }
     }
@@ -308,6 +336,20 @@ pub fn ensure_native_supervisor_with_policy<E>(
                 })
             }
         }
+    }
+}
+
+fn preserved_live_owner<E>(
+    data_root: &Path,
+    executable: &Path,
+    backend: &dyn NativeSupervisorBackend<E>,
+) -> Option<PreservedLiveOwner> {
+    match backend.verify_existing_live_owner(data_root, executable) {
+        Ok(pid) => Some(PreservedLiveOwner::Verified { pid }),
+        Err(error) if error.is::<crate::ProcessExecutableInspectionDenied>() => {
+            Some(PreservedLiveOwner::InspectionDenied { error })
+        }
+        Err(_) => None,
     }
 }
 

@@ -7,7 +7,9 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::compact_json;
-use ctx_daemon_runtime::{create_private_dir_all, daemon_root_path, write_private_json_file};
+use ctx_daemon_runtime::{
+    create_private_dir_all, daemon_root_path, write_private_json_file, PreservedLiveOwner,
+};
 
 const SUPERVISOR_RECEIPT_FILE: &str = "supervisor.json";
 
@@ -111,6 +113,82 @@ pub(super) fn write_installed_receipt_with_recovery_reason(
         ),
         None => write_supervisor_receipt(data_root, &receipt),
     }
+}
+
+pub(super) fn write_preserved_live_owner_receipt(
+    data_root: &Path,
+    executable: &Path,
+    artifact_path: Option<PathBuf>,
+    registration_verified: bool,
+    owner: &PreservedLiveOwner,
+    reason: Option<&anyhow::Error>,
+) -> Result<()> {
+    let (status, owner_pid, limitation, last_error, recovery_reason) = match owner {
+        PreservedLiveOwner::Verified { pid } => {
+            let detail = reason
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_else(|| "live daemon owner preserved".to_owned());
+            let (status, limitation) = if registration_verified {
+                (
+                    "registered_not_running",
+                    "native supervisor registration is valid, but a detached live daemon owner was preserved (run `ctx index mode auto` to hand off to the native supervisor)",
+                )
+            } else {
+                (
+                    "stale_registration",
+                    "native supervisor registration differed from the invoking environment; preserved the live daemon owner (run `ctx index mode auto` to reinstall)",
+                )
+            };
+            (
+                status,
+                Some(*pid),
+                limitation,
+                detail.clone(),
+                format!("preserved_live_owner: {detail}"),
+            )
+        }
+        PreservedLiveOwner::InspectionDenied { error } => {
+            let detail = match reason {
+                Some(reason) => format!("{reason:#}; live owner inspection: {error:#}"),
+                None => format!("{error:#}"),
+            };
+            let (status, limitation) = if registration_verified {
+                (
+                    "registered_unverified",
+                    "native supervisor registration is valid, but live daemon executable inspection was denied; preserved the live daemon owner without restarting",
+                )
+            } else {
+                (
+                    "stale_registration",
+                    "native supervisor registration differed from the invoking environment and live daemon executable inspection was denied; preserved the live daemon owner without restarting (run `ctx index mode auto` to reinstall)",
+                )
+            };
+            (
+                status,
+                None,
+                limitation,
+                detail.clone(),
+                format!("preserved_unverified_live_owner: {detail}"),
+            )
+        }
+    };
+    write_supervisor_receipt(
+        data_root,
+        &SupervisorReceipt {
+            kind: native_supervisor_kind().to_owned(),
+            status,
+            autostart_supported: true,
+            restart_supported: true,
+            registration_verified,
+            live_owner_verified: false,
+            owner_pid,
+            artifact_path,
+            executable_path: Some(executable.to_path_buf()),
+            limitation: Some(limitation.to_owned()),
+            last_error: Some(last_error),
+            recovery_reason: Some(recovery_reason),
+        },
+    )
 }
 
 fn persisted_recovery_reason(data_root: &Path) -> Option<String> {

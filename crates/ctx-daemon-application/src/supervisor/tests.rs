@@ -117,6 +117,9 @@ struct FakeSupervisorState {
     registration_probes: usize,
     detached_owner_live: bool,
     live_owner: Option<u32>,
+    existing_live_owner: Option<u32>,
+    live_owner_inspection_denied: Option<u32>,
+    existing_owner_inspection_denied: Option<u32>,
     handoffs: usize,
     installs: usize,
     disables: usize,
@@ -262,18 +265,23 @@ impl NativeSupervisorBackend<SupervisorEnvironmentSnapshot> for FakeSupervisorBa
     }
 
     fn verify_live_owner(&self, _data_root: &Path, _executable: &Path) -> Result<u32> {
-        self.state
-            .lock()
-            .unwrap()
+        let state = self.state.lock().unwrap();
+        if let Some(pid) = state.live_owner_inspection_denied {
+            return Err(ctx_daemon_runtime::ProcessExecutableInspectionDenied { pid }.into());
+        }
+        state
             .live_owner
             .ok_or_else(|| anyhow!("fake native manager has no owner"))
     }
 
     fn verify_existing_live_owner(&self, _data_root: &Path, _executable: &Path) -> Result<u32> {
-        self.state
-            .lock()
-            .unwrap()
-            .live_owner
+        let state = self.state.lock().unwrap();
+        if let Some(pid) = state.existing_owner_inspection_denied {
+            return Err(ctx_daemon_runtime::ProcessExecutableInspectionDenied { pid }.into());
+        }
+        state
+            .existing_live_owner
+            .or(state.live_owner)
             .ok_or_else(|| anyhow!("fake native manager has no existing live owner"))
     }
 
