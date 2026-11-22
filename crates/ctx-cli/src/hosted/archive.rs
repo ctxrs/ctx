@@ -27,7 +27,9 @@ impl ArchiveArgs {
         match self.command {
             ArchiveCommand::Export(_) => Some(Op::ArchiveExport),
             ArchiveCommand::Restore { .. } => Some(Op::ArchiveRestore),
-            ArchiveCommand::Atif(_) | ArchiveCommand::Verify { .. } => None,
+            ArchiveCommand::Atif(_)
+            | ArchiveCommand::Verify { .. }
+            | ArchiveCommand::Prune { .. } => None,
         }
     }
 
@@ -49,6 +51,12 @@ enum ArchiveCommand {
     Atif(ArchiveAtifArgs),
     /// Check the complete inventory, normalized records, and content digests.
     Verify { archive: PathBuf },
+    /// Preview superseded copies eligible for reclamation in an archive-owned root.
+    Prune {
+        /// Apply the verified reclamation plan.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Restore retained history into a new or archive-owned local data root.
     Restore {
         archive: PathBuf,
@@ -65,6 +73,18 @@ pub(super) fn run(args: &ArchiveArgs, root: Option<&Path>, ui: &mut Ui) -> Resul
         }
         ArchiveCommand::Atif(options) => archive_atif::run(options, &super::data_root(root)?)?,
         ArchiveCommand::Verify { archive } => archive_export::verify(archive)?,
+        ArchiveCommand::Prune { apply } => {
+            let receipt = ctx_history_archive::prune(&super::data_root(root)?, *apply)?;
+            let text = format!(
+                "Eligible archive snapshots: {} ({} bytes). Reclaimed: {} ({} bytes). Deferred by retained generations: {}.",
+                receipt.eligible_snapshots, receipt.eligible_bytes,
+                receipt.reclaimed_snapshots, receipt.reclaimed_bytes, receipt.deferred_generations,
+            );
+            (
+                json!({"schema_version":1,"operation":"archive_prune","receipt":receipt}),
+                text,
+            )
+        }
         ArchiveCommand::Restore {
             archive,
             expected_predecessors,

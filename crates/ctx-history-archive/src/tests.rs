@@ -10,6 +10,7 @@ use tempfile::tempdir;
 use super::*;
 
 mod provenance;
+mod prune;
 mod reexport;
 mod restore_regressions;
 mod selection;
