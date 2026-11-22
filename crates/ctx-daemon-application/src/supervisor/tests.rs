@@ -485,6 +485,21 @@ fn launch_agent_plist_is_persistent_sanitized_and_gui_registration_is_identity_b
     assert_eq!(launchctl_print_pid("state = waiting\n"), None);
 }
 
+fn legacy_task_xml(xml: &str, system_root: &Path) -> String {
+    // Legacy installations registered PowerShell itself as the Exec action.
+    let start = xml.find("<Command>").unwrap();
+    let end = xml.find("</Arguments>").unwrap();
+    let encoded = xml[..end].rsplit_once(' ').unwrap().1;
+    let powershell = system_root
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let mut legacy = xml.to_owned();
+    legacy.replace_range(start..end, &format!("<Command>{}</Command><Arguments>-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encoded}", powershell.display()));
+    legacy
+}
+
 #[test]
 fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_environment() {
     let script = windows_sanitized_daemon_script(
@@ -529,6 +544,11 @@ fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_env
         .unwrap()
     };
     assert!(registration_matches(&xml));
+    assert!(xml.contains("ctx-task-launcher.exe</Command>"));
+    assert!(!registration_matches(&legacy_task_xml(
+        &xml,
+        Path::new(r"C:\Windows")
+    )));
     assert!(xml.contains("<LogonTrigger>"));
     assert!(xml.contains("<UserId>S-1-5-21-1000</UserId>"));
     assert!(xml.contains("<RestartOnFailure>"));
@@ -714,6 +734,7 @@ fn windows_task_xml_registers_with_task_scheduler() -> Result<()> {
         &sid,
         &task_name,
     )?;
+    let stale_xml = legacy_task_xml(&stale_xml, Path::new(&system_root));
     write_atomic_file(&path, &windows_task_xml_bytes(&stale_xml))?;
     let create_stale = Command::new("schtasks")
         .args(["/Create", "/TN"])
@@ -791,8 +812,18 @@ fn windows_task_xml_registers_with_task_scheduler() -> Result<()> {
         &probe_arguments,
         &supervisor_environment_snapshot(&TestHost)?,
     )?;
-    let probe_xml =
-        windows_task_xml_with_script(Path::new(&system_root), &sid, &task_name, &action_script)?;
+    // Check the outer PowerShell process. The daemon child already requested
+    // CreateNoWindow before the task action itself became windowless.
+    let action_script = format!(
+        r#"Add-Type -Namespace CtxTest -Name Console -MemberDefinition '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();';if ([CtxTest.Console]::GetConsoleWindow() -ne [IntPtr]::Zero) {{exit 42}};{action_script}"#
+    );
+    let probe_xml = windows_task_xml_with_script(
+        &path,
+        Path::new(&system_root),
+        &sid,
+        &task_name,
+        &action_script,
+    )?;
     write_atomic_file(&path, &windows_task_xml_bytes(&probe_xml))?;
     let replace = Command::new("schtasks")
         .args(["/Create", "/TN"])

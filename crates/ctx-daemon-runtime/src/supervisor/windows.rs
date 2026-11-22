@@ -17,6 +17,10 @@ use crate::{daemon_lock_path, pid_from_lock_json, read_pid_lock_json};
 #[cfg(windows)]
 use std::fs;
 
+const WINDOWS_TASK_LAUNCHER_NAME: &str = "ctx-task-launcher.exe";
+#[cfg(windows)]
+const WINDOWS_TASK_LAUNCHER: &[u8] = include_bytes!(env!("CTX_TASK_LAUNCHER"));
+
 const WINDOWS_SUPERVISOR_OWNER_FILE: &str = "windows-supervisor-owner.json";
 
 pub fn windows_supervisor_owner_provenance_path(identity: &SupervisorIdentity) -> Result<PathBuf> {
@@ -103,6 +107,10 @@ pub fn disable_windows_supervisor(
     )?;
     remove_windows_supervisor_owner_provenance(identity)?;
     remove_windows_supervisor_file(path, "remove ctx scheduled-task definition")?;
+    remove_windows_supervisor_file(
+        &path.with_file_name(WINDOWS_TASK_LAUNCHER_NAME),
+        "remove ctx scheduled-task launcher",
+    )?;
     Ok(Some(path.to_path_buf()))
 }
 
@@ -148,6 +156,7 @@ pub fn windows_task_xml(
         &windows_supervisor_owner_provenance_path(spec.identity())?,
     )?;
     windows_task_xml_with_script(
+        spec.identity().artifact_path(),
         system_root,
         user_sid,
         spec.identity().name(),
@@ -157,6 +166,7 @@ pub fn windows_task_xml(
 }
 
 pub fn windows_task_xml_with_script(
+    definition: &Path,
     system_root: &Path,
     user_sid: &str,
     task_name: &str,
@@ -166,6 +176,24 @@ pub fn windows_task_xml_with_script(
     let user_sid = validated_supervisor_artifact_text("Windows user SID", user_sid)?;
     let task_name = validated_supervisor_artifact_text("Windows task name", task_name)?;
     let description = validated_supervisor_artifact_text("Windows task description", description)?;
+    let (command, arguments) = windows_task_action(definition, system_root, script)?;
+    // Task Scheduler rejects intervals below one minute, and Count is an unsigned byte.
+    Ok(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n<RegistrationInfo><URI>{}</URI><Description>{}</Description></RegistrationInfo>\n<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{}</UserId></LogonTrigger></Triggers>\n<Principals><Principal id=\"Author\"><UserId>{}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>255</Count></RestartOnFailure></Settings>\n<Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>{}</Arguments></Exec></Actions>\n</Task>\n",
+        xml_escape(task_name),
+        xml_escape(description),
+        xml_escape(user_sid),
+        xml_escape(user_sid),
+        xml_escape(&command),
+        xml_escape(&arguments),
+    ))
+}
+
+fn windows_task_action(
+    definition: &Path,
+    system_root: &Path,
+    script: &str,
+) -> Result<(String, String)> {
     let script = validated_supervisor_artifact_text("Windows supervisor script", script)?;
     let powershell = system_root
         .join("System32")
@@ -180,15 +208,11 @@ pub fn windows_task_xml_with_script(
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
     );
-    // Task Scheduler rejects intervals below one minute, and Count is an unsigned byte.
-    Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n<RegistrationInfo><URI>{}</URI><Description>{}</Description></RegistrationInfo>\n<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{}</UserId></LogonTrigger></Triggers>\n<Principals><Principal id=\"Author\"><UserId>{}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>255</Count></RestartOnFailure></Settings>\n<Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {}</Arguments></Exec></Actions>\n</Task>\n",
-        xml_escape(task_name),
-        xml_escape(description),
-        xml_escape(user_sid),
-        xml_escape(user_sid),
-        xml_escape(powershell_text),
-        encoded,
+    let launcher = definition.with_file_name(WINDOWS_TASK_LAUNCHER_NAME);
+    let command = validated_supervisor_artifact_path("Windows launcher path", &launcher)?;
+    Ok((
+        command.to_owned(),
+        format!("{} {encoded}", windows_command_line_quote(powershell_text)),
     ))
 }
 
@@ -326,6 +350,17 @@ pub fn verify_windows_supervisor_registration(
     manager_environment: &SupervisorManagerEnvironment,
 ) -> Result<()> {
     verify_supervisor_environment(spec)?;
+    let launcher = spec
+        .identity()
+        .artifact_path()
+        .with_file_name(WINDOWS_TASK_LAUNCHER_NAME);
+    if fs::read(&launcher).with_context(|| format!("read task launcher {}", launcher.display()))?
+        != WINDOWS_TASK_LAUNCHER
+    {
+        return Err(anyhow!(
+            "ctx scheduled-task launcher differs from the installed CLI"
+        ));
+    }
     let system_root = manager_environment_value(manager_environment, "SystemRoot")
         .ok_or_else(|| anyhow!("Windows SystemRoot is unavailable"))?;
     let sid = crate::current_windows_user_sid()?;
@@ -379,6 +414,13 @@ pub fn start_windows_supervisor(
 ) -> Result<()> {
     stop_windows_supervisor_action(identity, manager_environment)?;
     remove_windows_supervisor_owner_provenance(identity)?;
+    // Windows locks a running executable. Publish only after the old action stops.
+    let launcher = identity
+        .artifact_path()
+        .with_file_name(WINDOWS_TASK_LAUNCHER_NAME);
+    if fs::read(&launcher).ok().as_deref() != Some(WINDOWS_TASK_LAUNCHER) {
+        write_atomic_supervisor_file(&launcher, WINDOWS_TASK_LAUNCHER)?;
+    }
     let mut run = supervisor_command("schtasks", manager_environment);
     run.args(["/Run", "/TN"]).arg(identity.name());
     command_success(&mut run, "schtasks /Run")
@@ -545,26 +587,14 @@ pub fn windows_task_registration_matches(
     user_sid: &str,
     manager_environment: &SupervisorManagerEnvironment,
 ) -> Result<bool> {
-    let powershell = system_root
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
     let script = windows_sanitized_process_supervisor_script_with_provenance(
         spec.launch(),
         spec.environment_path(),
         &windows_supervisor_daemon_lock_path(spec.identity())?,
         &windows_supervisor_owner_provenance_path(spec.identity())?,
     )?;
-    let encoded = BASE64.encode(
-        script
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>(),
-    );
-    let powershell = powershell.to_string_lossy();
-    let arguments =
-        format!("-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encoded}");
+    let (command, arguments) =
+        windows_task_action(spec.identity().artifact_path(), system_root, &script)?;
     let registration = parse_windows_task_registration(xml)?;
     let trigger_identity_matches = windows_task_trigger_identity_matches(
         registration.logon_trigger_user_id.as_deref(),
@@ -602,7 +632,7 @@ pub fn windows_task_registration_matches(
         && registration.principal_count == 1
         && registration.action_count == 1
         && registration.exec_action_count == 1
-        && registration.command.as_deref() == Some(powershell.as_ref())
+        && registration.command.as_deref() == Some(command.as_str())
         && registration.arguments.as_deref() == Some(arguments.as_str()))
 }
 
@@ -915,6 +945,9 @@ pub fn decode_supervisor_text(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod manager_probe_tests;
+
+#[cfg(all(test, windows))]
+mod launcher_tests;
 
 #[cfg(test)]
 mod provenance_tests;

@@ -18,6 +18,7 @@ members = [
     "crates/ctx-daemon-application",
     "crates/ctx-daemon-service",
     "crates/ctx-daemon-runtime",
+    "crates/ctx-task-launcher",
     "crates/ctx-graph-types",
     "crates/ctx-graph-ingest",
     "crates/ctx-graph-python",

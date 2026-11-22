@@ -8,6 +8,7 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "BUILD.bazel",
     "Cargo.toml",
+    "build.rs",
 ])
 
 filegroup(
@@ -15,9 +16,20 @@ filegroup(
     srcs = glob(["**"], exclude = ["BUILD.bazel"]),
 )
 
-COMMON_RUSTC_ENV = {
-    "CARGO_MANIFEST_DIR": "crates/ctx-daemon-runtime",
-}
+LAUNCHER_DATA = select({
+    "@platforms//os:windows": ["//crates/ctx-task-launcher:ctx-task-launcher"],
+    "//conditions:default": [],
+})
+
+COMMON_RUSTC_ENV = select({
+    "@platforms//os:windows": {
+        "CARGO_MANIFEST_DIR": "crates/ctx-daemon-runtime",
+        "CTX_TASK_LAUNCHER": "$(execpath //crates/ctx-task-launcher:ctx-task-launcher)",
+    },
+    "//conditions:default": {
+        "CARGO_MANIFEST_DIR": "crates/ctx-daemon-runtime",
+    },
+})
 
 RUST_SRCS = glob(["src/**/*.rs"])
 
@@ -38,6 +50,7 @@ CTX_DAEMON_RUNTIME_RUSTC_FLAGS = [
 
 rust_library(
     name = "lib",
+    compile_data = LAUNCHER_DATA,
     srcs = PROD_SRCS,
     crate_name = "ctx_daemon_runtime",
     crate_root = "src/lib.rs",
@@ -51,6 +64,7 @@ rust_library(
 
 rust_library(
     name = "qualification_lib",
+    compile_data = LAUNCHER_DATA,
     testonly = True,
     srcs = PROD_SRCS,
     crate_name = "ctx_daemon_runtime",
@@ -65,6 +79,7 @@ rust_library(
 
 ctx_rust_test(
     name = "unit_tests",
+    compile_data = LAUNCHER_DATA,
     srcs = RUST_SRCS,
     crate_name = "ctx_daemon_runtime",
     crate_root = "src/lib.rs",

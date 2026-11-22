@@ -88,12 +88,14 @@ pub(super) fn windows_task_xml_with_environment(
 
 #[cfg(windows)]
 pub(super) fn windows_task_xml_with_script(
+    definition: &Path,
     system_root: &Path,
     user_sid: &str,
     task_name: &str,
     script: &str,
 ) -> Result<String> {
     ctx_daemon_runtime::windows_task_xml_with_script(
+        definition,
         system_root,
         user_sid,
         task_name,
