@@ -1,0 +1,21 @@
+load("@crates//:defs.bzl", "all_crate_deps", "crate_edition")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["BUILD.bazel", "Cargo.toml"])
+
+filegroup(
+    name = "cargo_package_data",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+ctx_rust_binary(
+    name = "ctx-task-launcher",
+    srcs = glob(["src/*.rs"]),
+    crate_name = "ctx_task_launcher",
+    crate_root = "src/main.rs",
+    edition = crate_edition(),
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = all_crate_deps(normal = True),
+)

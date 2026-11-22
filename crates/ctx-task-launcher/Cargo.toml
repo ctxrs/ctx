@@ -1,0 +1,16 @@
+[package]
+name = "ctx-task-launcher"
+version.workspace = true
+description = "Windowless entry point for the ctx Windows scheduled task"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
