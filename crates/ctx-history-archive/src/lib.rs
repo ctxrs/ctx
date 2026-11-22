@@ -14,6 +14,7 @@ mod export;
 mod io;
 mod plan;
 mod provenance;
+mod prune;
 mod restore;
 mod retained;
 mod selection;
@@ -27,6 +28,7 @@ pub use io::{verify, verify_member, visit_member_records, visit_members, visit_r
 pub use plan::summary::{ConversationPreview, ExportPreview, ScopeCounts, WorkspaceValue};
 pub use plan::{plan_export, plan_export_with_control, ExportPlan};
 pub use provenance::source_identities;
+pub use prune::{prune, PruneReceipt};
 pub use restore::{
     is_archive_root, map_record, mapped_event, mapped_session, mapped_source, prepare_restore_root,
     restore, ImportBinding, RestoreOptions, RestoreReceipt,

@@ -69,6 +69,21 @@ is a no-op. A corrected session requires `--expected-predecessors FILE`, a JSON
 object mapping that member's inventory path to its currently imported SHA-256.
 Missing sessions in a later archive do not delete earlier imports.
 
+To preview or reclaim superseded owned archive payloads:
+
+```sh
+ctx --data-root ./recovered-history archive prune --format json
+ctx --data-root ./recovered-history archive prune --apply --format json
+```
+
+Pruning preserves snapshots referenced by the active and retained lexical
+generations and may defer while an older reader holds a generation. It
+reclaims a superseded snapshot only when the current view covers every
+original record in that copy. Preview reports verified eligible payloads;
+apply reports the objects and logical bytes it removed. The command does
+not change the searchable index or provider history.
+
+
 Local search, conversation details, event enumeration, and locate output expose
 `archive_provenance` with `origin`, `view`, and `label_authority: "archive_creator"`.
 CLI text and MCP text identify these as creator-supplied labels, not verified
