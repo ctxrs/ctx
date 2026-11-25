@@ -323,6 +323,13 @@ pub(super) fn validate_manifest(
             "manifest active chunk count is smaller than its event count".to_owned(),
         ));
     }
+    let base_segments = envelope
+        .manifest
+        .segments
+        .iter()
+        .filter(|segment| segment.kind == SegmentKind::Base)
+        .map(|segment| (segment.generation, segment.source_identity_digest.as_str()))
+        .collect::<HashSet<_>>();
     let mut previous_snapshot = None::<&str>;
     for snapshot in &envelope.manifest.source_snapshots {
         validate_source_scope_field(&snapshot.source_identity_digest, "snapshot source")?;
@@ -330,11 +337,10 @@ pub(super) fn validate_manifest(
             || snapshot.generation > envelope.manifest.generation
             || previous_snapshot
                 .is_some_and(|previous| previous >= snapshot.source_identity_digest.as_str())
-            || !envelope.manifest.segments.iter().any(|segment| {
-                segment.generation == snapshot.generation
-                    && segment.source_identity_digest == snapshot.source_identity_digest
-                    && segment.kind == SegmentKind::Base
-            })
+            || !base_segments.contains(&(
+                snapshot.generation,
+                snapshot.source_identity_digest.as_str(),
+            ))
         {
             return Err(FlatStoreError::Corrupt(
                 "manifest source snapshots are invalid".to_owned(),

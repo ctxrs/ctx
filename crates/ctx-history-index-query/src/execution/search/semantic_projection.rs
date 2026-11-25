@@ -22,14 +22,24 @@ impl VerifiedIndex {
         let source_identity_query = self.source_identity_query(filter, fields)?;
         let query =
             filtered_event_query(semantic_eligibility, source_identity_query, filter, fields)?;
-        let addresses = self
+        let mut addresses = self
             .searcher
             .search(query.as_ref(), &DocSetCollector)
-            .map_err(IndexError::from)?;
+            .map_err(IndexError::from)?
+            .into_iter()
+            .collect::<Vec<_>>();
+        addresses.sort_unstable();
         let mut event_identities = HashMap::with_capacity(addresses.len());
+        let mut columns: Option<(u32, CoreEventIdentityColumns)> = None;
         for address in addresses {
-            let (event_id, event_identity_digest) =
-                core_event_identity_fast_preflight(&self.searcher, address)?;
+            if columns.as_ref().map(|(segment_ord, _)| *segment_ord) != Some(address.segment_ord) {
+                let opened = CoreEventIdentityColumns::open(&self.searcher, address.segment_ord)?;
+                columns = Some((address.segment_ord, opened));
+            }
+            let Some((_, segment_columns)) = columns.as_ref() else {
+                unreachable!("columns are opened for the current segment above");
+            };
+            let (event_id, event_identity_digest) = segment_columns.identity(address.doc_id)?;
             if event_identities
                 .insert(event_id, event_identity_digest)
                 .is_some()

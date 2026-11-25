@@ -18,9 +18,9 @@ pub use reader::{
 pub use reader::{VerifiedGenerationSnapshot, VerifiedIndex};
 pub(crate) use records::stored_event_record;
 use records::{
-    core_event_fast_preflight, core_event_identity_fast_preflight, stored_core_event_record,
-    stored_core_event_record_with_size, stored_core_event_record_with_source_json,
-    EventAddressCandidate, SessionEventAddressCandidate,
+    core_event_fast_preflight, stored_core_event_record, stored_core_event_record_with_size,
+    stored_core_event_record_with_source_json, CoreEventIdentityColumns, EventAddressCandidate,
+    SessionEventAddressCandidate,
 };
 use records::{ranked_event_ref_at_address, ranked_event_ref_at_address_with_order};
 

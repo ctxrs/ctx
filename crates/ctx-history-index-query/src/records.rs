@@ -151,13 +151,26 @@ fn event_range_order_at_address(
         .ok_or(IndexError::InvalidStoredDocumentField(
             SEARCH_REF_EVENT_RANGE_ORDER_FIELD,
         ))?;
-    let column = segment
+    let column = event_range_order_column(segment)?;
+    event_range_order_from_column(&column, address.doc_id)
+}
+
+fn event_range_order_column(
+    segment: &tantivy::SegmentReader,
+) -> Result<tantivy::columnar::BytesColumn> {
+    segment
         .fast_fields()
         .bytes(SEARCH_REF_EVENT_RANGE_ORDER_FIELD)?
         .ok_or(IndexError::InvalidStoredDocumentField(
             SEARCH_REF_EVENT_RANGE_ORDER_FIELD,
-        ))?;
-    let mut ordinals = column.term_ords(address.doc_id);
+        ))
+}
+
+fn event_range_order_from_column(
+    column: &tantivy::columnar::BytesColumn,
+    doc: DocId,
+) -> Result<ctx_history_index_format::EventRangeOrderKey> {
+    let mut ordinals = column.term_ords(doc);
     let ordinal = ordinals
         .next()
         .ok_or(IndexError::InvalidStoredDocumentField(
@@ -254,26 +267,41 @@ pub(super) fn core_event_fast_preflight(
     ))
 }
 
-/// Returns the compact event address and exact full identity digest without
-/// loading a stored document.
-pub(super) fn core_event_identity_fast_preflight(
-    searcher: &tantivy::Searcher,
-    address: DocAddress,
-) -> Result<(Uuid, [u8; 32])> {
-    let (event_id, _, _) = core_event_fast_preflight(searcher, address)?;
-    let event_identity_digest =
-        event_range_order_at_address(searcher, address)?.event_identity_digest();
-    if (ctx_history_index_format::CompactIdentity {
-        digest: event_identity_digest,
-    })
-    .as_uuid()
-        != event_id
-    {
-        return Err(IndexError::InvalidStoredDocumentField(
-            SEARCH_REF_EVENT_RANGE_ORDER_FIELD,
-        ));
+/// Fast-field columns for one segment that return each document's compact event
+/// address and exact full identity digest without loading a stored document.
+/// Bulk callers open the columns once per segment instead of once per document.
+pub(super) struct CoreEventIdentityColumns {
+    facts: ctx_history_index_format::CoreDocumentFastFactColumns,
+    range_order: tantivy::columnar::BytesColumn,
+}
+
+impl CoreEventIdentityColumns {
+    pub(super) fn open(searcher: &tantivy::Searcher, segment_ord: u32) -> Result<Self> {
+        let segment = searcher.segment_readers().get(segment_ord as usize).ok_or(
+            IndexError::InvalidStoredDocumentField(SEARCH_REF_EVENT_RANGE_ORDER_FIELD),
+        )?;
+        Ok(Self {
+            facts: ctx_history_index_format::CoreDocumentFastFactColumns::open(segment)?,
+            range_order: event_range_order_column(segment)?,
+        })
     }
-    Ok((event_id, event_identity_digest))
+
+    pub(super) fn identity(&self, doc: DocId) -> Result<(Uuid, [u8; 32])> {
+        let event_id = self.facts.facts(doc)?.event_id;
+        let event_identity_digest =
+            event_range_order_from_column(&self.range_order, doc)?.event_identity_digest();
+        if (ctx_history_index_format::CompactIdentity {
+            digest: event_identity_digest,
+        })
+        .as_uuid()
+            != event_id
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SEARCH_REF_EVENT_RANGE_ORDER_FIELD,
+            ));
+        }
+        Ok((event_id, event_identity_digest))
+    }
 }
 
 pub(super) fn stored_core_event_record_with_source_json(

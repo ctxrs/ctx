@@ -99,7 +99,7 @@ pub use stored_document::{
     core_document_fast_facts, decode_core_document, decode_core_record_bytes,
     decode_owned_core_document, decode_validated_core_record_bytes, unique_required_bytes,
     validate_core_record_encoded_bytes, validated_core_record_bytes, AcceptedCoreDocument,
-    CoreDocumentFastFacts,
+    CoreDocumentFastFactColumns, CoreDocumentFastFacts,
 };
 #[doc(hidden)]
 pub use verification::{
