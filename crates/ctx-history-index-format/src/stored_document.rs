@@ -1,5 +1,7 @@
 use ctx_history_core::{CoreRecord, MAX_ENCODED_CORE_RECORD_BYTES};
-use tantivy::{schema::Value as _, DocAddress, DocId, SegmentReader, TantivyDocument};
+use tantivy::{
+    columnar::Column, schema::Value as _, DocAddress, DocId, SegmentReader, TantivyDocument,
+};
 use uuid::Uuid;
 
 use crate::{source_token, Fields, IndexError, Result};
@@ -50,6 +52,10 @@ fn fast_uuid(
 
 fn unique_fast_u64(segment: &SegmentReader, doc: DocId, field_name: &'static str) -> Result<u64> {
     let column = segment.fast_fields().u64(field_name)?;
+    unique_column_u64(&column, doc, field_name)
+}
+
+fn unique_column_u64(column: &Column<u64>, doc: DocId, field_name: &'static str) -> Result<u64> {
     let mut values = column.values_for_doc(doc);
     let value = values
         .next()
@@ -86,8 +92,14 @@ fn core_record_encoded_bytes(searcher: &tantivy::Searcher, address: DocAddress) 
         .ok_or(IndexError::InvalidStoredDocumentField(
             CORE_RECORD_ENCODED_BYTES_FIELD,
         ))?;
-    let encoded_core_bytes =
-        unique_fast_u64(segment, address.doc_id, CORE_RECORD_ENCODED_BYTES_FIELD)?;
+    checked_encoded_core_bytes(unique_fast_u64(
+        segment,
+        address.doc_id,
+        CORE_RECORD_ENCODED_BYTES_FIELD,
+    )?)
+}
+
+fn checked_encoded_core_bytes(encoded_core_bytes: u64) -> Result<usize> {
     let encoded_core_bytes =
         usize::try_from(encoded_core_bytes).map_err(|_| IndexError::CountOverflow)?;
     if encoded_core_bytes == 0 || encoded_core_bytes > MAX_ENCODED_CORE_RECORD_BYTES {
@@ -96,6 +108,45 @@ fn core_record_encoded_bytes(searcher: &tantivy::Searcher, address: DocAddress) 
         ));
     }
     Ok(encoded_core_bytes)
+}
+
+/// The fast-field columns behind [`core_document_fast_facts`], opened once per
+/// segment so bulk callers do not reopen four columns for every document.
+pub struct CoreDocumentFastFactColumns {
+    event_id_high: Column<u64>,
+    event_id_low: Column<u64>,
+    encoded_core_bytes: Column<u64>,
+    content_bytes: Column<u64>,
+}
+
+impl CoreDocumentFastFactColumns {
+    pub fn open(segment: &SegmentReader) -> Result<Self> {
+        let fast_fields = segment.fast_fields();
+        Ok(Self {
+            event_id_high: fast_fields.u64(EVENT_ID_HIGH_FIELD)?,
+            event_id_low: fast_fields.u64(EVENT_ID_LOW_FIELD)?,
+            encoded_core_bytes: fast_fields.u64(CORE_RECORD_ENCODED_BYTES_FIELD)?,
+            content_bytes: fast_fields.u64(CORE_CONTENT_BYTES_FIELD)?,
+        })
+    }
+
+    pub fn facts(&self, doc: DocId) -> Result<CoreDocumentFastFacts> {
+        let high = unique_column_u64(&self.event_id_high, doc, EVENT_ID_HIGH_FIELD)?;
+        let low = unique_column_u64(&self.event_id_low, doc, EVENT_ID_LOW_FIELD)?;
+        let encoded_core_bytes = checked_encoded_core_bytes(unique_column_u64(
+            &self.encoded_core_bytes,
+            doc,
+            CORE_RECORD_ENCODED_BYTES_FIELD,
+        )?)?;
+        let content_bytes = unique_column_u64(&self.content_bytes, doc, CORE_CONTENT_BYTES_FIELD)?;
+        let content_bytes =
+            usize::try_from(content_bytes).map_err(|_| IndexError::CountOverflow)?;
+        Ok(CoreDocumentFastFacts {
+            event_id: Uuid::from_u128((u128::from(high) << 64) | u128::from(low)),
+            encoded_core_bytes,
+            content_bytes,
+        })
+    }
 }
 
 /// Returns the exact indexed identity and size facts used to admit a stored
@@ -108,20 +159,7 @@ pub fn core_document_fast_facts(
         .segment_readers()
         .get(address.segment_ord as usize)
         .ok_or(IndexError::InvalidStoredDocumentField(EVENT_ID_HIGH_FIELD))?;
-    let event_id = fast_uuid(
-        segment,
-        address.doc_id,
-        EVENT_ID_HIGH_FIELD,
-        EVENT_ID_LOW_FIELD,
-    )?;
-    let encoded_core_bytes = core_record_encoded_bytes(searcher, address)?;
-    let content_bytes = unique_fast_u64(segment, address.doc_id, CORE_CONTENT_BYTES_FIELD)?;
-    let content_bytes = usize::try_from(content_bytes).map_err(|_| IndexError::CountOverflow)?;
-    Ok(CoreDocumentFastFacts {
-        event_id,
-        encoded_core_bytes,
-        content_bytes,
-    })
+    CoreDocumentFastFactColumns::open(segment)?.facts(address.doc_id)
 }
 
 pub fn validate_core_record_encoded_bytes(
