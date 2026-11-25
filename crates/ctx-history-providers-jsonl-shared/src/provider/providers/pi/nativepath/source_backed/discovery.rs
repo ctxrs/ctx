@@ -7,7 +7,11 @@ use ctx_history_jsonl::{
     JsonlFamilyError, JsonlFamilyPendingLeaf, JsonlFamilyRejectedLeaf, JsonlProbeOutcome,
 };
 use ctx_history_source_io::visit_bounded_tree_files_isolating_selected;
-use std::{collections::BTreeSet, fs, io};
+use std::{
+    collections::BTreeSet,
+    fs,
+    io::{self, Read},
+};
 
 struct DiscoveredPiSource {
     path: PathBuf,
@@ -205,23 +209,52 @@ pub(super) fn discover<R>(
             cached,
         });
     }
-    let mut sources = HashMap::<[u8; 32], JsonlFileObservation>::new();
+    let dispositions = repeated_identity_dispositions(&authority, &discovered);
     let mut leaves = Vec::with_capacity(discovered.len());
-    for discovered in discovered {
+    for (discovered, disposition) in discovered.into_iter().zip(dispositions) {
         let DiscoveredPiSource {
             path,
             relative_path,
             cached,
         } = discovered;
-        let source_digest = cached.source.exact_descriptor_digest();
-        if let Some(selected) = sources.get(&source_digest) {
-            if selected == &cached.observation {
+        match disposition {
+            IdentityDisposition::Admit => {}
+            IdentityDisposition::CoveredCopy => {
                 next.insert(path, cached);
                 continue;
             }
-            return Err(CaptureError::InvalidPayload(
-                "Pi inventory repeats a native session identity".to_owned(),
-            ));
+            IdentityDisposition::Conflicting { diagnostic_owner } => {
+                let source = cached.source.clone();
+                let mut leaf = JsonlFamilyRejectedLeaf::bind_observed(
+                    path.clone(),
+                    relative_path,
+                    cached.observation.clone(),
+                    cached.binding_key.clone(),
+                    0,
+                )
+                .with_quarantined_source(source.clone());
+                if diagnostic_owner {
+                    leaf = leaf.with_logical_source_failure(
+                        source,
+                        format!(
+                            "Pi transcript {} repeats a native session identity claimed by another transcript with different content",
+                            path.display()
+                        ),
+                    );
+                }
+                rejected.push(leaf);
+                next.insert(path, cached);
+                continue;
+            }
+            IdentityDisposition::Unreadable(error) => {
+                rejected.push(reject_unreadable_file(
+                    &authority,
+                    &path,
+                    error,
+                    adapter.source_anchor_scope,
+                )?);
+                continue;
+            }
         }
         let leaf = JsonlFamilyLeaf::observe_after_identity_probe(
             cached.source.clone(),
@@ -244,7 +277,6 @@ pub(super) fn discover<R>(
                 continue;
             }
         }
-        sources.insert(source_digest, cached.observation.clone());
         next.insert(path, cached);
     }
     *adapter
@@ -259,6 +291,153 @@ pub(super) fn discover<R>(
         rejected,
         pending,
     )
+}
+
+/// How discovery treats one physical member of a Pi native session identity.
+#[derive(Debug)]
+enum IdentityDisposition {
+    /// The only member of its identity, or the most complete one.
+    Admit,
+    /// An exact record prefix of the admitted member. OMP copies a session's
+    /// subagent transcripts into sessions continued or forked from it, keeping
+    /// the original header, so these copies repeat the identity by design.
+    /// Every record is already in the admitted member, so no second leaf is
+    /// bound and nothing is lost.
+    CoveredCopy,
+    /// Members of one identity whose records diverge. None is admitted; one
+    /// deterministic member carries the diagnostic, as Claude discovery does.
+    Conflicting { diagnostic_owner: bool },
+    /// The member could not be read while comparing it with its peers.
+    Unreadable(CaptureError),
+}
+
+/// Resolves repeated native session identities member by member, so one
+/// repeated header no longer fails the whole Pi inventory.
+fn repeated_identity_dispositions(
+    authority: &ProviderSourceRoot,
+    discovered: &[DiscoveredPiSource],
+) -> Vec<IdentityDisposition> {
+    let mut members = HashMap::<[u8; 32], Vec<usize>>::new();
+    for (index, member) in discovered.iter().enumerate() {
+        members
+            .entry(member.cached.source.exact_descriptor_digest())
+            .or_default()
+            .push(index);
+    }
+    let mut dispositions = discovered
+        .iter()
+        .map(|_| IdentityDisposition::Admit)
+        .collect::<Vec<_>>();
+    for indexes in members.values().filter(|indexes| indexes.len() > 1) {
+        // Discovery visits paths in sorted order, so the first longest member
+        // is a deterministic choice among equally long copies.
+        let admitted = indexes.iter().copied().fold(indexes[0], |best, index| {
+            if discovered[index].cached.observation.length()
+                > discovered[best].cached.observation.length()
+            {
+                index
+            } else {
+                best
+            }
+        });
+        let mut conflicting = false;
+        for &index in indexes {
+            if index == admitted {
+                continue;
+            }
+            let member = &discovered[index];
+            let covered = if member.cached.observation == discovered[admitted].cached.observation {
+                Ok(true)
+            } else {
+                is_record_prefix_of(authority, member, &discovered[admitted])
+            };
+            match covered {
+                Ok(true) => dispositions[index] = IdentityDisposition::CoveredCopy,
+                Ok(false) => conflicting = true,
+                Err(error) => dispositions[index] = IdentityDisposition::Unreadable(error),
+            }
+        }
+        if conflicting {
+            for (position, &index) in indexes.iter().enumerate() {
+                if !matches!(dispositions[index], IdentityDisposition::Unreadable(_)) {
+                    dispositions[index] = IdentityDisposition::Conflicting {
+                        diagnostic_owner: position == 0,
+                    };
+                }
+            }
+        }
+    }
+    dispositions
+}
+
+/// Whether `copy` holds exactly a leading prefix of `admitted`'s bytes, at the
+/// lengths observed during discovery. A leading OMP title slot is metadata
+/// OMP rewrites in place, so it is skipped when both members start with one.
+fn is_record_prefix_of(
+    authority: &ProviderSourceRoot,
+    copy: &DiscoveredPiSource,
+    admitted: &DiscoveredPiSource,
+) -> Result<bool> {
+    const CHUNK: usize = 64 * 1024;
+    let copy_len = copy.cached.observation.length();
+    if copy_len > admitted.cached.observation.length() {
+        return Ok(false);
+    }
+    let mut copy_reader = authority
+        .open_file(&copy.relative_path)?
+        .reopen_same_object()?
+        .take(copy_len);
+    let mut admitted_reader = authority
+        .open_file(&admitted.relative_path)?
+        .reopen_same_object()?
+        .take(copy_len);
+    let mut remaining = copy_len;
+    let slot = JsonlMutableFirstRecord::WIRE_BYTES;
+    if copy_len >= slot as u64 {
+        let mut copy_slot = [0_u8; JsonlMutableFirstRecord::WIRE_BYTES];
+        let mut admitted_slot = [0_u8; JsonlMutableFirstRecord::WIRE_BYTES];
+        read_observed(&mut copy_reader, &mut copy_slot)?;
+        read_observed(&mut admitted_reader, &mut admitted_slot)?;
+        if !(is_omp_title_slot_wire(&copy_slot) && is_omp_title_slot_wire(&admitted_slot))
+            && copy_slot != admitted_slot
+        {
+            return Ok(false);
+        }
+        remaining -= slot as u64;
+    }
+    let mut copy_chunk = vec![0_u8; CHUNK];
+    let mut admitted_chunk = vec![0_u8; CHUNK];
+    while remaining > 0 {
+        let take = usize::try_from(remaining.min(CHUNK as u64))
+            .map_err(|_| CaptureError::SystemInvariant("Pi comparison chunk does not fit usize"))?;
+        read_observed(&mut copy_reader, &mut copy_chunk[..take])?;
+        read_observed(&mut admitted_reader, &mut admitted_chunk[..take])?;
+        if copy_chunk[..take] != admitted_chunk[..take] {
+            return Ok(false);
+        }
+        remaining -= take as u64;
+    }
+    Ok(true)
+}
+
+/// Reads bytes that discovery already observed; a short read means the file
+/// shrank after its observation.
+fn read_observed(reader: &mut impl Read, bytes: &mut [u8]) -> Result<()> {
+    reader.read_exact(bytes).map_err(|error| {
+        if error.kind() == io::ErrorKind::UnexpectedEof {
+            CaptureError::SourceChangedDuringCapture
+        } else {
+            CaptureError::Io(error)
+        }
+    })
+}
+
+fn is_omp_title_slot_wire(bytes: &[u8; JsonlMutableFirstRecord::WIRE_BYTES]) -> bool {
+    let (record, terminator) = bytes.split_at(JsonlMutableFirstRecord::WIRE_BYTES - 1);
+    terminator == b"\n"
+        && !record.contains(&b'\n')
+        && !record.contains(&b'\r')
+        && JsonlMutableFirstRecord::OmpTitleSlotV1.validates_record(record)
 }
 
 fn reject_unreadable_file(

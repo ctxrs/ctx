@@ -197,3 +197,129 @@ fn terminal_membership_ignores_omp_changes_jsonl_churn_and_preserves_all_leaf_cl
     let after_add = observe_terminal_membership(&sessions, &opening).unwrap();
     assert_eq!(unbound_paths(&after_add), expected_unbound);
 }
+
+const REPEATED_SESSION_ID: &str = "01a01e7d-0000-7000-8000-000000000001";
+
+fn omp_title_slot(title: &str) -> String {
+    let record = format!(
+        r#"{{"type":"title","v":1,"title":"{title}","source":"auto","updatedAt":"2026-11-16T00:00:00.000Z","pad":""}}"#
+    );
+    let pad = " ".repeat(JsonlMutableFirstRecord::WIRE_BYTES - 1 - record.len());
+    format!("{}{pad}\"}}\n", &record[..record.len() - 2])
+}
+
+fn subagent_transcript(title: &str, messages: &[&str]) -> String {
+    let mut transcript = omp_title_slot(title);
+    transcript.push_str(&format!(
+        r#"{{"type":"session","version":3,"id":"{REPEATED_SESSION_ID}","timestamp":"2026-11-16T00:00:00.000Z","cwd":"/tmp/proj"}}"#
+    ));
+    transcript.push('\n');
+    for (index, text) in messages.iter().enumerate() {
+        transcript.push_str(&format!(
+            r#"{{"type":"message","id":"{index:08x}","parentId":null,"timestamp":"2026-11-16T00:00:0{index}.000Z","message":{{"role":"user","content":[{{"type":"text","text":"{text}"}}],"timestamp":1794787201000}}}}"#
+        ));
+        transcript.push('\n');
+    }
+    transcript
+}
+
+fn write_session_dir_copy(project: &Path, session_dir: &str, contents: &str) -> PathBuf {
+    let dir = project.join(session_dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Researcher.jsonl");
+    fs::write(&path, contents).unwrap();
+    path
+}
+
+#[test]
+fn omp_title_slot_helper_writes_a_valid_fixed_width_slot() {
+    let slot = omp_title_slot("Researcher");
+    assert_eq!(slot.len(), JsonlMutableFirstRecord::WIRE_BYTES);
+    let bytes: [u8; JsonlMutableFirstRecord::WIRE_BYTES] = slot.as_bytes().try_into().unwrap();
+    assert!(is_omp_title_slot_wire(&bytes));
+}
+
+#[test]
+fn copied_subagent_transcripts_admit_the_most_complete_copy() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let project = sessions.join("-tmp-proj");
+    let original = subagent_transcript("Researcher", &["first", "second"]);
+    let continued = subagent_transcript("Researcher", &["first", "second", "third"]);
+    write_session_dir_copy(&project, "2026-11-16T00-00-00-000Z_parent", &original);
+    write_session_dir_copy(&project, "2026-11-16T01-00-00-000Z_fork", &original);
+    let longest =
+        write_session_dir_copy(&project, "2026-11-16T02-00-00-000Z_continued", &continued);
+
+    let adapter = PiJsonlAdapter::<()>::default();
+    let inventory = discover(&adapter, &sessions).unwrap();
+    assert_eq!(inventory.accepted_len(), 1);
+    assert_eq!(inventory.quarantined_len(), 0);
+    let admitted: Vec<&Path> = inventory
+        .accepted_leaves()
+        .map(|leaf| leaf.source_path())
+        .collect();
+    assert_eq!(
+        admitted,
+        vec![fs::canonicalize(&longest).unwrap().as_path()]
+    );
+    observe_terminal_membership(&sessions, &inventory).unwrap();
+}
+
+#[test]
+fn copies_that_differ_only_in_the_omp_title_slot_are_one_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let project = sessions.join("-tmp-proj");
+    write_session_dir_copy(
+        &project,
+        "2026-11-16T00-00-00-000Z_parent",
+        &subagent_transcript("Researcher", &["first"]),
+    );
+    write_session_dir_copy(
+        &project,
+        "2026-11-16T01-00-00-000Z_fork",
+        &subagent_transcript("Renamed researcher", &["first", "second"]),
+    );
+
+    let adapter = PiJsonlAdapter::<()>::default();
+    let inventory = discover(&adapter, &sessions).unwrap();
+    assert_eq!(inventory.accepted_len(), 1);
+    assert_eq!(inventory.quarantined_len(), 0);
+}
+
+#[test]
+fn divergent_repeated_identity_quarantines_its_members_and_keeps_peers() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let project = sessions.join("-tmp-proj");
+    write_session_dir_copy(
+        &project,
+        "2026-11-16T00-00-00-000Z_parent",
+        &subagent_transcript("Researcher", &["first", "left"]),
+    );
+    write_session_dir_copy(
+        &project,
+        "2026-11-16T01-00-00-000Z_fork",
+        &subagent_transcript("Researcher", &["first", "right"]),
+    );
+    fs::write(
+        project.join("2026-11-16T03-00-00-000Z_unrelated.jsonl"),
+        concat!(
+            r#"{"type":"session","version":3,"id":"01a01e7d-0000-7000-8000-000000000002","timestamp":"2026-11-16T03:00:00.000Z","cwd":"/tmp/proj"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let adapter = PiJsonlAdapter::<()>::default();
+    let inventory = discover(&adapter, &sessions).unwrap();
+    assert_eq!(inventory.accepted_len(), 1);
+    assert_eq!(inventory.quarantined_len(), 2);
+    let repeated = source_key_scoped(REPEATED_SESSION_ID, SourceAnchorScope::Unqualified).unwrap();
+    for leaf in inventory.quarantined_leaves() {
+        assert!(leaf
+            .source()
+            .is_some_and(|source| source.exact_descriptor_eq(&repeated)));
+    }
+}
