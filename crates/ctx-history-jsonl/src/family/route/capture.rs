@@ -245,7 +245,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         append_only_trust_allowed,
     )
     .map_err(|error| route_discovery(adapter, error))?;
-    classify_incomplete_first_records(adapter, &mut opening)
+    classify_incomplete_first_records(adapter, &mut opening, &bases_by_descriptor)
         .map_err(|error| route_discovery(adapter, error))?;
     if opening.root_missing()
         && adapter.root_missing_mode() == JsonlFamilyRootMissingMode::Unavailable

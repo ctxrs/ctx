@@ -56,6 +56,73 @@ fn revert_session_path(
 }
 
 #[test]
+fn certified_compressed_rollout_is_not_snapshotted_by_route_wide_refresh() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let archive_id = "019fb000-0000-7000-8000-000000000081";
+    let archive = compressed_session_path(&sessions, archive_id);
+    write_compressed(
+        &archive,
+        &session_bytes(archive_id, "certifiedarchivemarker"),
+    );
+    let registry = register_tree(&[&sessions]);
+    let refresh =
+        || refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let first = refresh();
+    assert!(first.failed_routes.is_empty());
+
+    let snapped = std::rc::Rc::new(std::cell::Cell::new(false));
+    set_after_standard_zstd_snapshot_hook({
+        let snapped = snapped.clone();
+        move || snapped.set(true)
+    });
+    assert_eq!(refresh().commit.generation_id, first.commit.generation_id);
+    assert!(
+        !snapped.get(),
+        "no-op refresh snapshotted a certified archive"
+    );
+
+    let sibling = "019fb000-0000-7000-8000-000000000082";
+    fs::write(
+        session_path(&sessions, sibling),
+        session_bytes(sibling, "newsiblingmarker"),
+    )
+    .unwrap();
+    assert!(refresh().failed_routes.is_empty());
+    assert!(
+        !snapped.get(),
+        "adding a sibling snapshotted a certified archive"
+    );
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(
+        search_event_candidates(&index, "certifiedarchivemarker", 8).len(),
+        1
+    );
+    assert_eq!(
+        search_event_candidates(&index, "newsiblingmarker", 8).len(),
+        1
+    );
+    drop(index);
+
+    write_compressed(
+        &archive,
+        &session_bytes(archive_id, "replacementarchivemarker"),
+    );
+    assert!(refresh().failed_routes.is_empty());
+    assert!(
+        snapped.get(),
+        "a changed archive must be physically validated"
+    );
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(
+        search_event_candidates(&index, "replacementarchivemarker", 8).len(),
+        1
+    );
+}
+
+#[test]
 fn revert_rollouts_use_embedded_owner_for_raw_and_compressed_tree_and_explicit_routes() {
     let temp = tempdir().unwrap();
     let tree_root = temp.path().join("revert-tree");

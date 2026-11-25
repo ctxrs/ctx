@@ -431,8 +431,12 @@ fn diagnosed_quarantine_owner_is_not_reclassified_as_pending() {
     )
     .unwrap();
 
-    super::super::capture::classify_incomplete_first_records(&PendingOnlyAdapter, &mut inventory)
-        .unwrap();
+    super::super::capture::classify_incomplete_first_records(
+        &PendingOnlyAdapter,
+        &mut inventory,
+        &HashMap::new(),
+    )
+    .unwrap();
 
     assert_eq!(inventory.quarantined_len(), 2);
     assert_eq!(inventory.pending_len(), 0);
