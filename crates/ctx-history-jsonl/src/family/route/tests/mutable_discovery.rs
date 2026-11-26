@@ -93,7 +93,7 @@ fn title_changes_between_discovery_classification_and_scan_preserve_exact_header
                 .set_modified(original_modified)
                 .unwrap();
         }
-        classify_incomplete_first_records(&TestAdapter, &mut opening).unwrap();
+        classify_incomplete_first_records(&TestAdapter, &mut opening, &HashMap::new()).unwrap();
         overwrite_title(&path, "before scan", false);
         if restore_mtime {
             fs::OpenOptions::new()

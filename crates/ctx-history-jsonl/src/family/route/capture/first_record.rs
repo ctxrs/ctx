@@ -8,6 +8,7 @@ use super::*;
 pub(in crate::family::route) fn classify_incomplete_first_records<R: JsonlFamilyRuntime>(
     adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
     opening: &mut JsonlFamilyInventory<JsonlRuntimeError<R>>,
+    bases: &HashMap<[u8; 32], &CertifiedSource>,
 ) -> JsonlResult<(), JsonlRuntimeError<R>> {
     if opening.root_missing {
         return Ok(());
@@ -17,13 +18,25 @@ pub(in crate::family::route) fn classify_incomplete_first_records<R: JsonlFamily
     for member in std::mem::take(&mut opening.members) {
         match member {
             JsonlFamilyInventoryMember::Accepted { identity, leaf } if !leaf.whole_record => {
+                let encoding = adapter.physical_encoding(&leaf);
+                // Opening an ordinary Zstandard stream snapshots and decodes the
+                // whole archive. An exact admitted base already proved framing
+                // for this observation; append-only trust cannot prove it.
+                if encoding == JsonlPhysicalEncoding::StandardZstdJsonl
+                    && base_for_leaf(bases, &leaf).is_some_and(|base| {
+                        admission::can_reuse_admission(adapter, &leaf, base, false)
+                    })
+                {
+                    classified.push(JsonlFamilyInventoryMember::Accepted { identity, leaf });
+                    continue;
+                }
                 let probe = first_record_is_incomplete(
                     &leaf.source_path,
                     &leaf.authority,
                     &leaf.authority_path,
                     &leaf.observation,
                     FirstRecordProbe {
-                        encoding: adapter.physical_encoding(&leaf),
+                        encoding,
                         framing: adapter.record_framing(),
                         freeze_observation_at_scan: leaf.frozen_scan_observation().is_some(),
                         admitted_length: leaf.admitted_length(),
