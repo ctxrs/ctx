@@ -75,11 +75,13 @@ neither.
 - `ctx upgrade` checks and applies signed CLI releases for official
   installer-managed binaries.
 - `ctx index` is the focused indexing surface. With no subcommand it shows a
-  one-shot status view; `ctx index mode` reads or changes `auto|manual` mode;
+  one-shot status view; `ctx index mode` reads or changes `auto|manual|scheduled` mode;
   `ctx index watch` follows progress; and `ctx index wait` blocks for selected
-  readiness. The canonical config is `[indexing] mode = "auto"|"manual"`, with
-  auto as the default. Auto permits persistent background maintenance; manual
-  disables it while retaining finite explicit refresh workers. The mode-change
+  readiness. The canonical config is `[indexing] mode = "auto"|"manual"|"scheduled"`,
+  with auto as the default. Auto permits persistent background maintenance; manual
+  disables it while retaining finite explicit refresh workers; scheduled keeps
+  the persistent daemon without filesystem watching and refreshes incrementally
+  every `indexing.interval_minutes`. The mode-change
   commands persist the choice and immediately reconcile daemon supervision.
 - `ctx status` and `ctx doctor` report ctx-owned daemon and supervisor health.
 - `ctx daemon run` is an advanced foreground, blocking maintenance command. It

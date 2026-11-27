@@ -66,6 +66,9 @@ enum IndexCommand {
 struct IndexModeArgs {
     #[arg(value_enum)]
     mode: Option<IndexModeArg>,
+    /// Refresh interval for `scheduled` mode, in minutes (default 10)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=1440))]
+    interval_minutes: Option<u64>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     format: JsonOutputFormat,
 }
@@ -74,6 +77,9 @@ struct IndexModeArgs {
 pub enum IndexModeArg {
     Auto,
     Manual,
+    /// Keep a background daemon without filesystem watching and refresh
+    /// incrementally on a fixed interval
+    Scheduled,
 }
 
 impl IndexModeArg {
@@ -81,6 +87,7 @@ impl IndexModeArg {
         match self {
             Self::Auto => "auto",
             Self::Manual => "manual",
+            Self::Scheduled => "scheduled",
         }
     }
 
@@ -125,7 +132,12 @@ pub trait IndexReadinessPort {
 
 pub trait IndexModePort {
     fn current(&mut self, data_root: &Path) -> Result<Value>;
-    fn update(&mut self, data_root: &Path, mode: IndexModeArg) -> Result<Value>;
+    fn update(
+        &mut self,
+        data_root: &Path,
+        mode: IndexModeArg,
+        interval_minutes: Option<u64>,
+    ) -> Result<Value>;
 }
 
 pub fn run_index(
@@ -156,7 +168,14 @@ pub fn run_index(
         Some(IndexCommand::Mode(args)) => {
             telemetry.operation = Some(IndexOperation::Mode);
             let report = match args.mode {
-                Some(requested) => mode.update(&data_root, requested)?,
+                Some(requested) => {
+                    if args.interval_minutes.is_some() && requested != IndexModeArg::Scheduled {
+                        anyhow::bail!(
+                            "--interval-minutes applies only to `ctx index mode scheduled`"
+                        );
+                    }
+                    mode.update(&data_root, requested, args.interval_minutes)?
+                }
                 None => mode.current(&data_root)?,
             };
             if parent_json || args.format.is_json() {
@@ -241,6 +260,9 @@ fn render_index_mode(report: &Value, changed: bool, ui: &Ui) -> Document {
     let detail = match mode {
         "auto" => "ctx will keep the index current in the background.",
         "manual" => "Run `ctx import` or use `ctx search --refresh wait` to update the index.",
+        "scheduled" => {
+            "ctx will refresh the index in the background on a fixed interval, without watching files."
+        }
         _ => "The indexing mode was updated.",
     };
     outcome(

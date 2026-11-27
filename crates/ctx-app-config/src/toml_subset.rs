@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::{bail, Context, Result};
 
 use super::{
-    AutoUpgradeMode, DaemonMode, IndexingMode, INDEXING_MEMORY_MB_MAX, INDEXING_MEMORY_MB_MIN,
+    AutoUpgradeMode, DaemonMode, IndexingMode, INDEXING_INTERVAL_MINUTES_MAX,
+    INDEXING_INTERVAL_MINUTES_MIN, INDEXING_MEMORY_MB_MAX, INDEXING_MEMORY_MB_MIN,
     INDEXING_WORKERS_MAX, INDEXING_WORKERS_MIN,
 };
 
@@ -146,10 +147,27 @@ pub(super) fn parse_indexing_mode(value: &ConfigValue) -> Result<IndexingMode> {
     match mode.to_ascii_lowercase().as_str() {
         "auto" | "automatic" => Ok(IndexingMode::Automatic),
         "manual" => Ok(IndexingMode::Manual),
+        "scheduled" => Ok(IndexingMode::Scheduled),
         _ => bail!(
-            "indexing.mode at line {} must be either \"auto\" or \"manual\"",
+            "indexing.mode at line {} must be \"auto\", \"manual\", or \"scheduled\"",
             value.line
         ),
+    }
+}
+
+pub(super) fn parse_indexing_interval_minutes(value: &ConfigValue) -> Result<u32> {
+    let parsed = parse_config_u64("indexing.interval_minutes", value)?;
+    validate_indexing_interval_minutes("indexing.interval_minutes", parsed)
+        .with_context(|| format!("indexing.interval_minutes at line {}", value.line))
+}
+
+pub(super) fn validate_indexing_interval_minutes(key: &str, minutes: u64) -> Result<u32> {
+    if (INDEXING_INTERVAL_MINUTES_MIN..=INDEXING_INTERVAL_MINUTES_MAX).contains(&minutes) {
+        Ok(u32::try_from(minutes).expect("interval bound fits in u32"))
+    } else {
+        bail!(
+            "{key} must be between {INDEXING_INTERVAL_MINUTES_MIN} and {INDEXING_INTERVAL_MINUTES_MAX} minutes"
+        )
     }
 }
 

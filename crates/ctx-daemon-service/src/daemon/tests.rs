@@ -1218,6 +1218,7 @@ fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
             daemon: crate::DaemonProductConfig {
                 enabled: true,
                 mode: DaemonMode::SourceRefreshOnly,
+                scheduled_import_interval: None,
             },
             semantic_enabled: true,
             ..AppConfig::default()

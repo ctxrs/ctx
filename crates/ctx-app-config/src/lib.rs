@@ -27,8 +27,9 @@ mod toml_subset;
 #[cfg(test)]
 pub use mutation::add_claude_root;
 pub use mutation::{
-    add_provider_root_with_kind, persisted_daemon_enabled, remove_provider_root,
-    set_auto_upgrade_mode, set_automatic_source_discovery_enabled, set_daemon_enabled,
+    add_provider_root_with_kind, persisted_daemon_enabled, persisted_indexing_mode,
+    remove_provider_root, set_auto_upgrade_mode, set_automatic_source_discovery_enabled,
+    set_daemon_enabled, set_indexing_interval_minutes, set_indexing_mode,
     set_semantic_search_enabled, set_semantic_search_enabled_with_executor, write_default_config,
     ProviderRootMutation,
 };
@@ -67,7 +68,8 @@ pub fn normalized_analytics_environment_override() -> Option<bool> {
 
 mod indexing;
 pub use indexing::{
-    IndexingConfig, IndexingMode, INDEXING_MEMORY_MB_MAX, INDEXING_MEMORY_MB_MIN,
+    IndexingConfig, IndexingMode, INDEXING_INTERVAL_MINUTES_DEFAULT, INDEXING_INTERVAL_MINUTES_MAX,
+    INDEXING_INTERVAL_MINUTES_MIN, INDEXING_MEMORY_MB_MAX, INDEXING_MEMORY_MB_MIN,
     INDEXING_WORKERS_MAX, INDEXING_WORKERS_MIN,
 };
 
@@ -334,6 +336,7 @@ impl Default for AppConfig {
                 mode: IndexingMode::Automatic,
                 memory_mb: None,
                 workers: None,
+                interval_minutes: None,
             },
             blame: BlameConfig { enabled: true },
             daemon: DaemonConfig {
@@ -351,8 +354,10 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// Whether a long-lived background daemon maintains the index (`auto`
+    /// or `scheduled`).
     pub const fn automatic_indexing_enabled(&self) -> bool {
-        self.indexing.mode.is_automatic()
+        self.indexing.mode.runs_daemon()
     }
 
     pub const fn indexing_memory_mb(&self) -> Option<usize> {
@@ -506,6 +511,9 @@ impl AppConfig {
                 "indexing.workers" => {
                     self.indexing.workers = Some(parse_indexing_workers(value)?);
                 }
+                "indexing.interval_minutes" => {
+                    self.indexing.interval_minutes = Some(parse_indexing_interval_minutes(value)?);
+                }
                 "blame.enabled" => {
                     self.blame.enabled = parse_config_bool(key, value)?;
                 }
@@ -656,7 +664,7 @@ impl AppConfig {
                 self.upgrade.interval = Duration::from_secs(seconds);
             }
         }
-        let indexing_config_manual = !self.indexing.mode.is_automatic();
+        let indexing_config_manual = self.indexing.mode == IndexingMode::Manual;
         let daemon_enabled_override = env::var("CTX_DAEMON_ENABLED")
             .ok()
             .and_then(|value| parse_bool_value(&value));
@@ -665,7 +673,9 @@ impl AppConfig {
             || deprecated_controls.disables_daemon();
         if daemon_disabled {
             self.indexing.mode = IndexingMode::Manual;
-        } else if daemon_enabled_override == Some(true) {
+        } else if daemon_enabled_override == Some(true)
+            && self.indexing.mode != IndexingMode::Scheduled
+        {
             self.indexing.mode = IndexingMode::Automatic;
         }
         if let Ok(mode) = env::var(DAEMON_MODE_ENV) {

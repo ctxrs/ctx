@@ -103,10 +103,56 @@ pub fn persisted_daemon_enabled(data_root: &Path) -> Result<bool> {
     Ok(AppConfig::load_persisted(data_root)?
         .indexing
         .mode
-        .is_automatic())
+        .runs_daemon())
+}
+
+pub fn persisted_indexing_mode(data_root: &Path) -> Result<IndexingMode> {
+    Ok(AppConfig::load_persisted(data_root)?.indexing.mode)
 }
 
 pub fn set_indexing_mode(data_root: &Path, mode: IndexingMode) -> Result<()> {
+    edit_indexing_table(data_root, |document| {
+        indexing_table(document)?.insert("mode", toml_edit::value(mode.as_str()));
+        if let Some(daemon) = document
+            .as_table_mut()
+            .get_mut("daemon")
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            daemon.remove("enabled");
+        }
+        Ok(())
+    })
+}
+
+/// Persists the `scheduled` mode refresh interval in minutes.
+pub fn set_indexing_interval_minutes(data_root: &Path, minutes: u64) -> Result<()> {
+    let minutes = crate::toml_subset::validate_indexing_interval_minutes(
+        "indexing.interval_minutes",
+        minutes,
+    )?;
+    edit_indexing_table(data_root, |document| {
+        indexing_table(document)?.insert("interval_minutes", toml_edit::value(i64::from(minutes)));
+        Ok(())
+    })
+}
+
+fn indexing_table(document: &mut toml_edit::DocumentMut) -> Result<&mut toml_edit::Table> {
+    if document.as_table().get("indexing").is_none() {
+        document
+            .as_table_mut()
+            .insert("indexing", toml_edit::table());
+    }
+    document
+        .as_table_mut()
+        .get_mut("indexing")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| anyhow::anyhow!("indexing configuration must be a table"))
+}
+
+fn edit_indexing_table(
+    data_root: &Path,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
+) -> Result<()> {
     let path = config_path_for_mutation(data_root)?;
     let _mutation_lock = ConfigMutationLock::acquire(&path)?;
     let text = read_config_text(&path)?;
@@ -122,24 +168,7 @@ pub fn set_indexing_mode(data_root: &Path, mode: IndexingMode) -> Result<()> {
     let mut document = text
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("parse {}", path.display()))?;
-    if document.as_table().get("indexing").is_none() {
-        document
-            .as_table_mut()
-            .insert("indexing", toml_edit::table());
-    }
-    let indexing = document
-        .as_table_mut()
-        .get_mut("indexing")
-        .and_then(toml_edit::Item::as_table_mut)
-        .ok_or_else(|| anyhow::anyhow!("indexing configuration must be a table"))?;
-    indexing.insert("mode", toml_edit::value(mode.as_str()));
-    if let Some(daemon) = document
-        .as_table_mut()
-        .get_mut("daemon")
-        .and_then(toml_edit::Item::as_table_mut)
-    {
-        daemon.remove("enabled");
-    }
+    edit(&mut document)?;
     let updated = document.to_string();
     let parsed =
         parse_toml_subset(&updated).with_context(|| format!("parse updated {}", path.display()))?;

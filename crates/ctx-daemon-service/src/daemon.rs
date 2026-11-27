@@ -45,6 +45,7 @@ use super::{
 mod automatic_upgrade;
 mod config_reload;
 mod lifecycle;
+mod scheduled_import;
 mod sharing;
 mod source_watch;
 mod storage_telemetry;
@@ -466,8 +467,11 @@ where
             &config_reload.to_json(),
         )?;
         ctx_daemon_runtime::block_daemon_main_before_ready_for_test(data_root)?;
-        let mut watch_runtime =
-            (!finite_worker).then(|| DaemonWatchRuntime::new(Arc::clone(&wakeup), ports.config));
+        // `scheduled` indexing mode keeps the daemon without a filesystem
+        // watcher and refreshes on its own timer instead.
+        let mut watch_runtime = (!finite_worker
+            && runtime.config.daemon.scheduled_import_interval.is_none())
+        .then(|| DaemonWatchRuntime::new(Arc::clone(&wakeup), ports.config));
         if let Some(watch_runtime) = watch_runtime.as_mut() {
             watch_runtime.reconcile_catalog_and_route_authority(
                 data_root,
@@ -531,6 +535,7 @@ where
             telemetry::deliver_active(observation, data_root, uploader_enabled, &events);
         }
         let mut next_safety_reconcile = Instant::now() + safety_interval;
+        let mut scheduled_import = scheduled_import::ScheduledImport::new(Instant::now());
         // Recovery installs the coordinator once before IPC activation, and
         // configuration reload only starts or stops services around that same
         // coordinator. Retain one stable owner outside the hot scheduler loop
@@ -683,6 +688,16 @@ where
                 break;
             }
             ctx_daemon_runtime::block_daemon_main_after_ready_for_test(data_root)?;
+            if !finite_worker {
+                scheduled_import.submit_if_due(
+                    data_root,
+                    runtime.config.daemon.scheduled_import_interval,
+                    refresh_service
+                        .as_ref()
+                        .and(daemon_scheduler_source_refresh(&source_refresh_coordinator)),
+                    Instant::now(),
+                );
+            }
             if let Some(watch_runtime) = watch_runtime.as_mut() {
                 watch_runtime.enqueue_pending_provider_root_refresh(
                     data_root,
@@ -784,6 +799,11 @@ where
                 now,
                 iteration.did_work,
             );
+            let wait_for = scheduled_import.bound_wait(
+                wait_for,
+                runtime.config.daemon.scheduled_import_interval,
+                now,
+            );
             let wake = wakeup.wait(sharing_workers.wait_duration(wait_for));
             if wake.shutdown {
                 break;
@@ -807,67 +827,71 @@ where
             let source_retry_due = retry_wakeup_due
                 && runtime.history_retry.consecutive_failures > 0
                 && runtime.history_retry.ready();
-            let watch_runtime = watch_runtime
-                .as_mut()
-                .expect("persistent daemon owns watch runtime");
-            if safety_due {
+            if safety_due && watch_runtime.is_none() {
+                // Scheduled mode owns no watcher; keep the safety deadline
+                // moving so it cannot turn into a zero-length wait.
                 next_safety_reconcile = Instant::now() + safety_interval;
-                watch_runtime.reconcile_catalog_and_route_authority(
-                    data_root,
-                    source_refresh,
-                    WatchCatalogReconcileTrigger::SafetyTimeout,
-                    false,
-                );
-                if let (Some(source_refresh), Some(catalog)) =
-                    (source_refresh, watch_runtime.catalog.snapshot())
-                {
-                    source_refresh.enqueue_overdue_hermes_exact_reconciliation(
+            }
+            if let Some(watch_runtime) = watch_runtime.as_mut() {
+                if safety_due {
+                    next_safety_reconcile = Instant::now() + safety_interval;
+                    watch_runtime.reconcile_catalog_and_route_authority(
                         data_root,
-                        &catalog,
-                        source_route_ledger_now_ms(),
-                    )?;
-                }
-            }
-            let watch_reconcile_trigger = wake
-                .source_watch
-                .reconcile
-                .map(WatchCatalogReconcileTrigger::CatalogControl)
-                .or_else(|| {
-                    wake.source_watch
-                        .rearm
-                        .then_some(WatchCatalogReconcileTrigger::WatcherRecovery)
-                })
-                .or_else(|| {
-                    wake.filesystem
-                        .then_some(WatchCatalogReconcileTrigger::Filesystem)
-                });
-            if let Some(trigger) = watch_reconcile_trigger {
-                watch_runtime.reconcile_catalog_and_route_authority(
-                    data_root,
-                    source_refresh,
-                    trigger,
-                    wake.source_watch.rearm,
-                );
-            }
-            if let Some(source_refresh) = source_refresh {
-                source_refresh.record_watch_routes_with_members(
-                    wake.source_watch.routes,
-                    wake.source_watch.members,
-                    source_route_ledger_now_ms(),
-                );
-            }
-            if let Some(watcher) = watch_runtime.file_watcher.as_ref() {
-                let _ = watcher.write_receipt(
-                    if safety_due
-                        || wake.filesystem
-                        || source_retry_due
-                        || scheduled_refresh_wakeup_due
+                        source_refresh,
+                        WatchCatalogReconcileTrigger::SafetyTimeout,
+                        false,
+                    );
+                    if let (Some(source_refresh), Some(catalog)) =
+                        (source_refresh, watch_runtime.catalog.snapshot())
                     {
-                        "active"
-                    } else {
-                        "idle"
-                    },
-                );
+                        source_refresh.enqueue_overdue_hermes_exact_reconciliation(
+                            data_root,
+                            &catalog,
+                            source_route_ledger_now_ms(),
+                        )?;
+                    }
+                }
+                let watch_reconcile_trigger = wake
+                    .source_watch
+                    .reconcile
+                    .map(WatchCatalogReconcileTrigger::CatalogControl)
+                    .or_else(|| {
+                        wake.source_watch
+                            .rearm
+                            .then_some(WatchCatalogReconcileTrigger::WatcherRecovery)
+                    })
+                    .or_else(|| {
+                        wake.filesystem
+                            .then_some(WatchCatalogReconcileTrigger::Filesystem)
+                    });
+                if let Some(trigger) = watch_reconcile_trigger {
+                    watch_runtime.reconcile_catalog_and_route_authority(
+                        data_root,
+                        source_refresh,
+                        trigger,
+                        wake.source_watch.rearm,
+                    );
+                }
+                if let Some(source_refresh) = source_refresh {
+                    source_refresh.record_watch_routes_with_members(
+                        wake.source_watch.routes,
+                        wake.source_watch.members,
+                        source_route_ledger_now_ms(),
+                    );
+                }
+                if let Some(watcher) = watch_runtime.file_watcher.as_ref() {
+                    let _ = watcher.write_receipt(
+                        if safety_due
+                            || wake.filesystem
+                            || source_retry_due
+                            || scheduled_refresh_wakeup_due
+                        {
+                            "active"
+                        } else {
+                            "idle"
+                        },
+                    );
+                }
             }
             let automatic_recovery_allowed =
                 daemon_automatic_recovery_allowed(&runtime.config, finite_worker);

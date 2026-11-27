@@ -519,9 +519,9 @@ pub(crate) fn maybe_autostart_daemon(
 pub(crate) fn update_indexing_mode(
     data_root: &Path,
     config: &ctx_app_config::AppConfig,
-    automatic: bool,
+    mode: ctx_app_config::IndexingMode,
 ) -> Result<ctx_daemon_cli::IndexingModeUpdate> {
-    ctx_daemon_cli::update_indexing_mode(data_root, &daemon_cli_config(config), automatic)
+    ctx_daemon_cli::update_indexing_mode(data_root, &daemon_cli_config(config), mode)
 }
 
 pub(crate) fn begin_current_daemon_upgrade_handoff(

@@ -116,10 +116,21 @@ pub(super) fn run_daemon_enabled_update(
 pub fn update_indexing_mode(
     data_root: &Path,
     config: &DaemonRuntimeConfig,
-    automatic: bool,
+    mode: ctx_app_config::IndexingMode,
 ) -> Result<crate::IndexingModeUpdate> {
-    super::super::daemon_supervisor::with_daemon_run_application(config, true, |application| {
-        apply_indexing_mode(application, data_root, automatic)
+    use super::super::daemon_supervisor::with_daemon_run_application_for_mode;
+    let previous = ctx_app_config::persisted_indexing_mode(data_root)?;
+    if previous.runs_daemon() && mode.runs_daemon() && previous != mode {
+        // `auto` and `scheduled` both keep the daemon enabled but differ in
+        // whether it watches the filesystem, which the running owner fixes at
+        // startup. Stop it through the ordinary disable path, then start it
+        // again under the requested mode.
+        with_daemon_run_application_for_mode(config, previous, |application| {
+            apply_indexing_mode(application, data_root, false)
+        })?;
+    }
+    with_daemon_run_application_for_mode(config, mode, |application| {
+        apply_indexing_mode(application, data_root, mode.runs_daemon())
     })
 }
 

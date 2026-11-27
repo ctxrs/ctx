@@ -11,6 +11,7 @@ fn inactive_semantic_runtime_preserves_persisted_failure_instead_of_pending() {
         crate::DaemonConfig {
             enabled: true,
             mode: crate::DaemonMode::Full,
+            scheduled_import_interval: None,
         },
         true,
         "config",
@@ -279,6 +280,7 @@ fn activation_failure_does_not_reuse_the_previous_executors_failure_class() {
         crate::DaemonConfig {
             enabled: true,
             mode: crate::DaemonMode::Full,
+            scheduled_import_interval: None,
         },
         true,
         "config",

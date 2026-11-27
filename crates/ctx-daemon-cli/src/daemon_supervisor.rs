@@ -17,6 +17,9 @@ pub(super) use ctx_daemon_application::{
 pub(super) struct CliDaemonApplicationHost<'config> {
     run_config: Option<&'config crate::composition::DaemonRuntimeConfig>,
     reload_persisted_config: bool,
+    // The daemon-running indexing mode persisted when the application enables
+    // the daemon (`auto` unless an explicit `scheduled` update is in progress).
+    enabled_indexing_mode: ctx_app_config::IndexingMode,
 }
 
 impl CliDaemonApplicationHost<'_> {
@@ -24,6 +27,7 @@ impl CliDaemonApplicationHost<'_> {
         Self {
             run_config: None,
             reload_persisted_config: true,
+            enabled_indexing_mode: ctx_app_config::IndexingMode::Automatic,
         }
     }
 
@@ -34,6 +38,7 @@ impl CliDaemonApplicationHost<'_> {
         CliDaemonApplicationHost {
             run_config: Some(config),
             reload_persisted_config,
+            enabled_indexing_mode: ctx_app_config::IndexingMode::Automatic,
         }
     }
 }
@@ -146,7 +151,11 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
     }
 
     fn set_daemon_enabled(&self, data_root: &Path, enabled: bool) -> Result<()> {
-        ctx_app_config::set_daemon_enabled(data_root, enabled)
+        if enabled {
+            ctx_app_config::set_indexing_mode(data_root, self.enabled_indexing_mode)
+        } else {
+            ctx_app_config::set_daemon_enabled(data_root, false)
+        }
     }
 
     fn request_daemon_shutdown(
@@ -286,6 +295,19 @@ pub(super) fn with_daemon_run_application<T>(
     operation: impl FnOnce(&ctx_daemon_application::DaemonApplication<'_>) -> T,
 ) -> T {
     let host = CliDaemonApplicationHost::for_daemon_run(config, reload_persisted_config);
+    let application = ctx_daemon_application::DaemonApplication::new(&host);
+    operation(&application)
+}
+
+/// Like [`with_daemon_run_application`], but enabling the daemon persists
+/// `enabled_mode` (`auto` or `scheduled`) instead of `auto`.
+pub(super) fn with_daemon_run_application_for_mode<T>(
+    config: &crate::composition::DaemonRuntimeConfig,
+    enabled_mode: ctx_app_config::IndexingMode,
+    operation: impl FnOnce(&ctx_daemon_application::DaemonApplication<'_>) -> T,
+) -> T {
+    let mut host = CliDaemonApplicationHost::for_daemon_run(config, true);
+    host.enabled_indexing_mode = enabled_mode;
     let application = ctx_daemon_application::DaemonApplication::new(&host);
     operation(&application)
 }
