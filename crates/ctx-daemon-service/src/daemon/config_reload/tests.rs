@@ -84,6 +84,7 @@ fn semantic_config(executor: SemanticEmbeddingExecutorConfig) -> DaemonConfigSna
         daemon: DaemonProductConfig {
             enabled: true,
             mode: DaemonMode::Full,
+            scheduled_import_interval: None,
         },
         semantic_enabled: true,
         semantic_executor: executor,

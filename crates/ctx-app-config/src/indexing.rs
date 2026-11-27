@@ -4,6 +4,10 @@ pub const INDEXING_MEMORY_MB_MIN: usize = 15;
 pub const INDEXING_MEMORY_MB_MAX: usize = 65_536;
 pub const INDEXING_WORKERS_MIN: usize = 1;
 pub const INDEXING_WORKERS_MAX: usize = 16;
+pub const INDEXING_INTERVAL_MINUTES_MIN: u64 = 1;
+pub const INDEXING_INTERVAL_MINUTES_MAX: u64 = 24 * 60;
+/// Refresh interval used by `scheduled` mode when none is configured.
+pub const INDEXING_INTERVAL_MINUTES_DEFAULT: u64 = 10;
 
 #[derive(Debug, Clone)]
 pub struct IndexingConfig {
@@ -14,6 +18,24 @@ pub struct IndexingConfig {
     /// Optional explicit indexing worker concurrency bound. When omitted,
     /// indexing sizes Tantivy indexer threads and leaf scanners automatically.
     pub workers: Option<usize>,
+    /// Optional refresh interval for `scheduled` mode, in minutes. Ignored by
+    /// the other modes; `scheduled` falls back to
+    /// [`INDEXING_INTERVAL_MINUTES_DEFAULT`].
+    pub interval_minutes: Option<u32>,
+}
+
+impl IndexingConfig {
+    /// The periodic incremental refresh interval when this configuration runs
+    /// the daemon without filesystem watching.
+    pub fn scheduled_interval(&self) -> Option<std::time::Duration> {
+        (self.mode == IndexingMode::Scheduled).then(|| {
+            std::time::Duration::from_secs(
+                self.interval_minutes
+                    .map_or(INDEXING_INTERVAL_MINUTES_DEFAULT, u64::from)
+                    .saturating_mul(60),
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -21,6 +43,9 @@ pub enum IndexingMode {
     #[default]
     Automatic,
     Manual,
+    /// The daemon stays running without filesystem watching and performs an
+    /// incremental refresh of all history every configured interval.
+    Scheduled,
 }
 
 impl IndexingMode {
@@ -28,10 +53,22 @@ impl IndexingMode {
         match self {
             Self::Automatic => "auto",
             Self::Manual => "manual",
+            Self::Scheduled => "scheduled",
         }
     }
 
     pub const fn is_automatic(self) -> bool {
+        matches!(self, Self::Automatic)
+    }
+
+    /// Whether a long-lived background daemon maintains the index.
+    pub const fn runs_daemon(self) -> bool {
+        matches!(self, Self::Automatic | Self::Scheduled)
+    }
+
+    /// Whether the daemon reacts to filesystem events. `scheduled` refreshes
+    /// on a timer instead.
+    pub const fn watches_filesystem(self) -> bool {
         matches!(self, Self::Automatic)
     }
 
@@ -150,5 +187,128 @@ mod tests {
         env_guard.set(INDEXING_WORKERS_ENV, "0");
         let error = format!("{:#}", AppConfig::load(data_root.path()).unwrap_err());
         assert!(error.contains(INDEXING_WORKERS_ENV), "{error}");
+    }
+
+    #[test]
+    fn scheduled_mode_runs_daemon_without_watching_and_defaults_interval() {
+        let _env = IndexingEnvGuard::new(&["CTX_DAEMON_ENABLED"]);
+        let data_root = tempfile::tempdir().unwrap();
+        fs::write(
+            data_root.path().join(CONFIG_FILE),
+            "[indexing]\nmode = \"scheduled\"\n",
+        )
+        .unwrap();
+
+        let config = AppConfig::load(data_root.path()).unwrap();
+
+        assert_eq!(config.indexing.mode, IndexingMode::Scheduled);
+        assert_eq!(config.indexing.mode.as_str(), "scheduled");
+        assert!(config.indexing.mode.runs_daemon());
+        assert!(!config.indexing.mode.watches_filesystem());
+        assert!(config.automatic_indexing_enabled());
+        assert_eq!(
+            config.indexing.scheduled_interval(),
+            Some(std::time::Duration::from_secs(
+                crate::INDEXING_INTERVAL_MINUTES_DEFAULT * 60
+            ))
+        );
+        assert!(IndexingMode::Automatic.watches_filesystem());
+        assert!(!IndexingMode::Manual.runs_daemon());
+    }
+
+    #[test]
+    fn scheduled_interval_parses_and_is_ignored_by_other_modes() {
+        let _env = IndexingEnvGuard::new(&["CTX_DAEMON_ENABLED"]);
+        let data_root = tempfile::tempdir().unwrap();
+        fs::write(
+            data_root.path().join(CONFIG_FILE),
+            "[indexing]\nmode = \"scheduled\"\ninterval_minutes = 25\n",
+        )
+        .unwrap();
+        let config = AppConfig::load(data_root.path()).unwrap();
+        assert_eq!(config.indexing.interval_minutes, Some(25));
+        assert_eq!(
+            config.indexing.scheduled_interval(),
+            Some(std::time::Duration::from_secs(25 * 60))
+        );
+
+        fs::write(
+            data_root.path().join(CONFIG_FILE),
+            "[indexing]\nmode = \"auto\"\ninterval_minutes = 25\n",
+        )
+        .unwrap();
+        let config = AppConfig::load(data_root.path()).unwrap();
+        assert_eq!(config.indexing.scheduled_interval(), None);
+    }
+
+    #[test]
+    fn scheduled_interval_rejects_out_of_range_values() {
+        let _env = IndexingEnvGuard::new(&["CTX_DAEMON_ENABLED"]);
+        for value in ["0", "1441", "-1", "ten"] {
+            let data_root = tempfile::tempdir().unwrap();
+            fs::write(
+                data_root.path().join(CONFIG_FILE),
+                format!("[indexing]\nmode = \"scheduled\"\ninterval_minutes = {value}\n"),
+            )
+            .unwrap();
+            let error = format!("{:#}", AppConfig::load(data_root.path()).unwrap_err());
+            assert!(
+                error.contains("indexing.interval_minutes"),
+                "{value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_enabled_environment_keeps_scheduled_mode() {
+        let env = IndexingEnvGuard::new(&["CTX_DAEMON_ENABLED"]);
+        let data_root = tempfile::tempdir().unwrap();
+        fs::write(
+            data_root.path().join(CONFIG_FILE),
+            "[indexing]\nmode = \"scheduled\"\n",
+        )
+        .unwrap();
+
+        env.set("CTX_DAEMON_ENABLED", "true");
+        assert_eq!(
+            AppConfig::load(data_root.path()).unwrap().indexing.mode,
+            IndexingMode::Scheduled
+        );
+        env.set("CTX_DAEMON_ENABLED", "false");
+        assert_eq!(
+            AppConfig::load(data_root.path()).unwrap().indexing.mode,
+            IndexingMode::Manual
+        );
+    }
+
+    #[test]
+    fn scheduled_mode_and_interval_persist_through_mutations() {
+        let _env = IndexingEnvGuard::new(&["CTX_DAEMON_ENABLED"]);
+        let data_root = tempfile::tempdir().unwrap();
+
+        crate::set_indexing_interval_minutes(data_root.path(), 15).unwrap();
+        crate::set_indexing_mode(data_root.path(), IndexingMode::Scheduled).unwrap();
+
+        assert_eq!(
+            crate::persisted_indexing_mode(data_root.path()).unwrap(),
+            IndexingMode::Scheduled
+        );
+        assert!(crate::persisted_daemon_enabled(data_root.path()).unwrap());
+        let config = AppConfig::load(data_root.path()).unwrap();
+        assert_eq!(config.indexing.interval_minutes, Some(15));
+        assert!(crate::set_indexing_interval_minutes(data_root.path(), 0).is_err());
+
+        crate::set_daemon_enabled(data_root.path(), false).unwrap();
+        assert_eq!(
+            crate::persisted_indexing_mode(data_root.path()).unwrap(),
+            IndexingMode::Manual
+        );
+        assert_eq!(
+            AppConfig::load(data_root.path())
+                .unwrap()
+                .indexing
+                .interval_minutes,
+            Some(15)
+        );
     }
 }

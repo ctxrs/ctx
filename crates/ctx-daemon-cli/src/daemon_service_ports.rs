@@ -62,6 +62,7 @@ fn config_snapshot_with_channel(
                 crate::composition::DaemonMode::Full => DaemonMode::Full,
                 crate::composition::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
             },
+            scheduled_import_interval: config.daemon.scheduled_import_interval,
         },
         indexing_memory_mb: config.indexing_memory_mb(),
         indexing_workers: config.indexing_workers(),

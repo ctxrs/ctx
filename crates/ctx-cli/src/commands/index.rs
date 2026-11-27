@@ -38,13 +38,23 @@ impl ctx_cli_presentation::commands::index::IndexModePort for CliIndexMode {
         &mut self,
         data_root: &Path,
         mode: ctx_cli_presentation::commands::index::IndexModeArg,
+        interval_minutes: Option<u64>,
     ) -> Result<Value> {
+        use ctx_cli_presentation::commands::index::IndexModeArg;
+        if let Some(minutes) = interval_minutes {
+            config::set_indexing_interval_minutes(data_root, minutes)?;
+        }
         let config = config::AppConfig::load(data_root)?;
-        let update = crate::semantic::update_indexing_mode(data_root, &config, mode.is_auto())?;
-        let applied_mode = if update.automatic { "auto" } else { "manual" };
+        let requested = match mode {
+            IndexModeArg::Auto => config::IndexingMode::Automatic,
+            IndexModeArg::Manual => config::IndexingMode::Manual,
+            IndexModeArg::Scheduled => config::IndexingMode::Scheduled,
+        };
+        let update = crate::semantic::update_indexing_mode(data_root, &config, requested)?;
+        let applied = config::AppConfig::load(data_root)?;
         Ok(index_mode_report(
             data_root,
-            applied_mode,
+            applied.indexing.mode.as_str(),
             Some(mode.as_str()),
             Some(update),
         ))

@@ -31,6 +31,8 @@ impl DaemonMode {
 pub struct DaemonConfig {
     pub enabled: bool,
     pub mode: DaemonMode,
+    /// Set in `scheduled` indexing mode; see `DaemonProductConfig`.
+    pub scheduled_import_interval: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +79,7 @@ impl DaemonRuntimeConfig {
                     ctx_app_config::DaemonMode::Full => DaemonMode::Full,
                     ctx_app_config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
                 },
+                scheduled_import_interval: config.indexing.scheduled_interval(),
             },
             config.semantic_search_enabled(),
             config.semantic_search_source(),
@@ -234,6 +237,7 @@ impl Default for DaemonRuntimeConfig {
             DaemonConfig {
                 enabled: true,
                 mode: DaemonMode::Full,
+                scheduled_import_interval: None,
             },
             false,
             "default",

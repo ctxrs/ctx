@@ -128,6 +128,9 @@ impl Default for DaemonConfigSnapshot {
 pub struct DaemonProductConfig {
     pub enabled: bool,
     pub mode: DaemonMode,
+    /// `scheduled` indexing mode: run without filesystem watching and submit
+    /// an incremental refresh of all history every interval.
+    pub scheduled_import_interval: Option<Duration>,
 }
 
 impl DaemonConfigSnapshot {
@@ -478,6 +481,7 @@ mod tests {
             daemon: DaemonProductConfig {
                 enabled: true,
                 mode: DaemonMode::Full,
+                scheduled_import_interval: None,
             },
             indexing_memory_mb: None,
             indexing_workers: None,

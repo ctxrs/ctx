@@ -34,9 +34,10 @@ The short-lived `upgrade.allow_rfc2544_fake_ip` key is retired. Versions after
 settings. This compatibility migration is scheduled for removal after
 2026-11-30 and at least three subsequent stable releases.
 
-The canonical persisted indexing control is `[indexing] mode = "auto"` or
-`"manual"`. Auto is the default. Use `ctx index mode` to read the effective
-mode and `ctx index mode auto` or `ctx index mode manual` to persist a change.
+The canonical persisted indexing control is `[indexing] mode = "auto"`,
+`"manual"`, or `"scheduled"`. Auto is the default. Use `ctx index mode` to read
+the effective mode and `ctx index mode auto`, `ctx index mode manual`, or
+`ctx index mode scheduled` to persist a change.
 
 ctx stores immutable Core/Tantivy search generations, optional semantic data,
 a derived attribution index, and content-free local usage aggregates locally. Treat the ctx data root like
@@ -547,7 +548,7 @@ Neither maintenance path changes the command result.
 | `ctx semantic enable` / `ctx semantic disable` | semantic policy, selected executor metadata, generation and local asset metadata, indexing mode, and daemon state | atomically updates `config.toml`; automatic-mode enable may start the daemon and use the selected executor, while disable lets daemon maintenance quiesce semantic work and retains downloaded assets |
 | `ctx status` | data root metadata, source epoch, lexical/semantic/attribution generation metadata, daemon state, and compact local usage health | none; does not mutate provider history, Core generations, or usage aggregates |
 | `ctx index` / `ctx index watch` / `ctx index wait` | indexing mode, lexical/semantic generation metadata, and daemon state | none |
-| `ctx index mode` | `config.toml` when present | none when reading; `auto` or `manual` writes `config.toml` and establishes or removes persistent supervision |
+| `ctx index mode` | `config.toml` when present | none when reading; `auto`, `manual`, or `scheduled` writes `config.toml` and establishes or removes persistent supervision |
 | `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, local history-source plugin manifests, and configured named history roots | none |
 | `ctx sources add [--replace]` / `ctx sources remove` | `config.toml` and named provider history root path metadata used for validation | atomically updates `config.toml`; provider history is never modified |
@@ -766,12 +767,27 @@ explicit import and search `--refresh wait` may use a finite Core worker.
 `--refresh off` and explicit `--no-daemon` controls never start or wake either
 profile.
 
+Scheduled mode keeps the persistent daemon but does not watch the filesystem.
+Instead, the daemon submits the same refresh as `ctx import --all
+--incremental` every `indexing.interval_minutes` minutes (default `10`, from
+`1` to `1440`). The first refresh after the daemon starts is exhaustive, like
+the startup reconciliation of auto mode. Use it when continuously written
+agent transcripts keep automatic mode busy and a bounded refresh delay is
+acceptable:
+
+```toml
+[indexing]
+mode = "scheduled"
+interval_minutes = 10
+```
+
 Use the public indexing controls to inspect or change the setting:
 
 ```bash
 ctx index mode
 ctx index mode auto
 ctx index mode manual
+ctx index mode scheduled --interval-minutes 10
 ```
 
 Mode setters persist the requested canonical value and reconcile supervision to
