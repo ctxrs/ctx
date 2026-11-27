@@ -538,7 +538,10 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             .map(|resume| resume.previous.complete_prefix_end())
     }
 
-    pub(super) fn execution_is_direct_append_resume(&self) -> bool {
+    /// True when this reader resumed at the certified frontier without
+    /// replaying the prefix, so a projector preflight observes only the
+    /// unfinished tail and new suffix.
+    pub fn execution_is_direct_append_resume(&self) -> bool {
         self.direct_append_resume
     }
 

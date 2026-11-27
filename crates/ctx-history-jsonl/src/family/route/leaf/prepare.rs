@@ -284,7 +284,7 @@ pub(in super::super) fn prepare_leaf_with_resources<R: JsonlFamilyRuntime>(
     }
     let mut projector = adapter.projector_with_provider_checkpoint(
         &leaf,
-        opened,
+        Arc::clone(&opened),
         DateTime::<Utc>::UNIX_EPOCH,
         resumed.and_then(|checkpoint| checkpoint.provider_checkpoint.as_ref()),
         base.is_some().then(|| base_event_lookup.clone()),
@@ -292,45 +292,71 @@ pub(in super::super) fn prepare_leaf_with_resources<R: JsonlFamilyRuntime>(
     )?;
     let mut logical_source_quarantine = None;
     if projector_preflight {
-        let initial = reader.execution_position()?;
-        let retry = match projector.preflight_with_failure_scope(
-            &mut reader,
-            resumed.map(|checkpoint| checkpoint.physical.complete_prefix_end()),
-        ) {
-            Ok(retry) => retry,
-            Err(JsonlFamilyProjectorPreflightError::RecordRejection { .. }) => {
-                return Err(JsonlRuntimeError::<R>::system_invariant(
-                    "JSONL projector leaked a record rejection from preflight",
-                ));
-            }
-            Err(JsonlFamilyProjectorPreflightError::LogicalSourceFailure { source, detail }) => {
-                if !source.exact_descriptor_eq(leaf.source()) {
+        loop {
+            let initial = reader.execution_position()?;
+            let retry = match projector.preflight_with_failure_scope(
+                &mut reader,
+                resumed.map(|checkpoint| checkpoint.physical.complete_prefix_end()),
+            ) {
+                Ok(retry) => retry,
+                Err(JsonlFamilyProjectorPreflightError::RecordRejection { .. }) => {
                     return Err(JsonlRuntimeError::<R>::system_invariant(
-                        "JSONL projector failed another logical source",
+                        "JSONL projector leaked a record rejection from preflight",
                     ));
                 }
-                logical_source_quarantine = Some((*source, detail));
-                false
-            }
-            Err(JsonlFamilyProjectorPreflightError::Internal(error)) => return Err(error),
-        };
-        let source_failed = logical_source_quarantine.is_some();
-        let physical_ready =
-            reader.settle_semantic_preflight(initial, !retry && !source_failed, true)?;
-        if source_failed {
-            resumed = None;
-            is_append = false;
-        } else {
-            if (retry || !physical_ready) && !is_append {
-                return Err(JsonlRuntimeError::<R>::system_invariant(
-                    "JSONL projector replaced a non-append",
-                ));
-            }
-            if retry || !physical_ready {
-                projector.retry_replacement();
+                Err(JsonlFamilyProjectorPreflightError::LogicalSourceFailure {
+                    source,
+                    detail,
+                }) => {
+                    if !source.exact_descriptor_eq(leaf.source()) {
+                        return Err(JsonlRuntimeError::<R>::system_invariant(
+                            "JSONL projector failed another logical source",
+                        ));
+                    }
+                    logical_source_quarantine = Some((*source, detail));
+                    false
+                }
+                Err(JsonlFamilyProjectorPreflightError::Internal(error)) => return Err(error),
+            };
+            let source_failed = logical_source_quarantine.is_some();
+            let physical_ready =
+                reader.settle_semantic_preflight(initial, !retry && !source_failed, true)?;
+            if reader.execution_is_direct_append_resume()
+                && (retry || !physical_ready || source_failed)
+            {
+                // A direct append preflight observed only the new suffix. Replace
+                // from the beginning so the replacement preflight, duplicate plan,
+                // and physical counts all cover the whole source.
+                reader = open_reader(None)?;
+                projector = adapter.projector_with_provider_checkpoint(
+                    &leaf,
+                    Arc::clone(&opened),
+                    DateTime::<Utc>::UNIX_EPOCH,
+                    None,
+                    Some(base_event_lookup.clone()),
+                    JsonlFamilyProjectionMode::Replacement,
+                )?;
+                logical_source_quarantine = None;
                 resumed = None;
                 is_append = false;
+                continue;
             }
+            if source_failed {
+                resumed = None;
+                is_append = false;
+            } else {
+                if (retry || !physical_ready) && !is_append {
+                    return Err(JsonlRuntimeError::<R>::system_invariant(
+                        "JSONL projector replaced a non-append",
+                    ));
+                }
+                if retry || !physical_ready {
+                    projector.retry_replacement();
+                    resumed = None;
+                    is_append = false;
+                }
+            }
+            break;
         }
     }
     let mut physical_records = resumed.map_or_else(

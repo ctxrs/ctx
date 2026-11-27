@@ -51,6 +51,9 @@ const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
 const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
 const PARSER_REVISION: &str = "claude-shared-jsonl-core-activity-v3-record-ownership";
+/// Provider checkpoint that admits a direct append resume. Checkpoints written
+/// before it existed carry no provider state and take the full path once.
+const APPEND_CHECKPOINT_V1: &str = "claude.append-checkpoint.v1";
 
 mod binding;
 mod discovery;
@@ -120,6 +123,21 @@ where
         JsonlFamilyAppendMode::ProjectorPreflight(true)
     }
 
+    /// Claude Code only appends to a session transcript. Replacing the file
+    /// (new object) or truncating it is still rejected by the shared reader,
+    /// and exhaustive reconciliation keeps authenticating the full prefix.
+    fn append_only_same_object_v1(&self) -> bool {
+        true
+    }
+
+    fn accepts_direct_append_checkpoint(&self, checkpoint: &TypedKey) -> bool {
+        matches!(checkpoint, TypedKey::Utf8(value) if value == APPEND_CHECKPOINT_V1)
+    }
+
+    fn allows_direct_append_for_leaf(&self, leaf: &ProviderJsonlLeaf) -> bool {
+        leaf.observation().supports_exact_revalidation()
+    }
+
     fn oversized_record_policy(&self) -> JsonlOversizedRecordPolicy {
         JsonlOversizedRecordPolicy::RejectRecord
     }
@@ -170,6 +188,10 @@ where
                 leaf.source_path().to_string_lossy(),
             ),
             duplicate_plan: ClaudeDuplicatePlan::default(),
+            append_base_lookup: match mode {
+                JsonlFamilyProjectionMode::CertifiedAppend => base_event_lookup.clone(),
+                _ => None,
+            },
             fallback_identities: match (mode, base_event_lookup) {
                 (JsonlFamilyProjectionMode::CertifiedAppend, Some(base_lookup)) => {
                     JsonlAppendOccurrenceState::for_append(base_lookup)
@@ -195,6 +217,9 @@ struct ClaudeProjector<B: ProviderRuntimeBinding> {
     session: ClaudeSessionMetadata,
     rejections: JsonlRecordRejections,
     duplicate_plan: ClaudeDuplicatePlan,
+    /// Base index membership used when a direct append preflight sees only
+    /// the new suffix and must detect identities already certified earlier.
+    append_base_lookup: Option<ProviderBaseEventLookup<B>>,
     fallback_identities: JsonlAppendOccurrenceState<[u8; 32], ProviderBaseEventLookup<B>>,
 }
 
@@ -234,6 +259,7 @@ where
             &self.source,
             self.identities.session_id,
             certified_prefix_end,
+            self.append_base_lookup.as_ref(),
             &mut self.duplicate_plan,
         )
     }
@@ -388,7 +414,9 @@ where
     }
 
     fn provider_checkpoint(&self) -> Result<Option<TypedKey>> {
-        Ok(None)
+        TypedKey::utf8(APPEND_CHECKPOINT_V1)
+            .map(Some)
+            .map_err(contract)
     }
 
     fn rejected_records(&self) -> u64 {
