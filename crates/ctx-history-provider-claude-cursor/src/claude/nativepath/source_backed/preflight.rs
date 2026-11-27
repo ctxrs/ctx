@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use ctx_history_capture_runtime::BaseEventLookup;
 use ctx_history_core::{
     derive_event_id, EventIdentityInput, NativeItemKey, ProjectionContractError, SourceKey,
     StableEntityId, TypedKey,
@@ -206,18 +207,25 @@ pub(super) fn checked_preflight_identity_count(
         })
 }
 
-pub(super) fn validate_source(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn validate_source<L: BaseEventLookup>(
     reader: &mut JsonlReader,
     source_path: &str,
     binding: &Binding,
     source: &SourceKey,
     session_id: StableEntityId,
     certified_prefix_end: Option<u64>,
+    append_base_lookup: Option<&L>,
     duplicate_plan: &mut ClaudeDuplicatePlan,
 ) -> std::result::Result<bool, ClaudePreflightError> {
     duplicate_plan.clear();
     let mut identities = Vec::new();
-    let mut requires_replacement = false;
+    // A direct append resume does not replay the certified prefix. Any suffix
+    // identity already present in the base index may supersede a certified
+    // observation (or conflict with its kind), so it requests the full
+    // replacement preflight instead of being decided from the suffix alone.
+    let suffix_only = reader.execution_is_direct_append_resume();
+    let mut requires_replacement = suffix_only && append_base_lookup.is_none();
     while reader
         .visit_page(
             &mut |record| -> std::result::Result<(), ClaudePreflightError> {
@@ -255,21 +263,33 @@ pub(super) fn validate_source(
                     })?;
                 for row in &parsed.rows {
                     match stable_native_event_identity(row, source, session_id) {
-                        Ok(Some(event_id)) => record_identities.push(ClaudePreflightIdentity {
-                            event_digest: event_id.digest(),
-                            source_record_ordinal: row.identity.source_record_ordinal,
-                            source_subrecord_index: u16::try_from(
-                                row.identity.source_subrecord_index,
-                            )
-                            .map_err(|_| {
-                                ClaudePreflightError::internal(CaptureError::SystemInvariant(
+                        Ok(Some(event_id)) => {
+                            if suffix_only && !requires_replacement {
+                                if let Some(lookup) = append_base_lookup {
+                                    requires_replacement =
+                                        lookup.contains(event_id.as_uuid()).map_err(|error| {
+                                            ClaudePreflightError::internal(
+                                                CaptureError::InvalidPayload(error.to_string()),
+                                            )
+                                        })?;
+                                }
+                            }
+                            record_identities.push(ClaudePreflightIdentity {
+                                event_digest: event_id.digest(),
+                                source_record_ordinal: row.identity.source_record_ordinal,
+                                source_subrecord_index: u16::try_from(
+                                    row.identity.source_subrecord_index,
+                                )
+                                .map_err(|_| {
+                                    ClaudePreflightError::internal(CaptureError::SystemInvariant(
                                     "Claude preflight subrecord identity exceeded its parser bound",
                                 ))
-                            })?,
-                            kind: row.kind,
-                            in_certified_prefix: certified_prefix_end
-                                .is_some_and(|end| evidence.byte_end_exclusive() <= end),
-                        }),
+                                })?,
+                                kind: row.kind,
+                                in_certified_prefix: certified_prefix_end
+                                    .is_some_and(|end| evidence.byte_end_exclusive() <= end),
+                            });
+                        }
                         Ok(None) => {}
                         Err(error) => match scope_claude_row_validation_error(error) {
                             ClaudePreflightError::RecordRejection { .. } => return Ok(()),

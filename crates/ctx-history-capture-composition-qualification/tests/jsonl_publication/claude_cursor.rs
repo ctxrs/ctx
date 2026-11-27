@@ -1211,3 +1211,258 @@ mod active_file_race;
 
 #[path = "claude_ownership.rs"]
 mod ownership;
+
+#[test]
+#[cfg(unix)]
+fn large_live_claude_transcript_reads_only_new_suffix_on_append() {
+    use ctx_history_source_io::read_metrics::track_source_reads;
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let index = temp.path().join("index");
+    let session = "large-live-claude-session";
+    let transcript = projects.join("project").join(format!("{session}.jsonl"));
+    let padding = "padding ".repeat(256);
+    let rows = (0..4_000)
+        .map(|index| {
+            claude_message(
+                if index % 2 == 0 { "user" } else { "assistant" },
+                &format!("prefix-event-{index}"),
+                session,
+                &format!("prefix body {index} {padding}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    write_transcript(&transcript, &rows);
+    let prefix_bytes = fs::metadata(&transcript).unwrap().len();
+    assert!(prefix_bytes > 8 * 1024 * 1024);
+    let registry = registry(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        &projects,
+    );
+    let cold = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert!(cold.failed_routes.is_empty());
+
+    for cycle in 0..3 {
+        append_transcript(
+            &transcript,
+            &claude_message(
+                "assistant",
+                &format!("live-append-{cycle}"),
+                session,
+                "liveappendmarker",
+            ),
+        );
+        let reads = track_source_reads(&transcript);
+        let appended = refresh_incremental(&index, &registry, &transcript);
+        assert!(appended.failed_routes.is_empty());
+        assert!(appended.logical_source_failures.is_empty());
+        let read = reads.bytes();
+        eprintln!("cycle {cycle}: read {read} bytes of {prefix_bytes}-byte prefix");
+        // Only the appended suffix (plus bounded read-ahead) may be read.
+        assert!(
+            read < 1024 * 1024,
+            "append cycle {cycle} reread {read} bytes of a {prefix_bytes}-byte transcript"
+        );
+        assert_eq!(
+            certified_prefix_bytes(&index, CaptureProvider::Claude),
+            fs::metadata(&transcript).unwrap().len()
+        );
+    }
+    let verified = VerifiedIndex::open_pinned(&index).unwrap();
+    assert_eq!(lexical_match_count(&verified, "liveappendmarker"), 3);
+}
+
+/// Ordinary maintenance refresh (daemon `Refresh`, `ctx import --incremental`),
+/// the only demand that admits append-only trust.
+fn refresh_incremental(
+    index: &Path,
+    registry: &SourceBackedProviderRegistry,
+    member: &Path,
+) -> crate::SourceBackedRefreshReceipt {
+    let route = registry
+        .routes()
+        .next()
+        .and_then(|route| route.route_identity.clone())
+        .unwrap();
+    crate::SourceBackedRefreshExecutor::new(registry.clone(), writer_options())
+        .refresh_physical_scope_with_detailed_progress_generation_state_reconciliation_and_worksets(
+            index,
+            crate::SourceBackedRefreshScope::All,
+            crate::SourceBackedRefreshScope::All,
+            crate::SourceBackedReconciliationDemand::Incremental,
+            std::collections::BTreeMap::from([(
+                route,
+                std::collections::BTreeSet::from([member.to_path_buf()]),
+            )]),
+            |_| Ok(()),
+            |_| ctx_history_index::GenerationStateEnvelope::new("ctx.test.empty.v1", Vec::new()),
+        )
+        .unwrap()
+}
+
+#[test]
+fn direct_claude_append_repeating_certified_identity_replaces_from_the_beginning() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let index = temp.path().join("index");
+    let session = "direct-duplicate-claude-session";
+    let transcript = projects.join("project").join(format!("{session}.jsonl"));
+    // Large enough that buffered read-ahead cannot cover the whole file.
+    let kept = format!("kept prefix observation {}", "padding ".repeat(16_384));
+    write_transcript(
+        &transcript,
+        &[
+            claude_message("user", "lead-event", session, "lead observation"),
+            claude_message("user", "kept-event", session, &kept),
+            claude_message(
+                "user",
+                "repeated-event",
+                session,
+                "stale prefix observation",
+            ),
+        ],
+    );
+    let registry = registry(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        &projects,
+    );
+    let cold = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert!(cold.failed_routes.is_empty());
+    let cold_records = indexed_records(&index, CaptureProvider::Claude, session);
+    assert_literal_bodies(
+        &cold_records,
+        &[
+            "lead observation",
+            kept.as_str(),
+            "stale prefix observation",
+        ],
+    );
+
+    // A fresh suffix identity takes the direct path and appends.
+    append_transcript(
+        &transcript,
+        &claude_message(
+            "assistant",
+            "suffix-event",
+            session,
+            "new suffix observation",
+        ),
+    );
+    let reads = ctx_history_source_io::read_metrics::track_source_reads(&transcript);
+    let appended = refresh_incremental(&index, &registry, &transcript);
+    assert!(reads.bytes() < fs::metadata(&transcript).unwrap().len() / 2);
+    drop(reads);
+    assert!(appended.failed_routes.is_empty());
+    assert!(appended.logical_source_failures.is_empty());
+    assert_literal_bodies(
+        &indexed_records(&index, CaptureProvider::Claude, session),
+        &[
+            "lead observation",
+            kept.as_str(),
+            "stale prefix observation",
+            "new suffix observation",
+        ],
+    );
+
+    // The suffix repeats an identity certified in the prefix: the direct
+    // preflight cannot see the prefix, so it must replace the whole source.
+    append_transcript(
+        &transcript,
+        &claude_message(
+            "user",
+            "repeated-event",
+            session,
+            "fresh suffix observation",
+        ),
+    );
+    let replaced = refresh_incremental(&index, &registry, &transcript);
+    assert!(replaced.failed_routes.is_empty());
+    assert!(replaced.logical_source_failures.is_empty());
+    let replaced_records = indexed_records(&index, CaptureProvider::Claude, session);
+    assert_literal_bodies(
+        &replaced_records,
+        &[
+            "lead observation",
+            kept.as_str(),
+            "new suffix observation",
+            "fresh suffix observation",
+        ],
+    );
+    assert_eq!(replaced_records[0].event_id, cold_records[0].event_id);
+    assert_eq!(replaced_records[3].event_id, cold_records[2].event_id);
+    assert_eq!(
+        certified_prefix_bytes(&index, CaptureProvider::Claude),
+        fs::metadata(&transcript).unwrap().len()
+    );
+
+    // Later appends resume directly again from the replacement checkpoint.
+    append_transcript(
+        &transcript,
+        &claude_message("assistant", "after-event", session, "after replacement"),
+    );
+    let reads = ctx_history_source_io::read_metrics::track_source_reads(&transcript);
+    let resumed = refresh_incremental(&index, &registry, &transcript);
+    assert!(resumed.failed_routes.is_empty());
+    assert!(reads.bytes() < fs::metadata(&transcript).unwrap().len() / 2);
+    assert_literal_bodies(
+        &indexed_records(&index, CaptureProvider::Claude, session),
+        &[
+            "lead observation",
+            kept.as_str(),
+            "new suffix observation",
+            "fresh suffix observation",
+            "after replacement",
+        ],
+    );
+}
+
+#[test]
+fn direct_claude_append_with_incompatible_repeated_kind_quarantines_the_source() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let index = temp.path().join("index");
+    let session = "direct-incompatible-claude-session";
+    let transcript = projects.join("project").join(format!("{session}.jsonl"));
+    write_transcript(
+        &transcript,
+        &[claude_message(
+            "user",
+            "retained-event",
+            session,
+            "retained before failure",
+        )],
+    );
+    let registry = registry(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        &projects,
+    );
+    refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    let before = indexed_records(&index, CaptureProvider::Claude, session);
+
+    append_transcript(
+        &transcript,
+        &claude_message(
+            "summary",
+            "retained-event",
+            session,
+            "must never publish partially",
+        ),
+    );
+    let quarantined = refresh_incremental(&index, &registry, &transcript);
+    assert!(quarantined.failed_routes.is_empty());
+    let [failure] = quarantined.logical_source_failures.failures() else {
+        panic!("one Claude source failure expected");
+    };
+    assert!(failure.carried_forward);
+    assert!(failure
+        .detail
+        .contains("repeats a stable event identity with incompatible event kinds"));
+    assert_eq!(
+        indexed_records(&index, CaptureProvider::Claude, session),
+        before
+    );
+}
